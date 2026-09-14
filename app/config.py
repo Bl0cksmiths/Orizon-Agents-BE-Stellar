@@ -250,7 +250,7 @@ class Settings(BaseSettings):
         if self.api_key:
             return self
         exposures: list[str] = []
-        if self.stellar_network.lower() in {"mainnet", "public"} and self.stellar_signing_key:
+        if self.stellar_network.strip().lower() in {"mainnet", "public"} and self.stellar_signing_key:
             exposures.append(
                 "STELLAR_SIGNING_KEY is set on mainnet, so /api/stellar/server/charge "
                 "and /server/seal sign real transactions"
