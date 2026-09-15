@@ -206,8 +206,12 @@ class Settings(BaseSettings):
         hatch. Both an enabled escape hatch and a missing secret would let
         anyone forge deposit/withdrawal callbacks in production, so refuse
         to start rather than run open.
+
+        Scoped by whether the configured environment resolves to a real-fiat
+        base URL, not by its name, so a future real-value environment is
+        covered automatically.
         """
-        if self.pdax_environment.strip().lower() == "production":
+        if pdax_moves_real_value(self.pdax_environment):
             if self.pdax_allow_unsigned_webhooks:
                 raise ValueError(
                     "PDAX_ALLOW_UNSIGNED_WEBHOOKS must not be enabled when "
@@ -256,7 +260,7 @@ class Settings(BaseSettings):
                 "STELLAR_SIGNING_KEY is set on mainnet, so /api/stellar/server/charge "
                 "and /server/seal sign real transactions"
             )
-        if self.pdax_environment.strip().lower() == "production" and self.pdax_username and self.pdax_password:
+        if pdax_moves_real_value(self.pdax_environment) and self.pdax_username and self.pdax_password:
             exposures.append("production PDAX credentials are set, so /api/pdax/* can move real fiat")
         if exposures:
             raise ValueError(
