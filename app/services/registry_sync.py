@@ -39,6 +39,7 @@ import contextlib
 import logging
 from typing import Any
 
+from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
 from ..schemas import Agent
 from ..state import state
@@ -49,6 +50,19 @@ logger = logging.getLogger(__name__)
 # Floor on the loop cadence — a misconfigured REGISTRY_SYNC_SECONDS of 0 (or
 # negative) must degrade to a slow poll, not a hot loop against the RPC.
 _MIN_INTERVAL_SECONDS = 5.0
+
+# Bound on a mirrored display name. The chain is NOT a validating peer:
+# `AgentRegistry.register` takes `name: String` and stores it verbatim, with no
+# length bound and no content check. `RegisterAgentReq.name`'s max_length=100
+# binds only callers who came through our API, and registration is
+# permissionless — an operator invoking the contract directly never meets it.
+# This is the defence-in-depth copy of that bound for the path that bypassed
+# it, mirroring the API rule rather than relaxing it (the `MAX_INTENT_CHARS`
+# discipline in `prompt_safety`). 100 chars is a display name's worth: long
+# enough that no name our own API would have accepted is ever truncated, short
+# enough that an essay cannot ride into process memory, the /api/agents
+# response, or the planner prompt.
+MAX_AGENT_NAME_CHARS = 100
 
 # Single-flight guard shared by the loop and on-demand callers: overlapping
 # passes would race identical reads through the shared executor for no gain.
@@ -87,10 +101,25 @@ def _to_agent(raw: dict[str, Any]) -> Agent:
     as ★0.00 — the opposite of the cold-start policy reputation_svc applies
     everywhere else. `runs` starts at 0 (no execution history is on-chain)
     and `real` stays False: an indexed agent has no in-process worker.
+
+    `name` is the one attacker-controlled free-text field in the record, so it
+    is clamped and neutralised HERE, at the trust boundary, rather than only
+    where it is consumed: an Agent built by this mapper is held in
+    `state.agents`, served by GET /api/agents, and read by every other
+    consumer, so an unbounded on-chain string must never enter application
+    state in the first place. `id` needs no such treatment (a Soroban `Symbol`
+    is `[A-Za-z0-9_]{1,32}` by construction) and neither do `skills`, which are
+    a `Vec<Symbol>` on-chain and so cannot carry whitespace, quotes, control
+    characters, or anything resembling a fence marker.
     """
     return Agent(
         id=raw["id"],
-        name=raw["name"],
+        # `sanitize_untrusted` is this repo's existing primitive
+        # (app/agents/workers/prompt_safety.py): it strips control characters,
+        # defuses fence-marker forgery, and clamps. Deliberately NOT
+        # `fence_untrusted` — a name is a field, not a free-text blob, and a
+        # multi-line BEGIN/END block cannot live inside an `Agent.name`.
+        name=sanitize_untrusted(raw["name"], max_chars=MAX_AGENT_NAME_CHARS),
         skills=list(raw["skills"]),
         price=raw["price"] / 1e7,
         rep=settings.reputation_prior_bps / 2000,
