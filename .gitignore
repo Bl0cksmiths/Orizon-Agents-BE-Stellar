@@ -15,3 +15,7 @@ build/
 .coverage
 .coverage.*
 htmlcov/
+
+# Evidence & ops docs — kept local, not needed for development
+/docs/evidence/*.md
+/docs/testnet-flip-runbook.md
