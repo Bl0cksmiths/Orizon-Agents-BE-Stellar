@@ -194,7 +194,10 @@ def synthetic_rating(
     weight = rating_weight_stroops(step_price_usdc)
 
     if not step_output:
-        # Timed out / raised — settled money for no delivered work.
+        # Timed out, raised, or returned nothing at all. NO money settled:
+        # every failure path skips the billing site (ADR 0005 D1), so this is
+        # unbilled negative evidence, and that is exactly the mechanism — the
+        # buyer keeps the money and the operator takes the reputation cost.
         return 20, weight
 
     if step_output.get("source") == "baked":
