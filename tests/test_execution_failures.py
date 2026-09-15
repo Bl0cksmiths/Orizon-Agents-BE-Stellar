@@ -50,6 +50,22 @@ def _add_task(task_id: str) -> None:
     )
 
 
+def _resolves_to(monkeypatch, lookup) -> None:
+    """Pin the dispatch seam to `lookup`.
+
+    execution_svc resolves a step's worker through the async `resolve_worker`
+    (local registry first, then a stored binding). These tests only care which
+    worker comes back, so a plain agent_id -> Worker|None lookup is adapted to
+    that seam here instead of at every call site — including one that raises,
+    which must still take down the whole run.
+    """
+
+    async def _resolve(agent_id):
+        return lookup(agent_id)
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
+
+
 def _drain(q: asyncio.Queue) -> list:
     items = []
     while not q.empty():
@@ -92,7 +108,7 @@ def test_mid_run_exception_marks_task_failed(monkeypatch):
     def boom(agent_id):
         raise RuntimeError("registry exploded")
 
-    monkeypatch.setattr(execution_svc, "get_worker", boom)
+    _resolves_to(monkeypatch, boom)
     task_id = "tsk_fail_exc"
     _add_task(task_id)
 
@@ -111,7 +127,7 @@ def test_mid_run_exception_marks_task_failed(monkeypatch):
 
 
 def test_step_exception_is_logged_with_context_and_traceback(monkeypatch, caplog):
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: _BoomWorker())
+    _resolves_to(monkeypatch, lambda agent_id: _BoomWorker())
     task_id = "tsk_step_log_exc"
     _add_task(task_id)
 
@@ -137,7 +153,7 @@ def test_step_timeout_is_logged(monkeypatch, caplog):
         async def run(self, intent, rationale, context=None):
             await asyncio.sleep(30)
 
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: HangingWorker())
+    _resolves_to(monkeypatch, lambda agent_id: HangingWorker())
     monkeypatch.setattr(execution_svc, "STEP_TIMEOUT_SECONDS", 0.05)
     task_id = "tsk_step_log_timeout"
     _add_task(task_id)
@@ -154,7 +170,7 @@ def test_step_timeout_is_logged(monkeypatch, caplog):
 
 
 def test_unknown_agent_step_is_logged(monkeypatch, caplog):
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: None)
+    _resolves_to(monkeypatch, lambda agent_id: None)
     task_id = "tsk_step_log_unknown"
     _add_task(task_id)
 
@@ -173,7 +189,7 @@ def test_unknown_agent_step_is_logged(monkeypatch, caplog):
 def test_run_with_every_step_failing_is_not_complete(monkeypatch):
     """The total-outage case: every step raises, the loop continues past all of
     them, and the run must NOT be finalized as "complete"."""
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: _BoomWorker())
+    _resolves_to(monkeypatch, lambda agent_id: _BoomWorker())
     task_id = "tsk_all_steps_failed"
     _add_task(task_id)
 
@@ -196,7 +212,7 @@ def test_run_with_every_step_failing_is_not_complete(monkeypatch):
 
 
 def test_run_with_every_step_failing_is_logged(monkeypatch, caplog):
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: _BoomWorker())
+    _resolves_to(monkeypatch, lambda agent_id: _BoomWorker())
     task_id = "tsk_all_steps_failed_log"
     _add_task(task_id)
 
@@ -210,7 +226,7 @@ def test_run_with_every_step_failing_is_logged(monkeypatch, caplog):
 def test_partial_run_that_still_produced_an_artifact_is_complete(monkeypatch):
     """Degraded but delivered: the caller still receives the artifact."""
     workers = {"agt_x": _OkWorker("w.gen", artifact=True), "agt_y": _BoomWorker("w.critic")}
-    monkeypatch.setattr(execution_svc, "get_worker", workers.get)
+    _resolves_to(monkeypatch, workers.get)
     task_id = "tsk_partial_with_artifact"
     _add_task(task_id)
 
@@ -224,7 +240,7 @@ def test_partial_run_that_still_produced_an_artifact_is_complete(monkeypatch):
 def test_partial_run_without_an_artifact_is_failed(monkeypatch):
     """Half a workflow with nothing to hand back is not a success."""
     workers = {"agt_x": _OkWorker("w.research"), "agt_y": _BoomWorker("w.gen")}
-    monkeypatch.setattr(execution_svc, "get_worker", workers.get)
+    _resolves_to(monkeypatch, workers.get)
     task_id = "tsk_partial_no_artifact"
     _add_task(task_id)
 
@@ -236,7 +252,7 @@ def test_partial_run_without_an_artifact_is_failed(monkeypatch):
 
 def test_fully_successful_run_is_complete(monkeypatch):
     workers = {"agt_x": _OkWorker("w.a", artifact=True), "agt_y": _OkWorker("w.b")}
-    monkeypatch.setattr(execution_svc, "get_worker", workers.get)
+    _resolves_to(monkeypatch, workers.get)
     task_id = "tsk_all_steps_ok"
     _add_task(task_id)
 
@@ -253,7 +269,7 @@ def test_fully_successful_run_is_complete(monkeypatch):
 
 
 def test_unknown_agent_counts_as_a_failed_step(monkeypatch):
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: None)
+    _resolves_to(monkeypatch, lambda agent_id: None)
     task_id = "tsk_unknown_agent_status"
     _add_task(task_id)
 
@@ -268,7 +284,7 @@ def test_cancelled_run_marks_task_failed_and_closes_bus(monkeypatch):
         async def run(self, intent, rationale, context=None):
             await asyncio.sleep(30)
 
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: SlowWorker())
+    _resolves_to(monkeypatch, lambda agent_id: SlowWorker())
     task_id = "tsk_fail_cancel"
     _add_task(task_id)
 
