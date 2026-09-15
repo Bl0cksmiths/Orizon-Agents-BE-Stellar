@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from app.agents.workers.external_contract import (
+    MAX_FILES,
     OUTPUT_RULES,
     ExternalOutputError,
     parse_operator_output,
@@ -141,3 +142,86 @@ def test_refusal_is_a_value_error() -> None:
     # Callers that do not care which rule fired still get a sane except clause.
     with pytest.raises(ValueError):
         parse_operator_output({"summary": ""})
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        "index.html",  # the whole file list as one string
+        {"index.html": "<html></html>"},  # a mapping instead of a list
+        7,
+        None,
+    ],
+)
+def test_a_malformed_file_list_is_dropped_not_refused(files: Any) -> None:
+    # The artifact envelope's TYPE is a refusal; a field inside it is a drop.
+    # The summary and the preview still describe work that was really done, and
+    # failing the step here would un-bill it over a container mistake.
+    out = parse_operator_output(_response(artifact={"title": "Checkout v2", "files": files}))
+    assert out["artifact"] == {"title": "Checkout v2"}
+
+
+def test_non_dict_file_entries_are_skipped() -> None:
+    # Unlike a critic list, a file list is filtered per entry: a shorter list of
+    # files is not a claim about the work, so dropping the junk keeps what is
+    # real. "index.html" survives; nothing else does.
+    out = parse_operator_output(
+        _response(
+            artifact={
+                "files": [
+                    "index.html",
+                    42,
+                    None,
+                    ["index.html", "<html></html>"],
+                    {"path": "orphan.html"},  # a path with no bytes is not a file
+                    {"path": "", "content": "<html></html>"},  # nor is content with no path
+                    {"path": "typed.html", "content": 12345},  # nor are non-string bytes
+                    {"path": "index.html", "content": "<html><body>real</body></html>"},
+                ]
+            }
+        )
+    )
+    assert [f["path"] for f in out["artifact"]["files"]] == ["index.html"]
+    assert out["artifact"]["files"][0]["content"].endswith("<body>real</body></html>")
+
+
+def test_the_file_list_is_capped() -> None:
+    files = [{"path": f"f{i}.txt", "content": "x"} for i in range(MAX_FILES * 3)]
+    out = parse_operator_output(_response(artifact={"files": files}))
+    assert len(out["artifact"]["files"]) == MAX_FILES
+    # Truncated from the front, so the cap is a cap and not a reshuffle.
+    assert out["artifact"]["files"][-1]["path"] == f"f{MAX_FILES - 1}.txt"
+
+
+def test_unknown_artifact_keys_are_dropped() -> None:
+    out = parse_operator_output(
+        _response(
+            artifact={
+                "title": "Checkout v2",
+                "entry": "index.html",
+                "language": "html",
+                "source": "baked",
+                "download_url": "https://operator.example/zip",
+                "__proto__": {"admin": True},
+            }
+        )
+    )
+    assert out["artifact"] == {"title": "Checkout v2"}
+
+
+def test_an_artifact_with_nothing_in_it_does_not_survive() -> None:
+    # `.get("artifact")` must stay falsy: it is what the trace branches on and
+    # what synthetic_rating pays +15 for. An empty dict claiming delivery would
+    # be a rating lever made of nothing.
+    for empty in ({}, {"unknown": "key"}, {"title": ""}, {"title": 9, "files": "no"}):
+        out = parse_operator_output(_response(artifact=empty))
+        assert "artifact" not in out
+
+
+def test_a_null_artifact_is_absent_not_malformed() -> None:
+    # JSON `null` is how an operator says "no artifact this step" — deploy_v0
+    # spells preview_url exactly that way. Refusing it would fail a step for
+    # declining to attach something optional.
+    out = parse_operator_output(_response(artifact=None))
+    assert "artifact" not in out
+    assert out["summary"] == GOOD["summary"]
