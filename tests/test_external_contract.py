@@ -27,6 +27,8 @@ import pytest
 
 from app.agents.workers.external_contract import (
     MAX_FILES,
+    MAX_NOTE_CHARS,
+    MAX_NOTES,
     OUTPUT_RULES,
     ExternalOutputError,
     parse_operator_output,
@@ -225,3 +227,62 @@ def test_a_null_artifact_is_absent_not_malformed() -> None:
     out = parse_operator_output(_response(artifact=None))
     assert "artifact" not in out
     assert out["summary"] == GOOD["summary"]
+
+
+_CRITIC_KEYS = ("critic_violations", "critic_notes")
+
+_MALFORMED_NOTE_LISTS: list[Any] = [
+    [1, 2],  # the card's case: numbers where strings belong
+    {"0": "first"},  # a mapping instead of a list
+    "a single note, unwrapped",
+    7,
+    [None],
+    [["nested"]],
+    [{"text": "structured note"}],
+    ["fine", 2, "also fine"],  # one bad item spoils the list — see below
+]
+
+
+@pytest.mark.parametrize("key", _CRITIC_KEYS)
+@pytest.mark.parametrize("value", _MALFORMED_NOTE_LISTS)
+def test_a_malformed_critic_list_is_dropped_whole(key: str, value: Any) -> None:
+    # Dropped WHOLE, never filtered down to the well-typed items — and this is
+    # the assertion that matters most in this file. reputation_svc does:
+    #
+    #     if isinstance(violations, list):
+    #         rating += 10 if not violations else -3 * min(len(violations), 10)
+    #
+    # so `[1, 2]` filtered to `[]` would not be a tidied field, it would be a
+    # +10 rating bonus minted out of a malformed one, settled on-chain. Absent
+    # is not a list, so the branch never runs and nothing is awarded.
+    out = parse_operator_output(_response(**{key: value}))
+    assert key not in out
+    assert out.get(key) is None
+    # …and it is a drop, not a refusal: the step still delivered.
+    assert out["summary"] == GOOD["summary"]
+
+
+@pytest.mark.parametrize("key", _CRITIC_KEYS)
+def test_an_empty_critic_list_is_honoured(key: str) -> None:
+    # "The critic found nothing" is a claim we cannot verify, and we take it at
+    # face value exactly as the local path does for our own workers. What the
+    # rule above refuses is MANUFACTURING that claim from input that never
+    # made it.
+    out = parse_operator_output(_response(**{key: []}))
+    assert out[key] == []
+
+
+@pytest.mark.parametrize("key", _CRITIC_KEYS)
+def test_critic_notes_are_capped_and_clamped(key: str) -> None:
+    out = parse_operator_output(_response(**{key: ["n" * (MAX_NOTE_CHARS * 4)] * (MAX_NOTES * 5)}))
+    assert len(out[key]) == MAX_NOTES
+    assert all(len(note) == MAX_NOTE_CHARS for note in out[key])
+    assert all(note.endswith("[truncated]") for note in out[key])
+
+
+def test_empty_strings_inside_a_critic_list_are_kept() -> None:
+    # Dropping them would shorten a violations list, and shorter means a
+    # smaller penalty. Every filter on this field points one way; none of them
+    # may point the operator's way.
+    out = parse_operator_output(_response(critic_violations=["", "  ", "real violation"]))
+    assert out["critic_violations"] == ["", "  ", "real violation"]
