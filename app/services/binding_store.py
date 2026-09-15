@@ -37,6 +37,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 # Retention cap for the in-memory store, sized like ramp_store._MAX_RAMPS (500)
@@ -356,3 +358,51 @@ class PostgresBindingStore:
         self._ready = False
         if pool is not None:
             await pool.close()
+
+
+# The process-wide store. A module-level singleton and NOT @lru_cache, which is
+# the obvious shortcut and is wrong here in a way that is invisible until
+# production: lru_cache would freeze whichever store the FIRST import happened
+# to resolve, so a DATABASE_URL that arrives later — set in the Render
+# dashboard, or by a test, or by anything that configures settings after this
+# module is imported — would be silently ignored and the service would keep
+# writing to memory while reporting success. That is precisely the failure this
+# abstraction exists to prevent, so the singleton is explicit and
+# close_binding_store() can clear it.
+_store: BindingStore | None = None
+
+
+def get_binding_store() -> BindingStore:
+    """The process's binding store, built on first use from `database_url`.
+
+    Resolved lazily — at the first call, not at import — so the value read is
+    the configuration the process is actually running with.
+    """
+    global _store
+    if _store is None:
+        dsn = settings.database_url.strip()
+        if dsn:
+            _store = PostgresBindingStore(dsn)
+            # The DSN carries the database password: report the choice, never
+            # the value.
+            logger.info("binding store: postgres (DATABASE_URL is set) — bindings survive a restart")
+        else:
+            _store = InMemoryBindingStore()
+            logger.info(
+                "binding store: in-memory (DATABASE_URL is unset) — bindings are LOST on restart; "
+                "set DATABASE_URL to persist them"
+            )
+    return _store
+
+
+async def close_binding_store() -> None:
+    """Release the store at lifespan shutdown; safe to call twice.
+
+    The singleton is cleared as well as closed, so a process that shuts a store
+    down and keeps running re-reads `database_url` next time instead of handing
+    out a closed pool.
+    """
+    global _store
+    store, _store = _store, None
+    if store is not None:
+        await store.close()
