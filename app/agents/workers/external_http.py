@@ -274,6 +274,15 @@ class ExternalHttpWorker(Worker):
             # in framing to a mainnet one and could be replayed across them.
             "ts": int(time.time()),
             "network": settings.stellar_network,
+            # The operator's budget, in RELATIVE milliseconds. Relative, not an
+            # absolute deadline, because the operator doc tells verifiers to
+            # tolerate ±300 s of clock skew — three times this whole budget —
+            # so an absolute timestamp could not be turned into a usable one.
+            # Emitted from the constant so the wire value can never drift from
+            # what is actually enforced. NOTE it is conservative by design: our
+            # clock starts BEFORE connect, so an operator timing from receipt
+            # always has less real budget than this number, never more.
+            "deadline_ms": int(DISPATCH_DEADLINE_SECONDS * 1000),
         }
         headers = {
             "Content-Type": "application/json",
