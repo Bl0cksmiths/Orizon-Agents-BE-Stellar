@@ -29,42 +29,71 @@ from stellar_sdk import Keypair
 
 CHALLENGE_TTL_SECONDS = 300
 
-# agent_id -> (nonce_hex, expiry_epoch). In-memory for the spike; Epic 2 moves
-# this behind the binding store so it survives a restart and multiple workers.
-_challenges: dict[str, tuple[str, float]] = {}
+# Domain separator and format version for the signed message. Domain-separated
+# so an Orizon binding signature can never also be a valid signature for another
+# protocol, and versioned so the format can move without a v1 signature silently
+# still being accepted — a v1 signature simply stops verifying under a v2
+# message.
+BINDING_MESSAGE_PREFIX = "orizon-bind:v1"
+
+# (agent_id, endpoint_url) -> (nonce_hex, expires_at). Keyed by the PAIR, not by
+# the agent id alone: a challenge authorizes exactly one endpoint, and keying it
+# by agent id let any anonymous caller destroy the honest owner's outstanding
+# nonce simply by requesting a challenge for a URL they control.
+_challenges: dict[tuple[str, str], tuple[str, float]] = {}
 
 
-def issue_challenge(agent_id: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> str:
-    """Mint and store a fresh challenge nonce for `agent_id`; return it.
+def binding_message(agent_id: str, endpoint_url: str, nonce: str) -> str:
+    """The exact UTF-8 string the agent's owner signs to prove a binding:
 
-    A new challenge overwrites any outstanding one for the same agent, so an
-    earlier nonce cannot be reused once the operator has asked for another.
+        orizon-bind:v1:{agent_id}:{endpoint_url}:{nonce}
+
+    The endpoint is IN the signed bytes (ADR 0003 D3). The 1.06 prototype signed
+    the nonce alone, so a signature captured inside its five-minute window could
+    be replayed to bind a DIFFERENT url: the nonce proved "the owner signed
+    something recently", never "the owner approved THIS endpoint".
+    """
+    return f"{BINDING_MESSAGE_PREFIX}:{agent_id}:{endpoint_url}:{nonce}"
+
+
+def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
+    """Mint and store a challenge for (agent_id, endpoint_url).
+
+    Returns (nonce, expires_at); the caller needs the expiry to tell the
+    operator how long the challenge has left to be signed.
     """
     nonce = secrets.token_hex(16)
-    _challenges[agent_id] = (nonce, time.time() + ttl_seconds)
-    return nonce
+    expires_at = time.time() + ttl_seconds
+    _challenges[(agent_id, endpoint_url)] = (nonce, expires_at)
+    return nonce, expires_at
 
 
-def verify_challenge(agent_id: str, owner: str, signature_b64: str) -> bool:
-    """Verify a base64 ed25519 signature over the outstanding nonce against
+def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64: str) -> bool:
+    """Verify a base64 ed25519 signature over `binding_message(...)` against
     `owner` (a Stellar G-address). Consumes the nonce on success.
+
+    Pure crypto and nonce lifecycle — NO chain I/O. `owner` is supplied by the
+    caller, which must have resolved it from the live registry; keeping the two
+    halves apart is what lets the hermetic suite test each without the other.
 
     Returns False on any failure — no or expired nonce, malformed owner or
     signature, or a signature that does not verify. Every failure mode
     (BadSignatureError, Ed25519PublicKeyInvalidError, binascii.Error) is a
     ValueError subclass, so one handler covers them without masking real bugs.
     """
-    entry = _challenges.get(agent_id)
+    key = (agent_id, endpoint_url)
+    entry = _challenges.get(key)
     if entry is None:
         return False
-    nonce, expiry = entry
-    if time.time() > expiry:
-        _challenges.pop(agent_id, None)
+    nonce, expires_at = entry
+    if time.time() > expires_at:
+        del _challenges[key]
         return False
+    message = binding_message(agent_id, endpoint_url, nonce)
     try:
         signature = base64.b64decode(signature_b64, validate=True)
-        Keypair.from_public_key(owner).verify(nonce.encode("utf-8"), signature)
+        Keypair.from_public_key(owner).verify(message.encode("utf-8"), signature)
     except ValueError:
         return False
-    _challenges.pop(agent_id, None)  # single use — a proven nonce never verifies twice
+    del _challenges[key]  # single use — a proven nonce never verifies twice
     return True
