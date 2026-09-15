@@ -64,6 +64,7 @@ Pure: no I/O, no clock, no network.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from .code_gen import MAX_ARTIFACT_CHARS, clamp_artifact_content
 from .code_validator import harden_artifact
@@ -283,3 +284,67 @@ def _parse_notes(value: object) -> list[str] | None:
     if not all(isinstance(item, str) for item in value):
         return None
     return [_clamp_text(item, MAX_NOTE_CHARS) for item in value[:MAX_NOTES]]
+
+
+# Schemes a browser NAVIGATES to. Deliberately not `endpoint_policy.ALLOWED_SCHEMES`
+# — see `_parse_preview_url` for why http belongs here and does not belong there.
+_DISPLAYABLE_SCHEMES = frozenset({"http", "https"})
+
+
+def _is_displayable(url: str) -> bool:
+    """Whether `url` is safe to put in a trace line and an anchor's href.
+
+    NOT `endpoint_policy.validate_endpoint_url`, and the difference is not an
+    oversight. That function answers "is this URL safe for US to dispatch to
+    from inside our network", so it enforces https-only and refuses private,
+    loopback, link-local and metadata addresses — SSRF rules, all of which
+    exist because our server makes the request. Nothing in this module makes a
+    request. `preview_url` is a string we render: it reaches the SSE trace via
+    execution_svc and the buyer's viewer, and it is the buyer's browser, on the
+    buyer's network, that ever follows it.
+
+    So the SSRF rules are not merely unnecessary here, they are wrong here:
+    `http://192.168.1.10:3000/preview` is an ordinary operator staging link,
+    and refusing it protects nobody — we never dial it, and a buyer who does is
+    reaching their own LAN, which they could reach by typing it.
+
+    The questions that DO apply to a displayed link are ones endpoint_policy
+    never asks:
+
+      * Will the scheme navigate, or execute? `javascript:` in an href runs in
+        the page's origin, and `data:text/html,…` renders attacker HTML under
+        a URL that looks like a preview. Both are content injection, not SSRF,
+        and both are the reason this is an allowlist of two schemes.
+      * Does it lie about who it belongs to? `https://orizon.xyz@evil.example`
+        reads as ours at a glance in a trace line. Userinfo has no place in a
+        preview link, so a URL carrying any is dropped rather than displayed.
+      * Can it break the surface it is rendered into? An embedded CR or LF in a
+        URL that lands in a line-oriented SSE frame is a framing bug waiting to
+        happen, so control characters and spaces are refused outright.
+      * Is it bounded? A megabyte of "URL" is not a link, it is a payload.
+    """
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # malformed IPv6 bracket, non-numeric port, …
+        return False
+    if parts.scheme.lower() not in _DISPLAYABLE_SCHEMES:
+        return False
+    if not parts.hostname:
+        return False
+    return parts.username is None and parts.password is None
+
+
+def _parse_preview_url(value: object) -> str | None:
+    """A displayable preview link, or None — dropped, never refused.
+
+    A bad preview link is a broken "ship" moment in the trace, not a failed
+    delivery, so it costs the operator their link and nothing else.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url or len(url) > MAX_PREVIEW_URL_CHARS:
+        return None
+    return url if _is_displayable(url) else None
