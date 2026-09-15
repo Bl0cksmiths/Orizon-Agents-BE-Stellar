@@ -13,10 +13,11 @@ agent by exactly the arithmetic a local one is judged by.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
-from app.schemas import Agent
+from app.schemas import Agent, Plan, PlanStep
 from app.seed import seed_registry
 from app.services import binding_registry, orchestrator_svc
 from app.services.reputation_svc import RepInfo
@@ -125,3 +126,69 @@ def test_floor_starvation_fallback_admits_a_bound_agent_but_never_an_unbound_one
     assert len(listed) == 3
     assert f"id={BOUND} " in fragment
     assert f"id={UNBOUND} " not in fragment
+
+
+def _step(agent_id: str) -> PlanStep:
+    return PlanStep(
+        agent_id=agent_id,
+        rationale="model-chosen step",
+        est_price_usdc=0.05,
+        est_eta_seconds=1.0,
+    )
+
+
+def _plan_returning(*agent_ids: str):
+    async def arun(prompt):
+        return SimpleNamespace(content=Plan(steps=[_step(a) for a in agent_ids]))
+
+    return arun
+
+
+def test_clean_keeps_a_step_naming_a_bound_external_agent(external_agents, monkeypatch):
+    # The model picks the bound agent alongside a local worker. Before 2.01 the
+    # clamp dropped it for having no local worker; now it has an endpoint, so
+    # the step survives and is priced from the registry.
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _plan_returning(BOUND, "agt_11c0"))
+
+    resp = asyncio.run(orchestrator_svc.decompose("write a haiku about databases"))
+
+    assert [s.agent_id for s in resp.steps] == [BOUND, "agt_11c0"]
+    assert [s.agent_id for s in state.plans[resp.plan_id].plan.steps] == [BOUND, "agt_11c0"]
+    bound_step = resp.steps[0]
+    assert bound_step.agent_name == state.agents[BOUND].name
+    assert bound_step.est_price_usdc == state.agents[BOUND].price
+
+
+def test_clean_still_drops_a_step_naming_an_unbound_agent(external_agents, monkeypatch):
+    # Known id, no local worker, no binding — nothing could execute it, so it
+    # must never reach /execute's unknown-agent skip path.
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _plan_returning(UNBOUND, "agt_11c0"))
+
+    resp = asyncio.run(orchestrator_svc.decompose("write a haiku about databases"))
+
+    assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
+
+    # A plan of nothing but the unbound agent still cleans to empty and takes
+    # the safe fallback, exactly as it did before 2.01.
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _plan_returning(UNBOUND))
+
+    resp = asyncio.run(orchestrator_svc.decompose("draft a landing page for a bakery"))
+
+    assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+
+
+def test_bound_external_agent_can_substitute_for_a_sub_floor_kit_agent(external_agents):
+    # code.gen (a kit agent) is under the floor; the bound agent is off the kit
+    # pipeline, shares its "code"/"html" skills and clears the floor, so it is
+    # an eligible stand-in.
+    designated = state.agents["agt_11c0"]
+    reps = {a.id: _info(a.id, smoothed=8000, lower=8000) for a in state.list_agents()}
+    reps[designated.id] = _info(designated.id, smoothed=100, lower=0)
+    reps[BOUND] = _info(BOUND, smoothed=9999, lower=9999)
+
+    assert orchestrator_svc._floor_substitute(designated, reps, taken=set()) is state.agents[BOUND]
+
+    # The unbound twin outscores it but can execute nothing, so widening the
+    # filter must not make it substitutable.
+    reps[UNBOUND] = _info(UNBOUND, smoothed=10000, lower=10000)
+    assert orchestrator_svc._floor_substitute(designated, reps, taken=set()) is state.agents[BOUND]
