@@ -23,6 +23,14 @@ Design notes, each deliberate:
   - Known ids are re-read every pass, not only new ones: an operator's
     on-chain reprice or delist must propagate to the marketplace — that is
     what makes story 1.08's delist real rather than cosmetic.
+  - What the chain reports is UNTRUSTED INPUT, not truth. Registration is
+    permissionless and the contract validates neither `name` nor `price`, so
+    the API bounds in `RegisterAgentReq` sit on the wrong side of the trust
+    boundary and a direct contract call never meets them. The mapper is
+    therefore the enforcement point: the name is clamped and neutralised, and
+    a price we could never settle is refused outright — and a refused record
+    DELISTS any copy an earlier pass indexed, so the re-read above cannot be
+    turned into a way to leave a stale believable price standing.
   - On-chain ids in the `agt_` namespace are SKIPPED: that namespace is the
     seeded catalog, and `state.add_agent` is an upsert, so indexing one would
     clobber a worker-backed agent with a chain record that has no worker.
@@ -39,6 +47,7 @@ import contextlib
 import logging
 from typing import Any
 
+from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
 from ..schemas import Agent
 from ..state import state
@@ -49,6 +58,49 @@ logger = logging.getLogger(__name__)
 # Floor on the loop cadence — a misconfigured REGISTRY_SYNC_SECONDS of 0 (or
 # negative) must degrade to a slow poll, not a hot loop against the RPC.
 _MIN_INTERVAL_SECONDS = 5.0
+
+# Bound on a mirrored display name. The chain is NOT a validating peer:
+# `AgentRegistry.register` takes `name: String` and stores it verbatim, with no
+# length bound and no content check. `RegisterAgentReq.name`'s max_length=100
+# binds only callers who came through our API, and registration is
+# permissionless — an operator invoking the contract directly never meets it.
+# This is the defence-in-depth copy of that bound for the path that bypassed
+# it, mirroring the API rule rather than relaxing it (the `MAX_INTENT_CHARS`
+# discipline in `prompt_safety`). 100 chars is a display name's worth: long
+# enough that no name our own API would have accepted is ever truncated, short
+# enough that an essay cannot ride into process memory, the /api/agents
+# response, or the planner prompt.
+MAX_AGENT_NAME_CHARS = 100
+
+# Bound on a mirrored price, by the same trust-boundary reasoning as the name:
+# `register` and `update_price` take a bare `i128` and check nothing about it,
+# not even the sign, so `RegisterAgentReq.price_usdc`'s `gt=0, le=10_000` binds
+# only callers who came through our API.
+MAX_ONCHAIN_PRICE_USDC = 10_000.0
+
+
+class UnbelievablePrice(ValueError):
+    """An on-chain price outside the range we are willing to mirror."""
+
+
+def _price_ceiling() -> float:
+    """Highest per-call price we will believe from the chain.
+
+    The tighter of two bounds, read LIVE on every call rather than cached — the
+    `settings.stellar_agent_registry` discipline, so a reconfigured cap takes
+    effect on the next pass instead of being pinned for the process lifetime:
+
+      * `MAX_ONCHAIN_PRICE_USDC` — our own API's ceiling, restated on the side
+        of the trust boundary that a direct contract call cannot bypass.
+      * `settings.max_charge_usdc` — `execution_svc` skips the on-chain charge,
+        the seal AND the ratings for the WHOLE RUN when a plan total exceeds
+        it. A single step priced above that cap therefore cannot appear in any
+        settleable plan: routing to it would not just overcharge, it would
+        strip settlement from every honest agent sharing the plan. An agent we
+        can never settle is not a cheap agent, it is an unroutable one.
+    """
+    return min(MAX_ONCHAIN_PRICE_USDC, settings.max_charge_usdc)
+
 
 # Single-flight guard shared by the loop and on-demand callers: overlapping
 # passes would race identical reads through the shared executor for no gain.
@@ -63,6 +115,7 @@ _task: asyncio.Task | None = None
 # on-chain.
 _disabled_logged = False
 _skipped_agt_ids: set[str] = set()
+_refused_price_ids: set[str] = set()
 
 # True while the loop is inside a failing streak — flips the pass-failure
 # log level from WARNING (first failure) to DEBUG (consecutive), and arms
@@ -87,18 +140,77 @@ def _to_agent(raw: dict[str, Any]) -> Agent:
     as ★0.00 — the opposite of the cold-start policy reputation_svc applies
     everywhere else. `runs` starts at 0 (no execution history is on-chain)
     and `real` stays False: an indexed agent has no in-process worker.
+
+    `name` is the one attacker-controlled free-text field in the record, so it
+    is clamped and neutralised HERE, at the trust boundary, rather than only
+    where it is consumed: an Agent built by this mapper is held in
+    `state.agents`, served by GET /api/agents, and read by every other
+    consumer, so an unbounded on-chain string must never enter application
+    state in the first place. `id` needs no such treatment (a Soroban `Symbol`
+    is `[A-Za-z0-9_]{1,32}` by construction) and neither do `skills`, which are
+    a `Vec<Symbol>` on-chain and so cannot carry whitespace, quotes, control
+    characters, or anything resembling a fence marker.
+
+    Raises `UnbelievablePrice` for a price outside `_price_ceiling()` — REFUSED
+    rather than clamped. Clamping would invent a commercial term: we would quote
+    the buyer, and pay the owner, a rate neither of them agreed to, and a price
+    clamped to the cap still consumes the entire charge budget and still denies
+    settlement to the rest of the plan. Refusing is the honest failure — we
+    cannot represent this agent's terms, so we do not offer it — and because
+    the caller then keeps it out of `state.agents` entirely, it is unroutable
+    everywhere at once (the planner block, the floor-starvation fallback, the
+    substitute search, the model-plan clamp, GET /api/agents and the execution
+    pricing) without a price filter duplicated across all six.
     """
+    price = raw["price"] / 1e7
+    ceiling = _price_ceiling()
+    if not 0 < price <= ceiling:
+        raise UnbelievablePrice(f"{price:.6f} USDC is outside (0, {ceiling:.6f}]")
     return Agent(
         id=raw["id"],
-        name=raw["name"],
+        # `sanitize_untrusted` is this repo's existing primitive
+        # (app/agents/workers/prompt_safety.py): it strips control characters,
+        # defuses fence-marker forgery, and clamps. Deliberately NOT
+        # `fence_untrusted` — a name is a field, not a free-text blob, and a
+        # multi-line BEGIN/END block cannot live inside an `Agent.name`.
+        name=sanitize_untrusted(raw["name"], max_chars=MAX_AGENT_NAME_CHARS),
         skills=list(raw["skills"]),
-        price=raw["price"] / 1e7,
+        price=price,
         rep=settings.reputation_prior_bps / 2000,
         status="online" if raw["active"] else "offline",
         runs=0,
         real=False,
         owner=raw["owner"],
         source="onchain",
+    )
+
+
+def _refuse_price(agent_id: str, reason: UnbelievablePrice) -> None:
+    """Keep a refused agent out of state, and DELIST one an earlier pass indexed.
+
+    Eviction is the point: known ids are re-read every pass, so without it an
+    operator could register at a believable price, wait to be indexed, then
+    reprice into the absurd — this pass would skip the upsert and leave the old
+    price standing as marketplace truth, which is precisely the stale mirror
+    the re-read exists to prevent. Only non-`agt_` ids reach here (the seeded
+    namespace is skipped before this point), so this can never delist a
+    worker-backed catalog agent.
+
+    Logged once per id, then at DEBUG — the `_skipped_agt_ids` discipline. A
+    15s loop against a permanently over-priced agent must not flood the log.
+    The wording is "refusing", not "failed": the record read back perfectly
+    well, we decline to believe what it says.
+    """
+    evicted = state.agents.pop(agent_id, None) is not None
+    if agent_id in _refused_price_ids:
+        logger.debug("registry sync: still refusing %r — %s", agent_id, reason)
+        return
+    _refused_price_ids.add(agent_id)
+    logger.warning(
+        "registry sync: refusing on-chain agent %r — %s; %s",
+        agent_id,
+        reason,
+        "delisted the record a previous pass indexed" if evicted else "not indexed",
     )
 
 
@@ -136,10 +248,20 @@ async def sync_once() -> int:
                 continue
             try:
                 raw = await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
-                state.add_agent(_to_agent(raw))
-                synced += 1
+                agent = _to_agent(raw)
+            except UnbelievablePrice as e:
+                # Must precede the catch-all: UnbelievablePrice is a ValueError,
+                # and a refusal is a policy decision, not a read failure.
+                _refuse_price(agent_id, e)
+                continue
             except Exception as e:
                 logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+                continue
+            # Believable again after a refusal — re-arm the warning so an
+            # operator flip-flopping across the cap stays visible in the log.
+            _refused_price_ids.discard(agent_id)
+            state.add_agent(agent)
+            synced += 1
         return synced
 
 
