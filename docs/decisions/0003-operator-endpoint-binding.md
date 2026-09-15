@@ -142,8 +142,13 @@ message an attacker can get signed under one encoding that becomes a different
 authorisation under the other. It is exactly two candidates — never a
 "try some prefixes" loop, which would be a trust widening.
 
-Note `stellar-sdk` 13.2.1 ships no SEP-53 helper, so the construction is
-implemented (and tested) by hand.
+`stellar-sdk` 13.2.1 implements SEP-53 directly as `Keypair.sign_message` /
+`verify_message`, so production calls the SDK rather than re-deriving the hash:
+a second copy of a signing framing inside an authorization path is a copy that
+can drift from the SDK's. The hand-built construction lives in the **tests**,
+where it is worth having — it pins the wire format against the spec, so the
+suite fails loudly if the SDK's framing ever moves, instead of merely proving
+the SDK agrees with itself.
 
 ### D4 — Why the binding is not on-chain
 

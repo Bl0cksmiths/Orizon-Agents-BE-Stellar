@@ -58,7 +58,13 @@ class BindChallengeResponse(BaseModel):
 
 class BindReq(BaseModel):
     endpoint_url: str = Field(..., min_length=8, max_length=2048)
-    signature: str = Field(..., min_length=64, max_length=256, description="base64 ed25519 signature")
+    # Upper bound only. A lower bound here would be caught by Pydantic and
+    # answered as the generic `validation_error`, which is exactly the code the
+    # frontend cannot map to an inline field error — so the *shape* of the
+    # signature is settled by the handler instead, which can answer the stable
+    # `signature_malformed`. max_length still bounds the decode: 256 chars is
+    # ~4x an ed25519 signature's 88, so nothing useful is truncated.
+    signature: str = Field(..., min_length=1, max_length=256, description="base64 ed25519 signature")
 
 
 class BindingResponse(BaseModel):
