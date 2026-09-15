@@ -116,9 +116,14 @@ def _is_blocked_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bo
     resolver hands back are judged by this one function, because a range that
     is unreachable by literal and reachable by name is not blocked at all.
 
-    An IPv4-mapped v6 address is unwrapped first — `::ffff:127.0.0.1` is
-    loopback, but `IPv6Address.is_loopback` says False for it, so without the
-    unwrap the mapped spelling would be a free bypass of every v4 rule.
+    An IPv4-mapped v6 address is unwrapped first so the v4 rules are applied to
+    the address that actually gets dialled. Note what this is and is not: on
+    CPython 3.12 `ipaddress.ip_address("::ffff:127.0.0.1").is_loopback` is
+    False, but `.is_private` and `.is_reserved` are both True, so the mapped
+    spelling was already refused before the unwrap existed — measured, not
+    assumed. The unwrap is defence in depth and intent-made-explicit, NOT a
+    patched hole: do not treat it as licence to drop is_private or is_reserved
+    from the predicate below, which is what actually catches these today.
     """
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
