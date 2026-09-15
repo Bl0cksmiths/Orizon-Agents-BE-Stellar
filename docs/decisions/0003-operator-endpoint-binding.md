@@ -118,6 +118,33 @@ Domain-separated (`orizon-bind:v1`) so an Orizon signature can never be a valid
 signature for another protocol, and versioned so the format can move. This is
 cheap now and expensive once the frontend ships its signing call.
 
+**Two signature encodings are accepted, deliberately.** Wallets do not agree on
+what "sign this message" means. The frontend calls
+`kit.signMessage(message)`, which delegates to the installed extension, and
+Freighter implements **SEP-53**, which does *not* sign the raw bytes:
+
+```
+payload   = b"Stellar Signed Message:\n" + message.encode("utf-8")
+digest    = sha256(payload).digest()          # single round
+signature = ed25519_sign(private_key, digest)
+```
+
+Verified against the SEP-0053 spec, not assumed. Had we verified only raw bytes,
+the flow would have failed end-to-end with the most common Stellar wallet — and
+failed as `not_agent_owner`, i.e. looking like a rejected owner rather than a
+format mismatch, which is about the most expensive possible way to learn this.
+`verify_challenge` therefore accepts **either** encoding.
+
+This is an interoperability widening, not a trust widening: both payloads are
+derived deterministically from the *same* domain-separated message, which
+already pins protocol, version, agent id, endpoint URL and nonce. There is no
+message an attacker can get signed under one encoding that becomes a different
+authorisation under the other. It is exactly two candidates — never a
+"try some prefixes" loop, which would be a trust widening.
+
+Note `stellar-sdk` 13.2.1 ships no SEP-53 helper, so the construction is
+implemented (and tested) by hand.
+
 ### D4 — Why the binding is not on-chain
 
 Not a preference — the contracts cannot express it. `AgentRegistry` has no
