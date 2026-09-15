@@ -21,9 +21,16 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
                "artifact"?, "critic_violations"?, "critic_notes"?,
                "preview_url"?, "source"?}
 
-    Timeouts  connect 5 s, total 110 s — under execution_svc.STEP_TIMEOUT_SECONDS
-              (120 s) so a slow operator is judged here, cleanly, as a failed
-              step rather than as the run loop's ambiguous outer timeout.
+    Deadline  DISPATCH_DEADLINE_SECONDS (100 s), measured on a monotonic clock
+              across connect + stream + parse and covering the retry, so a slow
+              operator is judged HERE as a failed step rather than by the run
+              loop's ambiguous outer ceiling (STEP_TIMEOUT_SECONDS, 120 s), with
+              headroom left for settlement afterwards.
+              The httpx timeouts below it are a floor, not the ceiling: httpx
+              has NO total-request timeout, and its `read` value is only the
+              idle gap between reads — an operator trickling one byte at a time
+              satisfies it forever. Story 2.02 fixed that; before it, this
+              docstring described a guarantee the code did not provide.
     Retry     at most once, and ONLY when the connection never established
               (ConnectError / ConnectTimeout): the operator never received the
               step, so a retry cannot double-run committed work, and the
