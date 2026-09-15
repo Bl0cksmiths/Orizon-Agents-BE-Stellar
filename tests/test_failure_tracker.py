@@ -348,3 +348,81 @@ def test_a_success_re_arms_the_eviction_warning(tiny_cap, caplog):
         record_failure("ext_f", "connect_failed")  # full again: news, not churn
 
     assert len(_evictions(caplog, logging.WARNING)) == 1
+
+
+# ── nothing operator-controlled reaches a log line ──────────────
+
+# Values an operator (or an attacker who registered an agent) could plausibly
+# steer into either argument. ADR 0003's rule is that a refusal logs the host
+# and the rule, never the attacker-controlled URL; this module is one layer
+# further in and logs neither.
+POISONED_RULES = [
+    "https://ops.example.com/orizon/dispatch?token=SUPERSECRET",
+    "ConnectionRefusedError: [Errno 111] connecting to 10.0.0.5:8080",
+    "connect_failed\nWARNING forged log line",
+    "Connect_Failed",  # the vocabulary is lowercase — near-misses are not waved through
+    "A" * 5000,
+]
+
+POISON_FRAGMENTS = ["SUPERSECRET", "ops.example.com", "10.0.0.5", "forged", "Errno"]
+
+
+def test_a_free_text_rule_is_normalised_before_it_is_stored_or_logged(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for rule in POISONED_RULES:
+            record_failure("ext_alpha", rule)
+
+    assert ft._streaks["ext_alpha"].rule == "unclassified"  # normalised at ingest, not at print time
+    messages = _messages(caplog)
+    assert messages  # the failures were still counted and reported
+    for message in messages:
+        assert not any(fragment in message for fragment in POISON_FRAGMENTS)
+        assert len(message) < 300  # the 5 000-character rule reached nothing
+
+
+def test_varying_the_rule_cannot_force_a_warning_on_every_failure(caplog):
+    # Every unusable value collapses to ONE token, so a caller who can vary the
+    # rule freely still cannot manufacture a class change per step and turn the
+    # coalescing guard into the log flood it exists to prevent.
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for n in range(10):
+            record_failure("ext_alpha", f"failed at attempt {n} — see https://host{n}.example.com")
+
+    warnings = _records(caplog, logging.WARNING)
+    # Two, and neither is caller-steerable: the first failure, and the
+    # run-length crossing at ten. Ten distinct values produced no class change.
+    assert len(warnings) == 2
+    assert all("unclassified" in w.getMessage() for w in warnings)
+    assert consecutive_failures("ext_alpha") == 10  # still counted exactly
+
+
+def test_a_vocabulary_token_survives_verbatim(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_failure("ext_alpha", "schema_rejected")
+
+    assert ft._streaks["ext_alpha"].rule == "schema_rejected"
+    assert "schema_rejected" in _messages(caplog)[0]
+
+
+def test_an_agent_id_outside_the_pattern_is_neither_tracked_nor_logged(caplog):
+    poisoned_ids = [
+        "https://ops.example.com/orizon/dispatch?token=SUPERSECRET",
+        "ext_alpha\nWARNING forged log line",
+        "ext alpha",
+        "A" * 33,  # AGENT_ID_PATTERN caps at 32
+        "",
+    ]
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for agent_id in poisoned_ids:
+            record_failure(agent_id, "connect_failed")
+            record_success(agent_id)
+            assert consecutive_failures(agent_id) == 0
+
+    assert ft._streaks == {}  # no slot in the bounded map for an id that cannot name an agent
+    for record in caplog.records:
+        if record.name != LOGGER_NAME:
+            continue
+        assert record.levelno == logging.DEBUG
+        assert not record.args  # nothing interpolated at all — the value is withheld, not truncated
+        assert not any(fragment in record.getMessage() for fragment in POISON_FRAGMENTS)
