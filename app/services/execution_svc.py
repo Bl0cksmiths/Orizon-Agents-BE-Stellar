@@ -211,6 +211,9 @@ async def _run(
     # local worker and do NOT for a bound external one, whose worker name is
     # "external.<agent_id>" — see _submit_ratings.
     delivered: dict[str, Any] = {}
+    # Agent ids whose step never reached a worker at all — see the resolve
+    # branch below. Distinct from "delivered nothing": these are not rated.
+    undispatched: set[str] = set()
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
@@ -251,6 +254,15 @@ async def _run(
                 # continues. Trace lines only reach the SSE viewer and are
                 # dropped with the task; every step failure also goes to the
                 # server log so an outage is diagnosable after the fact.
+                # Never dispatched, so never rated. resolve_worker fails OPEN,
+                # which means this branch is also where OUR outage lands — an
+                # unreadable binding store returns None exactly like a missing
+                # binding, and the read failure is negative-cached, so one blip
+                # can hit several steps. Rating here would write a permanent
+                # on-chain 20/100 against an operator who was never asked to
+                # deliver. "Did not deliver" and "was never asked" are
+                # different facts and only the first is theirs (ADR 0005 D5).
+                undispatched.add(step.agent_id)
                 logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
                 await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
                 continue
@@ -415,7 +427,15 @@ async def _run(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
                 if charge_tx and job_id:
-                    await _submit_ratings(task_id, start, plan, delivered, payer=payer, job_id=job_id)
+                    await _submit_ratings(
+                        task_id,
+                        start,
+                        plan,
+                        delivered,
+                        payer=payer,
+                        job_id=job_id,
+                        undispatched=frozenset(undispatched),
+                    )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to.
@@ -775,6 +795,7 @@ async def _submit_ratings(
     *,
     payer: str,
     job_id: bytes,
+    undispatched: frozenset[str] = frozenset(),
 ) -> None:
     """Submit the settler's synthetic per-step ratings to ReputationLedger.
 
@@ -799,6 +820,9 @@ async def _submit_ratings(
         # ("settled money for no delivered work") for an operator who shipped.
         # The agent_name fallback is for a caller that still hands in a
         # worker-name-keyed map, which is correct for a local step.
+        if step.agent_id in undispatched:
+            # We never sent them the step, so there is nothing to judge.
+            continue
         step_output = delivered.get(step.agent_id)
         if step_output is None:
             step_output = delivered.get(step.agent_name or "")
