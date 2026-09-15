@@ -94,6 +94,23 @@ def _unusable_field(output: dict) -> str | None:
     return None
 
 
+def _trace_url(value: object) -> str | None:
+    """An operator-supplied preview URL, when it is safe to put in a trace line.
+
+    The URL is chosen by whoever ran the step, and the line it lands in is
+    rendered in the buyer's viewer and kept with the task, so it is surfaced
+    only as a string carrying an http(s) scheme — a `javascript:` or `data:`
+    link is refused outright — and held to the same 180-char ceiling every
+    other traced value already gets.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    return url[:180]
+
+
 def _summarize(output: dict) -> str:
     if "summary" in output:
         return str(output["summary"])[:180]
@@ -303,8 +320,9 @@ async def _run(
                     joined = " · ".join(notes)[:180]
                     await _emit(task_id, start, "exec", f"{worker.name}: {joined}")
                 # Some workers (deploy.v0) attach a synthetic preview URL —
-                # surface it so the demo viewer sees the "ship" moment.
-                preview_url = output.get("preview_url")
+                # surface it so the demo viewer sees the "ship" moment. An
+                # unusable or non-http(s) one is dropped, not traced.
+                preview_url = _trace_url(output.get("preview_url"))
                 if preview_url:
                     await _emit(
                         task_id,
@@ -318,7 +336,9 @@ async def _run(
             art = output.get("artifact") if isinstance(output, dict) else None
             if art:
                 last_artifact = art
-                title = art.get("title", "artifact")
+                # Operator-chosen text: coerced and capped like every other
+                # traced value, so a title cannot flood the buyer's trace.
+                title = str(art.get("title", "artifact"))[:180]
                 files = art.get("files", [])
                 total_bytes = sum(len(f.get("content", "")) for f in files)
                 total_lines = sum(f.get("content", "").count("\n") + 1 for f in files)
