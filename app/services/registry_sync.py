@@ -64,6 +64,36 @@ _MIN_INTERVAL_SECONDS = 5.0
 # response, or the planner prompt.
 MAX_AGENT_NAME_CHARS = 100
 
+# Bound on a mirrored price, by the same trust-boundary reasoning as the name:
+# `register` and `update_price` take a bare `i128` and check nothing about it,
+# not even the sign, so `RegisterAgentReq.price_usdc`'s `gt=0, le=10_000` binds
+# only callers who came through our API.
+MAX_ONCHAIN_PRICE_USDC = 10_000.0
+
+
+class UnbelievablePrice(ValueError):
+    """An on-chain price outside the range we are willing to mirror."""
+
+
+def _price_ceiling() -> float:
+    """Highest per-call price we will believe from the chain.
+
+    The tighter of two bounds, read LIVE on every call rather than cached — the
+    `settings.stellar_agent_registry` discipline, so a reconfigured cap takes
+    effect on the next pass instead of being pinned for the process lifetime:
+
+      * `MAX_ONCHAIN_PRICE_USDC` — our own API's ceiling, restated on the side
+        of the trust boundary that a direct contract call cannot bypass.
+      * `settings.max_charge_usdc` — `execution_svc` skips the on-chain charge,
+        the seal AND the ratings for the WHOLE RUN when a plan total exceeds
+        it. A single step priced above that cap therefore cannot appear in any
+        settleable plan: routing to it would not just overcharge, it would
+        strip settlement from every honest agent sharing the plan. An agent we
+        can never settle is not a cheap agent, it is an unroutable one.
+    """
+    return min(MAX_ONCHAIN_PRICE_USDC, settings.max_charge_usdc)
+
+
 # Single-flight guard shared by the loop and on-demand callers: overlapping
 # passes would race identical reads through the shared executor for no gain.
 _lock = asyncio.Lock()
@@ -111,7 +141,22 @@ def _to_agent(raw: dict[str, Any]) -> Agent:
     is `[A-Za-z0-9_]{1,32}` by construction) and neither do `skills`, which are
     a `Vec<Symbol>` on-chain and so cannot carry whitespace, quotes, control
     characters, or anything resembling a fence marker.
+
+    Raises `UnbelievablePrice` for a price outside `_price_ceiling()` — REFUSED
+    rather than clamped. Clamping would invent a commercial term: we would quote
+    the buyer, and pay the owner, a rate neither of them agreed to, and a price
+    clamped to the cap still consumes the entire charge budget and still denies
+    settlement to the rest of the plan. Refusing is the honest failure — we
+    cannot represent this agent's terms, so we do not offer it — and because
+    the caller then keeps it out of `state.agents` entirely, it is unroutable
+    everywhere at once (the planner block, the floor-starvation fallback, the
+    substitute search, the model-plan clamp, GET /api/agents and the execution
+    pricing) without a price filter duplicated across all six.
     """
+    price = raw["price"] / 1e7
+    ceiling = _price_ceiling()
+    if not 0 < price <= ceiling:
+        raise UnbelievablePrice(f"{price:.6f} USDC is outside (0, {ceiling:.6f}]")
     return Agent(
         id=raw["id"],
         # `sanitize_untrusted` is this repo's existing primitive
@@ -121,7 +166,7 @@ def _to_agent(raw: dict[str, Any]) -> Agent:
         # multi-line BEGIN/END block cannot live inside an `Agent.name`.
         name=sanitize_untrusted(raw["name"], max_chars=MAX_AGENT_NAME_CHARS),
         skills=list(raw["skills"]),
-        price=raw["price"] / 1e7,
+        price=price,
         rep=settings.reputation_prior_bps / 2000,
         status="online" if raw["active"] else "offline",
         runs=0,
