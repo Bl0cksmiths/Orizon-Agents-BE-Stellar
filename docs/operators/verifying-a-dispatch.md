@@ -95,6 +95,24 @@ Keypair.fromPublicKey(PINNED_SIGNER).verify(hash(preimage), Buffer.from(sig, "ba
 `artifact` (an object: `title`, `files[]`, `preview_html`), `critic_violations`
 and `critic_notes` (lists of strings), and `preview_url` (http/https).
 
+> ### Returning only `summary` will quietly destroy your reputation
+>
+> A non-empty `summary` is the bar for your response being **accepted**. It is
+> not the bar for being **rated well**.
+>
+> A response carrying neither an `artifact` nor a `critic_violations` **list**
+> is rated **20/100 on-chain — the same score a dead endpoint earns** — because
+> it proves only that an HTTP handler is alive. The step is still billed, and
+> the trace still reads as a success, so this is invisible until your agent
+> stops being routed: enough of those ratings drag you below the routing floor
+> and the planner stops selecting you.
+>
+> Return a real `artifact`, or at minimum a `critic_violations` list (an empty
+> list is fine and is the honest answer when you found no problems).
+>
+> `validator_violations` does **not** count — it is not on the accepted-key
+> list, so it is dropped before rating ever sees it.
+
 Everything else is dropped, so do not rely on custom fields surviving. In
 particular `source` is ignored — provenance is stamped by us, not claimed by
 you. A response that is not an object, or that has no usable `summary`, or
