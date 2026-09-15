@@ -59,6 +59,7 @@ import logging
 import secrets
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -150,20 +151,68 @@ class ExternalDispatchError(RuntimeError):
         self.rule = rule
 
 
+def _refusal_host(url: str) -> str:
+    """The host of `url`, for a line someone will read in a log.
+
+    `app.routers.binding._host` for the dispatch path, and deliberately the same
+    shape: a refusal names the host, never the URL.
+    """
+    try:
+        return urlsplit(url).hostname or "-"
+    except ValueError:  # malformed IPv6 bracket, non-numeric port, …
+        return "-"
+
+
+def _without_url(url: str, message: str) -> str:
+    """`message` with the endpoint URL cut down to its host.
+
+    Every `EndpointPolicyError` message embeds `{url!r}`, which is right there —
+    the bind API answers the operator who typed the URL, so quoting it back is
+    the useful thing to do. A dispatch refusal has a different audience: it
+    becomes the `ExternalDispatchError` that `execution_svc` logs verbatim, so
+    the same prose writes the WHOLE endpoint into our server log, credentials
+    and all. `https://op.example/dispatch?token=SECRET` is an ordinary way to
+    write an operator endpoint and the token belongs in no log line of ours.
+
+    So the URL comes out and the host goes in, which is exactly what the bind
+    path's refusals carry (ADR 0003: host and rule, never the URL). The prose
+    around it survives — "points at non-public address 169.254.169.254" is the
+    part that explains the refusal, and it names nothing secret.
+
+    Belt and braces: if the URL is still in the message afterwards — prose that
+    quoted it in some shape this does not know how to redact — the prose is
+    dropped rather than the guarantee.
+    """
+    host = _refusal_host(url)
+    safe = message.replace(repr(url), f"for host {host!r}")
+    try:
+        query = urlsplit(url).query
+    except ValueError:
+        query = ""
+    if (url and url in safe) or (query and query in safe):
+        return f"endpoint for host {host!r} refused"
+    return safe
+
+
 def validate_endpoint_url(url: str) -> None:
     """Reject an operator endpoint that is not safe to dispatch to (SSRF).
 
     The rules themselves are `app.services.endpoint_policy.validate_endpoint_url`
     — one block-list, shared with the bind API, because a second copy is a copy
-    that drifts. This wrapper exists only to keep the dispatch path's error type:
+    that drifts. This wrapper exists to keep the dispatch path's error type:
     `EndpointPolicyError` becomes `ExternalDispatchError`, so a bad binding fails
     its step like any other dispatch failure rather than surfacing a ValueError
-    the run loop has no handling for. The message is passed through unchanged.
+    the run loop has no handling for.
+
+    The message is rewritten on the way through, not passed along: the URL is
+    redacted to its host (see `_without_url`) and the policy's own `rule` is
+    appended, so the coarse class reaches the trace while the specific reason
+    the endpoint was refused stays readable in the log.
     """
     try:
         _validate_endpoint_policy(url)
     except EndpointPolicyError as e:
-        raise ExternalDispatchError("endpoint_refused", str(e)) from e
+        raise ExternalDispatchError("endpoint_refused", f"{_without_url(url, str(e))} (rule: {e.rule})") from e
 
 
 class ExternalHttpWorker(Worker):
