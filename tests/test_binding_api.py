@@ -187,6 +187,30 @@ def test_bind_stores_the_endpoint_for_the_on_chain_owner(client, monkeypatch, st
     assert no_dns == [ENDPOINT]  # resolve-and-check ran, after authorisation
 
 
+def test_bind_accepts_a_sep53_signature_end_to_end(client, monkeypatch, store, no_dns):
+    # The path a REAL wallet takes. Every other bind test here signs the raw
+    # UTF-8 bytes, but the frontend calls kit.signMessage(), and Freighter
+    # implements SEP-53 — sign(sha256(b"Stellar Signed Message:\n" + msg)).
+    # Without this test the whole feature could pass CI and still fail against
+    # the most common Stellar wallet, and fail as "not_agent_owner" — looking
+    # like a rejected owner rather than a signature-framing mismatch.
+    kp = Keypair.random()
+    owned_by(monkeypatch, kp.public_key)
+    message = challenge(client, "bind_sep53").json()["message"]
+
+    r = client.post(
+        "/api/agents/bind_sep53/bind",
+        json={
+            "endpoint_url": ENDPOINT,
+            "signature": base64.b64encode(kp.sign_message(message.encode("utf-8"))).decode("ascii"),
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["owner"] == kp.public_key
+    assert stored(store, "bind_sep53") is not None
+
+
 def test_bind_refuses_a_signature_from_another_wallet(client, monkeypatch, store, no_dns):
     owner = Keypair.random()
     impostor = Keypair.random()
