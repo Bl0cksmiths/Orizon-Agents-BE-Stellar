@@ -80,12 +80,23 @@ def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLEN
     Returns (nonce, expires_at); the caller needs the expiry to tell the
     operator how long the challenge has left to be signed.
 
+    Near-idempotent inside the window: a live, unexpired challenge for the same
+    pair is returned AS IS, with whatever TTL it has left, rather than replaced.
+    The route is public, so without this any anonymous caller could loop it and
+    permanently grief the honest owner — every request minted a fresh nonce and
+    invalidated the one the owner was in the middle of signing, so the owner's
+    signature always arrived against a nonce that no longer existed. Re-issuing
+    also cannot be used to extend a challenge's life past its original expiry.
+
     Bounded, sweep-on-insert — ramp_store.save's discipline: a new key that
     would take the table past MAX_CHALLENGES first evicts the oldest EXPIRED
     challenge, falling back to the oldest overall, so the table cannot exceed
     its cap however many agent ids an anonymous caller invents.
     """
     key = (agent_id, endpoint_url)
+    live = _challenges.get(key)
+    if live is not None and live[1] > time.time():
+        return live
     if key not in _challenges and len(_challenges) >= MAX_CHALLENGES:
         _evict_one()
     nonce = secrets.token_hex(16)
