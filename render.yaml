@@ -29,6 +29,15 @@ services:
       # deliberate, and safer than serving those routes unauthenticated.
       - key: API_KEY
         sync: false
+      # Postgres connection string for the operator-endpoint binding store
+      # (story 2.01). Left UNSET the service still boots and binds work — they
+      # just live in memory and are lost on the next deploy or idle spin-down,
+      # which is fine for a demo but does not satisfy AC-5. Paste a Neon
+      # connection string here to make bindings durable; no code change is
+      # needed, the store implementation is selected from this value alone.
+      # Not a free Render Postgres: that tier expires after 30 days.
+      - key: DATABASE_URL
+        sync: false
 
       # ── HTTP ────────────────────────────────────────────────────────────
       - key: CORS_ORIGINS
