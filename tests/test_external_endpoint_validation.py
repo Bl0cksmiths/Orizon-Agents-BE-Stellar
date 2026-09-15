@@ -8,9 +8,12 @@ instance metadata, loopback and the private ranges.
 
 from __future__ import annotations
 
+import asyncio
+
+import httpx
 import pytest
 
-from app.agents.workers.external_http import ExternalDispatchError, validate_endpoint_url
+from app.agents.workers.external_http import ExternalDispatchError, ExternalHttpWorker, validate_endpoint_url
 
 
 @pytest.mark.parametrize(
@@ -94,3 +97,34 @@ def test_userinfo_does_not_disguise_a_blocked_host() -> None:
     # before the @ is credentials, the real host is the metadata service.
     with pytest.raises(ExternalDispatchError, match="non-public address"):
         validate_endpoint_url("https://operator.example@169.254.169.254/latest/meta-data/")
+
+
+def test_worker_refuses_to_dispatch_to_a_blocked_endpoint() -> None:
+    # The guard is wired into the dispatch path, not just available as a
+    # helper: no request is ever handed to the transport, and the failure is
+    # the ordinary ExternalDispatchError execution_svc already degrades on.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"summary": "should never be reached"})
+
+    async def go() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            worker = ExternalHttpWorker("ext_evil", "external.evil", "http://169.254.169.254/", client=client)
+            with pytest.raises(ExternalDispatchError, match="external dispatch"):
+                await worker.run("x", "y")
+
+    asyncio.run(go())
+    assert calls["n"] == 0  # the endpoint was never contacted
+
+
+def test_endpoint_rebound_after_construction_is_revalidated() -> None:
+    # endpoint_url is a plain attribute: validating per dispatch (not once in
+    # __init__) is what catches a URL swapped out after the worker was built.
+    worker = ExternalHttpWorker("ext_demo1", "external.demo", "https://operator.example/run")
+    worker.endpoint_url = "https://169.254.169.254/latest/meta-data/"
+
+    with pytest.raises(ExternalDispatchError, match="non-public address"):
+        asyncio.run(worker.run("x", "y"))
