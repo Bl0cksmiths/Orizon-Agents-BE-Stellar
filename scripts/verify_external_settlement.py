@@ -201,6 +201,41 @@ def asset_lines(config: dict[str, Any], credit: Credit | None) -> list[str]:
     return lines
 
 
+def funding_lines(config: dict[str, Any], credit: Credit | None) -> list[str]:
+    """Who funded the credit — the difference between a platform-funded payout
+    and an escrow settlement, and the one a reader must not have to infer from
+    a G-address.
+
+    It matters here because the deployed `PaymentEscrow` cannot move an
+    external payer's funds at all: `charge` calls the SAC's
+    `transfer(payer -> owner)` while only the settler signs, so the payer's
+    required authorization is missing and the call is rejected with
+    `Error(Auth, InvalidAction)`. Every payout this repo can actually produce
+    is therefore funded by a platform key and has to say so.
+    """
+    if credit is None:
+        return []
+    if credit.source is None:
+        return [
+            "  funded by:                unknown - Horizon's record names no counterparty",
+            "  ^ do not call this buyer-funded or escrow-settled until the payer is named.",
+        ]
+
+    platform_keys = {
+        "admin": config.get("admin"),
+        "dispatch signer": config.get("dispatch_signer"),
+    }
+    role = next((name for name, address in platform_keys.items() if address and address == credit.source), None)
+    lines = [f"  funded by:                {credit.source}"]
+    if role is not None:
+        lines.append(f"  ^ the deployment's {role} key: a PLATFORM-FUNDED payout, not an escrow settlement.")
+    else:
+        lines.append("  ^ not a key named by /api/stellar/network; confirm whose wallet this is before labelling it.")
+    lines.append("  note: PaymentEscrow.charge cannot settle an external payer's funds on this deployment -")
+    lines.append("        see docs/evidence/2.04-reference-agent-runbook.md, 'Settlement position'.")
+    return lines
+
+
 def _horizon_base(network: str) -> str:
     return "https://horizon.stellar.org" if network == "public" else "https://horizon-testnet.stellar.org"
 
@@ -352,7 +387,7 @@ def main() -> int:
         print(f"  [{'PASS' if c.ok else 'FAIL'}] {c.name}: {c.detail}")
 
     print()
-    for line in asset_lines(config, credit):
+    for line in asset_lines(config, credit) + funding_lines(config, credit):
         print(line)
 
     print(f"\n  stellar.expert (tx):      {_expert('tx', args.tx, args.network)}")
