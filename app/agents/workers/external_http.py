@@ -73,6 +73,12 @@ ALLOWED_SCHEMES = frozenset({"https"})
 # Hostnames that resolve to the local machine without ever touching an IP
 # literal. ".localhost" is reserved for exactly this by RFC 6761.
 _LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+# Names the cloud providers resolve to the link-local metadata service. Blocking
+# 169.254.169.254 as a literal does nothing about these: they are ordinary names
+# that only resolve inside the VM, so nothing short of a name check stops them.
+# This is a floor, not a fence — the resolve-then-check in Epic 2 is what makes
+# the range unreachable by ANY name. Keep both.
+_METADATA_HOSTNAMES = frozenset({"metadata.google.internal", "metadata.goog", "instance-data"})
 
 
 class ExternalDispatchError(RuntimeError):
@@ -170,6 +176,9 @@ def validate_endpoint_url(url: str) -> None:
 
     if host in _LOOPBACK_HOSTNAMES or any(host.endswith(f".{name}") for name in _LOOPBACK_HOSTNAMES):
         raise ExternalDispatchError(f"endpoint URL {url!r} points at loopback host {host!r}")
+
+    if host in _METADATA_HOSTNAMES:
+        raise ExternalDispatchError(f"endpoint URL {url!r} points at cloud metadata host {host!r}")
 
 
 class ExternalHttpWorker(Worker):
