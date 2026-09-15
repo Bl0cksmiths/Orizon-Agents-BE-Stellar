@@ -245,3 +245,106 @@ def test_a_class_reported_before_a_recovery_is_reported_again_after_it(caplog):
         record_failure("ext_alpha", "http_status")
 
     assert len(_records(caplog, logging.WARNING)) == 3
+
+
+# ── bounded: the cap, the eviction order, and the line it writes ─
+
+
+@pytest.fixture()
+def tiny_cap(monkeypatch):
+    """Three slots, so eviction is exercised in four lines instead of 257.
+
+    The cap is read live inside record_failure, so patching the module global
+    is enough — nothing captures it at import.
+    """
+    monkeypatch.setattr(ft, "_MAX_AGENTS", 3)
+    return 3
+
+
+def _evictions(caplog, level: int) -> list[logging.LogRecord]:
+    return [r for r in _records(caplog, level) if "failure tracker" in r.getMessage()]
+
+
+def test_the_map_never_grows_past_the_cap(tiny_cap):
+    for n in range(20):
+        record_failure(f"ext_{n}", "connect_failed")
+
+    assert len(ft._streaks) == tiny_cap
+
+
+def test_the_oldest_agent_is_evicted_first(tiny_cap):
+    for name in ["ext_a", "ext_b", "ext_c"]:
+        record_failure(name, "connect_failed")
+
+    record_failure("ext_d", "connect_failed")
+
+    assert "ext_a" not in ft._streaks
+    assert list(ft._streaks) == ["ext_b", "ext_c", "ext_d"]
+
+
+def test_an_agent_that_is_still_failing_outlives_a_quiet_one(tiny_cap):
+    # "Oldest" means least recently failing, not first seen: evicting the agent
+    # that is failing RIGHT NOW in favour of one that has been quiet since
+    # startup would drop the only streak anybody is going to grep for.
+    for name in ["ext_a", "ext_b", "ext_c"]:
+        record_failure(name, "connect_failed")
+    record_failure("ext_a", "connect_failed")
+
+    record_failure("ext_d", "connect_failed")
+
+    assert list(ft._streaks) == ["ext_c", "ext_a", "ext_d"]
+
+
+def test_an_evicted_streak_restarts_from_zero(tiny_cap):
+    record_failure("ext_a", "connect_failed")
+    record_failure("ext_a", "connect_failed")
+    for name in ["ext_b", "ext_c", "ext_d"]:
+        record_failure(name, "connect_failed")
+
+    assert consecutive_failures("ext_a") == 0
+
+
+def test_the_first_eviction_warns_and_names_what_was_dropped(tiny_cap, caplog):
+    for name in ["ext_a", "ext_b", "ext_c"]:
+        record_failure(name, "connect_failed")
+        record_failure(name, "connect_failed")
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_failure("ext_d", "http_status")
+
+    warnings = _evictions(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    dropped = warnings[0].getMessage()
+    assert "ext_a" in dropped
+    # The streak that was lost, so the operator can tell a dropped counter from
+    # an agent that genuinely just started failing.
+    assert "connect_failed" in dropped and "2 consecutive" in dropped
+
+
+def test_evictions_coalesce_to_debug_while_the_map_stays_full(tiny_cap, caplog):
+    for name in ["ext_a", "ext_b", "ext_c"]:
+        record_failure(name, "connect_failed")
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for n in range(5):
+            record_failure(f"ext_new_{n}", "connect_failed")
+
+    # At capacity every new agent evicts one, so an uncoalesced warning would
+    # be a flood proportional to the churn — exactly what this module prevents.
+    assert len(_evictions(caplog, logging.WARNING)) == 1
+    assert len(_evictions(caplog, logging.DEBUG)) == 4
+
+
+def test_a_success_re_arms_the_eviction_warning(tiny_cap, caplog):
+    for name in ["ext_a", "ext_b", "ext_c", "ext_d"]:
+        record_failure(name, "connect_failed")  # the fourth evicts and warns
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_success("ext_b")  # a slot is free again
+        record_failure("ext_e", "connect_failed")  # fits, evicts nothing
+        record_failure("ext_f", "connect_failed")  # full again: news, not churn
+
+    assert len(_evictions(caplog, logging.WARNING)) == 1
