@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from ..config import settings
+from ..schemas import AGENT_ID_PATTERN
 from ..security import require_api_key
 from ..services import registry_sync, reputation_svc
 from ..state import state
@@ -128,9 +129,8 @@ async def network() -> NetworkInfo:
     )
 
 
-# Agent ids are contract Symbols: short alphanumeric/underscore tokens. Reject
-# garbage at the router edge instead of paying an RPC round-trip to find out.
-AGENT_ID_PATTERN = r"^[A-Za-z0-9_]{1,32}$"
+# AGENT_ID_PATTERN now lives in app/schemas.py — the binding router bounds an
+# agent id with the same rule, and an SSRF-adjacent charset must have one owner.
 
 # Job/auth ids are 16-byte BytesN rendered hex — exactly 32 hex chars. Same
 # reasoning as AGENT_ID_PATTERN: bound the path param at the router edge so a
