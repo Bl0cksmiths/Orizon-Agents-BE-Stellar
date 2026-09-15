@@ -112,6 +112,30 @@ class Settings(BaseSettings):
     # Ceiling for a single PaymentEscrow.charge, in USDC.
     max_charge_usdc: float = 100.0
 
+    # ── Persistence (story 2.01 — operator endpoint binding) ──
+    # Postgres DSN for the operator endpoint binding table — the first durable
+    # write this service has ever made. EMPTY (the default) selects
+    # InMemoryBindingStore instead, which is what keeps the test suite hermetic
+    # and offline and what lets local dev run with no database at all: the whole
+    # choice is made from this one value, behind the BindingStore interface, with
+    # no code change on either side.
+    #
+    # It is set in the RENDER DASHBOARD, not here and not in render.yaml. A DSN
+    # embeds the database password, render.yaml is in git, and every secret it
+    # names is `sync: false` for exactly that reason. The dashboard also
+    # overrides render.yaml, so the dashboard is where a deployment's real value
+    # has to live regardless of which file this default sits in.
+    #
+    # This one variable is what makes AC-5 ("the binding survives a backend
+    # restart") true in production. The free instance spins down after ~15
+    # minutes idle and comes back FROM THE IMAGE, so a binding held in this
+    # process — or written to this process's filesystem — is gone before anyone
+    # looks at it. Pointed at a Neon DSN the binding outlives the restart, the
+    # redeploy and the demo; see docs/decisions/0003-operator-endpoint-binding.md
+    # for why Neon rather than Render's own free Postgres, which expires after 30
+    # days, i.e. exactly at award time.
+    database_url: str = ""
+
     # ── Reputation (Bayesian smoothing + routing floor) ───────
     # The on-chain ReputationLedger stores decayed, value-weighted rating
     # evidence; the backend smooths it with a Bayesian prior so new agents
