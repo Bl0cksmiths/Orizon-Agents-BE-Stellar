@@ -32,6 +32,7 @@ its wording.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from urllib.parse import urlsplit
@@ -186,3 +187,73 @@ def validate_endpoint_url(url: str) -> None:
 
     if host in _METADATA_HOSTNAMES:
         raise EndpointPolicyError("metadata_host", f"endpoint URL {url!r} points at cloud metadata host {host!r}")
+
+
+async def resolve_and_check(url: str) -> tuple[str, ...]:
+    """`validate_endpoint_url`, then resolve the host and judge what comes back.
+
+    The pure check can only see the URL as written, so `evil.example` — an
+    ordinary, perfectly public-looking name whose A record is 127.0.0.1 or
+    169.254.169.254 — walks straight through it. The hand-listed metadata names
+    are a floor for the handful of spellings we know; this is the general
+    answer: resolve the name and apply `_is_blocked_address`, the SAME
+    predicate the literal rule uses, to EVERY address returned. One public
+    address among five does not make a host dispatchable — the resolver is free
+    to hand any of them to the connect, so one blocked address refuses the lot.
+
+    Returns the resolved addresses (deduplicated, resolver order preserved) so
+    a caller can log or pin them.
+
+    A DNS lookup is an outbound *query*, not an outbound *request to the
+    endpoint*, so this still satisfies "no outbound request to the endpoint at
+    bind time". It does reach the network, which is why it is a separate
+    function: the bind handler runs the pure check first, before any chain read
+    or write, and only calls this once the caller has proved ownership — an
+    unauthenticated resolver is a service someone else will happily use.
+
+    Raises EndpointPolicyError with rule `unresolvable_host` (the name does not
+    resolve, or resolves to nothing usable) or `non_public_address` (naming the
+    offending address), plus anything `validate_endpoint_url` raises.
+    """
+    validate_endpoint_url(url)
+    host = (urlsplit(url).hostname or "").rstrip(".")
+
+    # The loop's resolver, not socket.getaddrinfo: the blocking call would stall
+    # the whole event loop for the length of a DNS timeout, and this runs inside
+    # a request handler.
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as e:  # socket.gaierror and friends are all OSError
+        raise EndpointPolicyError(
+            "unresolvable_host", f"endpoint URL {url!r} host {host!r} could not be resolved"
+        ) from e
+
+    addresses: list[str] = []
+    for info in infos:
+        # sockaddr[0] is the address for both AF_INET and AF_INET6; a v6 result
+        # can carry a "%eth0" scope suffix that ip_address will not parse.
+        address = str(info[4][0]).partition("%")[0]
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise EndpointPolicyError("unresolvable_host", f"endpoint URL {url!r} host {host!r} resolved to no addresses")
+
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as e:
+            # A resolver that answers with something unparseable is not an
+            # answer we can judge, and an unjudgeable address is not dispatchable.
+            raise EndpointPolicyError(
+                "unresolvable_host", f"endpoint URL {url!r} host {host!r} resolved to unparseable address {address!r}"
+            ) from e
+        if _is_blocked_address(ip):
+            raise EndpointPolicyError(
+                "non_public_address",
+                f"endpoint URL {url!r} host {host!r} resolves to non-public address {ip} — "
+                "private, loopback, link-local, reserved, multicast and unspecified "
+                "ranges are not dispatchable",
+            )
+
+    return tuple(addresses)
