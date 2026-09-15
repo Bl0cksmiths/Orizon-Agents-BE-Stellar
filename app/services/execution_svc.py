@@ -183,6 +183,14 @@ async def _run(
         "kit": kit.model_dump() if kit is not None else None,
         "intent": plan.intent,
     }
+    # What each step actually delivered, keyed by the PLAN STEP's agent_id.
+    # Separate from `context` because the two are keyed for different readers:
+    # `context` is worker-facing and keyed by worker name (a worker asks for
+    # context["code.gen"]), while the settler needs the output for a step it
+    # holds only an agent_id and a catalog agent_name for. Those coincide for a
+    # local worker and do NOT for a bound external one, whose worker name is
+    # "external.<agent_id>" — see _submit_ratings.
+    delivered: dict[str, Any] = {}
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
@@ -353,6 +361,7 @@ async def _run(
             # can read it. e.g. context["code.gen"] = {...}.
             if isinstance(output, dict):
                 context[worker.name] = output
+                delivered[step.agent_id] = output
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
@@ -381,7 +390,7 @@ async def _run(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
                 if charge_tx and job_id:
-                    await _submit_ratings(task_id, start, plan, context, payer=payer, job_id=job_id)
+                    await _submit_ratings(task_id, start, plan, delivered, payer=payer, job_id=job_id)
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to.
@@ -737,7 +746,7 @@ async def _submit_ratings(
     task_id: str,
     start: float,
     plan: StoredPlan,
-    context: dict[str, Any],
+    delivered: dict[str, Any],
     *,
     payer: str,
     job_id: bytes,
@@ -758,8 +767,17 @@ async def _submit_ratings(
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
     for step in plan.plan.steps:
-        # Context keys are worker names (e.g. "code.gen"), same as agent_name.
-        rating, weight = reputation_svc.synthetic_rating(context.get(step.agent_name or ""), step.est_price_usdc)
+        # Keyed by agent_id — the one identity both worker kinds share. Worker
+        # names do not: a bound external agent runs as "external.<agent_id>",
+        # never as the operator's catalog agent_name, so a name lookup missed
+        # every delivered external step and wrote a permanent on-chain 20/100
+        # ("settled money for no delivered work") for an operator who shipped.
+        # The agent_name fallback is for a caller that still hands in a
+        # worker-name-keyed map, which is correct for a local step.
+        step_output = delivered.get(step.agent_id)
+        if step_output is None:
+            step_output = delivered.get(step.agent_name or "")
+        rating, weight = reputation_svc.synthetic_rating(step_output, step.est_price_usdc)
         try:
             # Async path: the submit RPC runs in a worker thread but the ~30s
             # status poll waits on the event loop — no executor thread pinned.
