@@ -114,6 +114,14 @@ class _Streak:
 
 _streaks: OrderedDict[str, _Streak] = OrderedDict()
 
+# True while the map is full and evicting. Flips the eviction line from WARNING
+# (the first drop) to DEBUG, and is re-armed when a success frees a slot — the
+# `registry_sync._failing` discipline, needed here for the same reason: at
+# capacity EVERY new agent evicts one, so an uncoalesced warning would be a
+# log flood proportional to the churn, which is the failure mode this module
+# exists to prevent.
+_at_capacity = False
+
 
 def record_failure(agent_id: str, rule: str) -> None:
     """Count one failed step for `agent_id`, classified as `rule`.
@@ -194,9 +202,12 @@ def record_success(agent_id: str) -> None:
     inserting a zero-count entry per successful step would make the map track
     every agent that has ever run instead of only the ones that are failing.
     """
+    global _at_capacity
     streak = _streaks.pop(agent_id, None)
     if streak is None:
         return
+    # A slot is free again, so the next eviction is news rather than churn.
+    _at_capacity = False
     # Exactly one INFO, and only where a streak really ended —
     # `registry_sync`'s "recovered" line and `dispatch_signing._report_signed`
     # both fire off the path that actually succeeded, so a persistent failure
@@ -228,5 +239,25 @@ def _normalize_rule(rule: str) -> str:
 
 
 def _evict_one() -> None:
-    """Drop the least recently failing agent to make room for a new one."""
-    _streaks.popitem(last=False)
+    """Drop the least recently failing agent to make room for a new one.
+
+    Says so, because the drop is not free: the evicted agent's streak restarts
+    from zero, so its next failure reports as a first failure and its run-length
+    escalation is deferred. That is `ramp_store._evict_one` logging an evicted
+    in-flight ramp rather than losing it silently — an operator reading a "1
+    consecutive" line deserves to know a counter was reset under them.
+    """
+    global _at_capacity
+    agent_id, streak = _streaks.popitem(last=False)
+    if _at_capacity:
+        logger.debug("failure tracker still full: dropped %s (%s, %d consecutive)", agent_id, streak.rule, streak.count)
+        return
+    _at_capacity = True
+    logger.warning(
+        "failure tracker is full at %d agents — dropped the least recently failing one, %s (%s, %d consecutive); "
+        "its streak restarts from zero (coalescing to DEBUG until a success frees a slot)",
+        _MAX_AGENTS,
+        agent_id,
+        streak.rule,
+        streak.count,
+    )
