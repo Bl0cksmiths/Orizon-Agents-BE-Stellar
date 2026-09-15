@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from app.agents.workers import external_http as eh
 from app.agents.workers.external_http import MAX_RESPONSE_BYTES, ExternalDispatchError, ExternalHttpWorker
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
@@ -81,6 +82,9 @@ def test_dispatch_carries_the_envelope_and_returns_the_output() -> None:
     assert body["v"] == 2
     assert isinstance(body["ts"], int) and body["ts"] > 0
     assert body["network"]
+    # The operator's budget, emitted from the constant so the wire value can
+    # never drift from what the worker actually enforces.
+    assert body["deadline_ms"] == int(eh.DISPATCH_DEADLINE_SECONDS * 1000)
     assert body["agent_id"] == "ext_demo1"
     assert body["intent"] == "make a bakery landing page"
     assert body["rationale"] == "draft it"

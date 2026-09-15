@@ -159,7 +159,6 @@ def test_repeated_untrusted_junk_crosses_the_routing_floor():
         ({"artifact": {"title": "x"}, "critic_violations": []}, 95),
         ({"artifact": {"title": "x"}, "critic_violations": ["a", "b", "c"]}, 76),
         ({"critic_violations": []}, 80),  # critic content with no artifact still counts
-        ({"validator_violations": ["a"]}, 67),
     ],
 )
 def test_untrusted_output_that_delivers_still_earns_the_full_scale(delivered: dict[str, Any], expected: int):
@@ -167,6 +166,27 @@ def test_untrusted_output_that_delivers_still_earns_the_full_scale(delivered: di
     # that ships something is scored on exactly the same scale as a local one.
     assert rep.synthetic_rating(delivered, PRICE, first_party=False)[0] == expected
     assert rep.synthetic_rating(delivered, PRICE)[0] == expected
+
+
+def test_validator_violations_is_the_one_place_the_two_scales_diverge():
+    """The only shape scored differently for an untrusted agent, and the
+    divergence is deliberate.
+
+    `synthetic_rating` still honours `validator_violations` for a FIRST-PARTY
+    worker, which can genuinely set it. An untrusted agent cannot: the response
+    contract drops the key before rating ever sees it, because it is not on the
+    allowlist. Counting it as checkable work therefore scored a shape that can
+    never arrive — and an operator who guessed that name had it silently
+    discarded AND was then rated as having delivered nothing.
+    """
+    sent = {"validator_violations": ["a"]}
+    assert rep.synthetic_rating(sent, PRICE)[0] == 67  # first-party: unchanged
+    assert rep.synthetic_rating(sent, PRICE, first_party=False)[0] == 20  # untrusted: non-delivery
+
+    # and the reason it can never arrive
+    from app.agents.workers.external_contract import parse_operator_output
+
+    assert "validator_violations" not in parse_operator_output({"summary": "x", **sent})
 
 
 # ── D3: first-party scoring is untouched ────────────────────────

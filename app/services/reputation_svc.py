@@ -195,10 +195,14 @@ def _carries_checkable_work(step_output: dict[str, Any]) -> bool:
     """
     if step_output.get("artifact"):
         return True
-    violations = step_output.get("critic_violations")
-    if violations is None:
-        violations = step_output.get("validator_violations")
-    return isinstance(violations, list)
+    # `critic_violations` only. The fallback to `validator_violations` that
+    # used to live here read a key the external response contract drops — it is
+    # not on the allowlist — so an operator who sent that name had it silently
+    # discarded AND was then scored as having delivered nothing. Two stories
+    # written by different hands, each correct alone. A first-party worker that
+    # sets `validator_violations` is unaffected: this gate only runs for
+    # untrusted output (ADR 0005 D3).
+    return isinstance(step_output.get("critic_violations"), list)
 
 
 def synthetic_rating(
