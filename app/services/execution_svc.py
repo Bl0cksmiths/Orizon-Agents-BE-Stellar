@@ -7,12 +7,12 @@ import secrets
 import time
 from typing import Any
 
-from ..agents.registry import get_worker
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
+from .binding_registry import resolve_worker
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +157,21 @@ async def _run(
             )
 
         for step in plan.plan.steps:
-            worker = get_worker(step.agent_id)
+            # Resolution deliberately stays OUTSIDE the per-step try/except
+            # below. It is a lookup, not the step's work: resolve_worker fails
+            # OPEN — an unreadable binding store logs and returns None — so the
+            # only thing left that could raise here is a bug in resolution
+            # itself, which would repeat on every step anyway. Letting that
+            # reach the run-level handler (status "failed", stream closed) is
+            # therefore the honest outcome, and is what the suite pins.
+            worker = await resolve_worker(step.agent_id)
             if worker is None:
-                # Trace lines only reach the SSE viewer and are dropped with the
-                # task; every step failure also goes to the server log so an
-                # outage is diagnosable after the fact.
+                # No local worker and no resolvable binding. A bound agent
+                # that could not be resolved degrades identically to one nobody
+                # ever registered — the step is skipped, unbilled, and the run
+                # continues. Trace lines only reach the SSE viewer and are
+                # dropped with the task; every step failure also goes to the
+                # server log so an outage is diagnosable after the fact.
                 logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
                 await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
                 continue

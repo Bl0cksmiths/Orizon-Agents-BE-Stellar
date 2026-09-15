@@ -32,6 +32,22 @@ def _client_for(app: FastAPI) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://operator.example")
 
 
+def _resolves_to(monkeypatch: pytest.MonkeyPatch, lookup) -> None:
+    """Pin the dispatch seam to `lookup`.
+
+    execution_svc resolves a step's worker through the async `resolve_worker`
+    (local registry first, then a stored binding). The spike predates that
+    seam and only needs one worker handed back for one agent id, so the sync
+    lookup is adapted here; the binding path itself is covered by
+    tests/test_external_agent_dispatch.py.
+    """
+
+    async def _resolve(agent_id: str):
+        return lookup(agent_id)
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
+
+
 def _worker(client: httpx.AsyncClient) -> ExternalHttpWorker:
     return ExternalHttpWorker("ext_demo1", "external.demo", ENDPOINT, client=client)
 
@@ -91,7 +107,7 @@ def test_orchestrator_accepts_the_external_dispatch_response(monkeypatch: pytest
     async def go() -> None:
         async with _client_for(app) as client:
             worker = _worker(client)
-            monkeypatch.setattr(execution_svc, "get_worker", lambda aid: worker if aid == "ext_demo1" else None)
+            _resolves_to(monkeypatch, lambda aid: worker if aid == "ext_demo1" else None)
 
             plan = StoredPlan(
                 id="pln_ext_spike",
@@ -135,7 +151,7 @@ def test_operator_error_fails_the_step_unbilled(monkeypatch: pytest.MonkeyPatch)
     async def go() -> None:
         async with _client_for(app) as client:
             worker = _worker(client)
-            monkeypatch.setattr(execution_svc, "get_worker", lambda aid: worker if aid == "ext_demo1" else None)
+            _resolves_to(monkeypatch, lambda aid: worker if aid == "ext_demo1" else None)
             plan = StoredPlan(
                 id="pln_ext_fail",
                 intent="build a bakery landing page",
