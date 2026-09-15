@@ -43,12 +43,28 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
               the same ones: https only, no private / loopback / link-local /
               reserved / multicast address literals, no loopback or cloud
               metadata hostnames. Redirects are never followed.
+    Failure   every failure leaves this module as an ExternalDispatchError
+              carrying a `rule` from DISPATCH_RULES: endpoint_refused,
+              no_connection, response_timeout, transport_error, error_status,
+              oversize_response, invalid_response. Before story 2.03 the
+              sentence here claimed that unconditionally and the code did not
+              deliver it — `_dispatch` caught asyncio.TimeoutError,
+              ConnectError and ConnectTimeout and NOTHING else, so
+              RemoteProtocolError, DecodingError, ReadTimeout, ReadError,
+              PoolTimeout, WriteTimeout and TooManyRedirects came out as raw
+              httpx errors, which execution_svc cannot classify and no
+              per-agent failure count can see. Twelve failure modes also
+              rendered to the buyer as one trace line; the rule is what makes
+              them three different lines and a groupable log.
+    Refusals  name the HOST and the rule, never the URL — ADR 0003's logging
+              rule, which the dispatch path now follows too. An operator
+              endpoint can carry a credential in its query string, and an
+              ExternalDispatchError message is logged verbatim upstream.
 
-Any failure — no connection after the retry, a non-2xx status, an oversize or
-unreadable body, non-object JSON, or a missing `summary` — is raised as
-ExternalDispatchError. execution_svc catches it exactly like a raising local
+execution_svc catches ExternalDispatchError exactly like a raising local
 worker: the step is skipped, not billed, and the workflow degrades rather than
-crashing.
+crashing. It reads the class duck-typed — `getattr(e, "rule", None)` — so the
+run loop never imports a worker's module to classify a failure.
 """
 
 from __future__ import annotations
