@@ -249,3 +249,37 @@ def _parse_artifact(value: object) -> dict[str, Any] | None:
         # honest answer: no artifact was delivered.
         return None
     return harden_artifact(artifact)
+
+
+def _parse_notes(value: object) -> list[str] | None:
+    """A critic list, clamped, or None when it is malformed — dropped WHOLE.
+
+    Never filtered item by item, and that is the load-bearing decision here.
+    `critic_violations` is read by `reputation_svc.synthetic_rating`:
+
+        if isinstance(violations, list):
+            rating += 10 if not violations else -3 * min(len(violations), 10)
+
+    So `[1, 2]` filtered down to `[]` would not be a tidied field — it would be
+    a +10 rating bonus, minted out of a malformed one, with real settlement
+    weight behind it. Dropping the key instead leaves `violations` as None,
+    which is not a list, so the branch does not run at all and nothing is
+    awarded. Refusing the whole response was the alternative and is worse: it
+    fails an already-executed step over a decoration, which hands any operator
+    a way to void their own step after the work is done.
+
+    Empty strings inside an otherwise well-typed list are kept for the same
+    reason — dropping them shortens a violations list, and short means
+    forgiven. The count cap cannot launder a rating either: the penalty
+    saturates at 10 items, well under MAX_NOTES.
+
+    An empty list from the start IS honoured, and is a claim we cannot verify —
+    "the critic found nothing", worth +10. That is the same face value the
+    local path gives its own workers; what this refuses to do is manufacture
+    that claim on an operator's behalf out of input that never made it.
+    """
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(item, str) for item in value):
+        return None
+    return [_clamp_text(item, MAX_NOTE_CHARS) for item in value[:MAX_NOTES]]
