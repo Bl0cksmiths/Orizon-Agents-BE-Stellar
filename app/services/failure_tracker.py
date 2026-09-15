@@ -28,7 +28,9 @@ Three properties are load-bearing rather than incidental:
     a deployment that changes failure MODE is still told once. It transfers
     exactly: an endpoint going connection-refused → HTTP 500 → schema
     rejection tells the operator something new each time, while the same class
-    repeating does not. `registry_sync._refuse_price` supplies the other half —
+    repeating does not — and each class is news only the FIRST time a streak
+    shows it, so an endpoint alternating between two of them cannot flip the
+    guard back into a flood. `registry_sync._refuse_price` supplies the other half —
     per-id keying, and re-arming on recovery so an agent flip-flopping across
     the line stays visible instead of being coalesced away forever.
   - NOTHING OPERATOR-CONTROLLED REACHES A LOG LINE. `rule` is a token from a
@@ -100,13 +102,22 @@ _UNCLASSIFIED_RULE = "unclassified"
 class _Streak:
     """One agent's current run of failures. Absent means "not failing"."""
 
-    # Last failure class seen. Compared, not accumulated: the WARNING fires on
-    # a CHANGE, so only the most recent class matters.
+    # Most recent failure class, so the next failure can tell a change from a
+    # repeat.
     rule: str
     # Consecutive failures since the last success, across classes — a changed
     # class is still a failure, so it extends the streak rather than resetting
     # it. This is what consecutive_failures() returns.
     count: int
+    # Classes already reported for this streak. A change is news the FIRST time
+    # it is seen, not every time: a struggling endpoint alternating between,
+    # say, a connect failure and a read timeout changes class on every single
+    # step, and warning on each one would turn the coalescing guard back into
+    # the flood it prevents. The set is bounded by the closed rule vocabulary
+    # (everything unusable collapses to one token), and it dies with the
+    # streak — `registry_sync`'s "once per id, then DEBUG, re-armed on
+    # recovery" discipline, narrowed to once per class per outage.
+    seen: set[str]
     # True once the run-length WARNING has fired for this streak, so it fires
     # once per streak and not on every failure past the threshold.
     escalated: bool = False
@@ -146,7 +157,7 @@ def record_failure(agent_id: str, rule: str) -> None:
     if streak is None:
         if len(_streaks) >= _MAX_AGENTS:
             _evict_one()
-        _streaks[agent_id] = _Streak(rule=failure_class, count=1)
+        _streaks[agent_id] = _Streak(rule=failure_class, count=1, seen={failure_class})
         # First failure of a streak: the one line an operator needs to see the
         # moment an agent starts failing, and the anchor everything after it
         # coalesces against.
@@ -162,19 +173,21 @@ def record_failure(agent_id: str, rule: str) -> None:
     # terminal status; here recency is the only evidence of disposability.
     _streaks.move_to_end(agent_id)
     streak.count += 1
-    if streak.rule != failure_class:
-        # A CHANGED class is new operator information even mid-streak: the
-        # endpoint that was refusing connections is now answering and failing
-        # validation, which is a different fix. The streak is not reset — a
-        # different way of failing is still failing.
+    previous, streak.rule = streak.rule, failure_class
+    if failure_class not in streak.seen:
+        # A class this streak has not shown before is new operator information
+        # even mid-outage: the endpoint that was refusing connections is now
+        # answering and failing validation, which is a different fix. The
+        # streak is NOT reset — a different way of failing is still failing.
+        streak.seen.add(failure_class)
         logger.warning(
-            "agent %s failure class changed: %s → %s — %d consecutive (coalescing to DEBUG until it changes again)",
+            "agent %s failure class changed: %s → %s — %d consecutive (coalescing to DEBUG for classes "
+            "already reported in this streak)",
             agent_id,
-            streak.rule,
+            previous,
             failure_class,
             streak.count,
         )
-        streak.rule = failure_class
         return
     if streak.count >= _ESCALATION_STREAK and not streak.escalated:
         # Once per streak, not once per failure past the line: the count is in
@@ -182,7 +195,7 @@ def record_failure(agent_id: str, rule: str) -> None:
         # second escalation would carry no information the first did not.
         streak.escalated = True
         logger.warning(
-            "agent %s has failed %d consecutive steps with the same class (%s) — the endpoint looks "
+            "agent %s has failed %d consecutive steps (latest class: %s) — the endpoint looks "
             "persistently broken, not merely flaky (coalescing to DEBUG again)",
             agent_id,
             streak.count,
