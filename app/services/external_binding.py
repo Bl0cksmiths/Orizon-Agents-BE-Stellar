@@ -22,10 +22,14 @@ and confirming `owner` against the live AgentRegistry are Epic 2.
 from __future__ import annotations
 
 import base64
+import logging
 import secrets
 import time
+from collections import OrderedDict
 
 from stellar_sdk import Keypair
+
+logger = logging.getLogger(__name__)
 
 CHALLENGE_TTL_SECONDS = 300
 
@@ -36,11 +40,25 @@ CHALLENGE_TTL_SECONDS = 300
 # message.
 BINDING_MESSAGE_PREFIX = "orizon-bind:v1"
 
+# Retention cap for outstanding challenges (insertion-ordered eviction, see
+# issue_challenge). Matches ramp_store._MAX_RAMPS, and for the same reason with
+# sharper teeth: the challenge route is a PUBLIC, unauthenticated POST whose key
+# is entirely caller-supplied, and the prototype's plain dict was swept only
+# when a verify happened to hit that exact key — i.e. never, for keys an
+# attacker never verifies. That is unbounded growth on a 512 MB free instance.
+MAX_CHALLENGES = 500
+
 # (agent_id, endpoint_url) -> (nonce_hex, expires_at). Keyed by the PAIR, not by
 # the agent id alone: a challenge authorizes exactly one endpoint, and keying it
 # by agent id let any anonymous caller destroy the honest owner's outstanding
 # nonce simply by requesting a challenge for a URL they control.
-_challenges: dict[tuple[str, str], tuple[str, float]] = {}
+_challenges: OrderedDict[tuple[str, str], tuple[str, float]] = OrderedDict()
+
+# True while evictions are displacing LIVE challenges — flips the eviction log
+# from WARNING (first) to DEBUG (consecutive), the registry_sync._failing
+# discipline: a flood that keeps the table full must be visible once without
+# the warning itself becoming the flood.
+_evicting_live = False
 
 
 def binding_message(agent_id: str, endpoint_url: str, nonce: str) -> str:
@@ -61,11 +79,51 @@ def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLEN
 
     Returns (nonce, expires_at); the caller needs the expiry to tell the
     operator how long the challenge has left to be signed.
+
+    Bounded, sweep-on-insert — ramp_store.save's discipline: a new key that
+    would take the table past MAX_CHALLENGES first evicts the oldest EXPIRED
+    challenge, falling back to the oldest overall, so the table cannot exceed
+    its cap however many agent ids an anonymous caller invents.
     """
+    key = (agent_id, endpoint_url)
+    if key not in _challenges and len(_challenges) >= MAX_CHALLENGES:
+        _evict_one()
     nonce = secrets.token_hex(16)
     expires_at = time.time() + ttl_seconds
-    _challenges[(agent_id, endpoint_url)] = (nonce, expires_at)
+    _challenges[key] = (nonce, expires_at)
+    _challenges.move_to_end(key)  # a replacement is a fresh insert for eviction order
     return nonce, expires_at
+
+
+def _evict_one() -> None:
+    """Drop one challenge to make room: the oldest EXPIRED one, or — if every
+    outstanding challenge is still live — the oldest overall, so the table can
+    never exceed its cap.
+
+    Evicting a live challenge strands an operator who may be mid-signature, so
+    it is worth saying out loud; the nonce is never logged (it is a live
+    single-use credential) and consecutive evictions coalesce to DEBUG.
+    """
+    global _evicting_live
+    now = time.time()
+    victim = next(
+        (k for k, (_, expires_at) in _challenges.items() if expires_at <= now),
+        next(iter(_challenges)),
+    )
+    evicted = _challenges.pop(victim, None)
+    if evicted is not None and evicted[1] > now:
+        if _evicting_live:
+            logger.debug("evicted a live bind challenge: agent_id=%s", victim[0])
+        else:
+            _evicting_live = True
+            logger.warning(
+                "bind challenge table full at %d — evicting LIVE challenges (agent_id=%s); a pending "
+                "bind may have to be restarted (coalescing to DEBUG until it clears)",
+                MAX_CHALLENGES,
+                victim[0],
+            )
+    else:
+        _evicting_live = False
 
 
 def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64: str) -> bool:
