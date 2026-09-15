@@ -55,6 +55,7 @@ from typing import Any
 
 import httpx
 
+from app.agents.workers.external_contract import ExternalOutputError, parse_operator_output
 from app.config import settings
 from app.services.dispatch_signing import sign_dispatch
 from app.services.endpoint_policy import EndpointPolicyError
@@ -259,14 +260,29 @@ class ExternalHttpWorker(Worker):
             raise ExternalDispatchError(
                 f"external dispatch {dispatch_id} to {self.id}: response was not valid JSON"
             ) from e
-        if not isinstance(data, dict):
+        except RecursionError as e:
+            # ~1 MiB of "[[[[..." is ~500k deep and blows CPython's recursive
+            # scanner. RecursionError subclasses RuntimeError, so neither the
+            # tuple above nor a ValueError catch holds it — without this it
+            # escapes as a RUN failure instead of a step failure, taking the
+            # whole workflow (and everyone else's settlement) with it.
             raise ExternalDispatchError(
-                f"external dispatch {dispatch_id} to {self.id}: response JSON was "
-                f"{type(data).__name__}, expected an object"
-            )
-        summary = data.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ExternalDispatchError(
-                f"external dispatch {dispatch_id} to {self.id}: response missing a non-empty 'summary'"
-            )
-        return data
+                f"external dispatch {dispatch_id} to {self.id}: response nesting too deep"
+            ) from e
+
+        # Everything past here is the operator's shape, not ours: allowlisted,
+        # type-checked and clamped into a NEW dict by the contract, so no
+        # operator-chosen key ever reaches context, the trace, or a later
+        # operator. See ADR 0004 D1.
+        try:
+            output = parse_operator_output(data)
+        except ExternalOutputError as e:
+            raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: {e} (rule: {e.rule})") from e
+
+        # Provenance is stamped by US, never claimed by the operator. The
+        # contract drops any `source` they send, because synthetic_rating awards
+        # 95/100 for source == "baked" — a one-word self-award. This value is
+        # our assertion about where the output came from, so it means something
+        # theirs never could.
+        output["source"] = "external"
+        return output
