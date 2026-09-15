@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 from collections.abc import Iterator
 
 import pytest
@@ -41,6 +42,8 @@ from stellar_sdk.exceptions import BadSignatureError
 from app.config import settings
 from app.services import dispatch_signing as ds
 from app.services.dispatch_signing import dispatch_message, dispatch_signer_address, sign_dispatch
+
+LOGGER_NAME = "app.services.dispatch_signing"
 
 # A throwaway signer, derived from a fixed 32-byte seed so the suite pins a KNOWN
 # key without committing an S… literal to the repo for a scanner to find. It has
@@ -189,3 +192,100 @@ def test_a_mnemonic_key_signs_like_a_secret_key() -> None:
 
     assert dispatch_signer_address() == expected
     assert sign_dispatch(URL, BODY)[ds.SIGNER_HEADER] == expected
+
+
+def _records(caplog: pytest.LogCaptureFixture, level: int) -> list[logging.LogRecord]:
+    """This module's records at exactly `level` (registry_sync's test helper)."""
+    return [r for r in caplog.records if r.name == LOGGER_NAME and r.levelno == level]
+
+
+def test_an_unset_key_degrades_instead_of_raising() -> None:
+    """The demo, read-only and CI default: unsigned, not broken.
+
+    `client._signer_keypair` raises on an empty key, which is right on the money
+    path and wrong here — it would turn "this deployment has no dispatch key"
+    into a failed step for an operator who did nothing wrong.
+    """
+    assert settings.orizon_dispatch_signing_key == ""
+    assert sign_dispatch(URL, BODY) == {}  # splats into a header dict, adding nothing
+    assert dispatch_signer_address() is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-a-key",
+        "S" + "A" * 55,  # right shape, wrong checksum
+        " ".join(["zoo"] * 12),  # takes the mnemonic branch, fails there
+        "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",  # public key, not a secret
+    ],
+)
+def test_a_malformed_key_degrades_instead_of_crashing(bad: str) -> None:
+    """A typo must not take the dispatch path down.
+
+    `Settings._report_malformed_stellar_signing_key`'s reasoning, applied one
+    layer out: an unparseable key signs nothing, so it fails closed on its own,
+    and letting key-format drift raise on a live path buys nothing.
+    """
+    _configure(bad)
+    assert sign_dispatch(URL, BODY) == {}
+    assert dispatch_signer_address() is None
+
+
+def test_the_unsigned_warning_fires_once_not_once_per_dispatch(caplog: pytest.LogCaptureFixture) -> None:
+    """Visible once, then quiet — the `registry_sync._failing` discipline.
+
+    Every dispatch takes this path, so an uncoalesced warning would be a log
+    flood in proportion to traffic, which is exactly how the one line worth
+    reading gets filtered out.
+    """
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for _ in range(5):
+            assert sign_dispatch(URL, BODY) == {}
+        assert dispatch_signer_address() is None  # same coalesced report, other entry point
+
+    warnings = _records(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    assert "ORIZON_DISPATCH_SIGNING_KEY" in warnings[0].getMessage()
+    assert _records(caplog, logging.DEBUG)  # the other five coalesced rather than vanishing
+
+
+def test_a_key_injected_later_is_picked_up_and_reported_once(caplog: pytest.LogCaptureFixture) -> None:
+    """The setting is read live, and recovery is announced exactly once.
+
+    The memoized keypair is keyed on the secret it came from, so a deployment
+    that has the key injected starts signing without a restart — and the INFO
+    line comes from the path that actually produced a signature, so it cannot
+    alternate with the warning.
+    """
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        assert sign_dispatch(URL, BODY) == {}
+        _configure(SECRET)
+        assert sign_dispatch(URL, BODY)[ds.SIGNER_HEADER] == SIGNER.public_key
+        assert sign_dispatch(URL, BODY)[ds.SIGNER_HEADER] == SIGNER.public_key
+
+    assert len(_records(caplog, logging.WARNING)) == 1
+    infos = _records(caplog, logging.INFO)
+    assert len(infos) == 1
+    assert "signing enabled" in infos[0].getMessage()
+
+
+def test_neither_the_key_nor_the_signature_ever_reaches_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """ADR 0003's logging rule, on both halves of the secret material.
+
+    stellar_sdk's own exception text quotes the rejected seed back, which is why
+    the malformed-key path swallows the exception rather than logging it; and a
+    signature read out of a log is a replayable dispatch for as long as the
+    envelope stays plausible.
+    """
+    malformed = SECRET[:-1] + ("A" if SECRET[-1] != "A" else "B")  # a real seed, one character off
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        _configure(malformed)
+        assert sign_dispatch(URL, BODY) == {}
+        _configure(SECRET)
+        headers = sign_dispatch(URL, BODY)
+
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.name == LOGGER_NAME)
+    assert malformed not in logged
+    assert SECRET not in logged
+    assert headers[ds.SIGNATURE_HEADER] not in logged
