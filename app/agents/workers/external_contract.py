@@ -348,3 +348,65 @@ def _parse_preview_url(value: object) -> str | None:
     if not url or len(url) > MAX_PREVIEW_URL_CHARS:
         return None
     return url if _is_displayable(url) else None
+
+
+def parse_operator_output(raw: object) -> dict[str, Any]:
+    """Turn a decoded operator response into a worker-output dict we own.
+
+    Allowlist, type-check, clamp. The returned dict is NEW and shares no
+    container with `raw`: every value in it is a `str`, a `list[str]`, or a
+    dict this module built. A key not named below does not survive, whatever it
+    is called and whatever it holds.
+
+    Raises `ExternalOutputError` — rule from `OUTPUT_RULES` — when the
+    deliverable itself is missing. The worker re-raises it as
+    ExternalDispatchError, so a refused response fails its step like any other
+    dispatch failure: skipped, unbilled, the workflow degrades.
+
+    Pure: no I/O.
+    """
+    if not isinstance(raw, dict):
+        raise ExternalOutputError(
+            "not_an_object",
+            f"operator response was {type(raw).__name__}, expected an object",
+        )
+
+    # The one required field, and the only one whose absence is a refusal: a
+    # step that says nothing about what it did has not reported an outcome.
+    summary = _clean_text(raw.get("summary"), MAX_SUMMARY_CHARS)
+    if summary is None:
+        raise ExternalOutputError(
+            "summary_missing",
+            "operator response has no non-empty string 'summary'",
+        )
+
+    output: dict[str, Any] = {"summary": summary}
+
+    # `null` is JSON's spelling of "no artifact" (deploy_v0 sends exactly that
+    # for preview_url), so it is treated as absent rather than as a malformed
+    # object — refusing a step for declining to attach one would be perverse.
+    artifact = raw.get("artifact")
+    if artifact is not None:
+        parsed = _parse_artifact(artifact)
+        if parsed is not None:
+            output["artifact"] = parsed
+
+    for key in ("critic_violations", "critic_notes"):
+        notes = _parse_notes(raw.get(key))
+        if notes is not None:
+            output[key] = notes
+
+    preview_url = _parse_preview_url(raw.get("preview_url"))
+    if preview_url is not None:
+        output["preview_url"] = preview_url
+
+    # `source` is NOT in the allowlist, and its absence from this function is
+    # the point rather than an omission. `reputation_svc.synthetic_rating`
+    # short-circuits to 95/100 for `source == "baked"` — a score reserved for
+    # repo-owned, pre-validated demo artifacts — and that rating is settled
+    # on-chain with up to 100 USDC of weight behind it. An operator who can set
+    # their own provenance can award themselves that score, which is
+    # self-dealing. Dropped silently, like every other unknown key: there is no
+    # refusal to make, because there is no legitimate reason for an operator to
+    # send it and nothing is lost by ignoring it.
+    return output
