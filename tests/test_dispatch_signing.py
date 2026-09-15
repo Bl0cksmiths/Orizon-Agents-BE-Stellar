@@ -40,7 +40,7 @@ from stellar_sdk.exceptions import BadSignatureError
 
 from app.config import settings
 from app.services import dispatch_signing as ds
-from app.services.dispatch_signing import dispatch_message, sign_dispatch
+from app.services.dispatch_signing import dispatch_message, dispatch_signer_address, sign_dispatch
 
 # A throwaway signer, derived from a fixed 32-byte seed so the suite pins a KNOWN
 # key without committing an S… literal to the repo for a scanner to find. It has
@@ -115,3 +115,77 @@ def test_the_signed_payload_is_sep53_framed_not_the_raw_message() -> None:
     # And emphatically NOT a signature over the message bytes themselves.
     with pytest.raises(BadSignatureError):
         Keypair.from_public_key(SIGNER.public_key).verify(EXPECTED_MESSAGE.encode("utf-8"), signature)
+
+
+def test_a_signature_verifies_for_the_published_signer_address() -> None:
+    """The operator's happy path, performed exactly as an operator would.
+
+    They pin our address out of band, rebuild the message from THEIR endpoint
+    URL and the body they received, and verify. Nothing in the request is
+    trusted to tell them any of that.
+    """
+    _configure(SECRET)
+    assert dispatch_signer_address() == SIGNER.public_key
+
+    headers = sign_dispatch(URL, BODY)
+    assert set(headers) == {ds.SIGNATURE_HEADER, ds.VERSION_HEADER, ds.SIGNER_HEADER}
+    assert headers[ds.VERSION_HEADER] == "orizon-dispatch:v1"
+    assert headers[ds.SIGNER_HEADER] == SIGNER.public_key  # a hint; never the trust anchor
+
+    pinned = Keypair.from_public_key(SIGNER.public_key)
+    pinned.verify_message(dispatch_message(URL, BODY), _signature(headers))
+
+
+def test_a_signature_for_one_endpoint_does_not_verify_for_another() -> None:
+    """THE cross-operator replay property, made explicit.
+
+    Operator A holds a complete, genuinely-signed envelope we sent them: body,
+    signature, version and signer headers. Replayed verbatim at operator B, B
+    rebuilds the message with B's own URL — the only URL B has — and the
+    signature fails. Nothing here is an optional check B could forget: B cannot
+    even construct the message A verified, because that URL was never sent.
+    """
+    _configure(SECRET)
+    for_a = sign_dispatch(URL, BODY)
+    for_b = sign_dispatch(OTHER_URL, BODY)
+    pinned = Keypair.from_public_key(SIGNER.public_key)
+
+    # Same key, same body, different destination — a different signature.
+    assert for_b[ds.SIGNATURE_HEADER] != for_a[ds.SIGNATURE_HEADER]
+
+    # B cannot verify A's envelope...
+    with pytest.raises(BadSignatureError):
+        pinned.verify_message(dispatch_message(OTHER_URL, BODY), _signature(for_a))
+    # ...and B's own signature is equally useless to A.
+    with pytest.raises(BadSignatureError):
+        pinned.verify_message(dispatch_message(URL, BODY), _signature(for_b))
+
+
+def test_a_signature_does_not_carry_over_to_a_different_body() -> None:
+    """The body is bound too — by its digest, so size is irrelevant.
+
+    An operator who verifies the signature against the bytes they were handed
+    cannot be fed a substituted step under a captured signature.
+    """
+    _configure(SECRET)
+    signature = _signature(sign_dispatch(URL, BODY))
+    tampered = BODY.replace(b'"d1"', b'"d2"')
+    assert tampered != BODY
+
+    with pytest.raises(BadSignatureError):
+        Keypair.from_public_key(SIGNER.public_key).verify_message(dispatch_message(URL, tampered), signature)
+
+
+def test_a_mnemonic_key_signs_like_a_secret_key() -> None:
+    """Both forms `client._signer_keypair` accepts are accepted here.
+
+    An operator configuring ORIZON_DISPATCH_SIGNING_KEY copies the habits of
+    STELLAR_SIGNING_KEY, and a mnemonic that silently produced unsigned dispatch
+    would be a worse outcome than supporting it.
+    """
+    phrase = Keypair.generate_mnemonic_phrase()
+    expected = Keypair.from_mnemonic_phrase(phrase).public_key
+    _configure(phrase)
+
+    assert dispatch_signer_address() == expected
+    assert sign_dispatch(URL, BODY)[ds.SIGNER_HEADER] == expected
