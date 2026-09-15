@@ -23,7 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import SERVICE_VERSION, settings
 from .pdax.client import aclose_pdax_client
-from .routers import agents, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
+from .routers import agents, binding, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
 
 # Imported by symbol, not as a module: the root `/health` handler defined
 # below rebinds the name `health` at module scope, which would shadow a
@@ -39,6 +39,8 @@ from .security import (
 )
 from .seed import seed_registry
 from .services import execution_svc, registry_sync
+from .services.binding_registry import refresh_bound_ids
+from .services.binding_store import close_binding_store
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -92,6 +94,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # loop no-ops while STELLAR_AGENT_REGISTRY is blank, which keeps the
     # hermetic test suite offline.
     registry_sync.start()
+    # Seed the planner's routability set from the binding store. Without this a
+    # binding made before this process started would stay unroutable until the
+    # operator bound it again — which is precisely the restart AC-5 is about.
+    await refresh_bound_ids()
     yield
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
@@ -107,6 +113,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if pending:
         await asyncio.wait(pending, timeout=5)
     await aclose_pdax_client()
+    # Release the binding store's connection pool. A no-op for the in-memory
+    # store, which is what runs whenever DATABASE_URL is unset.
+    await close_binding_store()
     executor.shutdown(wait=False)
 
 
@@ -170,6 +179,10 @@ app = FastAPI(
         {"name": "flow", "description": "Agent-graph flow layout consumed by the frontend visualizer."},
         {"name": "payments", "description": "x402 payment challenges and settlement."},
         {"name": "stellar", "description": "Soroban contract reads, unsigned-XDR builds, and signed-XDR submits."},
+        {
+            "name": "binding",
+            "description": "Bind an operator HTTPS endpoint to an on-chain agent id, proved by a wallet signature.",
+        },
         {"name": "pdax", "description": "PDAX PHP-to-crypto on/off-ramp: trade, funding, withdrawals, webhooks."},
     ],
 )
@@ -329,6 +342,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 app.include_router(agents.router, prefix="/api", responses=_ERROR_RESPONSES)
+# Before agents.router would also work, but the binding paths are deliberately
+# shaped so they cannot collide with GET /agents/{agent_id} at any position.
+app.include_router(binding.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(orchestrator.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(tasks.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(trace.router, prefix="/api", responses=_ERROR_RESPONSES)

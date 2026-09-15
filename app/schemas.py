@@ -5,6 +5,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field
 
+# Agent ids are contract Symbols: short alphanumeric/underscore tokens. Reject
+# garbage at the router edge instead of paying an RPC round-trip to find out.
+# Lives here, not in a router, because more than one router now bounds an agent
+# id with it — anything outside this charset could only ever fail on-chain.
+# NOTE: this is NOT the same rule as HeaderSafeStr's charset below, which
+# additionally allows `.` and `-` and is driven by CRLF header safety.
+AGENT_ID_PATTERN = r"^[A-Za-z0-9_]{1,32}$"
+
 # ───── Registry ────────────────────────────────────────────
 AgentStatus = Literal["online", "idle", "offline"]
 # Provenance is contracted evidence, not cosmetics: SOW §6.3's "≥ 2 externally

@@ -31,10 +31,11 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
               — even 5xx — is never retried: the operator answered.
     Size cap  response body streamed and capped at MAX_RESPONSE_BYTES; an
               oversize body fails the step before it is buffered.
-    Endpoint  validated against the SSRF rules in `validate_endpoint_url`
-              before every dispatch: https only, no private / loopback /
-              link-local / reserved / multicast address literals, no loopback
-              hostnames. Redirects are never followed.
+    Endpoint  validated before every dispatch against the SSRF rules, which now
+              live in `app.services.endpoint_policy` because the bind API needs
+              the same ones: https only, no private / loopback / link-local /
+              reserved / multicast address literals, no loopback or cloud
+              metadata hostnames. Redirects are never followed.
 
 Any failure — no connection after the retry, a non-2xx status, an oversize or
 unreadable body, non-object JSON, or a missing `summary` — is raised as
@@ -45,14 +46,15 @@ crashing.
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import secrets
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
+
+from app.services.endpoint_policy import EndpointPolicyError
+from app.services.endpoint_policy import validate_endpoint_url as _validate_endpoint_policy
 
 from .base import Worker
 
@@ -64,14 +66,6 @@ CONNECT_TIMEOUT_SECONDS = 5.0
 TOTAL_TIMEOUT_SECONDS = 110.0
 MAX_RESPONSE_BYTES = 1_048_576  # 1 MiB — headroom over the ~10-60 KiB artifacts
 _USER_AGENT = "orizon-orchestrator/1"
-# Only https: an operator endpoint is a third party across the public internet,
-# and http would put the envelope (and the artifact coming back) on the wire in
-# the clear. Restricting the scheme also kills file://, gopher:// and the rest
-# of the SSRF-classic schemes in the same line.
-ALLOWED_SCHEMES = frozenset({"https"})
-# Hostnames that resolve to the local machine without ever touching an IP
-# literal. ".localhost" is reserved for exactly this by RFC 6761.
-_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 
 
 class ExternalDispatchError(RuntimeError):
@@ -83,61 +77,17 @@ class ExternalDispatchError(RuntimeError):
 def validate_endpoint_url(url: str) -> None:
     """Reject an operator endpoint that is not safe to dispatch to (SSRF).
 
-    An operator-supplied URL is an outbound request made by *our* server from
-    *inside* our network, so an unchecked one turns the orchestrator into a
-    proxy for anything the endpoint can reach: cloud instance metadata at
-    169.254.169.254 (credentials), 127.0.0.1 (this process' own admin surface),
-    and the private ranges holding the database and the internal services.
-
-    The rules, in order:
-      * scheme must be https — see ALLOWED_SCHEMES;
-      * a host must be present;
-      * an IP literal must be publicly routable — private, loopback,
-        link-local (which is what 169.254.169.254 is), reserved, multicast and
-        unspecified addresses are all refused, v4 and v6 alike;
-      * a hostname must not be a loopback name (`localhost`, `*.localhost`).
-
-    Raises ExternalDispatchError so a bad binding fails its step like any other
-    dispatch failure rather than crashing the run loop.
-
-    Deliberately NOT covered: this validates the URL as written. A hostname
-    that RESOLVES into a blocked range (including DNS rebinding between this
-    check and the connect) still gets through — closing that needs
-    resolve-then-pin at socket level, which belongs with operator endpoint
-    binding in Epic 2. Redirects cannot launder the check because we never
-    follow them (see _dispatch).
+    The rules themselves are `app.services.endpoint_policy.validate_endpoint_url`
+    — one block-list, shared with the bind API, because a second copy is a copy
+    that drifts. This wrapper exists only to keep the dispatch path's error type:
+    `EndpointPolicyError` becomes `ExternalDispatchError`, so a bad binding fails
+    its step like any other dispatch failure rather than surfacing a ValueError
+    the run loop has no handling for. The message is passed through unchanged.
     """
     try:
-        parts = urlsplit(url)
-        host = parts.hostname
-    except ValueError as e:  # malformed IPv6 bracket, non-numeric port, …
-        raise ExternalDispatchError(f"endpoint URL {url!r} could not be parsed") from e
-
-    scheme = parts.scheme.lower()
-    if scheme not in ALLOWED_SCHEMES:
-        raise ExternalDispatchError(
-            f"endpoint URL {url!r} uses scheme {scheme or '(none)'!r}; only {sorted(ALLOWED_SCHEMES)} allowed"
-        )
-
-    host = (host or "").rstrip(".")  # a trailing-dot FQDN names the same host
-    if not host:
-        raise ExternalDispatchError(f"endpoint URL {url!r} has no host")
-
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None  # a name, not a literal — fall through to the hostname rules
-
-    if ip is not None:
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise ExternalDispatchError(
-                f"endpoint URL {url!r} points at non-public address {host} — "
-                "private, loopback, link-local, reserved and multicast ranges are not dispatchable"
-            )
-        return
-
-    if host in _LOOPBACK_HOSTNAMES or any(host.endswith(f".{name}") for name in _LOOPBACK_HOSTNAMES):
-        raise ExternalDispatchError(f"endpoint URL {url!r} points at loopback host {host!r}")
+        _validate_endpoint_policy(url)
+    except EndpointPolicyError as e:
+        raise ExternalDispatchError(str(e)) from e
 
 
 class ExternalHttpWorker(Worker):

@@ -213,6 +213,21 @@ class _StringWorker:
         return "not a dict"
 
 
+def _resolves_to(monkeypatch, lookup) -> None:
+    """Pin the dispatch seam to `lookup`.
+
+    execution_svc resolves a step's worker through the async `resolve_worker`
+    (local registry first, then a stored binding); these tests only care which
+    worker comes back, so a plain agent_id -> Worker|None lookup is adapted to
+    that seam here rather than at every call site.
+    """
+
+    async def _resolve(agent_id):
+        return lookup(agent_id)
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
+
+
 def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
     settle_calls: list = []
     rating_calls: list = []
@@ -232,7 +247,7 @@ def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
 def test_run_with_no_successful_step_skips_charge_seal_and_ratings(monkeypatch):
     """Every step failed: nothing was delivered, so the payer's escrow
     authorization must not be consumed — no charge, no seal, no ratings."""
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: _BoomWorker())
+    _resolves_to(monkeypatch, lambda agent_id: _BoomWorker())
     settle_calls, rating_calls = _patch_settlement_recorders(monkeypatch)
     task_id = "tsk_receipt_allfail"
     _add_task(task_id)
@@ -251,7 +266,7 @@ def test_partial_run_still_settles_on_chain(monkeypatch):
     """Degraded but delivered: some steps succeeded and were billed, so the
     charge/seal/ratings sequence runs exactly as before the gate."""
     workers = {"agt_x": _OkWorker("w.gen", artifact=True), "agt_y": _BoomWorker("w.critic")}
-    monkeypatch.setattr(execution_svc, "get_worker", workers.get)
+    _resolves_to(monkeypatch, workers.get)
     settle_calls, rating_calls = _patch_settlement_recorders(monkeypatch)
     task_id = "tsk_receipt_partial"
     _add_task(task_id)
@@ -267,7 +282,7 @@ def test_partial_run_still_settles_on_chain(monkeypatch):
 
 # ── a worker returning a non-dict fails that step, not the run ──────────
 def test_non_dict_worker_output_fails_that_step_only(monkeypatch, caplog):
-    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: _StringWorker())
+    _resolves_to(monkeypatch, lambda agent_id: _StringWorker())
     task_id = "tsk_receipt_nondict"
     _add_task(task_id)
 
@@ -287,7 +302,7 @@ def test_non_dict_worker_output_fails_that_step_only(monkeypatch, caplog):
 
 def test_non_dict_worker_output_does_not_sink_a_delivering_run(monkeypatch):
     workers = {"agt_x": _OkWorker("w.gen", artifact=True), "agt_y": _StringWorker()}
-    monkeypatch.setattr(execution_svc, "get_worker", workers.get)
+    _resolves_to(monkeypatch, workers.get)
     task_id = "tsk_receipt_nondict_mixed"
     _add_task(task_id)
 

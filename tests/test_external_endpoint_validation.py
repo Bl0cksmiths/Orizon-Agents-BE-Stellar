@@ -74,6 +74,44 @@ def test_non_public_ip_literals_are_rejected(url: str) -> None:
 @pytest.mark.parametrize(
     "url",
     [
+        # Every one of these was ACCEPTED before the literal parser widened:
+        # ip_address() parses only the dotted-quad, so they fell through to the
+        # hostname rules, which only know `localhost`. getaddrinfo, meanwhile,
+        # resolves all of them — verified on this box — so the connect went to
+        # the blocked address anyway. Decimal, short-form, octal and hex of
+        # 127.0.0.1, then decimal of the metadata service.
+        "https://2130706433/run",
+        "https://127.1/run",
+        "https://127.0.1/run",
+        "https://0177.0.0.1/run",
+        "https://0x7f.1/run",
+        "https://2852039166/latest/meta-data/iam/security-credentials/",
+    ],
+)
+def test_non_canonical_ip_spellings_are_rejected(url: str) -> None:
+    with pytest.raises(ExternalDispatchError, match="non-public address"):
+        validate_endpoint_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://metadata.google.internal/computeMetadata/v1/instance/",
+        "https://METADATA.GOOGLE.INTERNAL/computeMetadata/v1/",  # case is not an escape
+        "https://metadata.goog/computeMetadata/v1/",
+        "https://instance-data/latest/meta-data/",
+    ],
+)
+def test_cloud_metadata_hostnames_are_rejected(url: str) -> None:
+    # These resolve to 169.254.169.254 only from inside the VM, so blocking the
+    # literal does nothing for them — they are ordinary names to this parser.
+    with pytest.raises(ExternalDispatchError, match="cloud metadata host"):
+        validate_endpoint_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "https://localhost/run",
         "https://localhost:9000/run",
         "https://LOCALHOST/run",  # case is not an escape
