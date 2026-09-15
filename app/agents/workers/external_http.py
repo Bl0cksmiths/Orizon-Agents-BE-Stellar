@@ -46,6 +46,7 @@ crashing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -194,11 +195,28 @@ class ExternalHttpWorker(Worker):
             follow_redirects=False,
         )
         try:
+            # One deadline for the whole dispatch, retry included — a monotonic
+            # clock so a wall-clock adjustment mid-dispatch cannot extend it.
+            deadline = time.monotonic() + DISPATCH_DEADLINE_SECONDS
             attempts = 0
             while True:
                 attempts += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ExternalDispatchError(
+                        f"external dispatch {dispatch_id} to {self.id}: "
+                        f"exceeded the {DISPATCH_DEADLINE_SECONDS:.0f}s dispatch deadline"
+                    )
                 try:
-                    return await self._once(client, body, headers, dispatch_id)
+                    return await asyncio.wait_for(self._once(client, body, headers, dispatch_id), timeout=remaining)
+                except asyncio.TimeoutError as e:
+                    # A slow-but-alive operator: judged HERE, as a failed step,
+                    # rather than by execution_svc's outer ceiling. Never
+                    # retried — the request was on the wire and may have run.
+                    raise ExternalDispatchError(
+                        f"external dispatch {dispatch_id} to {self.id}: "
+                        f"no response within {DISPATCH_DEADLINE_SECONDS:.0f}s"
+                    ) from e
                 except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                     # The connection never established, so the operator never
                     # received the step: a single retry cannot double-run work.
