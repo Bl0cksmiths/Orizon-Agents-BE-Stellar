@@ -120,3 +120,74 @@ def test_reading_the_counter_never_mutates_it(caplog):
 
     assert list(ft._streaks) == ["ext_alpha"]
     assert _messages(caplog) == []  # a query is not an event
+
+
+# ── escalation: what is worth a WARNING, and what is not ────────
+
+
+def test_the_first_failure_warns_and_the_same_class_repeating_is_debug(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for _ in range(4):
+            record_failure("ext_alpha", "connect_failed")
+
+    warnings = _records(caplog, logging.WARNING)
+    assert len(warnings) == 1  # not one per failed step — that is the flood
+    assert "ext_alpha" in warnings[0].getMessage()
+    assert "connect_failed" in warnings[0].getMessage()
+    assert len(_records(caplog, logging.DEBUG)) == 3
+
+
+def test_a_new_failure_class_warns_again_and_names_the_transition(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_failure("ext_alpha", "connect_failed")
+        record_failure("ext_alpha", "connect_failed")
+        record_failure("ext_alpha", "http_status")
+
+    warnings = _records(caplog, logging.WARNING)
+    assert len(warnings) == 2
+    changed = warnings[1].getMessage()
+    # Both ends of the transition, because "it changed" without saying from
+    # what is not actionable — the operator is deciding whether their fix
+    # moved the failure or their endpoint got worse.
+    assert "connect_failed" in changed and "http_status" in changed
+    assert "3 consecutive" in changed
+
+
+def test_an_alternating_endpoint_warns_once_per_class_not_once_per_step(caplog):
+    # The realistic flaky case: a struggling endpoint that refuses a connection
+    # on one step and times out on the next changes class every single step.
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for rule in ["connect_failed", "read_timeout"] * 3:
+            record_failure("ext_alpha", rule)
+
+    assert len(_records(caplog, logging.WARNING)) == 2  # one per class, then silence
+    assert len(_records(caplog, logging.DEBUG)) == 4
+
+
+def test_a_long_streak_escalates_once_then_falls_back_to_debug(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for _ in range(ft._ESCALATION_STREAK + 3):
+            record_failure("ext_alpha", "connect_failed")
+
+    warnings = _records(caplog, logging.WARNING)
+    assert len(warnings) == 2  # the first failure, then the run-length crossing
+    escalation = warnings[1].getMessage()
+    assert f"{ft._ESCALATION_STREAK} consecutive steps" in escalation
+    assert "persistently broken" in escalation
+
+
+def test_the_escalation_threshold_outlives_a_single_plan():
+    # The orchestrator decomposes an intent into 1–6 steps, so a threshold of 6
+    # or less would report a single unlucky run — one plan that happened to
+    # route every step at the same agent — as a persistently broken endpoint.
+    assert ft._ESCALATION_STREAK > 6
+
+
+def test_every_agent_gets_its_own_first_failure_warning(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_failure("ext_alpha", "connect_failed")
+        record_failure("ext_beta", "connect_failed")
+
+    warnings = _records(caplog, logging.WARNING)
+    assert len(warnings) == 2
+    assert [w.getMessage().split()[1] for w in warnings] == ["ext_alpha", "ext_beta"]
