@@ -315,7 +315,7 @@ class PostgresBindingStore:
                 self._ready = True
         return self._pool
 
-    async def _create_pool(self) -> Any:  # pragma: no cover — needs a live database
+    async def _create_pool(self) -> Any:
         asyncpg = _import_asyncpg()
         return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
 

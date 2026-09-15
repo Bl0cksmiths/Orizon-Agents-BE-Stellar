@@ -184,3 +184,211 @@ def test_records_are_frozen() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         record.endpoint_url = URL_TWO  # type: ignore[misc]
+
+
+# ── PostgresBindingStore ──────────────────────────────────────────────────
+
+
+class FakePool:
+    """Stands in for an asyncpg pool: records every statement and models the
+    one table just well enough to answer the two queries the store sends.
+
+    Rows are kept in a plain list, and list order IS the BIGSERIAL `id` order
+    the real queries sort by — so "the newest row" means the same thing here as
+    it does in Postgres, and an implementation that started UPDATEing rows
+    instead of appending them would visibly change `rows`.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.rows: list[dict[str, object]] = []
+        self.closed = 0
+
+    async def execute(self, sql: str, *args: object) -> str:
+        self.statements.append(sql)
+        return "CREATE TABLE"
+
+    async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
+        self.statements.append(sql)
+        if "INSERT INTO" in sql:
+            agent_id, endpoint_url, owner, bound_at = args
+            previous = self._history(str(agent_id))
+            self.rows.append({"agent_id": agent_id, "endpoint_url": endpoint_url, "owner": owner, "bound_at": bound_at})
+            return {
+                "endpoint_url": endpoint_url,
+                "owner": owner,
+                "bound_at": bound_at,
+                "previous_endpoint_url": previous[-1]["endpoint_url"] if previous else None,
+            }
+        history = self._history(str(args[0]))
+        if not history:
+            return None
+        newest = history[-1]
+        return {
+            "endpoint_url": newest["endpoint_url"],
+            "owner": newest["owner"],
+            "bound_at": newest["bound_at"],
+            "previous_endpoint_url": history[-2]["endpoint_url"] if len(history) > 1 else None,
+        }
+
+    def _history(self, agent_id: str) -> list[dict[str, object]]:
+        return [r for r in self.rows if r["agent_id"] == agent_id]
+
+    async def close(self) -> None:
+        self.closed += 1
+
+    @property
+    def writes(self) -> list[str]:
+        return [s for s in self.statements if "INSERT" in s or "UPDATE" in s or "DELETE" in s]
+
+
+def _pg(pool: FakePool) -> binding_store.PostgresBindingStore:
+    return binding_store.PostgresBindingStore("postgres://user:pw@example.invalid/db", pool=pool)
+
+
+def test_the_table_is_created_lazily_and_only_once() -> None:
+    """No migration tooling exists in this repo, so the DDL ships with the
+    store — but constructing it must not do I/O, and a hot process must not
+    re-run the DDL on every request."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    assert pool.statements == []  # construction alone talks to nothing
+
+    async def go() -> None:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.put(AGENT, URL_TWO, OWNER)
+        await store.get(AGENT)
+
+    asyncio.run(go())
+
+    ddl = [s for s in pool.statements if "CREATE TABLE" in s]
+    assert len(ddl) == 1
+    assert "CREATE TABLE IF NOT EXISTS agent_bindings" in ddl[0]
+
+
+def test_a_rebind_appends_a_row_and_never_updates_one() -> None:
+    """The append-only rule, asserted on the SQL actually sent: two binds for
+    one agent are two INSERTed rows, and no statement is an UPDATE."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> BindingRecord:
+        await store.put(AGENT, URL_ONE, OWNER)
+        return await store.put(AGENT, URL_TWO, OWNER)
+
+    second = asyncio.run(go())
+
+    assert len(pool.rows) == 2
+    assert len(pool.writes) == 2
+    assert all("INSERT INTO agent_bindings" in s for s in pool.writes)
+    assert not any("UPDATE" in s for s in pool.statements)
+    assert second.previous_endpoint_url == URL_ONE
+
+
+def test_no_sql_in_the_module_mutates_a_row() -> None:
+    """Belt and braces on the constants themselves, so a later edit that adds
+    an UPDATE has to delete this test to land."""
+    sql = " ".join(
+        (
+            binding_store._CREATE_TABLE_SQL,
+            binding_store._SELECT_LATEST_SQL,
+            binding_store._INSERT_SQL,
+        )
+    ).upper()
+
+    assert "UPDATE " not in sql
+    assert "DELETE " not in sql
+    assert "ON CONFLICT" not in sql  # an upsert is an update wearing a hat
+
+
+def test_get_returns_the_newest_row_with_its_predecessor() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> BindingRecord | None:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.put(AGENT, URL_TWO, OWNER)
+        await store.put(AGENT, URL_THREE, OWNER)
+        return await store.get(AGENT)
+
+    current = asyncio.run(go())
+
+    assert current is not None
+    assert current.agent_id == AGENT
+    assert current.endpoint_url == URL_THREE
+    assert current.previous_endpoint_url == URL_TWO
+    assert len(pool.rows) == 3  # all three binds are still on the audit trail
+
+
+def test_get_is_none_when_the_agent_has_no_row() -> None:
+    pool = FakePool()
+
+    assert asyncio.run(_pg(pool).get("agt_never")) is None
+
+
+def test_the_insert_returns_the_stored_timestamp() -> None:
+    """`put` dates the record itself and stores that same value, so the record
+    handed back is the row that was written — not a second clock reading."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    before = time.time()
+    record = asyncio.run(store.put(AGENT, URL_ONE, OWNER))
+    after = time.time()
+
+    assert before <= record.bound_at <= after
+    assert pool.rows[0]["bound_at"] == record.bound_at
+
+
+def test_close_closes_the_pool_once_and_is_safe_twice() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> None:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.close()
+        await store.close()
+
+    asyncio.run(go())
+
+    assert pool.closed == 1
+
+
+def test_the_pool_is_opened_with_min_size_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A free Render instance idles and its sockets die with it — a pool that
+    insists on a live connection wakes up holding a dead one."""
+    captured: dict[str, object] = {}
+
+    async def fake_create_pool(**kwargs: object) -> FakePool:
+        captured.update(kwargs)
+        return FakePool()
+
+    class FakeAsyncpg:
+        create_pool = staticmethod(fake_create_pool)
+
+    monkeypatch.setattr(binding_store, "_import_asyncpg", lambda: FakeAsyncpg)
+    store = binding_store.PostgresBindingStore("postgres://user:pw@example.invalid/db")
+
+    asyncio.run(store.get(AGENT))
+
+    assert captured["min_size"] == 0
+    assert captured["dsn"] == "postgres://user:pw@example.invalid/db"
+    assert captured["max_size"] == binding_store._POOL_MAX_SIZE
+
+
+def test_a_missing_driver_names_the_fix() -> None:
+    """asyncpg is imported at first use, not at module scope, so this suite —
+    and any checkout without the driver — imports and collects cleanly."""
+    try:
+        import asyncpg  # noqa: F401
+    except ModuleNotFoundError:
+        pass
+    else:
+        pytest.skip("asyncpg is installed, so the missing-driver path cannot be reached")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        binding_store._import_asyncpg()
+
+    message = str(excinfo.value)
+    assert "asyncpg" in message and "DATABASE_URL" in message
