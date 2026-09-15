@@ -72,6 +72,7 @@ def test_dispatch_carries_the_envelope_and_returns_the_output() -> None:
     out = asyncio.run(go())
 
     assert out["summary"] == "built the landing page"
+    # Stamped by us, not carried from the operator's response — see _parse.
     assert out["source"] == "external"
 
     body = seen["body"]
