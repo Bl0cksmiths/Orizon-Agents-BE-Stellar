@@ -31,10 +31,11 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
               — even 5xx — is never retried: the operator answered.
     Size cap  response body streamed and capped at MAX_RESPONSE_BYTES; an
               oversize body fails the step before it is buffered.
-    Endpoint  validated against the SSRF rules in `validate_endpoint_url`
-              before every dispatch: https only, no private / loopback /
-              link-local / reserved / multicast address literals, no loopback
-              hostnames. Redirects are never followed.
+    Endpoint  validated before every dispatch against the SSRF rules, which now
+              live in `app.services.endpoint_policy` because the bind API needs
+              the same ones: https only, no private / loopback / link-local /
+              reserved / multicast address literals, no loopback or cloud
+              metadata hostnames. Redirects are never followed.
 
 Any failure — no connection after the retry, a non-2xx status, an oversize or
 unreadable body, non-object JSON, or a missing `summary` — is raised as
@@ -45,15 +46,15 @@ crashing.
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import secrets
-import socket
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
+
+from app.services.endpoint_policy import EndpointPolicyError
+from app.services.endpoint_policy import validate_endpoint_url as _validate_endpoint_policy
 
 from .base import Worker
 
@@ -65,20 +66,6 @@ CONNECT_TIMEOUT_SECONDS = 5.0
 TOTAL_TIMEOUT_SECONDS = 110.0
 MAX_RESPONSE_BYTES = 1_048_576  # 1 MiB — headroom over the ~10-60 KiB artifacts
 _USER_AGENT = "orizon-orchestrator/1"
-# Only https: an operator endpoint is a third party across the public internet,
-# and http would put the envelope (and the artifact coming back) on the wire in
-# the clear. Restricting the scheme also kills file://, gopher:// and the rest
-# of the SSRF-classic schemes in the same line.
-ALLOWED_SCHEMES = frozenset({"https"})
-# Hostnames that resolve to the local machine without ever touching an IP
-# literal. ".localhost" is reserved for exactly this by RFC 6761.
-_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
-# Names the cloud providers resolve to the link-local metadata service. Blocking
-# 169.254.169.254 as a literal does nothing about these: they are ordinary names
-# that only resolve inside the VM, so nothing short of a name check stops them.
-# This is a floor, not a fence — the resolve-then-check in Epic 2 is what makes
-# the range unreachable by ANY name. Keep both.
-_METADATA_HOSTNAMES = frozenset({"metadata.google.internal", "metadata.goog", "instance-data"})
 
 
 class ExternalDispatchError(RuntimeError):
@@ -87,102 +74,20 @@ class ExternalDispatchError(RuntimeError):
     raising local worker: skipped, unbilled, the workflow degrades."""
 
 
-def _as_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    """The address `host` denotes, or None if it is a name.
-
-    `ipaddress.ip_address` parses only the canonical dotted-quad, but the
-    resolver is far more permissive: getaddrinfo reads "2130706433", "127.1"
-    and "0177.0.0.1" as 127.0.0.1, and "2852039166" as the metadata service.
-    Parsed by ip_address alone, every one of those spellings falls through to
-    the hostname rules — which only know `localhost` — and is then handed to
-    the connect as the blocked address after all.
-
-    socket.inet_aton IS the resolver's own parser, so it recognises exactly the
-    spellings getaddrinfo would go on to honour: decimal, octal, hex and the
-    short a.b / a.b.c forms. A name that inet_aton accepts is all-numeric and
-    therefore cannot be a public FQDN, so nothing legitimate is caught here.
-    """
-    try:
-        return ipaddress.ip_address(host)
-    except ValueError:
-        pass
-    try:
-        return ipaddress.IPv4Address(socket.inet_aton(host))
-    except (OSError, ipaddress.AddressValueError):
-        return None  # a real name, not a literal in disguise
-
-
 def validate_endpoint_url(url: str) -> None:
     """Reject an operator endpoint that is not safe to dispatch to (SSRF).
 
-    An operator-supplied URL is an outbound request made by *our* server from
-    *inside* our network, so an unchecked one turns the orchestrator into a
-    proxy for anything the endpoint can reach: cloud instance metadata at
-    169.254.169.254 (credentials), 127.0.0.1 (this process' own admin surface),
-    and the private ranges holding the database and the internal services.
-
-    The rules, in order:
-      * scheme must be https — see ALLOWED_SCHEMES;
-      * a host must be present;
-      * an IP literal must be publicly routable — private, loopback,
-        link-local (which is what 169.254.169.254 is), reserved, multicast and
-        unspecified addresses are all refused, v4 and v6 alike. "IP literal"
-        means any spelling the RESOLVER treats as one, not just the canonical
-        dotted-quad — see _as_ip_literal;
-      * a hostname must not be a loopback name (`localhost`, `*.localhost`)
-        or a known cloud metadata name (`metadata.google.internal`, …).
-
-    Raises ExternalDispatchError so a bad binding fails its step like any other
-    dispatch failure rather than crashing the run loop.
-
-    Deliberately NOT covered: this validates the URL as written, so an ordinary
-    name that RESOLVES into a blocked range still gets through — the metadata
-    names above are a hand-listed floor, not a general answer, and DNS
-    rebinding between this check and the connect is untouched. Closing that
-    needs resolve-then-pin at socket level, which belongs with operator
-    endpoint binding in Epic 2. Redirects cannot launder the check because we
-    never follow them (see _dispatch).
+    The rules themselves are `app.services.endpoint_policy.validate_endpoint_url`
+    — one block-list, shared with the bind API, because a second copy is a copy
+    that drifts. This wrapper exists only to keep the dispatch path's error type:
+    `EndpointPolicyError` becomes `ExternalDispatchError`, so a bad binding fails
+    its step like any other dispatch failure rather than surfacing a ValueError
+    the run loop has no handling for. The message is passed through unchanged.
     """
     try:
-        parts = urlsplit(url)
-        host = parts.hostname
-    except ValueError as e:  # malformed IPv6 bracket, non-numeric port, …
-        raise ExternalDispatchError(f"endpoint URL {url!r} could not be parsed") from e
-
-    scheme = parts.scheme.lower()
-    if scheme not in ALLOWED_SCHEMES:
-        raise ExternalDispatchError(
-            f"endpoint URL {url!r} uses scheme {scheme or '(none)'!r}; only {sorted(ALLOWED_SCHEMES)} allowed"
-        )
-
-    host = (host or "").rstrip(".")  # a trailing-dot FQDN names the same host
-    if not host:
-        raise ExternalDispatchError(f"endpoint URL {url!r} has no host")
-
-    ip = _as_ip_literal(host)
-    if ip is not None:
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            # Report the canonical form: "2130706433" is not obviously 127.0.0.1
-            # in a log line, and the operator needs to see what we resolved it to.
-            raise ExternalDispatchError(
-                f"endpoint URL {url!r} points at non-public address {ip} — "
-                "private, loopback, link-local, reserved, multicast and unspecified "
-                "ranges are not dispatchable"
-            )
-        return
-
-    if host in _LOOPBACK_HOSTNAMES or any(host.endswith(f".{name}") for name in _LOOPBACK_HOSTNAMES):
-        raise ExternalDispatchError(f"endpoint URL {url!r} points at loopback host {host!r}")
-
-    if host in _METADATA_HOSTNAMES:
-        raise ExternalDispatchError(f"endpoint URL {url!r} points at cloud metadata host {host!r}")
+        _validate_endpoint_policy(url)
+    except EndpointPolicyError as e:
+        raise ExternalDispatchError(str(e)) from e
 
 
 class ExternalHttpWorker(Worker):
