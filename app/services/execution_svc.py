@@ -214,6 +214,11 @@ async def _run(
     # Agent ids whose step never reached a worker at all — see the resolve
     # branch below. Distinct from "delivered nothing": these are not rated.
     undispatched: set[str] = set()
+    # Agent ids that ran on one of OUR workers. The rating scale trusts a
+    # first-party response to have delivered something real; an untrusted one
+    # has to prove it (ADR 0005 D3). Carried separately because `delivered`
+    # holds the output, not its provenance.
+    first_party_ids: set[str] = set()
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
@@ -398,7 +403,10 @@ async def _run(
                 context[worker.name] = output
                 # The settler reads a rating-facing view of the same output —
                 # an untrusted worker does not get to grade itself.
-                delivered[step.agent_id] = _rating_view(output, first_party=get_worker(step.agent_id) is worker)
+                first_party = get_worker(step.agent_id) is worker
+                if first_party:
+                    first_party_ids.add(step.agent_id)
+                delivered[step.agent_id] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
@@ -437,6 +445,7 @@ async def _run(
                     payer=payer,
                     job_id=unsettled_job_id(task_id),
                     undispatched=frozenset(undispatched),
+                    first_party_ids=frozenset(first_party_ids),
                 )
             else:
                 charge_tx, proof_tx, job_id = await _settle_onchain(
@@ -451,6 +460,7 @@ async def _run(
                         payer=payer,
                         job_id=job_id,
                         undispatched=frozenset(undispatched),
+                        first_party_ids=frozenset(first_party_ids),
                     )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
@@ -828,6 +838,7 @@ async def _submit_ratings(
     payer: str,
     job_id: bytes,
     undispatched: frozenset[str] = frozenset(),
+    first_party_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Submit the settler's synthetic per-step ratings to ReputationLedger.
 
@@ -858,7 +869,13 @@ async def _submit_ratings(
         step_output = delivered.get(step.agent_id)
         if step_output is None:
             step_output = delivered.get(step.agent_name or "")
-        rating, weight = reputation_svc.synthetic_rating(step_output, step.est_price_usdc)
+        # Untrusted output must carry something checkable to earn the base
+        # score. Without this an operator answering "{\"ok\": true}" forever
+        # scored 70 — the prior exactly — and their lower bound ROSE with every
+        # such reply, so lying outranked failing honestly (ADR 0005 D3).
+        rating, weight = reputation_svc.synthetic_rating(
+            step_output, step.est_price_usdc, first_party=step.agent_id in first_party_ids
+        )
         try:
             # Async path: the submit RPC runs in a worker thread but the ~30s
             # status poll waits on the event loop — no executor thread pinned.
