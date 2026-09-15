@@ -13,8 +13,18 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
               headers  Content-Type: application/json
                        Idempotency-Key: {dispatch_id}
                        User-Agent: orizon-orchestrator/1
-              body     {"v": 1, "agent_id", "intent", "rationale",
-                        "context", "dispatch_id"}
+                       X-Orizon-Signature          (base64 ed25519, SEP-53)
+                       X-Orizon-Signature-Version  (orizon-dispatch:v1)
+                       X-Orizon-Signer             (G..., a hint — operators
+                                                    MUST pin the key instead)
+                       — the three signature headers are absent, not empty,
+                       when no dispatch key is configured.
+              body     {"v": 2, "agent_id", "intent", "rationale",
+                        "context", "dispatch_id", "ts", "network",
+                        "deadline_ms"}
+                       Serialized ONCE with separators=(",", ":") and
+                       ensure_ascii=False; those exact bytes are what the
+                       signature covers and what goes on the wire.
 
     Response  200, application/json, body = the worker-output object:
               {"summary": str (required, non-empty),
