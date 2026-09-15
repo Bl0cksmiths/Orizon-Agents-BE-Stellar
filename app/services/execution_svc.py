@@ -315,13 +315,16 @@ async def _run(
                 # — unbilled, skipped, the run carries on — rather than an
                 # exception escaping to the run-level handler and taking the
                 # settlement (and every honest agent's payment) down with it.
+                # The field PATH is the diagnostic here — "artifact.files"
+                # names the offending value where the top-level type would
+                # only say "dict" — and it is a shape, not content, so the
+                # operator's own text stays out of the log.
                 logger.error(
-                    "task %s step %s (%s): field %r has an unusable shape (%s) — step treated as failed",
+                    "task %s step %s (%s): output field %r has an unusable shape — step treated as failed",
                     task_id,
                     step.agent_id,
                     worker.name,
                     unusable,
-                    type(output.get(unusable.split(".")[0])).__name__,
                 )
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
                 continue
