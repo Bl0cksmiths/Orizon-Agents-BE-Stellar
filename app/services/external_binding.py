@@ -1,22 +1,37 @@
-"""Off-chain endpoint binding — story-1.06 ownership proof (Candidate A).
+"""Off-chain endpoint binding — challenge, authority, and proof (ADR 0003).
 
 Binding an operator URL to an on-chain agent id must cost nothing but a
 signature from the wallet that owns the agent — no password, email, or API key
 (SOW Deliverable 1's whole premise). The flow:
 
-  1. issue_challenge(agent_id) -> nonce. A random, short-lived value stored
-     against the agent id.
-  2. The operator signs the nonce's UTF-8 bytes with the secret key of the
-     agent's on-chain owner (the G-address in the AgentRegistry `Agent`
-     struct) — e.g. via StellarWalletsKit signMessage — and base64-encodes the
-     signature.
-  3. verify_challenge(agent_id, owner, signature_b64) checks that signature
-     against `owner` and, on success, consumes the nonce (single use). The
-     caller then records the (agent_id -> endpoint_url) binding.
+  1. issue_challenge(agent_id, endpoint_url) -> (nonce, expires_at). A random,
+     short-lived value stored against the PAIR, and returned as-is while it is
+     still live so a re-issue cannot cancel a bind already in progress.
+  2. The operator signs binding_message(agent_id, endpoint_url, nonce) with the
+     secret key of the agent's on-chain owner — e.g. via StellarWalletsKit
+     signMessage — and base64-encodes the signature.
+  3. resolve_owner(agent_id) reads that owner from the LIVE AgentRegistry, and
+     verify_challenge(agent_id, endpoint_url, owner, signature_b64) checks the
+     signature against it, consuming the nonce only on success. The caller then
+     records the (agent_id -> endpoint_url) binding.
 
-This module is the spike prototype of steps 1 and 3 — pure and testable, with
-an in-memory nonce store. The persistent binding table, the bind API endpoint,
-and confirming `owner` against the live AgentRegistry are Epic 2.
+What 1.06 left to "Epic 2" is now here: the owner is confirmed against the live
+registry (`resolve_owner`), and the bind API endpoint calls into this module.
+Three things about it are load-bearing rather than incidental:
+
+  - The SIGNED MESSAGE COVERS THE ENDPOINT, not just the nonce. The prototype
+    signed the nonce alone, so a signature captured inside its five-minute
+    window could be replayed to bind a different url (D3).
+  - The OWNER READ FAILS CLOSED, inverting this repo's usual convention,
+    because here the read is the authorization and nothing downstream re-checks
+    it (D2). See `resolve_owner` for the full reasoning.
+  - The NONCE TABLE IS BOUNDED. Both bind routes are public and unauthenticated
+    by design, and the key is caller-supplied, so an unbounded table is memory
+    exhaustion on a free instance.
+
+The table is still process-local, so a bind in progress does not survive a
+restart (the BINDING itself does — that is `binding_store`'s job). A caller who
+was mid-signature simply asks for a new challenge.
 """
 
 from __future__ import annotations
