@@ -22,7 +22,7 @@ X-Orizon-Signer: G...            # convenience only — see the warning below
 
 {"v": 2, "agent_id": "...", "intent": "...", "rationale": "...",
  "context": {...}, "dispatch_id": "...", "ts": 1789480000,
- "network": "testnet"}
+ "network": "testnet", "deadline_ms": 100000}
 ```
 
 ## The five steps
@@ -118,10 +118,18 @@ particular `source` is ignored — provenance is stamped by us, not claimed by
 you. A response that is not an object, or that has no usable `summary`, or
 whose `artifact` is not an object, fails the step.
 
-Responses are capped at 1 MiB and must arrive within the dispatch deadline
-(currently 100 s, covering connect, transfer and parsing). A slow response is a
-failed step and is **not** retried — the request was on the wire and may have
-run, so we will not risk billing you for one job twice.
+Responses are capped at 1 MiB and must arrive within `deadline_ms`, the budget
+carried in the envelope (covering connect, transfer and parsing). Read it from
+the body rather than hard-coding it — the value can change, and it is inside the
+signed bytes so it cannot be tampered with in transit.
+
+**Budget conservatively.** Our clock starts *before* we connect to you, so by
+the time your handler runs you have less than `deadline_ms` remaining — on a
+host that sleeps, 30 s or more may already be gone. Return a partial result with
+a valid `summary` rather than working up to the limit.
+
+A slow response is a failed step and is **not** retried — the request was on the
+wire and may have run, so we will not risk billing you for one job twice.
 
 ## What we send you, and what we do not
 
