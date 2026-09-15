@@ -390,7 +390,7 @@ class ExternalHttpWorker(Worker):
                     # of statuses we will not use.
                     raise ExternalDispatchError(
                         "error_status",
-                        f"external dispatch {dispatch_id} to {self.id}: too many redirects",
+                        f"external dispatch {dispatch_id} to {self.id}: too many redirects ({type(e).__name__})",
                     ) from e
                 except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as e:
                     # EVERYTHING else httpx can raise, so the docstring's "any
