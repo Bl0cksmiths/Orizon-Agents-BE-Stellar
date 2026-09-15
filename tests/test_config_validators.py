@@ -162,8 +162,9 @@ def test_demo_defaults_still_boot_without_an_api_key():
 
 
 def test_pdax_environment_constant_matches_the_module_that_resolves_it():
-    # app/config.py cannot import BASE_URLS (circular), so this pins the copy
-    # to the source of truth instead.
+    # Both sides now read the one table in app/pdax_environments.py (it lives
+    # outside the app.pdax package precisely so app/config.py can import it),
+    # so this pins that they still resolve to the same set.
     from app.pdax.config import BASE_URLS
 
     assert set(PDAX_ENVIRONMENTS) == set(BASE_URLS)
