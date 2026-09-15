@@ -88,10 +88,65 @@ DISPATCH_DEADLINE_SECONDS = 100.0
 _USER_AGENT = "orizon-orchestrator/1"
 
 
+# The closed vocabulary of dispatch failure classes. Closed on purpose:
+# ExternalDispatchError rejects anything outside it, so a typo at a raise site
+# fails loudly here rather than travelling to the trace as a class nothing
+# handles. Same shape, deliberately, as `endpoint_policy.ENDPOINT_RULES` and
+# `external_contract.OUTPUT_RULES`: three vocabularies that behaved differently
+# would be three things to learn.
+#
+# COARSE on purpose. A dispatch has a dozen distinct ways to fail, but a class
+# earns an entry here only if an operator would do something DIFFERENT about
+# it, so each one below is one remedy: rebind the endpoint, come up, answer
+# faster, fix the HTTP stack, stop answering non-2xx, send less, send the
+# documented shape. The specific cause — a wrapped `EndpointPolicyError.rule`
+# or `ExternalOutputError.rule`, or the httpx exception's own type name — stays
+# in the prose, where whoever debugs one dispatch will look; the class is what
+# groups a week of them.
+DISPATCH_RULES: frozenset[str] = frozenset(
+    {
+        # The URL failed the SSRF policy, so nothing was dispatched at all.
+        "endpoint_refused",
+        # No connection was ever established, retry included: the operator
+        # never received the step.
+        "no_connection",
+        # The request WAS on the wire and no usable response arrived inside the
+        # dispatch deadline. May have executed; never retried.
+        "response_timeout",
+        # The connection existed and the HTTP conversation itself broke.
+        "transport_error",
+        # The operator answered, with something that is not a usable 2xx.
+        "error_status",
+        # The response body exceeded the size cap and was cut off unread.
+        "oversize_response",
+        # The body arrived whole and is not the documented shape.
+        "invalid_response",
+    }
+)
+
+
 class ExternalDispatchError(RuntimeError):
     """A step dispatched to an operator endpoint did not produce a usable
     result. Raised so execution_svc treats the step as failed — identical to a
-    raising local worker: skipped, unbilled, the workflow degrades."""
+    raising local worker: skipped, unbilled, the workflow degrades.
+
+    `rule` is one of `DISPATCH_RULES`; the constructor refuses any other value
+    so the vocabulary cannot quietly grow a synonym. The rule — not the prose —
+    is the machine-readable part: it is what the buyer's trace line names, what
+    an operator log groups on and what a test asserts on, which leaves the
+    message free to say something useful to a human without a test pinning its
+    wording.
+
+    RuntimeError, not the ValueError its two sibling vocabularies use: this is
+    not bad input to a function, it is a remote party failing to hold up its
+    end, and execution_svc's per-step handler already catches it as such.
+    """
+
+    def __init__(self, rule: str, message: str) -> None:
+        if rule not in DISPATCH_RULES:
+            raise ValueError(f"unknown dispatch rule {rule!r}")
+        super().__init__(message)
+        self.rule = rule
 
 
 def validate_endpoint_url(url: str) -> None:
@@ -107,7 +162,7 @@ def validate_endpoint_url(url: str) -> None:
     try:
         _validate_endpoint_policy(url)
     except EndpointPolicyError as e:
-        raise ExternalDispatchError(str(e)) from e
+        raise ExternalDispatchError("endpoint_refused", str(e)) from e
 
 
 class ExternalHttpWorker(Worker):
@@ -189,9 +244,11 @@ class ExternalHttpWorker(Worker):
         try:
             validate_endpoint_url(self.endpoint_url)
         except ExternalDispatchError as e:
-            # Re-raised with the module's prefix so the refusal correlates with
-            # the rest of this dispatch's log lines.
-            raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: {e}") from e
+            # Re-raised with the module's prefix so the refusal correlates
+            # with the rest of this dispatch's log lines, and with the wrapped
+            # class carried through: a refusal is still an endpoint refusal
+            # once this dispatch's prefix is on the front of it.
+            raise ExternalDispatchError(e.rule, f"external dispatch {dispatch_id} to {self.id}: {e}") from e
 
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
@@ -212,8 +269,9 @@ class ExternalHttpWorker(Worker):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ExternalDispatchError(
+                        "response_timeout",
                         f"external dispatch {dispatch_id} to {self.id}: "
-                        f"exceeded the {DISPATCH_DEADLINE_SECONDS:.0f}s dispatch deadline"
+                        f"exceeded the {DISPATCH_DEADLINE_SECONDS:.0f}s dispatch deadline",
                     )
                 try:
                     return await asyncio.wait_for(self._once(client, body, headers, dispatch_id), timeout=remaining)
@@ -222,15 +280,18 @@ class ExternalHttpWorker(Worker):
                     # rather than by execution_svc's outer ceiling. Never
                     # retried — the request was on the wire and may have run.
                     raise ExternalDispatchError(
+                        "response_timeout",
                         f"external dispatch {dispatch_id} to {self.id}: "
-                        f"no response within {DISPATCH_DEADLINE_SECONDS:.0f}s"
+                        f"no response within {DISPATCH_DEADLINE_SECONDS:.0f}s",
                     ) from e
                 except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                     # The connection never established, so the operator never
                     # received the step: a single retry cannot double-run work.
                     if attempts >= 2:
                         raise ExternalDispatchError(
-                            f"external dispatch {dispatch_id} to {self.id}: no connection after retry"
+                            "no_connection",
+                            f"external dispatch {dispatch_id} to {self.id}: "
+                            f"no connection after retry ({type(e).__name__})",
                         ) from e
                     logger.warning(
                         "external dispatch %s to %s: connection failed (%s) — retrying once",
@@ -248,14 +309,17 @@ class ExternalHttpWorker(Worker):
         # `content=` not `json=`: these are the bytes the signature covers.
         async with client.stream("POST", self.endpoint_url, content=body, headers=headers) as resp:
             if resp.status_code // 100 != 2:
-                raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: HTTP {resp.status_code}")
+                raise ExternalDispatchError(
+                    "error_status", f"external dispatch {dispatch_id} to {self.id}: HTTP {resp.status_code}"
+                )
             total = 0
             chunks: list[bytes] = []
             async for chunk in resp.aiter_bytes():
                 total += len(chunk)
                 if total > MAX_RESPONSE_BYTES:
                     raise ExternalDispatchError(
-                        f"external dispatch {dispatch_id} to {self.id}: response exceeds {MAX_RESPONSE_BYTES}-byte cap"
+                        "oversize_response",
+                        f"external dispatch {dispatch_id} to {self.id}: response exceeds {MAX_RESPONSE_BYTES}-byte cap",
                     )
                 chunks.append(chunk)
         return self._parse(b"".join(chunks), dispatch_id)
@@ -265,7 +329,7 @@ class ExternalHttpWorker(Worker):
             data = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ExternalDispatchError(
-                f"external dispatch {dispatch_id} to {self.id}: response was not valid JSON"
+                "invalid_response", f"external dispatch {dispatch_id} to {self.id}: response was not valid JSON"
             ) from e
         except RecursionError as e:
             # ~1 MiB of "[[[[..." is ~500k deep and blows CPython's recursive
@@ -274,7 +338,7 @@ class ExternalHttpWorker(Worker):
             # escapes as a RUN failure instead of a step failure, taking the
             # whole workflow (and everyone else's settlement) with it.
             raise ExternalDispatchError(
-                f"external dispatch {dispatch_id} to {self.id}: response nesting too deep"
+                "invalid_response", f"external dispatch {dispatch_id} to {self.id}: response nesting too deep"
             ) from e
 
         # Everything past here is the operator's shape, not ours: allowlisted,
@@ -284,7 +348,9 @@ class ExternalHttpWorker(Worker):
         try:
             output = parse_operator_output(data)
         except ExternalOutputError as e:
-            raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: {e} (rule: {e.rule})") from e
+            raise ExternalDispatchError(
+                "invalid_response", f"external dispatch {dispatch_id} to {self.id}: {e} (rule: {e.rule})"
+            ) from e
 
         # Provenance is stamped by US, never claimed by the operator. The
         # contract drops any `source` they send, because synthetic_rating awards
