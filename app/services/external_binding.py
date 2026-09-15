@@ -236,6 +236,47 @@ async def resolve_owner(agent_id: str) -> str | None:
     return result if isinstance(result, str) else None
 
 
+def _signature_matches(owner: str, message: str, signature_b64: str) -> bool:
+    """True if `signature_b64` is `owner`'s ed25519 signature over `message` in
+    EITHER of the two encodings real wallets produce.
+
+    Wallets do not agree on what "sign a message" means. Some sign the raw UTF-8
+    bytes; Freighter — which is what StellarWalletsKit's `signMessage` delegates
+    to in the console — implements SEP-53 and signs
+    `sha256(b"Stellar Signed Message:\\n" + message)` instead. Verifying only the
+    raw form would make every real bind fail, and fail looking like "wrong
+    owner" rather than the encoding mismatch it actually is.
+
+    Accepting both is an INTEROPERABILITY widening, not a trust widening. The
+    two payloads are derived deterministically from the SAME domain-separated
+    message, which already pins the protocol, version, agent id, endpoint URL
+    and nonce — so there is no message an attacker can get signed under one
+    encoding that becomes a DIFFERENT authorization under the other. It must not
+    be generalized any further: exactly these two, never a loop over candidate
+    prefixes.
+
+    `Keypair.verify_message` is the SDK's own SEP-53 implementation. Calling it
+    rather than re-deriving the prefixed hash here keeps this in step with the
+    spec instead of forking a second copy of the framing that can drift from it.
+    """
+    try:
+        keypair = Keypair.from_public_key(owner)
+        signature = base64.b64decode(signature_b64, validate=True)
+    except ValueError:
+        # Malformed owner address or non-base64 signature — nothing to verify.
+        return False
+    try:
+        keypair.verify(message.encode("utf-8"), signature)  # raw UTF-8 bytes
+        return True
+    except ValueError:
+        pass
+    try:
+        keypair.verify_message(message, signature)  # SEP-53 prefixed + hashed
+        return True
+    except ValueError:
+        return False
+
+
 def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64: str) -> bool:
     """Verify a base64 ed25519 signature over `binding_message(...)` against
     `owner` (a Stellar G-address). Consumes the nonce on success.
@@ -248,6 +289,8 @@ def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64
     signature, or a signature that does not verify. Every failure mode
     (BadSignatureError, Ed25519PublicKeyInvalidError, binascii.Error) is a
     ValueError subclass, so one handler covers them without masking real bugs.
+    A failed verification leaves the nonce ALONE: only a proven signature
+    consumes it, so a bad guess cannot cancel the real owner's pending bind.
     """
     key = (agent_id, endpoint_url)
     entry = _challenges.get(key)
@@ -257,11 +300,7 @@ def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64
     if time.time() > expires_at:
         del _challenges[key]
         return False
-    message = binding_message(agent_id, endpoint_url, nonce)
-    try:
-        signature = base64.b64decode(signature_b64, validate=True)
-        Keypair.from_public_key(owner).verify(message.encode("utf-8"), signature)
-    except ValueError:
+    if not _signature_matches(owner, binding_message(agent_id, endpoint_url, nonce), signature_b64):
         return False
     del _challenges[key]  # single use — a proven nonce never verifies twice
     return True
