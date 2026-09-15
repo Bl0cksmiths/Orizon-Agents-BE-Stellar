@@ -144,11 +144,12 @@ def _floor_substitute(
 
 
 def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
-    # Indexed on-chain agents (story 1.02) have no local worker until Epic 2
-    # lands — they must be marketplace-visible but never planner-routable, and
-    # the filter sits on the assignment so the floor-starvation fallback below
-    # (which sorts this list, not `routable`) can never admit one either.
-    agents = [a for a in state.list_agents() if get_worker(a.id) is not None]
+    # An indexed on-chain agent (story 1.02) is marketplace-visible but only
+    # planner-routable once an operator binds it an endpoint (story 2.01) —
+    # until then it has nothing to execute a step with. The filter sits on the
+    # assignment so the floor-starvation fallback below (which sorts this list,
+    # not `routable`) can never admit an unbound one either.
+    agents = [a for a in state.list_agents() if is_dispatchable(a.id)]
     routable = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
     if len(routable) < _MIN_ROUTABLE_AGENTS:
         logger.warning(
