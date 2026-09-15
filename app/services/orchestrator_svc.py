@@ -14,6 +14,7 @@ from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from ..state import state
 from . import reputation_svc
+from .binding_registry import is_dispatchable
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +114,13 @@ def _floor_substitute(
     taken: set[str],
 ) -> Agent | None:
     """Deterministically pick a floor-clearing replacement for a sub-floor kit
-    agent: worker-backed, OFF the kit pipeline, sharing >=1 skill, not already
+    agent: dispatchable, OFF the kit pipeline, sharing >=1 skill, not already
     used in this plan. Highest smoothed score wins, id breaks ties — a pure
     function of the reputation snapshot, so the plan stays reproducible.
+
+    "Dispatchable" is a local worker OR a bound external endpoint (story 2.01).
+    The floor is unchanged and still applied here: a bound agent stands in for
+    a sub-floor kit agent only if it clears the floor on the same arithmetic.
     """
     wanted = set(designated.skills)
     candidates = [
@@ -123,7 +128,7 @@ def _floor_substitute(
         for a in state.list_agents()
         if a.id not in taken
         and a.id not in _KIT_AGENT_IDS
-        and get_worker(a.id) is not None
+        and is_dispatchable(a.id)
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
     ]
