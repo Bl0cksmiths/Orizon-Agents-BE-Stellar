@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import secrets
 import time
 from typing import Any
@@ -319,8 +320,7 @@ async def _run(
                 # back to a generic token rather than crashing the classifier,
                 # and a future worker classifies itself for free. Same shape as
                 # pdax.errors.orizon_code's default (ADR 0005).
-                rule = getattr(e, "rule", None)
-                rule = rule if isinstance(rule, str) and rule else "unclassified"
+                rule = _failure_class(e)
                 failure_tracker.record_failure(step.agent_id, rule)
                 await _emit(task_id, start, "error", f"{worker.name} failed ({rule})")
                 continue
@@ -828,6 +828,22 @@ async def _settle_onchain(
         await _emit(task_id, start, "error", "on-chain settlement failed")
 
     return (charge_tx, proof_tx, settled_job_id)
+
+
+# A failure class is a token, never free text. Validated by SHAPE rather than
+# membership because the run loop must not import a worker's module to classify
+# its exception (ADR 0005) — so anything that is not a plain lowercase token
+# collapses to one generic value, the way pdax.errors.orizon_code defaults.
+# This guards a WORLD-READABLE surface: without it a hostile `rule` attribute
+# would put a URL or a key straight into the buyer's trace.
+_FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+UNCLASSIFIED_FAILURE = "unclassified"
+
+
+def _failure_class(exc: BaseException) -> str:
+    """The operator-facing class of `exc`, or `unclassified`."""
+    rule = getattr(exc, "rule", None)
+    return rule if isinstance(rule, str) and _FAILURE_CLASS_RE.match(rule) else UNCLASSIFIED_FAILURE
 
 
 def unsettled_job_id(task_id: str) -> bytes:
