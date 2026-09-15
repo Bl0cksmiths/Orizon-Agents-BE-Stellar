@@ -60,6 +60,40 @@ async def _emit(task_id: str, start: float, level: TraceLevel, msg: str) -> Trac
     return line
 
 
+def _unusable_field(output: dict) -> str | None:
+    """The first field of a worker's output whose SHAPE the post-step handling
+    below cannot consume, or None when every field of it is usable.
+
+    Since story 2.01 a step's output can be whatever JSON an operator's
+    endpoint chose to return, and the handling that follows joins the critic
+    lists, reads `artifact` as a mapping and walks `artifact.files` — each of
+    which raises on the wrong type, and none of which sits inside the per-step
+    try/except. One hostile field would therefore reach the run-level handler:
+    the whole workflow finalizes as "failed" and the on-chain settlement that
+    pays every OTHER agent in the plan never runs. Proving the shape here, one
+    branch below the non-dict check and before the step is billed, keeps a bad
+    envelope exactly what it is — that STEP's failure.
+
+    Absent and falsy values are usable: every reader below already guards for
+    them (`or []`, `if art:`). Only a present value of the wrong type is not.
+    """
+    for key in ("critic_violations", "critic_notes"):
+        value = output.get(key)
+        if value and not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            return key
+    art = output.get("artifact")
+    if not art:
+        return None
+    if not isinstance(art, dict):
+        return "artifact"
+    files = art.get("files", [])
+    if not isinstance(files, list):
+        return "artifact.files"
+    if any(not isinstance(f, dict) or not isinstance(f.get("content", ""), str) for f in files):
+        return "artifact.files"
+    return None
+
+
 def _summarize(output: dict) -> str:
     if "summary" in output:
         return str(output["summary"])[:180]
@@ -227,6 +261,24 @@ async def _run(
                     type(output).__name__,
                 )
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable result")
+                continue
+
+            unusable = _unusable_field(output)
+            if unusable is not None:
+                # Same rule as the non-dict case above, one level in: a field
+                # the post-step handling cannot consume is that STEP's failure
+                # — unbilled, skipped, the run carries on — rather than an
+                # exception escaping to the run-level handler and taking the
+                # settlement (and every honest agent's payment) down with it.
+                logger.error(
+                    "task %s step %s (%s): field %r has an unusable shape (%s) — step treated as failed",
+                    task_id,
+                    step.agent_id,
+                    worker.name,
+                    unusable,
+                    type(output.get(unusable.split(".")[0])).__name__,
+                )
+                await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
                 continue
 
             succeeded += 1
