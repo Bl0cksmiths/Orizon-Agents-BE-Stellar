@@ -247,7 +247,7 @@ collide regardless of router registration order.
 |---|---|---|
 | agent id not on-chain | 404 | `agent_not_found` *(reused, not a synonym)* |
 | signature fails against the on-chain owner | 401 | `not_agent_owner` |
-| nonce missing / consumed / expired | 401 | `challenge_invalid` |
+| nonce missing / consumed / expired | 401 | `not_agent_owner` *(collapsed — see below)* |
 | endpoint fails the SSRF policy | 422 | `endpoint_not_allowed` |
 | signature not base64 / wrong length | 422 | `signature_malformed` |
 | chain unreadable | 503 | `registry_unavailable` |
@@ -257,6 +257,17 @@ One code for all three nonce failures is deliberate, following
 `require_task_read` (`app/services/task_auth.py:47-50`): splitting
 `nonce_expired` from `nonce_replayed` tells an attacker which half of a captured
 signature is still live.
+
+**Amended during implementation:** `challenge_invalid` was dropped entirely and
+folded into `not_agent_owner`. The original table split "no live challenge"
+from "signature does not verify", but `verify_challenge` returns a single
+`bool` by design — the two are indistinguishable to the router, and making them
+distinguishable would have meant *adding* an oracle. That is the same leak the
+paragraph above refuses, one level up: a caller replaying a captured signature
+learns nothing about whether the nonce or the key was the reason it failed.
+`signature_malformed` (422) survives as a separate code because it is decided
+by a pure base64 decode in the router, before any secret is consulted, so it
+reveals nothing — it is a client bug, not a failed authentication.
 
 ### Handler order in `POST .../bind` — this ordering *is* AC-2 and AC-4
 
