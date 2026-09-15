@@ -110,8 +110,9 @@ DISPATCH_RULES: frozenset[str] = frozenset(
         # No connection was ever established, retry included: the operator
         # never received the step.
         "no_connection",
-        # The request WAS on the wire and no usable response arrived inside the
-        # dispatch deadline. May have executed; never retried.
+        # Time ran out: the request was committed to the wire (or is still
+        # waiting on a connection from our own pool) and no usable response
+        # came back inside the dispatch deadline. Never retried.
         "response_timeout",
         # The connection existed and the HTTP conversation itself broke.
         "transport_error",
@@ -299,6 +300,54 @@ class ExternalHttpWorker(Worker):
                         self.id,
                         type(e).__name__,
                     )
+                except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+                    # The other three httpx timeouts, none of which the clause
+                    # above catches (ConnectTimeout is a sibling, not a base).
+                    # None is retried, and only ConnectTimeout ever could be:
+                    # a read timeout means the request reached the operator and
+                    # may be running right now, and a write timeout means part
+                    # of it did — retrying either is exactly the double-run the
+                    # module's "no retry on a step that may have executed" rule
+                    # exists to prevent. PoolTimeout never left this process at
+                    # all, so a retry would be SAFE, but it would queue for the
+                    # same exhausted pool inside the same deadline; it is
+                    # grouped here because what an operator sees is a dispatch
+                    # that ran out of time.
+                    raise ExternalDispatchError(
+                        "response_timeout",
+                        f"external dispatch {dispatch_id} to {self.id}: no usable response ({type(e).__name__})",
+                    ) from e
+                except httpx.TooManyRedirects as e:
+                    # Unreachable while follow_redirects stays False — a 30x is
+                    # a non-2xx and fails as `error_status` in _once — but an
+                    # injected client can be built with redirects on, so it is
+                    # classed the same way: the operator answered, with a chain
+                    # of statuses we will not use.
+                    raise ExternalDispatchError(
+                        "error_status",
+                        f"external dispatch {dispatch_id} to {self.id}: too many redirects",
+                    ) from e
+                except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as e:
+                    # EVERYTHING else httpx can raise, so the docstring's "any
+                    # failure is raised as ExternalDispatchError" is true rather
+                    # than aspirational: RemoteProtocolError (the operator spoke
+                    # malformed HTTP or hung up mid-body), DecodingError (their
+                    # Content-Encoding does not match their bytes), ReadError /
+                    # WriteError / CloseError, ProxyError, UnsupportedProtocol,
+                    # LocalProtocolError. Before this clause each of those left
+                    # the module as a raw httpx error, which execution_svc
+                    # cannot classify and the failure tracker cannot count.
+                    #
+                    # Not retried: RemoteProtocolError and ReadError both follow
+                    # a request that was fully sent, so the step may have run.
+                    #
+                    # The httpx TYPE goes in the message, never its str(): an
+                    # httpx error's text can quote the request URL, which is the
+                    # one thing no message leaving this module may carry.
+                    raise ExternalDispatchError(
+                        "transport_error",
+                        f"external dispatch {dispatch_id} to {self.id}: transport failure ({type(e).__name__})",
+                    ) from e
         finally:
             if owns_client:
                 await client.aclose()
