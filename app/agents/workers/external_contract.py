@@ -63,7 +63,7 @@ Pure: no I/O, no clock, no network.
 
 from __future__ import annotations
 
-from .code_gen import MAX_ARTIFACT_CHARS
+from .code_gen import MAX_ARTIFACT_CHARS, clamp_artifact_content
 
 # Bounds, mirroring code_gen's scale. A summary is a trace line and a receipt
 # field, not a document; a title is a heading. MAX_ARTIFACT_CHARS is code_gen's
@@ -116,3 +116,56 @@ class ExternalOutputError(ValueError):
             raise ValueError(f"unknown operator output rule {rule!r}")
         super().__init__(message)
         self.rule = rule
+
+
+# What a clamped short text ends with, so a truncated summary reads as truncated
+# in the trace rather than as a sentence that simply stops.
+_TRUNCATION_SUFFIX = " …[truncated]"
+
+
+def _clamp_text(value: str, limit: int) -> str:
+    """Bound one short text field, degrading instead of raising.
+
+    Oversize is a quality failure, not a protocol violation: the step has
+    already run, so the field is cut back and marked rather than costing the
+    buyer the whole step. Same trade `clamp_artifact_content` makes for
+    generated HTML, applied to text where that function's HTML repair (closing
+    `</script>`, `</body>`) would be noise.
+    """
+    if len(value) <= limit:
+        return value
+    if limit <= len(_TRUNCATION_SUFFIX):  # pragma: no cover — no bound is this small
+        return value[:limit]
+    return value[: limit - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
+
+
+def _clean_text(value: object, limit: int) -> str | None:
+    """`value` as a non-empty clamped `str`, or None if it is neither.
+
+    Returning None rather than raising is what lets one call site refuse
+    (`summary`) and another drop (`title`) on the same check.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return _clamp_text(text, limit)
+
+
+def _clean_html(value: object) -> str | None:
+    """`value` as a bounded HTML payload, or None if it is not a str.
+
+    `clamp_artifact_content` is code_gen's own clamp, reused rather than
+    reimplemented: it cuts at a line boundary and re-closes a dangling
+    `<script>`/`<body>`/`<html>` so the truncated document still parses in the
+    viewer's iframe. Not stripped and not emptiness-checked — whitespace is
+    content here, and an empty payload is a poor artifact, not a bad response.
+
+    The second trim is not redundant: the clamp re-appends a note and closing
+    tags after the cut, so its output can land just above the raw ceiling.
+    `_MAX_STORED_CHARS` is the ceiling that actually bounds what we store.
+    """
+    if not isinstance(value, str):
+        return None
+    return clamp_artifact_content(value)[:_MAX_STORED_CHARS]
