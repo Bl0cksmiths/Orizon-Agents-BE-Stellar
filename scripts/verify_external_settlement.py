@@ -154,6 +154,64 @@ def _expert(kind: str, id_: str, network: str) -> str:
     return f"https://stellar.expert/explorer/{seg}/{kind}/{id_}"
 
 
+def check_agent_owner(payload: dict[str, Any], agent_id: str, expected_owner: str) -> list[Check]:
+    """Verify `GET /api/stellar/agent/{id}` — a LIVE `AgentRegistry.get(id)`
+    simulate, not the cached `/api/agents` list — names the expected owner.
+
+    That record's `owner` field IS `owner_of(id)`: the contract implements
+    `owner_of` as `get(id).owner` (agent-registry/src/lib.rs:117-120), and it is
+    the same value `PaymentEscrow.charge` resolves a payout to. Checking the
+    cached marketplace listing instead would prove only that our own sync loop
+    agreed with itself.
+    """
+    agent = payload.get("agent")
+    if not isinstance(agent, dict):
+        return [Check("agent_onchain", False, f"no agent record in the registry read (got {type(agent).__name__})")]
+
+    checks = [Check("agent_onchain", True, f"{agent_id} is registered on AgentRegistry")]
+    owner = agent.get("owner")
+    matches = owner == expected_owner
+    checks.append(
+        Check(
+            "owner_matches",
+            matches,
+            "owner_of matches the credited account" if matches else f"owner_of is {owner}, expected {expected_owner}",
+        )
+    )
+    return checks
+
+
+def check_binding(payload: dict[str, Any], agent_id: str, expected_owner: str) -> list[Check]:
+    """Verify `GET /api/agents/{id}/binding` shows an operator endpoint bound to
+    the same owner — what makes this an EXTERNAL agent rather than a seeded one.
+
+    Anonymous callers get the endpoint's host only (the full path is disclosed
+    only to the operator key), which is all the evidence needs: that a binding
+    exists, and whose wallet authorised it.
+    """
+    bound_id = payload.get("agent_id")
+    present = bound_id == agent_id
+    checks = [
+        Check(
+            "binding_present",
+            present,
+            f"bound to {payload.get('endpoint_url')}" if present else f"binding is for {bound_id!r}, not {agent_id!r}",
+        )
+    ]
+    owner = payload.get("owner")
+    matches = owner == expected_owner
+    checks.append(
+        Check(
+            "binding_owner_matches",
+            matches,
+            "binding owner matches the credited account"
+            if matches
+            else f"binding owner is {owner}, expected {expected_owner}",
+        )
+    )
+    return checks
+
+
 def check_settlement_tx(tx: dict[str, Any]) -> list[Check]:
     """Verify the Horizon transaction record (`GET /transactions/{hash}`) is a
     transaction that actually succeeded on chain.
@@ -184,8 +242,25 @@ def main() -> int:
     checks: list[Check] = []
     credit: Credit | None = None
     horizon = _horizon_base(args.network)
+    base = args.api_base.rstrip("/")
 
     with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+        agent_resp = client.get(f"{base}/api/stellar/agent/{args.agent}")
+        if agent_resp.status_code != 200:
+            checks.append(
+                Check("agent_onchain", False, f"/api/stellar/agent/{args.agent} returned {agent_resp.status_code}")
+            )
+        else:
+            checks.extend(check_agent_owner(agent_resp.json(), args.agent, args.owner))
+
+        binding_resp = client.get(f"{base}/api/agents/{args.agent}/binding")
+        if binding_resp.status_code != 200:
+            checks.append(
+                Check("binding_present", False, f"/api/agents/{args.agent}/binding returned {binding_resp.status_code}")
+            )
+        else:
+            checks.extend(check_binding(binding_resp.json(), args.agent, args.owner))
+
         tx_resp = client.get(f"{horizon}/transactions/{args.tx}")
         if tx_resp.status_code != 200:
             checks.append(Check("tx_on_horizon", False, f"Horizon returned {tx_resp.status_code} for the tx hash"))
