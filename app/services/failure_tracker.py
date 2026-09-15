@@ -139,6 +139,14 @@ def record_failure(agent_id: str, rule: str) -> None:
         if len(_streaks) >= _MAX_AGENTS:
             _evict_one()
         _streaks[agent_id] = _Streak(rule=failure_class, count=1)
+        # First failure of a streak: the one line an operator needs to see the
+        # moment an agent starts failing, and the anchor everything after it
+        # coalesces against.
+        logger.warning(
+            "agent %s failed a step (%s) — 1 consecutive (coalescing to DEBUG until the class changes)",
+            agent_id,
+            failure_class,
+        )
         return
     # Touched agents move to the young end, so eviction drops the agent that
     # has been quiet longest rather than the one that merely started failing
@@ -146,7 +154,37 @@ def record_failure(agent_id: str, rule: str) -> None:
     # terminal status; here recency is the only evidence of disposability.
     _streaks.move_to_end(agent_id)
     streak.count += 1
-    streak.rule = failure_class
+    if streak.rule != failure_class:
+        # A CHANGED class is new operator information even mid-streak: the
+        # endpoint that was refusing connections is now answering and failing
+        # validation, which is a different fix. The streak is not reset — a
+        # different way of failing is still failing.
+        logger.warning(
+            "agent %s failure class changed: %s → %s — %d consecutive (coalescing to DEBUG until it changes again)",
+            agent_id,
+            streak.rule,
+            failure_class,
+            streak.count,
+        )
+        streak.rule = failure_class
+        return
+    if streak.count >= _ESCALATION_STREAK and not streak.escalated:
+        # Once per streak, not once per failure past the line: the count is in
+        # the DEBUG lines and readable through consecutive_failures(), so a
+        # second escalation would carry no information the first did not.
+        streak.escalated = True
+        logger.warning(
+            "agent %s has failed %d consecutive steps with the same class (%s) — the endpoint looks "
+            "persistently broken, not merely flaky (coalescing to DEBUG again)",
+            agent_id,
+            streak.count,
+            failure_class,
+        )
+        return
+    # Same class, again: the flood case the module exists to absorb. One line
+    # per failed step is what the run loop already writes with a traceback;
+    # this one is cheap, greppable, and off by default.
+    logger.debug("agent %s still failing: %s — %d consecutive", agent_id, failure_class, streak.count)
 
 
 def record_success(agent_id: str) -> None:
