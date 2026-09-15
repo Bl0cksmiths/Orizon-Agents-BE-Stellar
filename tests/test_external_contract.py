@@ -454,3 +454,100 @@ def test_an_unbounded_preview_link_is_dropped() -> None:
     # A megabyte of "URL" is a payload, not a link — and it would be logged.
     huge = "https://operator.example/" + "p" * MAX_PREVIEW_URL_CHARS
     assert "preview_url" not in parse_operator_output(_response(preview_url=huge))
+
+
+@pytest.mark.parametrize("value", ["baked", "orizon", "trusted", 1, True, None])
+def test_source_never_survives(value: Any) -> None:
+    # reputation_svc.synthetic_rating short-circuits to 95/100 for
+    # source == "baked" — a score reserved for repo-owned, pre-validated demo
+    # artifacts — and that rating settles on-chain with up to 100 USDC of
+    # weight behind it. An operator who can set their own provenance awards
+    # themselves that score. Dropped silently, like any unknown key: there is
+    # nothing to refuse, because there is no honest reason to send it.
+    out = parse_operator_output(_response(source=value))
+    assert "source" not in out
+    # Nor by hiding it one level down, inside the artifact.
+    nested = parse_operator_output(_response(artifact={"title": "t", "source": value}))
+    assert "source" not in nested["artifact"]
+
+
+def test_validator_violations_never_survives() -> None:
+    # The lever nobody enumerates. synthetic_rating falls back to
+    # `validator_violations` when `critic_violations` is absent, so an empty
+    # one is worth +10 all the same — and an operator who sent BOTH a malformed
+    # critic_violations (dropped) and an empty validator_violations would
+    # collect the bonus through the back door. The allowlist closes it by
+    # construction: the key is not named, so it does not survive.
+    out = parse_operator_output(_response(critic_violations=[1, 2], validator_violations=[]))
+    assert "validator_violations" not in out
+    assert "critic_violations" not in out
+
+
+def test_unknown_keys_are_dropped() -> None:
+    # Dropped by DEFAULT, which is the difference between an allowlist and a
+    # block-list: a key nobody has thought of yet does not need a rule.
+    out = parse_operator_output(
+        _response(
+            cost_usdc=999_999,
+            rating=100,
+            counts={"files": 1},
+            context={"kit": "hijacked"},
+            summary_html="<b>done</b>",
+            **{"__proto__": {"admin": True}, "": "empty key"},
+        )
+    )
+    assert set(out) == {"summary", "artifact", "critic_violations", "critic_notes", "preview_url"}
+
+
+def _assert_flat(value: Any, depth: int = 0) -> None:
+    """Every leaf is a `str`, and nothing nests deeper than the shapes we build."""
+    assert depth <= 4, "output nested deeper than summary → artifact → files → file → str"
+    if isinstance(value, str):
+        return
+    if isinstance(value, dict):
+        assert all(isinstance(key, str) for key in value)
+        for item in value.values():
+            _assert_flat(item, depth + 1)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _assert_flat(item, depth + 1)
+        return
+    raise AssertionError(f"output leaked a {type(value).__name__}")
+
+
+def test_no_operator_nesting_survives() -> None:
+    # The response-side half of the parse-hostility problem. The caller's
+    # json.loads owns the ~1 MiB `[[[[…` body that raises RecursionError before
+    # this module is ever reached; what is OWNED here is the other direction —
+    # a deep structure surviving into context[worker.name] and then recursing
+    # on the way back OUT, at json.dumps of the next dispatch envelope or of a
+    # trace frame. It cannot: no operator container is ever copied, so the
+    # deepest thing that survives is a shape this module built.
+    deep: Any = "bottom"
+    for _ in range(200):
+        deep = [deep]
+
+    out = parse_operator_output(
+        {
+            "summary": "done",
+            "artifact": {
+                "title": "t",
+                "preview_html": deep,
+                "files": [{"path": "a.html", "content": "<html></html>", "meta": deep}, deep],
+                "nested": deep,
+            },
+            "critic_notes": [deep],
+            "preview_url": deep,
+            "whatever": deep,
+        }
+    )
+
+    _assert_flat(out)
+    assert json.dumps(out)  # and it round-trips without touching the recursion limit
+    assert set(out) == {"summary", "artifact"}
+    assert out["summary"] == "done"
+    assert set(out["artifact"]) == {"title", "files"}
+    assert [dict(f, content="<sealed>") for f in out["artifact"]["files"]] == [
+        {"path": "a.html", "content": "<sealed>"}
+    ]
