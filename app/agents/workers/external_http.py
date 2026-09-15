@@ -186,9 +186,30 @@ class ExternalHttpWorker(Worker):
         return await self._dispatch(payload, headers, dispatch_id)
 
     async def _dispatch(self, payload: dict[str, Any], headers: dict[str, str], dispatch_id: str) -> dict[str, Any]:
+        # Validated HERE, per dispatch, rather than in __init__, for two reasons.
+        # (1) Blast radius: execution_svc._run calls get_worker OUTSIDE its
+        #     per-step try/except, so a worker that raised at construction would
+        #     take down the whole workflow; raising on the dispatch path fails
+        #     just this step, unbilled, like every other ExternalDispatchError.
+        # (2) Coverage: endpoint_url is a plain attribute, so a URL rebound
+        #     after construction (an operator re-binding, a mutated registry
+        #     row) is re-checked on every attempt instead of trusting a
+        #     one-time check from whenever the worker happened to be built.
+        try:
+            validate_endpoint_url(self.endpoint_url)
+        except ExternalDispatchError as e:
+            # Re-raised with the module's prefix so the refusal correlates with
+            # the rest of this dispatch's log lines.
+            raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: {e}") from e
+
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
-            timeout=httpx.Timeout(TOTAL_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
+            timeout=httpx.Timeout(TOTAL_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
+            # httpx does not follow redirects by default; spelled out because the
+            # validation above only covers the URL WE dispatch to. A followed 30x
+            # would let an operator bounce us to 169.254.169.254 unchecked, so
+            # this must stay False.
+            follow_redirects=False,
         )
         try:
             attempts = 0
