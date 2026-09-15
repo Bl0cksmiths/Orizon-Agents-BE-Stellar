@@ -1,0 +1,412 @@
+"""The operator response contract — what we are willing to accept back from a
+bound external agent (ADR 0004, D1).
+
+`ExternalHttpWorker._parse` checks that the body is a JSON object carrying a
+non-empty `summary` and then returns the operator's whole dict. Whatever they
+put beside `summary` lands in `context[worker.name]`, is forwarded verbatim to
+every later operator in the plan, and reaches billing, on-chain reputation, the
+SSE trace and the buyer's artifact viewer. An untrusted third party choosing
+the bytes of all of that is the hole this module closes.
+
+**Nothing is passed through.** `parse_operator_output` builds a NEW dict out of
+an allowlist of keys, each type-checked and clamped, and every key it does not
+recognise is dropped. That is stronger than a block-list in two ways worth
+naming: a key we have not thought of yet is dropped by default rather than
+forwarded by default, and the returned object contains no operator-owned
+container — every value in it is a `str`, a `list[str]`, or a small dict we
+built ourselves out of `str`s. So nothing operator-shaped survives to be
+re-serialised into the next dispatch envelope or the trace.
+
+Refusal vs. drop — the line, stated once:
+
+  * A response is REFUSED when what is wrong is the *deliverable*: the body is
+    not an object at all, or there is no summary, or `artifact` — the payload
+    the buyer is paying for — is not even a dict. Refusal raises
+    `ExternalOutputError`, which the worker turns into a failed step: skipped
+    and unbilled. It is never a run failure; that is the existing `continue`
+    discipline, and it is what stops one hostile response from denying
+    settlement to every honest agent in the plan.
+  * A malformed *decoration* around a usable deliverable is DROPPED. Failing an
+    already-executed step because `critic_notes` arrived as a dict would charge
+    the buyer nothing for work that was actually done, and hand any operator a
+    way to fail their own step after the fact. Each drop site says why.
+
+Every refusal names a `rule` from `OUTPUT_RULES`, a closed vocabulary. The rule
+— not the prose — is the machine-readable part: it is what a caller maps to an
+error code and what a test asserts on, leaving the message free to say
+something useful to a human. The pattern, including the constructor that
+refuses an unknown rule so a typo at a raise site fails loudly here rather than
+travelling to a caller as an error code nothing handles, is
+`app.services.endpoint_policy`'s, deliberately: two vocabularies that behave
+differently would be two things to learn.
+
+Bounds mirror the local path (`code_gen`) rather than inventing a second scale
+— external output must not be allowed more room than our own workers get — and
+`MAX_ARTIFACT_CHARS` and the HTML clamp are *imported* from it rather than
+restated, because a bound with two copies is a bound that drifts.
+
+Not this module's problem, stated so it is not assumed: the caller does
+`json.loads` on the response bytes, and a ~1 MiB body of `[[[[…` raises
+`RecursionError` there — a `RuntimeError` subclass that the call site's
+`(json.JSONDecodeError, UnicodeDecodeError)` handler does not catch, so it
+escapes as a run failure rather than a step failure. That is a *parse*-site
+concern and the parse site belongs to the worker, not here: this module is
+handed an already-decoded object. It gets no rule in `OUTPUT_RULES`, because a
+rule nobody here can raise is a dead error code a caller would nonetheless
+write a branch for. The half of that hazard that IS ours — an operator's deep
+structure surviving into `context` and then blowing up on the way back OUT, at
+`json.dumps` of the next envelope — is closed structurally by the allowlist
+above: no operator container is ever copied into the result.
+
+Pure: no I/O, no clock, no network.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import urlsplit
+
+from .code_gen import MAX_ARTIFACT_CHARS, clamp_artifact_content
+from .code_validator import harden_artifact
+
+# Bounds, mirroring code_gen's scale. A summary is a trace line and a receipt
+# field, not a document; a title is a heading. MAX_ARTIFACT_CHARS is code_gen's
+# own per-file ceiling, imported rather than restated.
+MAX_SUMMARY_CHARS = 2_000
+MAX_TITLE_CHARS = 120
+MAX_FILES = 24
+MAX_NOTES = 16
+MAX_NOTE_CHARS = 500
+# Mirrors ArtifactFile.path's max_length.
+MAX_PATH_CHARS = 200
+# Roughly the shortest ceiling any mainstream browser enforces on a URL, and
+# far more than a preview link needs. It exists so a megabyte of "URL" cannot
+# be laundered into a trace line.
+MAX_PREVIEW_URL_CHARS = 2_048
+
+# What a clamped HTML payload can weigh: the ceiling plus the truncation note
+# and any closing tags `clamp_artifact_content` re-appends after the cut. Same
+# derivation as code_gen._MAX_STORED_CHARS, for the same reason.
+_MAX_STORED_CHARS = MAX_ARTIFACT_CHARS + 256
+
+# The closed vocabulary of refusal reasons. Closed on purpose: ExternalOutputError
+# rejects anything outside it, so a typo at a raise site fails loudly here rather
+# than reaching a caller as an error code nobody handles.
+#
+# Short on purpose too. Every entry here is a way the *deliverable* can be
+# missing; everything else an operator can get wrong is a drop, not a refusal,
+# and a drop needs no vocabulary because it is not reported.
+OUTPUT_RULES: frozenset[str] = frozenset(
+    {
+        "not_an_object",
+        "summary_missing",
+        "artifact_not_an_object",
+    }
+)
+
+
+class ExternalOutputError(ValueError):
+    """An operator response was refused, naming the rule that refused it.
+
+    `rule` is one of `OUTPUT_RULES`; the constructor refuses any other value so
+    the vocabulary cannot quietly grow a synonym. ValueError rather than a
+    bespoke base because callers that do not care which rule fired — the
+    worker, which re-raises everything as ExternalDispatchError, or a test —
+    still get a sensible except clause.
+    """
+
+    def __init__(self, rule: str, message: str) -> None:
+        if rule not in OUTPUT_RULES:
+            raise ValueError(f"unknown operator output rule {rule!r}")
+        super().__init__(message)
+        self.rule = rule
+
+
+# What a clamped short text ends with, so a truncated summary reads as truncated
+# in the trace rather than as a sentence that simply stops.
+_TRUNCATION_SUFFIX = " …[truncated]"
+
+
+def _clamp_text(value: str, limit: int) -> str:
+    """Bound one short text field, degrading instead of raising.
+
+    Oversize is a quality failure, not a protocol violation: the step has
+    already run, so the field is cut back and marked rather than costing the
+    buyer the whole step. Same trade `clamp_artifact_content` makes for
+    generated HTML, applied to text where that function's HTML repair (closing
+    `</script>`, `</body>`) would be noise.
+    """
+    if len(value) <= limit:
+        return value
+    if limit <= len(_TRUNCATION_SUFFIX):  # pragma: no cover — no bound is this small
+        return value[:limit]
+    return value[: limit - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
+
+
+def _clean_text(value: object, limit: int) -> str | None:
+    """`value` as a non-empty clamped `str`, or None if it is neither.
+
+    Returning None rather than raising is what lets one call site refuse
+    (`summary`) and another drop (`title`) on the same check.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return _clamp_text(text, limit)
+
+
+def _clean_html(value: object) -> str | None:
+    """`value` as a bounded HTML payload, or None if it is not a str.
+
+    `clamp_artifact_content` is code_gen's own clamp, reused rather than
+    reimplemented: it cuts at a line boundary and re-closes a dangling
+    `<script>`/`<body>`/`<html>` so the truncated document still parses in the
+    viewer's iframe. Not stripped and not emptiness-checked — whitespace is
+    content here, and an empty payload is a poor artifact, not a bad response.
+
+    The second trim is not redundant: the clamp re-appends a note and closing
+    tags after the cut, so its output can land just above the raw ceiling.
+    `_MAX_STORED_CHARS` is the ceiling that actually bounds what we store.
+    """
+    if not isinstance(value, str):
+        return None
+    return clamp_artifact_content(value)[:_MAX_STORED_CHARS]
+
+
+def _parse_files(value: object) -> list[dict[str, str]] | None:
+    """The artifact's file list, rebuilt entry by entry, or None if it is not a list.
+
+    Filtered per entry rather than dropped whole — the opposite of the choice
+    `_parse_notes` makes, and for a reason that does not apply here: a shorter
+    file list is not a *claim*. "Here are three files" stays true when a fourth
+    malformed one is discarded, whereas a shortened `critic_violations` asserts
+    something about the work that is no longer true.
+
+    `language` is deliberately not carried over. Nothing downstream needs it —
+    the viewer renders `preview_html`, and `harden_artifact` already recognises
+    an HTML file by its path suffix — so accepting it would only put another
+    uncontrolled operator string on the display path.
+    """
+    if not isinstance(value, list):
+        return None
+
+    files: list[dict[str, str]] = []
+    for entry in value:
+        if len(files) >= MAX_FILES:
+            break
+        if not isinstance(entry, dict):
+            continue  # a list of strings/ints is a shape mistake, not a file
+        path = _clean_text(entry.get("path"), MAX_PATH_CHARS)
+        content = _clean_html(entry.get("content"))
+        if path is None or content is None:
+            continue  # a file is a path AND bytes; half of one is neither
+        files.append({"path": path, "content": content})
+    return files
+
+
+def _parse_artifact(value: object) -> dict[str, Any] | None:
+    """The artifact, rebuilt from an allowlist and hardened, or None if empty.
+
+    Refuses a non-dict: `artifact` is the thing the buyer is paying for, and an
+    operator who returns a string or a list under that key has not produced one.
+    Every field inside it, by contrast, is dropped when malformed — a title that
+    arrived as an int does not invalidate the HTML beside it.
+
+    `harden_artifact` runs LAST, over the rebuilt dict, and is the point of
+    doing any of this in one place: an operator's `preview_html` goes into the
+    viewer's `srcDoc` exactly as a local artifact's does, so it needs the same
+    injected CSP. The iframe sandbox already blocks parent access; what the CSP
+    adds is `connect-src 'none'` — no beaconing out of the frame the buyer just
+    opened. Today only code_gen and code_critic call it, which is precisely why
+    external HTML reaches the viewer unsealed (ADR 0004, D1).
+
+    Order matters: clamp first, harden second. The CSP `<meta>` is injected at
+    the top of the document, so hardening a payload that was later truncated
+    would risk cutting the policy back off.
+    """
+    if not isinstance(value, dict):
+        raise ExternalOutputError(
+            "artifact_not_an_object",
+            f"operator response 'artifact' was {type(value).__name__}, expected an object",
+        )
+
+    artifact: dict[str, Any] = {}
+    title = _clean_text(value.get("title"), MAX_TITLE_CHARS)
+    if title is not None:
+        artifact["title"] = title
+    files = _parse_files(value.get("files"))
+    if files is not None:
+        artifact["files"] = files
+    preview_html = _clean_html(value.get("preview_html"))
+    if preview_html is not None:
+        artifact["preview_html"] = preview_html
+
+    if not artifact:
+        # Nothing survived the allowlist. Returning None rather than `{}` keeps
+        # `output.get("artifact")` falsy for the two readers that branch on it
+        # (the trace's artifact line, and synthetic_rating's +15), which is the
+        # honest answer: no artifact was delivered.
+        return None
+    return harden_artifact(artifact)
+
+
+def _parse_notes(value: object) -> list[str] | None:
+    """A critic list, clamped, or None when it is malformed — dropped WHOLE.
+
+    Never filtered item by item, and that is the load-bearing decision here.
+    `critic_violations` is read by `reputation_svc.synthetic_rating`:
+
+        if isinstance(violations, list):
+            rating += 10 if not violations else -3 * min(len(violations), 10)
+
+    So `[1, 2]` filtered down to `[]` would not be a tidied field — it would be
+    a +10 rating bonus, minted out of a malformed one, with real settlement
+    weight behind it. Dropping the key instead leaves `violations` as None,
+    which is not a list, so the branch does not run at all and nothing is
+    awarded. Refusing the whole response was the alternative and is worse: it
+    fails an already-executed step over a decoration, which hands any operator
+    a way to void their own step after the work is done.
+
+    Empty strings inside an otherwise well-typed list are kept for the same
+    reason — dropping them shortens a violations list, and short means
+    forgiven. The count cap cannot launder a rating either: the penalty
+    saturates at 10 items, well under MAX_NOTES.
+
+    An empty list from the start IS honoured, and is a claim we cannot verify —
+    "the critic found nothing", worth +10. That is the same face value the
+    local path gives its own workers; what this refuses to do is manufacture
+    that claim on an operator's behalf out of input that never made it.
+    """
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(item, str) for item in value):
+        return None
+    return [_clamp_text(item, MAX_NOTE_CHARS) for item in value[:MAX_NOTES]]
+
+
+# Schemes a browser NAVIGATES to. Deliberately not `endpoint_policy.ALLOWED_SCHEMES`
+# — see `_parse_preview_url` for why http belongs here and does not belong there.
+_DISPLAYABLE_SCHEMES = frozenset({"http", "https"})
+
+
+def _is_displayable(url: str) -> bool:
+    """Whether `url` is safe to put in a trace line and an anchor's href.
+
+    NOT `endpoint_policy.validate_endpoint_url`, and the difference is not an
+    oversight. That function answers "is this URL safe for US to dispatch to
+    from inside our network", so it enforces https-only and refuses private,
+    loopback, link-local and metadata addresses — SSRF rules, all of which
+    exist because our server makes the request. Nothing in this module makes a
+    request. `preview_url` is a string we render: it reaches the SSE trace via
+    execution_svc and the buyer's viewer, and it is the buyer's browser, on the
+    buyer's network, that ever follows it.
+
+    So the SSRF rules are not merely unnecessary here, they are wrong here:
+    `http://192.168.1.10:3000/preview` is an ordinary operator staging link,
+    and refusing it protects nobody — we never dial it, and a buyer who does is
+    reaching their own LAN, which they could reach by typing it.
+
+    The questions that DO apply to a displayed link are ones endpoint_policy
+    never asks:
+
+      * Will the scheme navigate, or execute? `javascript:` in an href runs in
+        the page's origin, and `data:text/html,…` renders attacker HTML under
+        a URL that looks like a preview. Both are content injection, not SSRF,
+        and both are the reason this is an allowlist of two schemes.
+      * Does it lie about who it belongs to? `https://orizon.xyz@evil.example`
+        reads as ours at a glance in a trace line. Userinfo has no place in a
+        preview link, so a URL carrying any is dropped rather than displayed.
+      * Can it break the surface it is rendered into? An embedded CR or LF in a
+        URL that lands in a line-oriented SSE frame is a framing bug waiting to
+        happen, so control characters and spaces are refused outright.
+      * Is it bounded? A megabyte of "URL" is not a link, it is a payload.
+    """
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # malformed IPv6 bracket, non-numeric port, …
+        return False
+    if parts.scheme.lower() not in _DISPLAYABLE_SCHEMES:
+        return False
+    if not parts.hostname:
+        return False
+    return parts.username is None and parts.password is None
+
+
+def _parse_preview_url(value: object) -> str | None:
+    """A displayable preview link, or None — dropped, never refused.
+
+    A bad preview link is a broken "ship" moment in the trace, not a failed
+    delivery, so it costs the operator their link and nothing else.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url or len(url) > MAX_PREVIEW_URL_CHARS:
+        return None
+    return url if _is_displayable(url) else None
+
+
+def parse_operator_output(raw: object) -> dict[str, Any]:
+    """Turn a decoded operator response into a worker-output dict we own.
+
+    Allowlist, type-check, clamp. The returned dict is NEW and shares no
+    container with `raw`: every value in it is a `str`, a `list[str]`, or a
+    dict this module built. A key not named below does not survive, whatever it
+    is called and whatever it holds.
+
+    Raises `ExternalOutputError` — rule from `OUTPUT_RULES` — when the
+    deliverable itself is missing. The worker re-raises it as
+    ExternalDispatchError, so a refused response fails its step like any other
+    dispatch failure: skipped, unbilled, the workflow degrades.
+
+    Pure: no I/O.
+    """
+    if not isinstance(raw, dict):
+        raise ExternalOutputError(
+            "not_an_object",
+            f"operator response was {type(raw).__name__}, expected an object",
+        )
+
+    # The one required field, and the only one whose absence is a refusal: a
+    # step that says nothing about what it did has not reported an outcome.
+    summary = _clean_text(raw.get("summary"), MAX_SUMMARY_CHARS)
+    if summary is None:
+        raise ExternalOutputError(
+            "summary_missing",
+            "operator response has no non-empty string 'summary'",
+        )
+
+    output: dict[str, Any] = {"summary": summary}
+
+    # `null` is JSON's spelling of "no artifact" (deploy_v0 sends exactly that
+    # for preview_url), so it is treated as absent rather than as a malformed
+    # object — refusing a step for declining to attach one would be perverse.
+    artifact = raw.get("artifact")
+    if artifact is not None:
+        parsed = _parse_artifact(artifact)
+        if parsed is not None:
+            output["artifact"] = parsed
+
+    for key in ("critic_violations", "critic_notes"):
+        notes = _parse_notes(raw.get(key))
+        if notes is not None:
+            output[key] = notes
+
+    preview_url = _parse_preview_url(raw.get("preview_url"))
+    if preview_url is not None:
+        output["preview_url"] = preview_url
+
+    # `source` is NOT in the allowlist, and its absence from this function is
+    # the point rather than an omission. `reputation_svc.synthetic_rating`
+    # short-circuits to 95/100 for `source == "baked"` — a score reserved for
+    # repo-owned, pre-validated demo artifacts — and that rating is settled
+    # on-chain with up to 100 USDC of weight behind it. An operator who can set
+    # their own provenance can award themselves that score, which is
+    # self-dealing. Dropped silently, like every other unknown key: there is no
+    # refusal to make, because there is no legitimate reason for an operator to
+    # send it and nothing is lost by ignoring it.
+    return output

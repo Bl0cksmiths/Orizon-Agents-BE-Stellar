@@ -23,6 +23,7 @@ from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..security import require_api_key
 from ..services import registry_sync, reputation_svc
+from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
@@ -38,6 +39,13 @@ class NetworkInfo(BaseModel):
     rpc_url: str
     network_passphrase: str
     admin: str
+    # The key that signs OUTBOUND dispatch envelopes, so an operator can verify
+    # a request really came from Orizon. Deliberately its own field and NOT an
+    # alias of `admin`: those are independent settings, and USING_CONTRACTS.md
+    # plans to split the on-chain roles onto separate keys — an operator who
+    # pinned `admin` would then see every signature turn into a forgery.
+    # None when unconfigured; dispatch is unsigned rather than failing.
+    dispatch_signer: str | None = None
     asset: str
     asset_sac: str
     contracts: dict[str, str]
@@ -118,6 +126,7 @@ async def network() -> NetworkInfo:
         rpc_url=settings.stellar_rpc_url,
         network_passphrase=sc.network_passphrase(),
         admin=settings.stellar_admin_address,
+        dispatch_signer=dispatch_signer_address(),
         asset="native",
         asset_sac=ids.asset_sac,
         contracts={

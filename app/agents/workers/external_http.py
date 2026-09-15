@@ -21,9 +21,16 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
                "artifact"?, "critic_violations"?, "critic_notes"?,
                "preview_url"?, "source"?}
 
-    Timeouts  connect 5 s, total 110 s — under execution_svc.STEP_TIMEOUT_SECONDS
-              (120 s) so a slow operator is judged here, cleanly, as a failed
-              step rather than as the run loop's ambiguous outer timeout.
+    Deadline  DISPATCH_DEADLINE_SECONDS (100 s), measured on a monotonic clock
+              across connect + stream + parse and covering the retry, so a slow
+              operator is judged HERE as a failed step rather than by the run
+              loop's ambiguous outer ceiling (STEP_TIMEOUT_SECONDS, 120 s), with
+              headroom left for settlement afterwards.
+              The httpx timeouts below it are a floor, not the ceiling: httpx
+              has NO total-request timeout, and its `read` value is only the
+              idle gap between reads — an operator trickling one byte at a time
+              satisfies it forever. Story 2.02 fixed that; before it, this
+              docstring described a guarantee the code did not provide.
     Retry     at most once, and ONLY when the connection never established
               (ConnectError / ConnectTimeout): the operator never received the
               step, so a retry cannot double-run committed work, and the
@@ -46,13 +53,18 @@ crashing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
+import time
 from typing import Any
 
 import httpx
 
+from app.agents.workers.external_contract import ExternalOutputError, parse_operator_output
+from app.config import settings
+from app.services.dispatch_signing import sign_dispatch
 from app.services.endpoint_policy import EndpointPolicyError
 from app.services.endpoint_policy import validate_endpoint_url as _validate_endpoint_policy
 
@@ -60,11 +72,19 @@ from .base import Worker
 
 logger = logging.getLogger(__name__)
 
-ENVELOPE_VERSION = 1
+ENVELOPE_VERSION = 2
 CONNECT_TIMEOUT_SECONDS = 5.0
 # Under execution_svc.STEP_TIMEOUT_SECONDS (120 s) on purpose — see module docstring.
 TOTAL_TIMEOUT_SECONDS = 110.0
 MAX_RESPONSE_BYTES = 1_048_576  # 1 MiB — headroom over the ~10-60 KiB artifacts
+# The REAL ceiling on one dispatch, measured on a monotonic clock across connect
+# + stream + parse. httpx has no total-request timeout: httpx.Timeout(110.0,
+# connect=5.0) resolves to read/write/pool=110, each of which is only an IDLE GAP
+# between reads. An operator trickling one byte every 109 s therefore never trips
+# it and runs until execution_svc's 120 s step ceiling — exactly the "ambiguous
+# outer timeout" this module's docstring claims cannot happen. Enforced here so
+# the promise is true, with headroom left for _settle_onchain afterwards.
+DISPATCH_DEADLINE_SECONDS = 100.0
 _USER_AGENT = "orizon-orchestrator/1"
 
 
@@ -127,15 +147,36 @@ class ExternalHttpWorker(Worker):
             "rationale": rationale,
             "context": context or {},
             "dispatch_id": dispatch_id,
+            # Freshness and deployment, both inside the signed bytes. SEP-53's
+            # preimage carries no network id — unlike Stellar transaction
+            # signing — so without `network` a testnet dispatch is byte-identical
+            # in framing to a mainnet one and could be replayed across them.
+            "ts": int(time.time()),
+            "network": settings.stellar_network,
         }
         headers = {
             "Content-Type": "application/json",
             "Idempotency-Key": dispatch_id,
             "User-Agent": _USER_AGENT,
         }
-        return await self._dispatch(payload, headers, dispatch_id)
+        # Serialized ONCE, here, and those exact bytes are what we sign and what
+        # we send. httpx's `json=` encodes with separators=(",", ":") and
+        # ensure_ascii=False, which differs from json.dumps() defaults — so
+        # signing json.dumps(payload) while sending json=payload would sign
+        # bytes the operator never receives. That breaks only when the payload
+        # contains non-ASCII, i.e. it passes every ASCII test and fails in
+        # production on the first accented character.
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        # Signed over the destination URL AND these bytes, so a signature
+        # captured by one operator cannot be replayed at another — the verifier
+        # has to supply their own endpoint URL to rebuild the message. Empty
+        # when no dispatch key is configured: an unsigned dispatch is a trust
+        # gap the OPERATOR is positioned to enforce (they can reject it), not a
+        # reason for us to fail a step.
+        headers.update(sign_dispatch(self.endpoint_url, body))
+        return await self._dispatch(body, headers, dispatch_id)
 
-    async def _dispatch(self, payload: dict[str, Any], headers: dict[str, str], dispatch_id: str) -> dict[str, Any]:
+    async def _dispatch(self, body: bytes, headers: dict[str, str], dispatch_id: str) -> dict[str, Any]:
         # Validated HERE, per dispatch, rather than in __init__, for two reasons.
         # (1) Blast radius: execution_svc._run calls get_worker OUTSIDE its
         #     per-step try/except, so a worker that raised at construction would
@@ -162,11 +203,28 @@ class ExternalHttpWorker(Worker):
             follow_redirects=False,
         )
         try:
+            # One deadline for the whole dispatch, retry included — a monotonic
+            # clock so a wall-clock adjustment mid-dispatch cannot extend it.
+            deadline = time.monotonic() + DISPATCH_DEADLINE_SECONDS
             attempts = 0
             while True:
                 attempts += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ExternalDispatchError(
+                        f"external dispatch {dispatch_id} to {self.id}: "
+                        f"exceeded the {DISPATCH_DEADLINE_SECONDS:.0f}s dispatch deadline"
+                    )
                 try:
-                    return await self._once(client, payload, headers, dispatch_id)
+                    return await asyncio.wait_for(self._once(client, body, headers, dispatch_id), timeout=remaining)
+                except asyncio.TimeoutError as e:
+                    # A slow-but-alive operator: judged HERE, as a failed step,
+                    # rather than by execution_svc's outer ceiling. Never
+                    # retried — the request was on the wire and may have run.
+                    raise ExternalDispatchError(
+                        f"external dispatch {dispatch_id} to {self.id}: "
+                        f"no response within {DISPATCH_DEADLINE_SECONDS:.0f}s"
+                    ) from e
                 except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                     # The connection never established, so the operator never
                     # received the step: a single retry cannot double-run work.
@@ -185,9 +243,10 @@ class ExternalHttpWorker(Worker):
                 await client.aclose()
 
     async def _once(
-        self, client: httpx.AsyncClient, payload: dict[str, Any], headers: dict[str, str], dispatch_id: str
+        self, client: httpx.AsyncClient, body: bytes, headers: dict[str, str], dispatch_id: str
     ) -> dict[str, Any]:
-        async with client.stream("POST", self.endpoint_url, json=payload, headers=headers) as resp:
+        # `content=` not `json=`: these are the bytes the signature covers.
+        async with client.stream("POST", self.endpoint_url, content=body, headers=headers) as resp:
             if resp.status_code // 100 != 2:
                 raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: HTTP {resp.status_code}")
             total = 0
@@ -208,14 +267,29 @@ class ExternalHttpWorker(Worker):
             raise ExternalDispatchError(
                 f"external dispatch {dispatch_id} to {self.id}: response was not valid JSON"
             ) from e
-        if not isinstance(data, dict):
+        except RecursionError as e:
+            # ~1 MiB of "[[[[..." is ~500k deep and blows CPython's recursive
+            # scanner. RecursionError subclasses RuntimeError, so neither the
+            # tuple above nor a ValueError catch holds it — without this it
+            # escapes as a RUN failure instead of a step failure, taking the
+            # whole workflow (and everyone else's settlement) with it.
             raise ExternalDispatchError(
-                f"external dispatch {dispatch_id} to {self.id}: response JSON was "
-                f"{type(data).__name__}, expected an object"
-            )
-        summary = data.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ExternalDispatchError(
-                f"external dispatch {dispatch_id} to {self.id}: response missing a non-empty 'summary'"
-            )
-        return data
+                f"external dispatch {dispatch_id} to {self.id}: response nesting too deep"
+            ) from e
+
+        # Everything past here is the operator's shape, not ours: allowlisted,
+        # type-checked and clamped into a NEW dict by the contract, so no
+        # operator-chosen key ever reaches context, the trace, or a later
+        # operator. See ADR 0004 D1.
+        try:
+            output = parse_operator_output(data)
+        except ExternalOutputError as e:
+            raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: {e} (rule: {e.rule})") from e
+
+        # Provenance is stamped by US, never claimed by the operator. The
+        # contract drops any `source` they send, because synthetic_rating awards
+        # 95/100 for source == "baked" — a one-word self-award. This value is
+        # our assertion about where the output came from, so it means something
+        # theirs never could.
+        output["source"] = "external"
+        return output
