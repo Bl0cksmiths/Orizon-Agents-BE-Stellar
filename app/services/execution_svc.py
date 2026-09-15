@@ -7,6 +7,7 @@ import secrets
 import time
 from typing import Any
 
+from ..agents.registry import get_worker
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
@@ -92,6 +93,25 @@ def _unusable_field(output: dict) -> str | None:
     if any(not isinstance(f, dict) or not isinstance(f.get("content", ""), str) for f in files):
         return "artifact.files"
     return None
+
+
+def _rating_view(output: dict, *, first_party: bool) -> dict[str, Any]:
+    """The record of one step's output that the settler's rating reads.
+
+    reputation_svc.synthetic_rating awards a flat 95 to output marked
+    `source="baked"` — deterministic, pre-validated kit output produced by a
+    worker in this repo. `source` is ALSO a field the published external
+    envelope lets an operator set, so with the rating lookup now finding
+    external output that branch would be self-dealing: a one-line response
+    buys a permanent 95/100 on-chain. A worker that is not the first-party one
+    registered for this agent id therefore does not get to supply it. Every
+    other signal the rating reads (did it deliver, did it ship an artifact,
+    what did the critic find) is checkable workflow evidence and passes
+    through untouched.
+    """
+    if first_party:
+        return output
+    return {k: v for k, v in output.items() if k != "source"}
 
 
 def _trace_url(value: object) -> str | None:
@@ -361,7 +381,9 @@ async def _run(
             # can read it. e.g. context["code.gen"] = {...}.
             if isinstance(output, dict):
                 context[worker.name] = output
-                delivered[step.agent_id] = output
+                # The settler reads a rating-facing view of the same output —
+                # an untrusted worker does not get to grade itself.
+                delivered[step.agent_id] = _rating_view(output, first_party=get_worker(step.agent_id) is worker)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
