@@ -141,9 +141,17 @@ class ExternalHttpWorker(Worker):
             "Idempotency-Key": dispatch_id,
             "User-Agent": _USER_AGENT,
         }
-        return await self._dispatch(payload, headers, dispatch_id)
+        # Serialized ONCE, here, and those exact bytes are what we sign and what
+        # we send. httpx's `json=` encodes with separators=(",", ":") and
+        # ensure_ascii=False, which differs from json.dumps() defaults — so
+        # signing json.dumps(payload) while sending json=payload would sign
+        # bytes the operator never receives. That breaks only when the payload
+        # contains non-ASCII, i.e. it passes every ASCII test and fails in
+        # production on the first accented character.
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return await self._dispatch(body, headers, dispatch_id)
 
-    async def _dispatch(self, payload: dict[str, Any], headers: dict[str, str], dispatch_id: str) -> dict[str, Any]:
+    async def _dispatch(self, body: bytes, headers: dict[str, str], dispatch_id: str) -> dict[str, Any]:
         # Validated HERE, per dispatch, rather than in __init__, for two reasons.
         # (1) Blast radius: execution_svc._run calls get_worker OUTSIDE its
         #     per-step try/except, so a worker that raised at construction would
@@ -174,7 +182,7 @@ class ExternalHttpWorker(Worker):
             while True:
                 attempts += 1
                 try:
-                    return await self._once(client, payload, headers, dispatch_id)
+                    return await self._once(client, body, headers, dispatch_id)
                 except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                     # The connection never established, so the operator never
                     # received the step: a single retry cannot double-run work.
@@ -193,9 +201,10 @@ class ExternalHttpWorker(Worker):
                 await client.aclose()
 
     async def _once(
-        self, client: httpx.AsyncClient, payload: dict[str, Any], headers: dict[str, str], dispatch_id: str
+        self, client: httpx.AsyncClient, body: bytes, headers: dict[str, str], dispatch_id: str
     ) -> dict[str, Any]:
-        async with client.stream("POST", self.endpoint_url, json=payload, headers=headers) as resp:
+        # `content=` not `json=`: these are the bytes the signature covers.
+        async with client.stream("POST", self.endpoint_url, content=body, headers=headers) as resp:
             if resp.status_code // 100 != 2:
                 raise ExternalDispatchError(f"external dispatch {dispatch_id} to {self.id}: HTTP {resp.status_code}")
             total = 0
