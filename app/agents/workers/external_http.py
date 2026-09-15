@@ -68,6 +68,14 @@ CONNECT_TIMEOUT_SECONDS = 5.0
 # Under execution_svc.STEP_TIMEOUT_SECONDS (120 s) on purpose — see module docstring.
 TOTAL_TIMEOUT_SECONDS = 110.0
 MAX_RESPONSE_BYTES = 1_048_576  # 1 MiB — headroom over the ~10-60 KiB artifacts
+# The REAL ceiling on one dispatch, measured on a monotonic clock across connect
+# + stream + parse. httpx has no total-request timeout: httpx.Timeout(110.0,
+# connect=5.0) resolves to read/write/pool=110, each of which is only an IDLE GAP
+# between reads. An operator trickling one byte every 109 s therefore never trips
+# it and runs until execution_svc's 120 s step ceiling — exactly the "ambiguous
+# outer timeout" this module's docstring claims cannot happen. Enforced here so
+# the promise is true, with headroom left for _settle_onchain afterwards.
+DISPATCH_DEADLINE_SECONDS = 100.0
 _USER_AGENT = "orizon-orchestrator/1"
 
 
