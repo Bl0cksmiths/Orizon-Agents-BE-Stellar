@@ -80,8 +80,12 @@ User-Agent: orizon-orchestrator/1
   "source":             "external" } // optional; free-form provenance tag
 ```
 
-- **Timeout:** connect 5 s, total 110 s — deliberately under `execution_svc.STEP_TIMEOUT_SECONDS`
-  (120 s) so a slow operator is judged here as a failed step, not by the run loop's outer `wait_for`.
+- **Timeout:** ~~connect 5 s, total 110 s~~ — **corrected by story 2.02 (ADR 0004).** This was
+  wrong: `httpx` has no total-request timeout, and `httpx.Timeout(110.0, connect=5.0)` resolves to
+  `read = write = pool = 110`, where `read` is only the *idle gap between reads*. An operator
+  trickling one byte every 109 s satisfied it indefinitely and ran until the run loop's outer
+  `wait_for` — the precise outcome this line claimed was impossible. A real monotonic
+  `DISPATCH_DEADLINE_SECONDS` now bounds connect + stream + parse, retry included.
 - **Retry:** at most one, and **only** when the connection never established (`ConnectError` /
   `ConnectTimeout`) — the operator never received the step, so a retry cannot double-run committed
   work, and the unchanged `Idempotency-Key` lets it dedupe regardless. A returned status (any 2xx–5xx)
