@@ -30,6 +30,7 @@ from app.agents.workers.external_contract import (
     MAX_FILES,
     MAX_NOTE_CHARS,
     MAX_NOTES,
+    MAX_PREVIEW_URL_CHARS,
     MAX_SUMMARY_CHARS,
     MAX_TITLE_CHARS,
     OUTPUT_RULES,
@@ -386,3 +387,70 @@ def test_hardening_is_not_applied_twice() -> None:
     once = parse_operator_output(_response(artifact={"preview_html": _BEACON}))["artifact"]["preview_html"]
     twice = parse_operator_output(_response(artifact={"preview_html": once}))["artifact"]["preview_html"]
     assert twice.count(_CSP) == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://operator.example/preview/abc",
+        "https://operator.example:8443/preview?build=7#top",
+        # http is ALLOWED here and forbidden by endpoint_policy, and the
+        # difference is the whole point: https-only exists because WE put an
+        # envelope on the wire. Nothing here goes on the wire.
+        "http://operator.example/preview",
+        # Likewise a private address. We never dial this link; the buyer's
+        # browser does, from the buyer's own network, where it resolves to
+        # their LAN or to nothing. Refusing it would protect nobody.
+        "http://192.168.1.10:3000/preview",
+    ],
+)
+def test_a_displayable_preview_link_survives(url: str) -> None:
+    assert parse_operator_output(_response(preview_url=url))["preview_url"] == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Schemes that EXECUTE rather than navigate. This is content injection,
+        # not SSRF, and it is why the allowlist has exactly two entries.
+        "javascript:alert(document.cookie)",
+        "JavaScript:alert(1)",
+        "java\tscript:alert(1)",  # the classic tab-in-the-scheme filter bypass
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+        "file:///etc/passwd",
+        # No scheme at all, including the protocol-relative form.
+        "//evil.example/preview",
+        "operator.example/preview",
+        # Userinfo: `https://orizon.xyz@evil.example` reads as ours at a glance
+        # in a trace line, and a preview link has no use for credentials.
+        "https://orizon.xyz@evil.example/preview",
+        "https://user:pw@evil.example/preview",
+        # No host to display.
+        "https://",
+        "https:///preview",
+        # Unparseable.
+        "https://[::1/preview",
+        # A CR or LF in a string bound for a line-oriented SSE frame.
+        "https://operator.example/p\nevent: injected",
+        "https://operator.example/p\r\ndata: injected",
+        # Not a string at all.
+        7,
+        {"url": "https://operator.example/preview"},
+        ["https://operator.example/preview"],
+        "",
+        "    ",
+    ],
+)
+def test_an_undisplayable_preview_link_is_dropped(url: Any) -> None:
+    # Dropped, never refused: a broken "ship" moment in the trace is not a
+    # failed delivery, and it costs the operator their link and nothing else.
+    out = parse_operator_output(_response(preview_url=url))
+    assert "preview_url" not in out
+    assert out["summary"] == GOOD["summary"]
+
+
+def test_an_unbounded_preview_link_is_dropped() -> None:
+    # A megabyte of "URL" is a payload, not a link — and it would be logged.
+    huge = "https://operator.example/" + "p" * MAX_PREVIEW_URL_CHARS
+    assert "preview_url" not in parse_operator_output(_response(preview_url=huge))
