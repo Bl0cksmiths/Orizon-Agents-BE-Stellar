@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -157,3 +158,80 @@ def test_bound_external_agent_is_dispatched_to_its_endpoint(monkeypatch):
     assert any("match agent: external.ext_bound1 (ext_bound1)" in ln.msg for ln in lines)
     assert any(ln.level == "out" and "external agent built the page" in ln.msg for ln in lines)
     assert not any(ln.level == "error" for ln in lines)
+
+
+def test_agent_with_no_worker_and_no_binding_is_skipped_as_before(monkeypatch, caplog):
+    """The pre-existing behaviour, unchanged: nothing local, nothing bound, so
+    the step is skipped and logged — never dispatched anywhere."""
+    _store_holding(monkeypatch)  # empty store
+    seen = _intercept_dispatch(monkeypatch)  # any dispatch at all is a failure
+    task_id = "tsk_bound_unknown"
+    _add_task(task_id)
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(execution_svc._run(_plan("pln_bound_unknown", "ext_missing1"), task_id))
+
+    assert seen == []
+    task = state.tasks[task_id]
+    assert task.status == "failed"
+    assert task.spent == 0.0
+    assert task.artifact is None
+
+    lines = state.traces[task_id]
+    assert any(ln.level == "error" and ln.msg == "unknown agent: ext_missing1" for ln in lines)
+    assert not any("workflow failed" in ln.msg for ln in lines)  # the step failed, not the run
+    msgs = [r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc"]
+    assert any(task_id in m and "ext_missing1" in m and "unknown agent" in m for m in msgs)
+
+
+class _UnreadableStore:
+    """A binding store whose read fails — a dropped pool, a Postgres that went
+    away mid-run. Dispatch never writes, so the write path asserts instead."""
+
+    async def get(self, agent_id: str):
+        raise RuntimeError("connection pool is closed")
+
+    async def put(self, agent_id: str, endpoint_url: str, owner: str):
+        raise AssertionError("the dispatch path must never write a binding")
+
+    async def list_agent_ids(self) -> frozenset[str]:
+        raise RuntimeError("connection pool is closed")
+
+    async def close(self) -> None:
+        return None
+
+
+def test_binding_store_read_failure_loses_the_step_not_the_run(monkeypatch, caplog):
+    """Resolution fails OPEN: an unreadable store degrades that one step to an
+    unknown agent — logged, unbilled — while the rest of the plan still runs.
+    Failing closed here would turn one bad read into a dead workflow, and
+    nothing at dispatch is an authorization decision: ownership was proved at
+    bind time."""
+    monkeypatch.setattr(binding_registry, "get_binding_store", _UnreadableStore)
+    seen = _intercept_dispatch(monkeypatch)  # an unresolved binding dispatches nowhere
+    task_id = "tsk_bound_unreadable"
+    _add_task(task_id, steps=2)
+
+    with caplog.at_level(logging.ERROR):
+        # Second step is a local worker: it needs no store read, so it proves
+        # the run survived the failed one rather than unwinding at it.
+        asyncio.run(execution_svc._run(_plan("pln_bound_unreadable", "ext_bound1", "agt_03d9"), task_id))
+
+    assert seen == []
+    task = state.tasks[task_id]
+    assert task.spent == PRICE  # only the step that ran was billed
+    lines = state.traces[task_id]
+    assert any(ln.level == "error" and ln.msg == "unknown agent: ext_bound1" for ln in lines)
+    assert any("match agent: code.next (agt_03d9)" in ln.msg for ln in lines)
+    assert any(ln.level == "out" and ln.msg.startswith("code.next:") for ln in lines)
+    # The run reached its own terminal accounting instead of the run-level
+    # handler — a read failure is never a crashed workflow.
+    assert not any("workflow failed" in ln.msg for ln in lines)
+    assert any("workflow incomplete — 1/2 agents produced output" in ln.msg for ln in lines)
+
+    # Diagnosable: the resolver names the agent whose lookup failed, with the
+    # traceback, because a binding that silently stopped routing is invisible.
+    records = [r for r in caplog.records if r.name == "app.services.binding_registry"]
+    assert records, "a failed binding lookup was never logged"
+    assert "ext_bound1" in records[0].getMessage()
+    assert records[0].exc_info is not None
