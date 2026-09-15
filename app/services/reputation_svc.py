@@ -13,8 +13,16 @@ Division of labour (mirrors ERC-8004: raw evidence on-chain, aggregation off):
 Score semantics: ratings are 0–100; every *_bps value here is basis points
 of that scale (0..10_000). Weights are USDC in stroops (7 decimals) — a
 rating earned on a 0.054 USDC step carries less evidence than one earned on
-an 0.180 USDC step, so reputation is a record of settled economic history,
-not a count of clicks.
+an 0.180 USDC step, so reputation is weighted by what a step was worth
+rather than by a count of clicks.
+
+"Worth" is the step's QUOTED price, not money that changed hands. The
+settler passes `step.est_price_usdc`, and a failed step is never billed
+(ADR 0005 D1) yet is rated all the same — so the weight measures what was at
+stake, which is as true of a step that failed as of one that delivered. This
+is deliberately NOT "a record of settled economic history": that reading
+would make every negative rating weightless, since non-delivery settles
+nothing.
 
 Cold start: with no on-chain evidence the smoothed score IS the prior
 (default 7000 = 3.5/5) and the lower bound still clears the default floor —
