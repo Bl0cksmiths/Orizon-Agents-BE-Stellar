@@ -194,7 +194,22 @@ def record_success(agent_id: str) -> None:
     inserting a zero-count entry per successful step would make the map track
     every agent that has ever run instead of only the ones that are failing.
     """
-    _streaks.pop(agent_id, None)
+    streak = _streaks.pop(agent_id, None)
+    if streak is None:
+        return
+    # Exactly one INFO, and only where a streak really ended —
+    # `registry_sync`'s "recovered" line and `dispatch_signing._report_signed`
+    # both fire off the path that actually succeeded, so a persistent failure
+    # can never be made to alternate WARNING/INFO forever. The id is safe to
+    # interpolate by construction: record_failure is the only writer and it
+    # refuses anything outside AGENT_ID_PATTERN, so a key that exists passed
+    # that gate.
+    logger.info(
+        "agent %s recovered after %d consecutive failures (last class: %s)",
+        agent_id,
+        streak.count,
+        streak.rule,
+    )
 
 
 def consecutive_failures(agent_id: str) -> int:
