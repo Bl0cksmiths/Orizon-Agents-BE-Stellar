@@ -149,16 +149,22 @@ def validate_endpoint_url(url: str) -> None:
     if not host:
         raise ExternalDispatchError(f"endpoint URL {url!r} has no host")
 
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None  # a name, not a literal — fall through to the hostname rules
-
+    ip = _as_ip_literal(host)
     if ip is not None:
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            # Report the canonical form: "2130706433" is not obviously 127.0.0.1
+            # in a log line, and the operator needs to see what we resolved it to.
             raise ExternalDispatchError(
-                f"endpoint URL {url!r} points at non-public address {host} — "
-                "private, loopback, link-local, reserved and multicast ranges are not dispatchable"
+                f"endpoint URL {url!r} points at non-public address {ip} — "
+                "private, loopback, link-local, reserved, multicast and unspecified "
+                "ranges are not dispatchable"
             )
         return
 
