@@ -55,6 +55,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.services.dispatch_signing import sign_dispatch
 from app.services.endpoint_policy import EndpointPolicyError
 from app.services.endpoint_policy import validate_endpoint_url as _validate_endpoint_policy
 
@@ -149,6 +150,13 @@ class ExternalHttpWorker(Worker):
         # contains non-ASCII, i.e. it passes every ASCII test and fails in
         # production on the first accented character.
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        # Signed over the destination URL AND these bytes, so a signature
+        # captured by one operator cannot be replayed at another — the verifier
+        # has to supply their own endpoint URL to rebuild the message. Empty
+        # when no dispatch key is configured: an unsigned dispatch is a trust
+        # gap the OPERATOR is positioned to enforce (they can reject it), not a
+        # reason for us to fail a step.
+        headers.update(sign_dispatch(self.endpoint_url, body))
         return await self._dispatch(body, headers, dispatch_id)
 
     async def _dispatch(self, body: bytes, headers: dict[str, str], dispatch_id: str) -> dict[str, Any]:
