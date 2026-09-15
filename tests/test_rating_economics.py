@@ -159,7 +159,12 @@ def test_repeated_untrusted_junk_crosses_the_routing_floor():
         ({"artifact": {"title": "x"}, "critic_violations": []}, 95),
         ({"artifact": {"title": "x"}, "critic_violations": ["a", "b", "c"]}, 76),
         ({"critic_violations": []}, 80),  # critic content with no artifact still counts
-        ({"validator_violations": ["a"]}, 67),
+        # `validator_violations` is NOT checkable work for an untrusted agent:
+        # the response contract drops the key (it is not on the allowlist), so
+        # an operator sending it has it discarded and is then scored as having
+        # delivered nothing. It cannot reach this branch in production, and
+        # pretending otherwise taught a shape that silently scores 20.
+        ({"validator_violations": ["a"]}, 20),
     ],
 )
 def test_untrusted_output_that_delivers_still_earns_the_full_scale(delivered: dict[str, Any], expected: int):
