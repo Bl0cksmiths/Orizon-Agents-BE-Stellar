@@ -179,17 +179,58 @@ def rating_weight_stroops(step_price_usdc: float) -> int:
     return max(1, round(capped * STROOPS_PER_USDC))
 
 
+def _carries_checkable_work(step_output: dict[str, Any]) -> bool:
+    """Whether a response delivered anything this service can actually check.
+
+    The two signals in the published external envelope that are evidence
+    rather than assertion: an `artifact`, which is the thing the buyer
+    receives, and critic (or validator) content, which is the record of a
+    pass made over that work. A response carrying neither has told us only
+    that an HTTP handler is alive.
+
+    Deliberately NOT a quality grader (ADR 0005 D3): it never reads the
+    artifact, scores prose, or weighs the violations. It answers the single
+    question a rating must settle before it can award the base score — was
+    anything delivered — and nothing else.
+    """
+    if step_output.get("artifact"):
+        return True
+    violations = step_output.get("critic_violations")
+    if violations is None:
+        violations = step_output.get("validator_violations")
+    return isinstance(violations, list)
+
+
 def synthetic_rating(
     step_output: dict[str, Any] | None,
     step_price_usdc: float,
+    *,
+    first_party: bool = True,
 ) -> tuple[int, int]:
-    """Derive the settler's synthetic rating for one settled step.
+    """Derive the settler's synthetic rating for one step.
 
     Returns (rating_0_to_100, weight_stroops). The rating is built from
     verifiable workflow signals (did the worker produce output, did it ship
     an artifact, did the critic find violations) — validation-gated
     reputation rather than opinion. Baked kit artifacts are deterministic
     and pre-validated by design, so they earn a fixed high score.
+
+    `first_party` is the trust distinction `execution_svc._rating_view`
+    already draws: was this step run by the worker this repo registers for
+    the agent id, or by an operator's endpoint. It is keyword-only and
+    defaults to True so a first-party step scores byte-identically to how it
+    always has; the settler passes False for a bound external step.
+
+    For UNTRUSTED output only, a response must carry something checkable to
+    reach the base score — an acknowledgement scores as non-delivery (ADR
+    0005 D3). Base 70 is exactly `reputation_prior_bps`, so before this gate
+    `{"ok": true}` held the mean at the prior while growing the evidence
+    mass, and the Wilson lower bound therefore ROSE with every junk response
+    (5677 → 5746 over 25 of them): answering garbage forever scored strictly
+    better than failing honestly, and no volume of it could ever cross the
+    routing floor. First-party scoring is untouched — a local worker
+    legitimately returns text with no artifact, and regrading that is a
+    different and much larger economic change.
     """
     weight = rating_weight_stroops(step_price_usdc)
 
@@ -198,6 +239,20 @@ def synthetic_rating(
         # every failure path skips the billing site (ADR 0005 D1), so this is
         # unbilled negative evidence, and that is exactly the mechanism — the
         # buyer keeps the money and the operator takes the reputation cost.
+        return 20, weight
+
+    if not first_party and not _carries_checkable_work(step_output):
+        # An acknowledgement that delivers nothing is worth what a timeout is
+        # worth, because the buyer received the same thing either way — so it
+        # scores the same 20. Not a middle value: anything above 20 leaves a
+        # lie priced cheaper than honest failure, and anything below it would
+        # punish a junk answer harder than a dead endpoint, which is not a
+        # distinction the evidence supports.
+        #
+        # Placed ahead of the `baked` branch as well as the base score: 95 is
+        # above base, so the same rule has to gate it. `_rating_view` already
+        # strips `source` from untrusted output; this is a second lock on that
+        # door, not a replacement for it.
         return 20, weight
 
     if step_output.get("source") == "baked":
