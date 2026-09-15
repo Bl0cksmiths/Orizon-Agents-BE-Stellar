@@ -23,7 +23,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.agents.workers.external_contract import parse_operator_output
+import pytest
+
+from app.agents.workers.external_contract import (
+    OUTPUT_RULES,
+    ExternalOutputError,
+    parse_operator_output,
+)
 
 # A well-formed response, every optional field populated. Tests mutate a copy of
 # this so a failure reads as "this one field went wrong", not "this whole
@@ -76,3 +82,62 @@ def test_no_operator_container_is_passed_through() -> None:
 
     raw["artifact"]["files"][0]["path"] = "mutated-after-the-fact.html"
     assert out["artifact"]["files"][0]["path"] == "index.html"
+
+
+# (response, the rule that must refuse it). A module constant rather than an
+# inline decorator argument so the coverage test below can prove that every rule
+# in the vocabulary is actually reachable.
+_REFUSALS: list[tuple[Any, str]] = [
+    # not_an_object — the body decoded, but not into a worker output.
+    ("just a string", "not_an_object"),
+    ([{"summary": "a list of one good response is still a list"}], "not_an_object"),
+    (42, "not_an_object"),
+    (None, "not_an_object"),  # JSON `null` decodes to None, and None is not a response
+    (True, "not_an_object"),
+    # summary_missing — the step reported no outcome.
+    ({}, "summary_missing"),
+    ({"artifact": {"title": "shipped"}}, "summary_missing"),  # an artifact is not a report
+    ({"summary": ""}, "summary_missing"),
+    ({"summary": "   \n\t "}, "summary_missing"),  # whitespace is not a summary
+    ({"summary": 5}, "summary_missing"),
+    ({"summary": None}, "summary_missing"),
+    ({"summary": ["a", "b"]}, "summary_missing"),
+    ({"summary": {"text": "done"}}, "summary_missing"),
+    # artifact_not_an_object — the deliverable arrived as something else.
+    ({"summary": "ok", "artifact": "<html>the whole document as a string</html>"}, "artifact_not_an_object"),
+    ({"summary": "ok", "artifact": [{"path": "a", "content": "b"}]}, "artifact_not_an_object"),
+    ({"summary": "ok", "artifact": 7}, "artifact_not_an_object"),
+    ({"summary": "ok", "artifact": True}, "artifact_not_an_object"),
+]
+
+
+@pytest.mark.parametrize(("raw", "rule"), _REFUSALS)
+def test_each_refusal_names_its_rule(raw: Any, rule: str) -> None:
+    # `.rule` is the assertable part. The message stays free to be useful to a
+    # human without a test pinning its wording.
+    with pytest.raises(ExternalOutputError) as exc:
+        parse_operator_output(raw)
+    assert exc.value.rule == rule
+    assert str(exc.value)  # and it still says something
+
+
+def test_every_rule_is_exercised() -> None:
+    # A rule nobody can produce is a dead error code that a caller will
+    # nonetheless write a branch for.
+    assert {rule for _, rule in _REFUSALS} == OUTPUT_RULES
+
+
+def test_rule_vocabulary_is_closed() -> None:
+    # A typo at a raise site must fail here, loudly, rather than travel to a
+    # caller as an error code nothing handles — so the constructor raises a
+    # PLAIN ValueError, which is deliberately not catchable as a refusal.
+    with pytest.raises(ValueError) as exc:
+        ExternalOutputError("summary_to_long", "typo at the raise site")
+    assert not isinstance(exc.value, ExternalOutputError)
+    assert "summary_to_long" in str(exc.value)
+
+
+def test_refusal_is_a_value_error() -> None:
+    # Callers that do not care which rule fired still get a sane except clause.
+    with pytest.raises(ValueError):
+        parse_operator_output({"summary": ""})
