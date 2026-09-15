@@ -75,7 +75,11 @@ def test_dispatch_carries_the_envelope_and_returns_the_output() -> None:
     assert out["source"] == "external"
 
     body = seen["body"]
-    assert body["v"] == 1
+    # v2 since story 2.02 (ADR 0004): the envelope gained `ts` and `network`,
+    # both inside the signed bytes.
+    assert body["v"] == 2
+    assert isinstance(body["ts"], int) and body["ts"] > 0
+    assert body["network"]
     assert body["agent_id"] == "ext_demo1"
     assert body["intent"] == "make a bakery landing page"
     assert body["rationale"] == "draft it"
