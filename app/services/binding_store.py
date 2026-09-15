@@ -91,6 +91,8 @@ CREATE INDEX IF NOT EXISTS agent_bindings_agent_id_id_desc_idx
 # row before it. LAG runs over every row for the agent — window functions are
 # evaluated before the outer ORDER BY/LIMIT — so the one row this returns
 # already knows its own predecessor.
+_SELECT_AGENT_IDS_SQL = "SELECT DISTINCT agent_id FROM agent_bindings"
+
 _SELECT_LATEST_SQL = """
 SELECT endpoint_url, owner, bound_at, previous_endpoint_url
 FROM (
@@ -196,6 +198,15 @@ class BindingStore(Protocol):
         """Record a binding and return it, `previous_endpoint_url` populated."""
         ...
 
+    async def list_agent_ids(self) -> frozenset[str]:
+        """Every agent id that currently has a binding.
+
+        Read once at startup to seed the synchronous routability check in
+        binding_registry; deliberately ids only, because the planner asks
+        "could this agent run?", never "where does it run?".
+        """
+        ...
+
     async def close(self) -> None:
         """Release anything held (a connection pool); safe to call twice."""
         ...
@@ -261,6 +272,11 @@ class InMemoryBindingStore:
             evicted.bound_at,
             self._max_bindings,
         )
+
+    async def list_agent_ids(self) -> frozenset[str]:
+        """Every agent id currently bound. A snapshot, not a live view — the
+        caller copies it into its own set and must not see it mutate underneath."""
+        return frozenset(self._bindings)
 
     async def close(self) -> None:
         """Drop every record.
@@ -350,6 +366,11 @@ class PostgresBindingStore:
             bound_at=float(row["bound_at"]),
             previous_endpoint_url=row["previous_endpoint_url"],
         )
+
+    async def list_agent_ids(self) -> frozenset[str]:
+        pool = await self._ready_pool()
+        rows = await pool.fetch(_SELECT_AGENT_IDS_SQL)
+        return frozenset(row["agent_id"] for row in rows)
 
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
