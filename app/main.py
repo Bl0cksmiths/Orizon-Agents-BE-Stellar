@@ -39,6 +39,7 @@ from .security import (
 )
 from .seed import seed_registry
 from .services import execution_svc, registry_sync
+from .services.binding_registry import refresh_bound_ids
 from .services.binding_store import close_binding_store
 
 
@@ -93,6 +94,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # loop no-ops while STELLAR_AGENT_REGISTRY is blank, which keeps the
     # hermetic test suite offline.
     registry_sync.start()
+    # Seed the planner's routability set from the binding store. Without this a
+    # binding made before this process started would stay unroutable until the
+    # operator bound it again — which is precisely the restart AC-5 is about.
+    await refresh_bound_ids()
     yield
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
