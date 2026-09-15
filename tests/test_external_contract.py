@@ -26,9 +26,12 @@ from typing import Any
 import pytest
 
 from app.agents.workers.external_contract import (
+    MAX_ARTIFACT_CHARS,
     MAX_FILES,
     MAX_NOTE_CHARS,
     MAX_NOTES,
+    MAX_SUMMARY_CHARS,
+    MAX_TITLE_CHARS,
     OUTPUT_RULES,
     ExternalOutputError,
     parse_operator_output,
@@ -286,3 +289,52 @@ def test_empty_strings_inside_a_critic_list_are_kept() -> None:
     # may point the operator's way.
     out = parse_operator_output(_response(critic_violations=["", "  ", "real violation"]))
     assert out["critic_violations"] == ["", "  ", "real violation"]
+
+
+# Slack over the raw ceiling that a clamped HTML payload is allowed to carry:
+# code_gen's truncation note, the `</script>`/`</body>`/`</html>` it re-appends
+# so the cut document still parses, and the CSP <meta> injected afterwards.
+_CLAMP_SLACK = 1_024
+
+
+def test_the_artifact_ceiling_is_the_local_one() -> None:
+    # Imported, not restated: external output must not be allowed more room
+    # than our own workers get, and a bound with two copies drifts.
+    from app.agents.workers.code_gen import MAX_ARTIFACT_CHARS as local_ceiling
+
+    assert MAX_ARTIFACT_CHARS == local_ceiling
+
+
+def test_an_oversize_summary_is_clamped() -> None:
+    out = parse_operator_output(_response(summary="s" * (MAX_SUMMARY_CHARS * 10)))
+    assert len(out["summary"]) == MAX_SUMMARY_CHARS
+    assert out["summary"].endswith("[truncated]")
+
+
+def test_an_oversize_title_is_clamped() -> None:
+    out = parse_operator_output(_response(artifact={"title": "t" * (MAX_TITLE_CHARS * 10)}))
+    assert len(out["artifact"]["title"]) == MAX_TITLE_CHARS
+    assert out["artifact"]["title"].endswith("[truncated]")
+
+
+def test_oversize_html_payloads_are_clamped() -> None:
+    # A megabyte of "artifact" is not an artifact: it is re-sent to every later
+    # operator, held in state for 200 tasks, and streamed to the viewer.
+    huge = "<html><head></head><body>" + ("z" * (MAX_ARTIFACT_CHARS * 2))
+    artifact = {"files": [{"path": "big.html", "content": huge}], "preview_html": huge}
+    out = parse_operator_output(_response(artifact=artifact))
+
+    preview = out["artifact"]["preview_html"]
+    content = out["artifact"]["files"][0]["content"]
+    for payload in (preview, content):
+        assert len(payload) < len(huge)
+        assert len(payload) <= MAX_ARTIFACT_CHARS + _CLAMP_SLACK
+        # code_gen's clamp, reused — it leaves its own mark and re-closes the
+        # document so the truncated HTML still parses in the iframe.
+        assert "orizon: artifact truncated" in payload
+        assert payload.rstrip().endswith("</html>")
+
+
+def test_an_oversize_file_path_is_clamped_not_dropped() -> None:
+    out = parse_operator_output(_response(artifact={"files": [{"path": "p" * 5_000, "content": "x"}]}))
+    assert len(out["artifact"]["files"][0]["path"]) == 200  # ArtifactFile.path's max_length
