@@ -30,17 +30,129 @@ a caller never has to read-then-write and AC-6 cannot race two rebinds.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
 # Retention cap for the in-memory store, sized like ramp_store._MAX_RAMPS (500)
 # so the process's bounded stores agree on what "bounded" costs.
 _MAX_BINDINGS = 500
+
+# Pool sizing for the Postgres store.
+#
+# min_size=0 is the load-bearing one. A free Render instance idles and is spun
+# down, and its TCP sockets die with it; a pool that insists on keeping a live
+# connection wakes up holding a dead one and hands it to the first request. At
+# zero the pool holds nothing while nothing is happening and opens a fresh
+# connection on demand, which is also what a serverless Postgres (Neon) wants.
+#
+# max_size is small because uvicorn runs --workers 1 (render.yaml): this is the
+# whole service's connection budget, not one worker's share of it, and free-tier
+# Postgres counts connections much more tightly than queries.
+_POOL_MIN_SIZE = 0
+_POOL_MAX_SIZE = 5
+
+# Created on first use with CREATE TABLE IF NOT EXISTS. There is no migration
+# tooling in this repo and one table does not justify introducing any: the DDL
+# is idempotent, so every boot and every redeploy converges on the same schema
+# with no migration step that could fail a deploy at 3am.
+#
+# The table is APPEND-ONLY — a rebind INSERTs a new row and nothing ever UPDATEs
+# one — which is what makes AC-6 cheap: the timestamp is the row's own
+# `bound_at`, the rebind history IS the audit trail, and `previous_endpoint_url`
+# is a window function over that history rather than a second copy of the truth
+# that can drift out of step with the first.
+#
+# Ordering is by the surrogate `id`, never by `bound_at`: two binds landing in
+# the same clock tick must still have a defined newest, and a float timestamp
+# cannot promise that. `bound_at` is stored as epoch seconds to match
+# BindingRecord exactly (`to_timestamp(bound_at)` renders it for a human), so
+# nothing converts a timezone between the write and the read.
+_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS agent_bindings (
+    id           BIGSERIAL PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    endpoint_url TEXT NOT NULL,
+    owner        TEXT NOT NULL,
+    bound_at     DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_bindings_agent_id_id_desc_idx
+    ON agent_bindings (agent_id, id DESC);
+"""
+
+# The newest row for one agent, with the endpoint it replaced derived from the
+# row before it. LAG runs over every row for the agent — window functions are
+# evaluated before the outer ORDER BY/LIMIT — so the one row this returns
+# already knows its own predecessor.
+_SELECT_LATEST_SQL = """
+SELECT endpoint_url, owner, bound_at, previous_endpoint_url
+FROM (
+    SELECT id,
+           endpoint_url,
+           owner,
+           bound_at,
+           LAG(endpoint_url) OVER (ORDER BY id) AS previous_endpoint_url
+    FROM agent_bindings
+    WHERE agent_id = $1
+) AS history
+ORDER BY id DESC
+LIMIT 1
+"""
+
+# Append the new binding and return it with its predecessor, in ONE statement.
+# Every CTE here sees the same snapshot, so `previous` cannot observe the row
+# `inserted` writes, and there is no window between a read and a write for a
+# second rebind to slip into — which is how `put` can promise a populated
+# `previous_endpoint_url` without the caller doing a read-then-write.
+# LEFT JOIN ... ON TRUE keeps the first-ever bind (no predecessor) returning a
+# row with previous_endpoint_url NULL rather than returning nothing at all.
+_INSERT_SQL = """
+WITH previous AS (
+    SELECT endpoint_url
+    FROM agent_bindings
+    WHERE agent_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+), inserted AS (
+    INSERT INTO agent_bindings (agent_id, endpoint_url, owner, bound_at)
+    VALUES ($1, $2, $3, $4)
+    RETURNING endpoint_url, owner, bound_at
+)
+SELECT inserted.endpoint_url,
+       inserted.owner,
+       inserted.bound_at,
+       previous.endpoint_url AS previous_endpoint_url
+FROM inserted
+LEFT JOIN previous ON TRUE
+"""
+
+
+def _import_asyncpg() -> Any:
+    """Import the driver at first Postgres use, never at module import.
+
+    This module is imported on every boot — by the router, and so by the
+    hermetic suite and by any checkout that installed only the dev
+    requirements. asyncpg is needed solely when DATABASE_URL is set, so
+    importing it at module scope would turn an optional dependency into a
+    mandatory one and break test collection wherever it is absent. Deferring it
+    means a missing driver surfaces here, at the moment something actually
+    wanted a database, with the fix in the message instead of as an ImportError
+    from an unrelated module three imports away.
+    """
+    try:
+        import asyncpg
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "DATABASE_URL is set but asyncpg is not installed, so bindings cannot be "
+            "stored durably. Install it (`pip install -r requirements.txt`, asyncpg>=0.30,<1) "
+            "or clear DATABASE_URL to fall back to the in-memory store."
+        ) from exc
+    return asyncpg
 
 
 @dataclass(frozen=True)
@@ -156,3 +268,91 @@ class InMemoryBindingStore:
         again — rather than quietly being a no-op on one side of the Protocol.
         """
         self._bindings.clear()
+
+
+class PostgresBindingStore:
+    """Append-only bindings in Postgres — the implementation AC-5 needs.
+
+    Deliberately thin: asyncpg, three SQL constants, and no ORM or migration
+    framework, because there is exactly one table and a dependency that has to
+    be understood before a deploy can be debugged is worse than the SQL it
+    replaces.
+
+    The pool and the table are both created LAZILY, on the first call that
+    needs them, so constructing the store never does I/O — importing this
+    module, resolving the singleton and booting the app all stay offline, and a
+    database that is briefly unreachable at boot costs a failed request rather
+    than a failed deploy.
+
+    `pool` is injectable for exactly one reason and it is stated rather than
+    disguised: the test suite is hermetic and has no database, so it passes a
+    fake pool and asserts the SQL this class actually sends.
+    """
+
+    def __init__(self, dsn: str, *, pool: Any | None = None) -> None:
+        self._dsn = dsn
+        self._pool: Any | None = pool
+        # Whether the DDL has been run against THIS pool. Separate from the
+        # pool itself so close() can reset both and a later call rebuilds them.
+        self._ready = False
+        # Serializes first use: a burst of concurrent binds on a cold process
+        # must create one pool and run the DDL once, not one per request.
+        self._lock = asyncio.Lock()
+
+    async def _ready_pool(self) -> Any:
+        if self._ready and self._pool is not None:
+            return self._pool
+        async with self._lock:
+            if self._pool is None:
+                self._pool = await self._create_pool()
+            if not self._ready:
+                # asyncpg runs argument-less queries through the simple
+                # protocol, which is what lets one execute() carry both DDL
+                # statements.
+                await self._pool.execute(_CREATE_TABLE_SQL)
+                self._ready = True
+        return self._pool
+
+    async def _create_pool(self) -> Any:  # pragma: no cover — needs a live database
+        asyncpg = _import_asyncpg()
+        return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+
+    async def get(self, agent_id: str) -> BindingRecord | None:
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_SELECT_LATEST_SQL, agent_id)
+        return None if row is None else self._to_record(agent_id, row)
+
+    async def put(self, agent_id: str, endpoint_url: str, owner: str) -> BindingRecord:
+        pool = await self._ready_pool()
+        # Timestamped here rather than with the database's now(): the record
+        # handed back must be the row that was stored, and this service already
+        # dates everything by its own clock in epoch seconds.
+        bound_at = time.time()
+        row = await pool.fetchrow(_INSERT_SQL, agent_id, endpoint_url, owner, bound_at)
+        if row is None:  # pragma: no cover — the CTE always returns the inserted row
+            raise RuntimeError(f"binding insert returned no row for agent_id={agent_id}")
+        return self._to_record(agent_id, row)
+
+    @staticmethod
+    def _to_record(agent_id: str, row: Any) -> BindingRecord:
+        """Map one asyncpg Record to a BindingRecord.
+
+        `agent_id` comes from the caller, not the row: it is the key both
+        queries filtered on, so selecting it back would be a column of round
+        trip bought for nothing.
+        """
+        return BindingRecord(
+            agent_id=agent_id,
+            endpoint_url=row["endpoint_url"],
+            owner=row["owner"],
+            bound_at=float(row["bound_at"]),
+            previous_endpoint_url=row["previous_endpoint_url"],
+        )
+
+    async def close(self) -> None:
+        # Cleared before the await so a close racing a request cannot hand out
+        # the pool that is being torn down, and so a second close is a no-op.
+        pool, self._pool = self._pool, None
+        self._ready = False
+        if pool is not None:
+            await pool.close()
