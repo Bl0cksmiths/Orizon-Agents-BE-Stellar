@@ -162,7 +162,19 @@ def passes_floor(info: RepInfo | None) -> bool:
 
 
 def rating_weight_stroops(step_price_usdc: float) -> int:
-    """Evidence weight of one rating: the step's settled value, capped."""
+    """Evidence weight of one rating: the step's QUOTED price, capped.
+
+    Not its settled value. The settler passes `step.est_price_usdc` — what the
+    step was quoted at — and every failure path skips the one billing site
+    (ADR 0005 D1), so the 20/100 a non-delivery earns is weighted by money
+    that was never charged. That is the intent, not an oversight: the weight
+    says how much was at stake on the step, and a step that promised 0.180
+    USDC of work and delivered none put 0.180 USDC at stake.
+
+    The 1-stroop floor keeps a zero-priced step from carrying literally no
+    evidence; `registry_sync` refuses an on-chain price low enough for that
+    floor to be an exploit (ADR 0005 D4).
+    """
     capped = min(max(step_price_usdc, 0.0), settings.reputation_max_rating_weight_usdc)
     return max(1, round(capped * STROOPS_PER_USDC))
 
