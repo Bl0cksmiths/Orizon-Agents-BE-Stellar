@@ -325,3 +325,64 @@ def test_a_first_party_worker_still_earns_the_baked_rating(monkeypatch):
     )
 
     assert calls == [("agt_11c0", 95)]
+
+
+# ── operator text in the buyer's trace is bounded and scheme-checked ─
+
+
+def _run_one(monkeypatch, task_id: str, output: Any) -> list:
+    """Run a one-step plan against `output` and hand back its trace lines."""
+    _resolves_to(monkeypatch, {"ext_trace": _Worker("external.ext_trace", output)})
+    _add_task(task_id, 1)
+    asyncio.run(execution_svc._run(_plan("pln_" + task_id, ("ext_trace", "Acme")), task_id))
+    return state.traces[task_id]
+
+
+def test_an_over_long_artifact_title_is_capped_in_the_trace(monkeypatch):
+    """Trace lines are retained with the task and rendered in the buyer's
+    viewer, and every other traced value is already held to 180 chars — a
+    title an operator chose does not get to be the exception."""
+    title = "T" * 500
+    lines = _run_one(
+        monkeypatch,
+        "tsk_hostile_long_title",
+        {"summary": "ok", "artifact": {"title": title, "files": [{"content": "x"}]}},
+    )
+
+    traced = next(ln for ln in lines if ln.level == "artifact")
+    assert "T" * 180 in traced.msg
+    assert "T" * 181 not in traced.msg
+    # Only the trace is capped: the artifact is still handed back whole.
+    artifact = state.tasks["tsk_hostile_long_title"].artifact
+    assert artifact is not None and artifact["title"] == title
+
+
+@pytest.mark.parametrize(
+    ("label", "url"),
+    [
+        ("javascript", "javascript:alert(document.cookie)"),
+        ("data", "data:text/html,<script>steal()</script>"),
+        ("scheme-relative", "//wallet-drainer.example/connect"),
+        ("ftp", "ftp://wallet-drainer.example/x"),
+        ("not-a-string", {"href": "https://ok.example"}),
+    ],
+)
+def test_a_non_http_preview_url_never_reaches_the_trace(monkeypatch, label, url):
+    """`preview_url` is rendered as the run's "ship" moment, so an operator
+    could otherwise put a `javascript:` or phishing link in front of the buyer
+    under the orchestrator's own voice."""
+    lines = _run_one(monkeypatch, f"tsk_hostile_url_{label.replace('-', '_')}", {"summary": "ok", "preview_url": url})
+
+    assert not any("preview →" in ln.msg for ln in lines)
+    # Refusing the link is not a step failure — the step still delivered.
+    assert state.tasks[f"tsk_hostile_url_{label.replace('-', '_')}"].status == "complete"
+
+
+def test_an_http_preview_url_is_still_surfaced_but_capped(monkeypatch):
+    """The legitimate deploy.v0 case keeps working, under the same ceiling."""
+    url = "https://operator.example/preview/" + "p" * 400
+    lines = _run_one(monkeypatch, "tsk_hostile_url_long", {"summary": "ok", "preview_url": url})
+
+    traced = next(ln for ln in lines if "preview →" in ln.msg)
+    assert url[:180] in traced.msg
+    assert url not in traced.msg
