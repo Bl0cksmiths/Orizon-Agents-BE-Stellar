@@ -411,7 +411,8 @@ async def _run(
                 # authorization for a dust amount (max(total, 0.000001)) and
                 # seal an attestation for an empty job.
                 logger.info(
-                    "task %s: no step produced output — skipping on-chain charge/seal/ratings (auth %s, payer %s)",
+                    "task %s: no step produced output — charge/seal skipped, ratings still submitted"
+                    " (auth %s, payer %s)",
                     task_id,
                     auth_id_hex,
                     payer,
@@ -421,6 +422,21 @@ async def _run(
                     start,
                     "exec",
                     "no agent produced output — skipping on-chain charge/seal",
+                )
+                # Ratings are NOT skipped with them (ADR 0005 D2). Charge and
+                # seal are correctly withheld, but ratings run the other way:
+                # a run where every step failed is precisely the evidence the
+                # routing floor needs, and withholding it meant the canonical
+                # broken endpoint — down, failing everything — accumulated no
+                # negative evidence at all and stayed routable forever.
+                await _submit_ratings(
+                    task_id,
+                    start,
+                    plan,
+                    delivered,
+                    payer=payer,
+                    job_id=unsettled_job_id(task_id),
+                    undispatched=frozenset(undispatched),
                 )
             else:
                 charge_tx, proof_tx, job_id = await _settle_onchain(
