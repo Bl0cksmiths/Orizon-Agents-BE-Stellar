@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..services import external_binding
+from ..services.binding_registry import note_bound
 from ..services.binding_store import get_binding_store
 from ..services.endpoint_policy import EndpointPolicyError, resolve_and_check, validate_endpoint_url
 from ..services.external_binding import OwnerLookupError
@@ -245,6 +246,11 @@ async def bind(
         raise HTTPException(422, "endpoint_not_allowed") from None
 
     record = await get_binding_store().put(agent_id, body.endpoint_url, owner)
+    # Make the agent routable to the planner immediately. The dispatch path
+    # reads the store directly, but the planner's filter is synchronous and
+    # works off an in-memory set, which would otherwise not know about this
+    # agent until the next process start.
+    note_bound(agent_id)
     replaced = record.previous_endpoint_url is not None
     # The accept path is the one place the full URL is logged — it is now
     # operator-declared configuration, not attacker-controlled text. `replaced`
