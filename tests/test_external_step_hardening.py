@@ -26,9 +26,11 @@ from typing import Any
 
 import pytest
 
+from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
 from app.state import state
+from app.stellar import client as sc
 
 INTENT = "render the launch deck"
 PRICE = 0.02
@@ -205,3 +207,121 @@ def test_a_degraded_step_leaves_no_output_for_later_steps(monkeypatch):
 
     assert seen, "the second step never ran"
     assert "external.ext_hostile" not in seen[0]
+
+
+# ── the settler rates what the step actually delivered ─────────────
+
+AUTH = "ab" * 16
+PAYER = "G" + "A" * 55
+JOB_ID = b"\x01" * 16
+
+
+def _settles(monkeypatch) -> list[tuple[str, int]]:
+    """Put the run on the on-chain path with the money stubbed out, and record
+    every (agent_id, rating) the settler submits.
+
+    Only the two calls that leave the process are replaced — the charge/seal
+    and the rating submit. `_submit_ratings` itself, and the lookup that feeds
+    it, are the code under test.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(settings, "stellar_signing_key", "SFAKEKEY")
+
+    async def _fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+        return ("0x" + "c" * 8, "0x" + "p" * 8, JOB_ID)
+
+    monkeypatch.setattr(execution_svc, "_settle_onchain", _fake_settle)
+
+    calls: list[tuple[str, int]] = []
+
+    async def _fake_submit(agent_id, job_id, rating, weight, payer, kind="auto"):
+        calls.append((agent_id, rating))
+        return {"hash": "deadbeefcafe0123", "status": "SUCCESS"}
+
+    monkeypatch.setattr(sc, "submit_rating_async", _fake_submit)
+    return calls
+
+
+def test_a_delivered_external_step_is_not_rated_twenty(monkeypatch):
+    """The lookup used to read the CATALOG name while the output was written
+    under the WORKER name — which for an external agent is "external.<id>",
+    never the operator's on-chain Agent.name. It missed every time, and
+    `synthetic_rating(None, …)` wrote a permanent 20/100 ("settled money for
+    no delivered work") for an operator who delivered."""
+    calls = _settles(monkeypatch)
+    _resolves_to(
+        monkeypatch,
+        {
+            "ext_rated": _Worker("external.ext_rated", GOOD_OUTPUT),
+            "agt_good": _Worker("w.good", GOOD_OUTPUT),
+        },
+    )
+    task_id = "tsk_hostile_rated"
+    _add_task(task_id, 2)
+    asyncio.run(
+        execution_svc._run(
+            _plan("pln_rated", ("ext_rated", "Acme Renderer"), ("agt_good", "w.good")),
+            task_id,
+            auth_id_hex=AUTH,
+            payer=PAYER,
+        )
+    )
+
+    # Both steps shipped the same clean artifact, so both earn the same score:
+    # the external one is not penalised for the shape of its worker name.
+    assert calls == [("ext_rated", 95), ("agt_good", 95)]
+    lines = state.traces[task_id]
+    assert any(ln.level == "proof" and "Acme Renderer rated 95/100" in ln.msg for ln in lines)
+
+
+def test_a_step_that_delivered_nothing_is_still_rated_twenty(monkeypatch):
+    """The other half of the re-key: fixing the miss must not hand a score to
+    a step that produced no output at all."""
+    calls = _settles(monkeypatch)
+    _resolves_to(monkeypatch, {"agt_good": _Worker("w.good", GOOD_OUTPUT)})
+    task_id = "tsk_hostile_unrated"
+    _add_task(task_id, 2)
+    asyncio.run(
+        execution_svc._run(
+            _plan("pln_unrated", ("ext_absent", "Ghost"), ("agt_good", "w.good")),
+            task_id,
+            auth_id_hex=AUTH,
+            payer=PAYER,
+        )
+    )
+
+    assert calls == [("ext_absent", 20), ("agt_good", 95)]
+
+
+def test_operator_supplied_source_cannot_buy_the_baked_rating(monkeypatch):
+    """`source` is an operator-settable field of the published envelope and
+    `synthetic_rating` pays a flat 95 for `source="baked"`. With the lookup
+    fixed that branch became reachable self-dealing: a one-line response for
+    a 95/100 on-chain. The untrusted worker's `source` never reaches it."""
+    calls = _settles(monkeypatch)
+    _resolves_to(monkeypatch, {"ext_baked": _Worker("external.ext_baked", {"summary": "ok", "source": "baked"})})
+    task_id = "tsk_hostile_baked"
+    _add_task(task_id, 1)
+    asyncio.run(execution_svc._run(_plan("pln_baked", ("ext_baked", "Acme")), task_id, auth_id_hex=AUTH, payer=PAYER))
+
+    # 70: output was delivered, but nothing in it is checkable evidence — no
+    # artifact and no critic verdict. Emphatically not the baked 95.
+    assert calls == [("ext_baked", 70)]
+
+
+def test_a_first_party_worker_still_earns_the_baked_rating(monkeypatch):
+    """Baked kit artifacts are repo-owned, deterministic and pre-validated —
+    the 95 is theirs. Withholding `source` from untrusted workers must not
+    quietly re-score the local kit path."""
+    calls = _settles(monkeypatch)
+    worker = _Worker("code.gen", {"summary": "ok", "source": "baked"})
+    _resolves_to(monkeypatch, {"agt_11c0": worker})
+    monkeypatch.setattr(execution_svc, "get_worker", lambda agent_id: worker if agent_id == "agt_11c0" else None)
+    task_id = "tsk_hostile_first_party"
+    _add_task(task_id, 1)
+    asyncio.run(
+        execution_svc._run(_plan("pln_first_party", ("agt_11c0", "code.gen")), task_id, auth_id_hex=AUTH, payer=PAYER)
+    )
+
+    assert calls == [("agt_11c0", 95)]
