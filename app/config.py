@@ -136,6 +136,34 @@ class Settings(BaseSettings):
     # days, i.e. exactly at award time.
     database_url: str = ""
 
+    # ── External dispatch (story 2.02 — envelope signing) ────
+    # S… secret (or a 12/24-word mnemonic) used to sign the SEP-53 envelope on
+    # every outbound dispatch, so an operator receiving a POST from us can prove
+    # it is ours. See docs/decisions/0004-external-dispatch-hardening.md D2.
+    #
+    # This is deliberately NOT stellar_signing_key. Reusing that key is
+    # cryptographically safe — SEP-53's "Stellar Signed Message:\n" prefix cannot
+    # collide with a transaction or Soroban-auth preimage, both domain-separated
+    # by network id — but it is wrong operationally, for three reasons:
+    #   - stellar_signing_key is the settler/sealer/scorer key: it is what signs
+    #     PaymentEscrow.charge and AttestationRegistry.seal, i.e. it moves money.
+    #     Rotating the dispatch key after an operator integration goes wrong
+    #     would then mean re-granting those on-chain roles and redeploying
+    #     PaymentEscrow — key rotation welded to a contract migration.
+    #   - it would put the settler seed on the outbound HTTP hot path, in a
+    #     module that talks to third-party URLs, for no benefit.
+    #   - the deployments an operator integrates against first are the demo and
+    #     read-only ones, which legitimately have no signing key at all, so
+    #     dispatch would be unsigned in exactly the place it needs proving.
+    #
+    # EMPTY (the default) means UNSIGNED dispatch, never a failure: an unsigned
+    # dispatch is not our vulnerability but a trust gap the operator is
+    # positioned to close by rejecting it, and failing closed would convert
+    # their policy into our outage. app/services/dispatch_signing.py degrades to
+    # no signature headers and logs one coalesced warning; the hermetic suite
+    # runs with no key at all. A malformed value degrades the same way.
+    orizon_dispatch_signing_key: str = ""
+
     # ── Reputation (Bayesian smoothing + routing floor) ───────
     # The on-chain ReputationLedger stores decayed, value-weighted rating
     # evidence; the backend smooths it with a Bayesian prior so new agents
