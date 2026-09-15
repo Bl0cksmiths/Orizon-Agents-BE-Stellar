@@ -40,6 +40,7 @@ headers it is given and dispatches either way.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 
@@ -214,3 +215,56 @@ def dispatch_signer_address() -> str | None:
     """
     keypair = _signer()
     return keypair.public_key if keypair is not None else None
+
+
+def sign_dispatch(endpoint_url: str, body: bytes) -> dict[str, str]:
+    """Signature headers for one dispatch to `endpoint_url` carrying exactly
+    `body` — or {} when this deployment has no usable key.
+
+    `body` must be the BYTES THAT GO ON THE WIRE, not a dict re-serialized here:
+    signing one encoding and sending another produces a signature over bytes the
+    operator never receives, and it breaks only once the payload contains
+    non-ASCII (ADR 0004). The caller serializes once and passes those bytes both
+    here and to the request.
+
+    `Keypair.sign_message` is the SDK's own SEP-53 implementation:
+    `sign(sha256(b"Stellar Signed Message:\n" + message))`. Calling it rather
+    than re-deriving the prefixed hash keeps this in step with the spec instead
+    of forking a second copy of the framing — `external_binding._signature_matches`
+    makes the same choice for the inbound direction, which is what keeps the two
+    halves of this protocol describing the same thing. `Keypair.sign()` is NEVER
+    used: it signs raw bytes with no domain separation at all, so a signature
+    over an attacker-shaped "endpoint" would be structurally indistinguishable
+    from a signature over a transaction envelope, separated only by length.
+
+    Returns {} — an empty mapping the caller can splat into its headers — rather
+    than raising or returning None, so the dispatch path has no branch to forget
+    and an unsigned deployment sends the same request minus three headers.
+
+    Never logs the signature. It is the "signature material" ADR 0003 refuses to
+    record, and an attacker who can read it out of a log can replay a dispatch
+    we made to one operator for as long as that envelope stays plausible.
+    """
+    keypair = _signer()
+    if keypair is None:
+        return {}
+    try:
+        signature = keypair.sign_message(dispatch_message(endpoint_url, body))
+    except Exception as e:
+        # Unreachable by construction — _signer only ever returns a keypair
+        # built from a secret, so the seed is present. Caught anyway because
+        # "never raises" is this module's contract and it is called from the
+        # outbound HTTP path: an unsigned dispatch is a degraded dispatch, while
+        # an exception here would fail a step the operator would have accepted.
+        # The type is named, never the message: it could quote key material.
+        _report_unsigned(
+            "sign_failed",
+            f"dispatch signing failed with {type(e).__name__} — outbound dispatch is UNSIGNED",
+        )
+        return {}
+    _report_signed()
+    return {
+        SIGNATURE_HEADER: base64.b64encode(signature).decode("ascii"),
+        VERSION_HEADER: DISPATCH_SIG_VERSION,
+        SIGNER_HEADER: keypair.public_key,
+    }
