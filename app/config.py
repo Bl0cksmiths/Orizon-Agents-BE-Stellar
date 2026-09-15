@@ -5,17 +5,18 @@ import logging
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .pdax_environments import BASE_URLS as PDAX_BASE_URLS
+from .pdax_environments import moves_real_value as pdax_moves_real_value
+
 logger = logging.getLogger(__name__)
 
 MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
 
-# The PDAX environments app/pdax/config.py:BASE_URLS can resolve a base URL
-# for. Written out here rather than imported because that module does
-# `from ..config import settings`: importing it back would run it while this
-# module is still executing (Settings() is constructed at the bottom), so the
-# import would fail. BASE_URLS stays the source of truth —
-# tests/test_config_validators.py asserts the two agree so they cannot drift.
-PDAX_ENVIRONMENTS = ("production", "stage", "uat")
+# The PDAX environments that resolve to a base URL, read from the shared table
+# in app/pdax_environments.py. That module is dependency-free and lives outside
+# the app.pdax package precisely so this one can import it while Settings() is
+# still being constructed — so there is one source of truth and no copy to drift.
+PDAX_ENVIRONMENTS = tuple(PDAX_BASE_URLS)
 
 # Advertised service version — the FastAPI app's `version` and the liveness
 # payload both read it here so the number they report can never disagree.
@@ -205,8 +206,12 @@ class Settings(BaseSettings):
         hatch. Both an enabled escape hatch and a missing secret would let
         anyone forge deposit/withdrawal callbacks in production, so refuse
         to start rather than run open.
+
+        Scoped by whether the configured environment resolves to a real-fiat
+        base URL, not by its name, so a future real-value environment is
+        covered automatically.
         """
-        if self.pdax_environment.strip().lower() == "production":
+        if pdax_moves_real_value(self.pdax_environment):
             if self.pdax_allow_unsigned_webhooks:
                 raise ValueError(
                     "PDAX_ALLOW_UNSIGNED_WEBHOOKS must not be enabled when "
@@ -250,12 +255,12 @@ class Settings(BaseSettings):
         if self.api_key:
             return self
         exposures: list[str] = []
-        if self.stellar_network.lower() in {"mainnet", "public"} and self.stellar_signing_key:
+        if self.stellar_network.strip().lower() in {"mainnet", "public"} and self.stellar_signing_key:
             exposures.append(
                 "STELLAR_SIGNING_KEY is set on mainnet, so /api/stellar/server/charge "
                 "and /server/seal sign real transactions"
             )
-        if self.pdax_environment.strip().lower() == "production" and self.pdax_username and self.pdax_password:
+        if pdax_moves_real_value(self.pdax_environment) and self.pdax_username and self.pdax_password:
             exposures.append("production PDAX credentials are set, so /api/pdax/* can move real fiat")
         if exposures:
             raise ValueError(

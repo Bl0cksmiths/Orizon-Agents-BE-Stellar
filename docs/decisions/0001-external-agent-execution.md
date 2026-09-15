@@ -114,8 +114,9 @@ authority follows on-chain ownership.
 ## Epic 2 impact (AC5)
 
 The spike de-risks Epic 2 and confirms the two hardest pieces work: the dispatch worker and the
-ownership proof are built and tested. The **30-hour estimate holds** — the spike consumed prototype
-effort that Epic 2 would have spent anyway; what remains is productionization, not discovery:
+ownership proof are built and tested. The **30-hour estimate holds** (28 h now, with the static SSRF
+guard on `endpoint_url` landed early as prod hardening) — the spike consumed prototype effort that
+Epic 2 would have spent anyway; what remains is productionization, not discovery:
 
 | Epic 2 work remaining | Notes | Est |
 |---|---|---|
@@ -123,7 +124,7 @@ effort that Epic 2 would have spent anyway; what remains is productionization, n
 | Bind API: `challenge` + `bind` endpoints, rate-limited, wired to `external_binding` | thin over the tested core | 5 h |
 | Resolver: `get_worker` (or a routing shim) returns an `ExternalHttpWorker` for bound external ids | the one seam change | 4 h |
 | Operator-facing bind UI in the dApp (challenge → wallet sign → submit) | FE | 6 h |
-| Request signing orchestrator→operator + allow-list/SSRF guard on `endpoint_url` | operators must trust dispatches; block internal targets | 5 h |
+| Request signing orchestrator→operator, plus resolve-time pinning for `endpoint_url` | operators must trust dispatches. The static SSRF guard already landed (`validate_endpoint_url`: https-only, no private/loopback/link-local/reserved/multicast literals, no loopback names, redirects never followed); what remains is signing and catching hostnames that *resolve* into those ranges | 3 h |
 | Reference operator endpoint + docs so an external dev can go live | sample server + envelope doc | 4 h |
 
 If any item slips, escalate to the Chapter Lead the same day (product rule). No change to the

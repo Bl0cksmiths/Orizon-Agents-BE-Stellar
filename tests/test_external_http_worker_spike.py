@@ -22,11 +22,14 @@ from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
 from app.state import state
 
-ENDPOINT = "http://operator.local/run"
+# A public https URL: the worker validates its endpoint before every dispatch
+# (SSRF guard), and the injected ASGI/Mock transports below never open a
+# socket, so the URL is only a label for the in-process endpoint.
+ENDPOINT = "https://operator.example/run"
 
 
 def _client_for(app: FastAPI) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://operator.local")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://operator.example")
 
 
 def _worker(client: httpx.AsyncClient) -> ExternalHttpWorker:
@@ -188,7 +191,7 @@ def test_connect_failure_retries_once_then_raises() -> None:
 
     async def go() -> None:
         transport = httpx.MockTransport(handler)
-        async with httpx.AsyncClient(transport=transport, base_url="http://operator.local") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="https://operator.example") as client:
             with pytest.raises(ExternalDispatchError):
                 await _worker(client).run("x", "y")
 

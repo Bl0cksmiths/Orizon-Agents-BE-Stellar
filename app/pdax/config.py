@@ -5,32 +5,46 @@ The PDAX institutions API runs in three environments. The base URL is
 selected from `settings.pdax_environment` ("production" | "stage" | "uat").
 All endpoint paths are versioned under `/pdax-institution/v1` (a few under
 `/v2`); see app/pdax/client.py for how paths are joined.
+
+The environment table itself lives in `app/pdax_environments.py` — outside this
+package, so `app/config.py` can share it without an import cycle. This module
+is the settings-bound view of it.
 """
 
 from __future__ import annotations
 
 from ..config import settings
+from ..pdax_environments import (
+    BASE_URLS,
+    DEFAULT_ENVIRONMENT,
+    base_url_for,
+    normalize,
+)
+from ..pdax_environments import moves_real_value as _env_moves_real_value
 
-# Base URLs per environment (see PDAX "Getting Started").
-BASE_URLS: dict[str, str] = {
-    "production": "https://services.pdax.ph/api/pdax-api",
-    "stage": "https://stage.services.sandbox.pdax.ph/api/pdax-api",
-    "uat": "https://uat.services.sandbox.pdax.ph/api/pdax-api",
-}
-
-DEFAULT_ENVIRONMENT = "uat"
+__all__ = [
+    "BASE_URLS",
+    "DEFAULT_ENVIRONMENT",
+    "allow_unsigned_webhooks",
+    "base_url",
+    "is_production",
+    "moves_real_value",
+]
 
 
 def base_url() -> str:
     """Resolve the PDAX base URL for the configured environment."""
-    env = (settings.pdax_environment or DEFAULT_ENVIRONMENT).strip().lower()
-    if env not in BASE_URLS:
-        raise RuntimeError(f"unknown PDAX environment {env!r}; expected one of {list(BASE_URLS)}")
-    return BASE_URLS[env]
+    return base_url_for(settings.pdax_environment)
 
 
 def is_production() -> bool:
-    return (settings.pdax_environment or DEFAULT_ENVIRONMENT).strip().lower() == "production"
+    return normalize(settings.pdax_environment) == "production"
+
+
+def moves_real_value() -> bool:
+    """True when the configured environment settles real fiat rather than
+    sandbox play money — derived from the resolved base URL, not the name."""
+    return _env_moves_real_value(settings.pdax_environment)
 
 
 def allow_unsigned_webhooks() -> bool:
