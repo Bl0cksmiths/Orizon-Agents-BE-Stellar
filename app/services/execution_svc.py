@@ -7,6 +7,7 @@ import secrets
 import time
 from typing import Any
 
+from ..agents.registry import get_worker
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
@@ -58,6 +59,76 @@ async def _emit(task_id: str, start: float, level: TraceLevel, msg: str) -> Trac
     state.append_trace(task_id, line)
     await bus.publish(task_id, line)
     return line
+
+
+def _unusable_field(output: dict) -> str | None:
+    """The first field of a worker's output whose SHAPE the post-step handling
+    below cannot consume, or None when every field of it is usable.
+
+    Since story 2.01 a step's output can be whatever JSON an operator's
+    endpoint chose to return, and the handling that follows joins the critic
+    lists, reads `artifact` as a mapping and walks `artifact.files` — each of
+    which raises on the wrong type, and none of which sits inside the per-step
+    try/except. One hostile field would therefore reach the run-level handler:
+    the whole workflow finalizes as "failed" and the on-chain settlement that
+    pays every OTHER agent in the plan never runs. Proving the shape here, one
+    branch below the non-dict check and before the step is billed, keeps a bad
+    envelope exactly what it is — that STEP's failure.
+
+    Absent and falsy values are usable: every reader below already guards for
+    them (`or []`, `if art:`). Only a present value of the wrong type is not.
+    """
+    for key in ("critic_violations", "critic_notes"):
+        value = output.get(key)
+        if value and not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            return key
+    art = output.get("artifact")
+    if not art:
+        return None
+    if not isinstance(art, dict):
+        return "artifact"
+    files = art.get("files", [])
+    if not isinstance(files, list):
+        return "artifact.files"
+    if any(not isinstance(f, dict) or not isinstance(f.get("content", ""), str) for f in files):
+        return "artifact.files"
+    return None
+
+
+def _rating_view(output: dict, *, first_party: bool) -> dict[str, Any]:
+    """The record of one step's output that the settler's rating reads.
+
+    reputation_svc.synthetic_rating awards a flat 95 to output marked
+    `source="baked"` — deterministic, pre-validated kit output produced by a
+    worker in this repo. `source` is ALSO a field the published external
+    envelope lets an operator set, so with the rating lookup now finding
+    external output that branch would be self-dealing: a one-line response
+    buys a permanent 95/100 on-chain. A worker that is not the first-party one
+    registered for this agent id therefore does not get to supply it. Every
+    other signal the rating reads (did it deliver, did it ship an artifact,
+    what did the critic find) is checkable workflow evidence and passes
+    through untouched.
+    """
+    if first_party:
+        return output
+    return {k: v for k, v in output.items() if k != "source"}
+
+
+def _trace_url(value: object) -> str | None:
+    """An operator-supplied preview URL, when it is safe to put in a trace line.
+
+    The URL is chosen by whoever ran the step, and the line it lands in is
+    rendered in the buyer's viewer and kept with the task, so it is surfaced
+    only as a string carrying an http(s) scheme — a `javascript:` or `data:`
+    link is refused outright — and held to the same 180-char ceiling every
+    other traced value already gets.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    return url[:180]
 
 
 def _summarize(output: dict) -> str:
@@ -132,6 +203,14 @@ async def _run(
         "kit": kit.model_dump() if kit is not None else None,
         "intent": plan.intent,
     }
+    # What each step actually delivered, keyed by the PLAN STEP's agent_id.
+    # Separate from `context` because the two are keyed for different readers:
+    # `context` is worker-facing and keyed by worker name (a worker asks for
+    # context["code.gen"]), while the settler needs the output for a step it
+    # holds only an agent_id and a catalog agent_name for. Those coincide for a
+    # local worker and do NOT for a bound external one, whose worker name is
+    # "external.<agent_id>" — see _submit_ratings.
+    delivered: dict[str, Any] = {}
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
@@ -229,6 +308,27 @@ async def _run(
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable result")
                 continue
 
+            unusable = _unusable_field(output)
+            if unusable is not None:
+                # Same rule as the non-dict case above, one level in: a field
+                # the post-step handling cannot consume is that STEP's failure
+                # — unbilled, skipped, the run carries on — rather than an
+                # exception escaping to the run-level handler and taking the
+                # settlement (and every honest agent's payment) down with it.
+                # The field PATH is the diagnostic here — "artifact.files"
+                # names the offending value where the top-level type would
+                # only say "dict" — and it is a shape, not content, so the
+                # operator's own text stays out of the log.
+                logger.error(
+                    "task %s step %s (%s): output field %r has an unusable shape — step treated as failed",
+                    task_id,
+                    step.agent_id,
+                    worker.name,
+                    unusable,
+                )
+                await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
+                continue
+
             succeeded += 1
             spent += step.est_price_usdc
             if not onchain:
@@ -251,8 +351,9 @@ async def _run(
                     joined = " · ".join(notes)[:180]
                     await _emit(task_id, start, "exec", f"{worker.name}: {joined}")
                 # Some workers (deploy.v0) attach a synthetic preview URL —
-                # surface it so the demo viewer sees the "ship" moment.
-                preview_url = output.get("preview_url")
+                # surface it so the demo viewer sees the "ship" moment. An
+                # unusable or non-http(s) one is dropped, not traced.
+                preview_url = _trace_url(output.get("preview_url"))
                 if preview_url:
                     await _emit(
                         task_id,
@@ -266,7 +367,9 @@ async def _run(
             art = output.get("artifact") if isinstance(output, dict) else None
             if art:
                 last_artifact = art
-                title = art.get("title", "artifact")
+                # Operator-chosen text: coerced and capped like every other
+                # traced value, so a title cannot flood the buyer's trace.
+                title = str(art.get("title", "artifact"))[:180]
                 files = art.get("files", [])
                 total_bytes = sum(len(f.get("content", "")) for f in files)
                 total_lines = sum(f.get("content", "").count("\n") + 1 for f in files)
@@ -281,6 +384,9 @@ async def _run(
             # can read it. e.g. context["code.gen"] = {...}.
             if isinstance(output, dict):
                 context[worker.name] = output
+                # The settler reads a rating-facing view of the same output —
+                # an untrusted worker does not get to grade itself.
+                delivered[step.agent_id] = _rating_view(output, first_party=get_worker(step.agent_id) is worker)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
@@ -309,7 +415,7 @@ async def _run(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
                 if charge_tx and job_id:
-                    await _submit_ratings(task_id, start, plan, context, payer=payer, job_id=job_id)
+                    await _submit_ratings(task_id, start, plan, delivered, payer=payer, job_id=job_id)
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to.
@@ -665,7 +771,7 @@ async def _submit_ratings(
     task_id: str,
     start: float,
     plan: StoredPlan,
-    context: dict[str, Any],
+    delivered: dict[str, Any],
     *,
     payer: str,
     job_id: bytes,
@@ -686,8 +792,17 @@ async def _submit_ratings(
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
     for step in plan.plan.steps:
-        # Context keys are worker names (e.g. "code.gen"), same as agent_name.
-        rating, weight = reputation_svc.synthetic_rating(context.get(step.agent_name or ""), step.est_price_usdc)
+        # Keyed by agent_id — the one identity both worker kinds share. Worker
+        # names do not: a bound external agent runs as "external.<agent_id>",
+        # never as the operator's catalog agent_name, so a name lookup missed
+        # every delivered external step and wrote a permanent on-chain 20/100
+        # ("settled money for no delivered work") for an operator who shipped.
+        # The agent_name fallback is for a caller that still hands in a
+        # worker-name-keyed map, which is correct for a local step.
+        step_output = delivered.get(step.agent_id)
+        if step_output is None:
+            step_output = delivered.get(step.agent_name or "")
+        rating, weight = reputation_svc.synthetic_rating(step_output, step.est_price_usdc)
         try:
             # Async path: the submit RPC runs in a worker thread but the ~30s
             # status poll waits on the event loop — no executor thread pinned.

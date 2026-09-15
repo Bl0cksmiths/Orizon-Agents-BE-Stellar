@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import secrets
 from typing import Any
 
 from ..agents.orchestrator import orchestrator_agent
-from ..agents.workers.prompt_safety import fence_user_input
+from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from ..state import state
 from . import reputation_svc
 from .binding_registry import is_dispatchable
+from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +144,49 @@ def _floor_substitute(
     return candidates[0]
 
 
+# Line-break characters that could split one agent's entry into two. Not in
+# `sanitize_untrusted`'s control-character class, which deliberately preserves
+# newlines because a fenced free-text blob legitimately contains them — this
+# block's one-line-per-agent grammar is a local concern, so it is handled here.
+_LINE_BREAKS = re.compile(r"[\r\n\u2028\u2029]+")
+
+
+def _prompt_name(name: str) -> str:
+    """Render an agent's name as a safe FIELD inside AVAILABLE_AGENTS.
+
+    The name is attacker-controlled: `AgentRegistry.register` is permissionless
+    and stores `name: String` verbatim, with no length or content check, so our
+    API's max_length=100 is validation on the wrong side of the trust boundary.
+    Since story 2.01 a registered-and-bound external agent is dispatchable, and
+    `_registry_prompt_fragment` filters on exactly that — which is what puts an
+    operator's text into the TRUSTED half of the planning prompt.
+
+    `sanitize_untrusted`, not `fence_untrusted`: AVAILABLE_AGENTS is the half
+    of the prompt the planner must parse and obey, so its contents cannot be
+    wrapped in a block that tells the model to ignore them, and a multi-line
+    BEGIN/END fence would destroy the line grammar besides. The field-level
+    primitive is the right one — it defuses marker forgery, strips control
+    characters, and clamps.
+
+    Two structural defences are layered on top, because this block's grammar is
+    one `- id=… name=… price=… rep=… skills=…` line per agent:
+
+      * line breaks collapse to spaces, so a name can never forge a second
+        `- id=` entry and offer the planner an agent that does not exist;
+      * the value is quoted (and inner double quotes become single ones), so a
+        name such as `x price=0.000 rep=5.00` cannot forge the FIELDS beside
+        it — the payload stays visibly inside one quoted string.
+
+    This is applied here rather than merely trusted from `registry_sync`
+    because prompt defence belongs at the prompt-construction site by this
+    repo's convention (see every `worker_prompt` call site), and because an
+    `Agent` can reach `state` by paths that never crossed the registry mirror.
+    """
+    safe = sanitize_untrusted(name, max_chars=MAX_AGENT_NAME_CHARS)
+    safe = _LINE_BREAKS.sub(" ", safe).replace('"', "'")
+    return f'"{safe}"'
+
+
 def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
     # An indexed on-chain agent (story 1.02) is marketplace-visible but only
     # planner-routable once an operator binds it an endpoint (story 2.01) —
@@ -169,7 +214,14 @@ def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
         # Live smoothed score on the 0–5 scale the prompt already uses;
         # seeded rep only when the agent has no reputation entry.
         rep_display = info.smoothed_bps / 2000 if info is not None else a.rep
-        lines.append(f"- id={a.id} name={a.name} price={a.price:.3f} rep={rep_display:.2f} skills={','.join(a.skills)}")
+        # Only `name` is treated: `id` is a Soroban Symbol and `skills` a
+        # Vec<Symbol> ([A-Za-z0-9_]{1,32} each), so neither can hold a space,
+        # a quote, a newline or a fence marker; price and rep are floats this
+        # line formats itself. Treating them would buy nothing.
+        lines.append(
+            f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
+            f"rep={rep_display:.2f} skills={','.join(a.skills)}"
+        )
     return "\n".join(lines)
 
 
