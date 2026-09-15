@@ -49,10 +49,12 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import time
 from typing import Any
 
 import httpx
 
+from app.config import settings
 from app.services.endpoint_policy import EndpointPolicyError
 from app.services.endpoint_policy import validate_endpoint_url as _validate_endpoint_policy
 
@@ -60,7 +62,7 @@ from .base import Worker
 
 logger = logging.getLogger(__name__)
 
-ENVELOPE_VERSION = 1
+ENVELOPE_VERSION = 2
 CONNECT_TIMEOUT_SECONDS = 5.0
 # Under execution_svc.STEP_TIMEOUT_SECONDS (120 s) on purpose — see module docstring.
 TOTAL_TIMEOUT_SECONDS = 110.0
@@ -127,6 +129,12 @@ class ExternalHttpWorker(Worker):
             "rationale": rationale,
             "context": context or {},
             "dispatch_id": dispatch_id,
+            # Freshness and deployment, both inside the signed bytes. SEP-53's
+            # preimage carries no network id — unlike Stellar transaction
+            # signing — so without `network` a testnet dispatch is byte-identical
+            # in framing to a mainnet one and could be replayed across them.
+            "ts": int(time.time()),
+            "network": settings.stellar_network,
         }
         headers = {
             "Content-Type": "application/json",
