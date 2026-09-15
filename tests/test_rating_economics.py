@@ -22,12 +22,17 @@ a regression there would be a silent economic change to every seeded agent.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import pytest
+from stellar_sdk import scval
 
 from app.config import settings
+from app.services import registry_sync
 from app.services import reputation_svc as rep
+from app.state import state
 
 USDC = rep.STROOPS_PER_USDC
 FLOOR = settings.reputation_floor_bps
@@ -39,6 +44,15 @@ PRIOR_LOWER_BOUND = 5677
 # 0.054 USDC is code.gen's catalog price and the one ADR 0005 quotes its
 # figures at, so the 5677 → 5746 exploit reproduces here digit for digit.
 PRICE = 0.054
+
+# Decayed evidence mass at 20/100 that puts the lower bound under the floor.
+# Everything in the D4 section is this number divided by a rating weight.
+EVIDENCE_TO_CROSS_STROOPS = 4_481_328
+
+SYNC_LOGGER = "app.services.registry_sync"
+REGISTRY_ID = "CFAKEREGISTRY"
+OWNER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
+DUST = "ext_dust"
 
 
 def _rep_info(n: int, price: float, rating: int) -> rep.RepInfo:
@@ -199,3 +213,167 @@ def test_the_weight_is_the_same_whichever_side_of_the_boundary_scored_it(price: 
     assert rep.synthetic_rating({"artifact": {"t": 1}}, price)[1] == expected
     assert rep.synthetic_rating({"artifact": {"t": 1}}, price, first_party=False)[1] == expected
     assert rep.synthetic_rating(None, price, first_party=False)[1] == expected
+
+
+# ── D4: a price too small for the floor to reach ────────────────
+
+
+def _raw(agent_id: str, **overrides: Any) -> dict[str, Any]:
+    """A registry `get` record as simulate_read decodes it — 0.05 USDC."""
+    record: dict[str, Any] = {
+        "active": True,
+        "id": agent_id,
+        "name": f"{agent_id}.worker",
+        "owner": OWNER,
+        "price": 500_000,
+        "registered_at": 1_757_000_000,
+        "skills": ["translate", "en"],
+    }
+    record.update(overrides)
+    return record
+
+
+def _sync_log(caplog: pytest.LogCaptureFixture, level: int) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == SYNC_LOGGER and r.levelno == level]
+
+
+@pytest.fixture()
+def registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
+    """A configured registry contract backed by an in-memory record set.
+
+    Restores `state.agents` and the module's once-per-process log guards, so
+    this file's refusals never leak into another test's log assertions.
+    """
+    records: dict[str, dict[str, Any]] = {}
+    monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
+
+    def fake_simulate_read(contract_id: str, fn: str, args: list | None = None, source: str | None = None) -> Any:
+        if fn == "list_ids":
+            return list(records)
+        assert fn == "get"
+        return records[scval.from_symbol(args[0])]  # asserts args arrive as real syms
+
+    monkeypatch.setattr(registry_sync.sc, "simulate_read", fake_simulate_read)
+    agents_before = dict(state.agents)
+    yield records
+    state.agents.clear()
+    state.agents.update(agents_before)
+    registry_sync._refused_price_ids.clear()
+    registry_sync._skipped_agt_ids.clear()
+    registry_sync._disabled_logged = False
+
+
+@pytest.mark.parametrize(
+    ("stroops", "why"),
+    [
+        (1, "the 1-stroop weight floor itself — no price is worse than this"),
+        (1_000, "0.0001 USDC: 4,482 failures, 336 a week forever"),
+        (9_999, "one stroop under the minimum"),
+        (0, "the contract does not require a positive price (#44)"),
+        (-500_000, "…nor a non-negative one (#44)"),
+    ],
+)
+def test_the_mapper_refuses_a_price_the_floor_could_never_reach(stroops: int, why: str):
+    # Zero and negative stay refused: the floor is positive, so it SUBSUMES
+    # #44's sign check rather than replacing or duplicating it.
+    with pytest.raises(registry_sync.UnbelievablePrice):
+        registry_sync._to_agent(_raw(DUST, price=stroops))
+
+
+def test_the_minimum_itself_is_believable():
+    assert registry_sync.MIN_ONCHAIN_PRICE_USDC == 0.001
+    agent = registry_sync._to_agent(_raw(DUST, price=10_000))
+    assert agent.price == pytest.approx(registry_sync.MIN_ONCHAIN_PRICE_USDC)
+    # And the ceiling is untouched by the new bound.
+    assert registry_sync._to_agent(_raw(DUST, price=int(settings.max_charge_usdc * 1e7)))
+
+
+def test_a_reprice_into_dust_delists_and_the_refusal_coalesces(registry, caplog):
+    caplog.set_level(logging.DEBUG, logger=SYNC_LOGGER)
+    registry[DUST] = _raw(DUST)
+    assert asyncio.run(registry_sync.sync_once()) == 1
+    assert state.agents[DUST].price == pytest.approx(0.05)
+
+    # Register believably, wait to be indexed, then reprice into dust on-chain.
+    # Known ids are re-read every pass, so this must EVICT the indexed copy —
+    # leaving the old price standing would be the stale mirror the re-read
+    # exists to prevent, and would leave a dust-priced agent routable.
+    registry[DUST] = _raw(DUST, price=1)
+    for _ in range(4):  # a 15s loop against a standing refusal must not flood
+        assert asyncio.run(registry_sync.sync_once()) == 0
+
+    assert DUST not in state.agents
+    warnings = _sync_log(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    assert DUST in warnings[0].getMessage()
+    assert "delisted" in warnings[0].getMessage()
+    assert len(_sync_log(caplog, logging.DEBUG)) == 3
+
+
+def test_one_dust_record_never_kills_the_pass(registry, caplog):
+    caplog.set_level(logging.DEBUG, logger=SYNC_LOGGER)
+    registry.update({DUST: _raw(DUST, price=1), "ext_ok": _raw("ext_ok")})
+
+    assert asyncio.run(registry_sync.sync_once()) == 1
+    assert DUST not in state.agents
+    assert state.agents["ext_ok"].price == pytest.approx(0.05)
+
+
+# ── D4: the minimum restores the mechanism ──────────────────────
+
+
+def _steady_state_weight(failures_per_week: int, price: float) -> int:
+    """Decayed evidence mass an agent settles at, failing at a constant rate.
+
+    ReputationLedger retains DECAY_BPS_PER_EPOCH of the accumulated mass each
+    epoch, so a constant intake `w` per epoch converges on w / (1 - retention).
+    This is the number that decides whether decay outruns accumulation.
+    """
+    retention = rep.DECAY_BPS_PER_EPOCH / 10_000
+    return int(failures_per_week * rep.rating_weight_stroops(price) / (1 - retention))
+
+
+def _excluded_at_rate(failures_per_week: int, price: float) -> bool:
+    """Whether a constant failure rate holds the agent BELOW the routing floor.
+
+    Not "reaches it once": the equilibrium mass is what survives decay, so this
+    is the honest form of the question "can this agent ever be excluded".
+    """
+    weight = _steady_state_weight(failures_per_week, price)
+    smoothed = rep.smoothed_bps(weight * 2000, weight)  # every rating a 20/100
+    return rep.lower_bound_bps(smoothed, weight) < FLOOR
+
+
+def test_an_agent_at_the_minimum_can_still_be_excluded():
+    """The point of the minimum: at it, failing still costs the agent routing."""
+    price = registry_sync.MIN_ONCHAIN_PRICE_USDC
+    assert rep.rating_weight_stroops(price) == 10_000
+    assert -(-EVIDENCE_TO_CROSS_STROOPS // 10_000) == 449  # failures needed
+
+    assert _rep_info(448, price, 20).lower_bound_bps == 5500
+    assert rep.passes_floor(_rep_info(448, price, 20))
+    assert _rep_info(449, price, 20).lower_bound_bps == 5499
+    assert not rep.passes_floor(_rep_info(449, price, 20))
+
+
+def test_decay_does_not_outrun_accumulation_at_the_minimum():
+    # 7.5% of the evidence evaporates every week, so a one-off burst is not
+    # enough — the agent has to be held below the floor by ongoing failure.
+    assert rep.DECAY_BPS_PER_EPOCH == 9_250
+    assert rep.EPOCH_SECONDS == 604_800
+
+    price = registry_sync.MIN_ONCHAIN_PRICE_USDC
+    assert not _excluded_at_rate(33, price)
+    assert _excluded_at_rate(34, price)  # ~5 failures a day holds it out, forever
+
+
+def test_below_the_minimum_the_floor_is_unreachable():
+    # 1 stroop: rating_weight_stroops floors here, so nothing prices worse.
+    dust = 0.0000001
+    assert rep.rating_weight_stroops(dust) == 1
+
+    assert not _excluded_at_rate(336_099, dust)
+    assert _excluded_at_rate(336_100, dust)
+    # 336,100 failures a week is 2,000 an hour, sustained forever, before the
+    # routing floor applies once. That is the immunity the minimum removes.
+    assert 336_100 / (7 * 24) > 2_000
