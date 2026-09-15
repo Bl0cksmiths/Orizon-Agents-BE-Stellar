@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,112 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx  # noqa: E402  (after the sys.path bootstrap above)
 
 from app.evidence import Check, all_passed  # noqa: E402
+
+
+@dataclass(frozen=True)
+class Credit:
+    """One credit to the owner, as the ledger records it."""
+
+    to: str
+    # Who paid. None when Horizon's record does not name a counterparty — which
+    # is itself worth printing, because an unnamed funder cannot be called a
+    # buyer payment.
+    source: str | None
+    amount: str
+    asset: str
+    # Which Horizon record proved it, so a reviewer can re-fetch the same one.
+    evidence: str
+
+
+def _records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    embedded = payload.get("_embedded")
+    records = embedded.get("records") if isinstance(embedded, dict) else None
+    return records if isinstance(records, list) else []
+
+
+def _asset_label(record: dict[str, Any]) -> str:
+    """Name the asset that moved, using Horizon's own fields and nothing else.
+
+    `native` is XLM and is spelled that way; anything else is spelled with the
+    code its issuer published. This function must never print a denomination
+    the ledger did not state — that is the 4.01 honesty rule in code.
+    """
+    if record.get("asset_type") == "native":
+        return "XLM (native)"
+    code = record.get("asset_code")
+    issuer = record.get("asset_issuer")
+    if code:
+        return f"{code} (issuer {issuer})" if issuer else str(code)
+    return str(record.get("asset_type") or "unknown asset")
+
+
+def find_credit_in_operations(operations: list[dict[str, Any]], owner: str) -> Credit | None:
+    """Look for the credit in `asset_balance_changes` on the transaction's
+    operations — how Horizon reports a Soroban SAC transfer, and the only place
+    a non-native SAC transfer is guaranteed to appear."""
+    for op in operations:
+        for change in op.get("asset_balance_changes") or []:
+            if change.get("to") != owner or change.get("type") not in {"transfer", "mint"}:
+                continue
+            return Credit(
+                to=owner,
+                source=change.get("from"),
+                amount=str(change.get("amount", "")),
+                asset=_asset_label(change),
+                evidence=f"asset_balance_changes on operation {op.get('id')} ({op.get('type')})",
+            )
+    return None
+
+
+def find_credit_in_effects(effects: list[dict[str, Any]], owner: str) -> Credit | None:
+    """Fall back to the `account_credited` effect — how a classic payment
+    operation reports the same movement, which has no balance-change array."""
+    for effect in effects:
+        if effect.get("type") != "account_credited" or effect.get("account") != owner:
+            continue
+        amount = str(effect.get("amount", ""))
+        source = next(
+            (
+                e.get("account")
+                for e in effects
+                if e.get("type") == "account_debited" and str(e.get("amount", "")) == amount
+            ),
+            None,
+        )
+        return Credit(
+            to=owner,
+            source=source,
+            amount=amount,
+            asset=_asset_label(effect),
+            evidence=f"account_credited effect {effect.get('id')}",
+        )
+    return None
+
+
+def check_owner_credited(credit: Credit | None, owner: str, expected_amount: float | None) -> list[Check]:
+    """The check the story actually turns on: the owner's balance MOVED, read
+    off the ledger rather than off a submit response we wrote ourselves."""
+    if credit is None:
+        return [Check("owner_credited", False, f"no credit to {owner} in this transaction's operations or effects")]
+
+    checks = [Check("owner_credited", True, f"{credit.amount} {credit.asset} credited to {owner} — {credit.evidence}")]
+    if expected_amount is None:
+        return checks
+
+    try:
+        landed = float(credit.amount)
+    except ValueError:
+        checks.append(Check("credited_amount", False, f"credited amount {credit.amount!r} is not a number"))
+        return checks
+    # One stroop of slack: Horizon renders 7 decimal places and the expected
+    # value arrives as a float, so an exact comparison would fail on rounding.
+    matches = abs(landed - expected_amount) <= 1e-7
+    if matches:
+        amount_detail = f"credited {credit.amount} as expected"
+    else:
+        amount_detail = f"credited {credit.amount}, expected {expected_amount}"
+    checks.append(Check("credited_amount", matches, amount_detail))
+    return checks
 
 
 def _horizon_base(network: str) -> str:
@@ -75,6 +182,7 @@ def main() -> int:
     args = p.parse_args()
 
     checks: list[Check] = []
+    credit: Credit | None = None
     horizon = _horizon_base(args.network)
 
     with httpx.Client(timeout=20.0, follow_redirects=True) as client:
@@ -84,6 +192,15 @@ def main() -> int:
         else:
             checks.append(Check("tx_on_horizon", True, "transaction found on Horizon"))
             checks.extend(check_settlement_tx(tx_resp.json()))
+
+            ops = client.get(f"{horizon}/transactions/{args.tx}/operations", params={"limit": 200})
+            if ops.status_code == 200:
+                credit = find_credit_in_operations(_records(ops.json()), args.owner)
+            if credit is None:
+                effects = client.get(f"{horizon}/transactions/{args.tx}/effects", params={"limit": 200})
+                if effects.status_code == 200:
+                    credit = find_credit_in_effects(_records(effects.json()), args.owner)
+            checks.extend(check_owner_credited(credit, args.owner, args.amount))
 
     print(f"\nExternal settlement evidence — agent {args.agent} - tx {args.tx[:12]}...\n")
     for c in checks:
