@@ -63,7 +63,10 @@ Pure: no I/O, no clock, no network.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .code_gen import MAX_ARTIFACT_CHARS, clamp_artifact_content
+from .code_validator import harden_artifact
 
 # Bounds, mirroring code_gen's scale. A summary is a trace line and a receipt
 # field, not a document; a title is a heading. MAX_ARTIFACT_CHARS is code_gen's
@@ -169,3 +172,80 @@ def _clean_html(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     return clamp_artifact_content(value)[:_MAX_STORED_CHARS]
+
+
+def _parse_files(value: object) -> list[dict[str, str]] | None:
+    """The artifact's file list, rebuilt entry by entry, or None if it is not a list.
+
+    Filtered per entry rather than dropped whole — the opposite of the choice
+    `_parse_notes` makes, and for a reason that does not apply here: a shorter
+    file list is not a *claim*. "Here are three files" stays true when a fourth
+    malformed one is discarded, whereas a shortened `critic_violations` asserts
+    something about the work that is no longer true.
+
+    `language` is deliberately not carried over. Nothing downstream needs it —
+    the viewer renders `preview_html`, and `harden_artifact` already recognises
+    an HTML file by its path suffix — so accepting it would only put another
+    uncontrolled operator string on the display path.
+    """
+    if not isinstance(value, list):
+        return None
+
+    files: list[dict[str, str]] = []
+    for entry in value:
+        if len(files) >= MAX_FILES:
+            break
+        if not isinstance(entry, dict):
+            continue  # a list of strings/ints is a shape mistake, not a file
+        path = _clean_text(entry.get("path"), MAX_PATH_CHARS)
+        content = _clean_html(entry.get("content"))
+        if path is None or content is None:
+            continue  # a file is a path AND bytes; half of one is neither
+        files.append({"path": path, "content": content})
+    return files
+
+
+def _parse_artifact(value: object) -> dict[str, Any] | None:
+    """The artifact, rebuilt from an allowlist and hardened, or None if empty.
+
+    Refuses a non-dict: `artifact` is the thing the buyer is paying for, and an
+    operator who returns a string or a list under that key has not produced one.
+    Every field inside it, by contrast, is dropped when malformed — a title that
+    arrived as an int does not invalidate the HTML beside it.
+
+    `harden_artifact` runs LAST, over the rebuilt dict, and is the point of
+    doing any of this in one place: an operator's `preview_html` goes into the
+    viewer's `srcDoc` exactly as a local artifact's does, so it needs the same
+    injected CSP. The iframe sandbox already blocks parent access; what the CSP
+    adds is `connect-src 'none'` — no beaconing out of the frame the buyer just
+    opened. Today only code_gen and code_critic call it, which is precisely why
+    external HTML reaches the viewer unsealed (ADR 0004, D1).
+
+    Order matters: clamp first, harden second. The CSP `<meta>` is injected at
+    the top of the document, so hardening a payload that was later truncated
+    would risk cutting the policy back off.
+    """
+    if not isinstance(value, dict):
+        raise ExternalOutputError(
+            "artifact_not_an_object",
+            f"operator response 'artifact' was {type(value).__name__}, expected an object",
+        )
+
+    artifact: dict[str, Any] = {}
+    title = _clean_text(value.get("title"), MAX_TITLE_CHARS)
+    if title is not None:
+        artifact["title"] = title
+    files = _parse_files(value.get("files"))
+    if files is not None:
+        artifact["files"] = files
+    preview_html = _clean_html(value.get("preview_html"))
+    if preview_html is not None:
+        artifact["preview_html"] = preview_html
+
+    if not artifact:
+        # Nothing survived the allowlist. Returning None rather than `{}` keeps
+        # `output.get("artifact")` falsy for the two readers that branch on it
+        # (the trace's artifact line, and synthetic_rating's +15), which is the
+        # honest answer: no artifact was delivered.
+        return None
+    return harden_artifact(artifact)
