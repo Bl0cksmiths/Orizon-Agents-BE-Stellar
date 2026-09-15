@@ -23,6 +23,7 @@ The load-bearing properties, in order:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -426,3 +427,37 @@ def test_an_agent_id_outside_the_pattern_is_neither_tracked_nor_logged(caplog):
         assert record.levelno == logging.DEBUG
         assert not record.args  # nothing interpolated at all — the value is withheld, not truncated
         assert not any(fragment in record.getMessage() for fragment in POISON_FRAGMENTS)
+
+
+# ── concurrency ─────────────────────────────────────────────────
+
+
+def test_concurrent_workflows_keep_every_counter_exact():
+    """Up to `orchestrator_max_concurrent` (8) workflows run at once, all on
+    one event loop under `--workers 1`.
+
+    No lock is taken, and this is what makes that safe: the tracker's functions
+    are synchronous and contain no `await`, so the loop cannot suspend halfway
+    through a read-modify-write and hand the map to another workflow. The
+    workflows below interleave as hard as asyncio allows — a suspension point
+    between every call — and still land on exact counts. A version that
+    awaited anything mid-update, or that ran off the loop in a worker thread,
+    would lose increments here.
+    """
+    agents = [f"ext_{n}" for n in range(8)]
+    steps = 6
+
+    async def workflow(agent_id: str) -> None:
+        for _ in range(steps):
+            record_failure(agent_id, "connect_failed")
+            await asyncio.sleep(0)
+            record_failure("ext_shared", "http_status")
+            await asyncio.sleep(0)
+
+    async def run_all() -> None:
+        await asyncio.gather(*(workflow(agent_id) for agent_id in agents))
+
+    asyncio.run(run_all())
+
+    assert [consecutive_failures(agent_id) for agent_id in agents] == [steps] * len(agents)
+    assert consecutive_failures("ext_shared") == steps * len(agents)
