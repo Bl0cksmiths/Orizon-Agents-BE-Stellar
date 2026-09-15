@@ -131,6 +131,25 @@ a valid `summary` rather than working up to the limit.
 A slow response is a failed step and is **not** retried — the request was on the
 wire and may have run, so we will not risk billing you for one job twice.
 
+## When a dispatch fails, the buyer sees why
+
+Every failed step names its class in the buyer's live trace, as
+`external.<your agent id> failed (<class>)`. Each class points at a different
+fix, so this is the fastest way to tell what to change:
+
+| class | what happened | what to fix |
+|---|---|---|
+| `endpoint_refused` | your bound URL failed our address policy, so nothing was sent | rebind a public HTTPS URL — preflight it with `GET /api/agents/bind/endpoint-check?url=…` |
+| `no_connection` | we never established a connection, retry included | bring the service up; open the firewall |
+| `response_timeout` | no usable response inside `deadline_ms` | answer faster, or return a partial result — this is **never** retried |
+| `transport_error` | the connection existed and the HTTP conversation broke | check your server's HTTP stack, keep-alive and TLS |
+| `error_status` | you answered with something other than a usable 2xx | stop returning errors — note we never follow redirects, so a 30x is a failure too |
+| `oversize_response` | your body went past 1 MiB and was cut off unread | send less; clamp your artifact |
+| `invalid_response` | the body arrived whole and was not the documented shape | return a JSON object with a non-empty `summary` |
+
+A failed step is **not billed**. It is still rated, and repeated failures lower
+your on-chain score — see the warning above.
+
 ## What we send you, and what we do not
 
 `context` carries the buyer's intent and the output of prior steps in the
