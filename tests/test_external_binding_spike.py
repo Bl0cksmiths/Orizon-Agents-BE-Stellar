@@ -141,3 +141,70 @@ def test_signature_for_one_endpoint_cannot_bind_another() -> None:
     assert verify_challenge("ext_h", OTHER_ENDPOINT, owner.public_key, sig) is False
     # the same signature is still good for the endpoint it was actually made for
     assert verify_challenge("ext_h", ENDPOINT, owner.public_key, sig) is True
+
+
+def test_reissue_inside_the_window_returns_the_same_challenge() -> None:
+    """The anti-griefing property.
+
+    The challenge route is public, so if every request minted a fresh nonce an
+    anonymous caller could loop it and make sure the honest owner's signature
+    always arrived against a nonce that had just been replaced.
+    """
+    nonce, expires_at = issue_challenge("ext_i", ENDPOINT)
+    # same nonce AND the original expiry — re-issuing cannot extend a challenge
+    assert issue_challenge("ext_i", ENDPOINT) == (nonce, expires_at)
+    # a different endpoint for the same agent is a different challenge, and
+    # asking for it must not disturb the one already outstanding
+    other_nonce, _ = issue_challenge("ext_i", OTHER_ENDPOINT)
+    assert other_nonce != nonce
+    assert issue_challenge("ext_i", ENDPOINT) == (nonce, expires_at)
+
+
+def test_an_expired_challenge_is_replaced_rather_than_returned() -> None:
+    stale_nonce, stale_expiry = issue_challenge("ext_j", ENDPOINT, ttl_seconds=-1)
+    fresh_nonce, fresh_expiry = issue_challenge("ext_j", ENDPOINT)
+    assert fresh_nonce != stale_nonce
+    assert fresh_expiry > stale_expiry
+
+
+def test_challenge_table_is_bounded_at_max_challenges() -> None:
+    """An unauthenticated POST whose key is caller-supplied must not be able to
+    grow the table without limit — that is memory exhaustion on a free instance.
+    """
+    from app.services import external_binding as eb
+
+    saved = eb._challenges.copy()
+    eb._challenges.clear()
+    try:
+        for i in range(eb.MAX_CHALLENGES + 50):
+            issue_challenge(f"flood_{i}", ENDPOINT)
+        assert len(eb._challenges) == eb.MAX_CHALLENGES
+        # every challenge here is live, so eviction fell back to oldest-first
+        assert ("flood_0", ENDPOINT) not in eb._challenges
+        assert (f"flood_{eb.MAX_CHALLENGES + 49}", ENDPOINT) in eb._challenges
+    finally:
+        eb._challenges.clear()
+        eb._challenges.update(saved)
+
+
+def test_eviction_drops_expired_challenges_before_live_ones() -> None:
+    """The live challenge is the OLDEST entry, so a naive oldest-first eviction
+    would take it and strand the one operator actually mid-bind."""
+    from app.services import external_binding as eb
+
+    saved = eb._challenges.copy()
+    eb._challenges.clear()
+    try:
+        issue_challenge("still_binding", ENDPOINT)
+        for i in range(eb.MAX_CHALLENGES - 1):
+            issue_challenge(f"stale_{i}", ENDPOINT, ttl_seconds=-1)
+        assert len(eb._challenges) == eb.MAX_CHALLENGES
+
+        issue_challenge("newcomer", ENDPOINT)
+        assert len(eb._challenges) == eb.MAX_CHALLENGES
+        assert ("still_binding", ENDPOINT) in eb._challenges
+        assert ("newcomer", ENDPOINT) in eb._challenges
+        assert ("stale_0", ENDPOINT) not in eb._challenges
+    finally:
+        eb._challenges.clear()
+        eb._challenges.update(saved)
