@@ -349,7 +349,11 @@ def test_operator_supplied_source_cannot_buy_the_baked_rating(monkeypatch):
 
     # 70: output was delivered, but nothing in it is checkable evidence — no
     # artifact and no critic verdict. Emphatically not the baked 95.
-    assert calls == [("ext_baked", 70)]
+    # 20, not 70: stripping `source` denies the 95, and ADR 0005 D3 then denies
+    # the base too, because this response carries nothing checkable. Answering
+    # with a bare acknowledgement now scores exactly like a dead endpoint —
+    # before, it scored the prior and RAISED the agent's lower bound.
+    assert calls == [("ext_baked", 20)]
 
 
 def test_a_first_party_worker_still_earns_the_baked_rating(monkeypatch):

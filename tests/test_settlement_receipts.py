@@ -236,7 +236,9 @@ def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
         settle_calls.append((payer, auth_id_hex, total_usdc))
         return ("chargehash123", "sealhash456", b"\x01" * 16)
 
-    async def fake_ratings(task_id, start, plan, context, *, payer, job_id, undispatched=frozenset()):
+    async def fake_ratings(
+        task_id, start, plan, context, *, payer, job_id, undispatched=frozenset(), first_party_ids=frozenset()
+    ):
         rating_calls.append(job_id)
 
     monkeypatch.setattr(execution_svc, "_settle_onchain", fake_settle)
