@@ -43,6 +43,10 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from stellar_sdk import Keypair
+
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 # Domain separator and format version for the signed message — `external_binding`'s
@@ -92,3 +96,121 @@ def dispatch_message(endpoint_url: str, body: bytes) -> str:
     pass those bytes both here and to `content=`).
     """
     return f"{DISPATCH_SIG_VERSION}:{endpoint_url}:{hashlib.sha256(body).hexdigest()}"
+
+
+# Derived keypair, memoized against the SECRET IT WAS DERIVED FROM rather than
+# lru_cached on a no-argument call the way `client._signer_keypair` is. Deriving
+# per dispatch would be wasteful on the outbound hot path, but a cache keyed on
+# nothing pins whatever the process saw first — the exact failure
+# `registry_sync` records for `sc.contract_ids()` — which would defeat runtime
+# reconfiguration and leave the hermetic suite unable to set a key at all. A
+# None keypair is a malformed value, cached so the failure is not re-derived
+# either. No lock: the worst a race can do is derive the same key twice.
+_cached: tuple[str, Keypair | None] = ("", None)
+
+# Why dispatch is currently unsigned, or None while it is signed. Flips the
+# report from WARNING (first) to DEBUG (while the reason is unchanged) and arms
+# the INFO recovery line — the `registry_sync._failing` discipline, keyed by
+# reason rather than a bare bool so a deployment that goes from unset to
+# malformed still gets told once. An unsigned deployment must be visible ONCE:
+# every dispatch takes this path, so an uncoalesced warning would be a log flood
+# proportional to traffic, which is how a real signal gets filtered out.
+_warned_reason: str | None = None
+
+
+def _report_unsigned(reason: str, message: str) -> None:
+    """Report that dispatch is going out unsigned — once per reason."""
+    global _warned_reason
+    if _warned_reason == reason:
+        logger.debug("dispatch still unsigned (%s)", reason)
+        return
+    _warned_reason = reason
+    logger.warning("%s (coalescing to DEBUG until it changes)", message)
+
+
+def _report_signed() -> None:
+    """Clear the degraded state and say so, once, when signing resumes.
+
+    Called only from the path that actually produced a signature: "dispatch is
+    signed again" is a claim only a completed signature can support, and
+    resetting on a mere address lookup would let a persistent signing failure
+    alternate INFO/WARNING forever instead of coalescing.
+    """
+    global _warned_reason
+    if _warned_reason is not None:
+        _warned_reason = None
+        logger.info("dispatch signing enabled — outbound envelopes are signed")
+
+
+def _derive(secret: str) -> Keypair | None:
+    """Build the signing keypair, or None if the configured value is unusable.
+
+    Accepts the two forms `client._signer_keypair` accepts — an S… secret or a
+    12/24-word mnemonic — because an operator configuring this will copy the
+    habits of STELLAR_SIGNING_KEY, and a mnemonic silently yielding unsigned
+    dispatch is a worse outcome than four extra lines here.
+
+    Returns None rather than raising, and the SDK exception is SWALLOWED whole:
+    no message interpolation, no exc_info. stellar_sdk's exception text quotes
+    the rejected seed back, so logging it would write a bearer credential into
+    the log — the precedent, and the reasoning, is
+    `Settings._report_malformed_stellar_signing_key`. The caller names the
+    variable instead.
+    """
+    words = secret.split()
+    try:
+        if len(words) >= 12:
+            return Keypair.from_mnemonic_phrase(" ".join(words))
+        return Keypair.from_secret(secret)
+    except Exception:
+        return None
+
+
+def _signer() -> Keypair | None:
+    """The dispatch signing keypair, or None when dispatch must go unsigned.
+
+    NEVER RAISES — which is the whole reason this exists instead of a call to
+    `client._signer_keypair`, whose contract is the opposite (it raises on an
+    empty key, and a raise on the dispatch path would turn "this deployment has
+    no dispatch key" into a failed step for an operator who did nothing wrong).
+
+    The setting is read LIVE on every call, never captured at import: the value
+    is what the hermetic suite mutates, and a deployment that has just had the
+    key injected should start signing without a restart.
+    """
+    global _cached
+    secret = (settings.orizon_dispatch_signing_key or "").strip()
+    if not secret:
+        _report_unsigned(
+            "unset",
+            "ORIZON_DISPATCH_SIGNING_KEY is not set — outbound dispatch is UNSIGNED, so an "
+            "operator cannot prove the request came from Orizon and may reject it. Set it to a "
+            "dedicated S… secret (NOT the settler key in STELLAR_SIGNING_KEY)",
+        )
+        return None
+    if _cached[0] != secret:
+        _cached = (secret, _derive(secret))
+    keypair = _cached[1]
+    if keypair is None:
+        _report_unsigned(
+            "malformed",
+            "ORIZON_DISPATCH_SIGNING_KEY is malformed — it is neither a valid S… secret key nor a "
+            "valid 12/24-word mnemonic phrase (the value is withheld from this log). Outbound "
+            "dispatch is UNSIGNED until it is re-injected from host secrets",
+        )
+    return keypair
+
+
+def dispatch_signer_address() -> str | None:
+    """The G… address operators should expect to have signed our dispatches, or
+    None when this deployment has no usable key and therefore signs nothing.
+
+    Never raises: it is read by a public network-config route as much as by the
+    dispatch path, and neither should 500 over an absent optional key.
+
+    Publishing this address is what makes the signature worth anything — an
+    operator pins it out of band and verifies against the pinned value, never
+    against X-Orizon-Signer.
+    """
+    keypair = _signer()
+    return keypair.public_key if keypair is not None else None
