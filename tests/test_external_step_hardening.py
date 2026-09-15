@@ -275,23 +275,65 @@ def test_a_delivered_external_step_is_not_rated_twenty(monkeypatch):
     assert any(ln.level == "proof" and "Acme Renderer rated 95/100" in ln.msg for ln in lines)
 
 
-def test_a_step_that_delivered_nothing_is_still_rated_twenty(monkeypatch):
+class _RaisingWorker:
+    """Dispatched, and failed — the operator was asked and did not deliver."""
+
+    real = True
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def run(self, intent, rationale, context=None):
+        raise RuntimeError("operator endpoint blew up")
+
+
+def test_a_dispatched_step_that_delivered_nothing_is_still_rated_twenty(monkeypatch):
     """The other half of the re-key: fixing the miss must not hand a score to
-    a step that produced no output at all."""
+    a step that produced no output at all.
+
+    The failing agent here is DISPATCHED and raises. That distinction is the
+    point — see the companion test below. Using an unresolvable agent to stand
+    for a failed one conflates "did not deliver" with "was never asked".
+    """
     calls = _settles(monkeypatch)
-    _resolves_to(monkeypatch, {"agt_good": _Worker("w.good", GOOD_OUTPUT)})
+    _resolves_to(
+        monkeypatch,
+        {"ext_broken": _RaisingWorker("external.ext_broken"), "agt_good": _Worker("w.good", GOOD_OUTPUT)},
+    )
     task_id = "tsk_hostile_unrated"
     _add_task(task_id, 2)
     asyncio.run(
         execution_svc._run(
-            _plan("pln_unrated", ("ext_absent", "Ghost"), ("agt_good", "w.good")),
+            _plan("pln_unrated", ("ext_broken", "Broken"), ("agt_good", "w.good")),
             task_id,
             auth_id_hex=AUTH,
             payer=PAYER,
         )
     )
 
-    assert calls == [("ext_absent", 20), ("agt_good", 95)]
+    assert calls == [("ext_broken", 20), ("agt_good", 95)]
+
+
+def test_a_step_that_was_never_dispatched_is_not_rated(monkeypatch):
+    """resolve_worker fails OPEN, so an unreadable binding store returns None
+    exactly like a missing binding — and the failure is negative-cached, so one
+    blip can hit several steps. Rating here would write a permanent on-chain
+    20/100 against an operator we never asked to deliver (ADR 0005 D5)."""
+    calls = _settles(monkeypatch)
+    _resolves_to(monkeypatch, {"agt_good": _Worker("w.good", GOOD_OUTPUT)})
+    task_id = "tsk_never_dispatched"
+    _add_task(task_id, 2)
+    asyncio.run(
+        execution_svc._run(
+            _plan("pln_undispatched", ("ext_absent", "Ghost"), ("agt_good", "w.good")),
+            task_id,
+            auth_id_hex=AUTH,
+            payer=PAYER,
+        )
+    )
+
+    assert calls == [("agt_good", 95)]
+    assert not any(agent == "ext_absent" for agent, _ in calls)
 
 
 def test_operator_supplied_source_cannot_buy_the_baked_rating(monkeypatch):
@@ -307,7 +349,11 @@ def test_operator_supplied_source_cannot_buy_the_baked_rating(monkeypatch):
 
     # 70: output was delivered, but nothing in it is checkable evidence — no
     # artifact and no critic verdict. Emphatically not the baked 95.
-    assert calls == [("ext_baked", 70)]
+    # 20, not 70: stripping `source` denies the 95, and ADR 0005 D3 then denies
+    # the base too, because this response carries nothing checkable. Answering
+    # with a bare acknowledgement now scores exactly like a dead endpoint —
+    # before, it scored the prior and RAISED the agent's lower bound.
+    assert calls == [("ext_baked", 20)]
 
 
 def test_a_first_party_worker_still_earns_the_baked_rating(monkeypatch):

@@ -236,7 +236,9 @@ def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
         settle_calls.append((payer, auth_id_hex, total_usdc))
         return ("chargehash123", "sealhash456", b"\x01" * 16)
 
-    async def fake_ratings(task_id, start, plan, context, *, payer, job_id):
+    async def fake_ratings(
+        task_id, start, plan, context, *, payer, job_id, undispatched=frozenset(), first_party_ids=frozenset()
+    ):
         rating_calls.append(job_id)
 
     monkeypatch.setattr(execution_svc, "_settle_onchain", fake_settle)
@@ -244,9 +246,16 @@ def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
     return settle_calls, rating_calls
 
 
-def test_run_with_no_successful_step_skips_charge_seal_and_ratings(monkeypatch):
+def test_run_with_no_successful_step_skips_charge_and_seal_but_still_rates(monkeypatch):
     """Every step failed: nothing was delivered, so the payer's escrow
-    authorization must not be consumed — no charge, no seal, no ratings."""
+    authorization must not be consumed — no charge, no seal.
+
+    Ratings go the OTHER way, and this test was changed to say so (ADR 0005
+    D2). It previously asserted `rating_calls == []`, which meant the canonical
+    broken endpoint — down, failing every step of every run — accumulated no
+    negative evidence at all and stayed above the routing floor forever. A run
+    where nothing succeeded is precisely the evidence the floor needs.
+    """
     _resolves_to(monkeypatch, lambda agent_id: _BoomWorker())
     settle_calls, rating_calls = _patch_settlement_recorders(monkeypatch)
     task_id = "tsk_receipt_allfail"
@@ -255,7 +264,9 @@ def test_run_with_no_successful_step_skips_charge_seal_and_ratings(monkeypatch):
     asyncio.run(execution_svc._run(_plan(("agt_x", "agt_y")), task_id, auth_id_hex=AUTH_ID_HEX, payer=PAYER))
 
     assert settle_calls == []
-    assert rating_calls == []
+    # Rated under a job id derived from the task, not a charge's random one —
+    # deterministic, so re-running the task cannot double-count the failure.
+    assert rating_calls == [execution_svc.unsettled_job_id(task_id)]
     task = state.tasks[task_id]
     assert task.status == "failed"
     assert task.charge_tx is None and task.proof_tx is None

@@ -28,7 +28,8 @@ Design notes, each deliberate:
     the API bounds in `RegisterAgentReq` sit on the wrong side of the trust
     boundary and a direct contract call never meets them. The mapper is
     therefore the enforcement point: the name is clamped and neutralised, and
-    a price we could never settle is refused outright — and a refused record
+    a price we could never settle — or one too small for reputation to ever
+    hold the agent to account — is refused outright, and a refused record
     DELISTS any copy an earlier pass indexed, so the re-read above cannot be
     turned into a way to leave a stale believable price standing.
   - On-chain ids in the `agt_` namespace are SKIPPED: that namespace is the
@@ -78,6 +79,26 @@ MAX_AGENT_NAME_CHARS = 100
 # only callers who came through our API.
 MAX_ONCHAIN_PRICE_USDC = 10_000.0
 
+# Floor on a mirrored price — the same trust boundary read from the other end.
+# `reputation_svc.rating_weight_stroops` weights a rating by the step's price
+# and floors that weight at 1 stroop, while on-chain evidence decays 7.5% per
+# epoch (a week). Below some price an agent's negative evidence can never
+# outrun the decay, and the routing floor stops being a mechanism at all.
+#
+# The arithmetic under the shipped config (prior 7000 bps over 12 USDC of prior
+# mass, floor 5500 bps, Wilson Z=1): crossing the floor on 20/100 evidence
+# takes 0.4481 USDC of decayed rating weight. At this minimum that is 449
+# failed steps — or, held against decay, a sustained 34 failures/week, so an
+# agent that is failing real traffic is excluded and STAYS excluded. One
+# decimal place lower it is 4,482 failures (336/week, forever); at the 1-stroop
+# weight floor it is 4,481,328 (336,100/week), which is what "arithmetically
+# un-excludable" means in practice.
+#
+# 0.001 USDC also sits seven times below the cheapest agent in the seeded
+# catalog (translate.42 at 0.007, which 65 failures excludes), so this refuses
+# a price chosen to be unaccountable, not a price chosen to be cheap.
+MIN_ONCHAIN_PRICE_USDC = 0.001
+
 
 class UnbelievablePrice(ValueError):
     """An on-chain price outside the range we are willing to mirror."""
@@ -100,6 +121,19 @@ def _price_ceiling() -> float:
         can never settle is not a cheap agent, it is an unroutable one.
     """
     return min(MAX_ONCHAIN_PRICE_USDC, settings.max_charge_usdc)
+
+
+def _price_floor() -> float:
+    """Lowest per-call price we will believe from the chain.
+
+    A fixed policy minimum rather than a tighter-of-two like `_price_ceiling`:
+    nothing in settings bounds a price from below (the API's `price_usdc`
+    carries `gt=0`, which admits a single stroop), and the bound that matters
+    is the reputation arithmetic recorded on `MIN_ONCHAIN_PRICE_USDC`, not a
+    spend cap. Kept as a function anyway, so both bounds are reached the same
+    way at the one site that applies them.
+    """
+    return MIN_ONCHAIN_PRICE_USDC
 
 
 # Single-flight guard shared by the loop and on-demand callers: overlapping
@@ -151,21 +185,32 @@ def _to_agent(raw: dict[str, Any]) -> Agent:
     a `Vec<Symbol>` on-chain and so cannot carry whitespace, quotes, control
     characters, or anything resembling a fence marker.
 
-    Raises `UnbelievablePrice` for a price outside `_price_ceiling()` — REFUSED
-    rather than clamped. Clamping would invent a commercial term: we would quote
-    the buyer, and pay the owner, a rate neither of them agreed to, and a price
-    clamped to the cap still consumes the entire charge budget and still denies
-    settlement to the rest of the plan. Refusing is the honest failure — we
-    cannot represent this agent's terms, so we do not offer it — and because
-    the caller then keeps it out of `state.agents` entirely, it is unroutable
-    everywhere at once (the planner block, the floor-starvation fallback, the
-    substitute search, the model-plan clamp, GET /api/agents and the execution
-    pricing) without a price filter duplicated across all six.
+    Raises `UnbelievablePrice` for a price outside `[_price_floor(),
+    _price_ceiling()]` — REFUSED rather than clamped, at both ends and for the
+    same reason. Clamping would invent a commercial term: we would quote the
+    buyer, and pay the owner, a rate neither of them agreed to. At the ceiling
+    a price clamped to the cap still consumes the entire charge budget and
+    still denies settlement to the rest of the plan; at the floor, clamping UP
+    would be worse still — we would raise an operator's own published price
+    purely to make our scoring arithmetic work. Refusing is the honest failure
+    — we cannot represent this agent's terms, so we do not offer it — and
+    because the caller then keeps it out of `state.agents` entirely, it is
+    unroutable everywhere at once (the planner block, the floor-starvation
+    fallback, the substitute search, the model-plan clamp, GET /api/agents and
+    the execution pricing) without a price filter duplicated across all six.
+
+    The floor is the dust case (ADR 0005 D4): below it a rating carries so
+    little evidence weight that on-chain decay outruns accumulation and the
+    routing floor can never exclude the agent, however much it fails. A dust
+    price is not a cheap agent, it is an unaccountable one. It also SUBSUMES
+    the zero-and-negative check this guard used to spell out — `_price_floor()`
+    is positive, so `0` and a negative i128 are still refused, by a strictly
+    tighter bound rather than by a second rule sitting next to it.
     """
     price = raw["price"] / 1e7
-    ceiling = _price_ceiling()
-    if not 0 < price <= ceiling:
-        raise UnbelievablePrice(f"{price:.6f} USDC is outside (0, {ceiling:.6f}]")
+    floor, ceiling = _price_floor(), _price_ceiling()
+    if not floor <= price <= ceiling:
+        raise UnbelievablePrice(f"{price:.6f} USDC is outside [{floor:.6f}, {ceiling:.6f}]")
     return Agent(
         id=raw["id"],
         # `sanitize_untrusted` is this repo's existing primitive

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import secrets
 import time
 from typing import Any
@@ -13,6 +14,7 @@ from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
+from . import failure_tracker
 from .binding_registry import resolve_worker
 
 logger = logging.getLogger(__name__)
@@ -211,6 +213,14 @@ async def _run(
     # local worker and do NOT for a bound external one, whose worker name is
     # "external.<agent_id>" — see _submit_ratings.
     delivered: dict[str, Any] = {}
+    # Agent ids whose step never reached a worker at all — see the resolve
+    # branch below. Distinct from "delivered nothing": these are not rated.
+    undispatched: set[str] = set()
+    # Agent ids that ran on one of OUR workers. The rating scale trusts a
+    # first-party response to have delivered something real; an untrusted one
+    # has to prove it (ADR 0005 D3). Carried separately because `delivered`
+    # holds the output, not its provenance.
+    first_party_ids: set[str] = set()
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
@@ -251,6 +261,15 @@ async def _run(
                 # continues. Trace lines only reach the SSE viewer and are
                 # dropped with the task; every step failure also goes to the
                 # server log so an outage is diagnosable after the fact.
+                # Never dispatched, so never rated. resolve_worker fails OPEN,
+                # which means this branch is also where OUR outage lands — an
+                # unreadable binding store returns None exactly like a missing
+                # binding, and the read failure is negative-cached, so one blip
+                # can hit several steps. Rating here would write a permanent
+                # on-chain 20/100 against an operator who was never asked to
+                # deliver. "Did not deliver" and "was never asked" are
+                # different facts and only the first is theirs (ADR 0005 D5).
+                undispatched.add(step.agent_id)
                 logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
                 await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
                 continue
@@ -291,7 +310,19 @@ async def _run(
                 )
                 # Trace lines are world-readable when TASK_AUTH_REQUIRED is
                 # off — the raw exception text stays in the server log above.
-                await _emit(task_id, start, "error", f"{worker.name} failed")
+                # The CLASS is safe to surface and is the whole point: twelve
+                # distinct failures used to render as this one line, so an
+                # operator could not tell "you are down" from "you are slow"
+                # from "your body is the wrong shape" — three different fixes.
+                #
+                # Read duck-typed, not by importing a worker's module: the run
+                # loop stays worker-agnostic, an unclassified exception falls
+                # back to a generic token rather than crashing the classifier,
+                # and a future worker classifies itself for free. Same shape as
+                # pdax.errors.orizon_code's default (ADR 0005).
+                rule = _failure_class(e)
+                failure_tracker.record_failure(step.agent_id, rule)
+                await _emit(task_id, start, "error", f"{worker.name} failed ({rule})")
                 continue
 
             if not isinstance(output, dict):
@@ -331,6 +362,9 @@ async def _run(
 
             succeeded += 1
             spent += step.est_price_usdc
+            # Clears the streak and emits one recovery INFO, so an endpoint that
+            # comes back is as visible in Render as one that broke.
+            failure_tracker.record_success(step.agent_id)
             if not onchain:
                 await _emit(
                     task_id,
@@ -386,7 +420,10 @@ async def _run(
                 context[worker.name] = output
                 # The settler reads a rating-facing view of the same output —
                 # an untrusted worker does not get to grade itself.
-                delivered[step.agent_id] = _rating_view(output, first_party=get_worker(step.agent_id) is worker)
+                first_party = get_worker(step.agent_id) is worker
+                if first_party:
+                    first_party_ids.add(step.agent_id)
+                delivered[step.agent_id] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
@@ -399,7 +436,8 @@ async def _run(
                 # authorization for a dust amount (max(total, 0.000001)) and
                 # seal an attestation for an empty job.
                 logger.info(
-                    "task %s: no step produced output — skipping on-chain charge/seal/ratings (auth %s, payer %s)",
+                    "task %s: no step produced output — charge/seal skipped, ratings still submitted"
+                    " (auth %s, payer %s)",
                     task_id,
                     auth_id_hex,
                     payer,
@@ -410,12 +448,37 @@ async def _run(
                     "exec",
                     "no agent produced output — skipping on-chain charge/seal",
                 )
+                # Ratings are NOT skipped with them (ADR 0005 D2). Charge and
+                # seal are correctly withheld, but ratings run the other way:
+                # a run where every step failed is precisely the evidence the
+                # routing floor needs, and withholding it meant the canonical
+                # broken endpoint — down, failing everything — accumulated no
+                # negative evidence at all and stayed routable forever.
+                await _submit_ratings(
+                    task_id,
+                    start,
+                    plan,
+                    delivered,
+                    payer=payer,
+                    job_id=unsettled_job_id(task_id),
+                    undispatched=frozenset(undispatched),
+                    first_party_ids=frozenset(first_party_ids),
+                )
             else:
                 charge_tx, proof_tx, job_id = await _settle_onchain(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
                 if charge_tx and job_id:
-                    await _submit_ratings(task_id, start, plan, delivered, payer=payer, job_id=job_id)
+                    await _submit_ratings(
+                        task_id,
+                        start,
+                        plan,
+                        delivered,
+                        payer=payer,
+                        job_id=job_id,
+                        undispatched=frozenset(undispatched),
+                        first_party_ids=frozenset(first_party_ids),
+                    )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to.
@@ -767,6 +830,38 @@ async def _settle_onchain(
     return (charge_tx, proof_tx, settled_job_id)
 
 
+# A failure class is a token, never free text. Validated by SHAPE rather than
+# membership because the run loop must not import a worker's module to classify
+# its exception (ADR 0005) — so anything that is not a plain lowercase token
+# collapses to one generic value, the way pdax.errors.orizon_code defaults.
+# This guards a WORLD-READABLE surface: without it a hostile `rule` attribute
+# would put a URL or a key straight into the buyer's trace.
+_FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+UNCLASSIFIED_FAILURE = "unclassified"
+
+
+def _failure_class(exc: BaseException) -> str:
+    """The operator-facing class of `exc`, or `unclassified`."""
+    rule = getattr(exc, "rule", None)
+    return rule if isinstance(rule, str) and _FAILURE_CLASS_RE.match(rule) else UNCLASSIFIED_FAILURE
+
+
+def unsettled_job_id(task_id: str) -> bytes:
+    """The rating id for a run that settled no money.
+
+    `_settle_onchain` mints a random job id as part of the charge, so a run
+    that never charges has none — which is why ratings used to be skipped
+    outright when nothing succeeded. That is exactly backwards: a run where
+    every step failed is the case the routing floor most needs evidence from.
+
+    Derived rather than random for the same reason `refund_svc.dispute_job_id`
+    is: `ReputationLedger.submit` guards replay on `(agent_id, job_id)`, so a
+    deterministic id means re-running the same task cannot double-count the
+    same failure, while staying linkable to the run that produced it.
+    """
+    return hashlib.sha256(task_id.encode("utf-8") + b"unsettled").digest()[:16]
+
+
 async def _submit_ratings(
     task_id: str,
     start: float,
@@ -775,6 +870,8 @@ async def _submit_ratings(
     *,
     payer: str,
     job_id: bytes,
+    undispatched: frozenset[str] = frozenset(),
+    first_party_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Submit the settler's synthetic per-step ratings to ReputationLedger.
 
@@ -799,10 +896,19 @@ async def _submit_ratings(
         # ("settled money for no delivered work") for an operator who shipped.
         # The agent_name fallback is for a caller that still hands in a
         # worker-name-keyed map, which is correct for a local step.
+        if step.agent_id in undispatched:
+            # We never sent them the step, so there is nothing to judge.
+            continue
         step_output = delivered.get(step.agent_id)
         if step_output is None:
             step_output = delivered.get(step.agent_name or "")
-        rating, weight = reputation_svc.synthetic_rating(step_output, step.est_price_usdc)
+        # Untrusted output must carry something checkable to earn the base
+        # score. Without this an operator answering "{\"ok\": true}" forever
+        # scored 70 — the prior exactly — and their lower bound ROSE with every
+        # such reply, so lying outranked failing honestly (ADR 0005 D3).
+        rating, weight = reputation_svc.synthetic_rating(
+            step_output, step.est_price_usdc, first_party=step.agent_id in first_party_ids
+        )
         try:
             # Async path: the submit RPC runs in a worker thread but the ~30s
             # status poll waits on the event loop — no executor thread pinned.
