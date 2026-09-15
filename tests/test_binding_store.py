@@ -392,3 +392,109 @@ def test_a_missing_driver_names_the_fix() -> None:
 
     message = str(excinfo.value)
     assert "asyncpg" in message and "DATABASE_URL" in message
+
+
+# ── get_binding_store / close_binding_store ───────────────────────────────
+
+DSN = "postgres://user:sup3rsecret@db.example.invalid/orizon"
+
+
+@pytest.fixture(autouse=True)
+def reset_singleton():
+    """The resolver is a module-level singleton; no test may inherit another's."""
+    binding_store._store = None
+    yield
+    binding_store._store = None
+
+
+def test_an_empty_database_url_selects_the_in_memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(binding_store.settings, "database_url", "")
+
+    assert isinstance(binding_store.get_binding_store(), InMemoryBindingStore)
+
+
+def test_a_database_url_selects_postgres_without_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolving must not do I/O: a database that is briefly unreachable at
+    boot has to cost a failed request, not a failed deploy."""
+    monkeypatch.setattr(binding_store.settings, "database_url", DSN)
+
+    store = binding_store.get_binding_store()
+
+    assert isinstance(store, binding_store.PostgresBindingStore)
+    assert store._pool is None  # nothing dialled yet
+
+
+def test_the_store_is_resolved_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(binding_store.settings, "database_url", "")
+
+    assert binding_store.get_binding_store() is binding_store.get_binding_store()
+
+
+def test_the_resolver_is_not_lru_cached() -> None:
+    """ADR 0003 D1 forbids @lru_cache here, and this is the assertion that
+    keeps someone from "tidying" the global away: a cached resolver would pin
+    whichever store the first import resolved and silently ignore a later
+    DATABASE_URL — writing to memory while reporting success, which is exactly
+    the failure the abstraction exists to prevent."""
+    assert not hasattr(binding_store.get_binding_store, "cache_clear")
+    assert not hasattr(binding_store.get_binding_store, "cache_info")
+
+
+def test_a_database_url_that_arrives_later_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The behavioural half of the test above."""
+    monkeypatch.setattr(binding_store.settings, "database_url", "")
+    assert isinstance(binding_store.get_binding_store(), InMemoryBindingStore)
+
+    monkeypatch.setattr(binding_store.settings, "database_url", DSN)
+    asyncio.run(binding_store.close_binding_store())
+
+    assert isinstance(binding_store.get_binding_store(), binding_store.PostgresBindingStore)
+
+
+def test_close_releases_the_store_and_clears_the_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(binding_store.settings, "database_url", "")
+    first = binding_store.get_binding_store()
+    asyncio.run(first.put(AGENT, URL_ONE, OWNER))
+
+    asyncio.run(binding_store.close_binding_store())
+    second = binding_store.get_binding_store()
+
+    assert second is not first
+    assert asyncio.run(second.get(AGENT)) is None
+
+
+def test_close_is_a_no_op_when_nothing_was_ever_resolved() -> None:
+    """Lifespan shutdown calls this unconditionally, including on a process
+    that never served a bind."""
+    asyncio.run(binding_store.close_binding_store())
+
+    assert binding_store._store is None
+
+
+def test_the_choice_is_logged_but_the_dsn_never_is(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A DSN carries the database password; the log says which store was
+    chosen and nothing else."""
+    monkeypatch.setattr(binding_store.settings, "database_url", DSN)
+
+    with caplog.at_level(logging.INFO, logger=STORE_LOGGER):
+        binding_store.get_binding_store()
+
+    lines = _messages(caplog, STORE_LOGGER)
+    assert any("postgres" in m for m in lines)
+    assert not any("sup3rsecret" in m or DSN in m for m in lines)
+
+
+def test_the_in_memory_default_announces_that_it_loses_bindings(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-5 is false on this path, so a deployment running it must be able to
+    find that out from its own startup log rather than from a lost binding."""
+    monkeypatch.setattr(binding_store.settings, "database_url", "")
+
+    with caplog.at_level(logging.INFO, logger=STORE_LOGGER):
+        binding_store.get_binding_store()
+
+    lines = _messages(caplog, STORE_LOGGER)
+    assert any("in-memory" in m and "LOST on restart" in m for m in lines)
