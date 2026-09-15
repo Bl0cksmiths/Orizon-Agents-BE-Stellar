@@ -319,8 +319,42 @@ single-use credential and the signature is exactly the "signature material"
 `app/routers/stellar.py:529-531` refuses to record. Refusals log the **host and
 rule**, not the attacker-controlled full URL; only the accept path logs the URL.
 
-## Out of scope for 2.01 (stated so it is not assumed)
+## D5 — Making the binding actually route (added after the first pass)
 
-Wiring a bound agent into `get_worker` (`app/agents/registry.py:37-38`) so it
-actually executes. Without it "a binding survives a restart" is true and
-useless. Tracked separately; 2.01 delivers the binding, not the dispatch.
+Originally deferred, then closed inside 2.01 because AC-5's wording is "my
+binding should still be in effect **and my agent should still be dispatchable**"
+— persistence alone does not meet it.
+
+`app/services/binding_registry.py` answers the orchestrator's two different
+questions with two different mechanisms, which is the whole design:
+
+- **`resolve_worker` (async) — dispatch.** Reads the binding store, the source
+  of truth, so a rebind takes effect on the next step rather than whenever a
+  cache expires. Used by `execution_svc._run`.
+- **`is_dispatchable` (sync) — planning.** `orchestrator_svc` filters candidate
+  agents inside list comprehensions and cannot await. This is the part that
+  nearly got missed: wiring only the dispatch path would have left a bound
+  agent dispatchable and **never selected**, because three separate sites gated
+  routability on `get_worker(...) is not None`.
+
+Both fail **open**, unlike `resolve_owner`. Nothing here is an authorization
+decision — ownership was proved at bind time — so an unreadable store means a
+skipped step and a degraded workflow, never an escalation.
+
+The synchronous set is seeded at startup and added to on each bind. That is
+sufficient only because `render.yaml` pins `--workers 1`; a multi-worker
+deployment needs a periodic refresh, or a bind served by one worker stays
+unroutable on another. Stated in the module, and repeated here because it is
+the kind of assumption that outlives the comment recording it.
+
+**Not changed, deliberately:** a binding does not exempt an agent from the
+reputation floor. `fetch_reps` returns a `RepInfo` for every agent in state —
+on both its success and its timeout path — so a cold-start external agent is
+judged by the same arithmetic as a cold-start local one, and `passes_floor`'s
+`None` branch is unreachable from the real path. Two consequences were accepted
+rather than decided silently: a bound agent counts toward
+`_MIN_ROUTABLE_AGENTS` and can therefore suppress the floor-starvation
+fallback, and that fallback's sort key still falls back to self-declared
+`Agent.rep` for any agent missing from `reps` (unreachable in production, but
+now guarding a wider set). Changing either is a reputation-policy decision, not
+a routability one.
