@@ -21,6 +21,7 @@ and confirming `owner` against the live AgentRegistry are Epic 2.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import secrets
@@ -28,6 +29,10 @@ import time
 from collections import OrderedDict
 
 from stellar_sdk import Keypair
+
+from ..config import settings
+from ..stellar import cache as rcache
+from ..stellar import client as sc
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +140,100 @@ def _evict_one() -> None:
             )
     else:
         _evicting_live = False
+
+
+# The owner lookup gets its OWN cache namespace, `agentowner:{agent_id}`. It must
+# NEVER share `agent:{agent_id}` with read_agent/_agent_exists: that key is
+# fail-OPEN and publicly pollable through GET /api/stellar/agent/{id}, so sharing
+# it would let an attacker pre-warm the very cache this authorization decision
+# reads from. 3 s, not the 15 s the marketplace reads use, because within the TTL
+# a FORMER owner could still bind: the deployed AgentRegistry has no
+# ownership-transfer entrypoint so that is unreachable today, and the short TTL
+# is what stops the code from depending on that staying true (ADR 0003 D2).
+OWNER_CACHE_TTL_SECONDS = 3.0
+
+# Marks the RuntimeError sc.simulate_read raises when the CHAIN ANSWERED and the
+# host function failed — `owner_of` panics on an id the registry does not hold.
+# Every other exception (transport error, timeout, unloadable source account, no
+# source address configured) means no answer came back at all, which is a very
+# different thing and must not be read as "no such agent".
+_SIMULATE_ERROR_PREFIX = "simulate failed:"
+
+
+class OwnerLookupError(RuntimeError):
+    """The chain could not be read — NOT "this agent has no owner".
+
+    The router turns this into 503 `registry_unavailable`, never 404 and never
+    "unknown owner, allow": "chain unreachable" and "no such agent" are
+    different facts and the API has to say which one happened.
+    """
+
+
+def _describe(e: BaseException) -> str:
+    """Compact "Type: message" description (registry_sync's helper) — bare type
+    when there is no message, as asyncio.TimeoutError carries none."""
+    text = str(e)
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+
+async def resolve_owner(agent_id: str) -> str | None:
+    """The agent's owner G-address, read from the LIVE AgentRegistry. Returns
+    None only when the agent genuinely is not on chain; raises OwnerLookupError
+    when the chain could not be read.
+
+    One single-agent `AgentRegistry.owner_of` read — never a `list_ids` scan.
+
+    FAIL CLOSED, and note that this deliberately INVERTS this repo's convention.
+    Every other registry read here fails OPEN: `_agent_exists`
+    (app/routers/stellar.py:387-405) returns False on any exception, and
+    `agent_id_available` says outright that "the chain's AlreadyExists is the
+    real guard". That is correct THERE, because in each of those cases the chain
+    still guards the operation downstream, so a wrong answer only buys a
+    friendlier error message before a transaction fails. A binding has no
+    downstream chain guard at all: nothing is submitted, nothing is signed by
+    us, no contract re-checks anything — THIS READ IS THE AUTHORIZATION. Failing
+    open here would read "RPC degrades, therefore anyone may bind any agent to
+    any endpoint they control".
+
+    `state.agents[agent_id].owner` is deliberately NOT used, even though it is
+    already in memory and free. It is exactly the cached owner list AC-1 rules
+    out: up to 15 s stale by design, stale INDEFINITELY through an RPC outage
+    (the sync loop fails open and never dies), and None for seeded agents.
+    Reading it would be an authorization bug, not an optimization.
+    """
+    # Read the setting LIVE rather than through the lru_cached sc.contract_ids():
+    # that helper pins whatever id (or blank) it saw first for the life of the
+    # process, the reason registry_sync.py:18-22 already records. The hermetic
+    # suite forces this to "" (tests/conftest.py:44) — and with no registry
+    # there is nothing to authorize against, so an unset id is a closed failure
+    # rather than a free pass.
+    contract_id = settings.stellar_agent_registry
+    if not contract_id:
+        raise OwnerLookupError("AgentRegistry is not configured (STELLAR_AGENT_REGISTRY is unset)")
+
+    async def _fetch() -> str | None:
+        try:
+            owner = await asyncio.to_thread(sc.simulate_read, contract_id, "owner_of", [sc.sym(agent_id)])
+        except Exception as e:
+            if isinstance(e, RuntimeError) and str(e).startswith(_SIMULATE_ERROR_PREFIX):
+                return None  # the chain answered and owner_of failed: no such agent
+            raise OwnerLookupError(f"AgentRegistry.owner_of failed: {_describe(e)}") from e
+        if isinstance(owner, str) and owner:
+            return owner
+        # The read succeeded but produced no address. That is not an answer we
+        # can authorize against, so refuse rather than guess.
+        raise OwnerLookupError(f"AgentRegistry.owner_of returned no address (got {type(owner).__name__})")
+
+    try:
+        result = await rcache.get_or_set(f"agentowner:{agent_id}", OWNER_CACHE_TTL_SECONDS, _fetch)
+    except OwnerLookupError:
+        raise
+    except Exception as e:
+        # Whatever else the cache layer surfaces — including a negative-cache
+        # hit whose exception class could not be rebuilt — still means the
+        # owner is unknown, and unknown is a refusal.
+        raise OwnerLookupError(f"owner lookup failed: {_describe(e)}") from e
+    return result if isinstance(result, str) else None
 
 
 def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64: str) -> bool:
