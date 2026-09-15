@@ -23,6 +23,14 @@ Design notes, each deliberate:
   - Known ids are re-read every pass, not only new ones: an operator's
     on-chain reprice or delist must propagate to the marketplace — that is
     what makes story 1.08's delist real rather than cosmetic.
+  - What the chain reports is UNTRUSTED INPUT, not truth. Registration is
+    permissionless and the contract validates neither `name` nor `price`, so
+    the API bounds in `RegisterAgentReq` sit on the wrong side of the trust
+    boundary and a direct contract call never meets them. The mapper is
+    therefore the enforcement point: the name is clamped and neutralised, and
+    a price we could never settle is refused outright — and a refused record
+    DELISTS any copy an earlier pass indexed, so the re-read above cannot be
+    turned into a way to leave a stale believable price standing.
   - On-chain ids in the `agt_` namespace are SKIPPED: that namespace is the
     seeded catalog, and `state.add_agent` is an upsert, so indexing one would
     clobber a worker-backed agent with a chain record that has no worker.
@@ -107,6 +115,7 @@ _task: asyncio.Task | None = None
 # on-chain.
 _disabled_logged = False
 _skipped_agt_ids: set[str] = set()
+_refused_price_ids: set[str] = set()
 
 # True while the loop is inside a failing streak — flips the pass-failure
 # log level from WARNING (first failure) to DEBUG (consecutive), and arms
@@ -176,6 +185,35 @@ def _to_agent(raw: dict[str, Any]) -> Agent:
     )
 
 
+def _refuse_price(agent_id: str, reason: UnbelievablePrice) -> None:
+    """Keep a refused agent out of state, and DELIST one an earlier pass indexed.
+
+    Eviction is the point: known ids are re-read every pass, so without it an
+    operator could register at a believable price, wait to be indexed, then
+    reprice into the absurd — this pass would skip the upsert and leave the old
+    price standing as marketplace truth, which is precisely the stale mirror
+    the re-read exists to prevent. Only non-`agt_` ids reach here (the seeded
+    namespace is skipped before this point), so this can never delist a
+    worker-backed catalog agent.
+
+    Logged once per id, then at DEBUG — the `_skipped_agt_ids` discipline. A
+    15s loop against a permanently over-priced agent must not flood the log.
+    The wording is "refusing", not "failed": the record read back perfectly
+    well, we decline to believe what it says.
+    """
+    evicted = state.agents.pop(agent_id, None) is not None
+    if agent_id in _refused_price_ids:
+        logger.debug("registry sync: still refusing %r — %s", agent_id, reason)
+        return
+    _refused_price_ids.add(agent_id)
+    logger.warning(
+        "registry sync: refusing on-chain agent %r — %s; %s",
+        agent_id,
+        reason,
+        "delisted the record a previous pass indexed" if evicted else "not indexed",
+    )
+
+
 async def sync_once() -> int:
     """Run one full sync pass; returns the number of agents upserted.
 
@@ -210,10 +248,20 @@ async def sync_once() -> int:
                 continue
             try:
                 raw = await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
-                state.add_agent(_to_agent(raw))
-                synced += 1
+                agent = _to_agent(raw)
+            except UnbelievablePrice as e:
+                # Must precede the catch-all: UnbelievablePrice is a ValueError,
+                # and a refusal is a policy decision, not a read failure.
+                _refuse_price(agent_id, e)
+                continue
             except Exception as e:
                 logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+                continue
+            # Believable again after a refusal — re-arm the warning so an
+            # operator flip-flopping across the cap stays visible in the log.
+            _refused_price_ids.discard(agent_id)
+            state.add_agent(agent)
+            synced += 1
         return synced
 
 
