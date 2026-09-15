@@ -49,6 +49,7 @@ import ipaddress
 import json
 import logging
 import secrets
+import socket
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -78,6 +79,31 @@ class ExternalDispatchError(RuntimeError):
     """A step dispatched to an operator endpoint did not produce a usable
     result. Raised so execution_svc treats the step as failed — identical to a
     raising local worker: skipped, unbilled, the workflow degrades."""
+
+
+def _as_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address `host` denotes, or None if it is a name.
+
+    `ipaddress.ip_address` parses only the canonical dotted-quad, but the
+    resolver is far more permissive: getaddrinfo reads "2130706433", "127.1"
+    and "0177.0.0.1" as 127.0.0.1, and "2852039166" as the metadata service.
+    Parsed by ip_address alone, every one of those spellings falls through to
+    the hostname rules — which only know `localhost` — and is then handed to
+    the connect as the blocked address after all.
+
+    socket.inet_aton IS the resolver's own parser, so it recognises exactly the
+    spellings getaddrinfo would go on to honour: decimal, octal, hex and the
+    short a.b / a.b.c forms. A name that inet_aton accepts is all-numeric and
+    therefore cannot be a public FQDN, so nothing legitimate is caught here.
+    """
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except (OSError, ipaddress.AddressValueError):
+        return None  # a real name, not a literal in disguise
 
 
 def validate_endpoint_url(url: str) -> None:
