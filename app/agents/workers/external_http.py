@@ -126,18 +126,22 @@ def validate_endpoint_url(url: str) -> None:
       * a host must be present;
       * an IP literal must be publicly routable — private, loopback,
         link-local (which is what 169.254.169.254 is), reserved, multicast and
-        unspecified addresses are all refused, v4 and v6 alike;
-      * a hostname must not be a loopback name (`localhost`, `*.localhost`).
+        unspecified addresses are all refused, v4 and v6 alike. "IP literal"
+        means any spelling the RESOLVER treats as one, not just the canonical
+        dotted-quad — see _as_ip_literal;
+      * a hostname must not be a loopback name (`localhost`, `*.localhost`)
+        or a known cloud metadata name (`metadata.google.internal`, …).
 
     Raises ExternalDispatchError so a bad binding fails its step like any other
     dispatch failure rather than crashing the run loop.
 
-    Deliberately NOT covered: this validates the URL as written. A hostname
-    that RESOLVES into a blocked range (including DNS rebinding between this
-    check and the connect) still gets through — closing that needs
-    resolve-then-pin at socket level, which belongs with operator endpoint
-    binding in Epic 2. Redirects cannot launder the check because we never
-    follow them (see _dispatch).
+    Deliberately NOT covered: this validates the URL as written, so an ordinary
+    name that RESOLVES into a blocked range still gets through — the metadata
+    names above are a hand-listed floor, not a general answer, and DNS
+    rebinding between this check and the connect is untouched. Closing that
+    needs resolve-then-pin at socket level, which belongs with operator
+    endpoint binding in Epic 2. Redirects cannot launder the check because we
+    never follow them (see _dispatch).
     """
     try:
         parts = urlsplit(url)
