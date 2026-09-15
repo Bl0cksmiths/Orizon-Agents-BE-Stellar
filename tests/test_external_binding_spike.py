@@ -15,6 +15,7 @@ old bare-nonce format no longer verifies at all.
 from __future__ import annotations
 
 import base64
+import hashlib
 
 from stellar_sdk import Keypair
 
@@ -208,3 +209,75 @@ def test_eviction_drops_expired_challenges_before_live_ones() -> None:
     finally:
         eb._challenges.clear()
         eb._challenges.update(saved)
+
+
+# ── SEP-53: what a real wallet actually signs ────────────────────────────
+SEP53_PREFIX = b"Stellar Signed Message:\n"
+
+
+def _sign_sep53(kp: Keypair, message: str) -> str:
+    """What Freighter produces through StellarWalletsKit's signMessage: base64
+    of the ed25519 signature over sha256(prefix + message).
+
+    Built from the SEP-53 spec by hand rather than from Keypair.sign_message, so
+    these tests prove the wire format the browser will send instead of proving
+    only that the SDK agrees with itself.
+    """
+    digest = hashlib.sha256(SEP53_PREFIX + message.encode("utf-8")).digest()
+    return base64.b64encode(kp.sign(digest)).decode("ascii")
+
+
+def test_hand_built_sep53_payload_matches_the_sdk_framing() -> None:
+    # verify_challenge accepts the SEP-53 form via Keypair.verify_message. If
+    # the SDK's framing ever moved, real wallet signatures would silently stop
+    # verifying — this pins the spec construction and the SDK's to each other.
+    kp = Keypair.random()
+    message = binding_message("ext_k", ENDPOINT, "cafe")
+    assert base64.b64decode(_sign_sep53(kp, message)) == kp.sign_message(message)
+
+
+def test_sep53_signed_message_binds_and_is_single_use() -> None:
+    owner = Keypair.random()
+    nonce, _ = issue_challenge("ext_l", ENDPOINT)
+    sig = _sign_sep53(owner, binding_message("ext_l", ENDPOINT, nonce))
+
+    assert verify_challenge("ext_l", ENDPOINT, owner.public_key, sig) is True
+    assert verify_challenge("ext_l", ENDPOINT, owner.public_key, sig) is False
+
+
+def test_both_signing_encodings_of_the_same_message_are_accepted() -> None:
+    """Wallets disagree on what "sign a message" means; a raw-bytes wallet and a
+    SEP-53 wallet must both be able to complete a bind."""
+    owner = Keypair.random()
+    raw_nonce, _ = issue_challenge("ext_m", ENDPOINT)
+    sep_nonce, _ = issue_challenge("ext_n", ENDPOINT)
+
+    raw_sig = _sign(owner, binding_message("ext_m", ENDPOINT, raw_nonce))
+    sep_sig = _sign_sep53(owner, binding_message("ext_n", ENDPOINT, sep_nonce))
+    assert verify_challenge("ext_m", ENDPOINT, owner.public_key, raw_sig) is True
+    assert verify_challenge("ext_n", ENDPOINT, owner.public_key, sep_sig) is True
+
+
+def test_sep53_framing_does_not_widen_what_counts_as_authorized() -> None:
+    """Two accepted encodings must not become two ways in.
+
+    Neither the old bare-nonce format, nor a signature made for another
+    endpoint, nor one from another wallet may pass just because it arrives
+    SEP-53 framed — and none of those failures may burn the live nonce.
+    """
+    owner = Keypair.random()
+    attacker = Keypair.random()
+    nonce, _ = issue_challenge("ext_o", ENDPOINT)
+
+    # the 1.06 bare-nonce format, SEP-53 framed
+    assert verify_challenge("ext_o", ENDPOINT, owner.public_key, _sign_sep53(owner, nonce)) is False
+    # the owner's own signature, but made for a different endpoint
+    for_other = _sign_sep53(owner, binding_message("ext_o", OTHER_ENDPOINT, nonce))
+    assert verify_challenge("ext_o", ENDPOINT, owner.public_key, for_other) is False
+    # a correctly-formed signature from a wallet that does not own the agent
+    from_attacker = _sign_sep53(attacker, binding_message("ext_o", ENDPOINT, nonce))
+    assert verify_challenge("ext_o", ENDPOINT, owner.public_key, from_attacker) is False
+
+    # none of that consumed the nonce — the real owner can still bind
+    good = _sign_sep53(owner, binding_message("ext_o", ENDPOINT, nonce))
+    assert verify_challenge("ext_o", ENDPOINT, owner.public_key, good) is True
