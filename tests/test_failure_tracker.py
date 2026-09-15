@@ -191,3 +191,57 @@ def test_every_agent_gets_its_own_first_failure_warning(caplog):
     warnings = _records(caplog, logging.WARNING)
     assert len(warnings) == 2
     assert [w.getMessage().split()[1] for w in warnings] == ["ext_alpha", "ext_beta"]
+
+
+# ── recovery ────────────────────────────────────────────────────
+
+
+def test_recovery_logs_exactly_one_info_carrying_the_streak_it_ended(caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for _ in range(3):
+            record_failure("ext_alpha", "connect_failed")
+        record_success("ext_alpha")
+
+    infos = _records(caplog, logging.INFO)
+    assert len(infos) == 1
+    recovered = infos[0].getMessage()
+    assert "ext_alpha" in recovered
+    # The length and the last class are what make the line worth reading: they
+    # say how bad it was and what it was doing, without a second grep.
+    assert "3 consecutive" in recovered
+    assert "connect_failed" in recovered
+
+
+def test_a_success_for_a_healthy_agent_says_nothing(caplog):
+    # Every successful step calls this. An INFO here would be one line per
+    # step per agent forever — a worse flood than the one being fixed.
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        for _ in range(5):
+            record_success("ext_alpha")
+
+    assert _messages(caplog) == []
+
+
+def test_recovery_re_arms_the_warning_so_a_flapping_agent_stays_visible(caplog):
+    # registry_sync's discipline: coalescing must not swallow the SECOND
+    # outage. An agent that fails, recovers, and fails again is two incidents.
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_failure("ext_alpha", "connect_failed")
+        record_success("ext_alpha")
+        record_failure("ext_alpha", "connect_failed")
+
+    assert len(_records(caplog, logging.WARNING)) == 2
+    assert len(_records(caplog, logging.INFO)) == 1
+
+
+def test_a_class_reported_before_a_recovery_is_reported_again_after_it(caplog):
+    # `seen` dies with the streak: the same class in a NEW outage is news
+    # again, otherwise a long-lived process would go quiet about a recurring
+    # failure mode it had already reported once hours earlier.
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        record_failure("ext_alpha", "connect_failed")
+        record_failure("ext_alpha", "http_status")
+        record_success("ext_alpha")
+        record_failure("ext_alpha", "http_status")
+
+    assert len(_records(caplog, logging.WARNING)) == 3
