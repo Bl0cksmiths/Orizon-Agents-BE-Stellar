@@ -7,13 +7,13 @@ import secrets
 from typing import Any
 
 from ..agents.orchestrator import orchestrator_agent
-from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_user_input
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from ..state import state
 from . import reputation_svc
+from .binding_registry import is_dispatchable
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +113,13 @@ def _floor_substitute(
     taken: set[str],
 ) -> Agent | None:
     """Deterministically pick a floor-clearing replacement for a sub-floor kit
-    agent: worker-backed, OFF the kit pipeline, sharing >=1 skill, not already
+    agent: dispatchable, OFF the kit pipeline, sharing >=1 skill, not already
     used in this plan. Highest smoothed score wins, id breaks ties — a pure
     function of the reputation snapshot, so the plan stays reproducible.
+
+    "Dispatchable" is a local worker OR a bound external endpoint (story 2.01).
+    The floor is unchanged and still applied here: a bound agent stands in for
+    a sub-floor kit agent only if it clears the floor on the same arithmetic.
     """
     wanted = set(designated.skills)
     candidates = [
@@ -123,7 +127,7 @@ def _floor_substitute(
         for a in state.list_agents()
         if a.id not in taken
         and a.id not in _KIT_AGENT_IDS
-        and get_worker(a.id) is not None
+        and is_dispatchable(a.id)
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
     ]
@@ -139,11 +143,12 @@ def _floor_substitute(
 
 
 def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
-    # Indexed on-chain agents (story 1.02) have no local worker until Epic 2
-    # lands — they must be marketplace-visible but never planner-routable, and
-    # the filter sits on the assignment so the floor-starvation fallback below
-    # (which sorts this list, not `routable`) can never admit one either.
-    agents = [a for a in state.list_agents() if get_worker(a.id) is not None]
+    # An indexed on-chain agent (story 1.02) is marketplace-visible but only
+    # planner-routable once an operator binds it an endpoint (story 2.01) —
+    # until then it has nothing to execute a step with. The filter sits on the
+    # assignment so the floor-starvation fallback below (which sorts this list,
+    # not `routable`) can never admit an unbound one either.
+    agents = [a for a in state.list_agents() if is_dispatchable(a.id)]
     routable = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
     if len(routable) < _MIN_ROUTABLE_AGENTS:
         logger.warning(
@@ -338,11 +343,12 @@ async def decompose(intent: str) -> DecomposeResponse:
     cleaned: list[PlanStep] = []
     for step in plan.steps:
         agent = state.agents.get(step.agent_id)
-        if not agent or get_worker(agent.id) is None:
+        if not agent or not is_dispatchable(agent.id):
             # Drop unknown ids silently — the model sometimes invents — or
-            # names an indexed agent with no local worker — dropping it here
-            # means /execute can never reach the unknown-agent skip path for
-            # a planned step.
+            # names an indexed agent that nothing can execute: no local worker
+            # and no operator binding. Dropping it here means /execute can
+            # never reach the unknown-agent skip path for a planned step. A
+            # bound external agent survives this filter, which is the point.
             continue
         cleaned.append(
             PlanStep(
