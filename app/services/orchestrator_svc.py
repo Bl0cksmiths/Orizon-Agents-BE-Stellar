@@ -7,7 +7,6 @@ import secrets
 from typing import Any
 
 from ..agents.orchestrator import orchestrator_agent
-from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_user_input
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
@@ -344,11 +343,12 @@ async def decompose(intent: str) -> DecomposeResponse:
     cleaned: list[PlanStep] = []
     for step in plan.steps:
         agent = state.agents.get(step.agent_id)
-        if not agent or get_worker(agent.id) is None:
+        if not agent or not is_dispatchable(agent.id):
             # Drop unknown ids silently — the model sometimes invents — or
-            # names an indexed agent with no local worker — dropping it here
-            # means /execute can never reach the unknown-agent skip path for
-            # a planned step.
+            # names an indexed agent that nothing can execute: no local worker
+            # and no operator binding. Dropping it here means /execute can
+            # never reach the unknown-agent skip path for a planned step. A
+            # bound external agent survives this filter, which is the point.
             continue
         cleaned.append(
             PlanStep(
