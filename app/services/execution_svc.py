@@ -13,6 +13,7 @@ from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
+from . import failure_tracker
 from .binding_registry import resolve_worker
 
 logger = logging.getLogger(__name__)
@@ -308,7 +309,20 @@ async def _run(
                 )
                 # Trace lines are world-readable when TASK_AUTH_REQUIRED is
                 # off — the raw exception text stays in the server log above.
-                await _emit(task_id, start, "error", f"{worker.name} failed")
+                # The CLASS is safe to surface and is the whole point: twelve
+                # distinct failures used to render as this one line, so an
+                # operator could not tell "you are down" from "you are slow"
+                # from "your body is the wrong shape" — three different fixes.
+                #
+                # Read duck-typed, not by importing a worker's module: the run
+                # loop stays worker-agnostic, an unclassified exception falls
+                # back to a generic token rather than crashing the classifier,
+                # and a future worker classifies itself for free. Same shape as
+                # pdax.errors.orizon_code's default (ADR 0005).
+                rule = getattr(e, "rule", None)
+                rule = rule if isinstance(rule, str) and rule else "unclassified"
+                failure_tracker.record_failure(step.agent_id, rule)
+                await _emit(task_id, start, "error", f"{worker.name} failed ({rule})")
                 continue
 
             if not isinstance(output, dict):
@@ -348,6 +362,9 @@ async def _run(
 
             succeeded += 1
             spent += step.est_price_usdc
+            # Clears the streak and emits one recovery INFO, so an endpoint that
+            # comes back is as visible in Render as one that broke.
+            failure_tracker.record_success(step.agent_id)
             if not onchain:
                 await _emit(
                     task_id,
