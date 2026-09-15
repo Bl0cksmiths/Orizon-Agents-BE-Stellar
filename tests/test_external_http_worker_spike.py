@@ -89,8 +89,11 @@ def test_dispatch_carries_the_envelope_and_returns_the_output() -> None:
 def test_orchestrator_accepts_the_external_dispatch_response(monkeypatch: pytest.MonkeyPatch) -> None:
     # The whole point of the spike: a step routed to an EXTERNAL agent id — one
     # with no local worker — is dispatched over HTTP and its response flows back
-    # through execution_svc._run as a completed, billed step. Today that same id
-    # hits the `unknown agent` skip at execution_svc._run:161 and earns nothing.
+    # through execution_svc._run as a completed, billed step. This test proves
+    # the worker end by injecting it directly; story 2.01 since closed the other
+    # end, so a BOUND id now resolves through binding_registry.resolve_worker
+    # instead of hitting the `unknown agent` skip. An unbound id still skips —
+    # see tests/test_external_agent_dispatch.py for both paths end to end.
     app = FastAPI()
 
     @app.post("/run")
