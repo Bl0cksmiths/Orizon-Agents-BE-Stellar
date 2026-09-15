@@ -50,6 +50,9 @@ class Credit:
     source: str | None
     amount: str
     asset: str
+    # Whether the word "USDC" may be used for this payout at all. Carried on the
+    # record so the decision is made once, from the ledger's asset code.
+    is_usdc: bool
     # Which Horizon record proved it, so a reviewer can re-fetch the same one.
     evidence: str
 
@@ -76,6 +79,13 @@ def _asset_label(record: dict[str, Any]) -> str:
     return str(record.get("asset_type") or "unknown asset")
 
 
+def _is_usdc(record: dict[str, Any]) -> bool:
+    """Whether the asset that moved is USDC — i.e. whether the ledger's own
+    asset code says so. The issuer is printed alongside the code so a reviewer
+    can check WHICH USDC; this decides only whether the word may appear."""
+    return record.get("asset_code") == "USDC"
+
+
 def find_credit_in_operations(operations: list[dict[str, Any]], owner: str) -> Credit | None:
     """Look for the credit in `asset_balance_changes` on the transaction's
     operations — how Horizon reports a Soroban SAC transfer, and the only place
@@ -89,6 +99,7 @@ def find_credit_in_operations(operations: list[dict[str, Any]], owner: str) -> C
                 source=change.get("from"),
                 amount=str(change.get("amount", "")),
                 asset=_asset_label(change),
+                is_usdc=_is_usdc(change),
                 evidence=f"asset_balance_changes on operation {op.get('id')} ({op.get('type')})",
             )
     return None
@@ -114,6 +125,7 @@ def find_credit_in_effects(effects: list[dict[str, Any]], owner: str) -> Credit 
             source=source,
             amount=amount,
             asset=_asset_label(effect),
+            is_usdc=_is_usdc(effect),
             evidence=f"account_credited effect {effect.get('id')}",
         )
     return None
@@ -143,6 +155,50 @@ def check_owner_credited(credit: Credit | None, owner: str, expected_amount: flo
         amount_detail = f"credited {credit.amount}, expected {expected_amount}"
     checks.append(Check("credited_amount", matches, amount_detail))
     return checks
+
+
+def _normalise_network(name: str) -> str:
+    """Horizon and Stellar Expert say `public`; our config says `mainnet`."""
+    lowered = name.strip().lower()
+    return "public" if lowered in {"mainnet", "public"} else lowered
+
+
+def check_network_config(config: dict[str, Any], network: str) -> list[Check]:
+    """Verify `GET /api/stellar/network` describes the SAME network the
+    transaction was read from.
+
+    A report that reads the asset off a mainnet deployment while reading the
+    transaction off testnet Horizon is not evidence — it is a mismatch that
+    happens to print. The asset disclosure below is only meaningful once this
+    passes.
+    """
+    configured = str(config.get("network") or "")
+    matches = _normalise_network(configured) == _normalise_network(network)
+    if matches:
+        detail = f"API network {configured!r} matches --network {network!r}"
+    else:
+        detail = f"API is on {configured!r} but the tx was read from {network!r} Horizon"
+    return [Check("network_matches", matches, detail)]
+
+
+def asset_lines(config: dict[str, Any], credit: Credit | None) -> list[str]:
+    """The honest-asset block, following 4.01's precedent.
+
+    Prints what the configured SAC actually is and what this particular credit
+    actually moved. On testnet the SAC wraps the native asset, so the payout is
+    XLM; the story's acceptance criterion says USDC, and the gap between those
+    two is exactly what this block exists to make impossible to miss.
+    """
+    lines = [
+        f"  asset SAC (configured):   {config.get('asset_sac') or '-'}",
+        f"  asset (API reports):      {config.get('asset') or '-'}",
+    ]
+    if credit is None:
+        return lines
+    lines.append(f"  asset (this credit):      {credit.asset}")
+    if not credit.is_usdc:
+        lines.append("  ^ NOT USDC. Label this payout with the asset above — never as USDC.")
+    return lines
 
 
 def _horizon_base(network: str) -> str:
@@ -245,6 +301,20 @@ def main() -> int:
     base = args.api_base.rstrip("/")
 
     with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+        config: dict[str, Any] = {}
+        network_resp = client.get(f"{base}/api/stellar/network")
+        if network_resp.status_code != 200:
+            # Without this the asset cannot be reported honestly, and an
+            # unlabelled payout is not evidence — so it is a failed check, not
+            # a skipped one.
+            checks.append(
+                Check("network_config_read", False, f"/api/stellar/network returned {network_resp.status_code}")
+            )
+        else:
+            config = network_resp.json()
+            checks.append(Check("network_config_read", True, f"asset SAC {config.get('asset_sac') or '-'}"))
+            checks.extend(check_network_config(config, args.network))
+
         agent_resp = client.get(f"{base}/api/stellar/agent/{args.agent}")
         if agent_resp.status_code != 200:
             checks.append(
@@ -280,6 +350,10 @@ def main() -> int:
     print(f"\nExternal settlement evidence — agent {args.agent} - tx {args.tx[:12]}...\n")
     for c in checks:
         print(f"  [{'PASS' if c.ok else 'FAIL'}] {c.name}: {c.detail}")
+
+    print()
+    for line in asset_lines(config, credit):
+        print(line)
 
     print(f"\n  stellar.expert (tx):      {_expert('tx', args.tx, args.network)}")
     print(f"  stellar.expert (account): {_expert('account', args.owner, args.network)}")
