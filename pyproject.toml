@@ -2,6 +2,18 @@
 # and pytest keeps its config in pytest.ini.
 [tool.ruff]
 line-length = 120
+# Ruff formats Python fenced in Markdown, and CI runs `ruff format --check .`
+# over the whole tree. That is wrong for these files. `docs/decisions/*` and the
+# operator guides carry ILLUSTRATIVE pseudo-Python — interface sketches with
+# column-aligned trailing comments, and `def f() -> None: ...` stubs whose
+# explanatory comment sits under the ellipsis. The formatter de-indents those
+# continuation comments to column 0, detaching them from what they annotate,
+# and expands the stubs so the comment lands after the body instead of
+# describing it. The alignment IS the content in a spec document, so the fix is
+# to leave them alone rather than to accept a worse document to satisfy a check.
+# Lint still covers them; only the formatter is excluded.
+[tool.ruff.format]
+exclude = ["docs/**/*.md"]
 
 [tool.mypy]
 python_version = "3.12"
