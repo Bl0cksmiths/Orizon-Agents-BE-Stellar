@@ -249,3 +249,36 @@ def test_both_paths_report_the_configured_floor(seeded: object, monkeypatch: pyt
         # exclusion never has to reach back to the envelope to find the floor.
         assert [n.floor_bps for n in kit.notices] == [floor]
         assert [n.floor_bps for n in free_form.notices] == [floor]
+
+
+def test_unpicked_agents_are_not_reported_as_excluded(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-3. Not being chosen is not an exclusion.
+
+    The whole point of a notice is that it is rare enough to read. A registry
+    of twelve agents produces a plan of one to six, so reporting "everyone we
+    didn't hire" would put five to eleven lines on every single plan card and
+    bury the one line that says an agent failed the trust gate. Product rules
+    forbid it, and `not_selected_by_planner` is deliberately not in the reason
+    vocabulary — this test is what stops it being reintroduced by behaviour
+    instead of by a Literal.
+    """
+    # Every agent well clear of the floor: nothing here is a floor action.
+    reps = {a.id: _clears_floor(a.id) for a in state.list_agents()}
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
+
+    # Both plans genuinely left agents on the table — otherwise there is
+    # nothing to under-report and the assertions below are vacuous.
+    assert len(kit.steps) < len(state.agents)
+    assert len(free_form.steps) == 1
+
+    assert [n.agent_id for n in kit.notices] == []
+    assert [n.agent_id for n in free_form.notices] == []
+
+    # Named explicitly because agt_04m1 (sol-audit) is dispatchable, clears
+    # the floor, and is on neither plan — the exact shape of agent a
+    # list-everything implementation would report.
+    for resp in (kit, free_form):
+        assert "agt_04m1" not in [s.agent_id for s in resp.steps]
+        assert not any(n.reason_code == "below_floor" for n in resp.notices)
