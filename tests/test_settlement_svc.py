@@ -175,6 +175,11 @@ def _reader(
     auth_errors = auth_errors or {}
 
     def fake_read(contract_id: str, function_name: str, args: Any = None, source: Any = None) -> Any:
+        if function_name == "list_ids":
+            # Not the service's read — the 1.02 registry-sync loop's. Served
+            # (as an empty registry) rather than refused, so the loop finds
+            # nothing to do instead of retrying against the real network.
+            return []
         if function_name == "owner_of":
             if isinstance(owner, BaseException):
                 raise owner
@@ -205,7 +210,7 @@ def _reader(
 
 
 @pytest.fixture(autouse=True)
-def configured(hermetic_settings: Any) -> Any:
+def configured(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Point the service at fake contract ids and give it an empty cache.
 
     conftest blanks the registry id and never touches the escrow or SAC ids, so
@@ -213,6 +218,13 @@ def configured(hermetic_settings: Any) -> Any:
     contracts. All three are pinned here and restored afterwards.
     """
     rcache.clear()
+    # Putting a registry id back re-arms the 1.02 sync loop, which every
+    # TestClient starts from lifespan and which reads `list_ids` the instant it
+    # does — before any test body has had a chance to patch anything. That read
+    # went to the real testnet RPC. This fixture is autouse, so installing a
+    # stand-in reader here puts it in place BEFORE the `client` fixture runs;
+    # tests that need their own reader override it afterwards.
+    monkeypatch.setattr(sc, "simulate_read", _reader())
     saved = (settings.stellar_payment_escrow, settings.stellar_asset_sac)
     settings.stellar_agent_registry = REGISTRY_ID
     settings.stellar_payment_escrow = ESCROW_ID
