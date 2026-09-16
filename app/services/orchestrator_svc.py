@@ -536,12 +536,22 @@ async def decompose(intent: str) -> DecomposeResponse:
     cleaned: list[PlanStep] = []
     for step in plan.steps:
         agent = state.agents.get(step.agent_id)
-        if not agent or not is_dispatchable(agent.id):
+        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
             # Drop unknown ids silently — the model sometimes invents — or
             # names an indexed agent that nothing can execute: no local worker
             # and no operator binding. Dropping it here means /execute can
             # never reach the unknown-agent skip path for a planned step. A
             # bound external agent survives this filter, which is the point.
+            #
+            # `_is_listed` is repeated here rather than trusted from the
+            # AVAILABLE_AGENTS block, because the block is what the planner was
+            # SHOWN and this is what the planner RETURNED, and the two are not
+            # the same set. The model can name an agent it saw in an earlier
+            # turn, or invent an id that happens to belong to a real withdrawn
+            # agent; either way the step survives the `state.agents` lookup, and
+            # this is the last gate before it is stored and later dispatched.
+            # A delisted agent reaching /execute is the whole bug, so the
+            # cheapest place to be sure is the point of use.
             continue
         cleaned.append(
             PlanStep(
@@ -555,7 +565,11 @@ async def decompose(intent: str) -> DecomposeResponse:
         )
 
     if not cleaned:
-        # Fall back to a minimal safe plan so the UI never gets stuck.
+        # Fall back to a minimal safe plan so the UI never gets stuck. No
+        # listing check: `agt_01h8` is seeded, `seed.py` ships it "online", and
+        # registry_sync skips the whole `agt_` namespace — so no on-chain
+        # `set_active` call can reach it. A guard here would be a branch for a
+        # state that has no producer.
         copy_agent = state.agents["agt_01h8"]
         cleaned = [
             PlanStep(
