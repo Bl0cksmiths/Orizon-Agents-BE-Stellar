@@ -39,7 +39,7 @@ import pytest
 
 from app.config import settings
 from app.demo_kits import detect_kit
-from app.schemas import DecomposeResponse, Plan, PlanStep
+from app.schemas import DecomposeResponse, Plan, PlanFloorNotice, PlanStep
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
@@ -282,3 +282,92 @@ def test_unpicked_agents_are_not_reported_as_excluded(seeded: object, monkeypatc
     for resp in (kit, free_form):
         assert "agt_04m1" not in [s.agent_id for s in resp.steps]
         assert not any(n.reason_code == "below_floor" for n in resp.notices)
+
+
+def test_pre_3_02_payloads_still_validate() -> None:
+    """AC-5. Every field this story adds is optional, at the model level.
+
+    `DecomposeResponse` is not only a response shape — it is parsed back from
+    stored and forwarded payloads, and the FE and the integration guide both
+    build it. If any 3.02 field became required, every plan written before
+    this deploy would stop validating on read, which is a data outage dressed
+    up as a schema change.
+    """
+    # Exactly the fields that existed before 3.02, nothing more.
+    notice = PlanFloorNotice(kind="excluded", agent_id="agt_02k2", reason="below routing floor")
+    assert notice.reason_code == "below_floor"  # the only action the old code took
+    assert notice.lower_bound_bps is None
+    assert notice.floor_bps == 0
+
+    resp = DecomposeResponse(
+        plan_id="pln_0000",
+        intent="write a launch announcement",
+        steps=[],
+        total_usdc=0.0,
+        total_eta=0.0,
+    )
+    assert resp.notices == []
+    assert resp.floor_bps == 0
+    assert resp.reputation_degraded is False
+
+    # The new keys are PRESENT in the serialized payload with their defaults.
+    # A client reading `floor_bps` off an old plan gets 0, never a missing key.
+    dumped = resp.model_dump()
+    assert dumped["floor_bps"] == 0
+    assert dumped["reputation_degraded"] is False
+    assert dumped["notices"] == []
+
+
+def test_full_payload_round_trips_unchanged() -> None:
+    """AC-5. Dump and reparse is lossless, including every 3.02 field.
+
+    The plan a buyer authorizes is serialized, stored, and read back before it
+    is executed. A field that survives the response but not the round trip
+    means the exclusion a buyer saw is not the exclusion the system later
+    believes it showed them — and that is the record a dispute is judged on.
+    """
+    original = DecomposeResponse(
+        plan_id="pln_beef",
+        intent="tetris game in html",
+        steps=[
+            PlanStep(
+                agent_id="agt_01h8",
+                agent_name="copywrite.v3",
+                rationale="stand in for the sub-floor brief agent",
+                est_price_usdc=0.012,
+                est_eta_seconds=0.5,
+                rep_bps=7000,
+                rep_source="onchain",
+                substituted_for="agt_05x7",
+                degraded=False,
+            )
+        ],
+        total_usdc=0.012,
+        total_eta=0.5,
+        notices=[
+            PlanFloorNotice(
+                kind="substituted",
+                agent_id="agt_05x7",
+                agent_name="seo.brief",
+                replacement_id="agt_01h8",
+                replacement_name="copywrite.v3",
+                reason="below routing floor (100 < 5500 bps)",
+                reason_code="below_floor",
+                lower_bound_bps=100,
+                floor_bps=5500,
+            ),
+            PlanFloorNotice(
+                kind="degraded",
+                agent_id="agt_09l5",
+                agent_name="research.pro",
+                reason="re-admitted below the floor to keep the plan workable",
+                reason_code="floor_relaxed",
+                lower_bound_bps=4900,
+                floor_bps=5500,
+            ),
+        ],
+        floor_bps=5500,
+        reputation_degraded=True,
+    )
+
+    assert DecomposeResponse.model_validate(original.model_dump()) == original
