@@ -146,6 +146,49 @@ def test_partial_batch_names_only_the_failed_agents(ledger_configured, monkeypat
     assert "agt_good" not in messages[0]
 
 
+def test_cold_start_and_failed_read_are_told_apart_only_by_degraded(ledger_configured, monkeypatch, caplog):
+    """The pair that genuinely looks alike: a never-rated agent and an agent
+    whose read failed BOTH report source="prior", so `degraded` is the only
+    thing separating "nobody has rated this one yet" from "we could not ask".
+    Comparing a degraded read against a RATED agent instead — onchain vs
+    prior — is exactly what hid the fail-open behaviour originally, because
+    the two states that collide were never put side by side. If this stops
+    holding, an operator reading the dashboard sees a newcomer and an
+    unreachable ledger as the same thing, and the outage warning starts
+    naming cold starts: a permissionless newcomer would page whoever is
+    on call, which trains them to ignore the line that matters.
+    """
+
+    async def flaky(key: str, ttl_seconds: float, producer):
+        if key.endswith("unread"):
+            raise RuntimeError("rpc down")
+        # A READABLE ledger holding no evidence — the real cold-start path
+        # (_info_from_state returns _prior_info when count and weight are 0),
+        # not a missing entry, which would take the failure branch instead.
+        return {"sum_w": 0, "weight": 0, "count": 0, "disputed": 0}
+
+    monkeypatch.setattr(rcache, "get_or_set", flaky)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        infos = asyncio.run(rep.fetch_reps(["agt_cold", "agt_unread"]))
+
+    cold, unread = infos["agt_cold"], infos["agt_unread"]
+    assert cold.source == "prior"
+    assert unread.source == "prior"
+    assert cold.degraded is False
+    assert unread.degraded is True
+    # And nothing else tells them apart: identical prior score, identical
+    # routing verdict. `degraded` carries the whole distinction.
+    assert cold.model_dump(exclude={"agent_id", "degraded"}) == unread.model_dump(exclude={"agent_id", "degraded"})
+    assert rep.passes_floor(cold) == rep.passes_floor(unread)
+
+    messages = _messages(caplog)
+    assert len(messages) == 1
+    assert "1/2 agents" in messages[0]
+    assert "agt_unread" in messages[0]
+    assert "agt_cold" not in messages[0], "a cold start is not an outage and must never be named as one"
+
+
 def test_degradation_warning_caps_the_named_agents(ledger_configured, monkeypatch, caplog):
     """The batch is the whole registry; the line still has to be readable."""
     monkeypatch.setattr(rcache, "get_or_set", _raising(RuntimeError("rpc down")))
