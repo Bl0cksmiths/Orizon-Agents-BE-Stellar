@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..security import require_api_key
-from ..services import registry_sync, reputation_svc
+from ..services import registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
 from ..stellar import cache as rcache
@@ -363,6 +363,23 @@ async def read_attestation(job_id_hex: str = Path(..., pattern=JOB_ID_HEX_PATTER
         # The RPC layer logs the underlying failure with its own timing.
         logger.warning("attestation read failed for %s: %s", job_id_hex, e)
         raise HTTPException(400, "attestation_read_failed") from e
+
+
+@router.get("/settlement/{agent_id}", response_model=SettlementEvidence)
+async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> SettlementEvidence:
+    """On-chain settlement evidence for one agent: every `charged` event Soroban
+    RPC still holds for it, with the platform's own payments separated out.
+
+    Deliberately never 5xx, unlike the reads above. A scan that could not run
+    answers 200 with `unavailable` set and no entries, because the dashboard
+    has to be able to say WHY it is showing nothing — a 404 or a 503 here would
+    leave it with an empty state indistinguishable from "this agent has never
+    been paid". For the same reason an empty `entries` with `unavailable` null
+    means "nothing inside `window_days`", and `total_stroops` counts only
+    charges proven to have come from someone other than us.
+    """
+    evidence = await settlement_svc.fetch_settlement(agent_id)
+    return SettlementEvidence(**evidence.model_dump())
 
 
 # ── writes (user signs via Freighter) ───────────────────────────
