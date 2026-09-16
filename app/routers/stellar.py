@@ -106,6 +106,42 @@ class AttestationRead(BaseModel):
     attestation: Any
 
 
+class SettlementEntry(BaseModel):
+    """One on-chain `charged` event (mirror of settlement_svc.SettlementEntry)."""
+
+    job_id: str  # hex, 16 bytes
+    auth_id: str  # hex, 16 bytes
+    amount_stroops: int  # 7-decimal units of the enclosing payload's `asset`
+    ledger: int  # the ledger that closed the charge — the explorer anchor
+    at: str | None  # ISO-8601 ledger close time
+    payer: str  # G… address, or "unknown" when the authorization was unreadable
+    # True when this is not third-party revenue: the agent's own owner paid, the
+    # platform's settler paid, or the payer could not be established at all.
+    self_payment: bool
+
+
+class SettlementEvidence(BaseModel):
+    """What the chain says one agent has been paid, and the limits of the look.
+
+    Mirror of settlement_svc.SettlementEvidence. Three fields are load-bearing
+    and must not be dropped by a client: `window_days` (an empty `entries` only
+    ever means "nothing in this window", never "never paid"), `unavailable`
+    (set when no scan happened, which is a different fact from zero earnings),
+    and `self_payment_stroops` (charges excluded from the total because the
+    platform — or an unidentifiable payer — funded them).
+    """
+
+    agent_id: str
+    asset: str  # what the escrow's SAC wraps; "native" (XLM) on testnet
+    window_days: float
+    scanned_ledgers: int
+    entries: list[SettlementEntry]
+    total_stroops: int  # sum of entries with self_payment False
+    self_payment_stroops: int  # sum of the excluded ones: reported, not hidden
+    truncated: bool
+    unavailable: str | None
+
+
 class XdrResponse(BaseModel):
     xdr: str
 
