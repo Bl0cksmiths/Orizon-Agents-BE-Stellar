@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from ..agents.registry import get_worker
+from ..agents.workers.prompt_safety import fence_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
@@ -114,6 +115,62 @@ def _rating_view(output: dict, *, first_party: bool) -> dict[str, Any]:
     if first_party:
         return output
     return {k: v for k, v in output.items() if k != "source"}
+
+
+# Uppercase, and long enough that prompt_safety's marker-forgery redaction
+# (`BEGIN|END <LABEL>` with LABEL ≥ 4 chars) covers a payload that tries to
+# spell out the end of its own block.
+_OPERATOR_FENCE_LABEL = "OPERATOR_OUTPUT"
+
+# The operator-written prose of the external envelope — the fields whose only
+# purpose is to be read. `artifact` and `preview_url` are deliberately absent;
+# see the docstring below.
+_OPERATOR_PROSE_FIELDS = ("summary", "critic_violations", "critic_notes")
+
+
+def _fenced_for_context(output: dict) -> dict[str, Any]:
+    """`output` with its operator-written prose fenced, for `context` only.
+
+    Story 2.02's AC-5 and Product Rule 5 require operator output to be fenced
+    before it can reach an LLM step, and nothing fenced it. The outcome held
+    anyway — but only because `external.{agent_id}` is a key no worker reads,
+    which is a property of the READERS, and the readers are the part most
+    likely to change. One line of the form `context[worker.name] = summary`
+    in a future worker reopens it silently, with no test failing. Fencing
+    where the value ENTERS context makes it a property of the value instead,
+    so a later reader inherits the defence rather than having to remember it.
+
+    `fence_untrusted`, not `fence_user_input`: the latter labels its block
+    USER_INPUT and clamps at MAX_INTENT_CHARS = 500, which would silently
+    truncate a legitimate 2 000-char summary (ADR 0004 corrects the card here).
+
+    A NEW dict, and only the context copy. The rating view, the artifact handed
+    back to the buyer and every trace line read the raw `output`, so the fence
+    cannot change what an agent is scored on or what the buyer receives.
+
+    The artifact is NOT fenced. It is a deliverable rather than prose: it
+    reaches the viewer through its own hardening path (`harden_artifact` plus
+    the sandboxed iframe, ADR 0004 D1), and a worker that read a fenced copy
+    out of context and re-emitted it as its own output would ship the security
+    directive into the buyer's artifact. The one worker that already splices
+    another step's artifact into a prompt — `code_critic` — fences it at the
+    prompt site, which is where a 120 kB blob should be fenced once rather
+    than carried fenced. `preview_url` is excluded for the plainer reason that
+    fencing a URL stops it being one; it is already bounded to an http(s)
+    string by the external contract and by `_trace_url`.
+    """
+    fenced: dict[str, Any] = dict(output)
+    for key in _OPERATOR_PROSE_FIELDS:
+        value = fenced.get(key)
+        if isinstance(value, str):
+            fenced[key] = fence_untrusted(value, label=_OPERATOR_FENCE_LABEL)
+        elif isinstance(value, list):
+            # Per item, not one joined block: the readers of these two keys
+            # take a list (`or []`, then join), so collapsing them to a string
+            # would break the very shape `_unusable_field` proved one branch
+            # earlier. That gate also guarantees every item here is a `str`.
+            fenced[key] = [fence_untrusted(item, label=_OPERATOR_FENCE_LABEL) for item in value]
+    return fenced
 
 
 def _trace_url(value: object) -> str | None:
@@ -294,6 +351,13 @@ async def _run(
                     worker.name,
                     STEP_TIMEOUT_SECONDS,
                 )
+                # A step that never answered failed as surely as one that
+                # raised, and the counter's question — is this agent broken, or
+                # was that one bad run — does not care which. Today the
+                # external worker's own deadline fires first, so this handler
+                # is reached by a LOCAL worker hanging, which was the one
+                # failure the streak could not see.
+                failure_tracker.record_failure(step.agent_id, STEP_TIMEOUT_FAILURE)
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
@@ -336,6 +400,12 @@ async def _run(
                     worker.name,
                     type(output).__name__,
                 )
+                # Counted like any other step failure. The external contract
+                # makes this unreachable for a bound operator — parse_operator_output
+                # returns a dict or raises — so what lands here is a local
+                # worker returning the wrong thing, which is exactly the kind
+                # of persistent breakage the streak exists to name.
+                failure_tracker.record_failure(step.agent_id, NOT_A_DICT_FAILURE)
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable result")
                 continue
 
@@ -357,6 +427,12 @@ async def _run(
                     worker.name,
                     unusable,
                 )
+                # One token for every unusable field, not one per path: the
+                # field name is the diagnostic and it is already in the log
+                # above, while the tracker coalesces on CLASS CHANGE — so
+                # spelling the path into the class would let a worker mangling
+                # a different field each time flip the guard back into a flood.
+                failure_tracker.record_failure(step.agent_id, UNUSABLE_OUTPUT_FAILURE)
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
                 continue
 
@@ -417,12 +493,16 @@ async def _run(
             # Persist this step's output under the agent name so later workers
             # can read it. e.g. context["code.gen"] = {...}.
             if isinstance(output, dict):
-                context[worker.name] = output
-                # The settler reads a rating-facing view of the same output —
-                # an untrusted worker does not get to grade itself.
                 first_party = get_worker(step.agent_id) is worker
                 if first_party:
                     first_party_ids.add(step.agent_id)
+                # Untrusted prose is fenced on the way IN — this assignment is
+                # the single boundary every later step reads through, so a
+                # worker added tomorrow gets the defence without knowing it
+                # needs one (2.02 AC-5 / Product Rule 5).
+                context[worker.name] = output if first_party else _fenced_for_context(output)
+                # The settler reads a rating-facing view of the same output —
+                # an untrusted worker does not get to grade itself.
                 delivered[step.agent_id] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
@@ -468,17 +548,34 @@ async def _run(
                 charge_tx, proof_tx, job_id = await _settle_onchain(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
-                if charge_tx and job_id:
-                    await _submit_ratings(
-                        task_id,
-                        start,
-                        plan,
-                        delivered,
-                        payer=payer,
-                        job_id=job_id,
-                        undispatched=frozenset(undispatched),
-                        first_party_ids=frozenset(first_party_ids),
-                    )
+                # Rated whether or not the money moved, exactly as the
+                # no-success branch above is (ADR 0005 D2). This used to sit
+                # behind `if charge_tx and job_id`, which made every rating a
+                # partial run could produce conditional on a settlement that
+                # never happens: _settle_onchain returns (None, None, None)
+                # when the charge raises and (charge_tx, None, None) when it
+                # comes back non-SUCCESS, so a run where one agent delivered
+                # and another did not submitted NOTHING. The agent that failed
+                # kept its prior and stayed routable, and the operator who did
+                # deliver earned no positive evidence either — the exact
+                # asymmetry the story exists to remove. Settlement answers
+                # "who gets paid"; a rating answers "who delivered", and the
+                # second does not depend on the first.
+                await _submit_ratings(
+                    task_id,
+                    start,
+                    plan,
+                    delivered,
+                    payer=payer,
+                    # The job id is minted by the charge, so a run that did not
+                    # settle has none. Falling back to the task-derived id is
+                    # what lets the evidence land anyway, and it is derived
+                    # rather than random so the ledger's (agent_id, job_id)
+                    # replay guard still counts one run exactly once.
+                    job_id=job_id or unsettled_job_id(task_id),
+                    undispatched=frozenset(undispatched),
+                    first_party_ids=frozenset(first_party_ids),
+                )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to.
@@ -838,6 +935,14 @@ async def _settle_onchain(
 # would put a URL or a key straight into the buyer's trace.
 _FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 UNCLASSIFIED_FAILURE = "unclassified"
+
+# The three step failures that carry no exception to classify: the outer
+# deadline, and the two output-shape gates. They are spelled here rather than
+# inline because they belong to the same closed vocabulary `_failure_class`
+# hands the tracker — one naming, one shape, one place to read them all.
+STEP_TIMEOUT_FAILURE = "step_timeout"
+NOT_A_DICT_FAILURE = "not_a_dict"
+UNUSABLE_OUTPUT_FAILURE = "unusable_output"
 
 
 def _failure_class(exc: BaseException) -> str:

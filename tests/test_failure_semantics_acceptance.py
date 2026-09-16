@@ -9,6 +9,10 @@ Recon found these two were argued rather than asserted:
     them rendered to the buyer as the same line. The classes are now surfaced,
     so the distinction is assertable rather than a matter of reading prose in a
     server log.
+  * **The premise itself** — "non-delivery has a cost to the agent". A PARTIAL
+    run rated nobody, because the submit sat behind `charge_tx and job_id` and
+    `PaymentEscrow.charge` cannot settle. Nothing pinned that, so the mechanism
+    could be dead in production with a green suite.
 
 The helpers mirror `tests/test_external_step_hardening.py` deliberately: the
 dispatch seam is pinned and every other line of the run loop is real.
@@ -22,9 +26,11 @@ from typing import Any
 import pytest
 
 from app.agents.workers.external_http import ExternalDispatchError
+from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
 from app.state import state
+from app.stellar import client as sc
 
 INTENT = "ship the launch page"
 PRICE = 0.02
@@ -200,3 +206,134 @@ def test_the_trace_class_cannot_carry_operator_text(monkeypatch):
     asyncio.run(execution_svc._run(_plan("pln_ac_leak", "agt_x"), task_id, auth_id_hex=AUTH, payer=PAYER))
 
     assert not any("SECRET" in ln for ln in _trace(task_id))
+
+
+# ── the premise — a partial run costs the agent that did not deliver ──
+
+# What `synthetic_rating` pays a step that produced nothing: timed out, raised,
+# or answered with nothing checkable. The whole mechanism is this number
+# landing on the right agent.
+FAILED = 20
+
+
+def _rates(monkeypatch, settle_result: tuple[str | None, str | None, bytes | None]) -> list[tuple[str, bytes, int]]:
+    """Put the run on the on-chain path and record every rating it submits.
+
+    Only the two calls that leave the process are replaced — the charge/seal,
+    which returns `settle_result`, and the ledger submit. `_submit_ratings`
+    and the branch that decides whether to call it are the code under test.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(settings, "stellar_signing_key", "SFAKEKEY")
+
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+        return settle_result
+
+    monkeypatch.setattr(execution_svc, "_settle_onchain", fake_settle)
+
+    calls: list[tuple[str, bytes, int]] = []
+
+    async def fake_submit(agent_id, job_id, rating, weight, payer, kind="auto"):
+        calls.append((agent_id, job_id, rating))
+        return {"hash": "deadbeefcafe0123", "status": "SUCCESS"}
+
+    monkeypatch.setattr(sc, "submit_rating_async", fake_submit)
+    return calls
+
+
+# The two ways the charge declines to hand back a job id. Both are live: a
+# charge that raises returns the first, and one that comes back non-SUCCESS
+# returns the second — and the deployed PaymentEscrow.charge cannot reach
+# either's happy path, because authorize() takes no custody, so charge's
+# transfer(&auth.payer, …) wants a require_auth only the payer can give.
+@pytest.mark.parametrize(
+    "settle_result",
+    [(None, None, None), ("chargehash", None, None)],
+    ids=["charge_raised", "charge_not_success"],
+)
+def test_a_partial_run_rates_both_outcomes_when_nothing_settled(monkeypatch, settle_result):
+    """One agent delivered, one was asked and did not. Both get rated.
+
+    This is story 2.03's premise, and until now it was false for every run that
+    reached the charge: the submit was gated on `charge_tx and job_id`, so a
+    broken endpoint kept its prior and stayed routable forever — while the
+    operator who DID deliver earned no positive evidence either.
+    """
+    calls = _rates(monkeypatch, settle_result)
+    _resolves_to(
+        monkeypatch,
+        {
+            "agt_a": _Answers("w.a", GOOD),
+            "ext_down": _Answers("external.ext_down", raises=ExternalDispatchError("no_connection", "refused")),
+        },
+    )
+    task_id = "tsk_ac_partial_unsettled"
+    _add_task(task_id, 2)
+
+    asyncio.run(
+        execution_svc._run(
+            _plan("pln_ac_partial_unsettled", "agt_a", "ext_down"), task_id, auth_id_hex=AUTH, payer=PAYER
+        )
+    )
+
+    rated = {agent: rating for agent, _job, rating in calls}
+    assert rated == {"agt_a": 85, "ext_down": FAILED}
+    # Under the task-derived id, which is deterministic — the ledger rejects a
+    # second rating for the same (agent_id, job_id), so re-running this task
+    # cannot double-count the same failure.
+    assert {job for _agent, job, _rating in calls} == {execution_svc.unsettled_job_id(task_id)}
+
+
+def test_a_settled_partial_run_still_rates_under_the_charges_job_id(monkeypatch):
+    """The fallback is a fallback. When the charge did mint a job id, the
+    ratings stay linked to the payment that funded the run rather than to a
+    second, synthetic id for the same steps."""
+    calls = _rates(monkeypatch, ("chargehash", "sealhash", b"\x02" * 16))
+    _resolves_to(
+        monkeypatch,
+        {
+            "agt_a": _Answers("w.a", GOOD),
+            "ext_down": _Answers("external.ext_down", raises=ExternalDispatchError("no_connection", "refused")),
+        },
+    )
+    task_id = "tsk_ac_partial_settled"
+    _add_task(task_id, 2)
+
+    asyncio.run(
+        execution_svc._run(_plan("pln_ac_partial_settled", "agt_a", "ext_down"), task_id, auth_id_hex=AUTH, payer=PAYER)
+    )
+
+    assert {job for _agent, job, _rating in calls} == {b"\x02" * 16}
+    assert execution_svc.unsettled_job_id(task_id) not in {job for _agent, job, _rating in calls}
+
+
+def test_an_agent_we_never_reached_is_rated_by_nobody_on_an_unsettled_run(monkeypatch):
+    """Decoupling ratings from settlement must not widen who gets rated.
+
+    `resolve_worker` fails OPEN, so an unreadable binding store returns None
+    exactly like a missing binding. An agent we never dispatched to did not
+    fail to deliver — it was never asked, and our outage is not their
+    reputation (ADR 0005 D5).
+    """
+    calls = _rates(monkeypatch, (None, None, None))
+    _resolves_to(
+        monkeypatch,
+        {
+            "agt_a": _Answers("w.a", GOOD),
+            "ext_down": _Answers("external.ext_down", raises=ExternalDispatchError("no_connection", "refused")),
+        },
+    )
+    task_id = "tsk_ac_partial_ghost"
+    _add_task(task_id, 3)
+
+    asyncio.run(
+        execution_svc._run(
+            _plan("pln_ac_partial_ghost", "agt_a", "ext_down", "ext_ghost"),
+            task_id,
+            auth_id_hex=AUTH,
+            payer=PAYER,
+        )
+    )
+
+    assert [agent for agent, _job, _rating in calls] == ["agt_a", "ext_down"]
