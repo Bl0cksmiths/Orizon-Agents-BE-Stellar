@@ -393,7 +393,7 @@ async def fetch_rep(agent_id: str) -> RepInfo:
     return info
 
 
-async def fetch_reps(agent_ids: list[str], timeout_seconds: float = 2.5) -> dict[str, RepInfo]:
+async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
     """Concurrent reads for a set of agents, bounded by one overall timeout.
 
     Never raises: on timeout or error every missing agent falls back to the
@@ -401,10 +401,17 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float = 2.5) -> dict
     batch that degrades logs exactly one warning covering every affected
     agent (see _log_degraded).
     """
+    # None means "whatever the deployment is configured for". The bound lives
+    # in Settings rather than in this signature so a config validator can see
+    # it: `_reputation_read_fits_the_planning_budget` refuses a boot where this
+    # read could eat the planning budget, and a validator that cannot read the
+    # value it is validating is theatre. An explicit argument still wins —
+    # the timeout-path tests drive it directly.
+    bound = settings.reputation_batch_timeout_seconds if timeout_seconds is None else timeout_seconds
     try:
         results = await asyncio.wait_for(
             asyncio.gather(*(_read_rep(a) for a in agent_ids)),
-            timeout=timeout_seconds,
+            timeout=bound,
         )
     except Exception as e:  # TimeoutError included: it subclasses Exception on 3.11+
         # The gather was aborted, so nothing is known about any agent.
