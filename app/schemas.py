@@ -164,12 +164,25 @@ class PlanFloorNotice(BaseModel):
     these. Additive with a safe default; clients that ignore it are unaffected.
     """
 
+    # `kind` is what happened to the PLAN; `reason_code` is why. They are
+    # orthogonal, not competing vocabularies: an agent can be excluded for
+    # being below the floor or for having no endpoint, and both read as
+    # kind="excluded". `kind` is not renamed because the plan card already
+    # ships against it.
     kind: Literal["excluded", "substituted", "degraded"]
     agent_id: str  # the designated kit agent the floor acted on
     agent_name: str | None = None
     replacement_id: str | None = None  # the substitute, when kind == "substituted"
     replacement_name: str | None = None
     reason: str  # e.g. "below routing floor (4200 < 5500 bps)"
+    # Additive with a default so a notice built before this field existed still
+    # validates; every notice this codebase constructs sets it explicitly.
+    reason_code: ExclusionReason = "below_floor"
+    # The deciding numbers, as data rather than interpolated into `reason`. A
+    # client that wants to render "4.10 against a 3.00 floor" should not have to
+    # parse an English sentence to get there.
+    lower_bound_bps: int | None = None  # None when the agent had no rep entry
+    floor_bps: int = 0
 
 
 # ───── Trace ───────────────────────────────────────────────
