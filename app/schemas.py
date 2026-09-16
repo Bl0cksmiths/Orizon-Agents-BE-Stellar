@@ -139,6 +139,23 @@ class StoredPlan(BaseModel):
     total_eta: float
 
 
+# Why the floor acted on an agent — a CLOSED set, because the plan card renders
+# one sentence per value and the integration guide documents them; a free-text
+# reason is unrenderable and undocumentable.
+#
+# Two values story 3.02 asked for are deliberately absent:
+#
+#   * `inactive` — `AgentRegistry.set_active(id, false)` syncs to
+#     `Agent.status == "offline"`, but nothing in routing reads that field (its
+#     only consumer is a metrics counter). An agent is never excluded for being
+#     inactive, so shipping the value would put a state in the API contract that
+#     the system cannot produce.
+#   * `not_selected_by_planner` — the story's own product rules forbid listing
+#     every unpicked agent, which would drown the signal this exists to create.
+#     A plan that simply did not choose an agent is not an exclusion.
+ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed"]
+
+
 class PlanFloorNotice(BaseModel):
     """One reputation-floor action taken while building a plan.
 
