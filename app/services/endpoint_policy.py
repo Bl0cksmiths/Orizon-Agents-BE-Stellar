@@ -154,10 +154,15 @@ def validate_endpoint_url(url: str) -> None:
     ordinary name that RESOLVES into a blocked range still passes — the
     metadata names above are a hand-listed floor, not a general answer. That is
     `resolve_and_check`'s job, and it is separate precisely because this half
-    must stay callable before any I/O has happened. DNS rebinding between a
-    check and a connect remains untouched by either; closing it needs
-    resolve-then-pin at socket level. Redirects cannot launder the check
-    because the worker never follows them.
+    must stay callable before any I/O has happened. Neither half answers for
+    DNS rebinding on its own: both judge the answer of the moment they ran, and
+    the bind API's check is minutes or months older than the connect it is
+    meant to protect. The dispatch path closes that with resolve-then-pin —
+    `app.agents.workers.external_http._PinnedAddressTransport` calls
+    `resolve_checked_addresses` immediately before the connect and then dials
+    the address it checked, leaving no name for the transport to look up a
+    second time. Redirects cannot launder the check because the worker never
+    follows them.
 
     Raises EndpointPolicyError. The worker re-raises it as ExternalDispatchError
     so a bad binding fails its step like any other dispatch failure.
