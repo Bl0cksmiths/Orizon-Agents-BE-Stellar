@@ -41,6 +41,7 @@ it is never allowed to stand in for a failed lookup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ from pydantic import BaseModel
 from stellar_sdk import scval
 from stellar_sdk.soroban_rpc import EventFilter, EventFilterType, EventInfo, GetEventsResponse
 
+from ..stellar import cache as rcache
 from ..stellar import client as sc
 
 logger = logging.getLogger(__name__)
@@ -314,3 +316,106 @@ def _scan_sync(escrow_id: str, agent_id: str) -> _Scan:
         truncated=truncated,
         seconds_per_ledger=_seconds_per_ledger(probe),
     )
+
+
+# Fan-out cap on the per-charge authorization reads, and the budget for all of
+# them together. Both bound the same resource MAX_PAGES does — the shared
+# worker pool — and a read that misses the budget simply leaves its payer
+# unresolved, which excludes that entry from revenue instead of guessing at it.
+PAYER_CONCURRENCY = 6
+PAYER_BUDGET_SECONDS = 10.0
+
+
+async def _read_payer(escrow_id: str, auth_id_hex: str) -> str | None:
+    """`authorization(auth_id).payer`, or None when it cannot be read.
+
+    Cached for IMMUTABLE_READ_TTL_SECONDS because `authorize` writes the payer
+    once and nothing ever rewrites it — the fields that do move (`spent`,
+    `revoked`) are not read here. Under a polling dashboard that turns a repeat
+    visit to the same agent into zero authorization reads.
+
+    Returns None rather than raising: one unreadable authorization must not
+    blank the entries around it, and the caller already treats an unknown payer
+    as "not proven to be revenue".
+    """
+
+    async def _fetch() -> str | None:
+        record = await asyncio.to_thread(
+            sc.simulate_read,
+            escrow_id,
+            "authorization",
+            [sc.bytes16(bytes.fromhex(auth_id_hex))],
+        )
+        payer = record.get("payer") if isinstance(record, dict) else None
+        return payer if isinstance(payer, str) and payer else None
+
+    try:
+        result = await rcache.get_or_set(f"escrowauth:{auth_id_hex}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
+    except Exception as e:
+        logger.warning("[settlement] authorization %s unreadable: %s", auth_id_hex, _describe(e))
+        return None
+    return result if isinstance(result, str) else None
+
+
+async def _resolve_payers(escrow_id: str, charges: list[_Charge]) -> dict[str, str]:
+    """auth_id → payer for the DISTINCT authorizations behind `charges`.
+
+    Deduplicated because one authorization can fund several charges, and
+    bounded because this is the only fan-out in the request that scales with
+    on-chain history rather than with configuration. `return_exceptions=True`
+    is the point of the gather: a single failed read leaves its own key absent
+    and every other payer intact.
+    """
+    auth_ids = sorted({c.auth_id for c in charges})
+    if not auth_ids:
+        return {}
+
+    gate = asyncio.Semaphore(PAYER_CONCURRENCY)
+
+    async def _one(auth_id: str) -> tuple[str, str | None]:
+        async with gate:
+            return auth_id, await _read_payer(escrow_id, auth_id)
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(_one(a) for a in auth_ids), return_exceptions=True),
+            timeout=PAYER_BUDGET_SECONDS,
+        )
+    except Exception as e:
+        # Every payer is now unknown, so every entry will be excluded from
+        # revenue. That is the safe direction: the alternative is presenting
+        # unverified charges as earnings.
+        logger.warning("[settlement] payer resolution aborted: %s", _describe(e))
+        return {}
+
+    resolved: dict[str, str] = {}
+    for result in results:
+        if isinstance(result, BaseException):
+            continue
+        auth_id, payer = result
+        if payer is not None:
+            resolved[auth_id] = payer
+    return resolved
+
+
+async def _read_settler(escrow_id: str) -> str | None:
+    """The escrow's `settler` address, or None when it cannot be read.
+
+    Needed because "the platform paid itself" is not only `payer == owner`. The
+    settler is the one account whose funds `charge` can actually move, so a
+    charge it paid is the platform's money either way — and the settler is a
+    deploy argument with no setter on this contract, hence the long TTL.
+    """
+
+    async def _fetch() -> str | None:
+        value = await asyncio.to_thread(sc.simulate_read, escrow_id, "settler", [])
+        return value if isinstance(value, str) and value else None
+
+    try:
+        result = await rcache.get_or_set(f"escrowsettler:{escrow_id}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
+    except Exception as e:
+        # Not fatal: the owner comparison still runs, so an unreadable settler
+        # narrows the self-payment test rather than disabling it.
+        logger.warning("[settlement] settler unreadable for %s: %s", escrow_id, _describe(e))
+        return None
+    return result if isinstance(result, str) else None
