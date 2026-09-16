@@ -294,6 +294,13 @@ async def _run(
                     worker.name,
                     STEP_TIMEOUT_SECONDS,
                 )
+                # A step that never answered failed as surely as one that
+                # raised, and the counter's question — is this agent broken, or
+                # was that one bad run — does not care which. Today the
+                # external worker's own deadline fires first, so this handler
+                # is reached by a LOCAL worker hanging, which was the one
+                # failure the streak could not see.
+                failure_tracker.record_failure(step.agent_id, STEP_TIMEOUT_FAILURE)
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
@@ -336,6 +343,12 @@ async def _run(
                     worker.name,
                     type(output).__name__,
                 )
+                # Counted like any other step failure. The external contract
+                # makes this unreachable for a bound operator — parse_operator_output
+                # returns a dict or raises — so what lands here is a local
+                # worker returning the wrong thing, which is exactly the kind
+                # of persistent breakage the streak exists to name.
+                failure_tracker.record_failure(step.agent_id, NOT_A_DICT_FAILURE)
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable result")
                 continue
 
@@ -357,6 +370,12 @@ async def _run(
                     worker.name,
                     unusable,
                 )
+                # One token for every unusable field, not one per path: the
+                # field name is the diagnostic and it is already in the log
+                # above, while the tracker coalesces on CLASS CHANGE — so
+                # spelling the path into the class would let a worker mangling
+                # a different field each time flip the guard back into a flood.
+                failure_tracker.record_failure(step.agent_id, UNUSABLE_OUTPUT_FAILURE)
                 await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
                 continue
 
@@ -855,6 +874,14 @@ async def _settle_onchain(
 # would put a URL or a key straight into the buyer's trace.
 _FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 UNCLASSIFIED_FAILURE = "unclassified"
+
+# The three step failures that carry no exception to classify: the outer
+# deadline, and the two output-shape gates. They are spelled here rather than
+# inline because they belong to the same closed vocabulary `_failure_class`
+# hands the tracker — one naming, one shape, one place to read them all.
+STEP_TIMEOUT_FAILURE = "step_timeout"
+NOT_A_DICT_FAILURE = "not_a_dict"
+UNUSABLE_OUTPUT_FAILURE = "unusable_output"
 
 
 def _failure_class(exc: BaseException) -> str:
