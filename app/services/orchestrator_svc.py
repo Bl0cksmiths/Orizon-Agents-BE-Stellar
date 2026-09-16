@@ -15,6 +15,7 @@ from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep,
 from ..state import state
 from . import reputation_svc
 from .binding_registry import is_dispatchable
+from .plan_notices import below_floor_exclusion, relaxation, unbound_exclusions
 from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ def _prompt_name(name: str) -> str:
     and stores `name: String` verbatim, with no length or content check, so our
     API's max_length=100 is validation on the wrong side of the trust boundary.
     Since story 2.01 a registered-and-bound external agent is dispatchable, and
-    `_registry_prompt_fragment` filters on exactly that — which is what puts an
+    `_routable_registry` filters on exactly that — which is what puts an
     operator's text into the TRUSTED half of the planning prompt.
 
     `sanitize_untrusted`, not `fence_untrusted`: AVAILABLE_AGENTS is the half
@@ -187,7 +188,22 @@ def _prompt_name(name: str) -> str:
     return f'"{safe}"'
 
 
-def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
+def _routable_registry(
+    reps: dict[str, reputation_svc.RepInfo],
+) -> tuple[str, list[PlanFloorNotice]]:
+    """The AVAILABLE_AGENTS block, AND the floor actions that shaped it.
+
+    The routable set is a subtraction, and until story 3.02 only the remainder
+    survived: the complement was dropped on the floor of a list comprehension
+    and the starvation relaxation went to `logger.warning`, where no buyer will
+    ever see it. Both halves are returned now, because the thing the buyer
+    needs to know is precisely what was taken away.
+
+    The block's bytes are unchanged by this — they are pinned in
+    tests/test_model_path_floor.py, since a one-character drift changes what
+    the planner plans and would surface as unrelated assertions failing
+    downstream.
+    """
     # An indexed on-chain agent (story 1.02) is marketplace-visible but only
     # planner-routable once an operator binds it an endpoint (story 2.01) —
     # until then it has nothing to execute a step with. The filter sits on the
@@ -208,6 +224,35 @@ def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
             reverse=True,
         )[:_MIN_ROUTABLE_AGENTS]
 
+    offered = {a.id for a in routable}
+    # Order is part of the contract — the plan card renders these in sequence,
+    # and a list that reshuffles between two identical requests reads as the
+    # system changing its mind. Registry order drives the first two groups and
+    # `unbound_exclusions` sorts the third, so the whole list is a pure
+    # function of the registry and the reputation snapshot.
+    #
+    # An agent that CLEARED the floor and merely lost a top-N slot to the
+    # backstop gets no notice: the closed reason vocabulary has no value for it
+    # (rightly — it was not excluded by the floor), and "not offered to the
+    # planner" is the signal the story forbids, since it would list most of the
+    # registry on every request.
+    notices = [
+        below_floor_exclusion(a, reps.get(a.id))
+        for a in agents
+        if a.id not in offered and not reputation_svc.passes_floor(reps.get(a.id))
+    ]
+    notices += [
+        relaxation(a, reps.get(a.id), min_routable=_MIN_ROUTABLE_AGENTS)
+        for a in routable
+        if not reputation_svc.passes_floor(reps.get(a.id))
+    ]
+    # Unbound on-chain agents are a registry fact, not a floor verdict, so they
+    # are read from the whole catalog rather than from `agents` (which is the
+    # dispatchable subset they are by definition absent from). Seeded agents
+    # are skipped: every one ships with a local worker, so an unbound seeded
+    # agent is a deployment defect to fix, not a buyer-facing exclusion.
+    notices += unbound_exclusions(a for a in state.list_agents() if a.source == "onchain" and not is_dispatchable(a.id))
+
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
         info = reps.get(a.id)
@@ -222,7 +267,19 @@ def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
-    return "\n".join(lines)
+    return "\n".join(lines), notices
+
+
+def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
+    """The prompt block alone, for callers that only assert on the string.
+
+    Kept as a named view rather than folded away because the prompt-safety and
+    routability suites exercise the block itself — what the planner is shown —
+    and reading a notices list they never use out of a tuple would obscure
+    exactly the thing they are about. Planning uses `_routable_registry`.
+    """
+    block, _ = _routable_registry(reps)
+    return block
 
 
 def build_planning_prompt(registry_block: str, intent: str) -> str:
