@@ -429,6 +429,10 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         total_usdc=round(total_price, 4),
         total_eta=round(total_eta, 2),
         notices=notices,
+        # Both paths answer the same two questions, because a buyer cannot tell
+        # which one planned their intent and should not have to.
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
     )
 
 
