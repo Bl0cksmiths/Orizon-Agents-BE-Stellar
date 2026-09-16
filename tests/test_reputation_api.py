@@ -19,7 +19,7 @@ from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.seed import seed_registry
 from app.services import execution_svc, orchestrator_svc
-from app.services.reputation_svc import RepInfo
+from app.services.reputation_svc import STROOPS_PER_USDC, RepInfo
 from app.state import state
 from app.stellar import cache as rcache
 from app.stellar import client as sc
@@ -167,6 +167,40 @@ def test_degraded_single_agent_reaches_the_client_as_degraded_true(client, unrea
     assert body["agent_id"] == "agt_01h8"
     assert body["degraded"] is True
     assert body["source"] == "prior"
+
+
+def test_partial_outage_marks_only_the_agents_that_failed(client, monkeypatch):
+    """One unreadable agent must not smear degraded=true across the batch —
+    nor be hidden by the agents that answered.
+
+    The flag is per agent in the response map because that is the granularity
+    an operator acts on: the dashboard marks the one agent whose score is a
+    fallback while the rest of the registry keeps its real on-chain numbers. A
+    batch-wide flag would bury a single dead agent in a healthy majority, or
+    turn the healthy majority into noise — and the degraded one is the agent
+    the routing floor is currently unable to judge.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    bad = sorted(a.id for a in state.list_agents())[0]
+
+    async def flaky(key: str, ttl_seconds: float, producer):
+        # Matched on the agent id rather than the whole cache key: the
+        # "repstate:" prefix is reputation_svc's private business.
+        if key.endswith(bad):
+            raise RuntimeError("rpc down")
+        return {"sum_w": 9000 * 10 * STROOPS_PER_USDC, "weight": 10 * STROOPS_PER_USDC, "count": 4, "disputed": 0}
+
+    monkeypatch.setattr(rcache, "get_or_set", flaky)
+
+    body = client.get("/api/stellar/reputation").json()
+
+    assert len(body["reputations"]) > 1, "a partial outage needs more than one agent to be partial"
+    assert {aid for aid, info in body["reputations"].items() if info["degraded"]} == {bad}
+    assert body["reputations"][bad]["source"] == "prior"
+    for aid, info in body["reputations"].items():
+        if aid != bad:
+            assert info["source"] == "onchain"
 
 
 # ── decompose stamping ──────────────────────────────────────────
