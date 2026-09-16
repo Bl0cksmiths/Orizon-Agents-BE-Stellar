@@ -67,6 +67,13 @@ class ReputationInfo(BaseModel):
     disputed: int  # lifetime dispute count
     dispute_rate_bps: int  # disputed / count, in bps
     source: Literal["onchain", "prior"]
+    # Whether this score is an OUTAGE fallback rather than a genuine cold start.
+    # Both report source="prior", and without this a client cannot tell "no
+    # ratings yet" from "we could not read the ledger" — during which
+    # passes_floor fails OPEN, so every agent reads as comfortably routable.
+    # reputation_svc.RepInfo has carried this flag since the degradation work;
+    # this mirror model silently dropped it, so it never reached a client.
+    degraded: bool = False
 
 
 class ReputationBatch(BaseModel):
