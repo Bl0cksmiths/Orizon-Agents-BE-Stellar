@@ -227,6 +227,63 @@ def test_thirty_agent_outage_emits_exactly_one_warning_record(ledger_configured,
     assert f"+{len(ids) - rep._DEGRADED_LOG_AGENT_LIMIT} more" in message
 
 
+def test_mixed_registry_of_thirty_still_coalesces_and_caps(ledger_configured, monkeypatch, caplog):
+    """The registry is not all seed data. Externally registered agents carry
+    operator-chosen ids ([A-Za-z0-9_]{1,32}) with no `agt_` prefix, arbitrary
+    case and no shared length, and once they outnumber the seeds they are the
+    ones an outage is reported against. Coalescing and the cap must key off
+    the batch, never off the id shape: anything that grouped or de-duplicated
+    by prefix would quietly split one outage into two warnings — or drop the
+    external half out of the named list — precisely when the registry has
+    grown enough for the line to matter.
+
+    The named list is asserted in full, including its order, because that
+    order is the contract an operator reads it by: agents are named in the
+    order the caller passed them (the registry's own order), so the twelve
+    shown are a readable prefix of a known list and `+N more` accounts for
+    the rest. Assert an arbitrary slice instead and a reordering would go
+    unnoticed, leaving the line naming twelve agents nobody can map back.
+    """
+    monkeypatch.setattr(rcache, "get_or_set", _raising(RuntimeError("rpc down")))
+    seeded = [f"agt_{i:03d}" for i in range(15)]
+    external = [
+        "weather_bot",
+        "w1_audit_a7x",
+        "sign_probe_bb5c12",
+        "pdf_summarizer",
+        "px_route_9f",
+        "MarketScout",
+        "nightly_qa_bot",
+        "tx_watch_04",
+        "logo_forge_v2",
+        "csv_tidy_77",
+        "aud_probe_c31",
+        "chain_sentry",
+        "route_mux_b8",
+        "img_caption_x",
+        "ledger_peek_5",
+    ]
+    # Interleaved, so a capped list built by population rather than by
+    # registry order could not pass by accident.
+    ids = [agent_id for pair in zip(seeded, external, strict=True) for agent_id in pair]
+    assert len(ids) == 30
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        infos = asyncio.run(rep.fetch_reps(ids))
+
+    assert all(i.degraded for i in infos.values())
+    warnings = [r for r in _records(caplog) if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "a grown registry is still one outage, so still one record"
+    message = warnings[0].getMessage()
+    assert "30/30 agents" in message
+
+    limit = rep._DEGRADED_LOG_AGENT_LIMIT
+    named = message.split("[", 1)[1].split("]", 1)[0]
+    assert named == ", ".join(ids[:limit]) + f", +{len(ids) - limit} more"
+    for agent_id in ids[limit:]:
+        assert agent_id not in message
+
+
 # ── the fail-open policy is explicit ────────────────────────────
 
 
