@@ -22,6 +22,12 @@ PDAX_ENVIRONMENTS = tuple(PDAX_BASE_URLS)
 # payload both read it here so the number they report can never disagree.
 SERVICE_VERSION = "0.1.0"
 
+# The largest share of the decompose planning budget that one batched
+# reputation read is allowed to claim. See the validator that uses it,
+# _reputation_read_fits_the_planning_budget, for why 10% and why a share
+# rather than a fixed number of seconds.
+REPUTATION_READ_BUDGET_SHARE = 0.10
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -180,6 +186,17 @@ class Settings(BaseSettings):
     reputation_floor_bps: int = 5500
     # TTL for cached on-chain rep_state reads (per agent).
     reputation_read_ttl_seconds: float = 15.0
+    # Wall-clock bound on ONE batched reputation read — the asyncio.wait_for
+    # around fetch_reps' gather (services/reputation_svc.py). Lifted out of that
+    # function's default argument so a deployment can tune it without a code
+    # change and, more to the point, so _reputation_read_fits_the_planning_budget
+    # below can see the number it is validating: a bound that exists only as a
+    # literal inside a signature is one no validator can check. fetch_reps keeps
+    # its per-call override (the degradation tests drive it to 0.02 s to force the
+    # timeout path); this value and that function's default are pinned equal by
+    # tests/test_reputation_budget.py, so whichever of the two a live read
+    # consults, the validator is checking the bound a read actually uses.
+    reputation_batch_timeout_seconds: float = 2.5
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
 
@@ -320,6 +337,76 @@ class Settings(BaseSettings):
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reputation_read_fits_the_planning_budget(self) -> "Settings":
+        """Fail fast when a reputation read could swallow the planning budget.
+
+        decompose() (services/orchestrator_svc.py) reads reputation for every
+        registered agent BEFORE it enters the asyncio.wait_for that bounds the
+        planning call, so the two budgets are serial, not nested: a request's
+        real planning latency is reputation_batch_timeout_seconds +
+        decompose_timeout_seconds, and only the second half has an error code.
+        A read that overruns does not produce 504 decompose_timeout — it
+        produces a slow 200, or a client that gave up, with nothing in the
+        failure taxonomy naming reputation at all. On the demo-kit path it is
+        worse: that short circuit returns before the wait_for is ever reached,
+        so the batch bound is the whole of the request's budget.
+
+        The rule is a SHARE of the planning budget rather than a fixed slack,
+        because both numbers are env-tunable and a fixed slack pins a shape
+        that is wrong the moment either side moves. 10% is sized off how much
+        of the decompose budget is already spoken for: the LLM leg it wraps is
+        allowed llm_timeout_seconds = 120 s per attempt, which is MORE than the
+        90 s decompose_timeout_seconds it is nested inside. That inversion is
+        deliberate — the inner number is the OpenAI client's per-request HTTP
+        bound, there to replace its 600 s default, while the outer one is the
+        end-to-end bound including queue time at _decompose_gate() — but it
+        means the planner is entitled to spend the entire budget and the plan
+        assembly after it is free, so there is no idle slack for a reputation
+        read to borrow. Today's shipped numbers sit at 2.5 / 90 = 2.8%, so the
+        live config keeps 3.6x of headroom and ordinary tuning still boots: a
+        batch bound doubled to 5 s, or a decompose timeout tightened to 30 s,
+        both pass.
+
+        Raised rather than logged — the opposite call from the report-only
+        family below, and deliberately so. Those catch values this file cannot
+        verify (a mistyped environment name, a malformed base32 seed, a key
+        format that may drift), where being wrong about the world would take a
+        live mainnet deploy down on merge. This one compares two numbers this
+        file declares itself: it can only reject a ratio a human typed, and the
+        same deploy that typed it can untype it. What it prevents is worse than
+        a merely broken deployment. The batch timeout exists so a Soroban
+        outage degrades reputation to the prior instead of taking planning
+        down, and a bound sized near the planning budget silently deletes that
+        guarantee — every decompose waits the full bound before falling back,
+        so the mechanism written to make an outage invisible becomes the
+        outage. It is latent, too: healthy RPC answers in milliseconds, so the
+        bad ratio tests clean and only bites during the exact incident the
+        timeout was written to survive.
+
+        reputation_read_ttl_seconds is deliberately NOT part of this check. It
+        is a cache TTL, not a request bound: it decides how OFTEN a decompose
+        pays for a live read, never how long one is allowed to take, so
+        measuring it against a timeout is a category error (a longer TTL makes
+        reads rarer, not slower; a TTL of 0 makes every decompose pay the bound
+        this rule already covers). The one relationship worth naming is a TTL
+        below the batch bound, where an entry can expire before the read that
+        wrote it returns — that wastes cache hits, breaches no budget, and does
+        not earn the power to refuse a boot.
+        """
+        allowance = self.decompose_timeout_seconds * REPUTATION_READ_BUDGET_SHARE
+        if self.reputation_batch_timeout_seconds > allowance:
+            raise ValueError(
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS={self.reputation_batch_timeout_seconds:g} is more than "
+                f"{REPUTATION_READ_BUDGET_SHARE:.0%} of DECOMPOSE_TIMEOUT_SECONDS="
+                f"{self.decompose_timeout_seconds:g} (at most {allowance:g} s is allowed). Reputation is "
+                "read before the planning call, not inside it, so a Soroban outage would add that long to "
+                "every /decompose with no error code naming it. Lower REPUTATION_BATCH_TIMEOUT_SECONDS to "
+                f"{allowance:g} or less, or raise DECOMPOSE_TIMEOUT_SECONDS to at least "
+                f"{self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE:g}."
             )
         return self
 

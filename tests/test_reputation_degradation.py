@@ -146,6 +146,49 @@ def test_partial_batch_names_only_the_failed_agents(ledger_configured, monkeypat
     assert "agt_good" not in messages[0]
 
 
+def test_cold_start_and_failed_read_are_told_apart_only_by_degraded(ledger_configured, monkeypatch, caplog):
+    """The pair that genuinely looks alike: a never-rated agent and an agent
+    whose read failed BOTH report source="prior", so `degraded` is the only
+    thing separating "nobody has rated this one yet" from "we could not ask".
+    Comparing a degraded read against a RATED agent instead — onchain vs
+    prior — is exactly what hid the fail-open behaviour originally, because
+    the two states that collide were never put side by side. If this stops
+    holding, an operator reading the dashboard sees a newcomer and an
+    unreachable ledger as the same thing, and the outage warning starts
+    naming cold starts: a permissionless newcomer would page whoever is
+    on call, which trains them to ignore the line that matters.
+    """
+
+    async def flaky(key: str, ttl_seconds: float, producer):
+        if key.endswith("unread"):
+            raise RuntimeError("rpc down")
+        # A READABLE ledger holding no evidence — the real cold-start path
+        # (_info_from_state returns _prior_info when count and weight are 0),
+        # not a missing entry, which would take the failure branch instead.
+        return {"sum_w": 0, "weight": 0, "count": 0, "disputed": 0}
+
+    monkeypatch.setattr(rcache, "get_or_set", flaky)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        infos = asyncio.run(rep.fetch_reps(["agt_cold", "agt_unread"]))
+
+    cold, unread = infos["agt_cold"], infos["agt_unread"]
+    assert cold.source == "prior"
+    assert unread.source == "prior"
+    assert cold.degraded is False
+    assert unread.degraded is True
+    # And nothing else tells them apart: identical prior score, identical
+    # routing verdict. `degraded` carries the whole distinction.
+    assert cold.model_dump(exclude={"agent_id", "degraded"}) == unread.model_dump(exclude={"agent_id", "degraded"})
+    assert rep.passes_floor(cold) == rep.passes_floor(unread)
+
+    messages = _messages(caplog)
+    assert len(messages) == 1
+    assert "1/2 agents" in messages[0]
+    assert "agt_unread" in messages[0]
+    assert "agt_cold" not in messages[0], "a cold start is not an outage and must never be named as one"
+
+
 def test_degradation_warning_caps_the_named_agents(ledger_configured, monkeypatch, caplog):
     """The batch is the whole registry; the line still has to be readable."""
     monkeypatch.setattr(rcache, "get_or_set", _raising(RuntimeError("rpc down")))
@@ -158,6 +201,87 @@ def test_degradation_warning_caps_the_named_agents(ledger_configured, monkeypatc
     message = _messages(caplog)[0]
     assert f"+{extra} more" in message
     assert ids[-1] not in message
+
+
+def test_thirty_agent_outage_emits_exactly_one_warning_record(ledger_configured, monkeypatch, caplog):
+    """Thirty agents is the registry the dashboard polls every 15 s, and the
+    coalescing has to hold at that size: ONE record, not one per agent.
+    Records rather than distinct messages: per-agent warnings would render
+    identically, so counting unique text would report "one warning" while
+    thirty lines actually went out per poll — two a second for the length of
+    the outage, burying every other line and burning Render's log retention.
+    """
+    monkeypatch.setattr(rcache, "get_or_set", _raising(RuntimeError("rpc down")))
+    ids = [f"agt_{i:03d}" for i in range(30)]
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        infos = asyncio.run(rep.fetch_reps(ids))
+
+    assert set(infos) == set(ids)
+    assert all(i.degraded for i in infos.values())
+    warnings = [r for r in _records(caplog) if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "30 agents must produce ONE warning record, not 30"
+    assert len(_records(caplog)) == 1, "and nothing else on the way through"
+    message = warnings[0].getMessage()
+    assert "30/30 agents" in message
+    assert f"+{len(ids) - rep._DEGRADED_LOG_AGENT_LIMIT} more" in message
+
+
+def test_mixed_registry_of_thirty_still_coalesces_and_caps(ledger_configured, monkeypatch, caplog):
+    """The registry is not all seed data. Externally registered agents carry
+    operator-chosen ids ([A-Za-z0-9_]{1,32}) with no `agt_` prefix, arbitrary
+    case and no shared length, and once they outnumber the seeds they are the
+    ones an outage is reported against. Coalescing and the cap must key off
+    the batch, never off the id shape: anything that grouped or de-duplicated
+    by prefix would quietly split one outage into two warnings — or drop the
+    external half out of the named list — precisely when the registry has
+    grown enough for the line to matter.
+
+    The named list is asserted in full, including its order, because that
+    order is the contract an operator reads it by: agents are named in the
+    order the caller passed them (the registry's own order), so the twelve
+    shown are a readable prefix of a known list and `+N more` accounts for
+    the rest. Assert an arbitrary slice instead and a reordering would go
+    unnoticed, leaving the line naming twelve agents nobody can map back.
+    """
+    monkeypatch.setattr(rcache, "get_or_set", _raising(RuntimeError("rpc down")))
+    seeded = [f"agt_{i:03d}" for i in range(15)]
+    external = [
+        "weather_bot",
+        "w1_audit_a7x",
+        "sign_probe_bb5c12",
+        "pdf_summarizer",
+        "px_route_9f",
+        "MarketScout",
+        "nightly_qa_bot",
+        "tx_watch_04",
+        "logo_forge_v2",
+        "csv_tidy_77",
+        "aud_probe_c31",
+        "chain_sentry",
+        "route_mux_b8",
+        "img_caption_x",
+        "ledger_peek_5",
+    ]
+    # Interleaved, so a capped list built by population rather than by
+    # registry order could not pass by accident.
+    ids = [agent_id for pair in zip(seeded, external, strict=True) for agent_id in pair]
+    assert len(ids) == 30
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        infos = asyncio.run(rep.fetch_reps(ids))
+
+    assert all(i.degraded for i in infos.values())
+    warnings = [r for r in _records(caplog) if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "a grown registry is still one outage, so still one record"
+    message = warnings[0].getMessage()
+    assert "30/30 agents" in message
+
+    limit = rep._DEGRADED_LOG_AGENT_LIMIT
+    named = message.split("[", 1)[1].split("]", 1)[0]
+    assert named == ", ".join(ids[:limit]) + f", +{len(ids) - limit} more"
+    for agent_id in ids[limit:]:
+        assert agent_id not in message
 
 
 # ── the fail-open policy is explicit ────────────────────────────
