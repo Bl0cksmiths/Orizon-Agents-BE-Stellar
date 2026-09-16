@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from ..agents.registry import get_worker
+from ..agents.workers.prompt_safety import fence_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
@@ -114,6 +115,62 @@ def _rating_view(output: dict, *, first_party: bool) -> dict[str, Any]:
     if first_party:
         return output
     return {k: v for k, v in output.items() if k != "source"}
+
+
+# Uppercase, and long enough that prompt_safety's marker-forgery redaction
+# (`BEGIN|END <LABEL>` with LABEL ≥ 4 chars) covers a payload that tries to
+# spell out the end of its own block.
+_OPERATOR_FENCE_LABEL = "OPERATOR_OUTPUT"
+
+# The operator-written prose of the external envelope — the fields whose only
+# purpose is to be read. `artifact` and `preview_url` are deliberately absent;
+# see the docstring below.
+_OPERATOR_PROSE_FIELDS = ("summary", "critic_violations", "critic_notes")
+
+
+def _fenced_for_context(output: dict) -> dict[str, Any]:
+    """`output` with its operator-written prose fenced, for `context` only.
+
+    Story 2.02's AC-5 and Product Rule 5 require operator output to be fenced
+    before it can reach an LLM step, and nothing fenced it. The outcome held
+    anyway — but only because `external.{agent_id}` is a key no worker reads,
+    which is a property of the READERS, and the readers are the part most
+    likely to change. One line of the form `context[worker.name] = summary`
+    in a future worker reopens it silently, with no test failing. Fencing
+    where the value ENTERS context makes it a property of the value instead,
+    so a later reader inherits the defence rather than having to remember it.
+
+    `fence_untrusted`, not `fence_user_input`: the latter labels its block
+    USER_INPUT and clamps at MAX_INTENT_CHARS = 500, which would silently
+    truncate a legitimate 2 000-char summary (ADR 0004 corrects the card here).
+
+    A NEW dict, and only the context copy. The rating view, the artifact handed
+    back to the buyer and every trace line read the raw `output`, so the fence
+    cannot change what an agent is scored on or what the buyer receives.
+
+    The artifact is NOT fenced. It is a deliverable rather than prose: it
+    reaches the viewer through its own hardening path (`harden_artifact` plus
+    the sandboxed iframe, ADR 0004 D1), and a worker that read a fenced copy
+    out of context and re-emitted it as its own output would ship the security
+    directive into the buyer's artifact. The one worker that already splices
+    another step's artifact into a prompt — `code_critic` — fences it at the
+    prompt site, which is where a 120 kB blob should be fenced once rather
+    than carried fenced. `preview_url` is excluded for the plainer reason that
+    fencing a URL stops it being one; it is already bounded to an http(s)
+    string by the external contract and by `_trace_url`.
+    """
+    fenced: dict[str, Any] = dict(output)
+    for key in _OPERATOR_PROSE_FIELDS:
+        value = fenced.get(key)
+        if isinstance(value, str):
+            fenced[key] = fence_untrusted(value, label=_OPERATOR_FENCE_LABEL)
+        elif isinstance(value, list):
+            # Per item, not one joined block: the readers of these two keys
+            # take a list (`or []`, then join), so collapsing them to a string
+            # would break the very shape `_unusable_field` proved one branch
+            # earlier. That gate also guarantees every item here is a `str`.
+            fenced[key] = [fence_untrusted(item, label=_OPERATOR_FENCE_LABEL) for item in value]
+    return fenced
 
 
 def _trace_url(value: object) -> str | None:
@@ -436,12 +493,16 @@ async def _run(
             # Persist this step's output under the agent name so later workers
             # can read it. e.g. context["code.gen"] = {...}.
             if isinstance(output, dict):
-                context[worker.name] = output
-                # The settler reads a rating-facing view of the same output —
-                # an untrusted worker does not get to grade itself.
                 first_party = get_worker(step.agent_id) is worker
                 if first_party:
                     first_party_ids.add(step.agent_id)
+                # Untrusted prose is fenced on the way IN — this assignment is
+                # the single boundary every later step reads through, so a
+                # worker added tomorrow gets the defence without knowing it
+                # needs one (2.02 AC-5 / Product Rule 5).
+                context[worker.name] = output if first_party else _fenced_for_context(output)
+                # The settler reads a rating-facing view of the same output —
+                # an untrusted worker does not get to grade itself.
                 delivered[step.agent_id] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
