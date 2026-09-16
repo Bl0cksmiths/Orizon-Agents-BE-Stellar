@@ -16,6 +16,7 @@ import time
 import pytest
 
 from app.config import settings
+from app.routers.stellar import ReputationInfo
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.seed import seed_registry
 from app.services import execution_svc, orchestrator_svc
@@ -201,6 +202,34 @@ def test_partial_outage_marks_only_the_agents_that_failed(client, monkeypatch):
     for aid, info in body["reputations"].items():
         if aid != bad:
             assert info["source"] == "onchain"
+
+
+# ── mirror-model parity ─────────────────────────────────────────
+
+
+def test_router_mirror_declares_every_service_field():
+    """ReputationInfo must declare every field RepInfo carries.
+
+    Both read routes answer with `ReputationInfo(**info.model_dump())`, and
+    pydantic discards keys the target model does not declare: no exception, no
+    warning, nothing for mypy to catch. A field added to RepInfo and forgotten
+    on the mirror is therefore computed on every request and thrown away one
+    line before the response is serialised, and the first symptom is a client
+    that cannot show something the backend has been producing for weeks.
+
+    That is history rather than a hypothesis. `degraded` — the only thing
+    separating "this agent has no ratings yet" from "the ledger could not be
+    read, and the routing floor is failing open" — was added to RepInfo and
+    never mirrored, so the distinction reached no client at all. If this test
+    fails, the field it names is already being dropped from every response:
+    declare it on ReputationInfo rather than relaxing the assertion.
+
+    One direction only, deliberately. A field the mirror has and the service
+    does not is visible to anyone who reads a response body, and the splat
+    would raise on it; a missing one is silent.
+    """
+    missing = sorted(set(RepInfo.model_fields) - set(ReputationInfo.model_fields))
+    assert not missing, f"ReputationInfo drops RepInfo field(s) {missing} — they never reach a client"
 
 
 # ── decompose stamping ──────────────────────────────────────────
