@@ -38,7 +38,7 @@ from .security import (
     request_id_var,
 )
 from .seed import seed_registry
-from .services import execution_svc, registry_sync
+from .services import execution_svc, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids
 from .services.binding_store import close_binding_store
 
@@ -80,8 +80,73 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 logger = logging.getLogger(__name__)
 
 
+def _report_cold_start_routability() -> None:
+    """State at boot whether this deployment can route a brand-new agent.
+
+    Registration is open to anyone and routing is gated on reputation, which
+    a newcomer does not have. The two only coexist because the floor is
+    applied to the prior-smoothed lower bound rather than to the raw on-chain
+    mean, which leaves a margin — 177 bps under the shipped config. Close that
+    margin (raise REPUTATION_FLOOR_BPS past the prior bound, or lower
+    REPUTATION_PRIOR_BPS or REPUTATION_PRIOR_WEIGHT_USDC) and no agent
+    registered from then on is ever routed, ever rated, or ever able to climb
+    out. Nothing raises and no request errors: registration keeps succeeding
+    and nobody new is hired, so the failure mode IS silence.
+
+    Reported from lifespan rather than joining config.py's startup-report
+    validators for two reasons. The predicate is reputation_svc's arithmetic
+    and reputation_svc imports settings, so config.py cannot import it back
+    without a cycle. And this is the only check that sees the value actually
+    in force: the Render dashboard overrides render.yaml, so a floor raised
+    there reaches no test and no repo default — CI would keep passing against
+    numbers this deployment does not use.
+
+    A warning, never a refusal to boot. config.py raises for configs that
+    would expose money routes or sign on the wrong network; a high floor is a
+    policy an operator may genuinely intend (a curated network that hires only
+    rated agents), and taking a live mainnet service down over a policy choice
+    is a worse outcome than a loud line. The healthy case is reported too, at
+    INFO, because a check that speaks only when it fails is indistinguishable
+    from a check that never ran — which is precisely the ambiguity this
+    exists to remove.
+    """
+    margin = reputation_svc.cold_start_margin()
+    if margin.clears:
+        logger.info(
+            "cold start ok: a newly registered agent scores %d bps against REPUTATION_FLOOR_BPS=%d "
+            "(REPUTATION_PRIOR_BPS=%d, REPUTATION_PRIOR_WEIGHT_USDC=%g) — %d bps of margin, so new "
+            "agents are routable.",
+            margin.lower_bound_bps,
+            margin.floor_bps,
+            margin.prior_bps,
+            margin.prior_weight_usdc,
+            margin.margin_bps,
+        )
+        return
+    logger.warning(
+        "cold start BROKEN: REPUTATION_FLOOR_BPS=%d is above the prior lower bound of %d bps "
+        "(REPUTATION_PRIOR_BPS=%d, REPUTATION_PRIOR_WEIGHT_USDC=%g), a margin of %d bps. A newly "
+        "registered agent has no on-chain evidence, so it is scored on that bound, misses the floor "
+        "on its first request and is never routed — never routed means never rated, and never rated "
+        "means it can never clear the floor. Registration stays open and no new agent is ever hired. "
+        "Lower REPUTATION_FLOOR_BPS to %d or below, or raise REPUTATION_PRIOR_BPS / "
+        "REPUTATION_PRIOR_WEIGHT_USDC. The value in force is whatever the Render dashboard sets — it "
+        "overrides render.yaml.",
+        margin.floor_bps,
+        margin.lower_bound_bps,
+        margin.prior_bps,
+        margin.prior_weight_usdc,
+        margin.margin_bps,
+        margin.lower_bound_bps,
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # First thing in the boot sequence: whether this config admits new agents
+    # at all is the one property no request, probe, or error will ever report,
+    # so it is stated before anything else can bury it.
+    _report_cold_start_routability()
     seed_registry()
     # Bound the default executor: asyncio.to_thread otherwise sizes it to
     # min(32, cpu_count + 4) from the HOST's core count, while Render grants

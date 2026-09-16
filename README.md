@@ -70,7 +70,9 @@ cp .env.example .env
 
 ## Reputation system
 
-Raw reputation evidence lives on-chain, aggregation lives here (the ERC-8004 split). The **ReputationLedger v2** contract stores decayed, value-weighted rating evidence per agent: every rating is weighted by the settled USDC value of the step that earned it, old evidence decays each epoch, and submissions are scorer-gated with a kind of `auto` (settler), `buyer`, or `dispute`. Reputation is a record of settled economic history, not a count of clicks.
+Raw reputation evidence lives on-chain, aggregation lives here (the ERC-8004 split). The **ReputationLedger v2** contract stores decayed, value-weighted rating evidence per agent: every rating is weighted by the USDC **at stake** on the step that earned it, old evidence decays each epoch, and submissions are scorer-gated with a kind of `auto` (settler), `buyer`, or `dispute`. Reputation is a record of economic exposure, not a count of clicks.
+
+The weight is the step's *quoted* price, not money that changed hands — and the distinction is load-bearing rather than pedantic. A failed step is never billed yet is rated all the same, so weighting by settled value would make every negative rating weightless: non-delivery settles nothing. Weighting by what was at stake is as true of a step that failed as of one that delivered, which is what lets non-delivery carry a cost at all. See `app/services/reputation_svc.py`'s module docstring and [docs/reputation.md](docs/reputation.md).
 
 The backend turns that evidence into routing decisions. A Bayesian prior (default 7000 bps = 3.5/5) smooths sparse evidence so permissionless newcomers start at a meaningful score instead of zero, and a Wilson-style lower bound on the smoothed mean feeds the routing floor: at decompose time, agents whose bound falls below `REPUTATION_FLOOR_BPS` are omitted from the planner's registry (never shrinking the candidate list below 3), and every plan step is stamped with the live smoothed score (`rep_bps` / `rep_source`). If the chain is unreachable the caller gets the prior, marked `source="prior"` — reads never fail.
 
@@ -86,6 +88,8 @@ Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /ap
 | `REPUTATION_FLOOR_BPS` | `5500` | routing floor applied to the smoothed lower bound at decompose time |
 | `REPUTATION_READ_TTL_SECONDS` | `15` | TTL for cached on-chain `rep_state` reads, per agent |
 | `REPUTATION_MAX_RATING_WEIGHT_USDC` | `100` | per-rating weight cap — one whale job can't own the score |
+
+`REPUTATION_PRIOR_BPS`, `REPUTATION_PRIOR_WEIGHT_USDC` and `REPUTATION_FLOOR_BPS` between them decide whether a brand-new agent is routable at all, and the margin is 177 bps. **[docs/reputation.md](docs/reputation.md)** has the arithmetic, the exact value at which each one starts excluding newcomers, and why the floor is applied to the lower bound rather than to the raw on-chain mean — read it before changing any of them.
 
 ## Testing
 
