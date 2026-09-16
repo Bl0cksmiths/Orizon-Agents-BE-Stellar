@@ -603,3 +603,111 @@ def test_the_route_answers_200_when_the_chain_cannot_be_read(monkeypatch: pytest
     body = response.json()
     assert body["unavailable"] == "soroban rpc unreachable"
     assert (body["entries"], body["total_stroops"]) == ([], 0)
+
+
+def _event_with_value(value_xdr: str) -> EventInfo:
+    """A `charged` event carrying an arbitrary payload — for the cases where
+    the deployed ABI no longer matches what this service decodes."""
+    return EventInfo(
+        type="contract",
+        ledger=1_000_010,
+        ledgerClosedAt="2026-09-16T08:57:00Z",
+        contractId=ESCROW_ID,
+        id="1000010-0",
+        topic=[scval.to_symbol(svc.CHARGED_TOPIC).to_xdr(), scval.to_symbol(AGENT_ID).to_xdr()],
+        value=value_xdr,
+        inSuccessfulContractCall=True,
+        operationIndex=0,
+        transactionIndex=0,
+        txHash="cd" * 32,
+    )
+
+
+@pytest.mark.parametrize(
+    "value_xdr",
+    [
+        "not-valid-xdr-at-all",
+        scval.to_vec([scval.to_bytes(b"\x01" * 16), scval.to_int128(5), scval.to_bytes(b"\x02" * 16)]).to_xdr(),
+        scval.to_vec(
+            [
+                scval.to_bytes(b"\xee" * 16),
+                scval.to_symbol("not_an_auth_id"),
+                scval.to_int128(5),
+                scval.to_bytes(b"\x02" * 16),
+            ]
+        ).to_xdr(),
+    ],
+    ids=["undecodable", "wrong_arity", "wrong_types"],
+)
+def test_a_charged_event_we_cannot_decode_is_skipped(monkeypatch: pytest.MonkeyPatch, value_xdr: str) -> None:
+    """If the escrow's ABI moves under us, the amount inside an event we no
+    longer understand is a number of unknown provenance. It is dropped, and the
+    charges around it still report — half a decoded event must never reach an
+    earnings figure."""
+    rpc = _FakeRpc(
+        events=[
+            _event_with_value(value_xdr),
+            _charged_event(1_000_020, _auth_id(1), _job_id(1), 10_000),
+        ]
+    )
+    reader = _reader(payers={_auth_id(1).hex(): BUYER})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert [e.amount_stroops for e in result.entries] == [10_000]
+    assert result.total_stroops == 10_000
+
+
+def test_an_unreadable_settler_costs_every_charge_its_revenue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the settler we cannot rule out that the platform funded a
+    charge, and "we could not check" must not render as "verified". The entry
+    keeps the payer that WAS established, so the exclusion is legible rather
+    than mysterious."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    reader = _reader(settler=ConnectionError("rpc unreachable"), payers={_auth_id(1).hex(): BUYER})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert [(e.payer, e.self_payment) for e in result.entries] == [(BUYER, True)]
+    assert (result.total_stroops, result.self_payment_stroops) == (0, 10_000)
+
+
+def test_a_payer_budget_timeout_excludes_every_charge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The authorization reads are the only fan-out that scales with on-chain
+    history, so they run against a budget. Blowing it leaves every payer
+    unknown — and an unknown payer is not revenue."""
+    monkeypatch.setattr(svc, "PAYER_BUDGET_SECONDS", 0)
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    reader = _reader(payers={_auth_id(1).hex(): BUYER})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert [(e.payer, e.self_payment) for e in result.entries] == [("unknown", True)]
+    assert (result.total_stroops, result.self_payment_stroops) == (0, 10_000)
+
+
+def test_an_unconfigured_sac_reports_an_unknown_asset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No SAC id means nothing to ask what the amounts are denominated in.
+    Saying so beats defaulting to a unit the deployment may not use."""
+    settings.stellar_asset_sac = ""
+    result = _run(monkeypatch, _FakeRpc(), _reader())
+
+    assert result.asset == "unknown"
+    assert result.unavailable is None
+
+
+def test_a_degenerate_ledger_span_falls_back_to_the_default_close_time() -> None:
+    """`window_days` is measured from the node's own retention span. A node
+    reporting a span it cannot have measured (zero ledgers, or clocks that ran
+    backwards) falls back to the nominal 5 s close time rather than producing
+    an absurd number of days."""
+    degenerate = GetEventsResponse(
+        events=[],
+        latestLedger=OLDEST_LEDGER,
+        oldestLedger=OLDEST_LEDGER,
+        latestLedgerCloseTime=OLDEST_CLOSE,
+        oldestLedgerCloseTime=OLDEST_CLOSE,
+        cursor="cursor",
+    )
+
+    assert svc._seconds_per_ledger(degenerate) == 5.0
