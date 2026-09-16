@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from stellar_sdk import scval
@@ -601,6 +601,9 @@ def test_the_route_returns_the_frozen_payload(monkeypatch: pytest.MonkeyPatch, c
         "exclusion",
     }
     assert (body["agent_id"], body["total_stroops"], body["unavailable"]) == (AGENT_ID, 10_000, None)
+    # Revenue carries no exclusion reason, which is the half of the contract a
+    # client is most likely to get backwards.
+    assert (body["entries"][0]["self_payment"], body["entries"][0]["exclusion"]) == (False, None)
 
 
 def test_the_route_answers_200_when_the_chain_cannot_be_read(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
@@ -724,3 +727,99 @@ def test_a_degenerate_ledger_span_falls_back_to_the_default_close_time() -> None
     )
 
     assert svc._seconds_per_ledger(degenerate) == 5.0
+
+
+@pytest.mark.parametrize(
+    ("payer", "settler", "expected"),
+    [
+        (None, SETTLER, "payer_unreadable"),
+        (OWNER, SETTLER, "owner"),
+        (SETTLER, SETTLER, "settler"),
+        (BUYER, None, "settler_unreadable"),
+        (BUYER, SETTLER, None),
+    ],
+    ids=["payer_unreadable", "owner", "settler", "settler_unreadable", "revenue"],
+)
+def test_every_exclusion_names_the_rule_that_applied(
+    monkeypatch: pytest.MonkeyPatch,
+    payer: str | None,
+    settler: str | None,
+    expected: str | None,
+) -> None:
+    """The four exclusions are four different sentences to the operator reading
+    them, and `self_payment` alone cannot tell them apart. `payer=None` here
+    means the authorization read failed; `settler=None` means `settler()` did.
+    """
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    reader = _reader(
+        settler=ConnectionError("rpc unreachable") if settler is None else settler,
+        payers={} if payer is None else {_auth_id(1).hex(): payer},
+        auth_errors={_auth_id(1).hex(): ConnectionError("rpc unreachable")} if payer is None else None,
+    )
+
+    entry = _run(monkeypatch, rpc, reader).entries[0]
+
+    assert entry.exclusion == expected
+    assert entry.self_payment is (expected is not None)
+
+
+def test_the_owner_rule_outranks_the_settler_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live case: `owner_of(orizon_batch)` IS the escrow's settler, so both
+    rules match every historical charge and only precedence decides what the
+    dashboard says. "Your own owner account funded this" is the more precise
+    statement about THIS agent — and for an external operator, whose owner is
+    their own wallet and not ours, it is the only true one."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    reader = _reader(owner=OWNER, settler=OWNER, payers={_auth_id(1).hex(): OWNER})
+
+    entry = _run(monkeypatch, rpc, reader).entries[0]
+
+    assert entry.exclusion == "owner"
+
+
+def test_an_unreadable_payer_outranks_an_unreadable_settler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both lookups failed. "We could not read the payer" is the more specific
+    fact — reporting "we could not rule out the platform" would describe a
+    comparison that never ran, because there was no account to compare."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    reader = _reader(
+        settler=ConnectionError("rpc unreachable"),
+        auth_errors={_auth_id(1).hex(): ConnectionError("rpc unreachable")},
+    )
+
+    entry = _run(monkeypatch, rpc, reader).entries[0]
+
+    assert (entry.exclusion, entry.payer) == ("payer_unreadable", "unknown")
+
+
+def test_an_exclusion_is_absent_exactly_when_the_charge_is_revenue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The invariant a client is entitled to rely on: `exclusion is None` if
+    and only if `self_payment` is False, and `total_stroops` is the sum of
+    exactly those entries."""
+    rpc = _FakeRpc(
+        events=[
+            _charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000),  # revenue
+            _charged_event(1_000_020, _auth_id(2), _job_id(2), 20_000),  # owner
+            _charged_event(1_000_030, _auth_id(3), _job_id(3), 30_000),  # settler
+            _charged_event(1_000_040, _auth_id(4), _job_id(4), 40_000),  # payer unreadable
+        ]
+    )
+    reader = _reader(
+        payers={_auth_id(1).hex(): BUYER, _auth_id(2).hex(): OWNER, _auth_id(3).hex(): SETTLER},
+        auth_errors={_auth_id(4).hex(): ConnectionError("rpc unreachable")},
+    )
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert [e.exclusion for e in result.entries] == [None, "owner", "settler", "payer_unreadable"]
+    for entry in result.entries:
+        assert (entry.exclusion is None) is (entry.self_payment is False)
+    assert result.total_stroops == sum(e.amount_stroops for e in result.entries if e.exclusion is None)
+    assert result.self_payment_stroops == sum(e.amount_stroops for e in result.entries if e.exclusion is not None)
+
+
+def test_the_exclusion_vocabulary_is_closed() -> None:
+    """The frontend keys its copy off these four strings, so the set is part of
+    the contract: adding a fifth rule without a sentence to go with it would
+    render as a blank reason next to a withheld amount."""
+    assert set(get_args(svc.Exclusion)) == {"payer_unreadable", "owner", "settler", "settler_unreadable"}
