@@ -292,7 +292,32 @@ def _routable_registry(
     # dispatchable subset they are by definition absent from). Seeded agents
     # are skipped: every one ships with a local worker, so an unbound seeded
     # agent is a deployment defect to fix, not a buyer-facing exclusion.
-    notices += unbound_exclusions(a for a in state.list_agents() if a.source == "onchain" and not is_dispatchable(a.id))
+    #
+    # Delisted agents are skipped for a related but distinct reason, and it is
+    # the reporting half of this lane's decision: a withdrawn agent gets NO
+    # notice at all, under any reason code.
+    #
+    # ADR 0006 D2 left `inactive` out of the closed `ExclusionReason` vocabulary
+    # because routing could not produce that state. This function just changed
+    # that premise — so the question is live again, and the answer is still no,
+    # on different grounds. `below_floor` is a verdict we reached, `floor_relaxed`
+    # is our own rule bending, `unbound_endpoint` is a setup step the operator
+    # has not finished (stories 2.05/2.06 exist to get it finished). All three
+    # explain a gap between what the marketplace lists and what the plan drew
+    # from. A delisting is none of those: the operator asked to be absent, got
+    # what they asked for, and `status` already says so on their own
+    # `GET /api/agents` row. Announcing it on every buyer's plan card, on every
+    # request, for as long as they stay withdrawn, publishes a business decision
+    # the buyer was never protected from — and the withdrawn set only grows over
+    # a deployment's life, so it would drown the notices this list exists for
+    # exactly the way D3 says `not_selected_by_planner` would.
+    #
+    # Concretely, that means a delisted-AND-unbound agent is filtered here
+    # rather than reported: "no endpoint bound" is true of it but is not why it
+    # is absent, and it is advice nobody wants acted on.
+    notices += unbound_exclusions(
+        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
+    )
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
