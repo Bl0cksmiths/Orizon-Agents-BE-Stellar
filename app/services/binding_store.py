@@ -413,8 +413,27 @@ class InMemoryBindingStore:
         )
 
     def _evict_one(self) -> None:
-        """Drop the least recently bound agent so the cap can never be exceeded."""
+        """Drop the least recently bound agent so the cap can never be exceeded.
+
+        The evicted id is announced to `binding_registry` as well as removed
+        here, because that module keeps a synchronous mirror of "who is bound"
+        for the planner and nothing else would ever correct it: the mirror is
+        loaded at startup and maintained by events, so a binding that
+        disappeared without an event stays in it for the life of the process.
+        The planner would keep offering the agent, `resolve_worker` would then
+        read this store, find nothing, and return None — and the step would be
+        silently skipped. Quiet, wrong, and indistinguishable from a planner bug.
+
+        Imported inside the function on purpose: `binding_registry` imports this
+        module at module scope, so a top-level import back would be a cycle.
+        This is a cold path — once per 500 distinct agents — so the per-call
+        lookup costs nothing worth the alternative, which is an observer hook
+        registered at startup to deliver a single fact to a single subscriber.
+        """
+        from .binding_registry import note_unbound
+
         victim, evicted = self._bindings.popitem(last=False)
+        note_unbound(victim)
         logger.warning(
             "evicted in-memory binding at cap: agent_id=%s endpoint=%s bound_at=%s cap=%d "
             "(set DATABASE_URL to store bindings durably)",
