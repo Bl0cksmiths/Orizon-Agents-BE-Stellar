@@ -44,6 +44,21 @@ inherited guarantee.
 
 ## D2 — Ratings decouple from settlement
 
+> **Widened 2026-09-17.** As written, this covered only a run where *nothing*
+> succeeded. The partial case — some steps delivered, some failed — was left
+> gated on `charge_tx and job_id`, and since `PaymentEscrow.charge` can never
+> succeed on this deployment, **no partial run submitted any rating at all**.
+> Proven by probe: `RATINGS SUBMITTED: []` on a run where one agent delivered
+> and one failed. So the agent that did not deliver took no cost, and the agent
+> that did took no credit.
+>
+> That was an incomplete application of this decision rather than a different
+> one — the reasoning below already covers it, because a partial run is also a
+> run where evidence exists and settlement does not. The rule now reads: a run
+> that produced any rateable outcome submits ratings, whether or not it
+> settled. The charge's own `job_id` is still used when there is one; the
+> derived id is a fallback, never a replacement.
+
 A run with no successful step still submits ratings. Charge and seal stay
 skipped — the existing reasoning is correct (charging would consume the payer's
 authorization for a dust amount, and there is nothing to attest to) — but
