@@ -270,10 +270,17 @@ def _routable_registry(
         # Live smoothed score on the 0–5 scale the prompt already uses;
         # seeded rep only when the agent has no reputation entry.
         rep_display = info.smoothed_bps / 2000 if info is not None else a.rep
-        # Only `name` is treated: `id` is a Soroban Symbol and `skills` a
-        # Vec<Symbol> ([A-Za-z0-9_]{1,32} each), so neither can hold a space,
-        # a quote, a newline or a fence marker; price and rep are floats this
-        # line formats itself. Treating them would buy nothing.
+        # Only `name` is treated. `id` is a Soroban Symbol
+        # ([A-Za-z0-9_]{1,32}), so it can hold no space, quote, newline or
+        # fence marker; price and rep are floats this line formats itself.
+        #
+        # `skills` is a Vec<Symbol> for an ON-CHAIN agent, and the same
+        # reasoning holds there — but the seeded catalog is plain Python and
+        # does contain a space (`agt_10b6` has "42 langs", app/seed.py:17), so
+        # the constraint is a property of the chain rather than of this field.
+        # It stays untreated because the seed is trusted first-party data, not
+        # because nothing here can contain a separator; an untrusted writer
+        # into `skills` would change that.
         lines.append(
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
