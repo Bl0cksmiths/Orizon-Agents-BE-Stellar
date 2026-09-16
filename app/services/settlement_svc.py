@@ -233,9 +233,13 @@ def _event_filter(escrow_id: str, agent_id: str) -> EventFilter:
     paging every `authd` and `revoked` event the escrow emitted for every other
     agent on the deployment, through a rate-limited public RPC.
     """
+    # Built with the JSON-RPC ALIASES (`type`, `contractIds`) rather than the
+    # snake_case field names. stellar-sdk's model allows either, but its
+    # generated signature is the alias one — so the field names type-check only
+    # under pydantic's mypy plugin, which this repo does not enable.
     return EventFilter(
-        event_type=EventFilterType.CONTRACT,
-        contract_ids=[escrow_id],
+        type=EventFilterType.CONTRACT,
+        contractIds=[escrow_id],
         topics=[[sc.sym(CHARGED_TOPIC).to_xdr(), sc.sym(agent_id).to_xdr()]],
     )
 
