@@ -64,6 +64,29 @@ _KIT_ETAS: dict[str, float] = {
 }
 
 
+def _is_listed(agent: Agent) -> bool:
+    """Whether this agent's operator still wants work routed to it.
+
+    `AgentRegistry.set_active(id, false)` is the on-chain delisting control, and
+    `registry_sync` maps it to `status == "offline"` — the only producer of that
+    value anywhere. Until now nothing in routing read the field, so the one
+    control an operator has for taking an agent out of service did nothing; this
+    predicate is what makes it real.
+
+    The rule is deliberately NEGATIVE — offline is withdrawn, anything else is
+    available — and not `status == "online"`, which is a different and wrong
+    rule. The seeded catalog ships two agents as "idle" (`agt_04m1`, `agt_06q4`
+    in app/seed.py), which means "nothing in flight right now", not "withdrawn".
+    Routing on equality would drop two working agents out of the twelve-agent
+    demo catalog to enforce a flag neither of their operators ever set.
+
+    A seeded agent can only ever carry the status `seed.py` gave it: the sync
+    loop skips the `agt_` namespace outright, so nothing on-chain can delist a
+    worker-backed catalog agent.
+    """
+    return agent.status != "offline"
+
+
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     """PlanStep reputation stamp — empty when the agent has no rep entry."""
     if info is None:
@@ -134,6 +157,13 @@ def _floor_substitute(
     "Dispatchable" is a local worker OR a bound external endpoint (story 2.01).
     The floor is unchanged and still applied here: a bound agent stands in for
     a sub-floor kit agent only if it clears the floor on the same arithmetic.
+
+    Delisted agents are excluded from the pool as well. Promoting one INTO a
+    kit slot is the same defect as offering one to the planner, only harder to
+    spot: the agent is not merely tolerated in a candidate list, it is chosen,
+    and it lands in the plan with a `substituted_for` badge implying we picked
+    the best available stand-in. An agent whose operator withdrew it is not
+    available at all.
     """
     wanted = set(designated.skills)
     candidates = [
@@ -141,6 +171,7 @@ def _floor_substitute(
         for a in state.list_agents()
         if a.id not in taken
         and a.id not in _KIT_AGENT_IDS
+        and _is_listed(a)
         and is_dispatchable(a.id)
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
@@ -215,12 +246,19 @@ def _routable_registry(
     the planner plans and would surface as unrelated assertions failing
     downstream.
     """
-    # An indexed on-chain agent (story 1.02) is marketplace-visible but only
-    # planner-routable once an operator binds it an endpoint (story 2.01) —
-    # until then it has nothing to execute a step with. The filter sits on the
-    # assignment so the floor-starvation fallback below (which sorts this list,
-    # not `routable`) can never admit an unbound one either.
-    agents = [a for a in state.list_agents() if is_dispatchable(a.id)]
+    # Two subtractions, both on the ASSIGNMENT rather than on `routable`,
+    # because the floor-starvation fallback below re-sorts THIS list:
+    #
+    #   * an indexed on-chain agent (story 1.02) is marketplace-visible but only
+    #     planner-routable once an operator binds it an endpoint (story 2.01) —
+    #     until then it has nothing to execute a step with;
+    #   * a delisted agent has been withdrawn by its own operator, and that is
+    #     the one exclusion the backstop may never undo. The floor is OUR rule
+    #     and we are entitled to relax it when relaxing keeps the product
+    #     working; `set_active(id, false)` is someone else's decision about
+    #     their own service, and re-admitting on starvation would route paid
+    #     work to an operator who asked us to stop.
+    agents = [a for a in state.list_agents() if _is_listed(a) and is_dispatchable(a.id)]
     routable = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
     if len(routable) < _MIN_ROUTABLE_AGENTS:
         logger.warning(
@@ -262,7 +300,32 @@ def _routable_registry(
     # dispatchable subset they are by definition absent from). Seeded agents
     # are skipped: every one ships with a local worker, so an unbound seeded
     # agent is a deployment defect to fix, not a buyer-facing exclusion.
-    notices += unbound_exclusions(a for a in state.list_agents() if a.source == "onchain" and not is_dispatchable(a.id))
+    #
+    # Delisted agents are skipped for a related but distinct reason, and it is
+    # the reporting half of this lane's decision: a withdrawn agent gets NO
+    # notice at all, under any reason code.
+    #
+    # ADR 0006 D2 left `inactive` out of the closed `ExclusionReason` vocabulary
+    # because routing could not produce that state. This function just changed
+    # that premise — so the question is live again, and the answer is still no,
+    # on different grounds. `below_floor` is a verdict we reached, `floor_relaxed`
+    # is our own rule bending, `unbound_endpoint` is a setup step the operator
+    # has not finished (stories 2.05/2.06 exist to get it finished). All three
+    # explain a gap between what the marketplace lists and what the plan drew
+    # from. A delisting is none of those: the operator asked to be absent, got
+    # what they asked for, and `status` already says so on their own
+    # `GET /api/agents` row. Announcing it on every buyer's plan card, on every
+    # request, for as long as they stay withdrawn, publishes a business decision
+    # the buyer was never protected from — and the withdrawn set only grows over
+    # a deployment's life, so it would drown the notices this list exists for
+    # exactly the way D3 says `not_selected_by_planner` would.
+    #
+    # Concretely, that means a delisted-AND-unbound agent is filtered here
+    # rather than reported: "no endpoint bound" is true of it but is not why it
+    # is absent, and it is advice nobody wants acted on.
+    notices += unbound_exclusions(
+        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
+    )
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
@@ -345,6 +408,25 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             # The kit pipeline references an agent that isn't seeded — this
             # is a programmer error. Skip the step rather than crash the
             # whole pipeline.
+            continue
+
+        if not _is_listed(agent):
+            # Delisted by its operator: for routing purposes as absent as an id
+            # that is not in the registry at all, so it is handled the same way
+            # — the step is dropped, with no substitute and no notice.
+            #
+            # The placement is the load-bearing part. It sits BEFORE the floor
+            # check and outside `dropped`, which is the list the starvation
+            # backstop re-admits from, so no combination of bad ratings can put
+            # a withdrawn agent back into a kit slot.
+            #
+            # No substitute, because a substitution is a FLOOR action: it emits
+            # `kind="substituted"` with `reason_code="below_floor"` and a
+            # sentence naming the bps the designated agent failed on. A delisted
+            # agent failed nothing, so the only honest notice here is none —
+            # which is also this lane's reporting decision (see
+            # `_routable_registry`). Quietly promoting a stand-in with no notice
+            # would be the silently reshuffled pipeline story 3.02 forbids.
             continue
 
         eta = _KIT_ETAS.get(agent_id, 1.0)
@@ -454,12 +536,22 @@ async def decompose(intent: str) -> DecomposeResponse:
     cleaned: list[PlanStep] = []
     for step in plan.steps:
         agent = state.agents.get(step.agent_id)
-        if not agent or not is_dispatchable(agent.id):
+        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
             # Drop unknown ids silently — the model sometimes invents — or
             # names an indexed agent that nothing can execute: no local worker
             # and no operator binding. Dropping it here means /execute can
             # never reach the unknown-agent skip path for a planned step. A
             # bound external agent survives this filter, which is the point.
+            #
+            # `_is_listed` is repeated here rather than trusted from the
+            # AVAILABLE_AGENTS block, because the block is what the planner was
+            # SHOWN and this is what the planner RETURNED, and the two are not
+            # the same set. The model can name an agent it saw in an earlier
+            # turn, or invent an id that happens to belong to a real withdrawn
+            # agent; either way the step survives the `state.agents` lookup, and
+            # this is the last gate before it is stored and later dispatched.
+            # A delisted agent reaching /execute is the whole bug, so the
+            # cheapest place to be sure is the point of use.
             continue
         cleaned.append(
             PlanStep(
@@ -473,7 +565,11 @@ async def decompose(intent: str) -> DecomposeResponse:
         )
 
     if not cleaned:
-        # Fall back to a minimal safe plan so the UI never gets stuck.
+        # Fall back to a minimal safe plan so the UI never gets stuck. No
+        # listing check: `agt_01h8` is seeded, `seed.py` ships it "online", and
+        # registry_sync skips the whole `agt_` namespace — so no on-chain
+        # `set_active` call can reach it. A guard here would be a branch for a
+        # state that has no producer.
         copy_agent = state.agents["agt_01h8"]
         cleaned = [
             PlanStep(
