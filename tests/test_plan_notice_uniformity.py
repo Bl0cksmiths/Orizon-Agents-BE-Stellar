@@ -34,12 +34,14 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import settings
 from app.demo_kits import detect_kit
-from app.schemas import DecomposeResponse, Plan, PlanFloorNotice, PlanStep
+from app.schemas import DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
@@ -371,3 +373,38 @@ def test_full_payload_round_trips_unchanged() -> None:
     )
 
     assert DecomposeResponse.model_validate(original.model_dump()) == original
+
+
+def test_exclusion_reason_vocabulary_is_closed() -> None:
+    """The reason vocabulary is a fixed set of three, and two absences are load-bearing.
+
+    Each value is rendered as one sentence on the plan card and documented in
+    the integration guide, so an open vocabulary is an unrenderable and
+    undocumentable card. Two values story 3.02 asked for are deliberately NOT
+    here, and this test is the note that stops someone "completing" the set:
+
+      * `inactive` — `AgentRegistry.set_active(id, false)` syncs through to
+        `Agent.status == "offline"`, but nothing in routing reads that field;
+        its only consumer is a metrics counter (app/routers/metrics.py:117).
+        An agent is never excluded for being inactive, so shipping the value
+        would put a state in the API contract that the system cannot produce,
+        and a client would write a branch that can never run.
+      * `not_selected_by_planner` — forbidden by the story's own product
+        rules, and by test_unpicked_agents_are_not_reported_as_excluded above:
+        listing every unhired agent drowns the signal these notices exist to
+        create.
+
+    Adding either one is a contract change, not a fix.
+    """
+    assert get_args(ExclusionReason) == ("below_floor", "unbound_endpoint", "floor_relaxed")
+
+    # And the model actually enforces it — a Literal that is never validated
+    # against is a comment.
+    for rejected in ("inactive", "not_selected_by_planner", ""):
+        with pytest.raises(ValidationError):
+            PlanFloorNotice(
+                kind="excluded",
+                agent_id="agt_02k2",
+                reason="whatever the caller felt like",
+                reason_code=rejected,  # type: ignore[arg-type]
+            )
