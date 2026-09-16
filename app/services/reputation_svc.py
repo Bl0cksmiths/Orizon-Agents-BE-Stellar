@@ -133,6 +133,63 @@ def lower_bound_bps(mean_bps: int, weight: int) -> int:
     return max(0, min(10_000, round(lb * 10_000)))
 
 
+class ColdStartMargin(BaseModel):
+    """The cold-start arithmetic as data, so no caller has to redo it.
+
+    Every field is a number a log line — or an operator reading one — would
+    otherwise have to derive from source. That derivation is exactly how the
+    margin became folklore: the single thing keeping permissionless
+    registration honest is a subtraction nobody can see.
+    """
+
+    floor_bps: int  # REPUTATION_FLOOR_BPS, as this process actually has it
+    prior_bps: int  # REPUTATION_PRIOR_BPS — the mean a newcomer is credited
+    prior_weight_usdc: float  # REPUTATION_PRIOR_WEIGHT_USDC — its evidence mass
+    lower_bound_bps: int  # what a prior-only agent is scored on for routing
+    margin_bps: int  # lower_bound_bps - floor_bps; negative excludes newcomers
+    clears: bool
+
+
+def cold_start_margin() -> ColdStartMargin:
+    """What a newly registered agent scores, against the floor it must clear.
+
+    `prior_clears_floor()` answers the same question with a bool, which is all
+    a line about an in-progress outage needs. This reports the numbers behind
+    it, because cold-start routability is a MARGIN rather than a property.
+    With the shipped config a prior-only agent scores 5677 bps against a 5500
+    bps floor, and those 177 bps are the whole of what stops open registration
+    being theatre: the floor is applied to the prior-smoothed lower bound, not
+    to the raw on-chain mean (which is 0 for an unrated agent), so a newcomer
+    is judged on the prior and clears.
+
+    Raise reputation_floor_bps past that bound, or lower reputation_prior_bps
+    or reputation_prior_weight_usdc, and the margin goes negative: every new
+    agent misses the floor on its first request, is never routed, therefore is
+    never rated, and an unrated agent never leaves the prior — so the
+    exclusion is permanent, not a slow start. Nothing fails when it happens.
+    Reads succeed, the floor is applied exactly as written, registration keeps
+    accepting agents, and the marketplace quietly stops hiring anyone new.
+
+    Returning the numbers rather than the verdict is the point: a caller given
+    only a bool has to re-derive prior, weight and bound to say anything
+    actionable, which puts a second copy of this arithmetic in the place least
+    able to keep it in step with this one.
+    """
+    bound = lower_bound_bps(settings.reputation_prior_bps, 0)
+    floor = settings.reputation_floor_bps
+    return ColdStartMargin(
+        floor_bps=floor,
+        prior_bps=settings.reputation_prior_bps,
+        prior_weight_usdc=settings.reputation_prior_weight_usdc,
+        lower_bound_bps=bound,
+        margin_bps=bound - floor,
+        # `>=`, mirroring passes_floor: an agent sitting exactly ON the floor
+        # clears it, so a floor set equal to the prior bound still admits
+        # newcomers — with zero margin, which the numbers above make visible.
+        clears=bound >= floor,
+    )
+
+
 def prior_clears_floor() -> bool:
     """Whether a prior-only agent clears the routing floor under the current
     config — i.e. whether `passes_floor` fails OPEN when the ledger is
