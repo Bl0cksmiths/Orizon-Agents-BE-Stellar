@@ -595,6 +595,7 @@ def test_the_route_returns_the_frozen_payload(monkeypatch: pytest.MonkeyPatch, c
         "auth_id",
         "amount_stroops",
         "ledger",
+        "tx_hash",
         "at",
         "payer",
         "self_payment",
