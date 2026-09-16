@@ -180,3 +180,54 @@ def test_every_builder_takes_the_floor_from_settings(monkeypatch: pytest.MonkeyP
     # The prose follows the same setting, so the sentence and the field agree.
     assert notices[0].reason == "below routing floor (4200 < 8000 bps)"
     assert notices[2].reason == "below routing floor (4200 < 8000 bps)"
+
+
+def test_unbound_exclusions_orders_by_agent_id():
+    """Deterministic order, because the kit path is a reproducible demo.
+
+    The caller's iterable comes from a registry walk, whose order is not a
+    contract; the plan card's is.
+    """
+    shuffled = [_agent("ext_c"), _agent("ext_a"), _agent("ext_b")]
+
+    ids = [n.agent_id for n in plan_notices.unbound_exclusions(shuffled)]
+
+    assert ids == ["ext_a", "ext_b", "ext_c"]
+
+
+def test_unbound_exclusions_caps_the_list():
+    """The cap is the point: a permissionless registry has no bound on how many
+    agents are unbound, and a roll-call of them buries the notices that matter."""
+    many = [_agent(f"ext_{i:02d}") for i in range(40)]
+
+    notices = plan_notices.unbound_exclusions(many)
+
+    assert len(notices) == plan_notices.UNBOUND_REPORT_CAP
+    assert all(n.reason_code == "unbound_endpoint" for n in notices)
+
+
+def test_the_cap_applies_after_the_sort_so_the_same_names_survive():
+    """Sorting after the cap would make the surviving eight depend on the order
+    the caller happened to walk the registry in — two identical requests could
+    then name different agents."""
+    forwards = [_agent(f"ext_{i:02d}") for i in range(40)]
+    backwards = list(reversed(forwards))
+
+    assert [n.agent_id for n in plan_notices.unbound_exclusions(forwards)] == [
+        n.agent_id for n in plan_notices.unbound_exclusions(backwards)
+    ]
+    assert [n.agent_id for n in plan_notices.unbound_exclusions(forwards)][0] == "ext_00"
+
+
+def test_unbound_exclusions_of_nothing_is_nothing():
+    """A plan where every agent was bound carries no notices at all — not an
+    empty-ish placeholder the card would have to filter out."""
+    assert plan_notices.unbound_exclusions([]) == []
+
+
+def test_unbound_exclusions_builds_the_same_notice_as_the_single_builder():
+    """One vocabulary, one construction site: the bulk helper is a cap and a
+    sort over `unbound_exclusion`, never a second copy of the payload."""
+    agent = _agent("ext_a")
+
+    assert plan_notices.unbound_exclusions([agent]) == [plan_notices.unbound_exclusion(agent)]
