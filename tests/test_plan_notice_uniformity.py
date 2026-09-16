@@ -408,3 +408,80 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
                 reason="whatever the caller felt like",
                 reason_code=rejected,  # type: ignore[arg-type]
             )
+
+
+def _assert_notice_invariants(resp: DecomposeResponse, path: str) -> None:
+    """The rules that make a notice renderable, checked on every notice.
+
+    `kind` says what happened to the PLAN and `reason_code` says why; they are
+    orthogonal, which is exactly why they can contradict each other. Each rule
+    below is one sentence the plan card would otherwise have to render as
+    nonsense.
+    """
+    for n in resp.notices:
+        where = f"{path}: {n.kind}/{n.reason_code} for {n.agent_id}"
+
+        if n.kind == "substituted":
+            # "Replaced by nothing" is not a substitution — it is a drop that
+            # forgot to say so, and the step it names is still in the plan.
+            assert n.replacement_id, f"{where}: substitution with no replacement"
+
+        if n.kind == "degraded":
+            # A degradation IS the floor being relaxed. Leaving the default
+            # `below_floor` here tells the buyer the agent was removed for
+            # failing the gate while it is standing in their plan.
+            assert n.reason_code == "floor_relaxed", f"{where}: degradation must say the floor was relaxed"
+
+        if n.reason_code == "unbound_endpoint":
+            # Nothing can substitute for or relax an endpoint that does not
+            # exist; the only honest outcome is exclusion.
+            assert n.kind == "excluded", f"{where}: an unbound endpoint can only be an exclusion"
+
+        # One floor per plan. A notice quoting a different threshold from the
+        # envelope it arrived in makes the card argue with itself.
+        assert n.floor_bps == resp.floor_bps, f"{where}: notice floor {n.floor_bps} != plan floor {resp.floor_bps}"
+
+        # bps of a 0..100 score. None is legal (the agent had no rep entry);
+        # anything outside the scale is a unit mix-up reaching the buyer.
+        assert n.lower_bound_bps is None or 0 <= n.lower_bound_bps <= 10_000, f"{where}: implausible lower bound"
+
+        assert n.reason.strip(), f"{where}: notice with no reason"
+
+
+def test_notices_are_internally_consistent_on_both_paths(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every notice either path emits has to hold together on its own terms.
+
+    A plan card reads one notice at a time and renders it verbatim. A
+    substitution with no replacement, or a re-admitted agent whose reason_code
+    says it was excluded, produces a card that tells the buyer something the
+    plan beside it contradicts — and that card is the record they authorize a
+    payment against.
+    """
+    # The whole curated pipeline under the floor at once. On the kit path this
+    # is the starvation scenario: one substitution, two re-admissions by the
+    # backstop, three outright drops — the only snapshot that produces all
+    # three `kind` values in one response. On the free-form path the same six
+    # agents drop out of the candidate pool.
+    scores = {
+        "agt_09l5": 5000,
+        "agt_05x7": 4600,
+        "agt_02k2": 4000,
+        "agt_11c0": 4900,
+        "agt_12r0": 4800,
+        "agt_08j2": 4700,
+    }
+    reps = {aid: _sub_floor(aid, smoothed=score) for aid, score in scores.items()}
+
+    kit = _run_kit(monkeypatch, reps)
+    # agt_01h8 is off the kit pipeline and keeps its cold-start score, so the
+    # model names an agent that actually clears the floor.
+    free_form = _run_free_form(monkeypatch, reps, ["agt_01h8"])
+
+    # Non-empty on BOTH paths, or the loop below asserts nothing. Six agents
+    # just failed the trust gate; a path that reports none of that is the
+    # defect this story was opened for.
+    assert kit.notices, "the kit path reported no floor action"
+    _assert_notice_invariants(kit, "kit")
+
+    assert free_form.notices, "the free-form path reported no floor action"
+    _assert_notice_invariants(free_form, "free-form")
