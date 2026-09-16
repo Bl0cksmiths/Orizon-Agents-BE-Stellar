@@ -180,6 +180,17 @@ class Settings(BaseSettings):
     reputation_floor_bps: int = 5500
     # TTL for cached on-chain rep_state reads (per agent).
     reputation_read_ttl_seconds: float = 15.0
+    # Wall-clock bound on ONE batched reputation read — the asyncio.wait_for
+    # around fetch_reps' gather (services/reputation_svc.py). Lifted out of that
+    # function's default argument so a deployment can tune it without a code
+    # change and, more to the point, so _reputation_read_fits_the_planning_budget
+    # below can see the number it is validating: a bound that exists only as a
+    # literal inside a signature is one no validator can check. fetch_reps keeps
+    # its per-call override (the degradation tests drive it to 0.02 s to force the
+    # timeout path); this value and that function's default are pinned equal by
+    # tests/test_reputation_budget.py, so whichever of the two a live read
+    # consults, the validator is checking the bound a read actually uses.
+    reputation_batch_timeout_seconds: float = 2.5
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
 
