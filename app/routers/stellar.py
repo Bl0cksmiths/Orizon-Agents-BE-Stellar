@@ -112,7 +112,13 @@ class SettlementEntry(BaseModel):
     job_id: str  # hex, 16 bytes
     auth_id: str  # hex, 16 bytes
     amount_stroops: int  # 7-decimal units of the enclosing payload's `asset`
-    ledger: int  # the ledger that closed the charge — the explorer anchor
+    ledger: int  # the ledger that closed the charge
+    # hex, 32 bytes — the transaction the charge settled in, which is what a
+    # client turns into an explorer link. NULL when the node's `txHash` was not
+    # a usable hash, and a null here means render NO link: a link that does not
+    # resolve reads as evidence and is not, which is worse than an entry that
+    # plainly offers nothing to open.
+    tx_hash: str | None
     at: str | None  # ISO-8601 ledger close time
     payer: str  # G… address, or "unknown" when the authorization was unreadable
     # True when this is not third-party revenue: the agent's own owner paid, the

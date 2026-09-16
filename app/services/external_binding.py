@@ -15,19 +15,27 @@ signature from the wallet that owns the agent — no password, email, or API key
      signature against it, consuming the nonce only on success. The caller then
      records the (agent_id -> endpoint_url) binding.
 
+UNBINDING runs the same three steps against the same machinery — one table, one
+eviction policy, one nonce lifecycle, one signature verifier — differing only in
+the key it occupies (`UNBIND_SUBJECT` instead of the endpoint) and the message it
+requires (`unbinding_message`, domain-separated from the bind one so neither
+signature can be replayed as the other). That reuse is the point: a second way
+to prove ownership of an agent is a second way to get ownership wrong.
+
 What 1.06 left to "Epic 2" is now here: the owner is confirmed against the live
 registry (`resolve_owner`), and the bind API endpoint calls into this module.
 Three things about it are load-bearing rather than incidental:
 
   - The SIGNED MESSAGE COVERS THE ENDPOINT, not just the nonce. The prototype
     signed the nonce alone, so a signature captured inside its five-minute
-    window could be replayed to bind a different url (D3).
+    window could be replayed to bind a different url (D3). The unbind message
+    deliberately does not — `unbinding_message` says why at length.
   - The OWNER READ FAILS CLOSED, inverting this repo's usual convention,
     because here the read is the authorization and nothing downstream re-checks
     it (D2). See `resolve_owner` for the full reasoning.
-  - The NONCE TABLE IS BOUNDED. Both bind routes are public and unauthenticated
-    by design, and the key is caller-supplied, so an unbounded table is memory
-    exhaustion on a free instance.
+  - The NONCE TABLE IS BOUNDED. Every challenge route is public and
+    unauthenticated by design, and the key is caller-supplied, so an unbounded
+    table is memory exhaustion on a free instance.
 
 The table is still process-local, so a bind in progress does not survive a
 restart (the BINDING itself does — that is `binding_store`'s job). A caller who
@@ -42,6 +50,7 @@ import logging
 import secrets
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 
 from stellar_sdk import Keypair
 
@@ -60,6 +69,32 @@ CHALLENGE_TTL_SECONDS = 300
 # message.
 BINDING_MESSAGE_PREFIX = "orizon-bind:v1"
 
+# The same idea for the other direction. A SEPARATE domain, not a flag inside
+# the bind message, and that is the single most load-bearing decision in the
+# unbind flow: a captured bind signature must not be usable as an unbind, and a
+# captured unbind signature must not be usable as a bind. Two distinct prefixes
+# make the two messages different byte strings, so an ed25519 signature over one
+# simply does not verify against the other — the property is enforced by the
+# maths, not by a check somebody could forget to write.
+UNBINDING_MESSAGE_PREFIX = "orizon-unbind:v1"
+
+# The second half of the challenge key for an UNBIND, where a bind uses the
+# endpoint URL. The table is keyed by (agent_id, subject) so the two flows share
+# one bounded store, one eviction policy and one nonce lifecycle, while living
+# in key spaces that cannot overlap: this value is not a URL — it has no scheme
+# `endpoint_policy` accepts — and every endpoint that reaches `issue_challenge`
+# has already passed `validate_endpoint_url`. tests/test_unbind_challenge.py
+# asserts that rather than leaving it as a claim.
+#
+# Keying an unbind by the agent id alone would be the obvious worry, since that
+# is exactly what ADR 0003 rejected for binds: any anonymous caller could ask
+# for a challenge and destroy the honest owner's outstanding nonce. It is safe
+# here for a reason that arrived later — `issue_challenge` returns a LIVE
+# challenge as-is instead of replacing it — so a flood of anonymous requests for
+# the same agent all get handed the same nonce they cannot sign. There is also
+# nothing to disambiguate: an unbind has exactly one meaning per agent.
+UNBIND_SUBJECT = UNBINDING_MESSAGE_PREFIX
+
 # Retention cap for outstanding challenges (insertion-ordered eviction, see
 # issue_challenge). Matches ramp_store._MAX_RAMPS, and for the same reason with
 # sharper teeth: the challenge route is a PUBLIC, unauthenticated POST whose key
@@ -68,8 +103,9 @@ BINDING_MESSAGE_PREFIX = "orizon-bind:v1"
 # attacker never verifies. That is unbounded growth on a 512 MB free instance.
 MAX_CHALLENGES = 500
 
-# (agent_id, endpoint_url) -> (nonce_hex, expires_at). Keyed by the PAIR, not by
-# the agent id alone: a challenge authorizes exactly one endpoint, and keying it
+# (agent_id, subject) -> (nonce_hex, expires_at), where `subject` is the endpoint
+# URL for a bind and UNBIND_SUBJECT for an unbind. Keyed by the PAIR, not by the
+# agent id alone: a bind challenge authorizes exactly one endpoint, and keying it
 # by agent id let any anonymous caller destroy the honest owner's outstanding
 # nonce simply by requesting a challenge for a URL they control.
 _challenges: OrderedDict[tuple[str, str], tuple[str, float]] = OrderedDict()
@@ -92,6 +128,37 @@ def binding_message(agent_id: str, endpoint_url: str, nonce: str) -> str:
     something recently", never "the owner approved THIS endpoint".
     """
     return f"{BINDING_MESSAGE_PREFIX}:{agent_id}:{endpoint_url}:{nonce}"
+
+
+def unbinding_message(agent_id: str, nonce: str) -> str:
+    """The exact UTF-8 string the agent's owner signs to revoke a binding:
+
+        orizon-unbind:v1:{agent_id}:{nonce}
+
+    NO ENDPOINT, and that is deliberate rather than an omission. Three reasons,
+    in order of weight:
+
+      1. An unbind is unconditional. It revokes whatever is currently bound, so
+         there is nothing for a URL to select between; including one would
+         invite the reading that it does, and a caller who named the wrong URL
+         would reasonably expect nothing to be revoked.
+      2. The operator frequently cannot supply it. This flow exists for a host
+         that has been compromised or decommissioned, and the only way to read a
+         binding back without the operator API key is `GET /{id}/binding`, which
+         discloses the HOST alone — never the path. Requiring the full URL would
+         make revocation hardest in exactly the situation it is for.
+      3. It would weaken the proof rather than strengthen it. The endpoint is in
+         the BIND message because a bind signature authorizes one specific
+         destination for the buyer's traffic, and a captured signature must not
+         be reusable against a different one (ADR 0003 D3). A revocation
+         authorizes no destination at all — the worst a "replayed" unbind can do
+         is stop dispatch the owner had already asked to stop.
+
+    What still pins the signature is the domain, the agent id, and the nonce:
+    the message cannot be mistaken for another protocol's, cannot be moved to a
+    different agent, and cannot be used twice.
+    """
+    return f"{UNBINDING_MESSAGE_PREFIX}:{agent_id}:{nonce}"
 
 
 def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
@@ -124,6 +191,18 @@ def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLEN
     _challenges[key] = (nonce, expires_at)
     _challenges.move_to_end(key)  # a replacement is a fresh insert for eviction order
     return nonce, expires_at
+
+
+def issue_unbind_challenge(agent_id: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
+    """Mint and store a challenge authorizing an UNBIND of `agent_id`.
+
+    A thin call into `issue_challenge` against the unbind key space rather than
+    a second issuer, on purpose: a parallel path to prove ownership is a second
+    path to get wrong, and everything that matters here — the bounded table, the
+    sweep-on-insert eviction, the idempotency inside the window, the single-use
+    nonce — is policy nobody should have to re-derive and keep in step.
+    """
+    return issue_challenge(agent_id, UNBIND_SUBJECT, ttl_seconds)
 
 
 def _evict_one() -> None:
@@ -292,6 +371,33 @@ def _signature_matches(owner: str, message: str, signature_b64: str) -> bool:
         return False
 
 
+def _verify(agent_id: str, subject: str, owner: str, signature_b64: str, message_for: Callable[[str], str]) -> bool:
+    """Nonce lifecycle plus signature check for one (agent_id, subject) key.
+
+    The shared body of `verify_challenge` and `verify_unbind_challenge`. Only
+    the message differs between them, so only the message is a parameter:
+    `message_for` receives the stored nonce and returns the exact bytes that
+    must have been signed. Everything a reviewer has to trust — the expiry, the
+    consume-only-on-success rule, the leave-the-nonce-alone-on-failure rule —
+    exists once, so the two flows cannot drift apart.
+
+    Returns False on any failure: no or expired nonce, malformed owner or
+    signature, or a signature that does not verify.
+    """
+    key = (agent_id, subject)
+    entry = _challenges.get(key)
+    if entry is None:
+        return False
+    nonce, expires_at = entry
+    if time.time() > expires_at:
+        del _challenges[key]
+        return False
+    if not _signature_matches(owner, message_for(nonce), signature_b64):
+        return False
+    del _challenges[key]  # single use — a proven nonce never verifies twice
+    return True
+
+
 def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64: str) -> bool:
     """Verify a base64 ed25519 signature over `binding_message(...)` against
     `owner` (a Stellar G-address). Consumes the nonce on success.
@@ -307,15 +413,42 @@ def verify_challenge(agent_id: str, endpoint_url: str, owner: str, signature_b64
     A failed verification leaves the nonce ALONE: only a proven signature
     consumes it, so a bad guess cannot cancel the real owner's pending bind.
     """
-    key = (agent_id, endpoint_url)
-    entry = _challenges.get(key)
-    if entry is None:
-        return False
-    nonce, expires_at = entry
-    if time.time() > expires_at:
-        del _challenges[key]
-        return False
-    if not _signature_matches(owner, binding_message(agent_id, endpoint_url, nonce), signature_b64):
-        return False
-    del _challenges[key]  # single use — a proven nonce never verifies twice
-    return True
+    return _verify(
+        agent_id,
+        endpoint_url,
+        owner,
+        signature_b64,
+        lambda nonce: binding_message(agent_id, endpoint_url, nonce),
+    )
+
+
+def verify_unbind_challenge(agent_id: str, owner: str, signature_b64: str) -> bool:
+    """Verify a base64 ed25519 signature over `unbinding_message(...)` — the
+    proof that `owner` authorised REVOKING this agent's binding.
+
+    A BIND SIGNATURE CANNOT REACH THIS, and it is worth being explicit about why,
+    because "the code path is different" would not be a reason. Three independent
+    barriers, any one of which is sufficient:
+
+      1. The bytes differ. The unbind message opens `orizon-unbind:v1` and
+         carries no endpoint, so a signature over `orizon-bind:v1:...` verifies
+         against it only if ed25519 is broken. This is the barrier that holds
+         even against a captured signature and an attacker who controls
+         everything else.
+      2. The nonces differ. Bind and unbind challenges live under different keys
+         in the table, so the nonce this looks up is one the owner never saw
+         inside a bind message — it cannot appear in a captured bind signature
+         even by coincidence.
+      3. A successful bind already consumed its nonce, so the message that
+         signature covers can never be re-derived from the table at all.
+
+    The reverse replay is closed by (1) as well: an unbind signature names no
+    endpoint, so it cannot authorise one.
+    """
+    return _verify(
+        agent_id,
+        UNBIND_SUBJECT,
+        owner,
+        signature_b64,
+        lambda nonce: unbinding_message(agent_id, nonce),
+    )

@@ -39,7 +39,7 @@ from .security import (
 )
 from .seed import seed_registry
 from .services import execution_svc, registry_sync, reputation_svc
-from .services.binding_registry import refresh_bound_ids
+from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 
 
@@ -163,7 +163,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # binding made before this process started would stay unroutable until the
     # operator bound it again — which is precisely the restart AC-5 is about.
     await refresh_bound_ids()
+    # ...and if that read failed, keep trying in the background. The load
+    # swallows its own failure so an unreadable store cannot stop the service,
+    # which used to mean a store that was merely SLOW to wake — a cold
+    # serverless Postgres, exactly what the min_size=0 pool is built for — left
+    # every externally operated agent unroutable for the whole process
+    # lifetime, with nothing but a redeploy to fix it. A no-op on the healthy
+    # path: the load above has already set `_loaded` and no task is created.
+    start_refresh_retry()
     yield
+    # Before anything else in the shutdown: a retry sitting in a 120 s sleep
+    # would otherwise still be pending when the loop closes.
+    await stop_refresh_retry()
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
     await registry_sync.stop()
@@ -290,7 +301,13 @@ app.add_middleware(
     # anything calls this API cross-origin with task auth on, its absence
     # here is a hard preflight failure.
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    # DELETE is here for `DELETE /api/agents/{id}/bind`, an operator revoking
+    # their endpoint. It is the one call in this API a compromised operator
+    # makes under time pressure, and a missing preflight method fails it with a
+    # browser CORS error rather than anything the console could explain. The
+    # console proxies same-origin today, so nothing exercises this list — which
+    # is precisely why it would have been found the first time it mattered.
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-api-key", "x-task-token"],
 )
 

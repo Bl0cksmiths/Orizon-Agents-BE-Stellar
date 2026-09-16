@@ -21,11 +21,13 @@ to keep that from costing anything anywhere else:
     framework, because this is one table. The driver is imported lazily so a
     checkout without it still boots, imports and tests cleanly.
   - The Postgres table is APPEND-ONLY. A rebind inserts a new row rather than
-    updating one, so AC-6's timestamp and the audit history come for free and
+    updating one, and an UNBIND inserts a tombstone rather than deleting one,
+    so AC-6's timestamp and the audit history come for free and
     `previous_endpoint_url` is derived at read time rather than maintained.
 
 `put` returns the NEW record with `previous_endpoint_url` already populated, so
-a caller never has to read-then-write and AC-6 cannot race two rebinds.
+a caller never has to read-then-write and AC-6 cannot race two rebinds. `delete`
+is shaped the same way and for the same reason: one statement, one snapshot.
 """
 
 from __future__ import annotations
@@ -62,13 +64,26 @@ _POOL_MAX_SIZE = 5
 # Created on first use with CREATE TABLE IF NOT EXISTS. There is no migration
 # tooling in this repo and one table does not justify introducing any: the DDL
 # is idempotent, so every boot and every redeploy converges on the same schema
-# with no migration step that could fail a deploy at 3am.
+# with no migration step that could fail a deploy at 3am. `revoked` arrived
+# after the table shipped, so the bare ADD COLUMN IF NOT EXISTS carries an
+# existing deployment's table forward on its next boot — also idempotent, and
+# the reason the column is NOT NULL DEFAULT FALSE rather than nullable: every
+# row written before revocation existed is, correctly, a live binding.
 #
-# The table is APPEND-ONLY — a rebind INSERTs a new row and nothing ever UPDATEs
-# one — which is what makes AC-6 cheap: the timestamp is the row's own
-# `bound_at`, the rebind history IS the audit trail, and `previous_endpoint_url`
-# is a window function over that history rather than a second copy of the truth
-# that can drift out of step with the first.
+# The table is APPEND-ONLY — a rebind INSERTs a new row, an UNBIND INSERTs a
+# tombstone, and nothing ever UPDATEs or DELETEs one — which is what makes AC-6
+# cheap: the timestamp is the row's own `bound_at`, the bind/rebind/revoke
+# history IS the audit trail, and `previous_endpoint_url` is a window function
+# over that history rather than a second copy of the truth that can drift out of
+# step with the first.
+#
+# A tombstone is a row for the same agent with `revoked` TRUE, carrying the
+# endpoint it revoked and the `bound_at` at which it was revoked. Deleting the
+# rows instead would destroy exactly the evidence an operator needs after a host
+# compromise — when the endpoint was attached, to what, by whom, and when it was
+# taken away — and would make a revocation indistinguishable from a bind that
+# never happened. So `revoked` is read as "the newest row wins": a tombstone is
+# the newest row, therefore this agent currently has no binding.
 #
 # Ordering is by the surrogate `id`, never by `bound_at`: two binds landing in
 # the same clock tick must still have a defined newest, and a float timestamp
@@ -81,26 +96,56 @@ CREATE TABLE IF NOT EXISTS agent_bindings (
     agent_id     TEXT NOT NULL,
     endpoint_url TEXT NOT NULL,
     owner        TEXT NOT NULL,
-    bound_at     DOUBLE PRECISION NOT NULL
+    bound_at     DOUBLE PRECISION NOT NULL,
+    revoked      BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE agent_bindings ADD COLUMN IF NOT EXISTS revoked BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS agent_bindings_agent_id_id_desc_idx
     ON agent_bindings (agent_id, id DESC);
+"""
+
+# Every agent whose NEWEST row is not a tombstone. A plain DISTINCT agent_id
+# would list an agent forever once it had ever bound, because its revocation is
+# stored as another row for the same id rather than as the absence of one —
+# which would put a revoked agent straight back into the planner's routable set
+# on the next restart. DISTINCT ON collapses to the newest row per agent (the
+# agent_id, id DESC index serves this ordering directly) and the outer filter
+# drops the ones that are tombstones.
+_SELECT_AGENT_IDS_SQL = """
+SELECT agent_id
+FROM (
+    SELECT DISTINCT ON (agent_id) agent_id, revoked
+    FROM agent_bindings
+    ORDER BY agent_id, id DESC
+) AS latest
+WHERE NOT revoked
 """
 
 # The newest row for one agent, with the endpoint it replaced derived from the
 # row before it. LAG runs over every row for the agent — window functions are
 # evaluated before the outer ORDER BY/LIMIT — so the one row this returns
 # already knows its own predecessor.
-_SELECT_AGENT_IDS_SQL = "SELECT DISTINCT agent_id FROM agent_bindings"
-
+#
+# `revoked` comes back rather than being filtered here, and that is deliberate:
+# a `WHERE NOT revoked` would select the newest SURVIVING binding, which is the
+# one the tombstone was written to retire — it would resurrect a revoked
+# endpoint instead of hiding it. The newest row is always the answer; `get`
+# turns a tombstone into None.
+#
+# The LAG masks a tombstone to NULL so a bind that FOLLOWS a revocation reports
+# `previous_endpoint_url` as None. It replaced nothing: the agent had no live
+# binding at that moment, and calling it a replacement would tell an operator
+# their unbind had silently not taken effect.
 _SELECT_LATEST_SQL = """
-SELECT endpoint_url, owner, bound_at, previous_endpoint_url
+SELECT endpoint_url, owner, bound_at, previous_endpoint_url, revoked
 FROM (
     SELECT id,
            endpoint_url,
            owner,
            bound_at,
-           LAG(endpoint_url) OVER (ORDER BY id) AS previous_endpoint_url
+           revoked,
+           LAG(CASE WHEN revoked THEN NULL ELSE endpoint_url END) OVER (ORDER BY id)
+               AS previous_endpoint_url
     FROM agent_bindings
     WHERE agent_id = $1
 ) AS history
@@ -115,9 +160,11 @@ LIMIT 1
 # `previous_endpoint_url` without the caller doing a read-then-write.
 # LEFT JOIN ... ON TRUE keeps the first-ever bind (no predecessor) returning a
 # row with previous_endpoint_url NULL rather than returning nothing at all.
+# The `previous` CTE masks a tombstone for the same reason the LAG above does:
+# binding again after a revocation replaces nothing.
 _INSERT_SQL = """
 WITH previous AS (
-    SELECT endpoint_url
+    SELECT CASE WHEN revoked THEN NULL ELSE endpoint_url END AS endpoint_url
     FROM agent_bindings
     WHERE agent_id = $1
     ORDER BY id DESC
@@ -133,6 +180,42 @@ SELECT inserted.endpoint_url,
        previous.endpoint_url AS previous_endpoint_url
 FROM inserted
 LEFT JOIN previous ON TRUE
+"""
+
+# Revoke the current binding by APPENDING a tombstone — never `DELETE FROM`.
+# One statement, for `_INSERT_SQL`'s reason: `live` and `tombstone` share a
+# snapshot, so there is no window between reading the current endpoint and
+# writing the row that retires it.
+#
+# `INSERT ... SELECT ... FROM live WHERE NOT live.revoked` is what makes a
+# repeated unbind free rather than merely harmless. When the newest row is
+# already a tombstone (or there is no row at all) the SELECT yields nothing, the
+# INSERT writes nothing, and the statement returns no row — so a client retrying
+# a revocation, or a script unbinding a list of agents nightly, cannot grow the
+# table by one row per attempt. The absent row is also how `delete` distinguishes
+# "a live binding was just revoked" from "there was nothing to revoke", without a
+# second round trip to ask.
+#
+# The tombstone carries the endpoint it revoked, copied from `live`. Deriving it
+# later from the row before would work, but a history row that has to be read
+# alongside its neighbour to mean anything is a worse audit record than one that
+# states what happened on its own line.
+_TOMBSTONE_SQL = """
+WITH live AS (
+    SELECT endpoint_url, revoked
+    FROM agent_bindings
+    WHERE agent_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+), tombstone AS (
+    INSERT INTO agent_bindings (agent_id, endpoint_url, owner, bound_at, revoked)
+    SELECT $1, live.endpoint_url, $2, $3, TRUE
+    FROM live
+    WHERE NOT live.revoked
+    RETURNING endpoint_url, owner, bound_at
+)
+SELECT endpoint_url, owner, bound_at
+FROM tombstone
 """
 
 
@@ -182,12 +265,37 @@ class BindingRecord:
     previous_endpoint_url: str | None
 
 
+@dataclass(frozen=True)
+class UnbindRecord:
+    """One revocation, as proved and stored — the tombstone, not the binding.
+
+    A separate type rather than a `BindingRecord` with a flag, because almost
+    every field would have to be reinterpreted: `endpoint_url` is the endpoint
+    that STOPPED being routed rather than the one that starts, `owner` is
+    whoever proved the revocation (which need not be who proved the bind, if the
+    agent changed hands in between), and `bound_at` would have to be read as its
+    own opposite. A revocation and a binding are different events and the store
+    says so in the type.
+    """
+
+    agent_id: str
+    # The endpoint that was live until this record retired it. Kept so the
+    # audit trail — and the operator's own confirmation — names what stopped
+    # receiving dispatch, not merely that something did.
+    revoked_endpoint_url: str
+    # The G-address that proved ownership at revoke time.
+    owner: str
+    # Epoch seconds, matching BindingRecord.bound_at: 2.01 AC-6 wants the change
+    # recorded with a timestamp, and a revocation is a change.
+    unbound_at: float
+
+
 class BindingStore(Protocol):
     """The seam between the router and wherever bindings actually live.
 
-    Narrow on purpose: three methods, all awaitable even in the in-memory
-    implementation that needs none of it, so swapping in Postgres is a
-    configuration change rather than a rewrite of every call site.
+    Narrow on purpose: four methods plus `close`, all awaitable even in the
+    in-memory implementation that needs none of it, so swapping in Postgres is
+    a configuration change rather than a rewrite of every call site.
     """
 
     async def get(self, agent_id: str) -> BindingRecord | None:
@@ -198,12 +306,31 @@ class BindingStore(Protocol):
         """Record a binding and return it, `previous_endpoint_url` populated."""
         ...
 
+    async def delete(self, agent_id: str, owner: str) -> UnbindRecord | None:
+        """Revoke `agent_id`'s binding; None if it had none.
+
+        After this, `get` answers None and `list_agent_ids` omits the id — the
+        agent stops being routable. IDEMPOTENT: an agent with no binding is
+        already in the end state the caller asked for, so this returns None
+        rather than raising, and calling it twice is not an error.
+
+        `owner` is the address that proved the revocation, recorded alongside
+        it. It is NOT checked against the binding's own owner: ownership is
+        resolved live from the chain by the caller, and an agent that has
+        legitimately changed hands must still be revocable by whoever owns it
+        now — re-checking here against the address stored at bind time would
+        lock the endpoint to a former owner forever.
+        """
+        ...
+
     async def list_agent_ids(self) -> frozenset[str]:
         """Every agent id that currently has a binding.
 
-        Read once at startup to seed the synchronous routability check in
+        Read at startup to seed the synchronous routability check in
         binding_registry; deliberately ids only, because the planner asks
-        "could this agent run?", never "where does it run?".
+        "could this agent run?", never "where does it run?". A revoked agent is
+        NOT in this set — the whole point of a revocation is that a restart must
+        not bring the agent back.
         """
         ...
 
@@ -261,9 +388,52 @@ class InMemoryBindingStore:
         self._bindings.move_to_end(agent_id)
         return record
 
+    async def delete(self, agent_id: str, owner: str) -> UnbindRecord | None:
+        """Drop the binding and report what was revoked, or None if there was
+        nothing bound.
+
+        No tombstone row is kept, and that is not a departure from the Postgres
+        store's append-only rule so much as an admission that there is nothing
+        here for it to append to: this store keeps only the CURRENT binding per
+        agent — `put` overwrites in place — so it has never held a history a
+        tombstone could join. Removing the entry is the whole of what a
+        tombstone buys on the read side (`get` answers None, `list_agent_ids`
+        omits the id) and it frees the slot against the cap as well. An operator
+        who needs the revocation to be evidence needs DATABASE_URL set, which is
+        the same sentence this store's docstring already makes about AC-5.
+        """
+        record = self._bindings.pop(agent_id, None)
+        if record is None:
+            return None
+        return UnbindRecord(
+            agent_id=agent_id,
+            revoked_endpoint_url=record.endpoint_url,
+            owner=owner,
+            unbound_at=time.time(),
+        )
+
     def _evict_one(self) -> None:
-        """Drop the least recently bound agent so the cap can never be exceeded."""
+        """Drop the least recently bound agent so the cap can never be exceeded.
+
+        The evicted id is announced to `binding_registry` as well as removed
+        here, because that module keeps a synchronous mirror of "who is bound"
+        for the planner and nothing else would ever correct it: the mirror is
+        loaded at startup and maintained by events, so a binding that
+        disappeared without an event stays in it for the life of the process.
+        The planner would keep offering the agent, `resolve_worker` would then
+        read this store, find nothing, and return None — and the step would be
+        silently skipped. Quiet, wrong, and indistinguishable from a planner bug.
+
+        Imported inside the function on purpose: `binding_registry` imports this
+        module at module scope, so a top-level import back would be a cycle.
+        This is a cold path — once per 500 distinct agents — so the per-call
+        lookup costs nothing worth the alternative, which is an observer hook
+        registered at startup to deliver a single fact to a single subscriber.
+        """
+        from .binding_registry import note_unbound
+
         victim, evicted = self._bindings.popitem(last=False)
+        note_unbound(victim)
         logger.warning(
             "evicted in-memory binding at cap: agent_id=%s endpoint=%s bound_at=%s cap=%d "
             "(set DATABASE_URL to store bindings durably)",
@@ -338,7 +508,13 @@ class PostgresBindingStore:
     async def get(self, agent_id: str) -> BindingRecord | None:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_LATEST_SQL, agent_id)
-        return None if row is None else self._to_record(agent_id, row)
+        # A tombstone is the newest row, so it is the answer — and the answer it
+        # gives is "no binding". Checked here rather than in the SQL because a
+        # WHERE would skip past the tombstone to the binding underneath it; see
+        # _SELECT_LATEST_SQL.
+        if row is None or row["revoked"]:
+            return None
+        return self._to_record(agent_id, row)
 
     async def put(self, agent_id: str, endpoint_url: str, owner: str) -> BindingRecord:
         pool = await self._ready_pool()
@@ -350,6 +526,26 @@ class PostgresBindingStore:
         if row is None:  # pragma: no cover — the CTE always returns the inserted row
             raise RuntimeError(f"binding insert returned no row for agent_id={agent_id}")
         return self._to_record(agent_id, row)
+
+    async def delete(self, agent_id: str, owner: str) -> UnbindRecord | None:
+        pool = await self._ready_pool()
+        # Our own clock, in epoch seconds, for `put`'s reason: the record handed
+        # back must be the row that was stored, not a value the database
+        # rendered in whatever timezone it happens to run in.
+        unbound_at = time.time()
+        row = await pool.fetchrow(_TOMBSTONE_SQL, agent_id, owner, unbound_at)
+        # No row means the statement's WHERE found nothing live to revoke — the
+        # agent was never bound, or a previous unbind already tombstoned it.
+        # Nothing was written, and the caller is told so rather than being
+        # handed a tombstone that does not exist.
+        if row is None:
+            return None
+        return UnbindRecord(
+            agent_id=agent_id,
+            revoked_endpoint_url=row["endpoint_url"],
+            owner=row["owner"],
+            unbound_at=float(row["bound_at"]),
+        )
 
     @staticmethod
     def _to_record(agent_id: str, row: Any) -> BindingRecord:

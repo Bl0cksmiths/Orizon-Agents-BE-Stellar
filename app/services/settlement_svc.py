@@ -13,7 +13,10 @@ What this reads
 amount, job_id))` after the transfer lands, and publishes nothing at all when
 it fails — so the presence of a `charged` event IS the proof that value moved.
 This module scans Soroban RPC's event history for that topic pair and turns
-each hit into one entry a reader can look up on an explorer.
+each hit into one entry a reader can look up on an explorer. The node names the
+transaction each event came out of, so "look up" means the transaction itself
+rather than the ledger it happened to close in — an entry nobody can open is
+a claim about the chain, not evidence from it.
 
 Why the payer has to be resolved separately
 -------------------------------------------
@@ -134,7 +137,12 @@ class SettlementEntry(BaseModel):
     job_id: str  # hex, 16 bytes — the job the charge settled
     auth_id: str  # hex, 16 bytes — the authorization it was drawn from
     amount_stroops: int  # 7-decimal units of `SettlementEvidence.asset`
-    ledger: int  # the ledger that closed the charge — the explorer anchor
+    ledger: int  # the ledger that closed the charge
+    # hex, 32 bytes — the transaction the charge settled in, and the thing a
+    # reader opens on an explorer. None when the node's `txHash` was not a
+    # hash (see `_tx_hash`); a client that gets None must render NO link rather
+    # than an unresolvable one.
+    tx_hash: str | None
     at: str | None  # ISO-8601 ledger close time, None if the node omitted it
     payer: str  # G… address, or UNKNOWN_PAYER when the authorization is unreadable
     # True when this is not third-party revenue: the agent's own owner paid, the
@@ -198,7 +206,51 @@ class _Charge:
     auth_id: str
     amount_stroops: int
     ledger: int
+    tx_hash: str | None
     at: str | None
+
+
+# A Stellar transaction hash is a 32-byte SHA-256, rendered as 64 hex chars.
+TX_HASH_BYTES = 32
+
+
+def _tx_hash(event: EventInfo) -> str | None:
+    """The transaction this event came out of, or None when it is not a hash.
+
+    The node names it on every event and stellar-sdk declares it REQUIRED
+    (`transaction_hash: str = Field(alias="txHash")`, no default, not
+    optional), so an event that reaches this function has one: a page whose
+    events omit `txHash` — or send null — fails `GetEventsResponse` validation
+    inside `get_events`, and `_scan_sync` reports that as an unreadable page
+    rather than as entries. Absence therefore never arrives here.
+
+    What the SDK does NOT check is that the string is a hash. Its validation is
+    `str` and nothing more, so `""` or a truncated id passes it intact. That is
+    the case this guards: the field exists to become an explorer link, and a
+    link built from a non-hash looks exactly like evidence while resolving to
+    nothing — which is worse than showing no link, because it sends an operator
+    off to verify a charge against a 404 and brings them back none the wiser.
+    Anything that is not 32 bytes of hex becomes None, and the client renders
+    the entry without a link.
+
+    The round trip through bytes also canonicalises the case, so the hash reads
+    as the same lowercase hex as the `job_id` and `auth_id` beside it.
+    """
+    try:
+        raw = bytes.fromhex(event.transaction_hash)
+    except ValueError:
+        raw = b""
+    if len(raw) != TX_HASH_BYTES:
+        # Loud because it should be impossible: the node is contradicting its
+        # own API, and the visible symptom is an entry that silently lost its
+        # link while every other field stayed correct.
+        logger.warning(
+            "[settlement] charged event at ledger %s carries an unusable txHash %r",
+            event.ledger,
+            event.transaction_hash,
+        )
+        return None
+    return raw.hex()
 
 
 def _decode_charged(event: EventInfo) -> _Charge | None:
@@ -232,6 +284,12 @@ def _decode_charged(event: EventInfo) -> _Charge | None:
         # its source, so the entry carries the node's word for when this
         # happened rather than the moment we asked.
         ledger=event.ledger,
+        # An unusable hash costs this charge its link and nothing else. The
+        # amount, the payer and the ledger were all decoded from the event
+        # itself and are no less true for the node having fumbled one field —
+        # dropping the whole charge would remove real settled value from the
+        # dashboard to punish a cosmetic defect.
+        tx_hash=_tx_hash(event),
         at=event.ledger_close_at.isoformat() if event.ledger_close_at else None,
     )
 
@@ -537,6 +595,7 @@ def _build_entries(
                 auth_id=charge.auth_id,
                 amount_stroops=charge.amount_stroops,
                 ledger=charge.ledger,
+                tx_hash=charge.tx_hash,
                 at=charge.at,
                 payer=payer if payer is not None else UNKNOWN_PAYER,
                 self_payment=self_payment,
