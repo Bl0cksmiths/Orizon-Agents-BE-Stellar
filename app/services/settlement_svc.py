@@ -473,3 +473,29 @@ def _build_entries(
         else:
             total += charge.amount_stroops
     return entries, total, excluded
+
+
+async def _read_asset(sac_id: str) -> str:
+    """What the escrow's SAC wraps, read from the SAC itself.
+
+    The unit is not a detail: testnet's SAC wraps the NATIVE asset, so `name()`
+    returns "native" and every amount here is XLM, never USDC. A dashboard that
+    labelled these stroops "USDC" would turn true numbers into a false claim,
+    so the label is read rather than assumed — and when it cannot be read it
+    says UNKNOWN_ASSET rather than falling back to a guess.
+
+    An asset is fixed for the life of a SAC id, hence the long TTL.
+    """
+    if not sac_id:
+        return UNKNOWN_ASSET
+
+    async def _fetch() -> str:
+        value = await asyncio.to_thread(sc.simulate_read, sac_id, "name", [])
+        return value if isinstance(value, str) and value else UNKNOWN_ASSET
+
+    try:
+        result = await rcache.get_or_set(f"sacasset:{sac_id}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
+    except Exception as e:
+        logger.warning("[settlement] asset name unreadable for %s: %s", sac_id, _describe(e))
+        return UNKNOWN_ASSET
+    return result if isinstance(result, str) else UNKNOWN_ASSET
