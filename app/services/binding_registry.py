@@ -46,11 +46,13 @@ BINDING_READ_TTL_SECONDS = 2.0
 # planner's routability filter and the marketplace's `bound` read; the dispatch
 # path always reads the store.
 #
-# Kept correct by a load at startup plus an add on every successful bind. That
-# is sufficient because render.yaml pins `--workers 1`, so no other process can
-# write a binding this one has not seen. If that ever becomes `--workers N`,
-# this set needs a periodic refresh (the registry_sync loop is the pattern) —
-# otherwise a bind served by worker A stays unroutable on worker B.
+# Kept correct by a load at startup, an add on every successful bind, and a
+# removal on every revocation or eviction. That is sufficient because
+# render.yaml pins `--workers 1`, so no other process can write a binding this
+# one has not seen. If that ever becomes `--workers N`, this set needs a
+# periodic refresh (the registry_sync loop is the pattern) — otherwise a bind
+# served by worker A stays unroutable on worker B, and worse, an UNBIND served
+# by worker A leaves worker B still dispatching to the revoked host.
 _bound_ids: set[str] = set()
 
 # Whether `_bound_ids` has ever been loaded from the store. False means the set
@@ -98,6 +100,25 @@ def note_bound(agent_id: str) -> None:
     """Record a just-completed bind so the agent is routable immediately,
     without waiting for a refresh."""
     _bound_ids.add(agent_id)
+
+
+def note_unbound(agent_id: str) -> None:
+    """Forget a binding that has just gone away, so the agent stops being
+    offered to the planner IMMEDIATELY.
+
+    The mirror of `note_bound`, and the more urgent half of the pair. A bind
+    that takes a moment to become visible costs an operator one idle step; a
+    revocation that takes a moment to become invisible keeps handing signed
+    dispatch envelopes — buyer intent, rationale and accumulated context — to a
+    host the owner has just declared compromised. There is no refresh on the
+    dispatch path to fall back on, so this set going stale in the unsafe
+    direction is not eventually-consistent, it is indefinite.
+
+    `discard`, not `remove`: every caller is describing an end state ("this
+    agent has no binding"), never asserting a prior one. An unbind of an agent
+    that was never in the set is exactly as successful as one that was.
+    """
+    _bound_ids.discard(agent_id)
 
 
 async def refresh_bound_ids() -> None:
