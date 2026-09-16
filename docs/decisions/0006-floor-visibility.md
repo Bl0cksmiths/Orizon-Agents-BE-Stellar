@@ -49,18 +49,49 @@ happened to the **plan**. `reason_code` says **why**. They compose:
 ships against it (`execution-plan.tsx`, `lib/guards.ts`), and renaming a field
 a live client reads buys nothing a second field does not.
 
-### D2 — `inactive` is not in the vocabulary, because nothing can produce it
+### D2 — `inactive` is not in the vocabulary, because a withdrawal is absence rather than refusal
+
+> **Amended 2026-09-17.** The original reasoning was that nothing in routing
+> read `Agent.status`, so the value could not be produced. **That premise is no
+> longer true** — the Epic 2 hardening pass taught both planning paths, the
+> floor-substitute search and the post-LLM clamp to honour the listing flag, so
+> `set_active(id, false)` now genuinely stops routing. The Consequences section
+> below said `inactive` "will need adding if, and only if, the orchestrator is
+> ever taught to honour the listing flag". That trigger has fired. The answer is
+> still no, but it has to be re-derived rather than inherited, so the body of
+> this decision is replaced.
 
 `AgentRegistry.set_active(id, false)` syncs to `Agent.status == "offline"`
-(`registry_sync.py:225`), and **nothing in routing reads that field**. The
-planner builds candidates from `is_dispatchable` and the floor; the only
-consumer of `Agent.status` in the entire backend is a metrics counter
-(`app/routers/metrics.py:117`). An agent is never excluded for being inactive.
+(`registry_sync.py:225`), and routing now excludes those agents everywhere a
+candidate is chosen.
 
-Shipping the value anyway would put a state in the API contract that the system
-cannot reach, and a closed vocabulary that lies about its own range is worse
-than a narrow one. The underlying gap — that delisting does not stop routing —
-is real and has its own ticket; it is not fixed by naming it here.
+They are still not reported as exclusions, because of **what kind of fact each
+reason code carries**:
+
+- `below_floor` is a verdict *we* reached about an agent.
+- `floor_relaxed` is *our own rule* bending.
+- `unbound_endpoint` is a setup step **the operator has not finished** — D4
+  below exists to get it fixed, and is worded to avoid blame for that reason.
+
+A withdrawal is none of these. The operator asked to be absent, got exactly
+what they asked for, and there is nothing to fix. `unbound_endpoint` reports an
+*unfinished* state its subject wants resolved; `inactive` would report a
+*deliberate, completed* state its subject wants honoured. Publishing it on
+every buyer's plan card would turn an operator's own business decision — a
+maintenance window, a withdrawal, a wind-down — into a standing public
+exclusion, which is the opposite of what the call asked for.
+
+Two things make the omission safe rather than merely defensible:
+
+1. **The fact is already published where it belongs.** `GET /api/agents`
+   returns every agent, offline ones included, with `status` on the row
+   (`app/routers/agents.py`, no filtering). A buyer who wants to know can see
+   it on the agent, in the catalog — not on somebody else's plan.
+2. **It is D3's drowning failure, and worse.** The withdrawn set grows
+   monotonically over a deployment's life and never recovers, unlike a
+   sub-floor agent that one good rating clears. An uncapped list would bury the
+   notices this feature exists to surface; a capped one would need a second cap
+   constant and more contract surface for a signal nobody can act on.
 
 ### D3 — `not_selected_by_planner` is not an exclusion
 
