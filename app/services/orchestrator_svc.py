@@ -94,12 +94,6 @@ def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
 _KIT_AGENT_IDS: frozenset[str] = frozenset(aid for aid, _ in _KIT_PIPELINE)
 
 
-def _floor_reason(info: reputation_svc.RepInfo | None) -> str:
-    """Why the floor acted on an agent, with the deciding lower-bound bps."""
-    lb = info.lower_bound_bps if info is not None else 0
-    return f"below routing floor ({lb} < {settings.reputation_floor_bps} bps)"
-
-
 def _kit_step(
     agent: Agent,
     rationale: str,
