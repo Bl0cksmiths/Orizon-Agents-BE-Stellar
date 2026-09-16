@@ -37,6 +37,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import settings
 from app.demo_kits import detect_kit
 from app.schemas import DecomposeResponse, Plan, PlanStep
 from app.seed import seed_registry
@@ -220,3 +221,31 @@ def test_both_paths_report_the_same_floor_action(seeded: object, monkeypatch: py
     # buyer a sentence — a reason_code with no reason is an unrenderable card.
     for resp in (kit, free_form):
         assert all(n.reason.strip() for n in resp.notices)
+
+
+def test_both_paths_report_the_configured_floor(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-2. `floor_bps` is the floor this plan was built against, from settings.
+
+    The threshold is per-deployment config. A client that hardcodes 5500 to
+    render "4.10 against a 3.00 floor" narrates the wrong number the moment an
+    operator tunes REPUTATION_FLOOR_BPS — silently, and in the one sentence
+    the buyer uses to judge whether the exclusion was fair. Two different
+    floors are exercised so a constant baked into the response cannot pass.
+    """
+    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+
+    for floor in (4200, 3300):
+        # Both below the shipped 5500 default, so a prior-only agent still
+        # clears them and the only floor action stays the one this test set up.
+        monkeypatch.setattr(settings, "reputation_floor_bps", floor)
+
+        kit = _run_kit(monkeypatch, reps)
+        free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
+
+        assert kit.floor_bps == floor
+        assert free_form.floor_bps == floor
+
+        # And the same number reaches the notice, so a card rendering one
+        # exclusion never has to reach back to the envelope to find the floor.
+        assert [n.floor_bps for n in kit.notices] == [floor]
+        assert [n.floor_bps for n in free_form.notices] == [floor]
