@@ -157,6 +157,13 @@ def _floor_substitute(
     "Dispatchable" is a local worker OR a bound external endpoint (story 2.01).
     The floor is unchanged and still applied here: a bound agent stands in for
     a sub-floor kit agent only if it clears the floor on the same arithmetic.
+
+    Delisted agents are excluded from the pool as well. Promoting one INTO a
+    kit slot is the same defect as offering one to the planner, only harder to
+    spot: the agent is not merely tolerated in a candidate list, it is chosen,
+    and it lands in the plan with a `substituted_for` badge implying we picked
+    the best available stand-in. An agent whose operator withdrew it is not
+    available at all.
     """
     wanted = set(designated.skills)
     candidates = [
@@ -164,6 +171,7 @@ def _floor_substitute(
         for a in state.list_agents()
         if a.id not in taken
         and a.id not in _KIT_AGENT_IDS
+        and _is_listed(a)
         and is_dispatchable(a.id)
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
