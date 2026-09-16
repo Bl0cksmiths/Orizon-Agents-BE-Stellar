@@ -34,6 +34,7 @@ from stellar_sdk import scval
 from stellar_sdk.soroban_rpc import EventInfo, GetEventsResponse
 
 from app.config import settings
+from app.routers import stellar as routes
 from app.services import settlement_svc as svc
 from app.stellar import cache as rcache
 from app.stellar import client as sc
@@ -970,3 +971,43 @@ def test_the_route_sends_null_rather_than_a_broken_hash(monkeypatch: pytest.Monk
     body = response.json()
     assert body["entries"][0]["tx_hash"] is None
     assert body["total_stroops"] == 10_000  # still counted — only the link is gone
+
+
+# ── mirror-model parity ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("service_model", "router_model"),
+    [
+        (svc.SettlementEvidence, routes.SettlementEvidence),
+        (svc.SettlementEntry, routes.SettlementEntry),
+    ],
+    ids=["evidence", "entry"],
+)
+def test_router_mirror_declares_every_service_field(
+    service_model: type[pydantic.BaseModel],
+    router_model: type[pydantic.BaseModel],
+) -> None:
+    """The route answers `SettlementEvidence(**evidence.model_dump())`, and
+    pydantic DISCARDS keys the target model does not declare: no exception, no
+    warning, nothing for mypy to catch. A field added to the service model and
+    forgotten on the mirror is therefore computed on every request and thrown
+    away one line before the response is serialised, and the first symptom is a
+    client that cannot show something the backend has been producing for weeks.
+
+    Story 3.03 added exactly this guard for the reputation models after
+    `degraded` was dropped that way for weeks
+    (test_reputation_api.py::test_router_mirror_declares_every_service_field).
+    The same splat sits on this route with the same trap under it, and
+    `tx_hash` walked straight into it: correct in the service, and invisible to
+    the panel that needs it until the mirror declared it too. If this fails,
+    the field it names is already being dropped from every response — declare
+    it on the mirror rather than relaxing the assertion.
+
+    One direction only, deliberately. An extra field on the mirror announces
+    itself: required, and the splat raises on the very first request;
+    optional, and it sits in every response body as a visible constant. Only
+    the missing direction fails quietly, so only it needs a test.
+    """
+    missing = sorted(set(service_model.model_fields) - set(router_model.model_fields))
+    assert not missing, f"{router_model.__name__} drops {service_model.__name__} field(s) {missing}"
