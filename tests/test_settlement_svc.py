@@ -11,7 +11,10 @@ pin is not arithmetic but ATTRIBUTION and HONESTY ABOUT IGNORANCE:
   - a scan that could not run says so in `unavailable` and never returns a zero
     that reads as "this agent earned nothing";
   - `scanned_ledgers` is what was actually read, and a walk that stopped early
-    admits it in `truncated`.
+    admits it in `truncated`;
+  - every entry names the transaction it settled in, so a reader can open the
+    charge on an explorer — and says None rather than hand out a link that
+    resolves to nothing.
 
 Hermetic: `sc._server` and `sc.simulate_read` are monkeypatched everywhere, and
 nothing here touches the network. There is no pytest-asyncio, so async entry
@@ -25,6 +28,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, get_args
 
+import pydantic
 import pytest
 from stellar_sdk import scval
 from stellar_sdk.soroban_rpc import EventInfo, GetEventsResponse
@@ -65,11 +69,26 @@ def _job_id(n: int) -> bytes:
     return bytes([0x80 | n]) * 16
 
 
-def _charged_event(ledger: int, auth_id: bytes, job_id: bytes, amount: int) -> EventInfo:
+def _tx_hash(ledger: int) -> str:
+    """A distinct, well-formed 32-byte hash per ledger. Distinct on purpose:
+    a constant would let an entry carry SOME hash and still pass while carrying
+    the wrong event's."""
+    return f"{ledger:064x}"
+
+
+def _charged_event(
+    ledger: int,
+    auth_id: bytes,
+    job_id: bytes,
+    amount: int,
+    tx_hash: str | None = None,
+) -> EventInfo:
     """A real `charged` EventInfo, encoded exactly as PaymentEscrow emits it:
     topics `("charged", agent_id)`, data `(receipt_id, auth_id, amount, job_id)`
     — note the payload carries NO payer and NO owner, which is the whole reason
-    this service has to resolve them itself."""
+    this service has to resolve them itself. `txHash` is the node's, not the
+    contract's: it sits beside the payload on every event rather than inside
+    it."""
     value = scval.to_vec(
         [
             scval.to_bytes(b"\xee" * 16),
@@ -89,7 +108,7 @@ def _charged_event(ledger: int, auth_id: bytes, job_id: bytes, amount: int) -> E
         inSuccessfulContractCall=True,
         operationIndex=0,
         transactionIndex=0,
-        txHash="ab" * 32,
+        txHash=_tx_hash(ledger) if tx_hash is None else tx_hash,
     )
 
 
@@ -824,3 +843,130 @@ def test_the_exclusion_vocabulary_is_closed() -> None:
     the contract: adding a fifth rule without a sentence to go with it would
     render as a blank reason next to a withheld amount."""
     assert set(get_args(svc.Exclusion)) == {"payer_unreadable", "owner", "settler", "settler_unreadable"}
+
+
+# ── transaction evidence ────────────────────────────────────────
+
+
+def test_an_entry_carries_the_transaction_the_charge_settled_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of the whole field: an operator can open the charge on an
+    explorer. The ledger alone only narrows it to everything that closed in the
+    same five seconds."""
+    tx = "9f" * 32
+    rpc = _FakeRpc(events=[_charged_event(1_000_050, _auth_id(1), _job_id(1), 120_000, tx_hash=tx)])
+    reader = _reader(payers={_auth_id(1).hex(): BUYER})
+
+    entry = _run(monkeypatch, rpc, reader).entries[0]
+
+    assert entry.tx_hash == tx
+    assert entry.ledger == 1_000_050  # the ledger is still reported beside it
+
+
+def test_every_entry_carries_its_own_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Story 2.06 AC2 asks for THREE settlements each linking to a transaction,
+    so the hashes have to be per-entry. A single hash copied across the list
+    would satisfy "the field is populated" and link all three charges to one
+    transaction — the exact confusion this evidence exists to remove."""
+    ledgers = (1_000_010, 1_000_020, 1_000_030)
+    rpc = _FakeRpc(
+        events=[_charged_event(led, _auth_id(n), _job_id(n), 10_000 * n) for n, led in enumerate(ledgers, 1)]
+    )
+    reader = _reader(payers={_auth_id(n).hex(): BUYER for n in (1, 2, 3)})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert [e.tx_hash for e in result.entries] == [_tx_hash(led) for led in ledgers]
+    assert len({e.tx_hash for e in result.entries}) == 3
+
+
+def test_the_sdk_never_hands_us_an_event_without_a_transaction_hash() -> None:
+    """Why `tx_hash` is only ever None for a MALFORMED hash and never a missing
+    one. stellar-sdk declares `transaction_hash: str` — required, no default,
+    not optional — so an event without `txHash` fails validation inside
+    `get_events` and the page raises before anything is decoded. `_scan_sync`
+    already reports that as an unreadable page rather than as entries.
+
+    Pinned as a test because the entire absence argument rests on it: if a
+    future SDK relaxes this field to optional, the service starts receiving
+    events it cannot decode at all and this is where that shows up."""
+    assert EventInfo.model_fields["transaction_hash"].is_required()
+    with pytest.raises(pydantic.ValidationError):
+        EventInfo(
+            type="contract",
+            ledger=1_000_010,
+            ledgerClosedAt="2026-09-16T08:57:00Z",
+            contractId=ESCROW_ID,
+            id="1000010-0",
+            topic=[],
+            value=scval.to_vec([]).to_xdr(),
+            inSuccessfulContractCall=True,
+            operationIndex=0,
+            transactionIndex=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "tx_hash",
+    ["", "ab" * 31, "ab" * 33, "zz" * 32, "0x" + "ab" * 32],
+    ids=["empty", "too_short", "too_long", "not_hex", "prefixed"],
+)
+def test_a_hash_that_is_not_a_hash_becomes_no_link(monkeypatch: pytest.MonkeyPatch, tx_hash: str) -> None:
+    """The SDK validates `txHash` as a string and nothing more, so any of these
+    would reach us intact and render as an explorer URL that resolves to
+    nothing. A dead evidence link is worse than no link: it looks like proof,
+    and it sends the reader off to check a charge against a 404. None is the
+    instruction to render no link at all."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_050, _auth_id(1), _job_id(1), 120_000, tx_hash=tx_hash)])
+    reader = _reader(payers={_auth_id(1).hex(): BUYER})
+
+    entry = _run(monkeypatch, rpc, reader).entries[0]
+
+    assert entry.tx_hash is None
+    # The charge itself is untouched. Everything else came out of the event's
+    # own payload and is no less true for the node fumbling one field beside
+    # it — dropping the entry would take real settled value off the dashboard.
+    assert (entry.amount_stroops, entry.payer, entry.self_payment) == (120_000, BUYER, False)
+
+
+def test_a_transaction_hash_is_reported_in_canonical_lowercase_hex(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hex has two spellings and an explorer accepts both, but the ids beside
+    it are lowercase `bytes.hex()` — so a client comparing or de-duplicating on
+    these strings sees one format, not two."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_050, _auth_id(1), _job_id(1), 120_000, tx_hash="AB" * 32)])
+    reader = _reader(payers={_auth_id(1).hex(): BUYER})
+
+    entry = _run(monkeypatch, rpc, reader).entries[0]
+
+    assert entry.tx_hash == "ab" * 32
+
+
+def test_the_route_carries_the_transaction_hash_to_the_client(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
+    """Asserted on the RESPONSE BODY, not the service model. The route answers
+    `SettlementEntry(**evidence.model_dump())` and pydantic drops keys the
+    mirror does not declare — silently, with nothing for mypy to catch — so a
+    hash that is correct in the service and absent from the payload is exactly
+    the failure this has to catch."""
+    tx = "9f" * 32
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000, tx_hash=tx)])
+    monkeypatch.setattr(sc, "_server", lambda **_kw: rpc)
+    monkeypatch.setattr(sc, "simulate_read", _reader(payers={_auth_id(1).hex(): BUYER}))
+
+    response = client.get(f"/api/stellar/settlement/{AGENT_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["entries"][0]["tx_hash"] == tx
+
+
+def test_the_route_sends_null_rather_than_a_broken_hash(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
+    """The unusable case as the frontend actually sees it: JSON null, which is
+    the instruction to render the entry with no link. An empty string would
+    build `…/tx/` and look like a link that had simply gone wrong."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000, tx_hash="not-a-hash")])
+    monkeypatch.setattr(sc, "_server", lambda **_kw: rpc)
+    monkeypatch.setattr(sc, "simulate_read", _reader(payers={_auth_id(1).hex(): BUYER}))
+
+    response = client.get(f"/api/stellar/settlement/{AGENT_ID}")
+
+    body = response.json()
+    assert body["entries"][0]["tx_hash"] is None
+    assert body["total_stroops"] == 10_000  # still counted — only the link is gone
