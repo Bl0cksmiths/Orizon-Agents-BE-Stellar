@@ -1,0 +1,669 @@
+"""
+Settlement evidence — the honest answer to "has this agent actually been paid?"
+
+The operator dashboard shows an earnings figure, and that figure has to come
+from the ledger's own record of money moving. It can never come from what this
+backend believes about the runs it orchestrated: a run finalizes `complete`
+whether or not its charge settled, so orchestration state is evidence that work
+happened, not that anyone paid for it.
+
+What this reads
+---------------
+`PaymentEscrow.charge` publishes `(("charged", agent_id), (receipt_id, auth_id,
+amount, job_id))` after the transfer lands, and publishes nothing at all when
+it fails — so the presence of a `charged` event IS the proof that value moved.
+This module scans Soroban RPC's event history for that topic pair and turns
+each hit into one entry a reader can look up on an explorer.
+
+Why the payer has to be resolved separately
+-------------------------------------------
+The event carries no payer and no owner, and without them a charge is just an
+amount. Every `charged` event the deployed escrow has emitted so far has
+`payer == settler == owner_of(agent_id)` — the platform paying itself — because
+`charge` ends in `usdc.transfer(&auth.payer, …)` while only the settler signs,
+so the SAC's `from.require_auth()` can only ever be satisfied for the settler's
+own funds (docs/evidence/2.04-reference-agent-runbook.md, "Settlement
+position"). Rendering those as operator revenue would be the single most
+misleading thing this dashboard could do, so every entry's payer is read back
+from `authorization(auth_id)` and compared against the agent's owner and the
+escrow's settler. Anything that resolves to one of our own keys — or that
+cannot be resolved at all — is still reported, but never counted.
+
+Why "no entries" is not "never paid"
+------------------------------------
+Soroban RPC keeps events for about seven days and then drops them, so a scan
+can only ever answer "within the window this node still holds". That is why
+`window_days` and `scanned_ledgers` travel with the result: the frontend says
+"nothing in the last N days", not "never paid". And a scan that could not run
+at all sets `unavailable` and returns no entries — zero is a real answer, and
+it is never allowed to stand in for a failed lookup.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
+from typing import Literal
+
+from pydantic import BaseModel
+from stellar_sdk import scval
+from stellar_sdk.soroban_rpc import EventFilter, EventFilterType, EventInfo, GetEventsResponse
+
+from ..config import settings
+from ..stellar import cache as rcache
+from ..stellar import client as sc
+from . import external_binding
+
+logger = logging.getLogger(__name__)
+
+# Soroban RPC keeps events for ~7 days — 604_800 s at the ~5 s ledger close
+# time — and then drops them. Nothing older is knowable from events at any
+# price, so this is the ceiling on what a scan can even claim to cover.
+RETENTION_LEDGERS = 120_960
+
+# A single getEvents call is capped by the node at ~10_000 ledgers, so covering
+# the window means paging. Pages are explicit [start, end) ledger ranges rather
+# than cursor continuations, because the range we asked for is exactly the
+# range we are entitled to claim we scanned — which is what `scanned_ledgers`
+# has to report.
+LEDGERS_PER_PAGE = 10_000
+
+# 13 pages cover the full retention window; 14 is that plus one page of slack
+# for a node whose retention runs a little long. The cap exists because the
+# walk runs inside the bounded worker pool app/main.py hands to
+# asyncio.to_thread — an unbounded page walk would pin one of those threads
+# behind a slow RPC and starve unrelated routes.
+MAX_PAGES = 14
+
+# Wall-clock cap on the whole page walk, for the same reason as MAX_PAGES:
+# 14 pages against the 5 s read timeout in `_server()` is over a minute of
+# pinned thread, which a dashboard poll must never be allowed to cost.
+SCAN_BUDGET_SECONDS = 20.0
+
+# Events per page. The filter already narrows to one contract, one topic and
+# one agent, so this sits far above anything the deployed escrow produces; a
+# page that fills it anyway means the range held more charges than we read, and
+# that is reported as `truncated` rather than silently under-counted.
+PAGE_EVENT_LIMIT = 200
+
+# A full scan is a dozen-odd RPC round trips and the dashboard polls, so the
+# whole answer is cached long enough to collapse a poll loop into one scan
+# while staying inside a human's sense of "live". `unavailable` answers are
+# cached the same way on purpose: a hard-down RPC must not be re-probed once
+# per poll.
+CACHE_TTL_SECONDS = 30.0
+
+# An Authorization's payer is written once by `authorize` and never moves after
+# it (only `spent` and `revoked` do), and both the escrow's settler and the
+# asset its SAC wraps are fixed at deploy time. Values that cannot drift are
+# cached far longer than a read that can.
+IMMUTABLE_READ_TTL_SECONDS = 900.0
+
+# What `payer` says when `authorization(auth_id)` could not be read. Chosen to
+# be obviously not a G-address, so no client can mistake it for one.
+UNKNOWN_PAYER = "unknown"
+
+# The label used wherever the asset behind the amounts could not be established.
+UNKNOWN_ASSET = "unknown"
+
+CHARGED_TOPIC = "charged"
+
+# Why a charge is not counted as revenue. These are four genuinely different
+# facts and they read as four different sentences to an operator: "you funded
+# this yourself" is not "the platform funded this", and neither of them is "we
+# could not check who funded this". `self_payment` collapses all four into one
+# boolean because the payload's arithmetic needs a single flag — but a client
+# cannot un-collapse it afterwards, and a client that tries will describe three
+# of the four wrongly. This alias is the discriminator that keeps them apart.
+#
+#   payer_unreadable   `authorization(auth_id)` could not be read at all.
+#   owner              the agent's own owner account funded the charge.
+#   settler            the platform's settler funded it — the escrow paying
+#                      itself, which is every charged event on this deployment.
+#   settler_unreadable the payer was read and is neither of the above, but
+#                      `settler()` was not, so a platform self-payment could
+#                      not be ruled out. Excluded fail-closed.
+Exclusion = Literal["payer_unreadable", "owner", "settler", "settler_unreadable"]
+
+
+class SettlementEntry(BaseModel):
+    """One `charged` event, attributed to the account that actually paid."""
+
+    job_id: str  # hex, 16 bytes — the job the charge settled
+    auth_id: str  # hex, 16 bytes — the authorization it was drawn from
+    amount_stroops: int  # 7-decimal units of `SettlementEvidence.asset`
+    ledger: int  # the ledger that closed the charge — the explorer anchor
+    at: str | None  # ISO-8601 ledger close time, None if the node omitted it
+    payer: str  # G… address, or UNKNOWN_PAYER when the authorization is unreadable
+    # True when this is not third-party revenue: the agent's own owner paid, the
+    # platform's settler paid, or the payer could not be established at all.
+    self_payment: bool
+    # WHICH of those it was, or None when the charge IS revenue. Exactly
+    # equivalent to `self_payment`: None if and only if `self_payment` is False.
+    exclusion: Exclusion | None
+
+
+class SettlementEvidence(BaseModel):
+    """Everything the chain will say about one agent's earnings, and the limits
+    of what was looked at while saying it."""
+
+    agent_id: str
+    asset: str  # what the escrow's SAC wraps; "native" (XLM) on testnet
+    window_days: float  # the span actually scanned, so a client can say "in N days"
+    scanned_ledgers: int  # ledgers actually covered, never the theoretical window
+    entries: list[SettlementEntry]
+    total_stroops: int  # sum of entries with self_payment False — verified revenue
+    self_payment_stroops: int  # sum of the excluded ones: reported, not hidden
+    truncated: bool  # the scan stopped before covering the whole window
+    # Why no scan happened, in words a human can act on; None when one did. An
+    # empty `entries` with this set to None means "nothing inside window_days".
+    unavailable: str | None
+
+
+def _describe(e: BaseException) -> str:
+    """Compact "Type: message" description — bare type when there is no
+    message, as asyncio.TimeoutError carries none. Mirrors the helper in
+    registry_sync and external_binding."""
+    text = str(e)
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+
+def _unavailable(agent_id: str, reason: str, asset: str = UNKNOWN_ASSET) -> SettlementEvidence:
+    """An answer that admits it has no answer.
+
+    Every field a caller might sum is zero AND `unavailable` says why, so a
+    client can tell "this agent earned nothing" from "we could not find out" —
+    the distinction the whole endpoint turns on.
+    """
+    return SettlementEvidence(
+        agent_id=agent_id,
+        asset=asset,
+        window_days=0.0,
+        scanned_ledgers=0,
+        entries=[],
+        total_stroops=0,
+        self_payment_stroops=0,
+        truncated=False,
+        unavailable=reason,
+    )
+
+
+@dataclass(frozen=True)
+class _Charge:
+    """One `charged` event, decoded but not yet attributed to a payer."""
+
+    job_id: str
+    auth_id: str
+    amount_stroops: int
+    ledger: int
+    at: str | None
+
+
+def _decode_charged(event: EventInfo) -> _Charge | None:
+    """Decode one `charged` event, or None if it is not one we understand.
+
+    The filter already pins the contract and both topics, so a payload that
+    does not unpack as `(receipt_id, auth_id, amount, job_id)` means the
+    deployed ABI has moved under us. Such an event is skipped and logged rather
+    than coerced: half a decoded event still has an amount, and putting a
+    number of unknown provenance on an earnings dashboard is precisely the
+    outcome this module exists to prevent. The rest of the scan stays readable,
+    and the warning is what says the ABI drifted.
+    """
+    try:
+        data = scval.to_native(event.value)
+    except Exception as e:
+        logger.warning("[settlement] undecodable charged event at ledger %s: %s", event.ledger, _describe(e))
+        return None
+    if not isinstance(data, (list, tuple)) or len(data) != 4:
+        logger.warning("[settlement] charged event at ledger %s is not a 4-tuple payload", event.ledger)
+        return None
+    _receipt_id, auth_id, amount, job_id = data
+    if not isinstance(auth_id, bytes) or not isinstance(job_id, bytes) or not isinstance(amount, int):
+        logger.warning("[settlement] charged event at ledger %s has unexpected field types", event.ledger)
+        return None
+    return _Charge(
+        job_id=job_id.hex(),
+        auth_id=auth_id.hex(),
+        amount_stroops=amount,
+        # `ledger_close_at` is the only timestamp on the event and the node is
+        # its source, so the entry carries the node's word for when this
+        # happened rather than the moment we asked.
+        ledger=event.ledger,
+        at=event.ledger_close_at.isoformat() if event.ledger_close_at else None,
+    )
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """The raw outcome of one page walk, and how much of the window it covers."""
+
+    charges: list[_Charge]
+    scanned_ledgers: int
+    truncated: bool
+    seconds_per_ledger: float
+
+
+def _event_filter(escrow_id: str, agent_id: str) -> EventFilter:
+    """Contract plus BOTH topics, so the node does the filtering.
+
+    Matching `("charged", agent_id)` server-side is what keeps a full-window
+    scan down to a handful of small pages. Filtering here instead would mean
+    paging every `authd` and `revoked` event the escrow emitted for every other
+    agent on the deployment, through a rate-limited public RPC.
+    """
+    # Built with the JSON-RPC ALIASES (`type`, `contractIds`) rather than the
+    # snake_case field names. stellar-sdk's model allows either, but its
+    # generated signature is the alias one — so the field names type-check only
+    # under pydantic's mypy plugin, which this repo does not enable.
+    return EventFilter(
+        type=EventFilterType.CONTRACT,
+        contractIds=[escrow_id],
+        topics=[[sc.sym(CHARGED_TOPIC).to_xdr(), sc.sym(agent_id).to_xdr()]],
+    )
+
+
+def _seconds_per_ledger(probe: GetEventsResponse) -> float:
+    """The ledger close interval, measured from the node's own retention span.
+
+    `window_days` is a client's licence to say "nothing in the last N days", so
+    N is measured rather than assumed: a node keeping six days instead of
+    seven, or a network running slow, both show up here instead of being
+    papered over by a constant. Clamped to a plausible range because one absurd
+    close time must not become an absurd claim.
+    """
+    ledgers = probe.latest_ledger - probe.oldest_ledger
+    seconds = probe.latest_Ledger_close_time - probe.oldest_ledger_close_time
+    if ledgers <= 0 or seconds <= 0:
+        return 5.0
+    return min(max(seconds / ledgers, 1.0), 30.0)
+
+
+def _scan_sync(escrow_id: str, agent_id: str) -> _Scan:
+    """Walk the retention window for this agent's `charged` events. Blocking.
+
+    Two setup calls before the walk, deliberately. `getLatestLedger` gives the
+    tip; a one-event `getEvents` probe then reports the node's OWN
+    `oldestLedger` and close times. Starting from a hardcoded
+    `latest - RETENTION_LEDGERS` instead would be a claim about retention we
+    never verified, and the node rejects the request outright whenever its real
+    retention runs even one ledger short of our constant. The probe's own
+    events are discarded — the walk below covers the tip again — so nothing is
+    counted twice.
+
+    `_server()` is reused rather than a fresh SorobanServer: it carries the
+    read timeout profile (5 s, no retry) that bounds this walk, and stellar-sdk
+    already sends a User-Agent, which the public RPC answers 403 without.
+    """
+    server = sc._server()
+    filters = [_event_filter(escrow_id, agent_id)]
+    latest = server.get_latest_ledger().sequence
+    probe = server.get_events(start_ledger=latest, filters=filters, limit=1)
+
+    charges: list[_Charge] = []
+    scanned = 0
+    truncated = False
+    pages = 0
+    deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+    cursor = max(probe.oldest_ledger, latest - RETENTION_LEDGERS + 1, 1)
+
+    while cursor <= latest:
+        if pages >= MAX_PAGES or time.monotonic() >= deadline:
+            truncated = True
+            break
+        end = min(cursor + LEDGERS_PER_PAGE, latest + 1)
+        try:
+            page = server.get_events(start_ledger=cursor, end_ledger=end, filters=filters, limit=PAGE_EVENT_LIMIT)
+        except Exception as e:
+            # The FIRST page failing means nothing was scanned at all, which is
+            # an `unavailable`, not a zero — let the caller say so. A later one
+            # failing leaves real, already-decoded entries behind it, and
+            # throwing those away to report a rounder number would be the same
+            # lie pointing the other way.
+            if scanned == 0:
+                raise
+            logger.warning("[settlement] page %d of %s failed: %s", pages + 1, agent_id, _describe(e))
+            truncated = True
+            break
+        pages += 1
+        scanned += end - cursor
+        cursor = end
+        charges.extend(c for c in (_decode_charged(ev) for ev in page.events) if c is not None)
+        if len(page.events) >= PAGE_EVENT_LIMIT:
+            # The node had at least as many charges in this range as we allowed
+            # it to return, so what came back may be a subset of the range we
+            # just claimed to have scanned. Saying so is the only honest move.
+            truncated = True
+
+    return _Scan(
+        charges=charges,
+        scanned_ledgers=scanned,
+        truncated=truncated,
+        seconds_per_ledger=_seconds_per_ledger(probe),
+    )
+
+
+# Fan-out cap on the per-charge authorization reads, and the budget for all of
+# them together. Both bound the same resource MAX_PAGES does — the shared
+# worker pool — and a read that misses the budget simply leaves its payer
+# unresolved, which excludes that entry from revenue instead of guessing at it.
+PAYER_CONCURRENCY = 6
+PAYER_BUDGET_SECONDS = 10.0
+
+
+async def _read_payer(escrow_id: str, auth_id_hex: str) -> str | None:
+    """`authorization(auth_id).payer`, or None when it cannot be read.
+
+    Cached for IMMUTABLE_READ_TTL_SECONDS because `authorize` writes the payer
+    once and nothing ever rewrites it — the fields that do move (`spent`,
+    `revoked`) are not read here. Under a polling dashboard that turns a repeat
+    visit to the same agent into zero authorization reads.
+
+    Returns None rather than raising: one unreadable authorization must not
+    blank the entries around it, and the caller already treats an unknown payer
+    as "not proven to be revenue".
+    """
+
+    async def _fetch() -> str | None:
+        record = await asyncio.to_thread(
+            sc.simulate_read,
+            escrow_id,
+            "authorization",
+            [sc.bytes16(bytes.fromhex(auth_id_hex))],
+        )
+        payer = record.get("payer") if isinstance(record, dict) else None
+        return payer if isinstance(payer, str) and payer else None
+
+    try:
+        result = await rcache.get_or_set(f"escrowauth:{auth_id_hex}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
+    except Exception as e:
+        logger.warning("[settlement] authorization %s unreadable: %s", auth_id_hex, _describe(e))
+        return None
+    return result if isinstance(result, str) else None
+
+
+async def _resolve_payers(escrow_id: str, charges: list[_Charge]) -> dict[str, str]:
+    """auth_id → payer for the DISTINCT authorizations behind `charges`.
+
+    Deduplicated because one authorization can fund several charges, and
+    bounded because this is the only fan-out in the request that scales with
+    on-chain history rather than with configuration. `return_exceptions=True`
+    is the point of the gather: a single failed read leaves its own key absent
+    and every other payer intact.
+    """
+    auth_ids = sorted({c.auth_id for c in charges})
+    if not auth_ids:
+        return {}
+
+    gate = asyncio.Semaphore(PAYER_CONCURRENCY)
+
+    async def _one(auth_id: str) -> tuple[str, str | None]:
+        async with gate:
+            return auth_id, await _read_payer(escrow_id, auth_id)
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(_one(a) for a in auth_ids), return_exceptions=True),
+            timeout=PAYER_BUDGET_SECONDS,
+        )
+    except Exception as e:
+        # Every payer is now unknown, so every entry will be excluded from
+        # revenue. That is the safe direction: the alternative is presenting
+        # unverified charges as earnings.
+        logger.warning("[settlement] payer resolution aborted: %s", _describe(e))
+        return {}
+
+    resolved: dict[str, str] = {}
+    for result in results:
+        if isinstance(result, BaseException):
+            continue
+        auth_id, payer = result
+        if payer is not None:
+            resolved[auth_id] = payer
+    return resolved
+
+
+async def _read_settler(escrow_id: str) -> str | None:
+    """The escrow's `settler` address, or None when it cannot be read.
+
+    Needed because "the platform paid itself" is not only `payer == owner`. The
+    settler is the one account whose funds `charge` can actually move, so a
+    charge it paid is the platform's money either way — and the settler is a
+    deploy argument with no setter on this contract, hence the long TTL.
+    """
+
+    async def _fetch() -> str | None:
+        value = await asyncio.to_thread(sc.simulate_read, escrow_id, "settler", [])
+        return value if isinstance(value, str) and value else None
+
+    try:
+        result = await rcache.get_or_set(f"escrowsettler:{escrow_id}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
+    except Exception as e:
+        # None costs every charge its revenue (see `_build_entries`), which is
+        # the point: without the settler we cannot rule out that the platform
+        # funded them, and "we could not check" must not read as "verified".
+        logger.warning("[settlement] settler unreadable for %s: %s", escrow_id, _describe(e))
+        return None
+    return result if isinstance(result, str) else None
+
+
+def _exclusion(payer: str | None, owner: str, settler: str | None) -> Exclusion | None:
+    """Which rule kept this charge out of revenue, or None when none did.
+
+    The ORDER is the whole content of this function, and two steps of it are
+    not the order anyone would write by accident:
+
+      1. `payer_unreadable` outranks everything, an unreadable settler
+         included. It is the most specific thing we actually know — we never
+         got as far as having an account to compare against — and answering
+         "we could not rule out the platform" for a charge whose payer we never
+         read would describe a comparison that never happened.
+      2. `owner` is checked BEFORE `settler`, and this is the one someone will
+         eventually "fix". On this deployment `owner_of(orizon_batch)` IS the
+         settler, so both rules match the same charge and only precedence
+         decides which sentence an operator reads. "Your own owner account
+         funded this" is the more precise statement RELATIVE TO THIS AGENT, and
+         for an external operator — whose owner is their own wallet and not one
+         of ours — it is the only correct one. Reversed, this would tell that
+         operator the platform had paid them.
+      3. `settler`: the platform funded it, the escrow paying itself.
+      4. `settler_unreadable` last, because it is the weakest claim of the
+         four: the payer was read and is neither of ours, and the only thing
+         keeping this out of revenue is a check we could not run.
+    """
+    if payer is None:
+        return "payer_unreadable"
+    if payer == owner:
+        return "owner"
+    if settler is not None and payer == settler:
+        return "settler"
+    if settler is None:
+        return "settler_unreadable"
+    return None
+
+
+def _build_entries(
+    charges: list[_Charge],
+    payers: dict[str, str],
+    owner: str,
+    settler: str | None,
+) -> tuple[list[SettlementEntry], int, int]:
+    """Attribute every charge and split verified revenue from everything else.
+
+    Returns (entries, total_stroops, self_payment_stroops). An amount counts as
+    revenue only when ALL THREE of these are known and none of them is us:
+
+      - the PAYER, read back from `authorization(auth_id)`;
+      - the agent's OWNER, so the operator moving their own money is not
+        mistaken for someone paying them;
+      - the escrow's SETTLER, the one account whose funds `charge` can actually
+        move — and the payer of every `charged` event this deployment has
+        produced so far.
+
+    Anything short of that is excluded, INCLUDING the cases where a lookup
+    merely failed: an unresolved payer, and a settler we could not read (which
+    leaves us unable to rule out that the platform funded the charge). Both
+    fail towards under-reporting, because an earnings figure that is too low is
+    a disappointment and one that is too high is a lie.
+
+    The exclusions are reported, never hidden. `self_payment` carries the whole
+    arithmetic of this payload — `total_stroops` is by definition the sum of
+    the entries where it is False — so an excluded charge has to be excluded
+    THROUGH that flag or the totals stop adding up. `exclusion` then says WHICH
+    of the four rules did it, because those four are not interchangeable to the
+    operator reading them (see `_exclusion`). Each entry also keeps whatever
+    was established about it: a real G-address where the payer was read,
+    UNKNOWN_PAYER where it was not, and its amount inside
+    `self_payment_stroops` either way.
+
+    Entries are ordered oldest-first, tie-broken on the ids, so two calls over
+    the same window return the same list in the same order.
+    """
+    entries: list[SettlementEntry] = []
+    total = 0
+    excluded = 0
+    for charge in sorted(charges, key=lambda c: (c.ledger, c.auth_id, c.job_id)):
+        payer = payers.get(charge.auth_id)
+        exclusion = _exclusion(payer, owner, settler)
+        # The same predicate this has always applied, now read off the reason
+        # rather than recomputed beside it — two expressions of one rule would
+        # be free to drift, and the payload's arithmetic gates on this flag.
+        self_payment = exclusion is not None
+        entries.append(
+            SettlementEntry(
+                job_id=charge.job_id,
+                auth_id=charge.auth_id,
+                amount_stroops=charge.amount_stroops,
+                ledger=charge.ledger,
+                at=charge.at,
+                payer=payer if payer is not None else UNKNOWN_PAYER,
+                self_payment=self_payment,
+                exclusion=exclusion,
+            )
+        )
+        if self_payment:
+            excluded += charge.amount_stroops
+        else:
+            total += charge.amount_stroops
+    return entries, total, excluded
+
+
+async def _read_asset(sac_id: str) -> str:
+    """What the escrow's SAC wraps, read from the SAC itself.
+
+    The unit is not a detail: testnet's SAC wraps the NATIVE asset, so `name()`
+    returns "native" and every amount here is XLM, never USDC. A dashboard that
+    labelled these stroops "USDC" would turn true numbers into a false claim,
+    so the label is read rather than assumed — and when it cannot be read it
+    says UNKNOWN_ASSET rather than falling back to a guess.
+
+    An asset is fixed for the life of a SAC id, hence the long TTL.
+    """
+    if not sac_id:
+        return UNKNOWN_ASSET
+
+    async def _fetch() -> str:
+        value = await asyncio.to_thread(sc.simulate_read, sac_id, "name", [])
+        return value if isinstance(value, str) and value else UNKNOWN_ASSET
+
+    try:
+        result = await rcache.get_or_set(f"sacasset:{sac_id}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
+    except Exception as e:
+        logger.warning("[settlement] asset name unreadable for %s: %s", sac_id, _describe(e))
+        return UNKNOWN_ASSET
+    return result if isinstance(result, str) else UNKNOWN_ASSET
+
+
+async def _settlement(agent_id: str) -> SettlementEvidence:
+    """Produce one agent's settlement evidence. Never raises.
+
+    Order matters. The owner is resolved BEFORE the scan and its failure ends
+    the request, for two reasons: without an owner no charge can be told apart
+    from a self-payment, and a list of unclassifiable charges rendered as
+    earnings is the exact failure this endpoint exists to prevent; and it is
+    also the cheapest read, so a miss here saves the dozen round trips behind
+    it.
+
+    Every early return is an `unavailable` with empty entries, never a zero. A
+    zero here would read as "this agent has earned nothing", which is a claim
+    about the chain — and we would not have looked at the chain to make it.
+    """
+    # Settings are read live rather than through the lru_cached
+    # `sc.contract_ids()`, which pins whatever it saw first for the life of the
+    # process. Same reasoning as registry_sync and external_binding.
+    escrow_id = settings.stellar_payment_escrow
+    if not escrow_id:
+        return _unavailable(agent_id, "escrow contract not configured")
+    if not settings.stellar_agent_registry:
+        return _unavailable(agent_id, "agent registry not configured")
+
+    try:
+        owner = await external_binding.resolve_owner(agent_id)
+    except external_binding.OwnerLookupError as e:
+        logger.warning("[settlement] owner unreadable for %s: %s", agent_id, _describe(e))
+        return _unavailable(agent_id, "agent owner unreadable")
+    if owner is None:
+        return _unavailable(agent_id, "agent not found in the registry")
+
+    asset = await _read_asset(settings.stellar_asset_sac)
+    try:
+        scan = await asyncio.to_thread(_scan_sync, escrow_id, agent_id)
+    except Exception as e:
+        logger.warning("[settlement] event scan failed for %s: %s", agent_id, _describe(e))
+        return _unavailable(agent_id, "soroban rpc unreachable", asset=asset)
+
+    # Only worth a round trip when there is something to classify — the common
+    # case for a young agent is an empty window.
+    settler = await _read_settler(escrow_id) if scan.charges else None
+    payers = await _resolve_payers(escrow_id, scan.charges)
+    entries, total, excluded = _build_entries(scan.charges, payers, owner, settler)
+
+    if scan.truncated:
+        logger.warning(
+            "[settlement] scan for %s stopped after %d ledgers — entries are a subset of the window",
+            agent_id,
+            scan.scanned_ledgers,
+        )
+    logger.debug(
+        "[settlement] %s: %d entries · %d stroops verified · %d excluded · %d ledgers",
+        agent_id,
+        len(entries),
+        total,
+        excluded,
+        scan.scanned_ledgers,
+    )
+    return SettlementEvidence(
+        agent_id=agent_id,
+        asset=asset,
+        window_days=round(scan.scanned_ledgers * scan.seconds_per_ledger / 86_400.0, 3),
+        scanned_ledgers=scan.scanned_ledgers,
+        entries=entries,
+        total_stroops=total,
+        self_payment_stroops=excluded,
+        truncated=scan.truncated,
+        unavailable=None,
+    )
+
+
+async def fetch_settlement(agent_id: str) -> SettlementEvidence:
+    """Cached settlement evidence for one agent. Never raises.
+
+    The cache is what makes a polled dashboard affordable: concurrent callers
+    share one flight, and a caller that walks away does not cancel the scan its
+    neighbour is waiting on.
+    """
+
+    async def _produce() -> SettlementEvidence:
+        return await _settlement(agent_id)
+
+    try:
+        result = await rcache.get_or_set(f"settlement:{agent_id}", CACHE_TTL_SECONDS, _produce)
+    except Exception as e:
+        # `_settlement` does not raise, so anything arriving here came from the
+        # cache layer itself (a cancelled flight, a rebuilt negative entry).
+        # Still an answer we do not have, and it has to say so.
+        logger.warning("[settlement] lookup failed for %s: %s", agent_id, _describe(e))
+        return _unavailable(agent_id, "settlement lookup failed")
+    return result if isinstance(result, SettlementEvidence) else _unavailable(agent_id, "settlement lookup failed")

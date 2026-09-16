@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..security import require_api_key
-from ..services import registry_sync, reputation_svc
+from ..services import registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
 from ..stellar import cache as rcache
@@ -67,6 +67,13 @@ class ReputationInfo(BaseModel):
     disputed: int  # lifetime dispute count
     dispute_rate_bps: int  # disputed / count, in bps
     source: Literal["onchain", "prior"]
+    # Whether this score is an OUTAGE fallback rather than a genuine cold start.
+    # Both report source="prior", and without this a client cannot tell "no
+    # ratings yet" from "we could not read the ledger" — during which
+    # passes_floor fails OPEN, so every agent reads as comfortably routable.
+    # reputation_svc.RepInfo has carried this flag since the degradation work;
+    # this mirror model silently dropped it, so it never reached a client.
+    degraded: bool = False
 
 
 class ReputationBatch(BaseModel):
@@ -97,6 +104,51 @@ class ReputationParams(BaseModel):
 
 class AttestationRead(BaseModel):
     attestation: Any
+
+
+class SettlementEntry(BaseModel):
+    """One on-chain `charged` event (mirror of settlement_svc.SettlementEntry)."""
+
+    job_id: str  # hex, 16 bytes
+    auth_id: str  # hex, 16 bytes
+    amount_stroops: int  # 7-decimal units of the enclosing payload's `asset`
+    ledger: int  # the ledger that closed the charge — the explorer anchor
+    at: str | None  # ISO-8601 ledger close time
+    payer: str  # G… address, or "unknown" when the authorization was unreadable
+    # True when this is not third-party revenue: the agent's own owner paid, the
+    # platform's settler paid, or the payer could not be established at all.
+    self_payment: bool
+    # WHICH of those four it was — "payer_unreadable" · "owner" · "settler" ·
+    # "settler_unreadable" — or None when the charge IS revenue. None if and
+    # only if `self_payment` is False. The client needs this because the four
+    # are not interchangeable sentences: "you funded this yourself" is not "the
+    # platform funded this", and neither is "we could not check who did".
+    # Deliberately NOT re-declared as a literal here, unlike ReputationInfo's
+    # two-value `source`: this set is the frontend's copy deck keyed by value,
+    # and a silent drift between the two lists would relabel real charges.
+    exclusion: settlement_svc.Exclusion | None
+
+
+class SettlementEvidence(BaseModel):
+    """What the chain says one agent has been paid, and the limits of the look.
+
+    Mirror of settlement_svc.SettlementEvidence. Three fields are load-bearing
+    and must not be dropped by a client: `window_days` (an empty `entries` only
+    ever means "nothing in this window", never "never paid"), `unavailable`
+    (set when no scan happened, which is a different fact from zero earnings),
+    and `self_payment_stroops` (charges excluded from the total because the
+    platform — or an unidentifiable payer — funded them).
+    """
+
+    agent_id: str
+    asset: str  # what the escrow's SAC wraps; "native" (XLM) on testnet
+    window_days: float
+    scanned_ledgers: int
+    entries: list[SettlementEntry]
+    total_stroops: int  # sum of entries with self_payment False
+    self_payment_stroops: int  # sum of the excluded ones: reported, not hidden
+    truncated: bool
+    unavailable: str | None
 
 
 class XdrResponse(BaseModel):
@@ -320,6 +372,23 @@ async def read_attestation(job_id_hex: str = Path(..., pattern=JOB_ID_HEX_PATTER
         # The RPC layer logs the underlying failure with its own timing.
         logger.warning("attestation read failed for %s: %s", job_id_hex, e)
         raise HTTPException(400, "attestation_read_failed") from e
+
+
+@router.get("/settlement/{agent_id}", response_model=SettlementEvidence)
+async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> SettlementEvidence:
+    """On-chain settlement evidence for one agent: every `charged` event Soroban
+    RPC still holds for it, with the platform's own payments separated out.
+
+    Deliberately never 5xx, unlike the reads above. A scan that could not run
+    answers 200 with `unavailable` set and no entries, because the dashboard
+    has to be able to say WHY it is showing nothing — a 404 or a 503 here would
+    leave it with an empty state indistinguishable from "this agent has never
+    been paid". For the same reason an empty `entries` with `unavailable` null
+    means "nothing inside `window_days`", and `total_stroops` counts only
+    charges proven to have come from someone other than us.
+    """
+    evidence = await settlement_svc.fetch_settlement(agent_id)
+    return SettlementEvidence(**evidence.model_dump())
 
 
 # ── writes (user signs via Freighter) ───────────────────────────
