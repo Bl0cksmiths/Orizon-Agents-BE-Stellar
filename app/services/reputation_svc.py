@@ -200,8 +200,14 @@ def prior_clears_floor() -> bool:
     raises REPUTATION_FLOOR_BPS above the prior bound gets a floor that fails
     closed AND a warning line that says so, instead of either policy being a
     silent property of the arithmetic. See the module docstring.
+
+    Delegates to `cold_start_margin()` rather than repeating its comparison:
+    the same two numbers decide the degradation policy here and whether a
+    newcomer is routable at all, and two copies of that eventually disagree —
+    at which point the outage warning and the startup warning would describe
+    different deployments.
     """
-    return lower_bound_bps(settings.reputation_prior_bps, 0) >= settings.reputation_floor_bps
+    return cold_start_margin().clears
 
 
 def passes_floor(info: RepInfo | None) -> bool:
