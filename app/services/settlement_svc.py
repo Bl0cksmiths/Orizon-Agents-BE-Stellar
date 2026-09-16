@@ -42,8 +42,11 @@ it is never allowed to stand in for a failed lookup.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from pydantic import BaseModel
+from stellar_sdk import scval
+from stellar_sdk.soroban_rpc import EventInfo
 
 logger = logging.getLogger(__name__)
 
@@ -156,4 +159,50 @@ def _unavailable(agent_id: str, reason: str, asset: str = UNKNOWN_ASSET) -> Sett
         self_payment_stroops=0,
         truncated=False,
         unavailable=reason,
+    )
+
+
+@dataclass(frozen=True)
+class _Charge:
+    """One `charged` event, decoded but not yet attributed to a payer."""
+
+    job_id: str
+    auth_id: str
+    amount_stroops: int
+    ledger: int
+    at: str | None
+
+
+def _decode_charged(event: EventInfo) -> _Charge | None:
+    """Decode one `charged` event, or None if it is not one we understand.
+
+    The filter already pins the contract and both topics, so a payload that
+    does not unpack as `(receipt_id, auth_id, amount, job_id)` means the
+    deployed ABI has moved under us. Such an event is skipped and logged rather
+    than coerced: half a decoded event still has an amount, and putting a
+    number of unknown provenance on an earnings dashboard is precisely the
+    outcome this module exists to prevent. The rest of the scan stays readable,
+    and the warning is what says the ABI drifted.
+    """
+    try:
+        data = scval.to_native(event.value)
+    except Exception as e:
+        logger.warning("[settlement] undecodable charged event at ledger %s: %s", event.ledger, _describe(e))
+        return None
+    if not isinstance(data, (list, tuple)) or len(data) != 4:
+        logger.warning("[settlement] charged event at ledger %s is not a 4-tuple payload", event.ledger)
+        return None
+    _receipt_id, auth_id, amount, job_id = data
+    if not isinstance(auth_id, bytes) or not isinstance(job_id, bytes) or not isinstance(amount, int):
+        logger.warning("[settlement] charged event at ledger %s has unexpected field types", event.ledger)
+        return None
+    return _Charge(
+        job_id=job_id.hex(),
+        auth_id=auth_id.hex(),
+        amount_stroops=amount,
+        # `ledger_close_at` is the only timestamp on the event and the node is
+        # its source, so the entry carries the node's word for when this
+        # happened rather than the moment we asked.
+        ledger=event.ledger,
+        at=event.ledger_close_at.isoformat() if event.ledger_close_at else None,
     )
