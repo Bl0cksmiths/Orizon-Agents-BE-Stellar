@@ -249,9 +249,10 @@ def test_router_mirror_declares_every_service_field():
     fails, the field it names is already being dropped from every response:
     declare it on ReputationInfo rather than relaxing the assertion.
 
-    One direction only, deliberately. A field the mirror has and the service
-    does not is visible to anyone who reads a response body, and the splat
-    would raise on it; a missing one is silent.
+    One direction only, deliberately. An extra field on the mirror announces
+    itself: required, and the splat raises on the very first request; optional,
+    and it sits in every response body as a visible constant. Only the missing
+    direction fails quietly, so only it needs a test.
     """
     missing = sorted(set(RepInfo.model_fields) - set(ReputationInfo.model_fields))
     assert not missing, f"ReputationInfo drops RepInfo field(s) {missing} — they never reach a client"
