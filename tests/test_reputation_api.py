@@ -1,5 +1,11 @@
 """Reputation wiring tests — read endpoints, plan stamping, floor routing,
-and the settler's best-effort rating submission."""
+and the settler's best-effort rating submission.
+
+The read-endpoint half is deliberately asserted on the parsed HTTP body
+rather than on a service model: the routers mirror reputation_svc.RepInfo
+into their own ReputationInfo by splatting, and pydantic discards keys the
+mirror does not declare without raising, so the only place a dropped field
+is observable is the wire."""
 
 from __future__ import annotations
 
@@ -7,12 +13,15 @@ import asyncio
 import secrets
 import time
 
+import pytest
+
 from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.seed import seed_registry
 from app.services import execution_svc, orchestrator_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
+from app.stellar import cache as rcache
 from app.stellar import client as sc
 
 
@@ -87,6 +96,69 @@ def test_reputation_params_not_shadowed_by_agent_route(client):
     assert "agent_id" not in body
     assert "smoothed_bps" not in body
     assert "prior_weight_usdc" in body
+
+
+# ── degradation on the wire ─────────────────────────────────────
+
+
+@pytest.fixture()
+def unreadable_ledger(monkeypatch):
+    """Reputation configured against a ledger whose every read fails.
+
+    `app.stellar.cache.get_or_set` is the only seam between reputation_svc and
+    Soroban RPC, so patching it there reproduces a hard-down chain while the
+    real route runs, offline. The tests below take `client` FIRST so lifespan
+    starts against conftest's blank ledger id and this fixture arms it only
+    afterwards; STELLAR_AGENT_REGISTRY is never touched here, since setting it
+    re-arms the 1.02 sync loop that lifespan fires before any test body runs.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+
+    async def rpc_down(key: str, ttl_seconds: float, producer):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(rcache, "get_or_set", rpc_down)
+
+
+def test_degraded_batch_reaches_the_client_as_degraded_true(client, unreadable_ledger):
+    """AC-1 on the wire: Soroban unreachable → every agent in the batch body
+    carries degraded=true and source="prior".
+
+    Asserted on parsed JSON, not on a model, because the loss happens in the
+    last step: the router answers with `ReputationInfo(**info.model_dump())`,
+    and pydantic drops keys the target model does not declare — silently, with
+    no error and no failing type check. If this stops holding, the dashboard
+    can no longer tell an outage from a cold-start registry, and an outage is
+    exactly when the routing floor fails open and every agent, including ones
+    already excluded for bad ratings, reads as comfortably routable.
+    """
+    r = client.get("/api/stellar/reputation")
+    assert r.status_code == 200
+    body = r.json()
+
+    seeded = {a.id for a in state.list_agents()}
+    assert set(body["reputations"]) == seeded
+    for agent_id, info in body["reputations"].items():
+        assert info["degraded"] is True, f"{agent_id} lost its degradation flag between the service and the client"
+        assert info["source"] == "prior"
+
+
+def test_degraded_single_agent_reaches_the_client_as_degraded_true(client, unreadable_ledger):
+    """The same AC on /reputation/{agent_id}.
+
+    A separate handler with a separate splat of its own, so the batch route
+    passing is no evidence at all about this one — the agent detail view reads
+    from here, and it is the view an operator opens to ask why a specific
+    agent scores what it scores.
+    """
+    r = client.get("/api/stellar/reputation/agt_01h8")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["agent_id"] == "agt_01h8"
+    assert body["degraded"] is True
+    assert body["source"] == "prior"
 
 
 # ── decompose stamping ──────────────────────────────────────────
