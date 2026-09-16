@@ -391,10 +391,15 @@ def test_a_gzip_bomb_is_refused_before_a_byte_of_it_is_read() -> None:
 
 @pytest.mark.parametrize("coding", ["gzip", "br", "zstd", "deflate", "gzip, br", "  GZIP  "])
 def test_any_content_coding_we_did_not_accept_is_refused(coding: str) -> None:
+    # The body here is valid JSON as it stands, so only the FRAMING can refuse
+    # it — which is what stops this passing for the wrong reason if the coding
+    # check is ever removed and the bytes are simply read as-is.
     resolver = _Resolver(_addrinfo(PUBLIC_V4))
+    pulled = {"n": 0}
 
     async def body() -> AsyncIterator[bytes]:
-        yield b"{}"  # pragma: no cover — never reached
+        pulled["n"] += 1
+        yield b'{"summary": "built it"}'
 
     handler = _streaming({"Content-Encoding": coding}, body())
 
@@ -402,7 +407,11 @@ def test_any_content_coding_we_did_not_accept_is_refused(coding: str) -> None:
         _install(resolver)
         return await _failing(_worker(transport=_pinned(handler)))
 
-    assert asyncio.run(go()).rule == "invalid_response"
+    error = asyncio.run(go())
+
+    assert error.rule == "invalid_response"
+    assert "-encoded but the request accepted identity only" in str(error)
+    assert pulled["n"] == 0
 
 
 @pytest.mark.parametrize("header", ["", "identity", " identity "])
