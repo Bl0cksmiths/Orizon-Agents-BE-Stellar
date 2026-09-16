@@ -410,6 +410,25 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             # whole pipeline.
             continue
 
+        if not _is_listed(agent):
+            # Delisted by its operator: for routing purposes as absent as an id
+            # that is not in the registry at all, so it is handled the same way
+            # — the step is dropped, with no substitute and no notice.
+            #
+            # The placement is the load-bearing part. It sits BEFORE the floor
+            # check and outside `dropped`, which is the list the starvation
+            # backstop re-admits from, so no combination of bad ratings can put
+            # a withdrawn agent back into a kit slot.
+            #
+            # No substitute, because a substitution is a FLOOR action: it emits
+            # `kind="substituted"` with `reason_code="below_floor"` and a
+            # sentence naming the bps the designated agent failed on. A delisted
+            # agent failed nothing, so the only honest notice here is none —
+            # which is also this lane's reporting decision (see
+            # `_routable_registry`). Quietly promoting a stand-in with no notice
+            # would be the silently reshuffled pipeline story 3.02 forbids.
+            continue
+
         eta = _KIT_ETAS.get(agent_id, 1.0)
         info = reps.get(agent.id)
         if reputation_svc.passes_floor(info):
