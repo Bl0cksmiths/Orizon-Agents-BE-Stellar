@@ -234,6 +234,21 @@ class DecomposeResponse(BaseModel):
     # substitutions, starvation-backstop degradations). Empty on the common
     # path where every routed agent clears the floor.
     notices: list[PlanFloorNotice] = Field(default_factory=list)
+    # The floor actually applied to THIS plan, so the card can state the
+    # threshold rather than only the verdict. Read from settings at plan time,
+    # not assumed by the client: the value is configurable per deployment and a
+    # client that hardcoded it would narrate the wrong number after a change.
+    floor_bps: int = 0
+    # At least one reputation read in this plan's snapshot fell back to the
+    # Bayesian prior because the ledger was unreadable. The buyer is being sold
+    # a trust signal computed from an estimate, and has a right to know before
+    # they authorize payment.
+    #
+    # Deliberately NOT named `degraded`: that word already means "re-admitted
+    # below the floor by the starvation backstop" on both `PlanStep` and
+    # `PlanFloorNotice.kind`, and a third meaning in one payload is a defect
+    # waiting to be written.
+    reputation_degraded: bool = False
 
 
 class ExecuteRequest(BaseModel):
