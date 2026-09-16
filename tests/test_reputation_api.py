@@ -52,9 +52,14 @@ def test_reputation_batch_covers_every_seeded_agent(client):
     assert set(body["reputations"]) == seeded
     assert body["floor_bps"] == settings.reputation_floor_bps
     assert body["prior_bps"] == settings.reputation_prior_bps
-    # Hermetic tests have no chain configured → every entry is the prior.
+    # Hermetic tests have no chain configured → every entry is the prior. A
+    # prior because nothing is deployed is a COLD START, not an outage, and the
+    # response has to carry the difference: a dashboard that read this state as
+    # degraded would raise an unreadable-ledger alarm on every poll of a
+    # perfectly healthy network, which is how operators learn to ignore it.
     for info in body["reputations"].values():
         assert info["source"] == "prior"
+        assert info["degraded"] is False
         assert info["smoothed_bps"] == settings.reputation_prior_bps
 
 
@@ -64,6 +69,9 @@ def test_reputation_single_agent_shape(client):
     body = r.json()
     assert body["agent_id"] == "agt_01h8"
     assert body["source"] == "prior"
+    # Unconfigured ledger, so this prior is a cold start rather than a
+    # fallback — same distinction as on the batch, drawn by a separate handler.
+    assert body["degraded"] is False
     assert body["smoothed_bps"] == settings.reputation_prior_bps
     assert body["count"] == 0
     assert body["lower_bound_bps"] >= settings.reputation_floor_bps
