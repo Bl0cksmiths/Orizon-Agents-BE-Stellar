@@ -468,17 +468,34 @@ async def _run(
                 charge_tx, proof_tx, job_id = await _settle_onchain(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
-                if charge_tx and job_id:
-                    await _submit_ratings(
-                        task_id,
-                        start,
-                        plan,
-                        delivered,
-                        payer=payer,
-                        job_id=job_id,
-                        undispatched=frozenset(undispatched),
-                        first_party_ids=frozenset(first_party_ids),
-                    )
+                # Rated whether or not the money moved, exactly as the
+                # no-success branch above is (ADR 0005 D2). This used to sit
+                # behind `if charge_tx and job_id`, which made every rating a
+                # partial run could produce conditional on a settlement that
+                # never happens: _settle_onchain returns (None, None, None)
+                # when the charge raises and (charge_tx, None, None) when it
+                # comes back non-SUCCESS, so a run where one agent delivered
+                # and another did not submitted NOTHING. The agent that failed
+                # kept its prior and stayed routable, and the operator who did
+                # deliver earned no positive evidence either — the exact
+                # asymmetry the story exists to remove. Settlement answers
+                # "who gets paid"; a rating answers "who delivered", and the
+                # second does not depend on the first.
+                await _submit_ratings(
+                    task_id,
+                    start,
+                    plan,
+                    delivered,
+                    payer=payer,
+                    # The job id is minted by the charge, so a run that did not
+                    # settle has none. Falling back to the task-derived id is
+                    # what lets the evidence land anyway, and it is derived
+                    # rather than random so the ledger's (agent_id, job_id)
+                    # replay guard still counts one run exactly once.
+                    job_id=job_id or unsettled_job_id(task_id),
+                    undispatched=frozenset(undispatched),
+                    first_party_ids=frozenset(first_party_ids),
+                )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to.
