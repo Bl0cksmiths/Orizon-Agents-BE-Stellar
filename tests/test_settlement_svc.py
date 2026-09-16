@@ -21,6 +21,7 @@ points are driven with a bare `asyncio.run` per the repo idiom.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -108,11 +109,13 @@ class _FakeRpc:
         oldest: int = OLDEST_LEDGER,
         page_errors: dict[int, BaseException] | None = None,
         latest_error: BaseException | None = None,
+        page_delay: float = 0.0,
     ) -> None:
         self.events = events or []
         self.latest = latest
         self.oldest = oldest
         self.page_errors = page_errors or {}
+        self.page_delay = page_delay
         self.latest_error = latest_error
         self.pages: list[tuple[int, int]] = []
         self.latest_close = OLDEST_CLOSE + (latest - oldest) * SECONDS_PER_LEDGER
@@ -135,6 +138,8 @@ class _FakeRpc:
             # bounds, and its events are deliberately discarded by the scanner.
             return self._response([])
         self.pages.append((start_ledger or 0, end_ledger))
+        if self.page_delay:
+            time.sleep(self.page_delay)
         error = self.page_errors.get(len(self.pages))
         if error is not None:
             raise error
@@ -370,3 +375,114 @@ def test_an_unreadable_asset_is_never_guessed(monkeypatch: pytest.MonkeyPatch) -
     assert result.asset == "unknown"
     # The amounts are still true — only their label is unknown.
     assert result.total_stroops == 120_000
+
+
+def test_the_window_is_paged_and_scanned_ledgers_reports_what_was_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A window wider than one getEvents call is walked in explicit [start, end)
+    pages, and `scanned_ledgers` is the sum of those ranges — never the
+    theoretical retention window."""
+    latest = OLDEST_LEDGER + 25_000
+    rpc = _FakeRpc(
+        latest=latest,
+        events=[
+            _charged_event(OLDEST_LEDGER + 5, _auth_id(1), _job_id(1), 10_000),
+            _charged_event(OLDEST_LEDGER + 15_000, _auth_id(2), _job_id(2), 20_000),
+            _charged_event(OLDEST_LEDGER + 24_999, _auth_id(3), _job_id(3), 30_000),
+        ],
+    )
+    reader = _reader(payers={_auth_id(n).hex(): BUYER for n in (1, 2, 3)})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert rpc.pages == [
+        (OLDEST_LEDGER, OLDEST_LEDGER + 10_000),
+        (OLDEST_LEDGER + 10_000, OLDEST_LEDGER + 20_000),
+        (OLDEST_LEDGER + 20_000, latest + 1),
+    ]
+    # One entry per page, oldest first — the walk collects across pages rather
+    # than stopping at the first that answered.
+    assert [e.amount_stroops for e in result.entries] == [10_000, 20_000, 30_000]
+    assert result.scanned_ledgers == 25_001
+    assert result.truncated is False
+    assert result.total_stroops == 60_000
+
+
+def test_the_scan_never_reaches_past_the_retention_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A node holding more history than RPC retention does not widen the claim:
+    the walk starts one retention window back from the tip, and the whole
+    window fits inside the page cap with room to spare."""
+    latest = OLDEST_LEDGER + 500_000
+    rpc = _FakeRpc(latest=latest)
+
+    result = _run(monkeypatch, rpc, _reader())
+
+    assert rpc.pages[0][0] == latest - svc.RETENTION_LEDGERS + 1
+    assert rpc.pages[-1][1] == latest + 1
+    assert len(rpc.pages) <= svc.MAX_PAGES
+    assert result.scanned_ledgers == svc.RETENTION_LEDGERS
+    assert result.truncated is False
+    assert result.window_days == 7.0  # 120_960 ledgers × 5 s, measured not assumed
+
+
+def test_the_page_cap_truncates_the_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping early is allowed; pretending the window was covered is not."""
+    monkeypatch.setattr(svc, "MAX_PAGES", 2)
+    rpc = _FakeRpc(latest=OLDEST_LEDGER + 25_000)
+
+    result = _run(monkeypatch, rpc, _reader())
+
+    assert len(rpc.pages) == 2
+    assert result.truncated is True
+    assert result.scanned_ledgers == 20_000  # what was read, not the 25_001 asked of it
+    assert result.unavailable is None  # a scan DID happen — it just did not finish
+
+
+def test_the_time_budget_truncates_the_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The walk runs on a shared worker thread, so it is bounded by wall clock
+    as well as by page count — and says so when the clock is what stopped it."""
+    monkeypatch.setattr(svc, "SCAN_BUDGET_SECONDS", 0.01)
+    rpc = _FakeRpc(latest=OLDEST_LEDGER + 25_000, page_delay=0.05)
+
+    result = _run(monkeypatch, rpc, _reader())
+
+    assert len(rpc.pages) == 1
+    assert result.truncated is True
+    assert result.scanned_ledgers == 10_000
+
+
+def test_a_saturated_page_is_reported_as_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page that fills its event limit may be a subset of the range it
+    covers, so the entries cannot be presented as the complete set even though
+    every ledger in the window was requested."""
+    monkeypatch.setattr(svc, "PAGE_EVENT_LIMIT", 1)
+    rpc = _FakeRpc(
+        events=[
+            _charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000),
+            _charged_event(1_000_020, _auth_id(2), _job_id(2), 20_000),
+        ]
+    )
+    reader = _reader(payers={_auth_id(n).hex(): BUYER for n in (1, 2)})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert len(result.entries) == 1
+    assert result.truncated is True
+    assert result.scanned_ledgers == LATEST_LEDGER - OLDEST_LEDGER + 1
+
+
+def test_a_later_page_failing_keeps_what_was_already_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entries already decoded are real. Throwing them away to report a rounder
+    number would be the same lie as inventing them, pointing the other way."""
+    rpc = _FakeRpc(
+        latest=OLDEST_LEDGER + 25_000,
+        events=[_charged_event(OLDEST_LEDGER + 5, _auth_id(1), _job_id(1), 10_000)],
+        page_errors={2: ConnectionError("rpc went away")},
+    )
+    reader = _reader(payers={_auth_id(1).hex(): BUYER})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert result.unavailable is None
+    assert result.truncated is True
+    assert result.scanned_ledgers == 10_000
+    assert result.total_stroops == 10_000
