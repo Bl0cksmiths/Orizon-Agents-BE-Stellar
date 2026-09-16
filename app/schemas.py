@@ -34,6 +34,16 @@ class Agent(BaseModel):
     # None for the seeded catalog. Story 1.08's operator view filters on it.
     owner: str | None = None
     source: AgentSource = "seeded"
+    # Whether an endpoint is bound — the marketplace's "is this operational"
+    # signal (story 3.05), answered for every agent in one list read rather
+    # than one HTTP call per row against a shared rate-limit bucket.
+    #
+    # Tri-state on purpose. `None` means the question does not apply: a seeded
+    # agent runs on a worker inside this process and has no endpoint to bind,
+    # so reporting `False` would describe a defect where there is none — the
+    # same conflation `binding_status.needsBinding` exists to prevent on the
+    # client. Only an on-chain agent can be meaningfully bound or unbound.
+    bound: bool | None = None
 
 
 # ───── Tasks ───────────────────────────────────────────────
