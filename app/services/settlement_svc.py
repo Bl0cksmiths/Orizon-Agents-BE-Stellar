@@ -419,3 +419,57 @@ async def _read_settler(escrow_id: str) -> str | None:
         logger.warning("[settlement] settler unreadable for %s: %s", escrow_id, _describe(e))
         return None
     return result if isinstance(result, str) else None
+
+
+def _build_entries(
+    charges: list[_Charge],
+    payers: dict[str, str],
+    owner: str,
+    settler: str | None,
+) -> tuple[list[SettlementEntry], int, int]:
+    """Attribute every charge and split verified revenue from everything else.
+
+    Returns (entries, total_stroops, self_payment_stroops). Three payers are
+    NOT revenue:
+
+      - the agent's own OWNER — the operator moving their own money;
+      - the escrow's SETTLER — the platform paying itself, which is what every
+        `charged` event on this deployment has been so far;
+      - a payer that could NOT BE RESOLVED — an unverified payment is not a
+        verified one.
+
+    The third is the uncomfortable one, and it is deliberate. `self_payment`
+    carries the whole arithmetic of this payload — `total_stroops` is by
+    definition the sum of the entries where it is False — so an unresolved
+    payer has to be excluded THROUGH that flag or the totals stop adding up.
+    Its `payer` field reads UNKNOWN_PAYER rather than a G-address, which is how
+    a client tells "the platform paid this" from "nobody could tell us who
+    paid", and its amount still appears in `self_payment_stroops`, so the
+    exclusion is visible instead of being a silently missing number.
+
+    Entries are ordered oldest-first, tie-broken on the ids, so two calls over
+    the same window return the same list in the same order.
+    """
+    ours = {a for a in (owner, settler) if a}
+    entries: list[SettlementEntry] = []
+    total = 0
+    excluded = 0
+    for charge in sorted(charges, key=lambda c: (c.ledger, c.auth_id, c.job_id)):
+        payer = payers.get(charge.auth_id)
+        self_payment = payer is None or payer in ours
+        entries.append(
+            SettlementEntry(
+                job_id=charge.job_id,
+                auth_id=charge.auth_id,
+                amount_stroops=charge.amount_stroops,
+                ledger=charge.ledger,
+                at=charge.at,
+                payer=payer if payer is not None else UNKNOWN_PAYER,
+                self_payment=self_payment,
+            )
+        )
+        if self_payment:
+            excluded += charge.amount_stroops
+        else:
+            total += charge.amount_stroops
+    return entries, total, excluded
