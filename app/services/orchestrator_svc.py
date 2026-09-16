@@ -71,6 +71,23 @@ def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     return {"rep_bps": info.smoothed_bps, "rep_source": info.source}
 
 
+def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
+    """Whether ANY reputation read in this snapshot fell back to the prior.
+
+    `RepInfo.degraded` means the on-chain read FAILED and the Bayesian prior was
+    served instead, so every floor verdict in this plan rests on an estimate.
+    With the shipped config the prior clears the floor, which means an outage
+    fails OPEN and the buyer is otherwise shown a trust gate that did not run.
+
+    Not to be confused with the other two `degraded`s in this payload:
+    `PlanStep.degraded` and `PlanFloorNotice.kind == "degraded"` both mean
+    "re-admitted BELOW the floor by the starvation backstop" — a verdict that
+    was reached, not one that could not be. A plan can carry either without the
+    other.
+    """
+    return any(info.degraded for info in reps.values())
+
+
 # Kit-pipeline agent ids. Substitutes are drawn from OUTSIDE this set —
 # borrowing one kit role's agent to fill another is itself a silent reshuffle,
 # which the product rules forbid.
@@ -430,7 +447,8 @@ async def decompose(intent: str) -> DecomposeResponse:
         return await _build_kit_plan(intent, kit, reps)
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
-    prompt = build_planning_prompt(_registry_prompt_fragment(reps), intent)
+    registry_block, notices = _routable_registry(reps)
+    prompt = build_planning_prompt(registry_block, intent)
 
     async def _bounded_plan() -> Any:
         # The kit short circuit above never takes this gate; every request
@@ -503,4 +521,11 @@ async def decompose(intent: str) -> DecomposeResponse:
         steps=cleaned,
         total_usdc=round(total_price, 4),
         total_eta=round(total_eta, 2),
+        # The floor acted BEFORE the planner was asked anything, so these
+        # describe the shortlist the model chose from, not the model's choice.
+        # An agent that cleared the floor and simply was not picked is absent
+        # from `notices` by construction — see `_routable_registry`.
+        notices=notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
     )
