@@ -13,7 +13,12 @@ answers here:
     synchronous answer a bound agent would be dispatchable and never selected,
     which is a binding that survives a restart and still does nothing.
 
-Both fail the same way a missing local worker already does — the agent is
+`is_bound` is a third reader of the same set and not an orchestrator path at
+all: the marketplace asks it, per agent, on every list read (story 3.05). It is
+the only caller that needs "we have not looked" to stay distinct from "no" —
+see `_loaded`.
+
+Both dispatch paths fail the same way a missing local worker already does — the agent is
 simply not routable — because nothing here is an authorization decision. The
 chain-owner check happened at bind time; by the time a binding is in the store
 it has already been proved. A read failure that skipped a step is a degraded
@@ -37,8 +42,9 @@ logger = logging.getLogger(__name__)
 # a single indexed lookup, so there is little to buy by caching it for longer.
 BINDING_READ_TTL_SECONDS = 2.0
 
-# Agent ids known to have a binding. Consulted only by the synchronous planning
-# path; the dispatch path always reads the store.
+# Agent ids known to have a binding. Consulted by the synchronous callers — the
+# planner's routability filter and the marketplace's `bound` read; the dispatch
+# path always reads the store.
 #
 # Kept correct by a load at startup plus an add on every successful bind. That
 # is sufficient because render.yaml pins `--workers 1`, so no other process can
@@ -47,6 +53,18 @@ BINDING_READ_TTL_SECONDS = 2.0
 # otherwise a bind served by worker A stays unroutable on worker B.
 _bound_ids: set[str] = set()
 
+# Whether `_bound_ids` has ever been loaded from the store. False means the set
+# is empty BECAUSE NOTHING HAS READ IT YET — a process before its lifespan ran,
+# or a startup load the store could not answer, which `refresh_bound_ids`
+# swallows on purpose so an unreadable store at boot cannot stop the service.
+#
+# `is_dispatchable` does not care: it fails the same way for "unbound" and for
+# "we have not looked", and the failure is a skipped step either way. `is_bound`
+# cares completely, because it is read by a buyer: an empty set reported as
+# `False` tells them a working production agent is broken, which is our own
+# ignorance dressed up as a fact about someone else's service.
+_loaded = False
+
 
 def is_dispatchable(agent_id: str) -> bool:
     """Whether a plan step naming `agent_id` could actually be executed.
@@ -54,6 +72,26 @@ def is_dispatchable(agent_id: str) -> bool:
     True for a local worker, and for an external agent with a binding.
     """
     return get_worker(agent_id) is not None or agent_id in _bound_ids
+
+
+def is_bound(agent_id: str) -> bool | None:
+    """Whether `agent_id` has an operator endpoint bound — None when unknown.
+
+    The marketplace's read of the set the planner already uses, and a different
+    question from `is_dispatchable`. That one answers "could a plan step run
+    here?" and is True for every seeded agent, because a local worker executes
+    it — nothing about a local worker is an endpoint, so answering this through
+    it would report the whole seeded catalog as bound.
+
+    None means we do not know, and is reserved for the state above: the set has
+    never been loaded, so its emptiness says nothing about any agent. A
+    membership hit is still True whatever `_loaded` says — `note_bound` records
+    a bind this process itself served, which is first-hand knowledge that does
+    not depend on a startup read having worked.
+    """
+    if agent_id in _bound_ids:
+        return True
+    return False if _loaded else None
 
 
 def note_bound(agent_id: str) -> None:
@@ -67,8 +105,11 @@ async def refresh_bound_ids() -> None:
 
     Called once at startup. A failure is logged and swallowed: an unreadable
     store at boot must not stop the service — every local agent still routes,
-    and external agents simply stay unroutable until this succeeds.
+    and external agents simply stay unroutable until this succeeds. `_loaded`
+    stays False when it does not, which is how `is_bound` tells an empty set
+    apart from an unread one.
     """
+    global _loaded
     try:
         ids = await get_binding_store().list_agent_ids()
     except Exception:
@@ -76,6 +117,7 @@ async def refresh_bound_ids() -> None:
         return
     _bound_ids.clear()
     _bound_ids.update(ids)
+    _loaded = True
     logger.info("binding registry: %d bound agent(s) loaded", len(_bound_ids))
 
 
