@@ -13,6 +13,8 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
               headers  Content-Type: application/json
                        Idempotency-Key: {dispatch_id}
                        User-Agent: orizon-orchestrator/1
+                       Accept-Encoding: identity   (see Size cap — a compressed
+                                                    reply is refused, not decoded)
                        X-Orizon-Signature          (base64 ed25519, SEP-53)
                        X-Orizon-Signature-Version  (orizon-dispatch:v1)
                        X-Orizon-Signer             (G..., a hint — operators
@@ -47,7 +49,17 @@ Envelope (frozen by this spike; see docs/decisions/0001-external-agent-execution
               unchanged Idempotency-Key lets it dedupe anyway. A returned status
               — even 5xx — is never retried: the operator answered.
     Size cap  response body streamed and capped at MAX_RESPONSE_BYTES; an
-              oversize body fails the step before it is buffered.
+              oversize body fails the step before it is buffered. The cap is
+              on the bytes ON THE WIRE, which is only the same thing as the
+              bytes we keep because the dispatch asks for `identity` and
+              refuses any other content-coding. Both halves are load-bearing:
+              httpx offers gzip by default and caps only what it has ALREADY
+              decoded, so a ~200 KB gzip body expanding to 200 MiB was refused
+              as `oversize_response` — after a measured 142 MiB traced peak
+              over a real socket, on a 512 MB instance, which is enough to take
+              out other buyers' in-flight settlements. Asking for identity
+              stops an honest operator compressing; refusing a coding we did
+              not ask for is what makes it hold against one who is not.
     Endpoint  validated before every dispatch against the SSRF rules, which now
               live in `app.services.endpoint_policy` because the bind API needs
               the same ones: https only, no private / loopback / link-local /
@@ -153,7 +165,9 @@ DISPATCH_RULES: frozenset[str] = frozenset(
         "error_status",
         # The response body exceeded the size cap and was cut off unread.
         "oversize_response",
-        # The body arrived whole and is not the documented shape.
+        # The response is not the documented shape — either the body
+        # arrived whole and is not it, or the framing said up front that it
+        # would not be (a content-coding the request did not accept).
         "invalid_response",
     }
 )
@@ -224,6 +238,35 @@ def _without_url(url: str, message: str) -> str:
     if (url and url in safe) or (query and query in safe):
         return f"endpoint for host {host!r} refused"
     return safe
+
+
+def _unacceptable_coding(header: str) -> str | None:
+    """The first content-coding in a `Content-Encoding` header that we did not
+    ask for, or None if the body is being sent as-is.
+
+    The dispatch sends `Accept-Encoding: identity`, so identity — or no header
+    at all — is the only answer that is in scope, and RFC 9110 makes anything
+    else a response the client said it would not take. We hold the operator to
+    that instead of decoding it, because decoding is the whole vulnerability:
+    the size cap can only count bytes it has been handed, and a decoder hands
+    over as many as the compressed body asks for. 1 MiB of gzip is up to a
+    gibibyte of output, and the cap fires after that gibibyte exists.
+
+    So the ONLY safe cap is one on the bytes as received, which is a cap we can
+    enforce only if nothing expands them afterwards. Note that capping the raw
+    stream alone would not have been enough either: an operator can send raw
+    bytes that decode to nothing at all (deflate empty stored blocks are five
+    bytes of input for zero bytes of output), and a decoded-byte loop that
+    never yields never reaches its own check.
+
+    A multi-coding header ("gzip, br") is judged on its first non-identity
+    entry — naming one is enough to explain the refusal.
+    """
+    for coding in header.split(","):
+        name = coding.strip().lower()
+        if name and name != "identity":
+            return name
+    return None
 
 
 def validate_endpoint_url(url: str) -> None:
@@ -380,6 +423,15 @@ class ExternalHttpWorker(Worker):
             "Content-Type": "application/json",
             "Idempotency-Key": dispatch_id,
             "User-Agent": _USER_AGENT,
+            # Overrides httpx's default "gzip, deflate, br, zstd". Not part of
+            # the envelope and not covered by the signature — it is a transport
+            # header, and changing it cannot change a byte an operator verifies
+            # — but it is what keeps a compressed reply off the happy path at
+            # all, so it is spelled here beside the rest of the request rather
+            # than hidden in the client. Costs bandwidth on a 10-60 KiB
+            # artifact that would have gzipped well; see `_once` for why that
+            # is the cheaper side of the trade.
+            "Accept-Encoding": "identity",
         }
         # Serialized ONCE, here, and those exact bytes are what we sign and what
         # we send. httpx's `json=` encodes with separators=(",", ":") and
@@ -551,9 +603,34 @@ class ExternalHttpWorker(Worker):
                 raise ExternalDispatchError(
                     "error_status", f"external dispatch {dispatch_id} to {self.id}: HTTP {resp.status_code}"
                 )
+            # Judged before a byte of the body is read, so a compressed
+            # reply costs us the headers and nothing else. See
+            # `_unacceptable_coding`: we asked for identity, and honouring a
+            # coding we refused to accept is what re-opens the size cap.
+            coding = _unacceptable_coding(resp.headers.get("content-encoding", ""))
+            if coding is not None:
+                raise ExternalDispatchError(
+                    "invalid_response",
+                    f"external dispatch {dispatch_id} to {self.id}: response is {coding}-encoded "
+                    "but the request accepted identity only",
+                )
             total = 0
             chunks: list[bytes] = []
-            async for chunk in resp.aiter_bytes():
+            # Count the bytes AS RECEIVED, not the bytes httpx hands back after
+            # decoding them: a cap on decoded bytes is a cap whose denominator
+            # the sender picks. With the coding refused above the two are the
+            # same stream, so this is belt and braces — but it is the belt, and
+            # it is what still bounds one dispatch's allocation if the check
+            # above is ever relaxed.
+            #
+            # aiter_raw refuses a response whose stream is already consumed,
+            # which an in-memory httpx.Response (MockTransport, throughout this
+            # suite) is from the moment it is constructed — its aiter_bytes
+            # replays the buffer instead, and there is no socket behind it to
+            # protect. A response off a socket is always a live stream, so
+            # production always takes the raw path.
+            body_stream = resp.aiter_bytes() if resp.is_stream_consumed else resp.aiter_raw()
+            async for chunk in body_stream:
                 total += len(chunk)
                 if total > MAX_RESPONSE_BYTES:
                     raise ExternalDispatchError(
