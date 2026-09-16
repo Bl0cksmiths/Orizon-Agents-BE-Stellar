@@ -301,6 +301,26 @@ def test_lifespan_schedules_the_retry_only_when_the_boot_load_failed(monkeypatch
         assert binding_registry._loaded is True
 
 
+def test_scheduling_the_retry_twice_leaves_one_retry(monkeypatch):
+    # Idempotent, so a second call — a re-entered lifespan, or a future caller
+    # that wants to nudge the load — cannot leave two schedules racing each
+    # other through the same store.
+    store = _FlakyStore(failures=99, agent_ids=frozenset())
+    monkeypatch.setattr(binding_registry, "get_binding_store", lambda: store)
+    _instant_retries(monkeypatch, 0)
+
+    async def go() -> None:
+        binding_registry.start_refresh_retry()
+        first = binding_registry._retry_task
+        binding_registry.start_refresh_retry()
+        assert binding_registry._retry_task is first
+        await binding_registry.stop_refresh_retry()
+
+    asyncio.run(go())
+
+    assert binding_registry._retry_task is None
+
+
 # ── the reload must not undo what this process knows ────────────
 
 
