@@ -285,3 +285,85 @@ def test_zero_revenue_is_returned_as_zero_not_hidden(monkeypatch: pytest.MonkeyP
     assert result.truncated is False
     assert result.scanned_ledgers == LATEST_LEDGER - OLDEST_LEDGER + 1
     assert result.window_days > 0
+
+
+def test_an_unreachable_rpc_is_unavailable_and_never_a_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The distinction the whole endpoint turns on. A zero that came from a
+    failed lookup reads on a dashboard as "this agent has earned nothing",
+    which is a claim about the chain we did not make."""
+    rpc = _FakeRpc(latest_error=ConnectionError("rpc unreachable"))
+
+    result = _run(monkeypatch, rpc, _reader())
+
+    assert result.unavailable == "soroban rpc unreachable"
+    assert (result.entries, result.total_stroops, result.self_payment_stroops) == ([], 0, 0)
+    assert result.scanned_ledgers == 0
+    # The asset was readable, so it is still reported: an unavailable answer
+    # need not throw away the facts it did establish.
+    assert result.asset == "native"
+
+
+def test_the_first_page_failing_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing was scanned, so there is nothing to report — the same fact as an
+    unreachable node, reached one round trip later."""
+    rpc = _FakeRpc(page_errors={1: ConnectionError("rpc unreachable")})
+
+    result = _run(monkeypatch, rpc, _reader())
+
+    assert result.unavailable == "soroban rpc unreachable"
+    assert result.entries == []
+
+
+def test_an_unconfigured_escrow_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No escrow id means no events to read, which is a configuration fact and
+    not an earnings fact."""
+    settings.stellar_payment_escrow = ""
+    result = _run(monkeypatch, _FakeRpc(), _reader())
+
+    assert result.unavailable == "escrow contract not configured"
+    assert result.total_stroops == 0
+
+
+def test_an_unconfigured_registry_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the registry the owner cannot be resolved, so no charge could be
+    told apart from a self-payment — refuse rather than guess."""
+    settings.stellar_agent_registry = ""
+    result = _run(monkeypatch, _FakeRpc(), _reader())
+
+    assert result.unavailable == "agent registry not configured"
+
+
+def test_an_unreadable_owner_is_unavailable_rather_than_unclassified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable chain is not the same statement as "the platform paid for
+    all of it".
+    Returning the charges with every one marked self_payment would be a
+    different false statement, so the scan does not even run."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_050, _auth_id(1), _job_id(1), 120_000)])
+    reader = _reader(owner=ConnectionError("rpc unreachable"))
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert result.unavailable == "agent owner unreadable"
+    assert result.entries == []
+    assert rpc.pages == []  # the expensive walk never started
+
+
+def test_an_agent_that_is_not_registered_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The chain answered and `owner_of` panicked: no such agent. A different
+    fact from an unreadable chain, and it gets a different sentence."""
+    result = _run(monkeypatch, _FakeRpc(), _reader(owner=CONTRACT_ERROR))
+
+    assert result.unavailable == "agent not found in the registry"
+
+
+def test_an_unreadable_asset_is_never_guessed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Testnet's SAC wraps XLM, so a default of "USDC" would relabel every
+    amount on the dashboard. When the SAC cannot be read the unit says so."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_050, _auth_id(1), _job_id(1), 120_000)])
+    reader = _reader(asset=ConnectionError("rpc unreachable"), payers={_auth_id(1).hex(): BUYER})
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert result.asset == "unknown"
+    # The amounts are still true — only their label is unknown.
+    assert result.total_stroops == 120_000
