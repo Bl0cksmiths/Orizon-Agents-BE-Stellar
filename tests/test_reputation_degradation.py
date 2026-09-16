@@ -203,6 +203,30 @@ def test_degradation_warning_caps_the_named_agents(ledger_configured, monkeypatc
     assert ids[-1] not in message
 
 
+def test_thirty_agent_outage_emits_exactly_one_warning_record(ledger_configured, monkeypatch, caplog):
+    """Thirty agents is the registry the dashboard polls every 15 s, and the
+    coalescing has to hold at that size: ONE record, not one per agent.
+    Records rather than distinct messages: per-agent warnings would render
+    identically, so counting unique text would report "one warning" while
+    thirty lines actually went out per poll — two a second for the length of
+    the outage, burying every other line and burning Render's log retention.
+    """
+    monkeypatch.setattr(rcache, "get_or_set", _raising(RuntimeError("rpc down")))
+    ids = [f"agt_{i:03d}" for i in range(30)]
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        infos = asyncio.run(rep.fetch_reps(ids))
+
+    assert set(infos) == set(ids)
+    assert all(i.degraded for i in infos.values())
+    warnings = [r for r in _records(caplog) if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "30 agents must produce ONE warning record, not 30"
+    assert len(_records(caplog)) == 1, "and nothing else on the way through"
+    message = warnings[0].getMessage()
+    assert "30/30 agents" in message
+    assert f"+{len(ids) - rep._DEGRADED_LOG_AGENT_LIMIT} more" in message
+
+
 # ── the fail-open policy is explicit ────────────────────────────
 
 
