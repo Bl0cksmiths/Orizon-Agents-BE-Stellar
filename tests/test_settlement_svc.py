@@ -42,12 +42,14 @@ OWNER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
 SETTLER = "GDUKMGUGDZQK6YHYA5Z6AY2G4XDSZPSZ3SW5UN3ARVMO6QSRDWP5YLEX"
 BUYER = "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ"
 
-# A 101-ledger node history whose close times are exactly 5 s apart, so
-# `window_days` comes out of measured data rather than a constant.
+# The stub's node history. Close times are always exactly 5 s apart whatever
+# range a test asks for, because `window_days` is derived from the span the
+# node reports rather than from a constant — so the stub has to report a
+# self-consistent one or the days it produces mean nothing.
 OLDEST_LEDGER = 1_000_000
 LATEST_LEDGER = 1_000_100
 OLDEST_CLOSE = 1_700_000_000
-LATEST_CLOSE = OLDEST_CLOSE + (LATEST_LEDGER - OLDEST_LEDGER) * 5
+SECONDS_PER_LEDGER = 5
 
 # Exactly what sc.simulate_read raises when the chain ANSWERED and the host
 # function failed — `owner_of` panics on an id the registry does not hold.
@@ -113,6 +115,7 @@ class _FakeRpc:
         self.page_errors = page_errors or {}
         self.latest_error = latest_error
         self.pages: list[tuple[int, int]] = []
+        self.latest_close = OLDEST_CLOSE + (latest - oldest) * SECONDS_PER_LEDGER
 
     def get_latest_ledger(self) -> Any:
         if self.latest_error is not None:
@@ -143,7 +146,7 @@ class _FakeRpc:
             events=events,
             latestLedger=self.latest,
             oldestLedger=self.oldest,
-            latestLedgerCloseTime=LATEST_CLOSE,
+            latestLedgerCloseTime=self.latest_close,
             oldestLedgerCloseTime=OLDEST_CLOSE,
             cursor="cursor",
         )
