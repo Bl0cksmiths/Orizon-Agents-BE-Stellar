@@ -486,3 +486,120 @@ def test_a_later_page_failing_keeps_what_was_already_read(monkeypatch: pytest.Mo
     assert result.truncated is True
     assert result.scanned_ledgers == 10_000
     assert result.total_stroops == 10_000
+
+
+def test_one_unreadable_authorization_does_not_blank_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A payer that could not be read costs its OWN entry its revenue and
+    nothing else. The unreadable one is still listed, labelled "unknown" rather
+    than given a plausible G-address, and its amount is reported among the
+    exclusions so the gap is visible instead of silently missing."""
+    rpc = _FakeRpc(
+        events=[
+            _charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000),
+            _charged_event(1_000_020, _auth_id(2), _job_id(2), 20_000),
+            _charged_event(1_000_030, _auth_id(3), _job_id(3), 30_000),
+        ]
+    )
+    reader = _reader(
+        payers={_auth_id(1).hex(): BUYER, _auth_id(3).hex(): BUYER},
+        auth_errors={_auth_id(2).hex(): ConnectionError("rpc unreachable")},
+    )
+
+    result = _run(monkeypatch, rpc, reader)
+
+    assert [(e.amount_stroops, e.payer, e.self_payment) for e in result.entries] == [
+        (10_000, BUYER, False),
+        (20_000, "unknown", True),
+        (30_000, BUYER, False),
+    ]
+    assert (result.total_stroops, result.self_payment_stroops) == (40_000, 20_000)
+    assert result.unavailable is None
+
+
+def test_the_authorization_behind_several_charges_is_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Charges deduplicate onto their authorization before the reads go out —
+    the per-entry fan-out is the only part of this request that grows with
+    on-chain history."""
+    rpc = _FakeRpc(
+        events=[
+            _charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000),
+            _charged_event(1_000_020, _auth_id(1), _job_id(2), 20_000),
+        ]
+    )
+    inner = _reader(payers={_auth_id(1).hex(): BUYER})
+    calls: list[str] = []
+
+    def counting(contract_id: str, function_name: str, args: Any = None, source: Any = None) -> Any:
+        calls.append(function_name)
+        return inner(contract_id, function_name, args, source)
+
+    result = _run(monkeypatch, rpc, counting)
+
+    assert calls.count("authorization") == 1
+    assert result.total_stroops == 30_000
+
+
+def test_a_repeat_lookup_is_served_from_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full scan is a dozen-odd round trips and the dashboard polls, so the
+    second look inside the TTL must not re-walk the window."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    monkeypatch.setattr(sc, "_server", lambda **_kw: rpc)
+    monkeypatch.setattr(sc, "simulate_read", _reader(payers={_auth_id(1).hex(): BUYER}))
+
+    async def twice() -> tuple[svc.SettlementEvidence, svc.SettlementEvidence]:
+        return await svc.fetch_settlement(AGENT_ID), await svc.fetch_settlement(AGENT_ID)
+
+    first, second = asyncio.run(twice())
+
+    assert first == second
+    assert len(rpc.pages) == 1
+
+
+def test_the_route_returns_the_frozen_payload(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
+    """The response shape the operator dashboard was built against. Every field
+    is load-bearing — `window_days` and `unavailable` are what stop an empty
+    list reading as "never paid" — so the key set is pinned here."""
+    rpc = _FakeRpc(events=[_charged_event(1_000_010, _auth_id(1), _job_id(1), 10_000)])
+    monkeypatch.setattr(sc, "_server", lambda **_kw: rpc)
+    monkeypatch.setattr(sc, "simulate_read", _reader(payers={_auth_id(1).hex(): BUYER}))
+
+    response = client.get(f"/api/stellar/settlement/{AGENT_ID}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {
+        "agent_id",
+        "asset",
+        "window_days",
+        "scanned_ledgers",
+        "entries",
+        "total_stroops",
+        "self_payment_stroops",
+        "truncated",
+        "unavailable",
+    }
+    assert set(body["entries"][0]) == {
+        "job_id",
+        "auth_id",
+        "amount_stroops",
+        "ledger",
+        "at",
+        "payer",
+        "self_payment",
+    }
+    assert (body["agent_id"], body["total_stroops"], body["unavailable"]) == (AGENT_ID, 10_000, None)
+
+
+def test_the_route_answers_200_when_the_chain_cannot_be_read(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
+    """Never a 5xx: a dashboard that gets an error back has an empty state
+    indistinguishable from "this agent has never been paid", which is the one
+    thing this endpoint exists to prevent it from saying."""
+    monkeypatch.setattr(sc, "_server", lambda **_kw: _FakeRpc(latest_error=ConnectionError("down")))
+    monkeypatch.setattr(sc, "simulate_read", _reader())
+
+    response = client.get(f"/api/stellar/settlement/{AGENT_ID}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["unavailable"] == "soroban rpc unreachable"
+    assert (body["entries"], body["total_stroops"]) == ([], 0)
