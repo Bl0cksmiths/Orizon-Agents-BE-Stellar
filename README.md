@@ -87,6 +87,8 @@ Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /ap
 | `REPUTATION_READ_TTL_SECONDS` | `15` | TTL for cached on-chain `rep_state` reads, per agent |
 | `REPUTATION_MAX_RATING_WEIGHT_USDC` | `100` | per-rating weight cap — one whale job can't own the score |
 
+`REPUTATION_PRIOR_BPS`, `REPUTATION_PRIOR_WEIGHT_USDC` and `REPUTATION_FLOOR_BPS` between them decide whether a brand-new agent is routable at all, and the margin is 177 bps. **[docs/reputation.md](docs/reputation.md)** has the arithmetic, the exact value at which each one starts excluding newcomers, and why the floor is applied to the lower bound rather than to the raw on-chain mean — read it before changing any of them.
+
 ## Testing
 
 ```bash
