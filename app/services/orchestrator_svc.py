@@ -15,7 +15,7 @@ from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep,
 from ..state import state
 from . import reputation_svc
 from .binding_registry import is_dispatchable
-from .plan_notices import below_floor_exclusion, relaxation, unbound_exclusions
+from .plan_notices import below_floor_exclusion, relaxation, substitution, unbound_exclusions
 from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
@@ -319,6 +319,11 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     3.02). Given the same reputation snapshot the plan — steps and notices — is
     identical, with no LLM call.
 
+    Every notice is built by `plan_notices`, the same module `_routable_registry`
+    uses, so "exactly as on the free-form path" is true by construction rather
+    than for as long as both paths are remembered together. The builders are
+    pure, which is what lets this path keep its determinism promise.
+
     A short randomized sleep up front mimics orchestrator "thinking time" so
     the Decompose UX feels like real LLM planning instead of a hardcoded dict
     being unpacked. It changes timing only, never plan content.
@@ -354,16 +359,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         if sub is not None:
             steps.append(_kit_step(sub, rationale, eta, reps, substituted_for=agent.id))
             taken.add(sub.id)
-            notices.append(
-                PlanFloorNotice(
-                    kind="substituted",
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    replacement_id=sub.id,
-                    replacement_name=sub.name,
-                    reason=_floor_reason(info),
-                )
-            )
+            notices.append(substitution(agent, sub, info))
         else:
             dropped.append((agent, rationale, info))
 
@@ -388,26 +384,9 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         if agent.id in readmit_ids:
             steps.append(_kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True))
             taken.add(agent.id)
-            notices.append(
-                PlanFloorNotice(
-                    kind="degraded",
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    reason=(
-                        "re-admitted below the floor to keep the plan workable "
-                        f"(fewer than {_MIN_ROUTABLE_AGENTS} agents cleared it)"
-                    ),
-                )
-            )
+            notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
         else:
-            notices.append(
-                PlanFloorNotice(
-                    kind="excluded",
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    reason=_floor_reason(info),
-                )
-            )
+            notices.append(below_floor_exclusion(agent, info))
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in steps)
