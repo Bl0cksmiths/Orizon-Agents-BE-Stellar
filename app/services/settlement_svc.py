@@ -42,11 +42,14 @@ it is never allowed to stand in for a failed lookup.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 from stellar_sdk import scval
-from stellar_sdk.soroban_rpc import EventInfo
+from stellar_sdk.soroban_rpc import EventFilter, EventFilterType, EventInfo, GetEventsResponse
+
+from ..stellar import client as sc
 
 logger = logging.getLogger(__name__)
 
@@ -205,4 +208,109 @@ def _decode_charged(event: EventInfo) -> _Charge | None:
         # happened rather than the moment we asked.
         ledger=event.ledger,
         at=event.ledger_close_at.isoformat() if event.ledger_close_at else None,
+    )
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """The raw outcome of one page walk, and how much of the window it covers."""
+
+    charges: list[_Charge]
+    scanned_ledgers: int
+    truncated: bool
+    seconds_per_ledger: float
+
+
+def _event_filter(escrow_id: str, agent_id: str) -> EventFilter:
+    """Contract plus BOTH topics, so the node does the filtering.
+
+    Matching `("charged", agent_id)` server-side is what keeps a full-window
+    scan down to a handful of small pages. Filtering here instead would mean
+    paging every `authd` and `revoked` event the escrow emitted for every other
+    agent on the deployment, through a rate-limited public RPC.
+    """
+    return EventFilter(
+        event_type=EventFilterType.CONTRACT,
+        contract_ids=[escrow_id],
+        topics=[[sc.sym(CHARGED_TOPIC).to_xdr(), sc.sym(agent_id).to_xdr()]],
+    )
+
+
+def _seconds_per_ledger(probe: GetEventsResponse) -> float:
+    """The ledger close interval, measured from the node's own retention span.
+
+    `window_days` is a client's licence to say "nothing in the last N days", so
+    N is measured rather than assumed: a node keeping six days instead of
+    seven, or a network running slow, both show up here instead of being
+    papered over by a constant. Clamped to a plausible range because one absurd
+    close time must not become an absurd claim.
+    """
+    ledgers = probe.latest_ledger - probe.oldest_ledger
+    seconds = probe.latest_Ledger_close_time - probe.oldest_ledger_close_time
+    if ledgers <= 0 or seconds <= 0:
+        return 5.0
+    return min(max(seconds / ledgers, 1.0), 30.0)
+
+
+def _scan_sync(escrow_id: str, agent_id: str) -> _Scan:
+    """Walk the retention window for this agent's `charged` events. Blocking.
+
+    Two setup calls before the walk, deliberately. `getLatestLedger` gives the
+    tip; a one-event `getEvents` probe then reports the node's OWN
+    `oldestLedger` and close times. Starting from a hardcoded
+    `latest - RETENTION_LEDGERS` instead would be a claim about retention we
+    never verified, and the node rejects the request outright whenever its real
+    retention runs even one ledger short of our constant. The probe's own
+    events are discarded — the walk below covers the tip again — so nothing is
+    counted twice.
+
+    `_server()` is reused rather than a fresh SorobanServer: it carries the
+    read timeout profile (5 s, no retry) that bounds this walk, and stellar-sdk
+    already sends a User-Agent, which the public RPC answers 403 without.
+    """
+    server = sc._server()
+    filters = [_event_filter(escrow_id, agent_id)]
+    latest = server.get_latest_ledger().sequence
+    probe = server.get_events(start_ledger=latest, filters=filters, limit=1)
+
+    charges: list[_Charge] = []
+    scanned = 0
+    truncated = False
+    pages = 0
+    deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+    cursor = max(probe.oldest_ledger, latest - RETENTION_LEDGERS + 1, 1)
+
+    while cursor <= latest:
+        if pages >= MAX_PAGES or time.monotonic() >= deadline:
+            truncated = True
+            break
+        end = min(cursor + LEDGERS_PER_PAGE, latest + 1)
+        try:
+            page = server.get_events(start_ledger=cursor, end_ledger=end, filters=filters, limit=PAGE_EVENT_LIMIT)
+        except Exception as e:
+            # The FIRST page failing means nothing was scanned at all, which is
+            # an `unavailable`, not a zero — let the caller say so. A later one
+            # failing leaves real, already-decoded entries behind it, and
+            # throwing those away to report a rounder number would be the same
+            # lie pointing the other way.
+            if scanned == 0:
+                raise
+            logger.warning("[settlement] page %d of %s failed: %s", pages + 1, agent_id, _describe(e))
+            truncated = True
+            break
+        pages += 1
+        scanned += end - cursor
+        cursor = end
+        charges.extend(c for c in (_decode_charged(ev) for ev in page.events) if c is not None)
+        if len(page.events) >= PAGE_EVENT_LIMIT:
+            # The node had at least as many charges in this range as we allowed
+            # it to return, so what came back may be a subset of the range we
+            # just claimed to have scanned. Saying so is the only honest move.
+            truncated = True
+
+    return _Scan(
+        charges=charges,
+        scanned_ledgers=scanned,
+        truncated=truncated,
+        seconds_per_ledger=_seconds_per_ledger(probe),
     )
