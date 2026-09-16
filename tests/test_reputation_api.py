@@ -1,5 +1,11 @@
 """Reputation wiring tests — read endpoints, plan stamping, floor routing,
-and the settler's best-effort rating submission."""
+and the settler's best-effort rating submission.
+
+The read-endpoint half is deliberately asserted on the parsed HTTP body
+rather than on a service model: the routers mirror reputation_svc.RepInfo
+into their own ReputationInfo by splatting, and pydantic discards keys the
+mirror does not declare without raising, so the only place a dropped field
+is observable is the wire."""
 
 from __future__ import annotations
 
@@ -7,12 +13,16 @@ import asyncio
 import secrets
 import time
 
+import pytest
+
 from app.config import settings
+from app.routers.stellar import ReputationInfo
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.seed import seed_registry
 from app.services import execution_svc, orchestrator_svc
-from app.services.reputation_svc import RepInfo
+from app.services.reputation_svc import STROOPS_PER_USDC, RepInfo
 from app.state import state
+from app.stellar import cache as rcache
 from app.stellar import client as sc
 
 
@@ -43,9 +53,14 @@ def test_reputation_batch_covers_every_seeded_agent(client):
     assert set(body["reputations"]) == seeded
     assert body["floor_bps"] == settings.reputation_floor_bps
     assert body["prior_bps"] == settings.reputation_prior_bps
-    # Hermetic tests have no chain configured → every entry is the prior.
+    # Hermetic tests have no chain configured → every entry is the prior. A
+    # prior because nothing is deployed is a COLD START, not an outage, and the
+    # response has to carry the difference: a dashboard that read this state as
+    # degraded would raise an unreadable-ledger alarm on every poll of a
+    # perfectly healthy network, which is how operators learn to ignore it.
     for info in body["reputations"].values():
         assert info["source"] == "prior"
+        assert info["degraded"] is False
         assert info["smoothed_bps"] == settings.reputation_prior_bps
 
 
@@ -55,6 +70,9 @@ def test_reputation_single_agent_shape(client):
     body = r.json()
     assert body["agent_id"] == "agt_01h8"
     assert body["source"] == "prior"
+    # Unconfigured ledger, so this prior is a cold start rather than a
+    # fallback — same distinction as on the batch, drawn by a separate handler.
+    assert body["degraded"] is False
     assert body["smoothed_bps"] == settings.reputation_prior_bps
     assert body["count"] == 0
     assert body["lower_bound_bps"] >= settings.reputation_floor_bps
@@ -87,6 +105,157 @@ def test_reputation_params_not_shadowed_by_agent_route(client):
     assert "agent_id" not in body
     assert "smoothed_bps" not in body
     assert "prior_weight_usdc" in body
+
+
+def test_routing_constants_are_read_per_request(client, monkeypatch):
+    """Both routes must answer with the LIVE floor and prior, not the values
+    the process booted with.
+
+    They are plain ints on the response models, so the natural way to get this
+    wrong is a default captured at import (`floor_bps: int = settings.x`),
+    which keeps serving the boot-time number for the life of the process. The
+    FE draws the routing floor from these and compares every agent's lower
+    bound against it, so a stale floor paints agents as routable that the
+    orchestrator has already stopped hiring — and a stale prior mislabels the
+    score an unrated agent actually carries.
+    """
+    monkeypatch.setattr(settings, "reputation_floor_bps", 6100)
+    monkeypatch.setattr(settings, "reputation_prior_bps", 7100)
+
+    batch = client.get("/api/stellar/reputation").json()
+    params = client.get("/api/stellar/reputation/params").json()
+
+    assert batch["floor_bps"] == params["floor_bps"] == 6100
+    assert batch["prior_bps"] == params["prior_bps"] == 7100
+    # And the live prior has to reach the per-agent scores too, not just the
+    # header the client draws its floor line against.
+    assert {info["smoothed_bps"] for info in batch["reputations"].values()} == {7100}
+
+
+# ── degradation on the wire ─────────────────────────────────────
+
+
+@pytest.fixture()
+def unreadable_ledger(monkeypatch):
+    """Reputation configured against a ledger whose every read fails.
+
+    `app.stellar.cache.get_or_set` is the only seam between reputation_svc and
+    Soroban RPC, so patching it there reproduces a hard-down chain while the
+    real route runs, offline. The tests below take `client` FIRST so lifespan
+    starts against conftest's blank ledger id and this fixture arms it only
+    afterwards; STELLAR_AGENT_REGISTRY is never touched here, since setting it
+    re-arms the 1.02 sync loop that lifespan fires before any test body runs.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+
+    async def rpc_down(key: str, ttl_seconds: float, producer):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(rcache, "get_or_set", rpc_down)
+
+
+def test_degraded_batch_reaches_the_client_as_degraded_true(client, unreadable_ledger):
+    """AC-1 on the wire: Soroban unreachable → every agent in the batch body
+    carries degraded=true and source="prior".
+
+    Asserted on parsed JSON, not on a model, because the loss happens in the
+    last step: the router answers with `ReputationInfo(**info.model_dump())`,
+    and pydantic drops keys the target model does not declare — silently, with
+    no error and no failing type check. If this stops holding, the dashboard
+    can no longer tell an outage from a cold-start registry, and an outage is
+    exactly when the routing floor fails open and every agent, including ones
+    already excluded for bad ratings, reads as comfortably routable.
+    """
+    r = client.get("/api/stellar/reputation")
+    assert r.status_code == 200
+    body = r.json()
+
+    seeded = {a.id for a in state.list_agents()}
+    assert set(body["reputations"]) == seeded
+    for agent_id, info in body["reputations"].items():
+        assert info["degraded"] is True, f"{agent_id} lost its degradation flag between the service and the client"
+        assert info["source"] == "prior"
+
+
+def test_degraded_single_agent_reaches_the_client_as_degraded_true(client, unreadable_ledger):
+    """The same AC on /reputation/{agent_id}.
+
+    A separate handler with a separate splat of its own, so the batch route
+    passing is no evidence at all about this one — the agent detail view reads
+    from here, and it is the view an operator opens to ask why a specific
+    agent scores what it scores.
+    """
+    r = client.get("/api/stellar/reputation/agt_01h8")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["agent_id"] == "agt_01h8"
+    assert body["degraded"] is True
+    assert body["source"] == "prior"
+
+
+def test_partial_outage_marks_only_the_agents_that_failed(client, monkeypatch):
+    """One unreadable agent must not smear degraded=true across the batch —
+    nor be hidden by the agents that answered.
+
+    The flag is per agent in the response map because that is the granularity
+    an operator acts on: the dashboard marks the one agent whose score is a
+    fallback while the rest of the registry keeps its real on-chain numbers. A
+    batch-wide flag would bury a single dead agent in a healthy majority, or
+    turn the healthy majority into noise — and the degraded one is the agent
+    the routing floor is currently unable to judge.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    bad = sorted(a.id for a in state.list_agents())[0]
+
+    async def flaky(key: str, ttl_seconds: float, producer):
+        # Matched on the agent id rather than the whole cache key: the
+        # "repstate:" prefix is reputation_svc's private business.
+        if key.endswith(bad):
+            raise RuntimeError("rpc down")
+        return {"sum_w": 9000 * 10 * STROOPS_PER_USDC, "weight": 10 * STROOPS_PER_USDC, "count": 4, "disputed": 0}
+
+    monkeypatch.setattr(rcache, "get_or_set", flaky)
+
+    body = client.get("/api/stellar/reputation").json()
+
+    assert len(body["reputations"]) > 1, "a partial outage needs more than one agent to be partial"
+    assert {aid for aid, info in body["reputations"].items() if info["degraded"]} == {bad}
+    assert body["reputations"][bad]["source"] == "prior"
+    for aid, info in body["reputations"].items():
+        if aid != bad:
+            assert info["source"] == "onchain"
+
+
+# ── mirror-model parity ─────────────────────────────────────────
+
+
+def test_router_mirror_declares_every_service_field():
+    """ReputationInfo must declare every field RepInfo carries.
+
+    Both read routes answer with `ReputationInfo(**info.model_dump())`, and
+    pydantic discards keys the target model does not declare: no exception, no
+    warning, nothing for mypy to catch. A field added to RepInfo and forgotten
+    on the mirror is therefore computed on every request and thrown away one
+    line before the response is serialised, and the first symptom is a client
+    that cannot show something the backend has been producing for weeks.
+
+    That is history rather than a hypothesis. `degraded` — the only thing
+    separating "this agent has no ratings yet" from "the ledger could not be
+    read, and the routing floor is failing open" — was added to RepInfo and
+    never mirrored, so the distinction reached no client at all. If this test
+    fails, the field it names is already being dropped from every response:
+    declare it on ReputationInfo rather than relaxing the assertion.
+
+    One direction only, deliberately. An extra field on the mirror announces
+    itself: required, and the splat raises on the very first request; optional,
+    and it sits in every response body as a visible constant. Only the missing
+    direction fails quietly, so only it needs a test.
+    """
+    missing = sorted(set(RepInfo.model_fields) - set(ReputationInfo.model_fields))
+    assert not missing, f"ReputationInfo drops RepInfo field(s) {missing} — they never reach a client"
 
 
 # ── decompose stamping ──────────────────────────────────────────
