@@ -139,6 +139,23 @@ class StoredPlan(BaseModel):
     total_eta: float
 
 
+# Why the floor acted on an agent — a CLOSED set, because the plan card renders
+# one sentence per value and the integration guide documents them; a free-text
+# reason is unrenderable and undocumentable.
+#
+# Two values story 3.02 asked for are deliberately absent:
+#
+#   * `inactive` — `AgentRegistry.set_active(id, false)` syncs to
+#     `Agent.status == "offline"`, but nothing in routing reads that field (its
+#     only consumer is a metrics counter). An agent is never excluded for being
+#     inactive, so shipping the value would put a state in the API contract that
+#     the system cannot produce.
+#   * `not_selected_by_planner` — the story's own product rules forbid listing
+#     every unpicked agent, which would drown the signal this exists to create.
+#     A plan that simply did not choose an agent is not an exclusion.
+ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed"]
+
+
 class PlanFloorNotice(BaseModel):
     """One reputation-floor action taken while building a plan.
 
@@ -147,12 +164,25 @@ class PlanFloorNotice(BaseModel):
     these. Additive with a safe default; clients that ignore it are unaffected.
     """
 
+    # `kind` is what happened to the PLAN; `reason_code` is why. They are
+    # orthogonal, not competing vocabularies: an agent can be excluded for
+    # being below the floor or for having no endpoint, and both read as
+    # kind="excluded". `kind` is not renamed because the plan card already
+    # ships against it.
     kind: Literal["excluded", "substituted", "degraded"]
     agent_id: str  # the designated kit agent the floor acted on
     agent_name: str | None = None
     replacement_id: str | None = None  # the substitute, when kind == "substituted"
     replacement_name: str | None = None
     reason: str  # e.g. "below routing floor (4200 < 5500 bps)"
+    # Additive with a default so a notice built before this field existed still
+    # validates; every notice this codebase constructs sets it explicitly.
+    reason_code: ExclusionReason = "below_floor"
+    # The deciding numbers, as data rather than interpolated into `reason`. A
+    # client that wants to render "4.10 against a 3.00 floor" should not have to
+    # parse an English sentence to get there.
+    lower_bound_bps: int | None = None  # None when the agent had no rep entry
+    floor_bps: int = 0
 
 
 # ───── Trace ───────────────────────────────────────────────
@@ -204,6 +234,21 @@ class DecomposeResponse(BaseModel):
     # substitutions, starvation-backstop degradations). Empty on the common
     # path where every routed agent clears the floor.
     notices: list[PlanFloorNotice] = Field(default_factory=list)
+    # The floor actually applied to THIS plan, so the card can state the
+    # threshold rather than only the verdict. Read from settings at plan time,
+    # not assumed by the client: the value is configurable per deployment and a
+    # client that hardcoded it would narrate the wrong number after a change.
+    floor_bps: int = 0
+    # At least one reputation read in this plan's snapshot fell back to the
+    # Bayesian prior because the ledger was unreadable. The buyer is being sold
+    # a trust signal computed from an estimate, and has a right to know before
+    # they authorize payment.
+    #
+    # Deliberately NOT named `degraded`: that word already means "re-admitted
+    # below the floor by the starvation backstop" on both `PlanStep` and
+    # `PlanFloorNotice.kind`, and a third meaning in one payload is a defect
+    # waiting to be written.
+    reputation_degraded: bool = False
 
 
 class ExecuteRequest(BaseModel):

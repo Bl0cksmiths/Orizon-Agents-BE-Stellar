@@ -15,6 +15,7 @@ from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep,
 from ..state import state
 from . import reputation_svc
 from .binding_registry import is_dispatchable
+from .plan_notices import below_floor_exclusion, relaxation, substitution, unbound_exclusions
 from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
@@ -70,16 +71,27 @@ def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     return {"rep_bps": info.smoothed_bps, "rep_source": info.source}
 
 
+def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
+    """Whether ANY reputation read in this snapshot fell back to the prior.
+
+    `RepInfo.degraded` means the on-chain read FAILED and the Bayesian prior was
+    served instead, so every floor verdict in this plan rests on an estimate.
+    With the shipped config the prior clears the floor, which means an outage
+    fails OPEN and the buyer is otherwise shown a trust gate that did not run.
+
+    Not to be confused with the other two `degraded`s in this payload:
+    `PlanStep.degraded` and `PlanFloorNotice.kind == "degraded"` both mean
+    "re-admitted BELOW the floor by the starvation backstop" — a verdict that
+    was reached, not one that could not be. A plan can carry either without the
+    other.
+    """
+    return any(info.degraded for info in reps.values())
+
+
 # Kit-pipeline agent ids. Substitutes are drawn from OUTSIDE this set —
 # borrowing one kit role's agent to fill another is itself a silent reshuffle,
 # which the product rules forbid.
 _KIT_AGENT_IDS: frozenset[str] = frozenset(aid for aid, _ in _KIT_PIPELINE)
-
-
-def _floor_reason(info: reputation_svc.RepInfo | None) -> str:
-    """Why the floor acted on an agent, with the deciding lower-bound bps."""
-    lb = info.lower_bound_bps if info is not None else 0
-    return f"below routing floor ({lb} < {settings.reputation_floor_bps} bps)"
 
 
 def _kit_step(
@@ -158,7 +170,7 @@ def _prompt_name(name: str) -> str:
     and stores `name: String` verbatim, with no length or content check, so our
     API's max_length=100 is validation on the wrong side of the trust boundary.
     Since story 2.01 a registered-and-bound external agent is dispatchable, and
-    `_registry_prompt_fragment` filters on exactly that — which is what puts an
+    `_routable_registry` filters on exactly that — which is what puts an
     operator's text into the TRUSTED half of the planning prompt.
 
     `sanitize_untrusted`, not `fence_untrusted`: AVAILABLE_AGENTS is the half
@@ -187,7 +199,22 @@ def _prompt_name(name: str) -> str:
     return f'"{safe}"'
 
 
-def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
+def _routable_registry(
+    reps: dict[str, reputation_svc.RepInfo],
+) -> tuple[str, list[PlanFloorNotice]]:
+    """The AVAILABLE_AGENTS block, AND the floor actions that shaped it.
+
+    The routable set is a subtraction, and until story 3.02 only the remainder
+    survived: the complement was dropped on the floor of a list comprehension
+    and the starvation relaxation went to `logger.warning`, where no buyer will
+    ever see it. Both halves are returned now, because the thing the buyer
+    needs to know is precisely what was taken away.
+
+    The block's bytes are unchanged by this — they are pinned in
+    tests/test_model_path_floor.py, since a one-character drift changes what
+    the planner plans and would surface as unrelated assertions failing
+    downstream.
+    """
     # An indexed on-chain agent (story 1.02) is marketplace-visible but only
     # planner-routable once an operator binds it an endpoint (story 2.01) —
     # until then it has nothing to execute a step with. The filter sits on the
@@ -208,21 +235,69 @@ def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
             reverse=True,
         )[:_MIN_ROUTABLE_AGENTS]
 
+    offered = {a.id for a in routable}
+    # Order is part of the contract — the plan card renders these in sequence,
+    # and a list that reshuffles between two identical requests reads as the
+    # system changing its mind. Registry order drives the first two groups and
+    # `unbound_exclusions` sorts the third, so the whole list is a pure
+    # function of the registry and the reputation snapshot.
+    #
+    # An agent that CLEARED the floor and merely lost a top-N slot to the
+    # backstop gets no notice: the closed reason vocabulary has no value for it
+    # (rightly — it was not excluded by the floor), and "not offered to the
+    # planner" is the signal the story forbids, since it would list most of the
+    # registry on every request.
+    notices = [
+        below_floor_exclusion(a, reps.get(a.id))
+        for a in agents
+        if a.id not in offered and not reputation_svc.passes_floor(reps.get(a.id))
+    ]
+    notices += [
+        relaxation(a, reps.get(a.id), min_routable=_MIN_ROUTABLE_AGENTS)
+        for a in routable
+        if not reputation_svc.passes_floor(reps.get(a.id))
+    ]
+    # Unbound on-chain agents are a registry fact, not a floor verdict, so they
+    # are read from the whole catalog rather than from `agents` (which is the
+    # dispatchable subset they are by definition absent from). Seeded agents
+    # are skipped: every one ships with a local worker, so an unbound seeded
+    # agent is a deployment defect to fix, not a buyer-facing exclusion.
+    notices += unbound_exclusions(a for a in state.list_agents() if a.source == "onchain" and not is_dispatchable(a.id))
+
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
         info = reps.get(a.id)
         # Live smoothed score on the 0–5 scale the prompt already uses;
         # seeded rep only when the agent has no reputation entry.
         rep_display = info.smoothed_bps / 2000 if info is not None else a.rep
-        # Only `name` is treated: `id` is a Soroban Symbol and `skills` a
-        # Vec<Symbol> ([A-Za-z0-9_]{1,32} each), so neither can hold a space,
-        # a quote, a newline or a fence marker; price and rep are floats this
-        # line formats itself. Treating them would buy nothing.
+        # Only `name` is treated. `id` is a Soroban Symbol
+        # ([A-Za-z0-9_]{1,32}), so it can hold no space, quote, newline or
+        # fence marker; price and rep are floats this line formats itself.
+        #
+        # `skills` is a Vec<Symbol> for an ON-CHAIN agent, and the same
+        # reasoning holds there — but the seeded catalog is plain Python and
+        # does contain a space (`agt_10b6` has "42 langs", app/seed.py:17), so
+        # the constraint is a property of the chain rather than of this field.
+        # It stays untreated because the seed is trusted first-party data, not
+        # because nothing here can contain a separator; an untrusted writer
+        # into `skills` would change that.
         lines.append(
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
-    return "\n".join(lines)
+    return "\n".join(lines), notices
+
+
+def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
+    """The prompt block alone, for callers that only assert on the string.
+
+    Kept as a named view rather than folded away because the prompt-safety and
+    routability suites exercise the block itself — what the planner is shown —
+    and reading a notices list they never use out of a tuple would obscure
+    exactly the thing they are about. Planning uses `_routable_registry`.
+    """
+    block, _ = _routable_registry(reps)
+    return block
 
 
 def build_planning_prompt(registry_block: str, intent: str) -> str:
@@ -244,6 +319,11 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     response so the buyer never sees a silently reshuffled pipeline (story
     3.02). Given the same reputation snapshot the plan — steps and notices — is
     identical, with no LLM call.
+
+    Every notice is built by `plan_notices`, the same module `_routable_registry`
+    uses, so "exactly as on the free-form path" is true by construction rather
+    than for as long as both paths are remembered together. The builders are
+    pure, which is what lets this path keep its determinism promise.
 
     A short randomized sleep up front mimics orchestrator "thinking time" so
     the Decompose UX feels like real LLM planning instead of a hardcoded dict
@@ -280,16 +360,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         if sub is not None:
             steps.append(_kit_step(sub, rationale, eta, reps, substituted_for=agent.id))
             taken.add(sub.id)
-            notices.append(
-                PlanFloorNotice(
-                    kind="substituted",
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    replacement_id=sub.id,
-                    replacement_name=sub.name,
-                    reason=_floor_reason(info),
-                )
-            )
+            notices.append(substitution(agent, sub, info))
         else:
             dropped.append((agent, rationale, info))
 
@@ -314,26 +385,9 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         if agent.id in readmit_ids:
             steps.append(_kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True))
             taken.add(agent.id)
-            notices.append(
-                PlanFloorNotice(
-                    kind="degraded",
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    reason=(
-                        "re-admitted below the floor to keep the plan workable "
-                        f"(fewer than {_MIN_ROUTABLE_AGENTS} agents cleared it)"
-                    ),
-                )
-            )
+            notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
         else:
-            notices.append(
-                PlanFloorNotice(
-                    kind="excluded",
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    reason=_floor_reason(info),
-                )
-            )
+            notices.append(below_floor_exclusion(agent, info))
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in steps)
@@ -355,6 +409,10 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         total_usdc=round(total_price, 4),
         total_eta=round(total_eta, 2),
         notices=notices,
+        # Both paths answer the same two questions, because a buyer cannot tell
+        # which one planned their intent and should not have to.
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
     )
 
 
@@ -373,7 +431,8 @@ async def decompose(intent: str) -> DecomposeResponse:
         return await _build_kit_plan(intent, kit, reps)
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
-    prompt = build_planning_prompt(_registry_prompt_fragment(reps), intent)
+    registry_block, notices = _routable_registry(reps)
+    prompt = build_planning_prompt(registry_block, intent)
 
     async def _bounded_plan() -> Any:
         # The kit short circuit above never takes this gate; every request
@@ -446,4 +505,11 @@ async def decompose(intent: str) -> DecomposeResponse:
         steps=cleaned,
         total_usdc=round(total_price, 4),
         total_eta=round(total_eta, 2),
+        # The floor acted BEFORE the planner was asked anything, so these
+        # describe the shortlist the model chose from, not the model's choice.
+        # An agent that cleared the floor and simply was not picked is absent
+        # from `notices` by construction — see `_routable_registry`.
+        notices=notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
     )
