@@ -64,6 +64,29 @@ _KIT_ETAS: dict[str, float] = {
 }
 
 
+def _is_listed(agent: Agent) -> bool:
+    """Whether this agent's operator still wants work routed to it.
+
+    `AgentRegistry.set_active(id, false)` is the on-chain delisting control, and
+    `registry_sync` maps it to `status == "offline"` — the only producer of that
+    value anywhere. Until now nothing in routing read the field, so the one
+    control an operator has for taking an agent out of service did nothing; this
+    predicate is what makes it real.
+
+    The rule is deliberately NEGATIVE — offline is withdrawn, anything else is
+    available — and not `status == "online"`, which is a different and wrong
+    rule. The seeded catalog ships two agents as "idle" (`agt_04m1`, `agt_06q4`
+    in app/seed.py), which means "nothing in flight right now", not "withdrawn".
+    Routing on equality would drop two working agents out of the twelve-agent
+    demo catalog to enforce a flag neither of their operators ever set.
+
+    A seeded agent can only ever carry the status `seed.py` gave it: the sync
+    loop skips the `agt_` namespace outright, so nothing on-chain can delist a
+    worker-backed catalog agent.
+    """
+    return agent.status != "offline"
+
+
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     """PlanStep reputation stamp — empty when the agent has no rep entry."""
     if info is None:
@@ -215,12 +238,19 @@ def _routable_registry(
     the planner plans and would surface as unrelated assertions failing
     downstream.
     """
-    # An indexed on-chain agent (story 1.02) is marketplace-visible but only
-    # planner-routable once an operator binds it an endpoint (story 2.01) —
-    # until then it has nothing to execute a step with. The filter sits on the
-    # assignment so the floor-starvation fallback below (which sorts this list,
-    # not `routable`) can never admit an unbound one either.
-    agents = [a for a in state.list_agents() if is_dispatchable(a.id)]
+    # Two subtractions, both on the ASSIGNMENT rather than on `routable`,
+    # because the floor-starvation fallback below re-sorts THIS list:
+    #
+    #   * an indexed on-chain agent (story 1.02) is marketplace-visible but only
+    #     planner-routable once an operator binds it an endpoint (story 2.01) —
+    #     until then it has nothing to execute a step with;
+    #   * a delisted agent has been withdrawn by its own operator, and that is
+    #     the one exclusion the backstop may never undo. The floor is OUR rule
+    #     and we are entitled to relax it when relaxing keeps the product
+    #     working; `set_active(id, false)` is someone else's decision about
+    #     their own service, and re-admitting on starvation would route paid
+    #     work to an operator who asked us to stop.
+    agents = [a for a in state.list_agents() if _is_listed(a) and is_dispatchable(a.id)]
     routable = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
     if len(routable) < _MIN_ROUTABLE_AGENTS:
         logger.warning(
