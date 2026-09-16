@@ -301,7 +301,13 @@ app.add_middleware(
     # anything calls this API cross-origin with task auth on, its absence
     # here is a hard preflight failure.
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    # DELETE is here for `DELETE /api/agents/{id}/bind`, an operator revoking
+    # their endpoint. It is the one call in this API a compromised operator
+    # makes under time pressure, and a missing preflight method fails it with a
+    # browser CORS error rather than anything the console could explain. The
+    # console proxies same-origin today, so nothing exercises this list — which
+    # is precisely why it would have been found the first time it mattered.
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-api-key", "x-task-token"],
 )
 
