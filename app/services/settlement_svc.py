@@ -420,8 +420,9 @@ async def _read_settler(escrow_id: str) -> str | None:
     try:
         result = await rcache.get_or_set(f"escrowsettler:{escrow_id}", IMMUTABLE_READ_TTL_SECONDS, _fetch)
     except Exception as e:
-        # Not fatal: the owner comparison still runs, so an unreadable settler
-        # narrows the self-payment test rather than disabling it.
+        # None costs every charge its revenue (see `_build_entries`), which is
+        # the point: without the settler we cannot rule out that the platform
+        # funded them, and "we could not check" must not read as "verified".
         logger.warning("[settlement] settler unreadable for %s: %s", escrow_id, _describe(e))
         return None
     return result if isinstance(result, str) else None
@@ -435,23 +436,29 @@ def _build_entries(
 ) -> tuple[list[SettlementEntry], int, int]:
     """Attribute every charge and split verified revenue from everything else.
 
-    Returns (entries, total_stroops, self_payment_stroops). Three payers are
-    NOT revenue:
+    Returns (entries, total_stroops, self_payment_stroops). An amount counts as
+    revenue only when ALL THREE of these are known and none of them is us:
 
-      - the agent's own OWNER — the operator moving their own money;
-      - the escrow's SETTLER — the platform paying itself, which is what every
-        `charged` event on this deployment has been so far;
-      - a payer that could NOT BE RESOLVED — an unverified payment is not a
-        verified one.
+      - the PAYER, read back from `authorization(auth_id)`;
+      - the agent's OWNER, so the operator moving their own money is not
+        mistaken for someone paying them;
+      - the escrow's SETTLER, the one account whose funds `charge` can actually
+        move — and the payer of every `charged` event this deployment has
+        produced so far.
 
-    The third is the uncomfortable one, and it is deliberate. `self_payment`
-    carries the whole arithmetic of this payload — `total_stroops` is by
-    definition the sum of the entries where it is False — so an unresolved
-    payer has to be excluded THROUGH that flag or the totals stop adding up.
-    Its `payer` field reads UNKNOWN_PAYER rather than a G-address, which is how
-    a client tells "the platform paid this" from "nobody could tell us who
-    paid", and its amount still appears in `self_payment_stroops`, so the
-    exclusion is visible instead of being a silently missing number.
+    Anything short of that is excluded, INCLUDING the cases where a lookup
+    merely failed: an unresolved payer, and a settler we could not read (which
+    leaves us unable to rule out that the platform funded the charge). Both
+    fail towards under-reporting, because an earnings figure that is too low is
+    a disappointment and one that is too high is a lie.
+
+    The exclusions are reported, never hidden. `self_payment` carries the whole
+    arithmetic of this payload — `total_stroops` is by definition the sum of
+    the entries where it is False — so an excluded charge has to be excluded
+    THROUGH that flag or the totals stop adding up. Each entry keeps whatever
+    was established about it: a real G-address where the payer was read,
+    UNKNOWN_PAYER where it was not, and its amount inside
+    `self_payment_stroops` either way.
 
     Entries are ordered oldest-first, tie-broken on the ids, so two calls over
     the same window return the same list in the same order.
@@ -462,7 +469,7 @@ def _build_entries(
     excluded = 0
     for charge in sorted(charges, key=lambda c: (c.ledger, c.auth_id, c.job_id)):
         payer = payers.get(charge.auth_id)
-        self_payment = payer is None or payer in ours
+        self_payment = payer is None or settler is None or payer in ours
         entries.append(
             SettlementEntry(
                 job_id=charge.job_id,
