@@ -191,12 +191,19 @@ def test_records_are_frozen() -> None:
 
 class FakePool:
     """Stands in for an asyncpg pool: records every statement and models the
-    one table just well enough to answer the two queries the store sends.
+    one table just well enough to answer the queries the store sends.
 
     Rows are kept in a plain list, and list order IS the BIGSERIAL `id` order
     the real queries sort by — so "the newest row" means the same thing here as
     it does in Postgres, and an implementation that started UPDATEing rows
     instead of appending them would visibly change `rows`.
+
+    Statements are dispatched by EQUALITY against the module's own constants,
+    never by sniffing for a substring. Two of the four statements now contain
+    both `INSERT` and `revoked`, so substring matching would silently route a
+    tombstone into the bind branch and the tests would keep passing while
+    asserting the wrong thing; equality means a query this fake has not been
+    taught fails loudly here instead.
     """
 
     def __init__(self) -> None:
@@ -210,26 +217,82 @@ class FakePool:
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
         self.statements.append(sql)
-        if "INSERT INTO" in sql:
-            agent_id, endpoint_url, owner, bound_at = args
-            previous = self._history(str(agent_id))
-            self.rows.append({"agent_id": agent_id, "endpoint_url": endpoint_url, "owner": owner, "bound_at": bound_at})
-            return {
+        if sql == binding_store._INSERT_SQL:
+            return self._insert(*args)
+        if sql == binding_store._TOMBSTONE_SQL:
+            return self._tombstone(*args)
+        assert sql == binding_store._SELECT_LATEST_SQL, f"unexpected statement: {sql}"
+        return self._latest(str(args[0]))
+
+    async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
+        self.statements.append(sql)
+        assert sql == binding_store._SELECT_AGENT_IDS_SQL, f"unexpected statement: {sql}"
+        # DISTINCT ON (agent_id) ... ORDER BY agent_id, id DESC, then drop the
+        # tombstones: last write per agent wins, and a revoked agent is absent.
+        newest = {str(r["agent_id"]): r for r in self.rows}
+        return [{"agent_id": a} for a, row in newest.items() if not row["revoked"]]
+
+    def _insert(self, *args: object) -> dict[str, object]:
+        agent_id, endpoint_url, owner, bound_at = args
+        previous = self._live_endpoint(str(agent_id))
+        self.rows.append(
+            {
+                "agent_id": agent_id,
                 "endpoint_url": endpoint_url,
                 "owner": owner,
                 "bound_at": bound_at,
-                "previous_endpoint_url": previous[-1]["endpoint_url"] if previous else None,
+                "revoked": False,
             }
-        history = self._history(str(args[0]))
+        )
+        return {
+            "endpoint_url": endpoint_url,
+            "owner": owner,
+            "bound_at": bound_at,
+            "previous_endpoint_url": previous,
+        }
+
+    def _tombstone(self, *args: object) -> dict[str, object] | None:
+        agent_id, owner, bound_at = args
+        history = self._history(str(agent_id))
+        # `INSERT ... SELECT FROM live WHERE NOT live.revoked`: with nothing
+        # live there is no row to select, so nothing is written and nothing
+        # comes back.
+        if not history or history[-1]["revoked"]:
+            return None
+        endpoint_url = history[-1]["endpoint_url"]
+        self.rows.append(
+            {
+                "agent_id": agent_id,
+                "endpoint_url": endpoint_url,
+                "owner": owner,
+                "bound_at": bound_at,
+                "revoked": True,
+            }
+        )
+        return {"endpoint_url": endpoint_url, "owner": owner, "bound_at": bound_at}
+
+    def _latest(self, agent_id: str) -> dict[str, object] | None:
+        history = self._history(agent_id)
         if not history:
             return None
         newest = history[-1]
+        previous = history[-2] if len(history) > 1 else None
         return {
             "endpoint_url": newest["endpoint_url"],
             "owner": newest["owner"],
             "bound_at": newest["bound_at"],
-            "previous_endpoint_url": history[-2]["endpoint_url"] if len(history) > 1 else None,
+            # LAG(CASE WHEN revoked THEN NULL ELSE endpoint_url END)
+            "previous_endpoint_url": None if previous is None or previous["revoked"] else previous["endpoint_url"],
+            "revoked": newest["revoked"],
         }
+
+    def _live_endpoint(self, agent_id: str) -> object | None:
+        """The `previous` CTE: the newest row's endpoint, or None when that row
+        is a tombstone — binding again after a revocation replaces nothing."""
+        history = self._history(agent_id)
+        if not history or history[-1]["revoked"]:
+            return None
+        return history[-1]["endpoint_url"]
 
     def _history(self, agent_id: str) -> list[dict[str, object]]:
         return [r for r in self.rows if r["agent_id"] == agent_id]
@@ -293,7 +356,9 @@ def test_no_sql_in_the_module_mutates_a_row() -> None:
         (
             binding_store._CREATE_TABLE_SQL,
             binding_store._SELECT_LATEST_SQL,
+            binding_store._SELECT_AGENT_IDS_SQL,
             binding_store._INSERT_SQL,
+            binding_store._TOMBSTONE_SQL,
         )
     ).upper()
 
