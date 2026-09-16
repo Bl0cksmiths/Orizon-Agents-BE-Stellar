@@ -118,6 +118,15 @@ class SettlementEntry(BaseModel):
     # True when this is not third-party revenue: the agent's own owner paid, the
     # platform's settler paid, or the payer could not be established at all.
     self_payment: bool
+    # WHICH of those four it was — "payer_unreadable" · "owner" · "settler" ·
+    # "settler_unreadable" — or None when the charge IS revenue. None if and
+    # only if `self_payment` is False. The client needs this because the four
+    # are not interchangeable sentences: "you funded this yourself" is not "the
+    # platform funded this", and neither is "we could not check who did".
+    # Deliberately NOT re-declared as a literal here, unlike ReputationInfo's
+    # two-value `source`: this set is the frontend's copy deck keyed by value,
+    # and a silent drift between the two lists would relabel real charges.
+    exclusion: settlement_svc.Exclusion | None
 
 
 class SettlementEvidence(BaseModel):

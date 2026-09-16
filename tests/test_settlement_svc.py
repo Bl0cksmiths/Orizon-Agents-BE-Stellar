@@ -586,6 +586,7 @@ def test_the_route_returns_the_frozen_payload(monkeypatch: pytest.MonkeyPatch, c
         "at",
         "payer",
         "self_payment",
+        "exclusion",
     }
     assert (body["agent_id"], body["total_stroops"], body["unavailable"]) == (AGENT_ID, 10_000, None)
 
