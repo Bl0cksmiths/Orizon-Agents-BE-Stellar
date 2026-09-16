@@ -107,6 +107,31 @@ def test_reputation_params_not_shadowed_by_agent_route(client):
     assert "prior_weight_usdc" in body
 
 
+def test_routing_constants_are_read_per_request(client, monkeypatch):
+    """Both routes must answer with the LIVE floor and prior, not the values
+    the process booted with.
+
+    They are plain ints on the response models, so the natural way to get this
+    wrong is a default captured at import (`floor_bps: int = settings.x`),
+    which keeps serving the boot-time number for the life of the process. The
+    FE draws the routing floor from these and compares every agent's lower
+    bound against it, so a stale floor paints agents as routable that the
+    orchestrator has already stopped hiring — and a stale prior mislabels the
+    score an unrated agent actually carries.
+    """
+    monkeypatch.setattr(settings, "reputation_floor_bps", 6100)
+    monkeypatch.setattr(settings, "reputation_prior_bps", 7100)
+
+    batch = client.get("/api/stellar/reputation").json()
+    params = client.get("/api/stellar/reputation/params").json()
+
+    assert batch["floor_bps"] == params["floor_bps"] == 6100
+    assert batch["prior_bps"] == params["prior_bps"] == 7100
+    # And the live prior has to reach the per-agent scores too, not just the
+    # header the client draws its floor line against.
+    assert {info["smoothed_bps"] for info in batch["reputations"].values()} == {7100}
+
+
 # ── degradation on the wire ─────────────────────────────────────
 
 
