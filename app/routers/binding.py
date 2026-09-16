@@ -3,13 +3,21 @@
 Binds an operator-hosted HTTPS endpoint to an on-chain agent id, authorised by
 a signature from the wallet the AgentRegistry names as that agent's owner.
 
+Revocation runs the same way in reverse: `DELETE /{agent_id}/bind` takes its own
+challenge, its own domain-separated message and its own single-use nonce, so the
+operator who bound an endpoint can also stop work being dispatched to it. That
+route is the only mechanism there is — `AgentRegistry.set_active(id, false)`
+marks an agent offline in the marketplace mirror, and the failure tracker only
+logs; neither removes an endpoint from routing.
+
 The wallet signature IS the credential — no API key, no password, no account
-(SOW Deliverable 1's premise). That is why both write routes are public:
+(SOW Deliverable 1's premise). That is why the write routes are public:
 `require_api_key` guards the routes where the *backend* spends its own key, and
 a shared secret cannot express "this caller owns *this* agent" anyway. Gating
 them would also be a no-op on the demo, where API_KEY is unset.
 
 The order of checks in `bind` is load-bearing, not stylistic; see its docstring.
+`unbind` follows the same order with the endpoint-shaped steps removed.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..services import external_binding
-from ..services.binding_registry import note_bound
+from ..services.binding_registry import note_bound, note_unbound
 from ..services.binding_store import get_binding_store
 from ..services.endpoint_policy import EndpointPolicyError, resolve_and_check, validate_endpoint_url
 from ..services.external_binding import OwnerLookupError
@@ -76,6 +84,46 @@ class BindingResponse(BaseModel):
     replaced: bool
 
 
+class UnbindChallengeResponse(BaseModel):
+    """Same shape as BindChallengeResponse, declared separately so the schema
+    the console generates names the flow it belongs to — the two messages are
+    NOT interchangeable and a shared model would suggest they were."""
+
+    agent_id: str
+    nonce: str
+    # `orizon-unbind:v1:{agent_id}:{nonce}` — no endpoint; see
+    # external_binding.unbinding_message for why.
+    message: str
+    expires_at: float
+    ttl_seconds: int
+
+
+class UnbindReq(BaseModel):
+    # No endpoint_url: an unbind revokes whatever is bound, and the operator of
+    # a compromised host may not be able to name it. `BindReq.signature`'s
+    # bounds, verbatim and for its reasons.
+    signature: str = Field(..., min_length=1, max_length=256, description="base64 ed25519 signature")
+
+
+class UnbindResponse(BaseModel):
+    agent_id: str
+    owner: str
+    # False when the agent had no binding to revoke. Not an error — see
+    # `unbind` — but the operator is told which of the two happened, because
+    # "your compromised host is no longer being dispatched to" and "it already
+    # was not" are different pieces of news.
+    was_bound: bool
+    # The tombstone's own timestamp (2.01 AC-6), or None when nothing was
+    # revoked. Deliberately not the request's clock: reporting a time for an
+    # event that never happened would put a fiction in the operator's audit
+    # trail.
+    unbound_at: float | None
+    # The revoked URL is NOT returned. `read_binding` discloses a full URL only
+    # to the operator API key, and adding a second disclosure path behind a
+    # different gate is how those two rules drift apart. The accept log records
+    # it server-side, which is where the audit trail lives anyway.
+
+
 class EndpointCheckResponse(BaseModel):
     allowed: bool
     rule: str | None = None
@@ -119,7 +167,10 @@ async def _require_owner(agent_id: str) -> str:
     try:
         owner = await external_binding.resolve_owner(agent_id)
     except OwnerLookupError:
-        logger.warning("bind refused: agent_id=%s reason=registry_unavailable", agent_id)
+        # "binding" rather than "bind": three routes reach this helper now — the
+        # two challenge mints and the unbind — so naming one of them would
+        # misattribute the refusal in the log.
+        logger.warning("binding refused: agent_id=%s reason=registry_unavailable", agent_id)
         raise HTTPException(503, "registry_unavailable") from None
     if owner is None:
         raise HTTPException(404, "agent_not_found")
@@ -158,6 +209,44 @@ async def endpoint_check(url: Annotated[str, Query(min_length=1, max_length=2048
     except EndpointPolicyError as e:
         return EndpointCheckResponse(allowed=False, rule=e.rule, message=str(e))
     return EndpointCheckResponse(allowed=True)
+
+
+@router.post(
+    "/{agent_id}/unbind/challenge",
+    response_model=UnbindChallengeResponse,
+    summary="Mint an unbind challenge to sign",
+)
+async def unbind_challenge(
+    agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
+) -> UnbindChallengeResponse:
+    """Issue the nonce and the exact message the agent's owner must sign to
+    revoke the binding.
+
+    No request body: an unbind names no endpoint (see
+    `external_binding.unbinding_message`), so there is nothing to supply.
+
+    The chain read comes first for `bind_challenge`'s reason — the bounded
+    challenge table may only ever hold real agent ids — and it has a second
+    consequence here worth stating: an agent the registry cannot name an owner
+    for cannot be unbound, because there is nobody to prove the revocation
+    against. The deployed AgentRegistry has no way to remove an agent, so a
+    binding cannot be orphaned this way today; if one ever gains it, the removal
+    entrypoint has to revoke the binding as part of the same change rather than
+    leave an endpoint nobody can detach.
+    """
+    await _require_owner(agent_id)
+
+    nonce, expires_at = external_binding.issue_unbind_challenge(agent_id)
+    # The nonce is a live single-use credential for its whole window: returned
+    # to the caller, never written to a log.
+    logger.info("unbind challenge issued: agent_id=%s", agent_id)
+    return UnbindChallengeResponse(
+        agent_id=agent_id,
+        nonce=nonce,
+        message=external_binding.unbinding_message(agent_id, nonce),
+        expires_at=expires_at,
+        ttl_seconds=external_binding.CHALLENGE_TTL_SECONDS,
+    )
 
 
 @router.post(
@@ -270,6 +359,90 @@ async def bind(
         bound_at=record.bound_at,
         replaced=replaced,
     )
+
+
+@router.delete("/{agent_id}/bind", response_model=UnbindResponse, summary="Revoke an agent's endpoint binding")
+async def unbind(
+    body: UnbindReq,
+    agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
+) -> UnbindResponse:
+    """Verify ownership and stop dispatching to the bound endpoint.
+
+    This is the operator's kill switch, and until it existed there was none. An
+    operator whose host was compromised or decommissioned could not stop signed
+    dispatch envelopes — carrying the buyer's intent, rationale and accumulated
+    context — being delivered to it: `set_active(id, false)` only flips the
+    mirrored marketplace status, the failure tracker only logs, and rebinding to
+    some other host merely redirected the traffic while every step failed
+    against the operator's own reputation.
+
+    `bind`'s ordering, minus the two endpoint-shaped steps (there is no URL to
+    policy-check and none to resolve):
+
+    1. **Signature shape** — a pure decode, before any chain read.
+    2. **Owner from the chain**, fail closed (`_require_owner`). Resolved LIVE,
+       never from `state.agents` or the record's own stored `owner`: an agent
+       that has changed hands must be revocable by whoever owns it NOW, and a
+       cached owner is the one thing an attacker who can wait could outlast.
+    3. **Signature** — the nonce is consumed here and only on success, so an RPC
+       outage cannot burn a pending operator's challenge.
+    4. **Tombstone the store, then forget the id.**
+
+    Status codes match `bind` exactly, including the deliberately
+    non-discriminating 401: one `not_agent_owner` covers "no live challenge",
+    "already used", "expired" and "signature does not verify", so the route
+    cannot be used to probe which agents exist or who owns them.
+
+    REVOKING AN AGENT THAT IS NOT BOUND IS A 200, not a 404. The caller is
+    asking for an end state — "nothing is dispatched to this agent" — and that
+    end state holds, so the request succeeded. A 404 would report failure for a
+    request that achieved exactly what it asked, and would push a client that
+    cannot tell a lost response from a lost binding into retrying a revocation
+    that already worked. `was_bound` reports which of the two happened, for an
+    operator who does need to know. A 204 was the other candidate and loses to
+    the same argument: it carries no body, so it could not say.
+    """
+    try:
+        raw_signature = base64.b64decode(body.signature, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(422, "signature_malformed") from None
+    if len(raw_signature) != _SIGNATURE_BYTES:
+        raise HTTPException(422, "signature_malformed")
+
+    owner = await _require_owner(agent_id)
+
+    if not external_binding.verify_unbind_challenge(agent_id, owner, body.signature):
+        # `bind`'s single code, for `bind`'s reason. Note this route must also
+        # not leak whether the agent HAD a binding, which is why the check
+        # happens before the store is touched at all.
+        logger.warning("unbind refused: agent_id=%s reason=not_agent_owner", agent_id)
+        raise HTTPException(401, "not_agent_owner")
+
+    record = await get_binding_store().delete(agent_id, owner)
+    # Unconditional, and deliberately not inside the `if record` below. The
+    # planner's synchronous set is a mirror, not the truth, and this is the one
+    # moment we know for certain the agent must not be in it — so a `_bound_ids`
+    # entry that somehow outlived its store record is repaired here rather than
+    # surviving until the next restart. Placed AFTER the store write so a failed
+    # write cannot leave the two disagreeing in the dangerous direction: dispatch
+    # reads the store, so a set that says "gone" over a store that says "bound"
+    # would look revoked while still delivering work.
+    note_unbound(agent_id)
+    if record is None:
+        logger.info("unbind: agent_id=%s owner=%s was_bound=false — already not bound", agent_id, owner)
+        return UnbindResponse(agent_id=agent_id, owner=owner, was_bound=False, unbound_at=None)
+
+    # The full URL is logged on the accept path for `bind`'s reason — it is
+    # operator-declared configuration, not attacker-controlled text — and here
+    # it is the audit record of exactly what stopped receiving dispatch.
+    logger.info(
+        "endpoint unbound: agent_id=%s owner=%s url=%s unbound_at=%s",
+        agent_id,
+        owner,
+        record.revoked_endpoint_url,
+        record.unbound_at,
+    )
+    return UnbindResponse(agent_id=agent_id, owner=owner, was_bound=True, unbound_at=record.unbound_at)
 
 
 @router.get("/{agent_id}/binding", response_model=BindingResponse, summary="Read an agent's binding")

@@ -1,14 +1,18 @@
 """Story 2.01 — the operator endpoint binding store (ADR 0003 D1).
 
-Three things are asserted here and they are the three that can silently rot:
+Four things are asserted here and they are the four that can silently rot:
 
   1. The in-memory default is BOUNDED, like every other store in this process
      (app/state.py's deque(maxlen=200), ramp_store's _MAX_RAMPS=500) — a store
      the whole internet can write to, one row per bind, cannot be a plain dict.
-  2. The Postgres table is APPEND-ONLY. A rebind INSERTs; nothing UPDATEs. That
-     is what makes AC-6's timestamp and `previous_endpoint_url` derivable
-     rather than maintained, so the SQL itself is under test.
-  3. The store is chosen from `database_url` at first USE, not at import, so a
+  2. The Postgres table is APPEND-ONLY. A rebind INSERTs, an unbind INSERTs a
+     tombstone; nothing UPDATEs and nothing DELETEs. That is what makes AC-6's
+     timestamp and `previous_endpoint_url` derivable rather than maintained, so
+     the SQL itself is under test.
+  3. A REVOKED binding is gone from both read paths — `get` answers None and
+     `list_agent_ids` omits the id — while every row of its history survives.
+     A revocation that a restart could undo is not a revocation.
+  4. The store is chosen from `database_url` at first USE, not at import, so a
      DATABASE_URL that arrives later is honoured instead of ignored.
 
 The suite is hermetic: no database, no network, no asyncpg. Postgres is
@@ -26,7 +30,7 @@ import time
 
 import pytest
 
-from app.services import binding_store
+from app.services import binding_registry, binding_store
 from app.services.binding_store import BindingRecord, InMemoryBindingStore
 
 STORE_LOGGER = "app.services.binding_store"
@@ -186,17 +190,122 @@ def test_records_are_frozen() -> None:
         record.endpoint_url = URL_TWO  # type: ignore[misc]
 
 
+# ── revoking a binding, in memory ─────────────────────────────────────────
+
+
+def test_delete_revokes_the_binding_and_reports_what_it_revoked() -> None:
+    store = InMemoryBindingStore()
+
+    async def go() -> tuple[binding_store.UnbindRecord | None, BindingRecord | None]:
+        await store.put(AGENT, URL_ONE, OWNER)
+        return await store.delete(AGENT, OWNER), await store.get(AGENT)
+
+    before = time.time()
+    record, current = asyncio.run(go())
+    after = time.time()
+
+    assert record is not None
+    assert record.agent_id == AGENT
+    assert record.revoked_endpoint_url == URL_ONE
+    assert record.owner == OWNER
+    # 2.01 AC-6 asks for the change to be recorded WITH A TIMESTAMP, and a
+    # revocation is a change.
+    assert before <= record.unbound_at <= after
+    assert current is None  # nothing is dispatched here any more
+
+
+def test_deleting_an_agent_that_is_not_bound_is_not_an_error() -> None:
+    """The caller is asking for an end state, and the end state already holds.
+    Twice in a row is the same story: the route answers 200 either way."""
+    store = InMemoryBindingStore()
+
+    async def go() -> tuple[object, object, object]:
+        never = await store.delete("agt_never", OWNER)
+        await store.put(AGENT, URL_ONE, OWNER)
+        first = await store.delete(AGENT, OWNER)
+        second = await store.delete(AGENT, OWNER)
+        return never, first, second
+
+    never, first, second = asyncio.run(go())
+
+    assert never is None
+    assert first is not None
+    assert second is None
+
+
+def test_a_revoked_agent_is_not_in_list_agent_ids() -> None:
+    """The set that seeds the planner's routability filter at startup. An agent
+    that stayed in it would be re-offered by the next boot, which is the whole
+    failure a revocation exists to prevent."""
+    store = InMemoryBindingStore()
+
+    async def go() -> tuple[frozenset[str], frozenset[str]]:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.put("agt_other", URL_TWO, OWNER)
+        before = await store.list_agent_ids()
+        await store.delete(AGENT, OWNER)
+        return before, await store.list_agent_ids()
+
+    before, after = asyncio.run(go())
+
+    assert before == frozenset({AGENT, "agt_other"})
+    assert after == frozenset({"agt_other"})
+
+
+def test_binding_again_after_a_revocation_replaces_nothing() -> None:
+    """`replaced` is how the API reports "your old endpoint is gone". After a
+    revocation there was no old endpoint, and saying otherwise would read as
+    the unbind having silently not taken effect."""
+    store = InMemoryBindingStore()
+
+    async def go() -> BindingRecord:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.delete(AGENT, OWNER)
+        return await store.put(AGENT, URL_TWO, OWNER)
+
+    assert asyncio.run(go()).previous_endpoint_url is None
+
+
+def test_eviction_removes_the_id_from_the_planner_s_routable_set() -> None:
+    """The desync this store could cause on its own. Eviction drops a binding
+    the planner's in-memory set still believes in, so the planner keeps
+    offering the agent, `resolve_worker` finds no binding, and the step is
+    silently skipped — a plan that quietly does less than it says."""
+    store = InMemoryBindingStore(max_bindings=1)
+    binding_registry.note_bound("ext_evicted")
+    try:
+        assert binding_registry.is_dispatchable("ext_evicted") is True
+
+        async def go() -> None:
+            await store.put("ext_evicted", URL_ONE, OWNER)
+            await store.put("ext_survivor", URL_TWO, OWNER)  # at cap → drops ext_evicted
+
+        asyncio.run(go())
+
+        assert asyncio.run(store.get("ext_evicted")) is None
+        assert binding_registry.is_dispatchable("ext_evicted") is False
+    finally:
+        binding_registry.note_unbound("ext_evicted")
+
+
 # ── PostgresBindingStore ──────────────────────────────────────────────────
 
 
 class FakePool:
     """Stands in for an asyncpg pool: records every statement and models the
-    one table just well enough to answer the two queries the store sends.
+    one table just well enough to answer the queries the store sends.
 
     Rows are kept in a plain list, and list order IS the BIGSERIAL `id` order
     the real queries sort by — so "the newest row" means the same thing here as
     it does in Postgres, and an implementation that started UPDATEing rows
     instead of appending them would visibly change `rows`.
+
+    Statements are dispatched by EQUALITY against the module's own constants,
+    never by sniffing for a substring. Two of the four statements now contain
+    both `INSERT` and `revoked`, so substring matching would silently route a
+    tombstone into the bind branch and the tests would keep passing while
+    asserting the wrong thing; equality means a query this fake has not been
+    taught fails loudly here instead.
     """
 
     def __init__(self) -> None:
@@ -210,26 +319,82 @@ class FakePool:
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
         self.statements.append(sql)
-        if "INSERT INTO" in sql:
-            agent_id, endpoint_url, owner, bound_at = args
-            previous = self._history(str(agent_id))
-            self.rows.append({"agent_id": agent_id, "endpoint_url": endpoint_url, "owner": owner, "bound_at": bound_at})
-            return {
+        if sql == binding_store._INSERT_SQL:
+            return self._insert(*args)
+        if sql == binding_store._TOMBSTONE_SQL:
+            return self._tombstone(*args)
+        assert sql == binding_store._SELECT_LATEST_SQL, f"unexpected statement: {sql}"
+        return self._latest(str(args[0]))
+
+    async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
+        self.statements.append(sql)
+        assert sql == binding_store._SELECT_AGENT_IDS_SQL, f"unexpected statement: {sql}"
+        # DISTINCT ON (agent_id) ... ORDER BY agent_id, id DESC, then drop the
+        # tombstones: last write per agent wins, and a revoked agent is absent.
+        newest = {str(r["agent_id"]): r for r in self.rows}
+        return [{"agent_id": a} for a, row in newest.items() if not row["revoked"]]
+
+    def _insert(self, *args: object) -> dict[str, object]:
+        agent_id, endpoint_url, owner, bound_at = args
+        previous = self._live_endpoint(str(agent_id))
+        self.rows.append(
+            {
+                "agent_id": agent_id,
                 "endpoint_url": endpoint_url,
                 "owner": owner,
                 "bound_at": bound_at,
-                "previous_endpoint_url": previous[-1]["endpoint_url"] if previous else None,
+                "revoked": False,
             }
-        history = self._history(str(args[0]))
+        )
+        return {
+            "endpoint_url": endpoint_url,
+            "owner": owner,
+            "bound_at": bound_at,
+            "previous_endpoint_url": previous,
+        }
+
+    def _tombstone(self, *args: object) -> dict[str, object] | None:
+        agent_id, owner, bound_at = args
+        history = self._history(str(agent_id))
+        # `INSERT ... SELECT FROM live WHERE NOT live.revoked`: with nothing
+        # live there is no row to select, so nothing is written and nothing
+        # comes back.
+        if not history or history[-1]["revoked"]:
+            return None
+        endpoint_url = history[-1]["endpoint_url"]
+        self.rows.append(
+            {
+                "agent_id": agent_id,
+                "endpoint_url": endpoint_url,
+                "owner": owner,
+                "bound_at": bound_at,
+                "revoked": True,
+            }
+        )
+        return {"endpoint_url": endpoint_url, "owner": owner, "bound_at": bound_at}
+
+    def _latest(self, agent_id: str) -> dict[str, object] | None:
+        history = self._history(agent_id)
         if not history:
             return None
         newest = history[-1]
+        previous = history[-2] if len(history) > 1 else None
         return {
             "endpoint_url": newest["endpoint_url"],
             "owner": newest["owner"],
             "bound_at": newest["bound_at"],
-            "previous_endpoint_url": history[-2]["endpoint_url"] if len(history) > 1 else None,
+            # LAG(CASE WHEN revoked THEN NULL ELSE endpoint_url END)
+            "previous_endpoint_url": None if previous is None or previous["revoked"] else previous["endpoint_url"],
+            "revoked": newest["revoked"],
         }
+
+    def _live_endpoint(self, agent_id: str) -> object | None:
+        """The `previous` CTE: the newest row's endpoint, or None when that row
+        is a tombstone — binding again after a revocation replaces nothing."""
+        history = self._history(agent_id)
+        if not history or history[-1]["revoked"]:
+            return None
+        return history[-1]["endpoint_url"]
 
     def _history(self, agent_id: str) -> list[dict[str, object]]:
         return [r for r in self.rows if r["agent_id"] == agent_id]
@@ -293,7 +458,9 @@ def test_no_sql_in_the_module_mutates_a_row() -> None:
         (
             binding_store._CREATE_TABLE_SQL,
             binding_store._SELECT_LATEST_SQL,
+            binding_store._SELECT_AGENT_IDS_SQL,
             binding_store._INSERT_SQL,
+            binding_store._TOMBSTONE_SQL,
         )
     ).upper()
 
@@ -498,3 +665,134 @@ def test_the_in_memory_default_announces_that_it_loses_bindings(
 
     lines = _messages(caplog, STORE_LOGGER)
     assert any("in-memory" in m and "LOST on restart" in m for m in lines)
+
+
+# ── revoking a binding, in Postgres ───────────────────────────────────────
+
+
+def test_an_unbind_appends_a_tombstone_and_deletes_nothing() -> None:
+    """The append-only rule at its most tempting breaking point: the obvious
+    implementation of "unbind" is `DELETE FROM`, and that would destroy exactly
+    the evidence an operator needs after a host compromise."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> binding_store.UnbindRecord | None:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.put(AGENT, URL_TWO, OWNER)
+        return await store.delete(AGENT, OWNER)
+
+    record = asyncio.run(go())
+
+    assert record is not None
+    assert record.revoked_endpoint_url == URL_TWO
+    # Two binds and a revocation — three rows, and the first two still say what
+    # they always said.
+    assert len(pool.rows) == 3
+    assert [r["endpoint_url"] for r in pool.rows] == [URL_ONE, URL_TWO, URL_TWO]
+    assert [r["revoked"] for r in pool.rows] == [False, False, True]
+    assert all("INSERT INTO agent_bindings" in s for s in pool.writes)
+    assert not any("DELETE" in s or "UPDATE" in s for s in pool.statements)
+
+
+def test_the_tombstone_carries_the_timestamp_the_store_returned() -> None:
+    """AC-6 again: the row that was written IS the record handed back, dated by
+    this process's clock in epoch seconds."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> binding_store.UnbindRecord | None:
+        await store.put(AGENT, URL_ONE, OWNER)
+        return await store.delete(AGENT, "G" + "B" * 55)
+
+    before = time.time()
+    record = asyncio.run(go())
+    after = time.time()
+
+    assert record is not None
+    assert before <= record.unbound_at <= after
+    assert pool.rows[-1]["bound_at"] == record.unbound_at
+    # The revoker is recorded, not the address that proved the original bind:
+    # an agent can change hands, and the audit trail should say who did this.
+    assert pool.rows[-1]["owner"] == "G" + "B" * 55
+    assert pool.rows[0]["owner"] == OWNER
+
+
+def test_get_is_none_once_the_newest_row_is_a_tombstone() -> None:
+    """A `WHERE NOT revoked` would have selected the binding UNDERNEATH the
+    tombstone and resurrected it, which is why the filter is not in the SQL."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> BindingRecord | None:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.put(AGENT, URL_TWO, OWNER)
+        await store.delete(AGENT, OWNER)
+        return await store.get(AGENT)
+
+    assert asyncio.run(go()) is None
+
+
+def test_list_agent_ids_excludes_a_tombstoned_agent() -> None:
+    """A plain `SELECT DISTINCT agent_id` would list an agent forever once it
+    had ever bound — the restart that undoes a revocation."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[frozenset[str], frozenset[str]]:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.put("agt_other", URL_TWO, OWNER)
+        before = await store.list_agent_ids()
+        await store.delete(AGENT, OWNER)
+        return before, await store.list_agent_ids()
+
+    before, after = asyncio.run(go())
+
+    assert before == frozenset({AGENT, "agt_other"})
+    assert after == frozenset({"agt_other"})
+
+
+def test_unbinding_twice_writes_only_one_tombstone() -> None:
+    """`INSERT ... SELECT FROM live WHERE NOT live.revoked` writes nothing when
+    there is nothing live, so a client retrying a revocation — or a nightly
+    script revoking a list — cannot grow the table one row per attempt."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[object, object]:
+        await store.put(AGENT, URL_ONE, OWNER)
+        return await store.delete(AGENT, OWNER), await store.delete(AGENT, OWNER)
+
+    first, second = asyncio.run(go())
+
+    assert first is not None
+    assert second is None
+    assert len(pool.rows) == 2  # the bind and one tombstone
+
+
+def test_revoking_an_agent_that_never_bound_writes_nothing() -> None:
+    pool = FakePool()
+
+    assert asyncio.run(_pg(pool).delete("agt_never", OWNER)) is None
+    assert pool.rows == []
+
+
+def test_a_bind_after_a_tombstone_reports_no_previous_endpoint() -> None:
+    """The LAG masks a tombstone, so the history still holds every row while
+    `replaced` reports the truth: this bind replaced nothing."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[BindingRecord, BindingRecord | None]:
+        await store.put(AGENT, URL_ONE, OWNER)
+        await store.delete(AGENT, OWNER)
+        rebound = await store.put(AGENT, URL_THREE, OWNER)
+        return rebound, await store.get(AGENT)
+
+    rebound, current = asyncio.run(go())
+
+    assert rebound.previous_endpoint_url is None
+    assert current is not None
+    assert current.endpoint_url == URL_THREE
+    assert current.previous_endpoint_url is None
+    assert len(pool.rows) == 3  # the whole history survives the round trip
