@@ -45,6 +45,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel
 from stellar_sdk import scval
@@ -109,6 +110,23 @@ UNKNOWN_ASSET = "unknown"
 
 CHARGED_TOPIC = "charged"
 
+# Why a charge is not counted as revenue. These are four genuinely different
+# facts and they read as four different sentences to an operator: "you funded
+# this yourself" is not "the platform funded this", and neither of them is "we
+# could not check who funded this". `self_payment` collapses all four into one
+# boolean because the payload's arithmetic needs a single flag — but a client
+# cannot un-collapse it afterwards, and a client that tries will describe three
+# of the four wrongly. This alias is the discriminator that keeps them apart.
+#
+#   payer_unreadable   `authorization(auth_id)` could not be read at all.
+#   owner              the agent's own owner account funded the charge.
+#   settler            the platform's settler funded it — the escrow paying
+#                      itself, which is every charged event on this deployment.
+#   settler_unreadable the payer was read and is neither of the above, but
+#                      `settler()` was not, so a platform self-payment could
+#                      not be ruled out. Excluded fail-closed.
+Exclusion = Literal["payer_unreadable", "owner", "settler", "settler_unreadable"]
+
 
 class SettlementEntry(BaseModel):
     """One `charged` event, attributed to the account that actually paid."""
@@ -122,6 +140,9 @@ class SettlementEntry(BaseModel):
     # True when this is not third-party revenue: the agent's own owner paid, the
     # platform's settler paid, or the payer could not be established at all.
     self_payment: bool
+    # WHICH of those it was, or None when the charge IS revenue. Exactly
+    # equivalent to `self_payment`: None if and only if `self_payment` is False.
+    exclusion: Exclusion | None
 
 
 class SettlementEvidence(BaseModel):
@@ -428,6 +449,41 @@ async def _read_settler(escrow_id: str) -> str | None:
     return result if isinstance(result, str) else None
 
 
+def _exclusion(payer: str | None, owner: str, settler: str | None) -> Exclusion | None:
+    """Which rule kept this charge out of revenue, or None when none did.
+
+    The ORDER is the whole content of this function, and two steps of it are
+    not the order anyone would write by accident:
+
+      1. `payer_unreadable` outranks everything, an unreadable settler
+         included. It is the most specific thing we actually know — we never
+         got as far as having an account to compare against — and answering
+         "we could not rule out the platform" for a charge whose payer we never
+         read would describe a comparison that never happened.
+      2. `owner` is checked BEFORE `settler`, and this is the one someone will
+         eventually "fix". On this deployment `owner_of(orizon_batch)` IS the
+         settler, so both rules match the same charge and only precedence
+         decides which sentence an operator reads. "Your own owner account
+         funded this" is the more precise statement RELATIVE TO THIS AGENT, and
+         for an external operator — whose owner is their own wallet and not one
+         of ours — it is the only correct one. Reversed, this would tell that
+         operator the platform had paid them.
+      3. `settler`: the platform funded it, the escrow paying itself.
+      4. `settler_unreadable` last, because it is the weakest claim of the
+         four: the payer was read and is neither of ours, and the only thing
+         keeping this out of revenue is a check we could not run.
+    """
+    if payer is None:
+        return "payer_unreadable"
+    if payer == owner:
+        return "owner"
+    if settler is not None and payer == settler:
+        return "settler"
+    if settler is None:
+        return "settler_unreadable"
+    return None
+
+
 def _build_entries(
     charges: list[_Charge],
     payers: dict[str, str],
@@ -455,7 +511,9 @@ def _build_entries(
     The exclusions are reported, never hidden. `self_payment` carries the whole
     arithmetic of this payload — `total_stroops` is by definition the sum of
     the entries where it is False — so an excluded charge has to be excluded
-    THROUGH that flag or the totals stop adding up. Each entry keeps whatever
+    THROUGH that flag or the totals stop adding up. `exclusion` then says WHICH
+    of the four rules did it, because those four are not interchangeable to the
+    operator reading them (see `_exclusion`). Each entry also keeps whatever
     was established about it: a real G-address where the payer was read,
     UNKNOWN_PAYER where it was not, and its amount inside
     `self_payment_stroops` either way.
@@ -463,13 +521,16 @@ def _build_entries(
     Entries are ordered oldest-first, tie-broken on the ids, so two calls over
     the same window return the same list in the same order.
     """
-    ours = {a for a in (owner, settler) if a}
     entries: list[SettlementEntry] = []
     total = 0
     excluded = 0
     for charge in sorted(charges, key=lambda c: (c.ledger, c.auth_id, c.job_id)):
         payer = payers.get(charge.auth_id)
-        self_payment = payer is None or settler is None or payer in ours
+        exclusion = _exclusion(payer, owner, settler)
+        # The same predicate this has always applied, now read off the reason
+        # rather than recomputed beside it — two expressions of one rule would
+        # be free to drift, and the payload's arithmetic gates on this flag.
+        self_payment = exclusion is not None
         entries.append(
             SettlementEntry(
                 job_id=charge.job_id,
@@ -479,6 +540,7 @@ def _build_entries(
                 at=charge.at,
                 payer=payer if payer is not None else UNKNOWN_PAYER,
                 self_payment=self_payment,
+                exclusion=exclusion,
             )
         )
         if self_payment:
