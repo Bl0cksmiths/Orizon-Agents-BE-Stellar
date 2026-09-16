@@ -50,8 +50,10 @@ from pydantic import BaseModel
 from stellar_sdk import scval
 from stellar_sdk.soroban_rpc import EventFilter, EventFilterType, EventInfo, GetEventsResponse
 
+from ..config import settings
 from ..stellar import cache as rcache
 from ..stellar import client as sc
+from . import external_binding
 
 logger = logging.getLogger(__name__)
 
@@ -499,3 +501,96 @@ async def _read_asset(sac_id: str) -> str:
         logger.warning("[settlement] asset name unreadable for %s: %s", sac_id, _describe(e))
         return UNKNOWN_ASSET
     return result if isinstance(result, str) else UNKNOWN_ASSET
+
+
+async def _settlement(agent_id: str) -> SettlementEvidence:
+    """Produce one agent's settlement evidence. Never raises.
+
+    Order matters. The owner is resolved BEFORE the scan and its failure ends
+    the request, for two reasons: without an owner no charge can be told apart
+    from a self-payment, and a list of unclassifiable charges rendered as
+    earnings is the exact failure this endpoint exists to prevent; and it is
+    also the cheapest read, so a miss here saves the dozen round trips behind
+    it.
+
+    Every early return is an `unavailable` with empty entries, never a zero. A
+    zero here would read as "this agent has earned nothing", which is a claim
+    about the chain — and we would not have looked at the chain to make it.
+    """
+    # Settings are read live rather than through the lru_cached
+    # `sc.contract_ids()`, which pins whatever it saw first for the life of the
+    # process. Same reasoning as registry_sync and external_binding.
+    escrow_id = settings.stellar_payment_escrow
+    if not escrow_id:
+        return _unavailable(agent_id, "escrow contract not configured")
+    if not settings.stellar_agent_registry:
+        return _unavailable(agent_id, "agent registry not configured")
+
+    try:
+        owner = await external_binding.resolve_owner(agent_id)
+    except external_binding.OwnerLookupError as e:
+        logger.warning("[settlement] owner unreadable for %s: %s", agent_id, _describe(e))
+        return _unavailable(agent_id, "agent owner unreadable")
+    if owner is None:
+        return _unavailable(agent_id, "agent not found in the registry")
+
+    asset = await _read_asset(settings.stellar_asset_sac)
+    try:
+        scan = await asyncio.to_thread(_scan_sync, escrow_id, agent_id)
+    except Exception as e:
+        logger.warning("[settlement] event scan failed for %s: %s", agent_id, _describe(e))
+        return _unavailable(agent_id, "soroban rpc unreachable", asset=asset)
+
+    # Only worth a round trip when there is something to classify — the common
+    # case for a young agent is an empty window.
+    settler = await _read_settler(escrow_id) if scan.charges else None
+    payers = await _resolve_payers(escrow_id, scan.charges)
+    entries, total, excluded = _build_entries(scan.charges, payers, owner, settler)
+
+    if scan.truncated:
+        logger.warning(
+            "[settlement] scan for %s stopped after %d ledgers — entries are a subset of the window",
+            agent_id,
+            scan.scanned_ledgers,
+        )
+    logger.debug(
+        "[settlement] %s: %d entries · %d stroops verified · %d excluded · %d ledgers",
+        agent_id,
+        len(entries),
+        total,
+        excluded,
+        scan.scanned_ledgers,
+    )
+    return SettlementEvidence(
+        agent_id=agent_id,
+        asset=asset,
+        window_days=round(scan.scanned_ledgers * scan.seconds_per_ledger / 86_400.0, 3),
+        scanned_ledgers=scan.scanned_ledgers,
+        entries=entries,
+        total_stroops=total,
+        self_payment_stroops=excluded,
+        truncated=scan.truncated,
+        unavailable=None,
+    )
+
+
+async def fetch_settlement(agent_id: str) -> SettlementEvidence:
+    """Cached settlement evidence for one agent. Never raises.
+
+    The cache is what makes a polled dashboard affordable: concurrent callers
+    share one flight, and a caller that walks away does not cancel the scan its
+    neighbour is waiting on.
+    """
+
+    async def _produce() -> SettlementEvidence:
+        return await _settlement(agent_id)
+
+    try:
+        result = await rcache.get_or_set(f"settlement:{agent_id}", CACHE_TTL_SECONDS, _produce)
+    except Exception as e:
+        # `_settlement` does not raise, so anything arriving here came from the
+        # cache layer itself (a cancelled flight, a rebuilt negative entry).
+        # Still an answer we do not have, and it has to say so.
+        logger.warning("[settlement] lookup failed for %s: %s", agent_id, _describe(e))
+        return _unavailable(agent_id, "settlement lookup failed")
+    return result if isinstance(result, SettlementEvidence) else _unavailable(agent_id, "settlement lookup failed")
