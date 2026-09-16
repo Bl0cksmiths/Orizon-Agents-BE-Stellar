@@ -30,9 +30,23 @@ schema default — see `PlanFloorNotice` for why the pair exists at all.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from ..config import settings
 from ..schemas import Agent, PlanFloorNotice
 from .reputation_svc import RepInfo
+
+# How many unbound agents a single plan will name before it stops listing them.
+#
+# The registry is permissionless: anyone can index an agent on-chain, and most
+# of them will never be bound to an endpoint, so the unbound set grows without
+# limit while the number of agents a plan actually wanted stays around six.
+# Listing all of them would bury the two or three notices the buyer needs to
+# read — the exact signal this story exists to create — under a roll-call of
+# agents they never asked for, and would grow the /decompose payload with it.
+# Eight is the compromise: comfortably more than one plan's worth of genuine
+# near-misses, few enough to stay scannable on the plan card.
+UNBOUND_REPORT_CAP: int = 8
 
 # Deliberately not phrased as a failure. An unbound agent is never dispatched
 # to in the first place, so it has failed nothing — the same distinction the
@@ -158,3 +172,21 @@ def relaxation(agent: Agent, info: RepInfo | None, *, min_routable: int) -> Plan
         lower_bound_bps=_lower_bound(info),
         floor_bps=settings.reputation_floor_bps,
     )
+
+
+def unbound_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
+    """Unbound-endpoint notices for `agents`, ordered by id and capped.
+
+    Sorted before the cap, not after, and by id rather than by anything derived
+    from live state: which eight agents get named has to be a property of the
+    input set alone. The kit path is the demo safety net — the same registry
+    snapshot must produce the same plan card every time, and a cap applied to
+    an arbitrarily ordered iterable would quietly rotate the names on the card
+    between two identical requests.
+
+    `agents` is the set the caller found unroutable for want of a binding; this
+    function does not decide that (it would need the binding registry, and this
+    module stays pure). It only decides how much of it the buyer is shown.
+    """
+    ordered = sorted(agents, key=lambda a: a.id)
+    return [unbound_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]
