@@ -24,6 +24,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The canonical contract address book lives in the (public) contracts
+      # repo. Checking it out beside this one keeps the drift check offline:
+      # fetching the map over HTTPS at test time would make the check depend on
+      # someone else's uptime, and a flaky check is a check that gets disabled.
+      - name: Checkout contract address book
+        uses: actions/checkout@v4
+        with:
+          repository: Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar
+          path: contracts
+          fetch-depth: 1
+
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -41,6 +52,13 @@ jobs:
 
       - name: Typecheck
         run: mypy
+
+      # Fails when addresses.json, .env.example and render.yaml do not name the
+      # same contracts. A mismatch is otherwise invisible: reputation reads fail
+      # open, so a wrong ledger address serves every agent the Bayesian prior
+      # and the marketplace looks like unrated newcomers rather than broken.
+      - name: Contract address drift
+        run: python scripts/check_contract_drift.py contracts
 
       - name: Test (with coverage gate)
         run: python -m pytest -q --cov
