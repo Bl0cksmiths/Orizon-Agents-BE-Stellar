@@ -485,3 +485,32 @@ def test_notices_are_internally_consistent_on_both_paths(seeded: object, monkeyp
 
     assert free_form.notices, "the free-form path reported no floor action"
     _assert_notice_invariants(free_form, "free-form")
+
+
+def test_both_paths_report_a_degraded_reputation_snapshot(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-6, the other uniform field: `reputation_degraded` on both paths.
+
+    When the ledger is unreadable every read falls back to the Bayesian prior,
+    which clears the shipped floor — so the floor fails OPEN and the plan
+    still builds, with nobody excluded. That is deliberate, but it means the
+    trust numbers on the card are an estimate rather than earned evidence, and
+    the buyer is about to authorize payment against them. A flag that only
+    appears on kit intents tells them so on the one plan they are least likely
+    to pay for.
+    """
+    healthy = {a.id: _rep(a.id, smoothed=7000, lower=5677) for a in state.list_agents()}
+    assert _run_kit(monkeypatch, healthy).reputation_degraded is False
+    assert _run_free_form(monkeypatch, healthy, ["agt_11c0"]).reputation_degraded is False
+
+    # Same scores, but every one of them is a prior standing in for a read
+    # that failed — the shape fetch_reps returns during a Soroban outage.
+    outage = {a.id: _rep(a.id, smoothed=7000, lower=5677, degraded=True) for a in state.list_agents()}
+    kit = _run_kit(monkeypatch, outage)
+    free_form = _run_free_form(monkeypatch, outage, ["agt_11c0"])
+
+    assert kit.reputation_degraded is True
+    assert free_form.reputation_degraded is True
+
+    # Fail-open, not fail-empty: the outage must not cost the buyer a plan.
+    assert kit.steps
+    assert free_form.steps
