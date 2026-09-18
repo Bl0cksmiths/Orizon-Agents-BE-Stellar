@@ -31,3 +31,11 @@ jobs:
           repository: Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar
           path: contracts
           fetch-depth: 1
+
+      # The check is standard-library only, so there is nothing to install —
+      # but it runs on the interpreter CI pins, so a pass here and a pass there
+      # mean the same thing.
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
