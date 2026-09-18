@@ -204,3 +204,25 @@ def test_backstop_re_admits_code_gen_before_higher_scored_roles(seeded: object) 
     assert all(s.degraded for s in resp.steps)
     assert {n.agent_id for n in resp.notices if n.kind == "degraded"} == {"agt_09l5", "agt_05x7", "agt_11c0"}
     assert {n.agent_id for n in resp.notices if n.kind == "excluded"} == {"agt_02k2", "agt_12r0", "agt_08j2"}
+
+
+def test_re_admitted_kit_steps_keep_their_pipeline_position(seeded: object) -> None:
+    # code.gen clears the floor (no entry == cold start) and every other role
+    # is dropped, so the backstop re-admits two: tokens and research, the two
+    # best scores. Appended after the loop they used to land AFTER code.gen,
+    # and execution runs steps in list order — code.gen would build before the
+    # design tokens it reads from the run context existed.
+    scores = {
+        "agt_09l5": 4900,
+        "agt_05x7": 4000,
+        "agt_02k2": 5000,
+        "agt_12r0": 3900,
+        "agt_08j2": 3800,
+        "agt_01h8": 3000,
+    }
+    resp = _run_kit({aid: _sub_floor(aid, smoothed=s) for aid, s in scores.items()})
+
+    ids = [s.agent_id for s in resp.steps]
+    assert ids == ["agt_09l5", "agt_02k2", "agt_11c0"]
+    assert ids.index("agt_02k2") < ids.index("agt_11c0")
+    assert [s.degraded for s in resp.steps] == [True, True, False]
