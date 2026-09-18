@@ -124,6 +124,23 @@ def _configured_secrets() -> tuple[str, ...]:
     return tuple(sorted(unique, key=len, reverse=True))
 
 
+REDACTED = "[redacted]"
+
+
+def redact_secrets(text: str) -> str:
+    """`text` with every configured secret and secret-shaped token masked.
+
+    Exact values first, then shapes: a configured key is masked even when it
+    has no recognisable shape, and a foreign key is masked even when it is not
+    ours. Pure and cheap enough to run on every log record.
+    """
+    for secret in _configured_secrets():
+        text = text.replace(secret, REDACTED)
+    for shape in _SECRET_SHAPES:
+        text = shape.sub(REDACTED, text)
+    return text
+
+
 # Resolved key for a forwarded chain that is too short to contain a client
 # entry once the trusted hops are removed. A literal, never an address: it
 # cannot collide with a real client, and seeing it as `client=` in the access
