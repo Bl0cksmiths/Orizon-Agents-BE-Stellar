@@ -6,6 +6,15 @@ name: Contract drift
 # own. A redeploy there that rewrites addresses.json is otherwise first noticed
 # when an unrelated backend PR goes red, and blamed on whoever opened it.
 on:
+  # Daily, so a contracts redeploy surfaces within a day, on this workflow and
+  # not on a stranger's PR. Off the hour on purpose: GitHub delays, and under
+  # load drops, scheduled runs queued at :00. Worth knowing about schedules:
+  # they only ever run the default branch's copy of this file; the failure
+  # email goes to whoever last edited the cron line; and in a public repo
+  # GitHub disables them after 60 days without activity, so a quiet repo needs
+  # the workflow re-enabled from the Actions tab.
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 permissions:
