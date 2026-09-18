@@ -141,6 +141,51 @@ def redact_secrets(text: str) -> str:
     return text
 
 
+# Only for `formatException`, which is formatter-independent; never formats a
+# whole record, so it cannot disagree with the handler's own formatter.
+_EXCEPTION_FORMATTER = logging.Formatter()
+
+
+class SecretRedactionLogFilter(logging.Filter):
+    """Mask secrets in every record before any handler formats it.
+
+    Call-site redaction (`orchestrator_svc._loggable`, `_redacted_target`)
+    covers the text this codebase writes; it cannot cover a library that logs
+    a provider's error verbatim, and agno does exactly that at ERROR. A
+    handler filter is the one place every record passes through.
+
+    The message is rendered here (`getMessage`, args interpolated) because a
+    secret can arrive in an argument as easily as in the format string, and
+    the record is only rewritten when something was masked, so the common
+    case leaves `msg`/`args` untouched for any downstream consumer.
+
+    A traceback is where a secret is most likely to hide — an exception built
+    from a connection string, a rejected key echoed in a provider error — and
+    formatters render it from `exc_info` after filters run. So it is rendered
+    and masked here too, and when masking changed it, folded into the message
+    with `exc_info` cleared: exactly how `JsonLogFormatter` already presents a
+    traceback, so the line is unchanged apart from the mask.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 — a malformed record is logging's to report, not ours to drop
+            return True
+        masked = redact_secrets(message)
+        if record.exc_info:
+            trace = _EXCEPTION_FORMATTER.formatException(record.exc_info)
+            masked_trace = redact_secrets(trace)
+            if masked_trace != trace:
+                masked = f"{masked}\n{masked_trace}"
+                record.exc_info = None
+                record.exc_text = None
+        if masked != message:
+            record.msg = masked
+            record.args = None
+        return True
+
+
 # Resolved key for a forwarded chain that is too short to contain a client
 # entry once the trusted hops are removed. A literal, never an address: it
 # cannot collide with a real client, and seeing it as `client=` in the access
