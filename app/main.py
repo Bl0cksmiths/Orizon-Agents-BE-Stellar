@@ -521,8 +521,9 @@ class RatingsReadiness(BaseModel):
 
 
 class ReadinessResponse(BaseModel):
-    """Per-dependency readiness report. Purely config-derived — no live
-    network calls, so the probe stays cheap and deterministic."""
+    """Per-dependency readiness report. No live network calls, so the probe
+    stays cheap and deterministic: everything is config-derived except
+    `ratings`, which reports the rating writer's last cached chain read."""
 
     status: str  # "ready" | "not_ready"
     llm: str  # "ok" | "missing_key"
