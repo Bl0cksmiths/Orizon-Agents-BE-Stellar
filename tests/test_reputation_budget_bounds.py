@@ -23,6 +23,7 @@ assertions."""
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from decimal import Decimal
@@ -30,7 +31,9 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.config import REPUTATION_READ_BUDGET_SHARE, Settings
+from app.config import REPUTATION_READ_BUDGET_SHARE, Settings, settings
+from app.services import reputation_svc
+from app.stellar import cache as rcache
 
 
 def _settings(**overrides: float) -> Settings:
@@ -178,3 +181,23 @@ def test_the_floor_holds_for_the_strings_a_dashboard_sends(monkeypatch, typed):
     monkeypatch.setenv("REPUTATION_BATCH_TIMEOUT_SECONDS", typed)
     with pytest.raises(ValidationError, match="REPUTATION_BATCH_TIMEOUT_SECONDS"):
         _settings()
+
+
+@pytest.mark.parametrize("bound", [0.0, -1.0, math.nan])
+def test_what_the_floor_prevents_is_real(monkeypatch, bound):
+    """The refusal's premise, demonstrated rather than asserted: with the
+    ledger answering instantly, a bound of 0, below 0 or NaN still marks every
+    agent degraded, because wait_for gives up before the first read runs. A
+    healthy chain, a working ledger, and reputation that never arrives."""
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+
+    async def healthy(key: str, ttl_seconds: float, producer):
+        return {"sum_w": 0, "weight": 0, "count": 0, "disputed": 0}
+
+    monkeypatch.setattr(rcache, "get_or_set", healthy)
+    ids = ["agt_a", "agt_b", "agt_c"]
+
+    assert not any(i.degraded for i in asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=1.0)).values())
+    degraded = asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=bound))
+    assert all(i.degraded for i in degraded.values())
