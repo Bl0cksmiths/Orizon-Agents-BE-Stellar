@@ -10,6 +10,8 @@ Keys are generated per test run, never copied from a real account.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from stellar_sdk import Keypair, StrKey
 
@@ -76,3 +78,17 @@ def test_a_value_too_short_to_be_a_credential_is_not_masked_everywhere(monkeypat
     monkeypatch.setattr(settings, "api_key", "demo")
 
     assert security.redact_secrets("demo intent decomposed") == "demo intent decomposed"
+
+
+def _record(msg: str, *args: object, exc_info: object = None) -> logging.LogRecord:
+    return logging.LogRecord("agno", logging.ERROR, __file__, 1, msg, args, exc_info)  # type: ignore[arg-type]
+
+
+def test_the_filter_masks_a_secret_passed_as_a_log_argument(secrets_configured: dict[str, str]) -> None:
+    # The format string is innocent; the secret rides in the args, which is
+    # how agno logs a provider error ("Error in Agent run: %s").
+    record = _record("Error in Agent run: %s", f"401 invalid key {secrets_configured['openai_api_key']}")
+
+    assert security.SecretRedactionLogFilter().filter(record) is True
+    assert record.getMessage() == "Error in Agent run: 401 invalid key [redacted]"
+    assert record.args is None
