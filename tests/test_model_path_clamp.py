@@ -139,3 +139,47 @@ def test_model_step_naming_a_sub_floor_agent_never_reaches_the_plan(
     # The model's only pick was clamped away, so the plan is the fallback —
     # the copywriter, which WAS offered.
     assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+
+
+# Three shapes of snapshot, one per way the shortlist can be built: the floor
+# alone, the floor topped up by the backstop, and the backstop alone.
+def _one_below_floor() -> dict[str, RepInfo]:
+    reps = _clearing_reps()
+    reps["agt_11c0"] = _info("agt_11c0", smoothed=6300, lower=4100)
+    return reps
+
+
+def _two_cleared() -> dict[str, RepInfo]:
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
+    reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+    return reps
+
+
+def _nobody_cleared() -> dict[str, RepInfo]:
+    return {a.id: _info(a.id, smoothed=1000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+
+
+@pytest.mark.parametrize("snapshot", [_one_below_floor, _two_cleared, _nobody_cleared])
+def test_no_plan_carries_a_step_and_an_exclusion_for_the_same_agent(
+    seeded: object,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: Callable[[], dict[str, RepInfo]],
+) -> None:
+    # The model names EVERY agent in the registry, the worst case for the
+    # clamp. A plan card that lists an agent as a step and as excluded tells
+    # the buyer two contradictory things about the one they are paying.
+    resp = _decompose(monkeypatch, snapshot(), _plan_naming(*(a.id for a in state.list_agents())))
+
+    stepped = {s.agent_id for s in resp.steps}
+    excluded = {n.agent_id for n in resp.notices if n.kind == "excluded"}
+    # Both non-empty in every shape, or the disjointness below is vacuous.
+    assert stepped
+    assert excluded
+    assert stepped.isdisjoint(excluded)
+    assert set(_stored_ids(resp)) == stepped
+
+    # The inline flag and the notices agree step by step: a kept step is
+    # `degraded` exactly when the backstop re-admitted it below the floor.
+    relaxed = {n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"}
+    assert {s.agent_id for s in resp.steps if s.degraded} == relaxed
