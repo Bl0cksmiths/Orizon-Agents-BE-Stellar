@@ -1053,9 +1053,13 @@ async def _submit_ratings(
                 payer,
                 exc_info=True,
             )
+            # The reason is a closed vocabulary — the ledger's own error name,
+            # or "rpc error" — never `e`'s text: the trace is world-readable
+            # and the simulation error behind a rejection runs to the whole
+            # diagnostic event log. The log line above keeps the full detail.
             await _emit(
                 task_id,
                 start,
                 "error",
-                f"reputation submit failed for {step.agent_name}",
+                f"reputation submit failed for {step.agent_name}: {rating_writer.failure_reason(e)}",
             )
