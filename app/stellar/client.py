@@ -287,6 +287,35 @@ def _to_jsonable(value: Any) -> Any:
     return value
 
 
+# `DataKey::Scorer` as ReputationLedger writes it into instance storage: a
+# `#[contracttype]` unit variant encodes as a one-element vec holding the
+# variant's name as a symbol (contract/reputation-ledger/src/lib.rs).
+_SCORER_STORAGE_KEY = scval.to_vec([scval.to_symbol("Scorer")])
+
+
+def _instance_storage_address(entry_xdr: str, key: SCVal) -> str | None:
+    """The address stored under `key` in a contract-instance ledger entry.
+
+    `entry_xdr` is the base64 `LedgerEntryData` that getLedgerEntries returns
+    for a contract's instance key. None when the instance's storage holds no
+    such key — a definite answer, read off the chain. Anything that is not a
+    contract instance, or a value under `key` that is not an address, raises
+    ValueError instead: an entry this cannot decode must never read as "no
+    value stored".
+    """
+    from stellar_sdk import xdr as _xdr
+
+    data = _xdr.LedgerEntryData.from_xdr(entry_xdr)
+    contract_data = data.contract_data
+    if contract_data is None or contract_data.val.instance is None:
+        raise ValueError("ledger entry is not a contract instance")
+    storage = contract_data.val.instance.storage
+    for item in storage.sc_map if storage is not None else []:
+        if item.key == key:
+            return scval.from_address(item.val).address
+    return None
+
+
 @lru_cache(maxsize=1)
 def _signer_keypair() -> Keypair:
     """
