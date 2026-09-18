@@ -497,8 +497,10 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     free-form path: a sub-floor agent is replaced by a floor-clearing worker
     that shares a skill, or dropped, and every such action is recorded on the
     response so the buyer never sees a silently reshuffled pipeline (story
-    3.02). Given the same reputation snapshot the plan — steps and notices — is
-    identical, with no LLM call.
+    3.02). Given the same registry and reputation snapshot the plan — steps
+    and notices — is identical, with no LLM call. The registry counts because
+    it always did: listing, bindings and substitute candidates are read from
+    it, and the unbound-endpoint notices both paths share are a fact about it.
 
     Every notice is built by `plan_notices`, the same module `_routable_registry`
     uses, so "exactly as on the free-form path" is true by construction rather
