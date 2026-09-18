@@ -123,3 +123,18 @@ def test_the_filter_masks_a_secret_inside_a_traceback(secrets_configured: dict[s
     assert "could not connect to [redacted]" in rendered
     assert rendered.startswith("binding store unavailable\nTraceback")
     assert record.exc_info is None
+
+
+def test_the_filter_keeps_a_clean_traceback_structured(secrets_configured: dict[str, str]) -> None:
+    # Nothing to mask in the traceback: exc_info stays, so the handler's own
+    # formatter renders it exactly as it did before this filter existed.
+    try:
+        raise ValueError("plan has no steps")
+    except ValueError:
+        exc = sys.exc_info()
+        record = _record("decompose failed", exc_info=exc)
+
+    security.SecretRedactionLogFilter().filter(record)
+
+    assert record.exc_info is exc
+    assert record.getMessage() == "decompose failed"
