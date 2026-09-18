@@ -131,8 +131,10 @@ class PlanStep(BaseModel):
     # headline score, this is the number that decided whether the agent was
     # routable. Carried so a card can show both without a second request.
     rep_lower_bound_bps: int | None = None
-    # Lifetime rating count. 0 with `rep_source == "prior"` is a genuine cold
-    # start — a newcomer with no history, not an agent with a bad one.
+    # Lifetime rating count. 0 with `rep_source == "prior"` and `rep_degraded`
+    # False is a genuine cold start — a newcomer with no history, not an agent
+    # with a bad one. A failed read also serves the prior with a 0 here, which
+    # is why the pair alone cannot say it.
     rep_count: int | None = None
     # Share of those ratings that were disputes, in bps (0..10_000).
     rep_dispute_rate_bps: int | None = None
