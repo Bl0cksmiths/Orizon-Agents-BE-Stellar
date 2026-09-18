@@ -86,3 +86,72 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
         "cold_start": {"routable": True, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177},
         "ratings": {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER},
     }
+
+
+def _signer_does_not_parse() -> str:
+    raise RuntimeError("STELLAR_SIGNING_KEY must be an S… secret")
+
+
+# Each status, set up the way a real deployment reaches it, and the exact
+# `ratings` object the probe must report for it.
+@pytest.mark.parametrize(
+    ("status", "arrange", "expected"),
+    [
+        (
+            "scorer",
+            lambda mp: _chain_says(mp, scorer=SIGNER),
+            {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER},
+        ),
+        (
+            "not_scorer",
+            lambda mp: _chain_says(mp, scorer=OTHER),
+            {"writer": "not_scorer", "signer": SIGNER, "scorer": OTHER},
+        ),
+        (
+            "not_scorer, nothing stored",
+            lambda mp: _chain_says(mp, scorer=None),
+            {"writer": "not_scorer", "signer": SIGNER, "scorer": None},
+        ),
+        (
+            "unchecked",
+            lambda mp: _chain_says(mp, error=ConnectionError("rpc down")),
+            {"writer": "unchecked", "signer": SIGNER, "scorer": None},
+        ),
+        (
+            "no_signer",
+            lambda mp: mp.setattr(settings, "stellar_signing_key", ""),
+            {"writer": "no_signer", "signer": None, "scorer": None},
+        ),
+        (
+            "no_signer, key does not parse",
+            lambda mp: mp.setattr(sc, "signer_public_key", _signer_does_not_parse),
+            {"writer": "no_signer", "signer": None, "scorer": None},
+        ),
+        (
+            "disabled",
+            lambda mp: mp.setattr(settings, "reputation_enabled", False),
+            {"writer": "disabled", "signer": None, "scorer": None},
+        ),
+    ],
+)
+def test_every_status_is_reported_and_none_moves_the_ready_verdict(client, monkeypatch, status, arrange, expected):
+    """Informational, like `cold_start`: a deployment that cannot write
+    ratings still serves every request, so no verdict here may turn a ready
+    deployment into a 503 — least of all `not_scorer`, the one that matters."""
+    arrange(monkeypatch)
+    r = client.get("/readiness")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["ratings"] == expected
+
+
+def test_a_healthy_writer_does_not_rescue_a_not_ready_deployment(client, monkeypatch):
+    """The other direction of "never gates"."""
+    _chain_says(monkeypatch, scorer=SIGNER)
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    r = client.get("/readiness")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "not_ready"
+    assert body["ratings"] == {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER}
