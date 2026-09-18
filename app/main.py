@@ -35,6 +35,7 @@ from .security import (
     RateLimitMiddleware,
     RequestContextMiddleware,
     RequestIdLogFilter,
+    SecretRedactionLogFilter,
     request_id_var,
 )
 from .seed import seed_registry
