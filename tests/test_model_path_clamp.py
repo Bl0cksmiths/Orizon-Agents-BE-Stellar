@@ -275,6 +275,9 @@ def test_agents_delisted_during_the_planning_call_are_clamped(seeded: object, mo
 
     assert [s.agent_id for s in resp.steps] == ["agt_02k2"]
     assert _stored_ids(resp) == ["agt_02k2"]
+    # The model answered, but with nothing still routable, so what is served
+    # is the fallback and the response says so.
+    assert resp.planner_fallback is True
     # A withdrawal is never a notice, however it arrives.
     assert resp.notices == []
 
