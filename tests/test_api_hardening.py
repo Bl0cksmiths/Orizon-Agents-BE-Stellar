@@ -41,21 +41,34 @@ def _configure_stellar(monkeypatch) -> None:
     monkeypatch.setattr(settings, "stellar_admin_address", VALID_G)
 
 
+def _pin_shipped_reputation(monkeypatch) -> None:
+    # The cold-start numbers are config, so a developer's .env would otherwise
+    # decide what the exact-equality assertions below expect.
+    monkeypatch.setattr(settings, "reputation_prior_bps", 7000)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", 12.0)
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+
+
 def test_readiness_ready_without_signing_key(client, monkeypatch):
     """Read-only deployments are legitimate: an absent signer is reported
     but never fails readiness (config.py doctrine)."""
     _configure_stellar(monkeypatch)
+    _pin_shipped_reputation(monkeypatch)
     monkeypatch.setattr(settings, "openai_api_key", "sk-test")
     monkeypatch.setattr(settings, "pdax_username", "")
     monkeypatch.setattr(settings, "pdax_password", "")
     r = client.get("/readiness")
     assert r.status_code == 200
+    # Exact equality on purpose: a field added to this probe has to be added
+    # here too, so nothing reaches an unauthenticated route unreviewed.
     assert r.json() == {
         "status": "ready",
         "llm": "ok",
         "stellar": "configured",
         "signer": "absent",
         "pdax": "unconfigured",
+        # 5677 - 5500: the shipped margin that keeps open registration real.
+        "cold_start": {"routable": True, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177},
     }
 
 
