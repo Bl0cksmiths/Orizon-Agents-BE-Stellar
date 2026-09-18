@@ -144,8 +144,9 @@ def _report_cold_start_routability() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # First thing in the boot sequence: whether this config admits new agents
-    # at all is the one property no request, probe, or error will ever report,
-    # so it is stated before anything else can bury it.
+    # at all is a property no request or error will ever report — only this
+    # line and /readiness's `cold_start`, which has to be asked — so it is
+    # stated before anything else can bury it.
     _report_cold_start_routability()
     seed_registry()
     # Bound the default executor: asyncio.to_thread otherwise sizes it to
