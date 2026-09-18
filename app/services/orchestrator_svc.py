@@ -5,7 +5,7 @@ import logging
 import random
 import re
 import secrets
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
@@ -248,6 +248,22 @@ def _prompt_name(name: str) -> str:
     safe = sanitize_untrusted(name, max_chars=MAX_AGENT_NAME_CHARS)
     safe = _LINE_BREAKS.sub(" ", safe).replace('"', "'")
     return f'"{safe}"'
+
+
+class _Shortlist(NamedTuple):
+    """What the free-form planner may route to, and what the buyer is told.
+
+    `offered` is the same set `block` lists, carried as data so the clamp can
+    hold the model to it: the block is what the planner was SHOWN, the model's
+    plan is what it RETURNED, and only ids in the first may survive into the
+    second. Re-deriving the set from the prompt string would be parsing our own
+    output back, and re-deriving it from state after the LLM call would ask a
+    different question of a registry that may have moved in the meantime.
+    """
+
+    block: str
+    notices: list[PlanFloorNotice]
+    offered: frozenset[str]
 
 
 def _routable_registry(
