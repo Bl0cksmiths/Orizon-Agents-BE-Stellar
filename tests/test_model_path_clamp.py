@@ -238,3 +238,19 @@ def test_fallback_prefers_an_agent_that_cleared_the_floor(seeded: object, monkey
     assert [n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"] == ["agt_12r0"]
     assert [s.agent_id for s in resp.steps] == ["agt_02k2"]
     assert resp.steps[0].degraded is False
+
+
+def test_fallback_to_a_re_admitted_agent_is_flagged_degraded(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Nobody clears the floor and the copywriter scores best, so the backstop
+    # re-admits it and the fallback, preferring it, routes there. That is
+    # allowed — it was offered — but it is a step below the floor, and the
+    # inline flag has to say so as its `floor_relaxed` notice does.
+    reps = _nobody_cleared()
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=5000, lower=100)
+
+    resp = _decompose(monkeypatch, reps, _plan_naming("agt_invented"))
+
+    assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert resp.steps[0].degraded is True
+    note = next(n for n in resp.notices if n.agent_id == "agt_01h8")
+    assert (note.kind, note.reason_code) == ("degraded", "floor_relaxed")
