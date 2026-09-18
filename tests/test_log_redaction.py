@@ -11,6 +11,7 @@ Keys are generated per test run, never copied from a real account.
 from __future__ import annotations
 
 import logging
+import sys
 
 import pytest
 from stellar_sdk import Keypair, StrKey
@@ -105,3 +106,20 @@ def test_the_filter_leaves_a_clean_record_untouched(secrets_configured: dict[str
 
     assert record.msg is original_msg
     assert record.args == args
+
+
+def test_the_filter_masks_a_secret_inside_a_traceback(secrets_configured: dict[str, str]) -> None:
+    # Formatters render exc_info after filters run, so a traceback carrying a
+    # secret would slip past a message-only mask. It is folded in, masked.
+    try:
+        raise ConnectionError(f"could not connect to {secrets_configured['database_url']}")
+    except ConnectionError:
+        record = _record("binding store unavailable", exc_info=sys.exc_info())
+
+    security.SecretRedactionLogFilter().filter(record)
+
+    rendered = record.getMessage()
+    assert secrets_configured["database_url"] not in rendered
+    assert "could not connect to [redacted]" in rendered
+    assert rendered.startswith("binding store unavailable\nTraceback")
+    assert record.exc_info is None
