@@ -41,6 +41,7 @@ class NoRoutableAgentsError(RuntimeError):
     from an upstream fault to say so.
     """
 
+
 # Gate on the free-form planning LLM call. /execute's fan-out is bounded by
 # orchestrator_max_concurrent (execution_svc); this is the same protection for
 # /decompose, whose non-kit path makes a real LLM call per request while the
