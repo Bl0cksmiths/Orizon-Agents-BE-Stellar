@@ -384,11 +384,12 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
     here, and this test is the note that stops someone "completing" the set:
 
       * `inactive` — `AgentRegistry.set_active(id, false)` syncs through to
-        `Agent.status == "offline"`, but nothing in routing reads that field;
-        its only consumer is a metrics counter (app/routers/metrics.py:117).
-        An agent is never excluded for being inactive, so shipping the value
-        would put a state in the API contract that the system cannot produce,
-        and a client would write a branch that can never run.
+        `Agent.status == "offline"`, and routing does honour it
+        (`orchestrator_svc._is_listed`): a delisted agent is never offered,
+        kept, substituted in or re-admitted. It is still not a reason code,
+        because a withdrawal is the operator's own decision rather than a
+        verdict the floor reached, so a delisted agent gets no notice at all —
+        tests/test_delisted_routing.py pins that silence.
       * `not_selected_by_planner` — forbidden by the story's own product
         rules, and by test_unpicked_agents_are_not_reported_as_excluded above:
         listing every unhired agent drowns the signal these notices exist to
