@@ -11,6 +11,7 @@ waits on the chain for it. Nothing here reaches the network.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from stellar_sdk import Keypair
@@ -155,3 +156,27 @@ def test_a_healthy_writer_does_not_rescue_a_not_ready_deployment(client, monkeyp
     body = r.json()
     assert body["status"] == "not_ready"
     assert body["ratings"] == {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER}
+
+
+def test_a_stale_answer_is_served_and_refreshed_behind_the_probe(client, monkeypatch):
+    """How the probe follows a set_scorer without a live read on its path:
+    past the TTL it still answers at once with what it knows, starts one
+    background read, and the next probe carries the new answer."""
+    monkeypatch.setattr(
+        rw, "_last_read", rw._ScorerRead(LEDGER, time.monotonic() - rw.SCORER_TTL_SECONDS - 1, scorer=OTHER)
+    )
+    reads: list[str] = []
+
+    def _after_set_scorer(ledger: str) -> str:
+        reads.append(ledger)
+        return SIGNER
+
+    monkeypatch.setattr(sc, "ledger_scorer", _after_set_scorer)
+
+    assert client.get("/readiness").json()["ratings"]["writer"] == "not_scorer"
+    deadline = time.monotonic() + 5
+    while (rw._last_read is None or rw._last_read.scorer != SIGNER) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    for _ in range(3):
+        assert client.get("/readiness").json()["ratings"] == {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER}
+    assert reads == [LEDGER]  # one read behind four probes
