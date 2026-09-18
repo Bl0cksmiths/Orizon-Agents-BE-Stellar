@@ -13,11 +13,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 
 import pytest
+from fastapi.testclient import TestClient
 from stellar_sdk import Keypair, StrKey
 
 from app.config import settings
+from app.main import app
 from app.services import rating_writer as rw
 from app.stellar import client as sc
 
@@ -188,3 +191,58 @@ def test_a_startup_check_that_dies_is_logged_not_lost(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger=WRITER_LOG):
         asyncio.run(_boot())
     assert any("startup check died" in r.getMessage() for r in _writer_records(caplog))
+
+
+# ── on the real boot path ───────────────────────────────────────
+
+
+def _wait_for_line(caplog, timeout: float = 5.0) -> logging.LogRecord:
+    """The boot line lands shortly after startup, from a background task."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        records = _writer_records(caplog)
+        if records:
+            return records[0]
+        time.sleep(0.01)
+    raise AssertionError("the ratings writer never reported at boot")
+
+
+def test_boot_reports_the_verdict(monkeypatch, caplog):
+    """Wired into lifespan — a helper nothing calls is the same silence in a
+    new shape."""
+    _signs_as(monkeypatch, SIGNER)
+    monkeypatch.setattr(sc, "ledger_scorer", lambda ledger: OTHER)
+    with caplog.at_level(logging.DEBUG, logger=WRITER_LOG), TestClient(app) as client:
+        client.get("/health")
+        record = _wait_for_line(caplog)
+    assert record.levelno == logging.WARNING
+    assert SIGNER in record.getMessage() and OTHER in record.getMessage()
+
+
+def test_the_hermetic_default_boots_disabled_without_a_chain_read(monkeypatch, caplog):
+    """The suite's own config — no ledger, no key — must name itself at boot
+    and must not reach for the chain (the fixture fails any read)."""
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "")
+    with caplog.at_level(logging.DEBUG, logger=WRITER_LOG), TestClient(app) as client:
+        client.get("/health")
+        record = _wait_for_line(caplog)
+    assert record.levelno == logging.WARNING
+    assert "ratings writer off (disabled)" in record.getMessage()
+
+
+def test_boot_does_not_wait_for_the_chain(monkeypatch):
+    """uvicorn serves nothing until lifespan startup returns, and on the free
+    tier the request that woke the instance is waiting on it. A chain read
+    that hangs must cost that request nothing."""
+    _signs_as(monkeypatch, SIGNER)
+    release = _hanging_chain(monkeypatch)
+    started = time.monotonic()
+    with TestClient(app) as client:
+        try:
+            assert client.get("/health").status_code == 200
+            assert time.monotonic() - started < 3
+            assert client.get("/readiness").json()["ratings"]["writer"] == "unchecked"
+        finally:
+            # Inside the client: its loop's executor would otherwise wait out
+            # the hung worker thread on the way down.
+            release.set()
