@@ -171,6 +171,13 @@ def _backstop_rank(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> tup
 # which the product rules forbid.
 _KIT_AGENT_IDS: frozenset[str] = frozenset(aid for aid, _ in _KIT_PIPELINE)
 
+# The kit role that produces the deliverable. Every other role feeds it (brief,
+# brand, tokens) or refines and seals what it made; without it a kit run has
+# no artifact, and `execution_svc._terminal_status` finalizes a partial run
+# with no artifact as "failed" — after the buyer has paid for the steps that
+# only existed to feed it.
+_KIT_BUILDER_ID = "agt_11c0"
+
 
 def _kit_step(
     agent: Agent,
