@@ -110,6 +110,20 @@ def test_readiness_names_a_lockout_nobody_touched_the_floor_for(client, monkeypa
     }
 
 
+def test_a_healthy_cold_start_does_not_rescue_a_not_ready_answer(client, monkeypatch):
+    """The other direction of "never gates": a routable cold start cannot
+    lift a deployment with no LLM key to ready, and the probe still reports
+    it — the operator reading a 503 is the one most likely to need it."""
+    _configure_stellar(monkeypatch)
+    _pin_shipped_reputation(monkeypatch)
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    r = client.get("/readiness")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "not_ready"
+    assert body["cold_start"]["routable"] is True
+
+
 def test_readiness_503_when_llm_key_missing(client, monkeypatch):
     _configure_stellar(monkeypatch)
     monkeypatch.setattr(settings, "openai_api_key", "")
