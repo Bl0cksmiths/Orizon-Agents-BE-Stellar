@@ -57,3 +57,19 @@ def test_a_bound_typed_at_exactly_the_share_boots(decompose):
     bound = _typed_share(decompose)
     s = _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=bound)
     assert s.reputation_batch_timeout_seconds == bound
+
+
+def test_every_budget_admits_a_bound_at_exactly_its_share():
+    """0.1 s to 200 s in 0.1 s steps — every integer budget included — each
+    with its bound typed at exactly the share. The named cases above are the
+    ones someone found; this is the claim that there are none left."""
+    above_the_float_product = 0
+    for tenths in range(1, 2001):
+        decompose = tenths / 10
+        bound = _typed_share(decompose)
+        above_the_float_product += bound > decompose * REPUTATION_READ_BUDGET_SHARE
+        _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=bound)
+    # Without this the sweep could pass vacuously: it only proves the
+    # comparison is tolerant if some typed bound really does sit above the
+    # float ceiling, which is the case a strict `>` refuses.
+    assert above_the_float_product > 0
