@@ -130,3 +130,70 @@ async def _read_scorer(ledger: str) -> None:
         _last_read = _ScorerRead(ledger, time.monotonic(), error=type(e).__name__)
     else:
         _last_read = _ScorerRead(ledger, time.monotonic(), scorer=scorer)
+
+
+# ── the verdict ─────────────────────────────────────────────────
+
+# A key that is set but does not parse. Deliberately not one of config_gap()'s
+# answers: that gate is presence-only, like `_submit_ratings` has always been,
+# so a malformed key still attempts each submit and fails it one by one — the
+# verdict is where it is named up front.
+_BAD_KEY = ConfigGap(
+    "no_signer",
+    "STELLAR_SIGNING_KEY is set but is neither an S… secret nor a 12/24-word mnemonic",
+    "the signing key is unusable",
+)
+
+
+@dataclass(frozen=True)
+class WriterVerdict:
+    """What this process knows about its ability to write ratings."""
+
+    status: WriterStatus
+    # The G… address ratings are signed with — set exactly when the chain
+    # decides (scorer / not_scorer / unchecked). A public key, never the secret.
+    signer: str | None = None
+    # The ledger's stored Scorer as last read — set only when a read found one.
+    scorer: str | None = None
+    # What stopped it, for disabled / no_signer.
+    gap: ConfigGap | None = None
+    # Why the Scorer is unknown, for unchecked. For the log line only.
+    read_error: str | None = None
+
+
+def _signer() -> str | None:
+    """The public key ratings are signed with, or None when the key does not parse.
+
+    The same cached keypair `submit_rating` signs with, so the verdict judges
+    the key actually in use. The exception is swallowed unread:
+    `_signer_keypair` interpolates stellar_sdk's message, which quotes the
+    rejected seed back.
+    """
+    try:
+        return sc.signer_public_key()
+    except Exception:
+        return None
+
+
+def verdict() -> WriterVerdict:
+    """The verdict from config and the last chain read. Never does I/O.
+
+    A read older than its TTL is still reported — it is the best this process
+    knows — until `check()` or `refresh_if_stale()` replaces it.
+    """
+    gap = config_gap()
+    if gap is not None:
+        return WriterVerdict(gap.status, gap=gap)
+    signer = _signer()
+    if signer is None:
+        return WriterVerdict("no_signer", gap=_BAD_KEY)
+    read = _last_read
+    if read is None or read.ledger != settings.stellar_reputation_ledger:
+        return WriterVerdict("unchecked", signer=signer, read_error="not read yet")
+    if read.error is not None:
+        return WriterVerdict("unchecked", signer=signer, read_error=read.error)
+    return WriterVerdict(
+        "scorer" if read.scorer == signer else "not_scorer",
+        signer=signer,
+        scorer=read.scorer,
+    )
