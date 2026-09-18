@@ -267,6 +267,24 @@ Prefer `set_scorer` over swapping `STELLAR_SIGNING_KEY` to match: the same key
 is also the escrow's settler and the attestation sealer, so changing it moves
 those roles too.
 
+It is informational, like `cold_start`, and never changes `status` or the 503:
+a deployment that cannot write ratings still serves every request, and
+read-only deployments are legitimate.
+
+It also adds no live network call to the probe. The Scorer is read once
+(one `getLedgerEntries` on the contract's instance entry, bounded at 8 s) and
+cached. A successful read is trusted for **5 minutes** — the Scorer changes only
+on a `set_scorer` or a redeploy, and a redeploy is a new contract id, which is
+read at once — so the probe follows a `set_scorer` within five minutes. A failed
+read is retried after **30 seconds**, so one RPC blip does not pin `unchecked`.
+When the cached read is past its time the probe still answers immediately with
+it and starts one background read; the next probe carries the fresh answer.
+
+The same verdict is logged once at boot — INFO for `scorer`, WARNING for
+everything else, naming both addresses and the fix for `not_scorer`. The check
+runs in the background, so a slow RPC never delays the request that woke the
+instance; the line lands a moment after the service starts.
+
 ## Cold start is not a degraded read
 
 Both produce `source: "prior"`. They differ by one flag.
