@@ -673,9 +673,6 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
     )
 
 
-# An OpenAI API key as a provider message may quote it: whole, or `*`-masked.
-_API_KEY_SHAPE = re.compile(r"sk-[A-Za-z0-9_*\-]+")
-
 # Enough of a failure message to say what went wrong, never a whole body.
 _FAILURE_EXCERPT_CHARS = 200
 
