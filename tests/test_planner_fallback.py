@@ -95,3 +95,36 @@ def test_a_planner_call_that_raises_serves_the_fallback_plan(seeded: object, mon
     assert resp.planner_fallback is True
     assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
     assert _stored_ids(resp) == ["agt_01h8"]
+
+
+def _code_gen_plan() -> Plan:
+    """The plan a real model returns for a build, so a fallback cannot pass for it."""
+    step = PlanStep(agent_id="agt_11c0", rationale="model-chosen step", est_price_usdc=0.05, est_eta_seconds=1.0)
+    return Plan(steps=[step])
+
+
+# What agno's `arun` really returns when the planner produced nothing usable —
+# a RunOutput, as in production, rather than a shape invented for the test.
+@pytest.mark.parametrize(
+    "run",
+    [
+        pytest.param(RunOutput(status=RunStatus.error, content="Connection error."), id="provider-error"),
+        pytest.param(RunOutput(status=RunStatus.cancelled, content="Run was cancelled"), id="cancelled"),
+        pytest.param(RunOutput(status=RunStatus.completed, content="Sure! Step 1: ..."), id="unparsed-answer"),
+        pytest.param(RunOutput(status=RunStatus.completed, content=None), id="no-answer"),
+        # agno's verdict wins over a plan-shaped content: an output guardrail
+        # that rejects a parsed plan leaves it in `content` on a failed run.
+        pytest.param(RunOutput(status=RunStatus.error, content=_code_gen_plan()), id="plan-on-failed-run"),
+    ],
+)
+def test_a_planner_run_with_no_usable_plan_serves_the_fallback_plan(
+    seeded: object, monkeypatch: pytest.MonkeyPatch, run: RunOutput
+) -> None:
+    async def _arun(_prompt: str) -> RunOutput:
+        return run
+
+    resp = _decompose(monkeypatch, _arun)
+
+    assert resp.planner_fallback is True
+    assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert _stored_ids(resp) == ["agt_01h8"]
