@@ -201,3 +201,22 @@ def test_a_failed_planner_call_gives_its_planning_slot_back(
     for planner in (_refused, _failed_run, _refused, _failed_run):
         assert _decompose(monkeypatch, planner).planner_fallback is True
     assert not orchestrator_svc._decompose_gate().locked()
+
+
+def test_the_planners_own_plan_is_not_flagged_as_a_fallback(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A completed run with a real Plan, one of whose steps names an agent that
+    # was never offered. The clamp trims that step and keeps the other, so
+    # what is served is still the planner's own choice, and the flag says so.
+    invented = PlanStep(
+        agent_id="agt_invented", rationale="model-chosen step", est_price_usdc=0.05, est_eta_seconds=1.0
+    )
+    plan = Plan(steps=[*_code_gen_plan().steps, invented])
+
+    async def _arun(_prompt: str) -> RunOutput:
+        return RunOutput(status=RunStatus.completed, content=plan)
+
+    resp = _decompose(monkeypatch, _arun)
+
+    assert resp.planner_fallback is False
+    assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
+    assert _stored_ids(resp) == ["agt_11c0"]
