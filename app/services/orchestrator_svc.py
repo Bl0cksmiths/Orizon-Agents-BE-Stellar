@@ -111,6 +111,26 @@ def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
     return any(info.degraded for info in reps.values())
 
 
+def _backstop_rank(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> tuple[int, str]:
+    """Sort key for the starvation backstop: best smoothed score first, id breaking ties.
+
+    ONE rule for both planning paths. They used to rank separately — the kit
+    path by `(-smoothed, id)`, the free-form path by smoothed score alone, ties
+    left to registry insertion order and self-declared `Agent.rep` standing in
+    for a missing entry — so one reputation snapshot could re-admit different
+    agents depending on which path planned the intent, which is exactly the
+    divergence `plan_notices` exists to rule out for the notices themselves.
+
+    Only sub-floor agents are ever ranked by it, and a sub-floor agent always
+    has an entry (`passes_floor(None)` admits the agent outright), so the 0 for
+    a missing entry is a totality guard, not a policy. It is deliberately not
+    `Agent.rep`: that is a number an on-chain registrant writes about itself,
+    and has no place in a ranking that stands in for evidence.
+    """
+    info = reps.get(agent.id)
+    return (-(info.smoothed_bps if info is not None else 0), agent.id)
+
+
 # Kit-pipeline agent ids. Substitutes are drawn from OUTSIDE this set —
 # borrowing one kit role's agent to fill another is itself a silent reshuffle,
 # which the product rules forbid.
