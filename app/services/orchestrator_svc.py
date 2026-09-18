@@ -537,13 +537,18 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             dropped.append((agent, rationale, info))
 
     # Starvation backstop — reuse _MIN_ROUTABLE_AGENTS rather than invent a
-    # second rule. If the floor left too few steps, re-admit the highest-scored
-    # dropped kit agents (top-N by smoothed score, id breaking ties) and record
-    # the degradation; the remainder are recorded as exclusions. Re-admitted
-    # steps are appended in pipeline order for a coherent plan.
-    by_score = sorted(dropped, key=lambda d: _backstop_rank(d[0], reps))
+    # second rule. If the floor left too few steps, re-admit dropped kit agents
+    # to cover the deficit and record the degradation; the remainder are
+    # recorded as exclusions. Re-admitted steps are appended in pipeline order
+    # for a coherent plan.
+    #
+    # The builder goes first whatever its score, then `_backstop_rank` — the
+    # free-form path's rule. Score alone once turned a battered tetris kit into
+    # research + brand + tokens with no code.gen: three paid steps preparing
+    # inputs for a build nobody was asked to do, and no artifact at the end.
+    by_priority = sorted(dropped, key=lambda d: (d[0].id != _KIT_BUILDER_ID, _backstop_rank(d[0], reps)))
     deficit = max(0, _MIN_ROUTABLE_AGENTS - len(steps))
-    readmit_ids = {d[0].id for d in by_score[:deficit]}
+    readmit_ids = {d[0].id for d in by_priority[:deficit]}
     if readmit_ids:
         logger.warning(
             "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s) by smoothed score",
