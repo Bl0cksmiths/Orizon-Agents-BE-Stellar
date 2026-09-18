@@ -155,3 +155,16 @@ def test_a_bound_that_is_not_a_positive_duration_refuses_to_boot(bound):
     negative and NaN expire before a read can answer; inf never expires."""
     with pytest.raises(ValidationError, match="is not a positive, finite number of seconds"):
         _settings(reputation_batch_timeout_seconds=bound)
+
+
+def test_the_floor_refusal_names_the_value_the_consequence_and_the_fix():
+    """Nothing about a zero bound looks broken from outside — reads "succeed"
+    at the prior — so the deploy log has to say what it would have done: the
+    floor stops filtering. And name a number that works, not just the rule."""
+    with pytest.raises(ValidationError) as exc:
+        _settings(reputation_batch_timeout_seconds=0.0)
+    message = str(exc.value)
+    assert "REPUTATION_BATCH_TIMEOUT_SECONDS=0 " in message
+    assert "reputation_degraded" in message
+    assert "routing floor stops filtering anyone" in message
+    assert f"the default is {Settings.model_fields['reputation_batch_timeout_seconds'].default:g}" in message
