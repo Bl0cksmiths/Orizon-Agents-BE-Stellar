@@ -268,8 +268,8 @@ class _Shortlist(NamedTuple):
 
 def _routable_registry(
     reps: dict[str, reputation_svc.RepInfo],
-) -> tuple[str, list[PlanFloorNotice]]:
-    """The AVAILABLE_AGENTS block, AND the floor actions that shaped it.
+) -> _Shortlist:
+    """The AVAILABLE_AGENTS block, the floor actions that shaped it, and its ids.
 
     The routable set is a subtraction, and until story 3.02 only the remainder
     survived: the complement was dropped on the floor of a list comprehension
@@ -397,7 +397,7 @@ def _routable_registry(
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
-    return "\n".join(lines), notices
+    return _Shortlist("\n".join(lines), notices, frozenset(offered))
 
 
 def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
@@ -408,8 +408,7 @@ def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
     and reading a notices list they never use out of a tuple would obscure
     exactly the thing they are about. Planning uses `_routable_registry`.
     """
-    block, _ = _routable_registry(reps)
-    return block
+    return _routable_registry(reps).block
 
 
 def build_planning_prompt(registry_block: str, intent: str) -> str:
@@ -559,8 +558,8 @@ async def decompose(intent: str) -> DecomposeResponse:
         return await _build_kit_plan(intent, kit, reps)
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
-    registry_block, notices = _routable_registry(reps)
-    prompt = build_planning_prompt(registry_block, intent)
+    shortlist = _routable_registry(reps)
+    prompt = build_planning_prompt(shortlist.block, intent)
 
     async def _bounded_plan() -> Any:
         # The kit short circuit above never takes this gate; every request
@@ -651,7 +650,7 @@ async def decompose(intent: str) -> DecomposeResponse:
         # describe the shortlist the model chose from, not the model's choice.
         # An agent that cleared the floor and simply was not picked is absent
         # from `notices` by construction — see `_routable_registry`.
-        notices=notices,
+        notices=shortlist.notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
     )
