@@ -32,10 +32,13 @@ For each step output:
 - est_eta_seconds: realistic guess between 0.3 and 3.0
 
 For free-form CODING / APP-BUILDING intents (verbs: code, build, implement,
-make + nouns: app, site, calculator, game, widget, timer, tool), prefer
-`code.gen` (agt_11c0) — often as a SINGLE-STEP plan. Do not add seo.brief or
-copywrite.v3 unless the task explicitly asks for marketing/content. Keep
-coding plans short and direct.
+make + nouns: app, site, calculator, game, widget, timer, tool):
+- if `code.gen` (agt_11c0) appears in AVAILABLE_AGENTS, prefer it — often as a
+  SINGLE-STEP plan;
+- if it does not appear, it is unavailable for this request: pick the listed
+  agent whose skills best fit the build instead.
+Do not add seo.brief or copywrite.v3 unless the task explicitly asks for
+marketing/content. Keep coding plans short and direct.
 
 Return ONLY the structured Plan. No commentary.
 """
