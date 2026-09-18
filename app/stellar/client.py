@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -381,6 +382,34 @@ def signer_public_key() -> str:
 # poll waits with mild exponential backoff (1s → 2s → 4s capped).
 _POLL_BUDGET_SECONDS = 30.0
 _POLL_MAX_DELAY_SECONDS = 4.0
+
+# The head of a simulation error when the invoked contract itself returned
+# one of its `#[contracterror]` values: "HostError: Error(Contract, #7)",
+# followed by the diagnostic event log. Anchored to the head on purpose — the
+# event log below it can quote other errors, and only the head is the one the
+# call failed with.
+_CONTRACT_ERROR_HEAD = re.compile(r"\s*HostError: Error\(Contract, #(\d+)\)")
+
+
+class ContractError(RuntimeError):
+    """A backend-signed call the contract itself rejected, with its error code.
+
+    The code is the discriminant of the contract's own `Error` enum, carried
+    as data so a caller can name the rejection (ReputationLedger's 1 is
+    `Unauthorized`, 7 is `Replay`) without parsing — or echoing — the
+    simulation's error text, which runs to the whole diagnostic event log.
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _contract_error_code(simulation_error: str | None) -> int | None:
+    """The contract error code heading a simulation error, or None."""
+    match = _CONTRACT_ERROR_HEAD.match(simulation_error or "")
+    return int(match.group(1)) if match else None
 
 
 def _send_server_signed(
