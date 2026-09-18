@@ -138,8 +138,9 @@ def test_model_step_naming_a_sub_floor_agent_never_reaches_the_plan(
     note = next(n for n in resp.notices if n.agent_id == "agt_11c0")
     assert (note.kind, note.reason_code, note.lower_bound_bps) == ("excluded", "below_floor", 4100)
     # The model's only pick was clamped away, so the plan is the fallback —
-    # the copywriter, which WAS offered.
+    # the copywriter, which WAS offered — and the response says it is one.
     assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert resp.planner_fallback is True
 
 
 # Three shapes of snapshot, one per way the shortlist can be built: the floor
