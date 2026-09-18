@@ -492,6 +492,7 @@ class ReadinessResponse(BaseModel):
     stellar: str  # "configured" | "incomplete"
     signer: str  # "configured" | "absent" — informational, never gates readiness
     pdax: str  # "configured" | "unconfigured" — informational
+    cold_start: ColdStartReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -525,10 +526,18 @@ async def readiness(response: Response) -> ReadinessResponse:
     ready = llm == "ok" and stellar_ok
     if not ready:
         response.status_code = 503
+    # Read after the verdict and never folded into it — see ColdStartReadiness.
+    margin = reputation_svc.cold_start_margin()
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         llm=llm,
         stellar="configured" if stellar_ok else "incomplete",
         signer="configured" if settings.stellar_signing_key else "absent",
         pdax="configured" if settings.pdax_username and settings.pdax_password else "unconfigured",
+        cold_start=ColdStartReadiness(
+            routable=margin.clears,
+            lower_bound_bps=margin.lower_bound_bps,
+            floor_bps=margin.floor_bps,
+            margin_bps=margin.margin_bps,
+        ),
     )
