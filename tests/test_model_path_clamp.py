@@ -18,7 +18,8 @@ planner and the reputation read stubbed:
   * no plan carries a step and an exclusion notice for the same agent;
   * a kept step below the floor is flagged `degraded`, matching its
     `floor_relaxed` notice;
-  * the fallback is drawn from the offered set, deterministically;
+  * the fallback is drawn from the offered set, deterministically, and
+    flagged `planner_fallback`, since the model did not choose it;
   * with nothing to offer, the request is refused before any LLM call.
 
 Fixtures are local rather than imported from the neighbouring floor suites, as
