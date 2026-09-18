@@ -39,7 +39,7 @@ cp .env.example .env
 | --- | --- | --- |
 | GET  | `/health`                            | liveness probe |
 | GET  | `/api/health`                        | the same liveness probe under the `/api` prefix |
-| GET  | `/readiness`                         | readiness probe — lists missing Stellar settings |
+| GET  | `/readiness`                         | readiness probe — per-dependency config status, plus an informational `cold_start` (can a brand-new agent clear the floor?) |
 | GET  | `/api/agents`                        | registry listing |
 | GET  | `/api/agents/{id}`                   | agent detail |
 | POST | `/api/orchestrator/decompose`        | intent → plan (real LLM) |
