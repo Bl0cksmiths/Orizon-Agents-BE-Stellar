@@ -772,11 +772,31 @@ async def decompose(intent: str) -> DecomposeResponse:
     # Hard end-to-end budget for the planning call — without it a hung
     # upstream would pin this request for the OpenAI client's full
     # timeout x retry envelope. The router maps TimeoutError to a 504.
-    result = await asyncio.wait_for(
-        _bounded_plan(),
-        timeout=settings.decompose_timeout_seconds,
-    )
-    plan = _planner_plan(result)
+    try:
+        result = await asyncio.wait_for(
+            _bounded_plan(),
+            timeout=settings.decompose_timeout_seconds,
+        )
+    except TimeoutError:
+        # Kept out of the degradation below on purpose: a hung planner has
+        # already cost the caller the whole budget, and 504 `decompose_timeout`
+        # is the answer the router and its clients already speak for that.
+        raise
+    except Exception as e:
+        # agno hands provider errors back as a failed run, which
+        # `_planner_plan` reads, so what raises here failed around the model
+        # call rather than inside it. The buyer's answer is the same either
+        # way, and the `async with` in `_bounded_plan` has already given the
+        # planning slot back.
+        logger.warning(
+            "planner %s call raised %s: %r; serving the fallback plan",
+            settings.orchestrator_model,
+            type(e).__name__,
+            _loggable(str(e)),
+        )
+        plan = None
+    else:
+        plan = _planner_plan(result)
 
     # Clamp to the shortlist; backfill names + snap price to registry truth.
     # A planner that produced no plan proposes no steps, so it lands in the
