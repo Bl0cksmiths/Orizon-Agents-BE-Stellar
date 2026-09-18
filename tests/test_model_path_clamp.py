@@ -254,3 +254,24 @@ def test_fallback_to_a_re_admitted_agent_is_flagged_degraded(seeded: object, mon
     assert resp.steps[0].degraded is True
     note = next(n for n in resp.notices if n.agent_id == "agt_01h8")
     assert (note.kind, note.reason_code) == ("degraded", "floor_relaxed")
+
+
+# ── the registry moving while the planner runs ──────────────────
+
+
+def test_agents_delisted_during_the_planning_call_are_clamped(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shortlist is built before the planning call, which can run for tens
+    # of seconds. An operator who delists in that window still wins: code.gen
+    # was offered and is what the model returns, but it and the copywriter are
+    # withdrawn before the answer arrives — so the step is clamped and the
+    # fallback passes over the copywriter it would otherwise prefer.
+    async def _arun(_prompt: str) -> SimpleNamespace:
+        _delist("agt_11c0", "agt_01h8")
+        return _plan("agt_11c0")
+
+    resp = _decompose(monkeypatch, _clearing_reps(), _arun)
+
+    assert [s.agent_id for s in resp.steps] == ["agt_02k2"]
+    assert _stored_ids(resp) == ["agt_02k2"]
+    # A withdrawal is never a notice, however it arrives.
+    assert resp.notices == []
