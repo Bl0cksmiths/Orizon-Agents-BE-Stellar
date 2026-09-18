@@ -279,21 +279,31 @@ def _routable_registry(
     #     their own service, and re-admitting on starvation would route paid
     #     work to an operator who asked us to stop.
     agents = [a for a in state.list_agents() if _is_listed(a) and is_dispatchable(a.id)]
-    routable = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
-    if len(routable) < _MIN_ROUTABLE_AGENTS:
+    cleared = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
+    # Starvation backstop: TOP UP the agents that cleared the floor, never
+    # replace them. Re-ranking the whole dispatchable set and keeping the top
+    # _MIN_ROUTABLE_AGENTS used to push agents that PASSED the floor out of the
+    # prompt in favour of better-scored ones that failed it — the floor then
+    # made the shortlist less trustworthy than no floor at all, and every
+    # `floor_relaxed` notice claimed a shortfall the plan had manufactured.
+    # Only the deficit is re-admitted, in the order the kit path uses too.
+    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(cleared))
+    readmitted = sorted(
+        (a for a in agents if not reputation_svc.passes_floor(reps.get(a.id))),
+        key=lambda a: _backstop_rank(a, reps),
+    )[:deficit]
+    if readmitted:
         logger.warning(
-            "reputation floor left only %d/%d agents routable; keeping top %d by smoothed score",
-            len(routable),
+            "reputation floor left only %d/%d agents routable; re-admitting %d below it by smoothed score",
+            len(cleared),
             len(agents),
-            _MIN_ROUTABLE_AGENTS,
+            len(readmitted),
         )
-        routable = sorted(
-            agents,
-            key=lambda a: reps[a.id].smoothed_bps if a.id in reps else round(a.rep * 2000),
-            reverse=True,
-        )[:_MIN_ROUTABLE_AGENTS]
 
-    offered = {a.id for a in routable}
+    offered = {a.id for a in cleared} | {a.id for a in readmitted}
+    # Registry order whichever rule admitted an agent, so a re-admission never
+    # reads to the planner as a promotion to the top of the list.
+    routable = [a for a in agents if a.id in offered]
     # Order is part of the contract — the plan card renders these in sequence,
     # and a list that reshuffles between two identical requests reads as the
     # system changing its mind. Registry order drives the first two groups and
