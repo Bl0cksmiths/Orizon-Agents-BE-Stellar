@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any
 
+from agno.utils.log import LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -35,10 +36,11 @@ from .security import (
     RateLimitMiddleware,
     RequestContextMiddleware,
     RequestIdLogFilter,
+    SecretRedactionLogFilter,
     request_id_var,
 )
 from .seed import seed_registry
-from .services import execution_svc, registry_sync, reputation_svc
+from .services import execution_svc, rating_writer, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 
@@ -76,7 +78,22 @@ class JsonLogFormatter(logging.Formatter):
 _log_handler = logging.StreamHandler()
 _log_handler.setFormatter(JsonLogFormatter())
 _log_handler.addFilter(RequestIdLogFilter())
+# Last, so it masks the record every earlier filter has finished with. See
+# SecretRedactionLogFilter for why this cannot be left to call sites.
+_log_handler.addFilter(SecretRedactionLogFilter())
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
+
+# agno gives its loggers a Rich console handler of their own and switches
+# propagation off, so its lines bypassed everything above: no JSON, no request
+# id, and no redaction — while it logs a provider's error text verbatim at
+# ERROR, the one line most likely to quote a key. Handing them back to the root
+# handler puts them under all three. Held at WARNING: agno's INFO chatter was
+# only ever console decoration, and its warnings and errors are what matters.
+for _agno_logger_name in (LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME):
+    _agno_logger = logging.getLogger(_agno_logger_name)
+    _agno_logger.handlers.clear()
+    _agno_logger.propagate = True
+    _agno_logger.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -156,6 +173,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # blocking Soroban SDK calls without oversubscribing the worker.
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="soroban")
     asyncio.get_running_loop().set_default_executor(executor)
+    # Whether this deployment can write ratings at all — the second silent
+    # failure this boot sequence names (services/rating_writer.py). Its answer
+    # needs one chain read, so it runs in the background, after the executor
+    # bind so that read uses the bounded pool; its line lands a moment after
+    # boot rather than holding the waking request behind the RPC.
+    rating_writer.start()
     # Mirror on-chain registrations into the marketplace (story 1.02). Started
     # after the executor bind so its to_thread reads use the bounded pool; the
     # loop no-ops while STELLAR_AGENT_REGISTRY is blank, which keeps the
@@ -177,6 +200,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
     # would otherwise still be pending when the loop closes.
     await stop_refresh_retry()
+    # Same reason: a scorer read still in flight must not outlive the loop.
+    await rating_writer.stop()
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
     await registry_sync.stop()
@@ -485,9 +510,37 @@ class ColdStartReadiness(BaseModel):
     margin_bps: int  # lower_bound_bps - floor_bps; negative locks newcomers out
 
 
+class RatingsReadiness(BaseModel):
+    """Whether this deployment can write ratings — `rating_writer`'s verdict.
+
+    `signer` says "configured" on a key's mere presence, which cannot tell a
+    working deployment from one whose key is not the ReputationLedger's Scorer
+    — where every rating reverts with Unauthorized while the service looks
+    healthy. `writer` answers the real question for the configuration and the
+    chain actually in force; services/rating_writer.py defines its statuses.
+
+    Informational only, like `cold_start` and for the same reason: a
+    deployment that cannot rate still serves every request, and read-only
+    deployments are legitimate. It adds no live network call to the probe
+    either: it reports the last cached chain read and, when that is stale,
+    starts a background refresh for the next probe to see.
+
+    Nothing here is secret. `signer` is the public key — the secret never
+    leaves the keypair — and `scorer` is public chain data. Both are here
+    because the fix for `not_scorer` is `set_scorer(<signer>)`, and after a
+    restart has taken the startup line with it, this is where an operator can
+    still read the two addresses.
+    """
+
+    writer: rating_writer.WriterStatus  # disabled | no_signer | scorer | not_scorer | unchecked
+    signer: str | None  # G… ratings are signed with; null unless the chain decides
+    scorer: str | None  # the ledger's stored Scorer as last read; null unless a read found one
+
+
 class ReadinessResponse(BaseModel):
-    """Per-dependency readiness report. Purely config-derived — no live
-    network calls, so the probe stays cheap and deterministic."""
+    """Per-dependency readiness report. No live network calls, so the probe
+    stays cheap and deterministic: everything is config-derived except
+    `ratings`, which reports the rating writer's last cached chain read."""
 
     status: str  # "ready" | "not_ready"
     llm: str  # "ok" | "missing_key"
@@ -495,6 +548,7 @@ class ReadinessResponse(BaseModel):
     signer: str  # "configured" | "absent" — informational, never gates readiness
     pdax: str  # "configured" | "unconfigured" — informational
     cold_start: ColdStartReadiness  # informational, never gates readiness
+    ratings: RatingsReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -509,7 +563,9 @@ async def readiness(response: Response) -> ReadinessResponse:
     the LLM key or the Stellar contract/RPC config. The signing key is
     deliberately informational — read-only deployments are legitimate — and
     so is `cold_start`: a floor that shuts newcomers out is a policy the
-    process serves correctly, not a dependency it lacks."""
+    process serves correctly, not a dependency it lacks. `ratings` is
+    informational on the signing key's own grounds: a deployment that cannot
+    write ratings still serves every request."""
     llm = "ok" if settings.openai_api_key else "missing_key"
 
     contract_ids = (
@@ -532,6 +588,10 @@ async def readiness(response: Response) -> ReadinessResponse:
         response.status_code = 503
     # Read after the verdict and never folded into it — see ColdStartReadiness.
     margin = reputation_svc.cold_start_margin()
+    # Likewise, and from cache: never a live read on the probe's path — see
+    # RatingsReadiness.
+    writer = rating_writer.verdict()
+    rating_writer.refresh_if_stale()
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         llm=llm,
@@ -544,4 +604,5 @@ async def readiness(response: Response) -> ReadinessResponse:
             floor_bps=margin.floor_bps,
             margin_bps=margin.margin_bps,
         ),
+        ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
     )

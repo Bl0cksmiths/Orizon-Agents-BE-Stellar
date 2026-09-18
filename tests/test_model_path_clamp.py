@@ -18,7 +18,8 @@ planner and the reputation read stubbed:
   * no plan carries a step and an exclusion notice for the same agent;
   * a kept step below the floor is flagged `degraded`, matching its
     `floor_relaxed` notice;
-  * the fallback is drawn from the offered set, deterministically;
+  * the fallback is drawn from the offered set, deterministically, and
+    flagged `planner_fallback`, since the model did not choose it;
   * with nothing to offer, the request is refused before any LLM call.
 
 Fixtures are local rather than imported from the neighbouring floor suites, as
@@ -138,8 +139,9 @@ def test_model_step_naming_a_sub_floor_agent_never_reaches_the_plan(
     note = next(n for n in resp.notices if n.agent_id == "agt_11c0")
     assert (note.kind, note.reason_code, note.lower_bound_bps) == ("excluded", "below_floor", 4100)
     # The model's only pick was clamped away, so the plan is the fallback —
-    # the copywriter, which WAS offered.
+    # the copywriter, which WAS offered — and the response says it is one.
     assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert resp.planner_fallback is True
 
 
 # Three shapes of snapshot, one per way the shortlist can be built: the floor
@@ -274,6 +276,9 @@ def test_agents_delisted_during_the_planning_call_are_clamped(seeded: object, mo
 
     assert [s.agent_id for s in resp.steps] == ["agt_02k2"]
     assert _stored_ids(resp) == ["agt_02k2"]
+    # The model answered, but with nothing still routable, so what is served
+    # is the fallback and the response says so.
+    assert resp.planner_fallback is True
     # A withdrawal is never a notice, however it arrives.
     assert resp.notices == []
 
@@ -303,14 +308,20 @@ def test_plan_is_refused_before_the_llm_when_nothing_can_be_offered(
     # block can only yield steps the clamp discards. Refused up front, so the
     # empty prompt never costs an LLM call or holds a planning slot.
     _delist(*(a.id for a in state.list_agents()))
+    # Recorded, not raised: a planner call that raises is served the fallback
+    # plan now, so a booby trap in here would be caught and the call it exists
+    # to forbid would go unnoticed.
+    calls: list[str] = []
 
-    async def _boom(_prompt: str) -> SimpleNamespace:
-        raise AssertionError("an empty shortlist must not reach the planner")
+    async def _arun(prompt: str) -> SimpleNamespace:
+        calls.append(prompt)
+        return _plan("agt_11c0")
 
     before = set(state.plans)
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
-        _decompose(monkeypatch, _clearing_reps(), _boom)
+        _decompose(monkeypatch, _clearing_reps(), _arun)
     assert set(state.plans) == before
+    assert calls == []
 
 
 def test_the_api_mints_no_plan_when_nothing_can_be_offered(
@@ -319,8 +330,9 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
     # The same refusal through the router the frontend calls. The request was
     # well-formed and the service cannot serve it, so the answer is a
     # server-side status and never a 200 carrying a plan: a retryable 503 with
-    # its own detail, so a client can tell it apart from a failed upstream call
-    # (502) or a hung planner (504).
+    # its own detail, so a client can tell it apart from a hung planner (504)
+    # or an unexpected fault (502). A planner that merely failed is neither: it
+    # gets the fallback plan, flagged `planner_fallback` (BLO-121).
     #
     # The stand-in planner answers the way a model shown an empty list would:
     # with nothing usable. That is the answer the old hardcoded fallback turned

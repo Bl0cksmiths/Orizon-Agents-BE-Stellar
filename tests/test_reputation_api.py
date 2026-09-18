@@ -425,4 +425,6 @@ def test_submit_ratings_skips_when_not_configured(monkeypatch):
             job_id=b"\x02" * 16,
         )
     )
-    assert "tsk_none" not in state.traces
+    # Short-circuited, but never silently: a paid run that rates nothing says
+    # why on its own trace, where the buyer and QA will look for the ratings.
+    assert [ln.msg for ln in state.traces["tsk_none"]] == ["ratings not submitted: no signing key is configured"]

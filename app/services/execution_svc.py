@@ -15,7 +15,7 @@ from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker
+from . import failure_tracker, rating_writer
 from .binding_registry import resolve_worker
 
 logger = logging.getLogger(__name__)
@@ -985,7 +985,15 @@ async def _submit_ratings(
     as traced because a rating that silently never landed skews the on-chain
     reputation the planner reads, and traces do not survive a restart.
     """
-    if not (settings.reputation_enabled and settings.stellar_reputation_ledger and settings.stellar_signing_key):
+    gap = rating_writer.config_gap()
+    if gap is not None:
+        # This used to be a bare `return`: a deployment missing any of these
+        # settings rated nothing and said nothing, which is how the testnet
+        # ledger sat at zero ratings with nobody able to say why. The operator
+        # now gets a WARNING naming the setting (at most hourly), and the
+        # buyer's trace says the ratings were not written and why.
+        rating_writer.note_skipped(task_id, gap)
+        await _emit(task_id, start, "error", f"ratings not submitted: {gap.reason}")
         return
 
     from ..stellar import client as sc
@@ -1026,6 +1034,33 @@ async def _submit_ratings(
                 "auto",
             )
             tx = result.get("hash") or ""
+            status = result.get("status")
+            if status != "SUCCESS":
+                # Sent but not landed: the ledger FAILED it after simulation
+                # passed, or it was still unconfirmed when the poll budget ran
+                # out. Neither wrote a rating, and both used to be traced as
+                # "rated N/100" — a success line for evidence that never landed.
+                logger.error(
+                    "task %s: reputation submit for %s (%s) did not land: status=%s tx=%s "
+                    "(job %s, rating %d, weight %d, payer %s)",
+                    task_id,
+                    step.agent_name,
+                    step.agent_id,
+                    status,
+                    tx,
+                    job_id.hex(),
+                    rating,
+                    weight,
+                    payer,
+                )
+                await _emit(
+                    task_id,
+                    start,
+                    "error",
+                    f"reputation submit failed for {step.agent_name}: "
+                    f"{rating_writer.unlanded_reason(status)} · tx {tx[:10]}…",
+                )
+                continue
             await _emit(
                 task_id,
                 start,
@@ -1045,9 +1080,13 @@ async def _submit_ratings(
                 payer,
                 exc_info=True,
             )
+            # The reason is a closed vocabulary — the ledger's own error name,
+            # or "rpc error" — never `e`'s text: the trace is world-readable
+            # and the simulation error behind a rejection runs to the whole
+            # diagnostic event log. The log line above keeps the full detail.
             await _emit(
                 task_id,
                 start,
                 "error",
-                f"reputation submit failed for {step.agent_name}",
+                f"reputation submit failed for {step.agent_name}: {rating_writer.failure_reason(e)}",
             )

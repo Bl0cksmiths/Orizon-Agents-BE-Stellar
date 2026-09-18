@@ -49,10 +49,15 @@ def test_kit_decompose_never_takes_the_gate(monkeypatch):
     seed_registry()
     monkeypatch.setattr(settings, "decompose_max_concurrent", 1)
 
-    async def no_arun(prompt):
-        raise AssertionError("kit decompose must never reach the LLM")
+    # Recorded rather than raised: decompose degrades a planner call that
+    # raises to its fallback plan (BLO-121), which would swallow the raise.
+    llm_calls = []
 
-    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", no_arun)
+    async def record_arun(prompt):
+        llm_calls.append(prompt)
+        return None
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", record_arun)
 
     async def scenario() -> None:
         gate = orchestrator_svc._decompose_gate()
@@ -67,3 +72,4 @@ def test_kit_decompose_never_takes_the_gate(monkeypatch):
         assert len(plan.steps) >= 4
 
     asyncio.run(scenario())
+    assert llm_calls == [], "kit decompose must never reach the LLM"

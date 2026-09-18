@@ -7,11 +7,14 @@ import re
 import secrets
 from typing import Any, NamedTuple
 
+from agno.run.base import RunStatus
+
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
+from ..security import redact_secrets
 from ..state import state
 from . import reputation_svc
 from .binding_registry import is_dispatchable
@@ -638,10 +641,10 @@ _FALLBACK_AGENT_ID = "agt_01h8"
 
 
 def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepInfo]) -> Agent | None:
-    """The agent an emptied model plan falls back to — from `offered` only.
+    """The agent an emptied or failed model plan falls back to — from `offered` only.
 
-    The fallback exists so the UI never gets stuck on a plan the clamp emptied,
-    but it is still a routing decision, and it used to be the one routing
+    The fallback exists so the UI never gets stuck on a plan the clamp emptied
+    or a planner that produced none, but it is still a routing decision, and it used to be the one routing
     decision that skipped the floor: `agt_01h8` was hardcoded, so a copywriter
     the floor had just excluded took the whole job the moment the model's picks
     were clamped away. It is held to the clamp's rule now — offered, and still
@@ -668,6 +671,69 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
             _backstop_rank(a, reps),
         ),
     )
+
+
+# Enough of a failure message to say what went wrong, never a whole body.
+_FAILURE_EXCERPT_CHARS = 200
+
+
+def _loggable(text: str) -> str:
+    """Third-party text made fit for a log line: no key in it, and bounded.
+
+    Neither source of a planner failure message is ours. An OpenAI 401 quotes
+    back the key it rejected, only partly masked, and an answer that did not
+    parse is whatever the model wrote, at whatever length. So every configured
+    secret and anything shaped like a key is redacted — by the same rule the
+    process-wide log filter applies (`app/security.py`), so the two cannot
+    drift — and the excerpt is clamped.
+    """
+    return redact_secrets(text)[:_FAILURE_EXCERPT_CHARS]
+
+
+# Run states in which agno itself reports that the planner call did not finish.
+_FAILED_RUNS = frozenset({RunStatus.error, RunStatus.cancelled})
+
+
+def _planner_plan(result: Any) -> Plan | None:
+    """The planner's own Plan, or None when its run produced none to use.
+
+    agno does not raise when the model call fails. `Agent.arun` catches the
+    provider's exception, marks the run `RunStatus.error` and returns the
+    message as the run's `content` — the field that holds the Plan on success.
+    A missing API key, a refused connection or an upstream 5xx therefore
+    arrives here looking like an answer, and was read as one: the clamp asked
+    the error string for `.steps`, and the router turned that AttributeError
+    into a 502 on every free-form intent (BLO-121). A provider error is not
+    model output, so the result is checked before anything reads it as a plan.
+
+    Two checks, because they answer different questions. The status is agno's
+    own verdict on the run, and the only thing that can reject one that failed
+    AFTER its answer parsed — an output guardrail refusing the plan, say —
+    where `content` would still hold a Plan. The type check covers what the
+    status does not: a run that completed with text that never parsed as a
+    Plan (agno leaves the raw string in `content`), or with no answer at all.
+    There is no dict branch: agno returns a dict only for a dict
+    `output_schema`, and this agent's is the `Plan` model. Both fields are read
+    with `getattr`, so a result of any other shape degrades here too, instead
+    of raising the AttributeError this function exists to prevent.
+
+    The failure is logged here, while the run is still in hand, and goes no
+    further: the caller serves the fallback plan, and the buyer is told only
+    that it is one.
+    """
+    status = getattr(result, "status", None)
+    content = getattr(result, "content", None)
+    if status not in _FAILED_RUNS and isinstance(content, Plan):
+        return content
+    excerpt = f": {_loggable(content)!r}" if isinstance(content, str) else ""
+    logger.warning(
+        "planner %s gave no usable plan (run status %s, %s content%s); serving the fallback plan",
+        settings.orchestrator_model,
+        getattr(status, "value", status),
+        type(content).__name__,
+        excerpt,
+    )
+    return None
 
 
 async def decompose(intent: str) -> DecomposeResponse:
@@ -703,15 +769,38 @@ async def decompose(intent: str) -> DecomposeResponse:
     # Hard end-to-end budget for the planning call — without it a hung
     # upstream would pin this request for the OpenAI client's full
     # timeout x retry envelope. The router maps TimeoutError to a 504.
-    result = await asyncio.wait_for(
-        _bounded_plan(),
-        timeout=settings.decompose_timeout_seconds,
-    )
-    plan: Plan = result.content
+    try:
+        result = await asyncio.wait_for(
+            _bounded_plan(),
+            timeout=settings.decompose_timeout_seconds,
+        )
+    except TimeoutError:
+        # Kept out of the degradation below on purpose: a hung planner has
+        # already cost the caller the whole budget, and 504 `decompose_timeout`
+        # is the answer the router and its clients already speak for that.
+        raise
+    except Exception as e:
+        # agno hands provider errors back as a failed run, which
+        # `_planner_plan` reads, so what raises here failed around the model
+        # call rather than inside it. The buyer's answer is the same either
+        # way, and the `async with` in `_bounded_plan` has already given the
+        # planning slot back.
+        logger.warning(
+            "planner %s call raised %s: %r; serving the fallback plan",
+            settings.orchestrator_model,
+            type(e).__name__,
+            _loggable(str(e)),
+        )
+        plan = None
+    else:
+        plan = _planner_plan(result)
 
     # Clamp to the shortlist; backfill names + snap price to registry truth.
+    # A planner that produced no plan proposes no steps, so it lands in the
+    # empty-plan fallback below by the same road as a plan the clamp emptied.
+    proposed = plan.steps if plan is not None else []
     cleaned: list[PlanStep] = []
-    for step in plan.steps:
+    for step in proposed:
         if step.agent_id not in shortlist.offered:
             # The planner may only route to what it was OFFERED. The block is
             # what it was SHOWN and this is what it RETURNED, and the two are
@@ -755,7 +844,11 @@ async def decompose(intent: str) -> DecomposeResponse:
             )
         )
 
-    if not cleaned:
+    # Whatever left `cleaned` empty — a planner that failed, or one whose every
+    # step the clamp discarded — the steps served from here on are not the
+    # model's plan, and the response has to say so.
+    planner_fallback = not cleaned
+    if planner_fallback:
         # Fall back to a minimal safe plan so the UI never gets stuck — drawn
         # from the shortlist like any model step, never from outside it. The
         # copywriter used to be hardcoded here on the grounds that nothing
@@ -809,4 +902,5 @@ async def decompose(intent: str) -> DecomposeResponse:
         notices=shortlist.notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
+        planner_fallback=planner_fallback,
     )

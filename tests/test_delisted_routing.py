@@ -381,17 +381,23 @@ def test_relisting_restores_the_full_kit_pipeline(seeded: object) -> None:
 
 
 def test_kit_path_honours_delisting_without_calling_the_llm(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _boom(*_a: object, **_k: object) -> object:
-        raise AssertionError("kit path must never call the LLM")
+    # Recorded rather than raised: decompose degrades a planner call that
+    # raises to its fallback plan (BLO-121), which would swallow the raise.
+    llm_calls: list[object] = []
+
+    async def _record(*a: object, **_k: object) -> object:
+        llm_calls.append(a)
+        return None
 
     async def _fake_reps(_ids: object, *_a: object, **_k: object) -> dict[str, RepInfo]:
         return {}
 
-    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _boom)
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
     monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
     _delist("agt_11c0")
 
     resp = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+    assert llm_calls == [], "kit path must never call the LLM"
 
     assert "agt_11c0" not in [s.agent_id for s in resp.steps]
     assert resp.notices == []

@@ -77,6 +77,117 @@ class RequestIdLogFilter(logging.Filter):
         return True
 
 
+# Token shapes that are secret wherever they appear, whatever logged them.
+# A shape catches what the configured-value pass cannot: a key that is not
+# this deployment's own (a provider echoing back a rejected key, a pasted
+# seed in an exception message). Both are anchored to whole tokens so a
+# public key, a contract id or a transaction hash is never mistaken for one —
+# Stellar public keys start with G and contract ids with C, and only a
+# secret seed is an S followed by exactly 55 base32 characters.
+_SECRET_SHAPES: tuple[re.Pattern[str], ...] = (
+    # OpenAI-style API keys, whole or as a provider echoes them back `*`-masked
+    # ("sk-proj-abc*****wxyz") — the unmasked tail is still part of the key.
+    re.compile(r"\bsk-[A-Za-z0-9_*\-]{8,}"),
+    re.compile(r"\bS[A-Z2-7]{55}\b"),  # Stellar secret seeds (StrKey "S…")
+)
+
+# Below this length a configured value is not masked by exact match: a short
+# string is more likely to be an ordinary word than a credential, and masking
+# every occurrence of it would shred unrelated log text. Every real secret
+# this service holds is far longer; a short one is a config mistake the
+# validators and the startup lines exist to report, not something to hide.
+_MIN_MASKED_SECRET_CHARS = 8
+
+
+def _configured_secrets() -> tuple[str, ...]:
+    """This deployment's own secret values, longest first.
+
+    Read on every call rather than captured at import: tests and hot config
+    reloads change `settings`, and a mask built from yesterday's values
+    protects nothing. Longest first so a secret that contains another (a
+    database URL embedding its password) is masked whole, not in pieces.
+
+    `database_url` is in the list for its password; the URL as a whole is
+    masked because a password cannot be cut out of an arbitrary DSN safely.
+    `stellar_signing_key` may be a 12/24-word mnemonic, which no token shape
+    recognises — only the exact-value pass can catch it.
+    """
+    values = (
+        settings.openai_api_key,
+        settings.api_key,
+        settings.database_url,
+        settings.orizon_dispatch_signing_key,
+        settings.stellar_signing_key,
+        settings.pdax_password,
+        settings.pdax_otp_secret,
+        settings.pdax_webhook_secret,
+    )
+    unique = {v.strip() for v in values if v and len(v.strip()) >= _MIN_MASKED_SECRET_CHARS}
+    return tuple(sorted(unique, key=len, reverse=True))
+
+
+REDACTED = "[redacted]"
+
+
+def redact_secrets(text: str) -> str:
+    """`text` with every configured secret and secret-shaped token masked.
+
+    Exact values first, then shapes: a configured key is masked even when it
+    has no recognisable shape, and a foreign key is masked even when it is not
+    ours. Pure and cheap enough to run on every log record.
+    """
+    for secret in _configured_secrets():
+        text = text.replace(secret, REDACTED)
+    for shape in _SECRET_SHAPES:
+        text = shape.sub(REDACTED, text)
+    return text
+
+
+# Only for `formatException`, which is formatter-independent; never formats a
+# whole record, so it cannot disagree with the handler's own formatter.
+_EXCEPTION_FORMATTER = logging.Formatter()
+
+
+class SecretRedactionLogFilter(logging.Filter):
+    """Mask secrets in every record before any handler formats it.
+
+    Call-site redaction (`orchestrator_svc._loggable`, `_redacted_target`)
+    covers the text this codebase writes; it cannot cover a library that logs
+    a provider's error verbatim, and agno does exactly that at ERROR. A
+    handler filter is the one place every record passes through.
+
+    The message is rendered here (`getMessage`, args interpolated) because a
+    secret can arrive in an argument as easily as in the format string, and
+    the record is only rewritten when something was masked, so the common
+    case leaves `msg`/`args` untouched for any downstream consumer.
+
+    A traceback is where a secret is most likely to hide — an exception built
+    from a connection string, a rejected key echoed in a provider error — and
+    formatters render it from `exc_info` after filters run. So it is rendered
+    and masked here too, and when masking changed it, folded into the message
+    with `exc_info` cleared: exactly how `JsonLogFormatter` already presents a
+    traceback, so the line is unchanged apart from the mask.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 — a malformed record is logging's to report, not ours to drop
+            return True
+        masked = redact_secrets(message)
+        if record.exc_info:
+            trace = _EXCEPTION_FORMATTER.formatException(record.exc_info)
+            masked_trace = redact_secrets(trace)
+            if masked_trace != trace:
+                masked = f"{masked}\n{masked_trace}"
+                record.exc_info = None
+                record.exc_text = None
+        if masked != message:
+            record.msg = masked
+            record.args = None
+        return True
+
+
 # Resolved key for a forwarded chain that is too short to contain a client
 # entry once the trusted hops are removed. A literal, never an address: it
 # cannot collide with a real client, and seeing it as `client=` in the access
