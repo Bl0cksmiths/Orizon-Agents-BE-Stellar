@@ -137,9 +137,10 @@ def test_kit_path_applies_floor_without_calling_the_llm(seeded: object, monkeypa
 def test_starvation_backstop_keeps_kit_plan_workable(seeded: object) -> None:
     # Every kit agent falls below the floor at once. Only agt_05x7 has a
     # matching off-pipeline substitute (agt_01h8), leaving one step — under the
-    # _MIN_ROUTABLE_AGENTS floor of 3. The backstop must re-admit the two
-    # highest-scored dropped agents so the buyer still gets a workable plan,
-    # recording the degradation; the rest are recorded as exclusions.
+    # _MIN_ROUTABLE_AGENTS floor of 3. The backstop must re-admit two dropped
+    # agents — the builder, then the best-scored — so the buyer still gets a
+    # workable plan, recording the degradation; the rest are recorded as
+    # exclusions.
     scores = {
         "agt_09l5": 5000,
         "agt_05x7": 4600,
@@ -157,7 +158,7 @@ def test_starvation_backstop_keeps_kit_plan_workable(seeded: object) -> None:
     # slot it fills, then the builder — never in the order they were admitted.
     assert ids == ["agt_09l5", "agt_01h8", "agt_11c0"]
 
-    # Top two dropped agents by smoothed score are re-admitted, not the rest.
+    # code.gen and the best-scored other role are re-admitted, not the rest.
     degraded = {n.agent_id for n in resp.notices if n.kind == "degraded"}
     assert degraded == {"agt_09l5", "agt_11c0"}
     assert {"agt_09l5", "agt_11c0"} <= set(ids)
