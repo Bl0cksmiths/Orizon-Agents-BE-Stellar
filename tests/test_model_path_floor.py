@@ -334,3 +334,35 @@ def test_notice_order_is_stable_across_runs(seeded: object, monkeypatch: pytest.
     codes = [c for _, c, _ in shape]
     assert codes == sorted(codes, key=["below_floor", "floor_relaxed", "unbound_endpoint"].index)
     assert [aid for _, c, aid in shape if c == "unbound_endpoint"] == ["ext_idx1", "ext_idx2"]
+
+
+# ── the backstop tops up, it never replaces ─────────────────────
+
+
+def _offered_ids(reps: dict[str, RepInfo]) -> list[str]:
+    """The agent ids in the AVAILABLE_AGENTS block, in the order shown."""
+    block = orchestrator_svc._registry_prompt_fragment(reps)
+    return [ln.split(" ")[1].removeprefix("id=") for ln in block.splitlines() if ln.startswith("- id=")]
+
+
+def test_backstop_tops_up_the_agents_that_cleared_the_floor(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The audit's case: two agents clear the floor and the other ten, all
+    # below it, outscore them on smoothed score. The backstop used to re-rank
+    # all twelve and keep the top three — pushing BOTH agents that passed out
+    # of the prompt, offering three that failed, and stamping each with a
+    # notice claiming fewer than three had cleared.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
+    reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+
+    # Both agents that cleared, plus exactly the deficit: the one best-scored
+    # sub-floor agent. Registry order, whichever rule admitted each.
+    assert _offered_ids(reps) == ["agt_01h8", "agt_02k2", "agt_12r0"]
+
+    resp = _decompose(monkeypatch, reps, "agt_01h8")
+
+    assert [n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"] == ["agt_12r0"]
+    excluded = {n.agent_id for n in resp.notices if n.reason_code == "below_floor"}
+    assert excluded == {a.id for a in state.list_agents()} - {"agt_01h8", "agt_02k2", "agt_12r0"}
+    # An agent that cleared the floor is never the subject of a notice.
+    assert not any(n.agent_id in {"agt_01h8", "agt_02k2"} for n in resp.notices)
