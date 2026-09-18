@@ -39,3 +39,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # The same command as ci.yml's step of the same name. Exit 1 is drift,
+      # and exit 2 — a source missing or unattributable — fails the run too:
+      # a check that goes quiet when its input disappears is the silence it
+      # exists to break (scripts/check_contract_drift.py).
+      - name: Contract address drift
+        run: python scripts/check_contract_drift.py contracts
