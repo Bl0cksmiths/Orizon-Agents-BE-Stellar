@@ -124,3 +124,60 @@ def test_the_config_gate_names_the_first_gap_an_operator_would_fix(monkeypatch):
     assert rw.config_gap() is rw._NO_KEY
     monkeypatch.setattr(settings, "stellar_signing_key", "S-present")
     assert rw.config_gap() is None
+
+
+def test_a_config_verdict_never_reads_the_chain(monkeypatch):
+    """disabled and no_signer are known from config alone. The fixture's
+    unstubbed read would fail this test if either went to the chain."""
+    for kwargs in ({"enabled": False}, {"ledger": ""}, {"key": False}):
+        configure(monkeypatch, **kwargs)
+        assert asyncio.run(rw.check()).status in ("disabled", "no_signer")
+
+
+# ── the chain decides ───────────────────────────────────────────
+
+
+def test_a_signer_that_is_the_stored_scorer_is_scorer(monkeypatch):
+    configure(monkeypatch)
+    chain = on_chain(monkeypatch, Chain(scorer=SIGNER))
+    v = asyncio.run(rw.check())
+    assert (v.status, v.signer, v.scorer) == ("scorer", SIGNER, SIGNER)
+    assert chain.reads == [LEDGER]
+
+
+def test_a_signer_that_is_not_the_stored_scorer_is_not_scorer(monkeypatch):
+    """The live failure: every submit would revert with Unauthorized. Both
+    addresses are kept, because the fix is set_scorer(<signer>)."""
+    configure(monkeypatch)
+    on_chain(monkeypatch, Chain(scorer=OTHER))
+    v = asyncio.run(rw.check())
+    assert (v.status, v.signer, v.scorer) == ("not_scorer", SIGNER, OTHER)
+
+
+def test_a_ledger_that_stores_no_scorer_is_not_scorer(monkeypatch):
+    """No instance at that id on this network, or not a ReputationLedger:
+    the chain answered, and no signer can rate against it."""
+    configure(monkeypatch)
+    on_chain(monkeypatch, Chain(scorer=None))
+    v = asyncio.run(rw.check())
+    assert (v.status, v.signer, v.scorer) == ("not_scorer", SIGNER, None)
+
+
+def test_a_read_that_fails_is_unchecked_never_a_guess(monkeypatch):
+    """Could-not-read is not evidence either way. Neither scorer nor
+    not_scorer may come out of a failed read, and the cause kept for the log
+    is the exception's type — its text stays in the client's own ERROR line."""
+    configure(monkeypatch)
+    on_chain(monkeypatch, Chain(error=ConnectionError("rpc down at https://rpc.example/?key=abc")))
+    v = asyncio.run(rw.check())
+    assert (v.status, v.signer, v.scorer) == ("unchecked", SIGNER, None)
+    assert v.read_error == "ConnectionError"
+
+
+def test_nothing_read_yet_is_unchecked(monkeypatch):
+    """verdict() never reads: before the first read resolves, the honest
+    answer is that the chain has not been checked."""
+    configure(monkeypatch)
+    v = rw.verdict()
+    assert (v.status, v.signer, v.scorer) == ("unchecked", SIGNER, None)
+    assert v.read_error == "not read yet"
