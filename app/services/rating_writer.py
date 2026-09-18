@@ -30,6 +30,7 @@ reason on every rating a paid run fails to write.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -309,3 +310,56 @@ def report(v: WriterVerdict) -> None:
             v.status,
             v.gap.problem if v.gap is not None else "configuration incomplete",
         )
+
+
+# The boot-time check while it runs: held so it is not garbage collected
+# mid-read, and so shutdown can cancel it.
+_report_task: asyncio.Task[None] | None = None
+
+
+async def _check_and_report() -> None:
+    report(await check())
+
+
+def start() -> None:
+    """Check the verdict and log it, in the background (lifespan startup).
+
+    Deliberately not awaited. uvicorn accepts no connection until lifespan
+    startup returns, and on the free tier every wake from idle is a boot with
+    the request that woke it still waiting — so a read here, up to
+    SCORER_READ_TIMEOUT_SECONDS against a rate-limited public RPC, would be
+    paid for by a user, for a log line. Nothing needs the verdict first
+    either: it gates nothing, and `_submit_ratings` never consults it.
+    """
+    global _report_task
+    if _report_task is not None and not _report_task.done():
+        return
+    _report_task = asyncio.get_running_loop().create_task(_check_and_report())
+    _report_task.add_done_callback(_on_report_done)
+
+
+def _on_report_done(task: asyncio.Task[None]) -> None:
+    # registry_sync._on_task_done's reason: nothing awaits this task, so an
+    # exception inside it would otherwise vanish without a line anywhere.
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("ratings writer startup check died: %s", exc, exc_info=exc)
+
+
+async def stop() -> None:
+    """Cancel the startup check and any read in flight (lifespan shutdown).
+
+    Without this a shutdown inside a slow read leaves a pending task for the
+    loop to destroy — the noise lifespan already goes out of its way to avoid.
+    """
+    global _report_task, _read_task
+    loop = asyncio.get_running_loop()
+    tasks = [t for t in (_report_task, _read_task) if t is not None and not t.done() and t.get_loop() is loop]
+    _report_task = _read_task = None
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
