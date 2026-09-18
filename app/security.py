@@ -89,6 +89,40 @@ _SECRET_SHAPES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bS[A-Z2-7]{55}\b"),  # Stellar secret seeds (StrKey "S…")
 )
 
+# Below this length a configured value is not masked by exact match: a short
+# string is more likely to be an ordinary word than a credential, and masking
+# every occurrence of it would shred unrelated log text. Every real secret
+# this service holds is far longer; a short one is a config mistake the
+# validators and the startup lines exist to report, not something to hide.
+_MIN_MASKED_SECRET_CHARS = 8
+
+
+def _configured_secrets() -> tuple[str, ...]:
+    """This deployment's own secret values, longest first.
+
+    Read on every call rather than captured at import: tests and hot config
+    reloads change `settings`, and a mask built from yesterday's values
+    protects nothing. Longest first so a secret that contains another (a
+    database URL embedding its password) is masked whole, not in pieces.
+
+    `database_url` is in the list for its password; the URL as a whole is
+    masked because a password cannot be cut out of an arbitrary DSN safely.
+    `stellar_signing_key` may be a 12/24-word mnemonic, which no token shape
+    recognises — only the exact-value pass can catch it.
+    """
+    values = (
+        settings.openai_api_key,
+        settings.api_key,
+        settings.database_url,
+        settings.orizon_dispatch_signing_key,
+        settings.stellar_signing_key,
+        settings.pdax_password,
+        settings.pdax_otp_secret,
+        settings.pdax_webhook_secret,
+    )
+    unique = {v.strip() for v in values if v and len(v.strip()) >= _MIN_MASKED_SECRET_CHARS}
+    return tuple(sorted(unique, key=len, reverse=True))
+
 
 # Resolved key for a forwarded chain that is too short to contain a client
 # entry once the trusted hops are removed. A literal, never an address: it
