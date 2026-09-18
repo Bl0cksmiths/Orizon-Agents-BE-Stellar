@@ -23,6 +23,24 @@ logger = logging.getLogger(__name__)
 # The reputation floor may never starve the planner of choices.
 _MIN_ROUTABLE_AGENTS = 3
 
+
+class NoRoutableAgentsError(RuntimeError):
+    """No agent can take a step: nothing is both listed and dispatchable.
+
+    The starvation backstop can relax the reputation floor, but it cannot
+    conjure an agent — it only re-admits from the listed, dispatchable set, and
+    when that set is empty (every operator delisted, every endpoint unbound)
+    there is nothing honest to plan with. The one thing this path must never do
+    about it is route to an agent it did not offer, which is what the old
+    hardcoded fallback did. So the request is refused instead, before any LLM
+    call is spent on a prompt with no agents in it.
+
+    A distinct type because it is not a planner failure and not a bad request:
+    it is the service being temporarily unable to serve (503, retryable once an
+    agent is relisted or bound), and a caller has to be able to tell it apart
+    from an upstream fault to say so.
+    """
+
 # Gate on the free-form planning LLM call. /execute's fan-out is bounded by
 # orchestrator_max_concurrent (execution_svc); this is the same protection for
 # /decompose, whose non-kit path makes a real LLM call per request while the
