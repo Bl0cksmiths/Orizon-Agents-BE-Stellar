@@ -92,3 +92,16 @@ def test_the_filter_masks_a_secret_passed_as_a_log_argument(secrets_configured: 
     assert security.SecretRedactionLogFilter().filter(record) is True
     assert record.getMessage() == "Error in Agent run: 401 invalid key [redacted]"
     assert record.args is None
+
+
+def test_the_filter_leaves_a_clean_record_untouched(secrets_configured: dict[str, str]) -> None:
+    # Nothing to mask: msg and args stay the very objects the caller logged,
+    # so structured consumers downstream see the record as it was written.
+    args = ("agt_11c0", 3)
+    record = _record("plan for %s has %d steps", *args)
+    original_msg = record.msg
+
+    security.SecretRedactionLogFilter().filter(record)
+
+    assert record.msg is original_msg
+    assert record.args == args
