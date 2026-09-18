@@ -38,6 +38,19 @@ REPUTATION_READ_BUDGET_SHARE = 0.10
 REPUTATION_READ_BUDGET_TOLERANCE = 1e-9
 
 
+def _seconds(value: float) -> str:
+    """A duration as a boot error prints it: precise enough to copy back in.
+
+    `:g` keeps six significant digits, so it prints a ceiling of 12.3456789 s
+    as 12.3457 — above the ceiling it names — and a validator whose advice is
+    formatted that way refuses its own suggested fix. Twelve digits bound the
+    rounding at 5e-12 relative, far inside REPUTATION_READ_BUDGET_TOLERANCE,
+    while still hiding binary float noise: 0.7 × 0.1 prints as 0.07, not as
+    the 0.06999999999999999 it is stored as.
+    """
+    return f"{value:.12g}"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -473,13 +486,14 @@ class Settings(BaseSettings):
             self.reputation_batch_timeout_seconds, allowance, rel_tol=REPUTATION_READ_BUDGET_TOLERANCE
         ):
             raise ValueError(
-                f"REPUTATION_BATCH_TIMEOUT_SECONDS={self.reputation_batch_timeout_seconds:g} is more than "
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS={_seconds(self.reputation_batch_timeout_seconds)} is more than "
                 f"{REPUTATION_READ_BUDGET_SHARE:.0%} of DECOMPOSE_TIMEOUT_SECONDS="
-                f"{self.decompose_timeout_seconds:g} (at most {allowance:g} s is allowed). Reputation is "
-                "read before the planning call, not inside it, so a Soroban outage would add that long to "
-                "every /decompose with no error code naming it. Lower REPUTATION_BATCH_TIMEOUT_SECONDS to "
-                f"{allowance:g} or less, or raise DECOMPOSE_TIMEOUT_SECONDS to at least "
-                f"{self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE:g}."
+                f"{_seconds(self.decompose_timeout_seconds)} (at most {_seconds(allowance)} s is allowed). "
+                "Reputation is read before the planning call, not inside it, so a Soroban outage would add "
+                "that long to every /decompose with no error code naming it. Lower "
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS to {_seconds(allowance)} or less, or raise "
+                "DECOMPOSE_TIMEOUT_SECONDS to at least "
+                f"{_seconds(self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE)}."
             )
         return self
 
