@@ -220,3 +220,21 @@ def test_fallback_keeps_the_copywriter_when_it_was_offered(seeded: object, monke
     assert resp.steps[0].rationale == "fallback: generate copy for the intent"
     assert resp.steps[0].degraded is False
     assert resp.notices == []
+
+
+def test_fallback_prefers_an_agent_that_cleared_the_floor(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The copywriter is under the floor and too weak for the backstop to reach,
+    # so the fallback has to choose. Two agents cleared the floor; the backstop
+    # topped the shortlist up with code.critic, which outscores both on
+    # smoothed score. A relaxation is a last resort, not a tie-breaker, so the
+    # job goes to an agent the floor actually passed.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=1000, lower=100)
+    reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+    reps["agt_03d9"] = _info("agt_03d9", smoothed=6000, lower=6000)
+
+    resp = _decompose(monkeypatch, reps, _plan_naming("agt_invented"))
+
+    assert [n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"] == ["agt_12r0"]
+    assert [s.agent_id for s in resp.steps] == ["agt_02k2"]
+    assert resp.steps[0].degraded is False
