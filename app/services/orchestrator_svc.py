@@ -604,6 +604,7 @@ async def decompose(intent: str) -> DecomposeResponse:
             # agent reaching /execute is the whole bug, and a step with nothing
             # to execute it would only reach /execute's unknown-agent skip.
             continue
+        info = reps.get(agent.id)
         cleaned.append(
             PlanStep(
                 agent_id=agent.id,
@@ -611,7 +612,14 @@ async def decompose(intent: str) -> DecomposeResponse:
                 rationale=step.rationale.strip(),
                 est_price_usdc=agent.price,
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
-                **_rep_fields(reps.get(agent.id)),
+                # An OFFERED agent below the floor can only be one the
+                # starvation backstop re-admitted, which already carries a
+                # `floor_relaxed` notice — so the inline flag and the notice
+                # agree, as they do on the kit path. Recomputed from the same
+                # snapshot rather than trusted from the model's output, whose
+                # copy of this field is whatever it chose to write.
+                degraded=not reputation_svc.passes_floor(info),
+                **_rep_fields(info),
             )
         )
 
