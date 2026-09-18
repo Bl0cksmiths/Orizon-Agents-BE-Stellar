@@ -184,6 +184,30 @@ are never chosen, and their operators conclude the marketplace is dead rather
 than that a config value moved 200 bps. The check puts the consequence in front
 of whoever changed the value, at the moment they changed it.
 
+The same verdict is available on demand. `GET /readiness` carries a `cold_start`
+object built from the same computation as the startup line:
+
+```json
+"cold_start": {"routable": true, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177}
+```
+
+| field | meaning |
+| --- | --- |
+| `routable` | a brand-new agent clears the floor — the startup line's verdict |
+| `lower_bound_bps` | what a newcomer is scored on: the prior's lower bound |
+| `floor_bps` | the floor this process actually has — the Render dashboard's value, not render.yaml's |
+| `margin_bps` | `lower_bound_bps − floor_bps`; negative means newcomers are locked out |
+
+It exists because the startup line is written once per boot, and a free-tier
+instance boots on every wake from idle: by the time anyone goes looking, the line
+is buried under the request log or gone with the instance that wrote it. The
+probe answers whenever it is asked, for the configuration in force.
+
+It is informational, like `signer` and `pdax`, and never changes `status` or the
+503. A floor that excludes newcomers is a policy the process serves correctly,
+not a dependency it is missing — the same reason the startup check warns rather
+than refusing to boot.
+
 The same pair of numbers appears in the warning emitted when reputation reads
 fall back to the prior, which states which way the floor is failing for the
 duration of the outage.
