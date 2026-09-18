@@ -445,6 +445,21 @@ class Settings(BaseSettings):
         wrote it returns — that wastes cache hits, breaches no budget, and does
         not earn the power to refuse a boot.
         """
+        # A share of a budget that is not a real duration is not a rule. NaN
+        # compares false against everything and a share of inf is inf, so
+        # either one waved every batch bound through; zero or below was caught,
+        # but by a message advising a batch bound of zero or below — advice the
+        # validator above refuses. Each also breaks planning on its own:
+        # wait_for expires a NaN, zero or negative deadline on arrival, so every
+        # free-form plan is a 504, and inf leaves the call with no bound at all.
+        planning = self.decompose_timeout_seconds
+        if not (math.isfinite(planning) and planning > 0):
+            raise ValueError(
+                f"DECOMPOSE_TIMEOUT_SECONDS={planning:g} is not a positive, finite number of seconds. A deadline "
+                "of zero, below zero or NaN expires every planning call the moment it starts and inf never "
+                "expires one, and no share of any of them can bound the reputation read that runs before it. "
+                "Set DECOMPOSE_TIMEOUT_SECONDS to a positive number of seconds."
+            )
         allowance = self.decompose_timeout_seconds * REPUTATION_READ_BUDGET_SHARE
         if self.reputation_batch_timeout_seconds > allowance:
             raise ValueError(
