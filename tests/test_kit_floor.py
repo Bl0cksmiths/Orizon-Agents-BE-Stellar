@@ -113,11 +113,16 @@ def test_kit_plan_is_deterministic(seeded: object) -> None:
 def test_kit_path_applies_floor_without_calling_the_llm(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
     # Drive the full public entry point: decompose() must detect the kit,
     # apply the floor, and never touch the orchestrator LLM. Any call to it
-    # fails the test loudly.
-    async def _boom(*_a: object, **_k: object) -> object:
-        raise AssertionError("kit path must never call the LLM")
+    # fails the test. Recorded rather than raised: decompose degrades a planner
+    # call that raises to its fallback plan (BLO-121), so a raise here would be
+    # swallowed and a kit path that wrongly reached the model would still pass.
+    llm_calls: list[object] = []
 
-    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _boom)
+    async def _record(*a: object, **_k: object) -> object:
+        llm_calls.append(a)
+        return None
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
 
     reps = {"agt_05x7": _sub_floor("agt_05x7")}
 
