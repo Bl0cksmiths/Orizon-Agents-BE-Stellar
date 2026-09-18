@@ -585,7 +585,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     readmit_ids = {d.agent.id for d in by_priority[:deficit]}
     if readmit_ids:
         logger.warning(
-            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s) by smoothed score",
+            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s), builder first",
             len(placed),
             len(readmit_ids),
         )
