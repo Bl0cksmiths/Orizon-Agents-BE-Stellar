@@ -85,7 +85,9 @@ class RequestIdLogFilter(logging.Filter):
 # Stellar public keys start with G and contract ids with C, and only a
 # secret seed is an S followed by exactly 55 base32 characters.
 _SECRET_SHAPES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"),  # OpenAI-style API keys
+    # OpenAI-style API keys, whole or as a provider echoes them back `*`-masked
+    # ("sk-proj-abc*****wxyz") — the unmasked tail is still part of the key.
+    re.compile(r"\bsk-[A-Za-z0-9_*\-]{8,}"),
     re.compile(r"\bS[A-Z2-7]{55}\b"),  # Stellar secret seeds (StrKey "S…")
 )
 
