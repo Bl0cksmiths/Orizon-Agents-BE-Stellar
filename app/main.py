@@ -82,6 +82,18 @@ _log_handler.addFilter(RequestIdLogFilter())
 # SecretRedactionLogFilter for why this cannot be left to call sites.
 _log_handler.addFilter(SecretRedactionLogFilter())
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
+
+# agno gives its loggers a Rich console handler of their own and switches
+# propagation off, so its lines bypassed everything above: no JSON, no request
+# id, and no redaction — while it logs a provider's error text verbatim at
+# ERROR, the one line most likely to quote a key. Handing them back to the root
+# handler puts them under all three. Held at WARNING: agno's INFO chatter was
+# only ever console decoration, and its warnings and errors are what matters.
+for _agno_logger_name in (LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME):
+    _agno_logger = logging.getLogger(_agno_logger_name)
+    _agno_logger.handlers.clear()
+    _agno_logger.propagate = True
+    _agno_logger.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
