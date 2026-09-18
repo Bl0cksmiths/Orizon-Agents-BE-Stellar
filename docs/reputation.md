@@ -285,6 +285,35 @@ everything else, naming both addresses and the fix for `not_scorer`. The check
 runs in the background, so a slow RPC never delays the request that woke the
 instance; the line lands a moment after the service starts.
 
+### When a paid run writes no rating
+
+The run's trace says so, in words that carry no exception text (the trace is
+readable by anyone holding the task):
+
+| trace line | cause |
+| --- | --- |
+| `ratings not submitted: reputation is disabled` | `REPUTATION_ENABLED` is false |
+| `ratings not submitted: no reputation ledger is configured` | `STELLAR_REPUTATION_LEDGER` is unset |
+| `ratings not submitted: no signing key is configured` | `STELLAR_SIGNING_KEY` is unset |
+| `reputation submit failed for <agent>: Unauthorized` | the signer is not the ledger's Scorer |
+| `… : Replay` | this agent was already rated for this job — the ledger rates a job once |
+| `… : OutOfRange` | the rating or its weight is outside what the ledger accepts |
+| `… : NotFound` | the ledger has no Scorer stored |
+| `… : contract error #N` | a ledger error this backend does not know by name |
+| `… : transaction failed` | the ledger accepted the simulation, then failed the transaction |
+| `… : unconfirmed` | still unconfirmed when the 30 s poll budget ran out — it may yet land |
+| `… : rpc error` | anything else: the RPC, the network, the signer's account |
+
+The first three also log a WARNING naming the setting, at most once an hour per
+cause, and each one says how many further runs went unrated since the last. The
+rest log an ERROR with the full detail, which the trace deliberately omits.
+
+**If the ledger shows no ratings,** check in this order: were there any
+wallet-authorized runs at all? Then `curl -s https://<host>/readiness` and read
+`ratings.writer` — anything but `scorer` is the answer, and the table above says
+what to do. If it is `scorer`, read a paid run's trace for the reason each
+rating did not land.
+
 ## Cold start is not a degraded read
 
 Both produce `source: "prior"`. They differ by one flag.
