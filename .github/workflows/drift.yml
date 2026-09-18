@@ -1,0 +1,22 @@
+name: Contract drift
+
+# The contract address check, run on its own, away from any pull request.
+# ci.yml runs the same check, but only when this repo changes — and the
+# canonical address book lives in the contracts repo, which has no CI of its
+# own. A redeploy there that rewrites addresses.json is otherwise first noticed
+# when an unrelated backend PR goes red, and blamed on whoever opened it.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Contract address drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
