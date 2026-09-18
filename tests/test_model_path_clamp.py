@@ -307,14 +307,20 @@ def test_plan_is_refused_before_the_llm_when_nothing_can_be_offered(
     # block can only yield steps the clamp discards. Refused up front, so the
     # empty prompt never costs an LLM call or holds a planning slot.
     _delist(*(a.id for a in state.list_agents()))
+    # Recorded, not raised: a planner call that raises is served the fallback
+    # plan now, so a booby trap in here would be caught and the call it exists
+    # to forbid would go unnoticed.
+    calls: list[str] = []
 
-    async def _boom(_prompt: str) -> SimpleNamespace:
-        raise AssertionError("an empty shortlist must not reach the planner")
+    async def _arun(prompt: str) -> SimpleNamespace:
+        calls.append(prompt)
+        return _plan("agt_11c0")
 
     before = set(state.plans)
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
-        _decompose(monkeypatch, _clearing_reps(), _boom)
+        _decompose(monkeypatch, _clearing_reps(), _arun)
     assert set(state.plans) == before
+    assert calls == []
 
 
 def test_the_api_mints_no_plan_when_nothing_can_be_offered(
