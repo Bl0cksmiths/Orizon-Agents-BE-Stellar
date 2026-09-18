@@ -333,3 +333,41 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
     assert r.status_code >= 500
     assert "plan_id" not in r.json()
     assert set(state.plans) == before
+
+
+def test_the_model_cannot_write_its_own_reputation_onto_a_step(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `PlanStep` is the planner's output schema, so every reputation field and
+    # the `degraded` verdict are fields the model can fill in. The clamp
+    # rebuilds each step from the registry and the snapshot, so whatever the
+    # model wrote there is discarded rather than shown to the buyer.
+    reps = _clearing_reps()
+
+    async def _arun(_prompt: str) -> SimpleNamespace:
+        forged = PlanStep(
+            agent_id="agt_11c0",
+            rationale="model-chosen step",
+            est_price_usdc=0.0,
+            est_eta_seconds=1.0,
+            rep_bps=10_000,
+            rep_source="onchain",
+            rep_lower_bound_bps=10_000,
+            rep_count=9_999,
+            rep_dispute_rate_bps=0,
+            rep_degraded=False,
+            substituted_for="agt_03d9",
+            degraded=True,
+        )
+        return SimpleNamespace(content=Plan(steps=[forged]))
+
+    resp = _decompose(monkeypatch, reps, _arun)
+
+    step = resp.steps[0]
+    info = reps["agt_11c0"]
+    assert (step.rep_bps, step.rep_lower_bound_bps, step.rep_count) == (
+        info.smoothed_bps,
+        info.lower_bound_bps,
+        info.count,
+    )
+    assert step.est_price_usdc == state.agents["agt_11c0"].price
+    assert step.substituted_for is None
+    assert step.degraded is False
