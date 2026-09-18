@@ -471,10 +471,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     # dropped kit agents (top-N by smoothed score, id breaking ties) and record
     # the degradation; the remainder are recorded as exclusions. Re-admitted
     # steps are appended in pipeline order for a coherent plan.
-    by_score = sorted(
-        dropped,
-        key=lambda d: (-(d[2].smoothed_bps if d[2] is not None else 0), d[0].id),
-    )
+    by_score = sorted(dropped, key=lambda d: _backstop_rank(d[0], reps))
     deficit = max(0, _MIN_ROUTABLE_AGENTS - len(steps))
     readmit_ids = {d[0].id for d in by_score[:deficit]}
     if readmit_ids:
