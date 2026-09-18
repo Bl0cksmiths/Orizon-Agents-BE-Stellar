@@ -95,6 +95,7 @@ The plan as a whole says what shaped it, on both planning paths (all defaulted, 
 | `notices` | every floor action taken while building the plan — exclusions, substitutions, starvation-backstop re-admissions — plus on-chain agents excluded for having no bound endpoint |
 | `floor_bps` | the routing floor this plan was actually judged against, read from settings at plan time |
 | `reputation_degraded` | at least one reputation read in this plan's snapshot **failed** and the prior was served, so the floor verdicts rest on an estimate |
+| `planner_fallback` | the steps are the deterministic **fallback plan**, not the planner's own — the planning model failed or returned no usable plan, or every step it chose was clamped away. Still stored, executable and held to the floor like any plan; always `false` on the demo-kit path |
 
 After each settled workflow the settler submits one synthetic rating per step (`kind="auto"`), derived from verifiable workflow signals — did the worker deliver output, ship an artifact, trip critic violations — so scores are validation-gated rather than opinion. Submissions run sequentially (one scorer account) and are best-effort: a failed rating logs a trace line and never fails the workflow.
 
