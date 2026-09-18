@@ -530,6 +530,7 @@ class ReadinessResponse(BaseModel):
     signer: str  # "configured" | "absent" — informational, never gates readiness
     pdax: str  # "configured" | "unconfigured" — informational
     cold_start: ColdStartReadiness  # informational, never gates readiness
+    ratings: RatingsReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -567,6 +568,10 @@ async def readiness(response: Response) -> ReadinessResponse:
         response.status_code = 503
     # Read after the verdict and never folded into it — see ColdStartReadiness.
     margin = reputation_svc.cold_start_margin()
+    # Likewise, and from cache: never a live read on the probe's path — see
+    # RatingsReadiness.
+    writer = rating_writer.verdict()
+    rating_writer.refresh_if_stale()
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         llm=llm,
@@ -579,4 +584,5 @@ async def readiness(response: Response) -> ReadinessResponse:
             floor_bps=margin.floor_bps,
             margin_bps=margin.margin_bps,
         ),
+        ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
     )
