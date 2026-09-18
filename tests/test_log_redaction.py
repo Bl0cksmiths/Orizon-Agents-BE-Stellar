@@ -10,6 +10,8 @@ Keys are generated per test run, never copied from a real account.
 
 from __future__ import annotations
 
+import io
+import json
 import logging
 import sys
 
@@ -146,3 +148,29 @@ def test_a_provider_masked_key_is_masked_to_the_last_character() -> None:
     text = "Incorrect API key provided: sk-proj-abc*****wxyz. Check your key."
 
     assert security.redact_secrets(text) == "Incorrect API key provided: [redacted]. Check your key."
+
+
+def test_agno_logs_leave_through_the_redacting_json_handler(
+    secrets_configured: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # agno logs a provider failure verbatim at ERROR on its own logger. It
+    # must reach the root handler (JSON, request id, redaction) rather than
+    # the Rich console handler agno installs for itself.
+    from app import main
+
+    agno_logger = logging.getLogger("agno")
+    assert agno_logger.handlers == []
+    assert agno_logger.propagate is True
+    assert main._log_handler in logging.getLogger().handlers
+
+    sink = io.StringIO()
+    previous = main._log_handler.setStream(sink)
+    try:
+        agno_logger.error("Error in Agent run: %s", f"invalid key {secrets_configured['openai_api_key']}")
+    finally:
+        main._log_handler.setStream(previous)
+
+    line = json.loads(sink.getvalue().splitlines()[-1])
+    assert line["logger"] == "agno"
+    assert line["level"] == "ERROR"
+    assert line["msg"] == "Error in Agent run: invalid key [redacted]"
