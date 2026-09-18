@@ -640,10 +640,10 @@ _FALLBACK_AGENT_ID = "agt_01h8"
 
 
 def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepInfo]) -> Agent | None:
-    """The agent an emptied model plan falls back to — from `offered` only.
+    """The agent an emptied or failed model plan falls back to — from `offered` only.
 
-    The fallback exists so the UI never gets stuck on a plan the clamp emptied,
-    but it is still a routing decision, and it used to be the one routing
+    The fallback exists so the UI never gets stuck on a plan the clamp emptied
+    or a planner that produced none, but it is still a routing decision, and it used to be the one routing
     decision that skipped the floor: `agt_01h8` was hardcoded, so a copywriter
     the floor had just excluded took the whole job the moment the model's picks
     were clamped away. It is held to the clamp's rule now — offered, and still
