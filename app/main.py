@@ -493,6 +493,33 @@ class ColdStartReadiness(BaseModel):
     margin_bps: int  # lower_bound_bps - floor_bps; negative locks newcomers out
 
 
+class RatingsReadiness(BaseModel):
+    """Whether this deployment can write ratings — `rating_writer`'s verdict.
+
+    `signer` says "configured" on a key's mere presence, which cannot tell a
+    working deployment from one whose key is not the ReputationLedger's Scorer
+    — where every rating reverts with Unauthorized while the service looks
+    healthy. `writer` answers the real question for the configuration and the
+    chain actually in force; services/rating_writer.py defines its statuses.
+
+    Informational only, like `cold_start` and for the same reason: a
+    deployment that cannot rate still serves every request, and read-only
+    deployments are legitimate. It adds no live network call to the probe
+    either: it reports the last cached chain read and, when that is stale,
+    starts a background refresh for the next probe to see.
+
+    Nothing here is secret. `signer` is the public key — the secret never
+    leaves the keypair — and `scorer` is public chain data. Both are here
+    because the fix for `not_scorer` is `set_scorer(<signer>)`, and after a
+    restart has taken the startup line with it, this is where an operator can
+    still read the two addresses.
+    """
+
+    writer: rating_writer.WriterStatus  # disabled | no_signer | scorer | not_scorer | unchecked
+    signer: str | None  # G… ratings are signed with; null unless the chain decides
+    scorer: str | None  # the ledger's stored Scorer as last read; null unless a read found one
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. Purely config-derived — no live
     network calls, so the probe stays cheap and deterministic."""
