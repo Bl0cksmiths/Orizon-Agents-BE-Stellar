@@ -266,8 +266,8 @@ def _routable_registry(
     the planner plans and would surface as unrelated assertions failing
     downstream.
     """
-    # Two subtractions, both on the ASSIGNMENT rather than on `routable`,
-    # because the floor-starvation fallback below re-sorts THIS list:
+    # Two subtractions, both on the ASSIGNMENT rather than on `cleared`,
+    # because the floor-starvation backstop below re-admits from THIS list:
     #
     #   * an indexed on-chain agent (story 1.02) is marketplace-visible but only
     #     planner-routable once an operator binds it an endpoint (story 2.01) —
