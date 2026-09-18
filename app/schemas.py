@@ -136,6 +136,12 @@ class PlanStep(BaseModel):
     rep_count: int | None = None
     # Share of those ratings that were disputes, in bps (0..10_000).
     rep_dispute_rate_bps: int | None = None
+    # True when this agent's on-chain reputation read FAILED and the Bayesian
+    # prior was served in its place, so every `rep_*` number above is an
+    # estimate. NOT `degraded` below: that one means the step was re-admitted
+    # below the floor — a verdict that was reached, where this says one could
+    # not be. Per-step mate to `DecomposeResponse.reputation_degraded`.
+    rep_degraded: bool = False
     # The designated agent this step replaced, when the reputation floor forced
     # a substitution on the kit path. None on the normal path. Lets the plan
     # card badge the step inline without re-joining the response notices.
