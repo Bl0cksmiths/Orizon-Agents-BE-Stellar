@@ -10,8 +10,12 @@ touches the network.
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
-from stellar_sdk import Address, Keypair, StrKey, scval, xdr
+from stellar_sdk import Address, Durability, Keypair, StrKey, scval, xdr
 from stellar_sdk.xdr import SCVal, SCValType
 
 from app.stellar import client as sc
@@ -102,3 +106,60 @@ def test_a_scorer_that_is_not_an_address_raises():
     entry = _instance_entry([(_key("Scorer"), scval.to_symbol("nobody"))])
     with pytest.raises(ValueError):
         sc._instance_storage_address(entry, sc._SCORER_STORAGE_KEY)
+
+
+# ── the read ────────────────────────────────────────────────────
+
+
+class _FakeServer:
+    """Stands in for SorobanServer: records the call, answers as told."""
+
+    def __init__(self, entry_xdr: str | None = None, error: Exception | None = None) -> None:
+        self.entry_xdr = entry_xdr
+        self.error = error
+        self.calls: list[tuple[str, SCVal, Durability]] = []
+
+    def get_contract_data(self, contract_id: str, key: SCVal, durability: Durability) -> Any:
+        self.calls.append((contract_id, key, durability))
+        if self.error is not None:
+            raise self.error
+        return None if self.entry_xdr is None else SimpleNamespace(xdr=self.entry_xdr)
+
+
+def _serve(monkeypatch, server: _FakeServer) -> list[bool]:
+    profiles: list[bool] = []
+
+    def _server(*, submit: bool = False) -> _FakeServer:
+        profiles.append(submit)
+        return server
+
+    monkeypatch.setattr(sc, "_server", _server)
+    return profiles
+
+
+def test_the_read_fetches_the_persistent_instance_entry_on_the_read_profile(monkeypatch):
+    """The read profile is the 5 s, no-retry client: a verdict that exists to
+    be cheap must not inherit the submit profile's patience."""
+    server = _FakeServer(_instance_entry([(_key("Scorer"), scval.to_address(SCORER))]))
+    profiles = _serve(monkeypatch, server)
+
+    assert sc.ledger_scorer(LEDGER_ID) == SCORER
+    assert profiles == [False]
+    assert server.calls == [(LEDGER_ID, SCVal(SCValType.SCV_LEDGER_KEY_CONTRACT_INSTANCE), Durability.PERSISTENT)]
+
+
+def test_no_instance_on_this_network_is_a_definite_none(monkeypatch):
+    """The RPC answers "no such entry" for a contract id that does not exist
+    on the configured network — a real answer, and it means no scorer."""
+    _serve(monkeypatch, _FakeServer(None))
+    assert sc.ledger_scorer(LEDGER_ID) is None
+
+
+def test_an_rpc_failure_raises_and_is_logged_once(monkeypatch, caplog):
+    _serve(monkeypatch, _FakeServer(error=ConnectionError("rpc unreachable")))
+    with caplog.at_level(logging.DEBUG, logger="app.stellar.client"), pytest.raises(ConnectionError):
+        sc.ledger_scorer(LEDGER_ID)
+    records = [r for r in caplog.records if r.name == "app.stellar.client"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert "stage=get_ledger_entries" in records[0].getMessage()
