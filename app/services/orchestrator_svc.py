@@ -693,6 +693,52 @@ def _loggable(text: str) -> str:
     return _API_KEY_SHAPE.sub("sk-[redacted]", text)[:_FAILURE_EXCERPT_CHARS]
 
 
+# Run states in which agno itself reports that the planner call did not finish.
+_FAILED_RUNS = frozenset({RunStatus.error, RunStatus.cancelled})
+
+
+def _planner_plan(result: Any) -> Plan | None:
+    """The planner's own Plan, or None when its run produced none to use.
+
+    agno does not raise when the model call fails. `Agent.arun` catches the
+    provider's exception, marks the run `RunStatus.error` and returns the
+    message as the run's `content` — the field that holds the Plan on success.
+    A missing API key, a refused connection or an upstream 5xx therefore
+    arrives here looking like an answer, and was read as one: the clamp asked
+    the error string for `.steps`, and the router turned that AttributeError
+    into a 502 on every free-form intent (BLO-121). A provider error is not
+    model output, so the result is checked before anything reads it as a plan.
+
+    Two checks, because they answer different questions. The status is agno's
+    own verdict on the run, and the only thing that can reject one that failed
+    AFTER its answer parsed — an output guardrail refusing the plan, say —
+    where `content` would still hold a Plan. The type check covers what the
+    status does not: a run that completed with text that never parsed as a
+    Plan (agno leaves the raw string in `content`), or with no answer at all.
+    There is no dict branch: agno returns a dict only for a dict
+    `output_schema`, and this agent's is the `Plan` model. Both fields are read
+    with `getattr`, because `arun` is declared to return a union that includes
+    a stream, and whatever it hands back has to degrade here rather than raise.
+
+    The failure is logged here, while the run is still in hand, and goes no
+    further: the caller serves the fallback plan, and the buyer is told only
+    that it is one.
+    """
+    status = getattr(result, "status", None)
+    content = getattr(result, "content", None)
+    if status not in _FAILED_RUNS and isinstance(content, Plan):
+        return content
+    excerpt = f": {_loggable(content)!r}" if isinstance(content, str) else ""
+    logger.warning(
+        "planner %s gave no usable plan (run status %s, %s content%s); serving the fallback plan",
+        settings.orchestrator_model,
+        getattr(status, "value", status),
+        type(content).__name__,
+        excerpt,
+    )
+    return None
+
+
 async def decompose(intent: str) -> DecomposeResponse:
     # One live reputation snapshot per decompose — timeout-bounded and never
     # raises (prior fallback), shared by the kit path, the routing prompt,
