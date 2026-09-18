@@ -26,6 +26,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import REPUTATION_READ_BUDGET_SHARE, Settings
 
@@ -73,3 +74,22 @@ def test_every_budget_admits_a_bound_at_exactly_its_share():
     # comparison is tolerant if some typed bound really does sit above the
     # float ceiling, which is the case a strict `>` refuses.
     assert above_the_float_product > 0
+
+
+@pytest.mark.parametrize(("decompose", "bound"), [(25.0, 2.5), (90.0, 9.0), (56.0, 5.6), (10.0, 1.0), (1.0, 0.1)])
+def test_the_real_boundaries_still_boot(decompose, bound):
+    # The tolerance exists for fractional budgets; it must not have cost the
+    # round-number ones a single boot. 90 / 9 is the shipped budget at its
+    # full share.
+    assert _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=bound)
+
+
+@pytest.mark.parametrize("decompose", [0.7, 5.6, 25.0, 56.0, 90.0])
+def test_the_tolerance_admits_no_bound_anyone_would_type(decompose):
+    """Tolerant is not loose. One part in a billion absorbs float noise; a
+    millisecond over, or one part in a million over, is a real breach and is
+    refused exactly as before."""
+    exact = _typed_share(decompose)
+    for past in (exact + 0.001, exact * (1 + 1e-6)):
+        with pytest.raises(ValidationError, match="REPUTATION_BATCH_TIMEOUT_SECONDS"):
+            _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=past)
