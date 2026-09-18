@@ -221,3 +221,31 @@ def test_the_planners_own_plan_is_not_flagged_as_a_fallback(seeded: object, monk
     assert resp.planner_fallback is False
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
     assert _stored_ids(resp) == ["agt_11c0"]
+
+
+def test_the_fallback_plan_is_stored_and_executable(
+    seeded: object, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fallback is a plan like any other, not an apology: /execute resolves
+    # its id and hands the stored plan to execution. Execution itself is stood
+    # in for — the copywriter's own LLM call is not what this pins.
+    handed: list[StoredPlan] = []
+
+    async def _execute_plan(plan: StoredPlan, **_kw: object) -> str:
+        handed.append(plan)
+        return "tsk_fallback"
+
+    async def _arun(_prompt: str) -> RunOutput:
+        return RunOutput(status=RunStatus.error, content="Connection error.")
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _arun)
+    monkeypatch.setattr(orchestrator_router, "execute_plan", _execute_plan)
+
+    plan = client.post("/api/orchestrator/decompose", json={"intent": FREE_FORM_INTENT}).json()
+    r = client.post("/api/orchestrator/execute", json={"plan_id": plan["plan_id"]})
+
+    assert plan["planner_fallback"] is True
+    assert r.status_code == 200
+    assert r.json()["task_id"] == "tsk_fallback"
+    assert [p.id for p in handed] == [plan["plan_id"]]
+    assert [s.agent_id for s in handed[0].plan.steps] == ["agt_01h8"]
