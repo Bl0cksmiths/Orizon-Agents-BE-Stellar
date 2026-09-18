@@ -79,3 +79,17 @@ def test_a_blank_api_key_serves_the_fallback_plan_not_a_502(
     assert [s["agent_id"] for s in body["steps"]] == ["agt_01h8"]
     # The provider's message is for the log, not the buyer.
     assert "OPENAI_API_KEY" not in r.text
+
+
+def test_a_planner_call_that_raises_serves_the_fallback_plan(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # agno turns the provider's own errors into a failed run (above), so what
+    # can still raise out of `arun` is everything around the model call. It
+    # gets the answer a failed run gets, not a 502.
+    async def _refused(_prompt: str) -> object:
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    resp = _decompose(monkeypatch, _refused)
+
+    assert resp.planner_fallback is True
+    assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert _stored_ids(resp) == ["agt_01h8"]
