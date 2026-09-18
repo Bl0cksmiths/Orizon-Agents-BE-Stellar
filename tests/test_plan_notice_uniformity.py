@@ -138,7 +138,9 @@ def _run_kit(monkeypatch: pytest.MonkeyPatch, reps: dict[str, RepInfo]) -> Decom
 
     _freeze_reps(monkeypatch, reps)
     monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
-    return asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+    resp = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+    assert llm_calls == [], "the kit path must never call the LLM"
+    return resp
 
 
 def _run_free_form(
