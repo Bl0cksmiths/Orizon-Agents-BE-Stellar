@@ -13,6 +13,7 @@ network, and an unstubbed read fails the test.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 
@@ -368,3 +369,58 @@ def test_a_sent_rating_that_did_not_land_is_named_by_how():
     assert rw.unlanded_reason("FAILED") == "transaction failed"
     assert rw.unlanded_reason("timeout") == "unconfirmed"
     assert rw.unlanded_reason(None) == "transaction failed"
+
+
+# ── the skipped-ratings warning ─────────────────────────────────
+
+WRITER_LOG = "app.services.rating_writer"
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == WRITER_LOG and r.levelno == logging.WARNING]
+
+
+def test_the_first_skip_warns_naming_the_setting_and_the_task(caplog):
+    with caplog.at_level(logging.WARNING, logger=WRITER_LOG):
+        rw.note_skipped("tsk_first", rw._NO_KEY)
+    [line] = _warnings(caplog)
+    assert "tsk_first" in line
+    assert "STELLAR_SIGNING_KEY is unset" in line
+    assert "unrated" in line
+
+
+def test_a_busy_deployment_does_not_get_a_line_per_run(caplog):
+    with caplog.at_level(logging.WARNING, logger=WRITER_LOG):
+        for i in range(50):
+            rw.note_skipped(f"tsk_{i}", rw._NO_KEY)
+    assert len(_warnings(caplog)) == 1
+
+
+def test_the_warning_returns_after_the_interval_with_the_runs_it_held_back(monkeypatch, caplog):
+    """Rate-limited, not dropped: the next line says how many runs went
+    unrated since the last one, so a quiet log still carries the volume."""
+    with caplog.at_level(logging.WARNING, logger=WRITER_LOG):
+        for i in range(4):
+            rw.note_skipped(f"tsk_{i}", rw._NO_KEY)
+        monkeypatch.setitem(
+            rw._skip_warned_at, rw._NO_KEY.problem, time.monotonic() - rw.SKIP_WARNING_INTERVAL_SECONDS - 1
+        )
+        rw.note_skipped("tsk_later", rw._NO_KEY)
+    first, second = _warnings(caplog)
+    assert "0 more run(s)" in first
+    assert "tsk_later" in second and "3 more run(s)" in second
+
+
+def test_each_cause_is_warned_on_its_own_clock(caplog):
+    with caplog.at_level(logging.WARNING, logger=WRITER_LOG):
+        rw.note_skipped("tsk_a", rw._NO_KEY)
+        rw.note_skipped("tsk_b", rw._NO_LEDGER)
+    lines = _warnings(caplog)
+    assert len(lines) == 2
+    assert "STELLAR_REPUTATION_LEDGER is unset" in lines[1]
+
+
+def test_the_trace_reasons_name_no_setting():
+    """The operator line names the variable; the buyer's trace does not."""
+    for gap in (rw._REPUTATION_OFF, rw._NO_LEDGER, rw._NO_KEY, rw._BAD_KEY):
+        assert "STELLAR_" not in gap.reason and "REPUTATION_" not in gap.reason
