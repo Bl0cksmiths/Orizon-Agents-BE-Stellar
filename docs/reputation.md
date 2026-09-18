@@ -249,6 +249,14 @@ picking a top-N among identical prior scores; and the window is bounded by the
 read TTL and the batch timeout. Every occurrence logs a WARNING naming the
 affected agents.
 
+That last bound only holds because the batch timeout is itself bounded, and the
+service refuses to boot unless it is. `REPUTATION_BATCH_TIMEOUT_SECONDS` must be
+a positive, finite number of seconds, no more than 10% of
+`DECOMPOSE_TIMEOUT_SECONDS`. Zero, a negative value or NaN would expire every
+read before it could answer — a healthy chain, and every agent degraded to the
+prior for as long as the value stayed set — while inf would let one hung RPC
+stall every plan.
+
 ## Before you change any of these values
 
 1. Compute the prior-only lower bound under the new configuration and compare it
