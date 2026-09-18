@@ -237,6 +237,36 @@ The first two are config. The third exists only on the chain, which is why a
 key that is present but is not the Scorer used to look perfectly healthy: the
 service reported `signer: configured` while no rating ever landed.
 
+### The `ratings` readiness field
+
+`GET /readiness` answers all three on demand, next to `cold_start`:
+
+```json
+"ratings": {"writer": "scorer", "signer": "GA7AI5…5OQV", "scorer": "GA7AI5…5OQV"}
+```
+
+| `writer` | meaning | what to do |
+| --- | --- | --- |
+| `scorer` | the signer is the ledger's Scorer — paid runs' ratings land | nothing |
+| `not_scorer` | the signer is not the Scorer, or the ledger stores none — every rating reverts | have the ledger admin call `set_scorer(<signer>)`; if `scorer` is `null`, check `STELLAR_REPUTATION_LEDGER` names a ledger on this network |
+| `unchecked` | the Scorer could not be read from the chain — never guessed either way | wait for the retry (30 s); if it persists, check `STELLAR_RPC_URL` |
+| `no_signer` | `STELLAR_SIGNING_KEY` is unset or does not parse — paid runs are not rated | set the Scorer's key |
+| `disabled` | `REPUTATION_ENABLED` is false or `STELLAR_REPUTATION_LEDGER` is unset — paid runs are not rated | configure both, if ratings are wanted |
+
+| field | meaning |
+| --- | --- |
+| `signer` | the G… address ratings are signed with; `null` unless the config is complete and the key parses |
+| `scorer` | the Scorer the ledger stores, as last read; `null` unless a read found one |
+
+Both addresses are public — the signing secret never leaves the keypair, and
+the Scorer is public chain data. They are on the probe because the fix for
+`not_scorer` is `set_scorer(<signer>)`, and an operator reading the probe after
+a restart has no other place to find either.
+
+Prefer `set_scorer` over swapping `STELLAR_SIGNING_KEY` to match: the same key
+is also the escrow's settler and the attestation sealer, so changing it moves
+those roles too.
+
 ## Cold start is not a degraded read
 
 Both produce `source: "prior"`. They differ by one flag.
