@@ -377,3 +377,16 @@ def test_backstop_stays_out_when_enough_agents_clear_the_floor(seeded: object) -
         reps[agent_id] = _info(agent_id, smoothed=6000, lower=6000)
 
     assert _offered_ids(reps) == ["agt_01h8", "agt_02k2", "agt_03d9"]
+
+
+def test_a_re_admitted_model_step_is_flagged_degraded(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The kit path has always flagged a re-admitted step inline; the model path
+    # built every step with `degraded` left at False, so a step the backstop
+    # let in below the floor looked, on the card, like one that had passed.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
+    reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+
+    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_12r0")
+
+    assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_12r0", True)]
