@@ -399,3 +399,40 @@ def unlanded_reason(status: object) -> str:
     Anything else short of SUCCESS is the ledger's FAILED.
     """
     return "unconfirmed" if status == "timeout" else "transaction failed"
+
+
+# ── a paid run that rated nothing ───────────────────────────────
+
+# A deployment missing a setting skips ratings on every paid run. A line per
+# run buries the log; a line per process scrolls out of any recent window on a
+# long-lived instance. Hourly per cause keeps it inside any hour of logs
+# someone pulls, at no more than 24 lines a day — and a free-tier instance,
+# which restarts on every wake, still says it on its first paid run.
+SKIP_WARNING_INTERVAL_SECONDS = 3600.0
+_skip_warned_at: dict[str, float] = {}
+_skips_unreported: dict[str, int] = {}
+
+
+def note_skipped(task_id: str, gap: ConfigGap) -> None:
+    """Log that a paid run's ratings were skipped — at most hourly per cause.
+
+    Runs in between are counted, not dropped: the next line says how many
+    went unrated in silence, so the rate limit hides no volume.
+    """
+    now = time.monotonic()
+    last = _skip_warned_at.get(gap.problem)
+    if last is not None and now - last < SKIP_WARNING_INTERVAL_SECONDS:
+        _skips_unreported[gap.problem] = _skips_unreported.get(gap.problem, 0) + 1
+        return
+    unreported = _skips_unreported.pop(gap.problem, 0)
+    _skip_warned_at[gap.problem] = now
+    logger.warning(
+        "ratings not submitted for task %s: %s. Wallet-authorized runs on this deployment go unrated, "
+        "so no agent earns on-chain evidence and routing runs on the prior alone. %d more run(s) "
+        "were skipped for this reason since the last warning; this line repeats at most every %.0f "
+        "minutes.",
+        task_id,
+        gap.problem,
+        unreported,
+        SKIP_WARNING_INTERVAL_SECONDS / 60,
+    )
