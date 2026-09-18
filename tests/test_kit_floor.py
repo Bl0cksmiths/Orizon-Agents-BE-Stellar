@@ -152,6 +152,9 @@ def test_starvation_backstop_keeps_kit_plan_workable(seeded: object) -> None:
     ids = [s.agent_id for s in resp.steps]
     assert len(resp.steps) >= orchestrator_svc._MIN_ROUTABLE_AGENTS
     assert "agt_01h8" in ids  # the one substitution still stands
+    # Pipeline order throughout: research, then the substitute in the brand
+    # slot it fills, then the builder — never in the order they were admitted.
+    assert ids == ["agt_09l5", "agt_01h8", "agt_11c0"]
 
     # Top two dropped agents by smoothed score are re-admitted, not the rest.
     degraded = {n.agent_id for n in resp.notices if n.kind == "degraded"}
