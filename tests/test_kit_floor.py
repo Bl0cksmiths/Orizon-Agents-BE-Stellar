@@ -132,6 +132,7 @@ def test_kit_path_applies_floor_without_calling_the_llm(seeded: object, monkeypa
     monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
 
     resp = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+    assert llm_calls == [], "kit path must never call the LLM"
 
     ids = [s.agent_id for s in resp.steps]
     assert "agt_05x7" not in ids
