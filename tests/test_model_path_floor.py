@@ -92,13 +92,15 @@ PINNED_BLOCK = """AVAILABLE_AGENTS:
 - id=agt_11c0 name="code.gen" price=0.054 rep=3.50 skills=code,html,js,build
 - id=agt_12r0 name="code.critic" price=0.052 rep=3.55 skills=a11y,polish,review"""
 
-# The starvation backstop's shape: nobody clears the floor, so the block is the
-# top _MIN_ROUTABLE_AGENTS by SMOOTHED score (not lower bound), best first —
-# an ordering the planner reads as a ranking, so it is pinned too.
+# The starvation backstop's shape: nobody clears the floor, so the backstop
+# re-admits the top _MIN_ROUTABLE_AGENTS by SMOOTHED score (not lower bound) —
+# but the block lists them in REGISTRY order, like every other block. A
+# best-first order would read to the planner as a ranking the floor never
+# endorsed, so the order is pinned too.
 PINNED_STARVED_BLOCK = """AVAILABLE_AGENTS:
-- id=agt_12r0 name="code.critic" price=0.052 rep=0.56 skills=a11y,polish,review
+- id=agt_10b6 name="translate.42" price=0.007 rep=0.55 skills=i18n,42 langs
 - id=agt_11c0 name="code.gen" price=0.054 rep=0.55 skills=code,html,js,build
-- id=agt_10b6 name="translate.42" price=0.007 rep=0.55 skills=i18n,42 langs"""
+- id=agt_12r0 name="code.critic" price=0.052 rep=0.56 skills=a11y,polish,review"""
 
 
 def test_registry_prompt_block_is_byte_identical(seeded: object) -> None:
