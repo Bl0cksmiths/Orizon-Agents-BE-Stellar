@@ -647,3 +647,37 @@ def test_plan_steps_without_the_enriched_fields_still_validate() -> None:
     stored = StoredPlan(id="pln_beef", intent="build it", plan=Plan(steps=[full]), total_usdc=0.054, total_eta=2.6)
     assert StoredPlan.model_validate(stored.model_dump()) == stored
     assert StoredPlan.model_validate_json(stored.model_dump_json()) == stored
+
+
+def test_both_backstops_re_admit_by_one_rule(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One snapshot, one shortfall, the same agent re-admitted on both paths.
+
+    The two starvation backstops used to rank separately: the kit path by
+    smoothed score with the id breaking ties, the free-form path by smoothed
+    score alone with ties left to registry insertion order. So a tie — the
+    normal state of a fresh deployment, where every agent sits on the same
+    prior — could re-admit different agents for the same world depending on
+    which intent was typed. The registry is loaded in REVERSE id order here so
+    insertion order and id order disagree, and the tie has to be broken by the
+    rule rather than by luck.
+    """
+    agents = state.list_agents()
+    state.agents.clear()
+    for agent in reversed(agents):
+        state.add_agent(agent)
+
+    # Exactly two agents clear the floor on both paths — code.gen and the
+    # deploy seal, both kit roles — so each backstop is one short. Tokens and
+    # the critic tie for the best score below the floor; nothing can
+    # substitute for them, the copywriter being under the floor too.
+    reps = {a.id: _sub_floor(a.id, smoothed=3000) for a in state.list_agents()}
+    reps["agt_11c0"] = _clears_floor("agt_11c0")
+    reps["agt_08j2"] = _clears_floor("agt_08j2")
+    reps["agt_02k2"] = _sub_floor("agt_02k2", smoothed=6000)
+    reps["agt_12r0"] = _sub_floor("agt_12r0", smoothed=6000)
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
+
+    assert [n.agent_id for n in kit.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
+    assert [n.agent_id for n in free_form.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
