@@ -183,6 +183,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
     # would otherwise still be pending when the loop closes.
     await stop_refresh_retry()
+    # Same reason: a scorer read still in flight must not outlive the loop.
+    await rating_writer.stop()
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
     await registry_sync.stop()
