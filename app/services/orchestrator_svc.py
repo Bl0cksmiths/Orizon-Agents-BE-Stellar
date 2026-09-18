@@ -463,6 +463,14 @@ def build_planning_prompt(registry_block: str, intent: str) -> str:
     return "\n\n".join([registry_block, fence_user_input(intent), "Return the Plan."])
 
 
+class _DroppedKitRole(NamedTuple):
+    """A sub-floor kit role with no substitute, held for the starvation backstop."""
+
+    agent: Agent
+    rationale: str
+    info: reputation_svc.RepInfo | None
+
+
 async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_svc.RepInfo]) -> DecomposeResponse:
     """Deterministic 6-step plan for a curated demo intent. No LLM call.
 
@@ -490,7 +498,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     # Sub-floor agents with no substitute — held until after the loop so the
     # starvation backstop can re-admit the strongest before the rest are
     # recorded as plain exclusions.
-    dropped: list[tuple[Agent, str, reputation_svc.RepInfo | None]] = []
+    dropped: list[_DroppedKitRole] = []
 
     for agent_id, rationale in _KIT_PIPELINE:
         agent = state.agents.get(agent_id)
@@ -534,7 +542,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             taken.add(sub.id)
             notices.append(substitution(agent, sub, info))
         else:
-            dropped.append((agent, rationale, info))
+            dropped.append(_DroppedKitRole(agent, rationale, info))
 
     # Starvation backstop — reuse _MIN_ROUTABLE_AGENTS rather than invent a
     # second rule. If the floor left too few steps, re-admit dropped kit agents
@@ -546,9 +554,9 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     # free-form path's rule. Score alone once turned a battered tetris kit into
     # research + brand + tokens with no code.gen: three paid steps preparing
     # inputs for a build nobody was asked to do, and no artifact at the end.
-    by_priority = sorted(dropped, key=lambda d: (d[0].id != _KIT_BUILDER_ID, _backstop_rank(d[0], reps)))
+    by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
     deficit = max(0, _MIN_ROUTABLE_AGENTS - len(steps))
-    readmit_ids = {d[0].id for d in by_priority[:deficit]}
+    readmit_ids = {d.agent.id for d in by_priority[:deficit]}
     if readmit_ids:
         logger.warning(
             "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s) by smoothed score",
