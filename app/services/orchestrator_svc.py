@@ -310,11 +310,14 @@ def _routable_registry(
     # `unbound_exclusions` sorts the third, so the whole list is a pure
     # function of the registry and the reputation snapshot.
     #
-    # An agent that CLEARED the floor and merely lost a top-N slot to the
-    # backstop gets no notice: the closed reason vocabulary has no value for it
-    # (rightly — it was not excluded by the floor), and "not offered to the
-    # planner" is the signal the story forbids, since it would list most of the
-    # registry on every request.
+    # Every agent that CLEARED the floor is offered — the backstop only ever
+    # adds to them — so the only floor exclusions are sub-floor agents the
+    # backstop did not reach, and no agent is both offered and excluded.
+    #
+    # Deliberately uncapped, unlike the unbound group: every entry here is a
+    # verdict the floor reached against an agent the buyer could otherwise have
+    # been routed to, and story 3.02 forbids a floor verdict going unsaid. A
+    # cap would silence exactly the agents past the cut.
     notices = [
         below_floor_exclusion(a, reps.get(a.id))
         for a in agents
