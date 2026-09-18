@@ -77,6 +77,9 @@ class JsonLogFormatter(logging.Formatter):
 _log_handler = logging.StreamHandler()
 _log_handler.setFormatter(JsonLogFormatter())
 _log_handler.addFilter(RequestIdLogFilter())
+# Last, so it masks the record every earlier filter has finished with. See
+# SecretRedactionLogFilter for why this cannot be left to call sites.
+_log_handler.addFilter(SecretRedactionLogFilter())
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 logger = logging.getLogger(__name__)
 
