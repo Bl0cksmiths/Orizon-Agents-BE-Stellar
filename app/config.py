@@ -1,6 +1,7 @@
 import base64
 import binascii
 import logging
+import math
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -337,6 +338,53 @@ class Settings(BaseSettings):
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reputation_read_has_a_real_bound(self) -> "Settings":
+        """Fail fast when the batched reputation read has no usable deadline.
+
+        fetch_reps (services/reputation_svc.py) hands this number to
+        asyncio.wait_for as the deadline for the whole batch. The budget rule
+        below only ever looked UP — it caps the bound at a share of the
+        planning budget — so nothing stopped it from going down to nothing.
+        wait_for treats a deadline of 0, any negative value, or NaN as already
+        expired: the gather is cancelled before a single rep_state read can
+        answer, every agent falls back to the prior marked degraded, and every
+        plan goes out flagged reputation_degraded. Under the shipped config a
+        prior-only agent clears the floor, so the floor then fails OPEN for
+        the life of the process — an agent the ledger has already rated below
+        it is routable again, with the chain perfectly healthy. The degradation
+        policy accepts failing open because an outage is bounded by the read
+        TTL and by this timeout; a timeout that expires on arrival turns a
+        bounded outage into a permanent one that no RPC recovery can end.
+
+        inf is the opposite failure: no bound at all, so a hung RPC holds every
+        decompose for as long as the socket does — the exact incident this
+        timeout exists to absorb. A finite planning budget happens to catch it
+        in the share rule below, but only as a ratio; refusing it here names
+        the actual problem. NaN is refused here for a sharper reason still: it
+        compares false against everything, so the share rule cannot see it.
+
+        Raised rather than logged, for the budget rule's own reason: it can
+        only reject a number this file declares, which the deploy that typed it
+        can untype, and what it prevents is silent — reads "succeed" at the
+        prior, nothing errors, and the only symptom is a trust gate that has
+        stopped gating.
+        """
+        bound = self.reputation_batch_timeout_seconds
+        if not (math.isfinite(bound) and bound > 0):
+            # Read from the field rather than restated, so the advice cannot
+            # drift from the default it names.
+            default = type(self).model_fields["reputation_batch_timeout_seconds"].default
+            raise ValueError(
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS={bound:g} is not a positive, finite number of seconds. "
+                "A deadline of zero, below zero or NaN expires before any reputation read can answer, so every "
+                "agent is scored on the prior, every plan is flagged reputation_degraded and the routing floor "
+                "stops filtering anyone; inf removes the bound, so a hung Soroban RPC stalls every /decompose. "
+                "Set REPUTATION_BATCH_TIMEOUT_SECONDS to a positive number of seconds within the planning budget "
+                f"(the default is {default:g})."
             )
         return self
 
