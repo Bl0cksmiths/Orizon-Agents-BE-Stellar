@@ -685,20 +685,30 @@ async def decompose(intent: str) -> DecomposeResponse:
         )
 
     if not cleaned:
-        # Fall back to a minimal safe plan so the UI never gets stuck. No
-        # listing check: `agt_01h8` is seeded, `seed.py` ships it "online", and
-        # registry_sync skips the whole `agt_` namespace — so no on-chain
-        # `set_active` call can reach it. A guard here would be a branch for a
-        # state that has no producer.
-        copy_agent = state.agents["agt_01h8"]
+        # Fall back to a minimal safe plan so the UI never gets stuck — drawn
+        # from the shortlist like any model step, never from outside it. The
+        # copywriter used to be hardcoded here on the grounds that nothing
+        # on-chain can delist it; true, but the FLOOR can exclude it, and the
+        # fallback then routed to an agent the plan card was simultaneously
+        # reporting as below the floor.
+        fallback = _fallback_agent(shortlist.offered, reps)
+        if fallback is None:
+            # Everything offered was delisted or unbound while the planner ran.
+            raise NoRoutableAgentsError("every offered agent left the registry during planning")
+        info = reps.get(fallback.id)
         cleaned = [
             PlanStep(
-                agent_id=copy_agent.id,
-                agent_name=copy_agent.name,
-                rationale="fallback: generate copy for the intent",
-                est_price_usdc=copy_agent.price,
+                agent_id=fallback.id,
+                agent_name=fallback.name,
+                rationale=(
+                    "fallback: generate copy for the intent"
+                    if fallback.id == _FALLBACK_AGENT_ID
+                    else "fallback: the planner returned no usable step, so the top-ranked shortlisted agent takes it"
+                ),
+                est_price_usdc=fallback.price,
                 est_eta_seconds=0.8,
-                **_rep_fields(reps.get(copy_agent.id)),
+                degraded=not reputation_svc.passes_floor(info),
+                **_rep_fields(info),
             )
         ]
 
