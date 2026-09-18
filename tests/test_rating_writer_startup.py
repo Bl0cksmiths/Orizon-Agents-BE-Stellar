@@ -152,6 +152,24 @@ def test_start_checks_and_reports_without_being_awaited(monkeypatch, caplog):
     assert "ratings writer ok" in record.getMessage()
 
 
+def test_a_second_start_keeps_the_check_already_running(monkeypatch, caplog):
+    """Idempotent, like registry_sync.start: one boot, one read, one line."""
+    _signs_as(monkeypatch, SIGNER)
+    monkeypatch.setattr(sc, "ledger_scorer", lambda ledger: SIGNER)
+
+    async def _boot_twice():
+        rw.start()
+        first = rw._report_task
+        rw.start()
+        assert rw._report_task is first
+        assert first is not None
+        await first
+
+    with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
+        asyncio.run(_boot_twice())
+    assert len(_writer_records(caplog)) == 1
+
+
 def test_stop_cancels_a_check_still_waiting_on_the_chain(monkeypatch, caplog):
     _signs_as(monkeypatch, SIGNER)
     release = _hanging_chain(monkeypatch)
