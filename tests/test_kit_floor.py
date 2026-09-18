@@ -181,3 +181,26 @@ def test_kit_step_for_unseeded_agent_is_skipped_not_crashed(seeded: object) -> N
     assert "agt_08j2" not in ids
     assert len(resp.steps) == 5
     assert not any(n.agent_id == "agt_08j2" for n in resp.notices)
+
+
+def test_backstop_re_admits_code_gen_before_higher_scored_roles(seeded: object) -> None:
+    # The audit's case. Every kit agent is under the floor and so is the
+    # copywriter, so no role has a substitute and all six are dropped. By score
+    # alone the backstop re-admitted research + brand + tokens: three paid
+    # steps preparing inputs for a build no step performs, and no artifact.
+    # The builder role outranks score, then the shared ranking fills the rest.
+    scores = {
+        "agt_09l5": 5000,
+        "agt_05x7": 4900,
+        "agt_02k2": 4800,
+        "agt_11c0": 4000,
+        "agt_12r0": 3900,
+        "agt_08j2": 3800,
+        "agt_01h8": 3000,
+    }
+    resp = _run_kit({aid: _sub_floor(aid, smoothed=s) for aid, s in scores.items()})
+
+    assert [s.agent_id for s in resp.steps] == ["agt_09l5", "agt_05x7", "agt_11c0"]
+    assert all(s.degraded for s in resp.steps)
+    assert {n.agent_id for n in resp.notices if n.kind == "degraded"} == {"agt_09l5", "agt_05x7", "agt_11c0"}
+    assert {n.agent_id for n in resp.notices if n.kind == "excluded"} == {"agt_02k2", "agt_12r0", "agt_08j2"}
