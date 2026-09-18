@@ -168,3 +168,13 @@ def test_the_floor_refusal_names_the_value_the_consequence_and_the_fix():
     assert "reputation_degraded" in message
     assert "routing floor stops filtering anyone" in message
     assert f"the default is {Settings.model_fields['reputation_batch_timeout_seconds'].default:g}" in message
+
+
+@pytest.mark.parametrize("typed", ["0", "-1", "nan", "NaN", "inf", "-inf"])
+def test_the_floor_holds_for_the_strings_a_dashboard_sends(monkeypatch, typed):
+    # Render hands the process a string. pydantic parses "nan" and "inf" to
+    # floats without complaint, so the refusal has to hold on the path a
+    # deployment actually takes, not only for Python literals.
+    monkeypatch.setenv("REPUTATION_BATCH_TIMEOUT_SECONDS", typed)
+    with pytest.raises(ValidationError, match="REPUTATION_BATCH_TIMEOUT_SECONDS"):
+        _settings()
