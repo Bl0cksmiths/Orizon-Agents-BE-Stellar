@@ -15,6 +15,7 @@ as those suites do themselves, so this file fails for its own reasons only.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 import pytest
