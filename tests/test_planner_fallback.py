@@ -24,7 +24,8 @@ from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
 from app.demo_kits import detect_kit
-from app.schemas import DecomposeResponse, Plan, PlanStep
+from app.routers import orchestrator as orchestrator_router
+from app.schemas import DecomposeResponse, Plan, PlanStep, StoredPlan
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.state import state
