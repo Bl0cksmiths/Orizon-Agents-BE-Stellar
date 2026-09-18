@@ -140,11 +140,13 @@ def _backstop_rank(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> tup
     agents depending on which path planned the intent, which is exactly the
     divergence `plan_notices` exists to rule out for the notices themselves.
 
-    Only sub-floor agents are ever ranked by it, and a sub-floor agent always
-    has an entry (`passes_floor(None)` admits the agent outright), so the 0 for
-    a missing entry is a totality guard, not a policy. It is deliberately not
-    `Agent.rep`: that is a number an on-chain registrant writes about itself,
-    and has no place in a ranking that stands in for evidence.
+    The backstops only ever rank sub-floor agents, and a sub-floor agent always
+    has an entry (`passes_floor(None)` admits the agent outright). The one
+    other caller, `_fallback_agent`, uses it as a last tie-breaker, and
+    `fetch_reps` returns an entry for every agent it is asked about. So the 0
+    for a missing entry is a totality guard, not a policy — and it is
+    deliberately not `Agent.rep`, a number an on-chain registrant writes about
+    itself, which has no place in a ranking that stands in for evidence.
     """
     info = reps.get(agent.id)
     return (-(info.smoothed_bps if info is not None else 0), agent.id)
