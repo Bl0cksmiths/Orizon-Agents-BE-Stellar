@@ -72,3 +72,19 @@ def test_the_scorer_is_read_under_its_own_key_not_the_admins():
     took the first address it met would report the admin as the scorer."""
     entry = _instance_entry([(_key("Admin"), scval.to_address(ADMIN)), (_key("Scorer"), scval.to_address(SCORER))])
     assert sc._instance_storage_address(entry, sc._SCORER_STORAGE_KEY) == SCORER
+
+
+def test_the_key_is_the_contracttype_encoding_of_the_variant():
+    """`DataKey::Scorer` is stored as vec[symbol("Scorer")]. A bare symbol —
+    the obvious guess — would silently match nothing and read as absent."""
+    entry = _instance_entry([(scval.to_symbol("Scorer"), scval.to_address(SCORER))])
+    assert sc._instance_storage_address(entry, sc._SCORER_STORAGE_KEY) is None
+
+
+def test_storage_without_a_scorer_is_a_definite_none():
+    entry = _instance_entry([(_key("Admin"), scval.to_address(ADMIN))])
+    assert sc._instance_storage_address(entry, sc._SCORER_STORAGE_KEY) is None
+
+
+def test_an_instance_with_no_storage_at_all_is_a_definite_none():
+    assert sc._instance_storage_address(_instance_entry(None), sc._SCORER_STORAGE_KEY) is None
