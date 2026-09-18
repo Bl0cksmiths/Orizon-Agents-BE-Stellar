@@ -39,7 +39,7 @@ cp .env.example .env
 | --- | --- | --- |
 | GET  | `/health`                            | liveness probe |
 | GET  | `/api/health`                        | the same liveness probe under the `/api` prefix |
-| GET  | `/readiness`                         | readiness probe — per-dependency config status, plus an informational `cold_start` (can a brand-new agent clear the floor?) |
+| GET  | `/readiness`                         | readiness probe — per-dependency config status, plus two informational blocks: `cold_start` (can a brand-new agent clear the floor?) and `ratings` (can this deployment write ratings — is its signer the ledger's scorer?) |
 | GET  | `/api/agents`                        | registry listing |
 | GET  | `/api/agents/{id}`                   | agent detail |
 | POST | `/api/orchestrator/decompose`        | intent → plan (real LLM) |
