@@ -247,3 +247,65 @@ def refresh_if_stale() -> None:
     """
     if _needs_read():
         _start_read()
+
+
+# ── saying it at boot ───────────────────────────────────────────
+
+
+def report(v: WriterVerdict) -> None:
+    """Log the verdict as one line: INFO when ratings can land, WARNING otherwise.
+
+    The healthy case speaks too, for the reason main.py's cold-start line does:
+    a check that is heard only when it fails cannot be told apart from one
+    that never ran. Every line names what an operator needs to act without
+    opening source — both addresses when they disagree — and none can carry a
+    secret: the signer is a public key, and read errors are type names.
+    """
+    ledger = settings.stellar_reputation_ledger
+    if v.status == "scorer":
+        logger.info(
+            "ratings writer ok: signer %s is the Scorer of ReputationLedger %s, so wallet-authorized "
+            "runs will write their ratings on-chain (simulated runs never rate, by design).",
+            v.signer,
+            ledger,
+        )
+    elif v.status == "not_scorer" and v.scorer is not None:
+        logger.warning(
+            "ratings writer BROKEN: STELLAR_SIGNING_KEY signs as %s, but ReputationLedger %s accepts "
+            "ratings only from its Scorer %s. Every rating submit will revert with Unauthorized, so no "
+            "paid run adds on-chain evidence and every agent stays on the prior — while /readiness "
+            "still reports the signer configured. Fix it on-chain: the ledger admin calls "
+            "set_scorer(%s). Swapping STELLAR_SIGNING_KEY instead would also change the settler and "
+            "sealer.",
+            v.signer,
+            ledger,
+            v.scorer,
+            v.signer,
+        )
+    elif v.status == "not_scorer":
+        logger.warning(
+            "ratings writer BROKEN: ReputationLedger %s stores no Scorer on %s — no contract instance "
+            "lives at that id on this network, or it is not a ReputationLedger. Every rating submit "
+            "will fail, so paid runs will not be rated. Check STELLAR_REPUTATION_LEDGER against the "
+            "ledger deployed for STELLAR_NETWORK=%s.",
+            ledger,
+            settings.stellar_network,
+            settings.stellar_network,
+        )
+    elif v.status == "unchecked":
+        logger.warning(
+            "ratings writer unchecked: could not read the Scorer of ReputationLedger %s (%s), so "
+            "whether signer %s may rate is unknown. Paid runs still submit their ratings, and if the "
+            "signer is not the Scorer each one reverts with Unauthorized. /readiness retries the read "
+            "and reports ratings.writer once it lands.",
+            ledger,
+            v.read_error,
+            v.signer,
+        )
+    else:
+        logger.warning(
+            "ratings writer off (%s): %s, so wallet-authorized runs will not be rated and no agent "
+            "earns on-chain evidence beyond the prior. Simulated runs never rate either, by design.",
+            v.status,
+            v.gap.problem if v.gap is not None else "configuration incomplete",
+        )
