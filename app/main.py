@@ -453,6 +453,36 @@ async def health() -> HealthResponse:
     return health_payload()
 
 
+class ColdStartReadiness(BaseModel):
+    """Whether this deployment can route an agent that has never been rated.
+
+    The startup line from `_report_cold_start_routability` says the same
+    thing, once per boot — and on the free tier a boot is every wake from idle,
+    so by the time anyone asks, the line is buried under a request log or gone
+    with the instance that wrote it. This puts the verdict behind a probe that
+    answers whenever it is asked, for the configuration actually in force: the
+    Render dashboard overrides render.yaml, so no repo file can say what it is.
+
+    Informational only — it never moves `status`, for the startup check's own
+    reason. Readiness answers "can this process serve"; a floor above the
+    prior's bound serves every request correctly and simply hires nobody new,
+    which is a policy an operator may intend (a curated network), not a missing
+    dependency. A not-ready answer would also misfire twice over: it would fail
+    probes on a deployment that is working as configured, and a monitor keyed on
+    the status would page someone about a decision rather than a fault.
+
+    Every field is copied from `reputation_svc.cold_start_margin()` rather than
+    recomputed, so this answer and the startup line cannot disagree. None of it
+    is secret: the floor and the prior inputs are already public on
+    /api/stellar/reputation/params, and the rest is arithmetic over them.
+    """
+
+    routable: bool  # a prior-only newcomer clears the routing floor
+    lower_bound_bps: int  # what a newcomer is scored on: the prior's lower bound
+    floor_bps: int  # REPUTATION_FLOOR_BPS as this process has it
+    margin_bps: int  # lower_bound_bps - floor_bps; negative locks newcomers out
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. Purely config-derived — no live
     network calls, so the probe stays cheap and deterministic."""
