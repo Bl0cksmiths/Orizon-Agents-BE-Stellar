@@ -250,3 +250,52 @@ def test_the_fallback_plan_is_stored_and_executable(
     assert r.json()["task_id"] == "tsk_fallback"
     assert [p.id for p in handed] == [plan["plan_id"]]
     assert [s.agent_id for s in handed[0].plan.steps] == ["agt_01h8"]
+
+
+def _sub_floor(agent_id: str, smoothed: int) -> RepInfo:
+    """An on-chain entry whose lower bound no plausible floor lets through."""
+    return RepInfo(
+        agent_id=agent_id,
+        smoothed_bps=smoothed,
+        lower_bound_bps=100,
+        avg_bps=smoothed,
+        count=3,
+        weight=5 * 10_000_000,
+        disputed=0,
+        dispute_rate_bps=0,
+        source="onchain",
+    )
+
+
+def test_a_failed_planners_fallback_is_judged_like_any_free_form_plan(
+    seeded: object, monkeypatch: pytest.MonkeyPatch, hermetic_settings: object
+) -> None:
+    # Nobody clears the floor and the copywriter scores best, so the
+    # starvation backstop re-admits it and the fallback, preferring it, routes
+    # below the floor. A failed planner changes nothing about how that plan is
+    # judged — same shortlist, same notices, same floor rule as any free-form
+    # plan — so the step is `degraded`, its `floor_relaxed` notice agrees, and
+    # the reputation it was judged on travels with it.
+    reps = {a.id: _sub_floor(a.id, 1000 + i * 10) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _sub_floor("agt_01h8", 5000)
+    # One read that fell back to the prior, which the plan must admit to.
+    reps["agt_12r0"] = reps["agt_12r0"].model_copy(update={"degraded": True})
+
+    async def _fake_reps(_ids: object, *_a: object, **_k: object) -> dict[str, RepInfo]:
+        return reps
+
+    async def _arun(_prompt: str) -> RunOutput:
+        return RunOutput(status=RunStatus.error, content="Connection error.")
+
+    monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
+    resp = _decompose(monkeypatch, _arun)
+
+    assert resp.planner_fallback is True
+    step = resp.steps[0]
+    assert (step.agent_id, step.degraded) == ("agt_01h8", True)
+    assert (step.rep_bps, step.rep_lower_bound_bps, step.rep_source) == (5000, 100, "onchain")
+    note = next(n for n in resp.notices if n.agent_id == "agt_01h8")
+    assert (note.kind, note.reason_code) == ("degraded", "floor_relaxed")
+    assert any(n.reason_code == "below_floor" for n in resp.notices)
+    assert resp.floor_bps == hermetic_settings.reputation_floor_bps
+    assert resp.reputation_degraded is True
