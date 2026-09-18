@@ -776,11 +776,14 @@ async def decompose(intent: str) -> DecomposeResponse:
         _bounded_plan(),
         timeout=settings.decompose_timeout_seconds,
     )
-    plan: Plan = result.content
+    plan = _planner_plan(result)
 
     # Clamp to the shortlist; backfill names + snap price to registry truth.
+    # A planner that produced no plan proposes no steps, so it lands in the
+    # empty-plan fallback below by the same road as a plan the clamp emptied.
+    proposed = plan.steps if plan is not None else []
     cleaned: list[PlanStep] = []
-    for step in plan.steps:
+    for step in proposed:
         if step.agent_id not in shortlist.offered:
             # The planner may only route to what it was OFFERED. The block is
             # what it was SHOWN and this is what it RETURNED, and the two are
