@@ -13,6 +13,7 @@ network, and an unstubbed read fails the test.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -259,3 +260,82 @@ def test_the_ttls_are_the_documented_ones():
     read (docs/reputation.md). A change here is a change to that promise."""
     assert rw.SCORER_TTL_SECONDS == 300.0
     assert rw.UNCHECKED_RETRY_SECONDS == 30.0
+
+
+# ── the bound ───────────────────────────────────────────────────
+
+
+def test_a_read_that_hangs_times_out_to_unchecked(monkeypatch):
+    """The read runs on a worker thread the loop cannot cancel; the verdict
+    must resolve at the bound anyway, as unchecked, not wait for the thread."""
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "SCORER_READ_TIMEOUT_SECONDS", 0.05)
+    release = threading.Event()
+
+    def _hung(ledger: str) -> str | None:
+        release.wait(5)
+        return SIGNER
+
+    monkeypatch.setattr(sc, "ledger_scorer", _hung)
+
+    async def _ask():
+        started = time.monotonic()
+        v = await rw.check()
+        elapsed = time.monotonic() - started
+        release.set()  # let the abandoned worker finish before the loop closes
+        return v, elapsed
+
+    v, elapsed = asyncio.run(_ask())
+    assert (v.status, v.signer, v.scorer) == ("unchecked", SIGNER, None)
+    assert v.read_error == "timed out after 0.05s"
+    assert elapsed < 2
+
+
+def test_the_bound_sits_above_the_clients_own_http_timeout():
+    """Below 5 s it would cut off a slow read the client would have allowed."""
+    assert rw.SCORER_READ_TIMEOUT_SECONDS > 5
+
+
+# ── the non-blocking path the probe uses ────────────────────────
+
+
+def test_verdict_never_touches_the_chain(monkeypatch):
+    configure(monkeypatch)
+    assert rw.verdict().status == "unchecked"  # the fixture fails any read
+
+
+def test_refresh_if_stale_starts_a_read_and_does_not_wait_for_it(monkeypatch):
+    configure(monkeypatch)
+    chain = on_chain(monkeypatch, Chain(scorer=SIGNER))
+
+    async def _probe_then_settle():
+        rw.refresh_if_stale()
+        before = rw.verdict().status  # returned without waiting
+        task = rw._read_task
+        assert task is not None
+        await task
+        return before, rw.verdict().status
+
+    assert asyncio.run(_probe_then_settle()) == ("unchecked", "scorer")
+    assert chain.reads == [LEDGER]
+
+
+def test_refresh_if_stale_leaves_a_fresh_read_alone(monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "_last_read", aged(1, scorer=SIGNER))
+
+    async def _probe():
+        rw.refresh_if_stale()
+        return rw._read_task
+
+    assert asyncio.run(_probe()) is None
+
+
+def test_refresh_if_stale_never_reads_for_a_config_verdict(monkeypatch):
+    configure(monkeypatch, key=False)
+
+    async def _probe():
+        rw.refresh_if_stale()
+        return rw._read_task
+
+    assert asyncio.run(_probe()) is None
