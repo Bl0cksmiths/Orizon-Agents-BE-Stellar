@@ -43,7 +43,7 @@ from app.config import settings
 from app.demo_kits import detect_kit
 from app.schemas import Agent, DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep
 from app.seed import seed_registry
-from app.services import orchestrator_svc
+from app.services import orchestrator_svc, reputation_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
@@ -556,3 +556,62 @@ def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypat
     for resp in (kit, free_form):
         # In emitted order, not sorted: the grouping is part of the contract.
         assert [(n.kind, n.agent_id, n.reason_code, n.lower_bound_bps, n.floor_bps) for n in resp.notices] == expected
+
+
+def test_both_paths_stamp_the_same_reputation_on_a_step(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The enriched step contract, identical on both paths.
+
+    A plan card renders the numbers the floor was judged on — the lower bound,
+    how many ratings stand behind it, how many were disputed, whether the read
+    even succeeded — from the step itself. If one path stamps them and the
+    other does not, the card for a free-form intent goes blank exactly where
+    the demo intent showed the evidence.
+
+    Two agents, one per question: code.gen with distinctive on-chain evidence,
+    and code.critic whose read FAILED and was served the prior. The second is
+    where `rep_degraded` and `degraded` must not be confused: the read failed,
+    the agent still cleared the floor, and nothing was re-admitted.
+    """
+    reps = {a.id: _clears_floor(a.id) for a in state.list_agents()}
+    reps["agt_11c0"] = RepInfo(
+        agent_id="agt_11c0",
+        smoothed_bps=8200,
+        lower_bound_bps=7100,
+        avg_bps=8400,
+        count=42,
+        weight=42 * 10_000_000,
+        disputed=3,
+        dispute_rate_bps=714,
+        source="onchain",
+    )
+    reps["agt_12r0"] = reputation_svc._prior_info("agt_12r0", degraded=True)
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0", "agt_12r0"])
+
+    for agent_id in ("agt_11c0", "agt_12r0"):
+        info = reps[agent_id]
+        expected = (
+            info.smoothed_bps,
+            info.source,
+            info.lower_bound_bps,
+            info.count,
+            info.dispute_rate_bps,
+            info.degraded,
+            False,
+        )
+        for resp in (kit, free_form):
+            step = next(s for s in resp.steps if s.agent_id == agent_id)
+            stamp = (
+                step.rep_bps,
+                step.rep_source,
+                step.rep_lower_bound_bps,
+                step.rep_count,
+                step.rep_dispute_rate_bps,
+                step.rep_degraded,
+                step.degraded,
+            )
+            assert stamp == expected
+
+    assert kit.reputation_degraded is True
+    assert free_form.reputation_degraded is True
