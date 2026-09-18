@@ -97,6 +97,8 @@ The plan as a whole says what shaped it, on both planning paths (all defaulted, 
 | `reputation_degraded` | at least one reputation read in this plan's snapshot **failed** and the prior was served, so the floor verdicts rest on an estimate |
 | `planner_fallback` | the steps are the deterministic **fallback plan**, not the planner's own — the planning model failed or returned no usable plan, or every step it chose was clamped away. Still stored, executable and held to the floor like any plan; always `false` on the demo-kit path |
 
+A free-form intent does not fail because the model did. A blank `OPENAI_API_KEY`, a refused connection or an upstream error is served the fallback plan with `planner_fallback: true`; the provider's message is logged with any API key redacted, and never returned. Only two conditions refuse the request: a planner that outlives `DECOMPOSE_TIMEOUT_SECONDS` (504 `decompose_timeout`), and a registry with nothing listed and dispatchable to offer, refused before any LLM call (503 `no_routable_agents`).
+
 After each settled workflow the settler submits one synthetic rating per step (`kind="auto"`), derived from verifiable workflow signals — did the worker deliver output, ship an artifact, trip critic violations — so scores are validation-gated rather than opinion. Submissions run sequentially (one scorer account) and are best-effort: a failed rating logs a trace line and never fails the workflow.
 
 Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /api/stellar/reputation/{id}` (one agent). Tunables:
