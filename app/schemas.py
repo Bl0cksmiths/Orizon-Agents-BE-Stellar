@@ -131,6 +131,9 @@ class PlanStep(BaseModel):
     # headline score, this is the number that decided whether the agent was
     # routable. Carried so a card can show both without a second request.
     rep_lower_bound_bps: int | None = None
+    # Lifetime rating count. 0 with `rep_source == "prior"` is a genuine cold
+    # start — a newcomer with no history, not an agent with a bad one.
+    rep_count: int | None = None
     # The designated agent this step replaced, when the reputation floor forced
     # a substitution on the kit path. None on the normal path. Lets the plan
     # card badge the step inline without re-joining the response notices.
