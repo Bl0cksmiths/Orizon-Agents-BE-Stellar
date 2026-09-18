@@ -159,3 +159,25 @@ def test_the_provider_message_is_logged_redacted_and_never_returned(
     assert "Incorrect API key provided" in logged[0]
     assert "sk-configured" not in logged[0]
     assert "abc*****wxyz" not in logged[0]
+
+
+def test_a_hung_planner_still_times_out_and_mints_no_plan(
+    seeded: object, monkeypatch: pytest.MonkeyPatch, hermetic_settings: object
+) -> None:
+    # The one planner failure that is NOT degraded. The caller has already
+    # waited out the whole budget, and the router answers it with 504
+    # `decompose_timeout` (tests/test_orchestrator_timeout.py) — never with a
+    # fallback plan served after the deadline it was promised.
+    monkeypatch.setattr(hermetic_settings, "decompose_timeout_seconds", 0.05)
+    # One slot, so a slot the timeout failed to give back would show.
+    monkeypatch.setattr(hermetic_settings, "decompose_max_concurrent", 1)
+
+    async def _hangs(_prompt: str) -> RunOutput:
+        await asyncio.sleep(30)
+        return RunOutput(status=RunStatus.completed, content=_code_gen_plan())
+
+    before = set(state.plans)
+    with pytest.raises(TimeoutError):
+        _decompose(monkeypatch, _hangs)
+    assert set(state.plans) == before
+    assert not orchestrator_svc._decompose_gate().locked()
