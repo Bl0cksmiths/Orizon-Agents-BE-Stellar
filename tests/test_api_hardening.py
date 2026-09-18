@@ -72,6 +72,30 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
     }
 
 
+def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(client, monkeypatch):
+    """The hostile config: a floor raised past the prior's bound. Nothing
+    errors — every newcomer just misses the floor forever — so the probe has
+    to say so. It says so without failing: the process serves correctly, and
+    a curated network that hires only rated agents is a policy, not an
+    outage (the startup check's own doctrine, app/main.py)."""
+    _configure_stellar(monkeypatch)
+    _pin_shipped_reputation(monkeypatch)
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "pdax_username", "")
+    monkeypatch.setattr(settings, "pdax_password", "")
+    monkeypatch.setattr(settings, "reputation_floor_bps", 6000)
+    r = client.get("/readiness")
+    assert r.status_code == 200
+    assert r.json() == {
+        "status": "ready",
+        "llm": "ok",
+        "stellar": "configured",
+        "signer": "absent",
+        "pdax": "unconfigured",
+        "cold_start": {"routable": False, "lower_bound_bps": 5677, "floor_bps": 6000, "margin_bps": -323},
+    }
+
+
 def test_readiness_503_when_llm_key_missing(client, monkeypatch):
     _configure_stellar(monkeypatch)
     monkeypatch.setattr(settings, "openai_api_key", "")
