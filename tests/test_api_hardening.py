@@ -41,13 +41,49 @@ def _configure_stellar(monkeypatch) -> None:
     monkeypatch.setattr(settings, "stellar_admin_address", VALID_G)
 
 
+def _pin_shipped_reputation(monkeypatch) -> None:
+    # The cold-start numbers are config, so a developer's .env would otherwise
+    # decide what the exact-equality assertions below expect.
+    monkeypatch.setattr(settings, "reputation_prior_bps", 7000)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", 12.0)
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+
+
 def test_readiness_ready_without_signing_key(client, monkeypatch):
     """Read-only deployments are legitimate: an absent signer is reported
     but never fails readiness (config.py doctrine)."""
     _configure_stellar(monkeypatch)
+    _pin_shipped_reputation(monkeypatch)
     monkeypatch.setattr(settings, "openai_api_key", "sk-test")
     monkeypatch.setattr(settings, "pdax_username", "")
     monkeypatch.setattr(settings, "pdax_password", "")
+    r = client.get("/readiness")
+    assert r.status_code == 200
+    # Exact equality on purpose: a field added to this probe has to be added
+    # here too, so nothing reaches an unauthenticated route unreviewed.
+    assert r.json() == {
+        "status": "ready",
+        "llm": "ok",
+        "stellar": "configured",
+        "signer": "absent",
+        "pdax": "unconfigured",
+        # 5677 - 5500: the shipped margin that keeps open registration real.
+        "cold_start": {"routable": True, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177},
+    }
+
+
+def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(client, monkeypatch):
+    """The hostile config: a floor raised past the prior's bound. Nothing
+    errors — every newcomer just misses the floor forever — so the probe has
+    to say so. It says so without failing: the process serves correctly, and
+    a curated network that hires only rated agents is a policy, not an
+    outage (the startup check's own doctrine, app/main.py)."""
+    _configure_stellar(monkeypatch)
+    _pin_shipped_reputation(monkeypatch)
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "pdax_username", "")
+    monkeypatch.setattr(settings, "pdax_password", "")
+    monkeypatch.setattr(settings, "reputation_floor_bps", 6000)
     r = client.get("/readiness")
     assert r.status_code == 200
     assert r.json() == {
@@ -56,7 +92,36 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         "stellar": "configured",
         "signer": "absent",
         "pdax": "unconfigured",
+        "cold_start": {"routable": False, "lower_bound_bps": 5677, "floor_bps": 6000, "margin_bps": -323},
     }
+
+
+def test_readiness_names_a_lockout_nobody_touched_the_floor_for(client, monkeypatch):
+    """The least visible way in: trimming the prior's evidence mass. The
+    newcomer's displayed score is still 3.5/5 and the floor never moved, yet
+    the bound sinks below it — so the bound itself has to be on the probe."""
+    _pin_shipped_reputation(monkeypatch)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", 4.0)
+    assert client.get("/readiness").json()["cold_start"] == {
+        "routable": False,
+        "lower_bound_bps": 4709,
+        "floor_bps": 5500,
+        "margin_bps": -791,
+    }
+
+
+def test_a_healthy_cold_start_does_not_rescue_a_not_ready_answer(client, monkeypatch):
+    """The other direction of "never gates": a routable cold start cannot
+    lift a deployment with no LLM key to ready, and the probe still reports
+    it — the operator reading a 503 is the one most likely to need it."""
+    _configure_stellar(monkeypatch)
+    _pin_shipped_reputation(monkeypatch)
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    r = client.get("/readiness")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "not_ready"
+    assert body["cold_start"]["routable"] is True
 
 
 def test_readiness_503_when_llm_key_missing(client, monkeypatch):

@@ -15,8 +15,10 @@ entirely of silence.
 
 CI cannot catch it either: the suite runs against the repo defaults or a
 test-time override, while this deployment takes its floor from the Render
-dashboard, which overrides render.yaml. A check at startup is the only one
-that sees the number actually in force.
+dashboard, which overrides render.yaml. Only a check in the running process
+sees the number actually in force — the startup line, and the `cold_start`
+object /readiness reports on demand, which the last test holds to the same
+verdict.
 
 So these tests pin the check itself: that it runs on the real boot path,
 that it names every number an operator needs to act on without opening
@@ -272,3 +274,27 @@ def test_the_reported_verdict_and_the_routing_verdict_cannot_disagree(monkeypatc
         monkeypatch.setattr(settings, "reputation_floor_bps", floor)
         assert rep.cold_start_margin().clears is rep.passes_floor(rep._prior_info("agt_new"))
         assert rep.cold_start_margin().clears is rep.prior_clears_floor()
+
+
+# ── the probe answers what the boot line said ───────────────────
+
+
+def test_the_readiness_probe_and_the_startup_line_cannot_disagree(monkeypatch, caplog):
+    """A free-tier instance restarts on every wake, so the boot line is often
+    gone by the time anyone asks; /readiness answers the same question on
+    demand. Two surfaces for one verdict are only safe while they are the same
+    verdict, so they are compared through the real boot path on both sides of
+    the boundary, with the service's own margin as the referee."""
+    for floor in (SHIPPED_FLOOR_BPS, SHIPPED_PRIOR_BOUND_BPS, SHIPPED_PRIOR_BOUND_BPS + 1, 9000):
+        monkeypatch.setattr(settings, "reputation_floor_bps", floor)
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME), TestClient(app) as client:
+            cold_start = client.get("/readiness").json()["cold_start"]
+        margin = rep.cold_start_margin()
+        assert cold_start == {
+            "routable": margin.clears,
+            "lower_bound_bps": margin.lower_bound_bps,
+            "floor_bps": floor,
+            "margin_bps": margin.margin_bps,
+        }
+        assert cold_start["routable"] is (_only_record(caplog).levelno == logging.INFO)
