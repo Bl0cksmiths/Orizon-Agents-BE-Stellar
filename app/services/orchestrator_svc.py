@@ -715,8 +715,8 @@ async def decompose(intent: str) -> DecomposeResponse:
             # The planner may only route to what it was OFFERED. The block is
             # what it was SHOWN and this is what it RETURNED, and the two are
             # not the same set: the model invents ids, repeats ones from an
-            # earlier turn, and follows its own instructions' standing
-            # preferences onto agents the floor just removed. Any of those
+            # earlier turn, and names agents it knows by reputation or from its
+            # instructions even when the floor just removed them. Any of those
             # would be stored, dispatched and paid for — a sub-floor agent
             # sailing past the trust gate with a `below_floor` notice about it
             # on the very same plan card. Holding the plan to `offered` is what
