@@ -127,6 +127,23 @@ class PlanStep(BaseModel):
     est_eta_seconds: float = Field(..., ge=0)
     rep_bps: int | None = None  # smoothed reputation at plan time (0..10_000)
     rep_source: Literal["onchain", "prior"] | None = None
+    # The conservative bound the routing floor is judged on — `rep_bps` is the
+    # headline score, this is the number that decided whether the agent was
+    # routable. Carried so a card can show both without a second request.
+    rep_lower_bound_bps: int | None = None
+    # Lifetime rating count. 0 with `rep_source == "prior"` and `rep_degraded`
+    # False is a genuine cold start — a newcomer with no history, not an agent
+    # with a bad one. A failed read also serves the prior with a 0 here, which
+    # is why the pair alone cannot say it.
+    rep_count: int | None = None
+    # Share of those ratings that were disputes, in bps (0..10_000).
+    rep_dispute_rate_bps: int | None = None
+    # True when this agent's on-chain reputation read FAILED and the Bayesian
+    # prior was served in its place, so every `rep_*` number above is an
+    # estimate. NOT `degraded` below: that one means the step was re-admitted
+    # below the floor — a verdict that was reached, where this says one could
+    # not be. Per-step mate to `DecomposeResponse.reputation_degraded`.
+    rep_degraded: bool = False
     # The designated agent this step replaced, when the reputation floor forced
     # a substitution on the kit path. None on the normal path. Lets the plan
     # card badge the step inline without re-joining the response notices.
@@ -156,10 +173,13 @@ class StoredPlan(BaseModel):
 # Two values story 3.02 asked for are deliberately absent:
 #
 #   * `inactive` — `AgentRegistry.set_active(id, false)` syncs to
-#     `Agent.status == "offline"`, but nothing in routing reads that field (its
-#     only consumer is a metrics counter). An agent is never excluded for being
-#     inactive, so shipping the value would put a state in the API contract that
-#     the system cannot produce.
+#     `Agent.status == "offline"`, and routing does read that field
+#     (`orchestrator_svc._is_listed`): a delisted agent is never offered to the
+#     planner, kept by the clamp, promoted as a substitute or re-admitted by a
+#     backstop. It is still not a reason code, because a withdrawal is not a
+#     verdict the floor reached — it is the operator's own decision, already
+#     visible on their `GET /api/agents` row — so a delisted agent gets no
+#     notice at all (argued in `orchestrator_svc._routable_registry`).
 #   * `not_selected_by_planner` — the story's own product rules forbid listing
 #     every unpicked agent, which would drown the signal this exists to create.
 #     A plan that simply did not choose an agent is not an exclusion.

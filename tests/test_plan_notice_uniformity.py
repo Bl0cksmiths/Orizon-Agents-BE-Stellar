@@ -41,9 +41,9 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.demo_kits import detect_kit
-from app.schemas import DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep
+from app.schemas import Agent, DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from app.seed import seed_registry
-from app.services import orchestrator_svc
+from app.services import orchestrator_svc, reputation_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
@@ -384,11 +384,12 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
     here, and this test is the note that stops someone "completing" the set:
 
       * `inactive` — `AgentRegistry.set_active(id, false)` syncs through to
-        `Agent.status == "offline"`, but nothing in routing reads that field;
-        its only consumer is a metrics counter (app/routers/metrics.py:117).
-        An agent is never excluded for being inactive, so shipping the value
-        would put a state in the API contract that the system cannot produce,
-        and a client would write a branch that can never run.
+        `Agent.status == "offline"`, and routing does honour it
+        (`orchestrator_svc._is_listed`): a delisted agent is never offered,
+        kept, substituted in or re-admitted. It is still not a reason code,
+        because a withdrawal is the operator's own decision rather than a
+        verdict the floor reached, so a delisted agent gets no notice at all —
+        tests/test_delisted_routing.py pins that silence.
       * `not_selected_by_planner` — forbidden by the story's own product
         rules, and by test_unpicked_agents_are_not_reported_as_excluded above:
         listing every unhired agent drowns the signal these notices exist to
@@ -514,3 +515,169 @@ def test_both_paths_report_a_degraded_reputation_snapshot(seeded: object, monkey
     # Fail-open, not fail-empty: the outage must not cost the buyer a plan.
     assert kit.steps
     assert free_form.steps
+
+
+def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-6 for the registry half of the vocabulary: `unbound_endpoint`.
+
+    An indexed on-chain agent with no endpoint is marketplace-visible and
+    un-routable. The free-form path told the buyer so; the kit path, which
+    every demo takes, said nothing — so the same registry produced two
+    different accounts of itself depending on the intent. Both paths now draw
+    on one selection and put it in the same place: after the floor's own
+    notices, ordered by id.
+    """
+    # Inserted out of id order, so the order below is the builder's and not
+    # the registry's.
+    for agent_id in ("ext_idx2", "ext_idx1"):
+        state.add_agent(
+            Agent(
+                id=agent_id,
+                name=f"{agent_id}.remote",
+                skills=["remote"],
+                price=0.02,
+                rep=4.99,
+                status="online",
+                runs=0,
+                source="onchain",
+            )
+        )
+    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
+
+    floor = settings.reputation_floor_bps
+    expected = [
+        ("excluded", UNSUBSTITUTABLE_KIT_AGENT, "below_floor", SUB_FLOOR_LOWER_BPS, floor),
+        ("excluded", "ext_idx1", "unbound_endpoint", None, floor),
+        ("excluded", "ext_idx2", "unbound_endpoint", None, floor),
+    ]
+    for resp in (kit, free_form):
+        # In emitted order, not sorted: the grouping is part of the contract.
+        assert [(n.kind, n.agent_id, n.reason_code, n.lower_bound_bps, n.floor_bps) for n in resp.notices] == expected
+
+
+def test_both_paths_stamp_the_same_reputation_on_a_step(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The enriched step contract, identical on both paths.
+
+    A plan card renders the numbers the floor was judged on — the lower bound,
+    how many ratings stand behind it, how many were disputed, whether the read
+    even succeeded — from the step itself. If one path stamps them and the
+    other does not, the card for a free-form intent goes blank exactly where
+    the demo intent showed the evidence.
+
+    Two agents, one per question: code.gen with distinctive on-chain evidence,
+    and code.critic whose read FAILED and was served the prior. The second is
+    where `rep_degraded` and `degraded` must not be confused: the read failed,
+    the agent still cleared the floor, and nothing was re-admitted.
+    """
+    reps = {a.id: _clears_floor(a.id) for a in state.list_agents()}
+    reps["agt_11c0"] = RepInfo(
+        agent_id="agt_11c0",
+        smoothed_bps=8200,
+        lower_bound_bps=7100,
+        avg_bps=8400,
+        count=42,
+        weight=42 * 10_000_000,
+        disputed=3,
+        dispute_rate_bps=714,
+        source="onchain",
+    )
+    reps["agt_12r0"] = reputation_svc._prior_info("agt_12r0", degraded=True)
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0", "agt_12r0"])
+
+    for agent_id in ("agt_11c0", "agt_12r0"):
+        info = reps[agent_id]
+        expected = (
+            info.smoothed_bps,
+            info.source,
+            info.lower_bound_bps,
+            info.count,
+            info.dispute_rate_bps,
+            info.degraded,
+            False,
+        )
+        for resp in (kit, free_form):
+            step = next(s for s in resp.steps if s.agent_id == agent_id)
+            stamp = (
+                step.rep_bps,
+                step.rep_source,
+                step.rep_lower_bound_bps,
+                step.rep_count,
+                step.rep_dispute_rate_bps,
+                step.rep_degraded,
+                step.degraded,
+            )
+            assert stamp == expected
+
+    assert kit.reputation_degraded is True
+    assert free_form.reputation_degraded is True
+
+
+def test_plan_steps_without_the_enriched_fields_still_validate() -> None:
+    """The four reputation fields on a step are additive, like the rest of 3.02.
+
+    `PlanStep` is parsed back from stored plans and is also the planner's
+    output schema, so a required field would reject every plan written before
+    this deploy and every model answer that leaves it out — which is all of
+    them, since the model is never asked for reputation.
+    """
+    step = PlanStep(agent_id="agt_11c0", rationale="build it", est_price_usdc=0.054, est_eta_seconds=2.6)
+    assert (step.rep_lower_bound_bps, step.rep_count, step.rep_dispute_rate_bps, step.rep_degraded) == (
+        None,
+        None,
+        None,
+        False,
+    )
+
+    # And the populated shape survives storage, in memory and over the wire.
+    full = step.model_copy(
+        update={
+            "rep_bps": 8200,
+            "rep_source": "onchain",
+            "rep_lower_bound_bps": 7100,
+            "rep_count": 42,
+            "rep_dispute_rate_bps": 714,
+            "rep_degraded": True,
+        }
+    )
+    stored = StoredPlan(id="pln_beef", intent="build it", plan=Plan(steps=[full]), total_usdc=0.054, total_eta=2.6)
+    assert StoredPlan.model_validate(stored.model_dump()) == stored
+    assert StoredPlan.model_validate_json(stored.model_dump_json()) == stored
+
+
+def test_both_backstops_re_admit_by_one_rule(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One snapshot, one shortfall, the same agent re-admitted on both paths.
+
+    The two starvation backstops used to rank separately: the kit path by
+    smoothed score with the id breaking ties, the free-form path by smoothed
+    score alone with ties left to registry insertion order. So a tie — the
+    normal state of a fresh deployment, where every agent sits on the same
+    prior — could re-admit different agents for the same world depending on
+    which intent was typed. The registry is loaded in REVERSE id order here so
+    insertion order and id order disagree, and the tie has to be broken by the
+    rule rather than by luck.
+    """
+    agents = state.list_agents()
+    state.agents.clear()
+    for agent in reversed(agents):
+        state.add_agent(agent)
+
+    # Exactly two agents clear the floor on both paths — code.gen and the
+    # deploy seal, both kit roles — so each backstop is one short. Tokens and
+    # the critic tie for the best score below the floor; nothing can
+    # substitute for them, the copywriter being under the floor too.
+    reps = {a.id: _sub_floor(a.id, smoothed=3000) for a in state.list_agents()}
+    reps["agt_11c0"] = _clears_floor("agt_11c0")
+    reps["agt_08j2"] = _clears_floor("agt_08j2")
+    reps["agt_02k2"] = _sub_floor("agt_02k2", smoothed=6000)
+    reps["agt_12r0"] = _sub_floor("agt_12r0", smoothed=6000)
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
+
+    assert [n.agent_id for n in kit.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
+    assert [n.agent_id for n in free_form.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]

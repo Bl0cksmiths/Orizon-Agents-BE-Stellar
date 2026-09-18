@@ -5,7 +5,7 @@ import logging
 import random
 import re
 import secrets
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 
 # The reputation floor may never starve the planner of choices.
 _MIN_ROUTABLE_AGENTS = 3
+
+
+class NoRoutableAgentsError(RuntimeError):
+    """No agent can take a step: nothing is both listed and dispatchable.
+
+    The starvation backstop can relax the reputation floor, but it cannot
+    conjure an agent — it only re-admits from the listed, dispatchable set, and
+    when that set is empty (every operator delisted, every endpoint unbound)
+    there is nothing honest to plan with. The one thing this path must never do
+    about it is route to an agent it did not offer, which is what the old
+    hardcoded fallback did. So the request is refused instead, before any LLM
+    call is spent on a prompt with no agents in it.
+
+    A distinct type because it is not a planner failure and not a bad request:
+    it is the service being temporarily unable to serve (503, retryable once an
+    agent is relisted or bound), and a caller has to be able to tell it apart
+    from an upstream fault to say so.
+    """
+
 
 # Gate on the free-form planning LLM call. /execute's fan-out is bounded by
 # orchestrator_max_concurrent (execution_svc); this is the same protection for
@@ -88,10 +107,24 @@ def _is_listed(agent: Agent) -> bool:
 
 
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
-    """PlanStep reputation stamp — empty when the agent has no rep entry."""
+    """PlanStep reputation stamp — empty when the agent has no rep entry.
+
+    The one place a step's reputation is stamped, on every path (kit step,
+    substitute, re-admission, model step, fallback), so a card can never show
+    a lower bound on one path and not another. Everything here comes from the
+    snapshot the floor was applied with: a card that re-read reputation later
+    could show a bound the plan was never judged on.
+    """
     if info is None:
         return {}
-    return {"rep_bps": info.smoothed_bps, "rep_source": info.source}
+    return {
+        "rep_bps": info.smoothed_bps,
+        "rep_source": info.source,
+        "rep_lower_bound_bps": info.lower_bound_bps,
+        "rep_count": info.count,
+        "rep_dispute_rate_bps": info.dispute_rate_bps,
+        "rep_degraded": info.degraded,
+    }
 
 
 def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
@@ -106,15 +139,44 @@ def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
     `PlanStep.degraded` and `PlanFloorNotice.kind == "degraded"` both mean
     "re-admitted BELOW the floor by the starvation backstop" — a verdict that
     was reached, not one that could not be. A plan can carry either without the
-    other.
+    other. `PlanStep.rep_degraded` is this same fact per step, stamped by
+    `_rep_fields`, so a card can say WHICH agent's numbers are an estimate.
     """
     return any(info.degraded for info in reps.values())
+
+
+def _backstop_rank(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> tuple[int, str]:
+    """Sort key for the starvation backstop: best smoothed score first, id breaking ties.
+
+    ONE rule for both planning paths. They used to rank separately — the kit
+    path by `(-smoothed, id)`, the free-form path by smoothed score alone, ties
+    left to registry insertion order and self-declared `Agent.rep` standing in
+    for a missing entry — so one reputation snapshot could re-admit different
+    agents depending on which path planned the intent, which is exactly the
+    divergence `plan_notices` exists to rule out for the notices themselves.
+
+    The backstops only ever rank sub-floor agents, and a sub-floor agent always
+    has an entry (`passes_floor(None)` admits the agent outright). The one
+    other caller, `_fallback_agent`, uses it as a last tie-breaker, and
+    `fetch_reps` returns an entry for every agent it is asked about. So the 0
+    for a missing entry is a totality guard, not a policy — and it is
+    deliberately not `Agent.rep`, a number an on-chain registrant writes about
+    itself, which has no place in a ranking that stands in for evidence.
+    """
+    info = reps.get(agent.id)
+    return (-(info.smoothed_bps if info is not None else 0), agent.id)
 
 
 # Kit-pipeline agent ids. Substitutes are drawn from OUTSIDE this set —
 # borrowing one kit role's agent to fill another is itself a silent reshuffle,
 # which the product rules forbid.
 _KIT_AGENT_IDS: frozenset[str] = frozenset(aid for aid, _ in _KIT_PIPELINE)
+
+# The kit role that produces the deliverable. Every other role feeds it (brief,
+# brand, tokens) or refines and seals what it made, and code.gen is the worker
+# that serves the kit's artifact — so a kit plan without it hands the buyer no
+# artifact at all, only the paid-for inputs to a build no step performs.
+_KIT_BUILDER_ID = "agt_11c0"
 
 
 def _kit_step(
@@ -230,10 +292,49 @@ def _prompt_name(name: str) -> str:
     return f'"{safe}"'
 
 
+class _Shortlist(NamedTuple):
+    """What the free-form planner may route to, and what the buyer is told.
+
+    `offered` is the same set `block` lists, carried as data so the clamp can
+    hold the model to it: the block is what the planner was SHOWN, the model's
+    plan is what it RETURNED, and only ids in the first may survive into the
+    second. Re-deriving the set from the prompt string would be parsing our own
+    output back, and re-deriving it from state after the LLM call would ask a
+    different question of a registry that may have moved in the meantime.
+    """
+
+    block: str
+    notices: list[PlanFloorNotice]
+    offered: frozenset[str]
+
+
+def _unbound_notices() -> list[PlanFloorNotice]:
+    """`unbound_endpoint` notices for the registry as it stands — both paths.
+
+    Unbound on-chain agents are a registry fact, not a floor verdict, so they
+    are read from the whole catalog rather than from a routable subset (which
+    they are by definition absent from), and the fact does not depend on which
+    path planned the intent. One selection, called by both, so the two cannot
+    disagree about which agents it names.
+
+    Seeded agents are skipped: every one ships with a local worker, so an
+    unbound seeded agent is a deployment defect to fix, not a buyer-facing
+    exclusion. Delisted agents are skipped as well — a withdrawn agent gets no
+    notice under any reason code, argued at the call in `_routable_registry`.
+
+    Reads registry and binding state, never reputation, and `unbound_exclusions`
+    orders by id before it caps, so the kit path's determinism promise holds:
+    the same registry yields the same notices.
+    """
+    return unbound_exclusions(
+        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
+    )
+
+
 def _routable_registry(
     reps: dict[str, reputation_svc.RepInfo],
-) -> tuple[str, list[PlanFloorNotice]]:
-    """The AVAILABLE_AGENTS block, AND the floor actions that shaped it.
+) -> _Shortlist:
+    """The AVAILABLE_AGENTS block, the floor actions that shaped it, and its ids.
 
     The routable set is a subtraction, and until story 3.02 only the remainder
     survived: the complement was dropped on the floor of a list comprehension
@@ -246,8 +347,8 @@ def _routable_registry(
     the planner plans and would surface as unrelated assertions failing
     downstream.
     """
-    # Two subtractions, both on the ASSIGNMENT rather than on `routable`,
-    # because the floor-starvation fallback below re-sorts THIS list:
+    # Two subtractions, both on the ASSIGNMENT rather than on `cleared`,
+    # because the floor-starvation backstop below re-admits from THIS list:
     #
     #   * an indexed on-chain agent (story 1.02) is marketplace-visible but only
     #     planner-routable once an operator binds it an endpoint (story 2.01) —
@@ -259,32 +360,45 @@ def _routable_registry(
     #     their own service, and re-admitting on starvation would route paid
     #     work to an operator who asked us to stop.
     agents = [a for a in state.list_agents() if _is_listed(a) and is_dispatchable(a.id)]
-    routable = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
-    if len(routable) < _MIN_ROUTABLE_AGENTS:
+    cleared = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
+    # Starvation backstop: TOP UP the agents that cleared the floor, never
+    # replace them. Re-ranking the whole dispatchable set and keeping the top
+    # _MIN_ROUTABLE_AGENTS used to push agents that PASSED the floor out of the
+    # prompt in favour of better-scored ones that failed it — the floor then
+    # made the shortlist less trustworthy than no floor at all, and every
+    # `floor_relaxed` notice claimed a shortfall the plan had manufactured.
+    # Only the deficit is re-admitted, in the order the kit path uses too.
+    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(cleared))
+    readmitted = sorted(
+        (a for a in agents if not reputation_svc.passes_floor(reps.get(a.id))),
+        key=lambda a: _backstop_rank(a, reps),
+    )[:deficit]
+    if readmitted:
         logger.warning(
-            "reputation floor left only %d/%d agents routable; keeping top %d by smoothed score",
-            len(routable),
+            "reputation floor left only %d/%d agents routable; re-admitting %d below it by smoothed score",
+            len(cleared),
             len(agents),
-            _MIN_ROUTABLE_AGENTS,
+            len(readmitted),
         )
-        routable = sorted(
-            agents,
-            key=lambda a: reps[a.id].smoothed_bps if a.id in reps else round(a.rep * 2000),
-            reverse=True,
-        )[:_MIN_ROUTABLE_AGENTS]
 
-    offered = {a.id for a in routable}
+    offered = {a.id for a in cleared} | {a.id for a in readmitted}
+    # Registry order whichever rule admitted an agent, so a re-admission never
+    # reads to the planner as a promotion to the top of the list.
+    routable = [a for a in agents if a.id in offered]
     # Order is part of the contract — the plan card renders these in sequence,
     # and a list that reshuffles between two identical requests reads as the
     # system changing its mind. Registry order drives the first two groups and
     # `unbound_exclusions` sorts the third, so the whole list is a pure
     # function of the registry and the reputation snapshot.
     #
-    # An agent that CLEARED the floor and merely lost a top-N slot to the
-    # backstop gets no notice: the closed reason vocabulary has no value for it
-    # (rightly — it was not excluded by the floor), and "not offered to the
-    # planner" is the signal the story forbids, since it would list most of the
-    # registry on every request.
+    # Every agent that CLEARED the floor is offered — the backstop only ever
+    # adds to them — so the only floor exclusions are sub-floor agents the
+    # backstop did not reach, and no agent is both offered and excluded.
+    #
+    # Deliberately uncapped, unlike the unbound group: every entry here is a
+    # verdict the floor reached against an agent the buyer could otherwise have
+    # been routed to, and story 3.02 forbids a floor verdict going unsaid. A
+    # cap would silence exactly the agents past the cut.
     notices = [
         below_floor_exclusion(a, reps.get(a.id))
         for a in agents
@@ -295,15 +409,12 @@ def _routable_registry(
         for a in routable
         if not reputation_svc.passes_floor(reps.get(a.id))
     ]
-    # Unbound on-chain agents are a registry fact, not a floor verdict, so they
-    # are read from the whole catalog rather than from `agents` (which is the
-    # dispatchable subset they are by definition absent from). Seeded agents
-    # are skipped: every one ships with a local worker, so an unbound seeded
-    # agent is a deployment defect to fix, not a buyer-facing exclusion.
+    # Unbound on-chain agents, which `_unbound_notices` selects the same way
+    # for both paths, come last.
     #
-    # Delisted agents are skipped for a related but distinct reason, and it is
-    # the reporting half of this lane's decision: a withdrawn agent gets NO
-    # notice at all, under any reason code.
+    # Delisted agents are skipped there for a related but distinct reason, and
+    # it is the reporting half of this lane's decision: a withdrawn agent gets
+    # NO notice at all, under any reason code.
     #
     # ADR 0006 D2 left `inactive` out of the closed `ExclusionReason` vocabulary
     # because routing could not produce that state. This function just changed
@@ -320,12 +431,10 @@ def _routable_registry(
     # a deployment's life, so it would drown the notices this list exists for
     # exactly the way D3 says `not_selected_by_planner` would.
     #
-    # Concretely, that means a delisted-AND-unbound agent is filtered here
-    # rather than reported: "no endpoint bound" is true of it but is not why it
-    # is absent, and it is advice nobody wants acted on.
-    notices += unbound_exclusions(
-        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
-    )
+    # Concretely, that means a delisted-AND-unbound agent is filtered rather
+    # than reported: "no endpoint bound" is true of it but is not why it is
+    # absent, and it is advice nobody wants acted on.
+    notices += _unbound_notices()
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
@@ -348,7 +457,7 @@ def _routable_registry(
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
-    return "\n".join(lines), notices
+    return _Shortlist("\n".join(lines), notices, frozenset(offered))
 
 
 def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
@@ -359,8 +468,7 @@ def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
     and reading a notices list they never use out of a tuple would obscure
     exactly the thing they are about. Planning uses `_routable_registry`.
     """
-    block, _ = _routable_registry(reps)
-    return block
+    return _routable_registry(reps).block
 
 
 def build_planning_prompt(registry_block: str, intent: str) -> str:
@@ -373,6 +481,15 @@ def build_planning_prompt(registry_block: str, intent: str) -> str:
     return "\n\n".join([registry_block, fence_user_input(intent), "Return the Plan."])
 
 
+class _DroppedKitRole(NamedTuple):
+    """A sub-floor kit role with no substitute, held for the starvation backstop."""
+
+    position: int  # index in _KIT_PIPELINE — where the step goes if re-admitted
+    agent: Agent
+    rationale: str
+    info: reputation_svc.RepInfo | None
+
+
 async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_svc.RepInfo]) -> DecomposeResponse:
     """Deterministic 6-step plan for a curated demo intent. No LLM call.
 
@@ -380,8 +497,10 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     free-form path: a sub-floor agent is replaced by a floor-clearing worker
     that shares a skill, or dropped, and every such action is recorded on the
     response so the buyer never sees a silently reshuffled pipeline (story
-    3.02). Given the same reputation snapshot the plan — steps and notices — is
-    identical, with no LLM call.
+    3.02). Given the same registry and reputation snapshot the plan — steps
+    and notices — is identical, with no LLM call. The registry counts because
+    it always did: listing, bindings and substitute candidates are read from
+    it, and the unbound-endpoint notices both paths share are a fact about it.
 
     Every notice is built by `plan_notices`, the same module `_routable_registry`
     uses, so "exactly as on the free-form path" is true by construction rather
@@ -394,15 +513,20 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     """
     await asyncio.sleep(1.4 + random.random() * 1.0)
 
-    steps: list[PlanStep] = []
+    # (pipeline position, step). Execution runs steps in list order and later
+    # roles read earlier ones' output from the run context — code.gen takes its
+    # design tokens from design.figma, code.critic polishes code.gen's draft —
+    # so a step is only coherent at its own position, however late it was
+    # admitted.
+    placed: list[tuple[int, PlanStep]] = []
     notices: list[PlanFloorNotice] = []
     taken: set[str] = set()
     # Sub-floor agents with no substitute — held until after the loop so the
-    # starvation backstop can re-admit the strongest before the rest are
+    # starvation backstop can choose which to re-admit before the rest are
     # recorded as plain exclusions.
-    dropped: list[tuple[Agent, str, reputation_svc.RepInfo | None]] = []
+    dropped: list[_DroppedKitRole] = []
 
-    for agent_id, rationale in _KIT_PIPELINE:
+    for position, (agent_id, rationale) in enumerate(_KIT_PIPELINE):
         agent = state.agents.get(agent_id)
         if agent is None:
             # The kit pipeline references an agent that isn't seeded — this
@@ -432,7 +556,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         eta = _KIT_ETAS.get(agent_id, 1.0)
         info = reps.get(agent.id)
         if reputation_svc.passes_floor(info):
-            steps.append(_kit_step(agent, rationale, eta, reps))
+            placed.append((position, _kit_step(agent, rationale, eta, reps)))
             taken.add(agent.id)
             continue
 
@@ -440,36 +564,46 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         # shares a skill, else drop the step. Either way the buyer is told.
         sub = _floor_substitute(agent, reps, taken)
         if sub is not None:
-            steps.append(_kit_step(sub, rationale, eta, reps, substituted_for=agent.id))
+            placed.append((position, _kit_step(sub, rationale, eta, reps, substituted_for=agent.id)))
             taken.add(sub.id)
             notices.append(substitution(agent, sub, info))
         else:
-            dropped.append((agent, rationale, info))
+            dropped.append(_DroppedKitRole(position, agent, rationale, info))
 
     # Starvation backstop — reuse _MIN_ROUTABLE_AGENTS rather than invent a
-    # second rule. If the floor left too few steps, re-admit the highest-scored
-    # dropped kit agents (top-N by smoothed score, id breaking ties) and record
-    # the degradation; the remainder are recorded as exclusions. Re-admitted
-    # steps are appended in pipeline order for a coherent plan.
-    by_score = sorted(
-        dropped,
-        key=lambda d: (-(d[2].smoothed_bps if d[2] is not None else 0), d[0].id),
-    )
-    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(steps))
-    readmit_ids = {d[0].id for d in by_score[:deficit]}
+    # second rule. If the floor left too few steps, re-admit dropped kit agents
+    # to cover the deficit and record the degradation; the remainder are
+    # recorded as exclusions. A re-admitted step goes back to its own pipeline
+    # position, never onto the end: appended, design tokens would run AFTER the
+    # code.gen step that needs them, and it would build without them.
+    #
+    # The builder goes first whatever its score, then `_backstop_rank` — the
+    # free-form path's rule. Score alone once turned a battered tetris kit into
+    # research + brand + tokens with no code.gen: three paid steps preparing
+    # inputs for a build nobody was asked to do, and no artifact at the end.
+    by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
+    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(placed))
+    readmit_ids = {d.agent.id for d in by_priority[:deficit]}
     if readmit_ids:
         logger.warning(
-            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s) by smoothed score",
-            len(steps),
+            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s), builder first",
+            len(placed),
             len(readmit_ids),
         )
-    for agent, rationale, info in dropped:
+    for position, agent, rationale, info in dropped:
         if agent.id in readmit_ids:
-            steps.append(_kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True))
+            step = _kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True)
+            placed.append((position, step))
             taken.add(agent.id)
             notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
         else:
             notices.append(below_floor_exclusion(agent, info))
+    # Last, as on the free-form path, so both lists group the same way: what
+    # the floor did first, then registry entries nothing could dispatch. This
+    # path used to report none, so a demo intent showed a marketplace with
+    # agents its plan card never accounted for.
+    notices += _unbound_notices()
+    steps = [step for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in steps)
@@ -498,6 +632,44 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     )
 
 
+# The empty-plan fallback's preferred agent. A copywriter can produce something
+# for any intent, which no other seeded role can promise.
+_FALLBACK_AGENT_ID = "agt_01h8"
+
+
+def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepInfo]) -> Agent | None:
+    """The agent an emptied model plan falls back to — from `offered` only.
+
+    The fallback exists so the UI never gets stuck on a plan the clamp emptied,
+    but it is still a routing decision, and it used to be the one routing
+    decision that skipped the floor: `agt_01h8` was hardcoded, so a copywriter
+    the floor had just excluded took the whole job the moment the model's picks
+    were clamped away. It is held to the clamp's rule now — offered, and still
+    listed and dispatchable at the point of use.
+
+    One deterministic key, so the same snapshot always falls back to the same
+    agent:
+
+      1. `agt_01h8` whenever it is offered, as before;
+      2. an agent that CLEARED the floor ahead of one the backstop re-admitted —
+         a relaxation is a last resort, not a tie-breaker;
+      3. `_backstop_rank`: best smoothed score, id breaking ties.
+
+    None when nothing offered is still routable; the caller refuses the plan.
+    """
+    candidates = [a for a in state.list_agents() if a.id in offered and _is_listed(a) and is_dispatchable(a.id)]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda a: (
+            a.id != _FALLBACK_AGENT_ID,
+            not reputation_svc.passes_floor(reps.get(a.id)),
+            _backstop_rank(a, reps),
+        ),
+    )
+
+
 async def decompose(intent: str) -> DecomposeResponse:
     # One live reputation snapshot per decompose — timeout-bounded and never
     # raises (prior fallback), shared by the kit path, the routing prompt,
@@ -513,8 +685,13 @@ async def decompose(intent: str) -> DecomposeResponse:
         return await _build_kit_plan(intent, kit, reps)
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
-    registry_block, notices = _routable_registry(reps)
-    prompt = build_planning_prompt(registry_block, intent)
+    shortlist = _routable_registry(reps)
+    if not shortlist.offered:
+        # Checked before the gate, not after the call: an empty AVAILABLE_AGENTS
+        # block can only produce steps the clamp discards, so the LLM call would
+        # be paid for, hold a planning slot, and change nothing.
+        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+    prompt = build_planning_prompt(shortlist.block, intent)
 
     async def _bounded_plan() -> Any:
         # The kit short circuit above never takes this gate; every request
@@ -532,27 +709,34 @@ async def decompose(intent: str) -> DecomposeResponse:
     )
     plan: Plan = result.content
 
-    # Clamp to known agents; backfill names + snap price to registry truth.
+    # Clamp to the shortlist; backfill names + snap price to registry truth.
     cleaned: list[PlanStep] = []
     for step in plan.steps:
+        if step.agent_id not in shortlist.offered:
+            # The planner may only route to what it was OFFERED. The block is
+            # what it was SHOWN and this is what it RETURNED, and the two are
+            # not the same set: the model invents ids, repeats ones from an
+            # earlier turn, and names agents it knows by reputation or from its
+            # instructions even when the floor just removed them. Any of those
+            # would be stored, dispatched and paid for — a sub-floor agent
+            # sailing past the trust gate with a `below_floor` notice about it
+            # on the very same plan card. Holding the plan to `offered` is what
+            # makes the floor a gate rather than a suggestion, and it is also
+            # why no step can ever share an agent with an exclusion notice:
+            # every excluded agent is, by construction, not offered.
+            continue
         agent = state.agents.get(step.agent_id)
         if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
-            # Drop unknown ids silently — the model sometimes invents — or
-            # names an indexed agent that nothing can execute: no local worker
-            # and no operator binding. Dropping it here means /execute can
-            # never reach the unknown-agent skip path for a planned step. A
-            # bound external agent survives this filter, which is the point.
-            #
-            # `_is_listed` is repeated here rather than trusted from the
-            # AVAILABLE_AGENTS block, because the block is what the planner was
-            # SHOWN and this is what the planner RETURNED, and the two are not
-            # the same set. The model can name an agent it saw in an earlier
-            # turn, or invent an id that happens to belong to a real withdrawn
-            # agent; either way the step survives the `state.agents` lookup, and
-            # this is the last gate before it is stored and later dispatched.
-            # A delisted agent reaching /execute is the whole bug, so the
-            # cheapest place to be sure is the point of use.
+            # Offered, but no longer routable at the point of use. The
+            # shortlist was built BEFORE the planning call, and that call can
+            # take tens of seconds, during which an operator can delist the
+            # agent or unbind its endpoint. This is the last gate before the
+            # step is stored and later dispatched, so the registry is asked
+            # again here rather than trusted from the snapshot: a delisted
+            # agent reaching /execute is the whole bug, and a step with nothing
+            # to execute it would only reach /execute's unknown-agent skip.
             continue
+        info = reps.get(agent.id)
         cleaned.append(
             PlanStep(
                 agent_id=agent.id,
@@ -560,25 +744,42 @@ async def decompose(intent: str) -> DecomposeResponse:
                 rationale=step.rationale.strip(),
                 est_price_usdc=agent.price,
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
-                **_rep_fields(reps.get(agent.id)),
+                # An OFFERED agent below the floor can only be one the
+                # starvation backstop re-admitted, which already carries a
+                # `floor_relaxed` notice — so the inline flag and the notice
+                # agree, as they do on the kit path. Recomputed from the same
+                # snapshot rather than trusted from the model's output, whose
+                # copy of this field is whatever it chose to write.
+                degraded=not reputation_svc.passes_floor(info),
+                **_rep_fields(info),
             )
         )
 
     if not cleaned:
-        # Fall back to a minimal safe plan so the UI never gets stuck. No
-        # listing check: `agt_01h8` is seeded, `seed.py` ships it "online", and
-        # registry_sync skips the whole `agt_` namespace — so no on-chain
-        # `set_active` call can reach it. A guard here would be a branch for a
-        # state that has no producer.
-        copy_agent = state.agents["agt_01h8"]
+        # Fall back to a minimal safe plan so the UI never gets stuck — drawn
+        # from the shortlist like any model step, never from outside it. The
+        # copywriter used to be hardcoded here on the grounds that nothing
+        # on-chain can delist it; true, but the FLOOR can exclude it, and the
+        # fallback then routed to an agent the plan card was simultaneously
+        # reporting as below the floor.
+        fallback = _fallback_agent(shortlist.offered, reps)
+        if fallback is None:
+            # Everything offered was delisted or unbound while the planner ran.
+            raise NoRoutableAgentsError("every offered agent left the registry during planning")
+        info = reps.get(fallback.id)
         cleaned = [
             PlanStep(
-                agent_id=copy_agent.id,
-                agent_name=copy_agent.name,
-                rationale="fallback: generate copy for the intent",
-                est_price_usdc=copy_agent.price,
+                agent_id=fallback.id,
+                agent_name=fallback.name,
+                rationale=(
+                    "fallback: generate copy for the intent"
+                    if fallback.id == _FALLBACK_AGENT_ID
+                    else "fallback: the planner returned no usable step, so the top-ranked shortlisted agent takes it"
+                ),
+                est_price_usdc=fallback.price,
                 est_eta_seconds=0.8,
-                **_rep_fields(reps.get(copy_agent.id)),
+                degraded=not reputation_svc.passes_floor(info),
+                **_rep_fields(info),
             )
         ]
 
@@ -605,7 +806,7 @@ async def decompose(intent: str) -> DecomposeResponse:
         # describe the shortlist the model chose from, not the model's choice.
         # An agent that cleared the floor and simply was not picked is absent
         # from `notices` by construction — see `_routable_registry`.
-        notices=notices,
+        notices=shortlist.notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
     )

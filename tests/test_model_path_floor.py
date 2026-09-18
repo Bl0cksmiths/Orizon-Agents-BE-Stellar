@@ -92,13 +92,15 @@ PINNED_BLOCK = """AVAILABLE_AGENTS:
 - id=agt_11c0 name="code.gen" price=0.054 rep=3.50 skills=code,html,js,build
 - id=agt_12r0 name="code.critic" price=0.052 rep=3.55 skills=a11y,polish,review"""
 
-# The starvation backstop's shape: nobody clears the floor, so the block is the
-# top _MIN_ROUTABLE_AGENTS by SMOOTHED score (not lower bound), best first —
-# an ordering the planner reads as a ranking, so it is pinned too.
+# The starvation backstop's shape: nobody clears the floor, so the backstop
+# re-admits the top _MIN_ROUTABLE_AGENTS by SMOOTHED score (not lower bound) —
+# but the block lists them in REGISTRY order, like every other block. A
+# best-first order would read to the planner as a ranking the floor never
+# endorsed, so the order is pinned too.
 PINNED_STARVED_BLOCK = """AVAILABLE_AGENTS:
-- id=agt_12r0 name="code.critic" price=0.052 rep=0.56 skills=a11y,polish,review
+- id=agt_10b6 name="translate.42" price=0.007 rep=0.55 skills=i18n,42 langs
 - id=agt_11c0 name="code.gen" price=0.054 rep=0.55 skills=code,html,js,build
-- id=agt_10b6 name="translate.42" price=0.007 rep=0.55 skills=i18n,42 langs"""
+- id=agt_12r0 name="code.critic" price=0.052 rep=0.56 skills=a11y,polish,review"""
 
 
 def test_registry_prompt_block_is_byte_identical(seeded: object) -> None:
@@ -332,3 +334,59 @@ def test_notice_order_is_stable_across_runs(seeded: object, monkeypatch: pytest.
     codes = [c for _, c, _ in shape]
     assert codes == sorted(codes, key=["below_floor", "floor_relaxed", "unbound_endpoint"].index)
     assert [aid for _, c, aid in shape if c == "unbound_endpoint"] == ["ext_idx1", "ext_idx2"]
+
+
+# ── the backstop tops up, it never replaces ─────────────────────
+
+
+def _offered_ids(reps: dict[str, RepInfo]) -> list[str]:
+    """The agent ids in the AVAILABLE_AGENTS block, in the order shown."""
+    block = orchestrator_svc._registry_prompt_fragment(reps)
+    return [ln.split(" ")[1].removeprefix("id=") for ln in block.splitlines() if ln.startswith("- id=")]
+
+
+def test_backstop_tops_up_the_agents_that_cleared_the_floor(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The audit's case: two agents clear the floor and the other ten, all
+    # below it, outscore them on smoothed score. The backstop used to re-rank
+    # all twelve and keep the top three — pushing BOTH agents that passed out
+    # of the prompt, offering three that failed, and stamping each with a
+    # notice claiming fewer than three had cleared.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
+    reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+
+    # Both agents that cleared, plus exactly the deficit: the one best-scored
+    # sub-floor agent. Registry order, whichever rule admitted each.
+    assert _offered_ids(reps) == ["agt_01h8", "agt_02k2", "agt_12r0"]
+
+    resp = _decompose(monkeypatch, reps, "agt_01h8")
+
+    assert [n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"] == ["agt_12r0"]
+    excluded = {n.agent_id for n in resp.notices if n.reason_code == "below_floor"}
+    assert excluded == {a.id for a in state.list_agents()} - {"agt_01h8", "agt_02k2", "agt_12r0"}
+    # An agent that cleared the floor is never the subject of a notice.
+    assert not any(n.agent_id in {"agt_01h8", "agt_02k2"} for n in resp.notices)
+
+
+def test_backstop_stays_out_when_enough_agents_clear_the_floor(seeded: object) -> None:
+    # Exactly _MIN_ROUTABLE_AGENTS clear, and the nine below outscore all of
+    # them. Nothing is short, so nothing is re-admitted: a better smoothed
+    # score is never a reason to bend the floor on its own.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    for agent_id in ("agt_01h8", "agt_02k2", "agt_03d9"):
+        reps[agent_id] = _info(agent_id, smoothed=6000, lower=6000)
+
+    assert _offered_ids(reps) == ["agt_01h8", "agt_02k2", "agt_03d9"]
+
+
+def test_a_re_admitted_model_step_is_flagged_degraded(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The kit path has always flagged a re-admitted step inline; the model path
+    # built every step with `degraded` left at False, so a step the backstop
+    # let in below the floor looked, on the card, like one that had passed.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
+    reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+
+    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_12r0")
+
+    assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_12r0", True)]

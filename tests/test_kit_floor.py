@@ -16,6 +16,7 @@ import asyncio
 import pytest
 
 from app.demo_kits import detect_kit
+from app.schemas import Agent
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
@@ -136,9 +137,10 @@ def test_kit_path_applies_floor_without_calling_the_llm(seeded: object, monkeypa
 def test_starvation_backstop_keeps_kit_plan_workable(seeded: object) -> None:
     # Every kit agent falls below the floor at once. Only agt_05x7 has a
     # matching off-pipeline substitute (agt_01h8), leaving one step — under the
-    # _MIN_ROUTABLE_AGENTS floor of 3. The backstop must re-admit the two
-    # highest-scored dropped agents so the buyer still gets a workable plan,
-    # recording the degradation; the rest are recorded as exclusions.
+    # _MIN_ROUTABLE_AGENTS floor of 3. The backstop must re-admit two dropped
+    # agents — the builder, then the best-scored — so the buyer still gets a
+    # workable plan, recording the degradation; the rest are recorded as
+    # exclusions.
     scores = {
         "agt_09l5": 5000,
         "agt_05x7": 4600,
@@ -152,8 +154,11 @@ def test_starvation_backstop_keeps_kit_plan_workable(seeded: object) -> None:
     ids = [s.agent_id for s in resp.steps]
     assert len(resp.steps) >= orchestrator_svc._MIN_ROUTABLE_AGENTS
     assert "agt_01h8" in ids  # the one substitution still stands
+    # Pipeline order throughout: research, then the substitute in the brand
+    # slot it fills, then the builder — never in the order they were admitted.
+    assert ids == ["agt_09l5", "agt_01h8", "agt_11c0"]
 
-    # Top two dropped agents by smoothed score are re-admitted, not the rest.
+    # code.gen and the best-scored other role are re-admitted, not the rest.
     degraded = {n.agent_id for n in resp.notices if n.kind == "degraded"}
     assert degraded == {"agt_09l5", "agt_11c0"}
     assert {"agt_09l5", "agt_11c0"} <= set(ids)
@@ -181,3 +186,76 @@ def test_kit_step_for_unseeded_agent_is_skipped_not_crashed(seeded: object) -> N
     assert "agt_08j2" not in ids
     assert len(resp.steps) == 5
     assert not any(n.agent_id == "agt_08j2" for n in resp.notices)
+
+
+def test_backstop_re_admits_code_gen_before_higher_scored_roles(seeded: object) -> None:
+    # The audit's case. Every kit agent is under the floor and so is the
+    # copywriter, so no role has a substitute and all six are dropped. By score
+    # alone the backstop re-admitted research + brand + tokens: three paid
+    # steps preparing inputs for a build no step performs, and no artifact.
+    # The builder role outranks score, then the shared ranking fills the rest.
+    scores = {
+        "agt_09l5": 5000,
+        "agt_05x7": 4900,
+        "agt_02k2": 4800,
+        "agt_11c0": 4000,
+        "agt_12r0": 3900,
+        "agt_08j2": 3800,
+        "agt_01h8": 3000,
+    }
+    resp = _run_kit({aid: _sub_floor(aid, smoothed=s) for aid, s in scores.items()})
+
+    assert [s.agent_id for s in resp.steps] == ["agt_09l5", "agt_05x7", "agt_11c0"]
+    assert all(s.degraded for s in resp.steps)
+    assert {n.agent_id for n in resp.notices if n.kind == "degraded"} == {"agt_09l5", "agt_05x7", "agt_11c0"}
+    assert {n.agent_id for n in resp.notices if n.kind == "excluded"} == {"agt_02k2", "agt_12r0", "agt_08j2"}
+
+
+def test_re_admitted_kit_steps_keep_their_pipeline_position(seeded: object) -> None:
+    # code.gen clears the floor (no entry == cold start) and every other role
+    # is dropped, so the backstop re-admits two: tokens and research, the two
+    # best scores. Appended after the loop they used to land AFTER code.gen,
+    # and execution runs steps in list order — code.gen would build before the
+    # design tokens it reads from the run context existed.
+    scores = {
+        "agt_09l5": 4900,
+        "agt_05x7": 4000,
+        "agt_02k2": 5000,
+        "agt_12r0": 3900,
+        "agt_08j2": 3800,
+        "agt_01h8": 3000,
+    }
+    resp = _run_kit({aid: _sub_floor(aid, smoothed=s) for aid, s in scores.items()})
+
+    ids = [s.agent_id for s in resp.steps]
+    assert ids == ["agt_09l5", "agt_02k2", "agt_11c0"]
+    assert ids.index("agt_02k2") < ids.index("agt_11c0")
+    assert [s.degraded for s in resp.steps] == [True, True, False]
+
+
+def test_kit_path_reports_unbound_agents_after_its_floor_notices(seeded: object) -> None:
+    # An on-chain agent indexed but never bound: marketplace-visible, not
+    # dispatchable. The free-form path has reported it since story 3.02; the
+    # kit path said nothing, so the same registry read differently depending on
+    # which path planned the intent. Same selection, same place in the list.
+    state.add_agent(
+        Agent(
+            id="ext_idx1",
+            name="ext_idx1.remote",
+            skills=["remote"],
+            price=0.02,
+            rep=4.99,
+            status="online",
+            runs=0,
+            source="onchain",
+        )
+    )
+
+    resp = _run_kit({"agt_02k2": _sub_floor("agt_02k2")})
+
+    assert [(n.kind, n.reason_code, n.agent_id) for n in resp.notices] == [
+        ("excluded", "below_floor", "agt_02k2"),
+        ("excluded", "unbound_endpoint", "ext_idx1"),
+    ]
+    # Reported, never routed: nothing can execute a step for it.
+    assert "ext_idx1" not in [s.agent_id for s in resp.steps]
