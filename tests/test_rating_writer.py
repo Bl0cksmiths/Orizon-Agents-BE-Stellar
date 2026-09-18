@@ -339,3 +339,32 @@ def test_refresh_if_stale_never_reads_for_a_config_verdict(monkeypatch):
         return rw._read_task
 
     assert asyncio.run(_probe()) is None
+
+
+# ── naming a failed submit ──────────────────────────────────────
+
+
+def test_the_ledgers_rejections_are_named_by_the_contracts_own_words():
+    """Codes from ReputationLedger's `Error` enum (contract/reputation-ledger/src/lib.rs)."""
+    assert rw.failure_reason(sc.ContractError("prepare failed: …", 1)) == "Unauthorized"
+    assert rw.failure_reason(sc.ContractError("prepare failed: …", 2)) == "NotFound"
+    assert rw.failure_reason(sc.ContractError("prepare failed: …", 7)) == "Replay"
+    assert rw.failure_reason(sc.ContractError("prepare failed: …", 100)) == "OutOfRange"
+
+
+def test_a_code_the_ledger_does_not_define_is_still_only_a_number():
+    assert rw.failure_reason(sc.ContractError("prepare failed: …", 42)) == "contract error #42"
+
+
+def test_anything_else_is_the_generic_reason_and_never_its_text():
+    """The trace is world-readable. A failure's text can carry a URL with a
+    key in it, or the whole diagnostic event log — none of it may pass."""
+    leaky = RuntimeError("load_account https://rpc.example/?apikey=SECRET: sequence collision")
+    assert rw.failure_reason(leaky) == "rpc error"
+    assert rw.failure_reason(TimeoutError()) == "rpc error"
+
+
+def test_a_sent_rating_that_did_not_land_is_named_by_how():
+    assert rw.unlanded_reason("FAILED") == "transaction failed"
+    assert rw.unlanded_reason("timeout") == "unconfirmed"
+    assert rw.unlanded_reason(None) == "transaction failed"
