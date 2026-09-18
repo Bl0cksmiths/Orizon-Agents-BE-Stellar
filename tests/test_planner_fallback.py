@@ -129,3 +129,33 @@ def test_a_planner_run_with_no_usable_plan_serves_the_fallback_plan(
     assert resp.planner_fallback is True
     assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
     assert _stored_ids(resp) == ["agt_01h8"]
+
+
+def test_the_provider_message_is_logged_redacted_and_never_returned(
+    seeded: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    hermetic_settings: object,
+) -> None:
+    # An OpenAI 401 once agno has made it the run's content. It quotes the
+    # rejected key back: the configured one whole, as it does a short key, and
+    # another only partly masked.
+    configured = "sk-configured-0123456789"
+    monkeypatch.setattr(hermetic_settings, "openai_api_key", configured)
+    message = f"Incorrect API key provided: {configured}. Also tried sk-proj-abc*****wxyz."
+
+    async def _arun(_prompt: str) -> RunOutput:
+        return RunOutput(status=RunStatus.error, content=message)
+
+    with caplog.at_level(logging.WARNING, logger=orchestrator_svc.logger.name):
+        resp = _decompose(monkeypatch, _arun)
+
+    # The buyer is told a fallback was served, never why the provider failed.
+    assert "Incorrect API key" not in resp.model_dump_json()
+    logged = [r.getMessage() for r in caplog.records if r.name == orchestrator_svc.logger.name]
+    assert len(logged) == 1
+    assert "serving the fallback plan" in logged[0]
+    # What is worth debugging survives; the keys do not.
+    assert "Incorrect API key provided" in logged[0]
+    assert "sk-configured" not in logged[0]
+    assert "abc*****wxyz" not in logged[0]
