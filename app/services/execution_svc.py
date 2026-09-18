@@ -1034,6 +1034,33 @@ async def _submit_ratings(
                 "auto",
             )
             tx = result.get("hash") or ""
+            status = result.get("status")
+            if status != "SUCCESS":
+                # Sent but not landed: the ledger FAILED it after simulation
+                # passed, or it was still unconfirmed when the poll budget ran
+                # out. Neither wrote a rating, and both used to be traced as
+                # "rated N/100" — a success line for evidence that never landed.
+                logger.error(
+                    "task %s: reputation submit for %s (%s) did not land: status=%s tx=%s "
+                    "(job %s, rating %d, weight %d, payer %s)",
+                    task_id,
+                    step.agent_name,
+                    step.agent_id,
+                    status,
+                    tx,
+                    job_id.hex(),
+                    rating,
+                    weight,
+                    payer,
+                )
+                await _emit(
+                    task_id,
+                    start,
+                    "error",
+                    f"reputation submit failed for {step.agent_name}: "
+                    f"{rating_writer.unlanded_reason(status)} · tx {tx[:10]}…",
+                )
+                continue
             await _emit(
                 task_id,
                 start,
