@@ -107,10 +107,24 @@ def _is_listed(agent: Agent) -> bool:
 
 
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
-    """PlanStep reputation stamp — empty when the agent has no rep entry."""
+    """PlanStep reputation stamp — empty when the agent has no rep entry.
+
+    The one place a step's reputation is stamped, on every path (kit step,
+    substitute, re-admission, model step, fallback), so a card can never show
+    a lower bound on one path and not another. Everything here comes from the
+    snapshot the floor was applied with: a card that re-read reputation later
+    could show a bound the plan was never judged on.
+    """
     if info is None:
         return {}
-    return {"rep_bps": info.smoothed_bps, "rep_source": info.source}
+    return {
+        "rep_bps": info.smoothed_bps,
+        "rep_source": info.source,
+        "rep_lower_bound_bps": info.lower_bound_bps,
+        "rep_count": info.count,
+        "rep_dispute_rate_bps": info.dispute_rate_bps,
+        "rep_degraded": info.degraded,
+    }
 
 
 def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
