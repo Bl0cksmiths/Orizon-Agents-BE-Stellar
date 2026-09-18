@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -27,6 +28,7 @@ from typing import Any
 
 from stellar_sdk import (
     Address,
+    Durability,
     Keypair,
     Network,
     SorobanServer,
@@ -36,7 +38,7 @@ from stellar_sdk import (
 from stellar_sdk.client.requests_client import RequestsClient
 from stellar_sdk.exceptions import PrepareTransactionException
 from stellar_sdk.soroban_rpc import GetTransactionStatus, SendTransactionStatus
-from stellar_sdk.xdr import SCVal
+from stellar_sdk.xdr import SCVal, SCValType
 
 from ..config import settings
 
@@ -287,6 +289,62 @@ def _to_jsonable(value: Any) -> Any:
     return value
 
 
+# `DataKey::Scorer` as ReputationLedger writes it into instance storage: a
+# `#[contracttype]` unit variant encodes as a one-element vec holding the
+# variant's name as a symbol (contract/reputation-ledger/src/lib.rs).
+_SCORER_STORAGE_KEY = scval.to_vec([scval.to_symbol("Scorer")])
+
+
+def _instance_storage_address(entry_xdr: str, key: SCVal) -> str | None:
+    """The address stored under `key` in a contract-instance ledger entry.
+
+    `entry_xdr` is the base64 `LedgerEntryData` that getLedgerEntries returns
+    for a contract's instance key. None when the instance's storage holds no
+    such key — a definite answer, read off the chain. Anything that is not a
+    contract instance, or a value under `key` that is not an address, raises
+    ValueError instead: an entry this cannot decode must never read as "no
+    value stored".
+    """
+    from stellar_sdk import xdr as _xdr
+
+    data = _xdr.LedgerEntryData.from_xdr(entry_xdr)
+    contract_data = data.contract_data
+    if contract_data is None or contract_data.val.instance is None:
+        raise ValueError("ledger entry is not a contract instance")
+    storage = contract_data.val.instance.storage
+    for item in storage.sc_map if storage is not None else []:
+        if item.key == key:
+            return scval.from_address(item.val).address
+    return None
+
+
+def ledger_scorer(ledger_id: str) -> str | None:
+    """The address ReputationLedger `ledger_id` stores as its Scorer.
+
+    `submit` accepts a rating only from that address, and the contract has no
+    view that returns it, so it is read straight off the contract's instance
+    ledger entry: one getLedgerEntries round trip on the read profile (5 s, no
+    retry) — no source account, no simulation, nothing signed.
+
+    None means the chain answered and holds no Scorer: no contract instance
+    lives at `ledger_id` on this network, or its storage has no Scorer key.
+    Anything else raises — an RPC failure, or an entry that does not decode —
+    because "could not read" must never be mistaken for "read, and absent".
+    """
+    server = _server()
+    with _rpc_span("read", f"{_contract_label(ledger_id)}.Scorer", slow_ms=SLOW_READ_MS) as span:
+        span["stage"] = "get_ledger_entries"
+        entry = server.get_contract_data(
+            ledger_id,
+            SCVal(SCValType.SCV_LEDGER_KEY_CONTRACT_INSTANCE),
+            Durability.PERSISTENT,
+        )
+        span["stage"] = "decode"
+        scorer = None if entry is None else _instance_storage_address(entry.xdr, _SCORER_STORAGE_KEY)
+        span["stage"] = "ok"
+    return scorer
+
+
 @lru_cache(maxsize=1)
 def _signer_keypair() -> Keypair:
     """
@@ -325,6 +383,34 @@ def signer_public_key() -> str:
 _POLL_BUDGET_SECONDS = 30.0
 _POLL_MAX_DELAY_SECONDS = 4.0
 
+# The head of a simulation error when the invoked contract itself returned
+# one of its `#[contracterror]` values: "HostError: Error(Contract, #7)",
+# followed by the diagnostic event log. Anchored to the head on purpose — the
+# event log below it can quote other errors, and only the head is the one the
+# call failed with.
+_CONTRACT_ERROR_HEAD = re.compile(r"\s*HostError: Error\(Contract, #(\d+)\)")
+
+
+class ContractError(RuntimeError):
+    """A backend-signed call the contract itself rejected, with its error code.
+
+    The code is the discriminant of the contract's own `Error` enum, carried
+    as data so a caller can name the rejection (ReputationLedger's 1 is
+    `Unauthorized`, 7 is `Replay`) without parsing — or echoing — the
+    simulation's error text, which runs to the whole diagnostic event log.
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _contract_error_code(simulation_error: str | None) -> int | None:
+    """The contract error code heading a simulation error, or None."""
+    match = _CONTRACT_ERROR_HEAD.match(simulation_error or "")
+    return int(match.group(1)) if match else None
+
 
 def _send_server_signed(
     contract_id: str,
@@ -359,7 +445,11 @@ def _send_server_signed(
         try:
             tx = server.prepare_transaction(tx)
         except PrepareTransactionException as e:
-            raise RuntimeError(f"prepare failed: {e.simulate_transaction_response.error}") from e
+            detail = e.simulate_transaction_response.error
+            code = _contract_error_code(detail)
+            if code is not None:
+                raise ContractError(f"prepare failed: {detail}", code) from e
+            raise RuntimeError(f"prepare failed: {detail}") from e
         tx.sign(kp)
 
         span["stage"] = "send"

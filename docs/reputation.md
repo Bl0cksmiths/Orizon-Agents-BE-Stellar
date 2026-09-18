@@ -212,6 +212,108 @@ The same pair of numbers appears in the warning emitted when reputation reads
 fall back to the prior, which states which way the floor is failing for the
 duration of the outage.
 
+## Where ratings come from
+
+**Only wallet-authorized runs produce ratings.** When a buyer's wallet
+authorizes a run, the backend settles it and then writes one rating per
+dispatched step to ReputationLedger, signed with `STELLAR_SIGNING_KEY`. A
+simulated run — no wallet, no authorization — never rates, by design: a rating
+is weighted by the USDC at stake on the step that earned it, and a simulated
+run has none. A deployment that has only ever served simulated runs will show
+every agent on the prior, and that is correct, not a fault.
+
+A paid run's ratings still land only if three things line up:
+
+1. Reputation is on (`REPUTATION_ENABLED`) and a ledger is configured
+   (`STELLAR_REPUTATION_LEDGER`).
+2. A signing key is configured (`STELLAR_SIGNING_KEY`) and parses.
+3. That key **is the ledger's Scorer**. `ReputationLedger.submit` accepts a
+   rating only when its caller equals the Scorer address the ledger keeps in
+   its own storage — set when the contract was deployed, changed only by the
+   ledger admin's `set_scorer`. Any other key has every rating reverted with
+   `Unauthorized`.
+
+The first two are config. The third exists only on the chain, which is why a
+key that is present but is not the Scorer used to look perfectly healthy: the
+service reported `signer: configured` while no rating ever landed.
+
+### The `ratings` readiness field
+
+`GET /readiness` answers all three on demand, next to `cold_start`:
+
+```json
+"ratings": {"writer": "scorer", "signer": "GA7AI5…5OQV", "scorer": "GA7AI5…5OQV"}
+```
+
+| `writer` | meaning | what to do |
+| --- | --- | --- |
+| `scorer` | the signer is the ledger's Scorer — paid runs' ratings land | nothing |
+| `not_scorer` | the signer is not the Scorer, or the ledger stores none — every rating reverts | have the ledger admin call `set_scorer(<signer>)`; if `scorer` is `null`, check `STELLAR_REPUTATION_LEDGER` names a ledger on this network |
+| `unchecked` | the Scorer could not be read from the chain — never guessed either way | wait for the retry (30 s); if it persists, check `STELLAR_RPC_URL` |
+| `no_signer` | `STELLAR_SIGNING_KEY` is unset or does not parse — paid runs are not rated | set the Scorer's key |
+| `disabled` | `REPUTATION_ENABLED` is false or `STELLAR_REPUTATION_LEDGER` is unset — paid runs are not rated | configure both, if ratings are wanted |
+
+| field | meaning |
+| --- | --- |
+| `signer` | the G… address ratings are signed with; `null` unless the config is complete and the key parses |
+| `scorer` | the Scorer the ledger stores, as last read; `null` unless a read found one |
+
+Both addresses are public — the signing secret never leaves the keypair, and
+the Scorer is public chain data. They are on the probe because the fix for
+`not_scorer` is `set_scorer(<signer>)`, and an operator reading the probe after
+a restart has no other place to find either.
+
+Prefer `set_scorer` over swapping `STELLAR_SIGNING_KEY` to match: the same key
+is also the escrow's settler and the attestation sealer, so changing it moves
+those roles too.
+
+It is informational, like `cold_start`, and never changes `status` or the 503:
+a deployment that cannot write ratings still serves every request, and
+read-only deployments are legitimate.
+
+It also adds no live network call to the probe. The Scorer is read once
+(one `getLedgerEntries` on the contract's instance entry, bounded at 8 s) and
+cached. A successful read is trusted for **5 minutes** — the Scorer changes only
+on a `set_scorer` or a redeploy, and a redeploy is a new contract id, which is
+read at once — so the probe follows a `set_scorer` within five minutes. A failed
+read is retried after **30 seconds**, so one RPC blip does not pin `unchecked`.
+When the cached read is past its time the probe still answers immediately with
+it and starts one background read; the next probe carries the fresh answer.
+
+The same verdict is logged once at boot — INFO for `scorer`, WARNING for
+everything else, naming both addresses and the fix for `not_scorer`. The check
+runs in the background, so a slow RPC never delays the request that woke the
+instance; the line lands a moment after the service starts.
+
+### When a paid run writes no rating
+
+The run's trace says so, in words that carry no exception text (the trace is
+readable by anyone holding the task):
+
+| trace line | cause |
+| --- | --- |
+| `ratings not submitted: reputation is disabled` | `REPUTATION_ENABLED` is false |
+| `ratings not submitted: no reputation ledger is configured` | `STELLAR_REPUTATION_LEDGER` is unset |
+| `ratings not submitted: no signing key is configured` | `STELLAR_SIGNING_KEY` is unset |
+| `reputation submit failed for <agent>: Unauthorized` | the signer is not the ledger's Scorer |
+| `… : Replay` | this agent was already rated for this job — the ledger rates a job once |
+| `… : OutOfRange` | the rating or its weight is outside what the ledger accepts |
+| `… : NotFound` | the ledger has no Scorer stored |
+| `… : contract error #N` | a ledger error this backend does not know by name |
+| `… : transaction failed` | the ledger accepted the simulation, then failed the transaction |
+| `… : unconfirmed` | still unconfirmed when the 30 s poll budget ran out — it may yet land |
+| `… : rpc error` | anything else: the RPC, the network, the signer's account |
+
+The first three also log a WARNING naming the setting, at most once an hour per
+cause, and each one says how many further runs went unrated since the last. The
+rest log an ERROR with the full detail, which the trace deliberately omits.
+
+**If the ledger shows no ratings,** check in this order: were there any
+wallet-authorized runs at all? Then `curl -s https://<host>/readiness` and read
+`ratings.writer` — anything but `scorer` is the answer, and the table above says
+what to do. If it is `scorer`, read a paid run's trace for the reason each
+rating did not land.
+
 ## Cold start is not a degraded read
 
 Both produce `source: "prior"`. They differ by one flag.
