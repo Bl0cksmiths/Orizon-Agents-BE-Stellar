@@ -577,26 +577,32 @@ async def decompose(intent: str) -> DecomposeResponse:
     )
     plan: Plan = result.content
 
-    # Clamp to known agents; backfill names + snap price to registry truth.
+    # Clamp to the shortlist; backfill names + snap price to registry truth.
     cleaned: list[PlanStep] = []
     for step in plan.steps:
+        if step.agent_id not in shortlist.offered:
+            # The planner may only route to what it was OFFERED. The block is
+            # what it was SHOWN and this is what it RETURNED, and the two are
+            # not the same set: the model invents ids, repeats ones from an
+            # earlier turn, and follows its own instructions' standing
+            # preferences onto agents the floor just removed. Any of those
+            # would be stored, dispatched and paid for — a sub-floor agent
+            # sailing past the trust gate with a `below_floor` notice about it
+            # on the very same plan card. Holding the plan to `offered` is what
+            # makes the floor a gate rather than a suggestion, and it is also
+            # why no step can ever share an agent with an exclusion notice:
+            # every excluded agent is, by construction, not offered.
+            continue
         agent = state.agents.get(step.agent_id)
         if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
-            # Drop unknown ids silently — the model sometimes invents — or
-            # names an indexed agent that nothing can execute: no local worker
-            # and no operator binding. Dropping it here means /execute can
-            # never reach the unknown-agent skip path for a planned step. A
-            # bound external agent survives this filter, which is the point.
-            #
-            # `_is_listed` is repeated here rather than trusted from the
-            # AVAILABLE_AGENTS block, because the block is what the planner was
-            # SHOWN and this is what the planner RETURNED, and the two are not
-            # the same set. The model can name an agent it saw in an earlier
-            # turn, or invent an id that happens to belong to a real withdrawn
-            # agent; either way the step survives the `state.agents` lookup, and
-            # this is the last gate before it is stored and later dispatched.
-            # A delisted agent reaching /execute is the whole bug, so the
-            # cheapest place to be sure is the point of use.
+            # Offered, but no longer routable at the point of use. The
+            # shortlist was built BEFORE the planning call, and that call can
+            # take tens of seconds, during which an operator can delist the
+            # agent or unbind its endpoint. This is the last gate before the
+            # step is stored and later dispatched, so the registry is asked
+            # again here rather than trusted from the snapshot: a delisted
+            # agent reaching /execute is the whole bug, and a step with nothing
+            # to execute it would only reach /execute's unknown-agent skip.
             continue
         cleaned.append(
             PlanStep(
