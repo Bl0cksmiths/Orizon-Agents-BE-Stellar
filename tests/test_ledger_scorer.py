@@ -10,6 +10,7 @@ touches the network.
 
 from __future__ import annotations
 
+import pytest
 from stellar_sdk import Address, Keypair, StrKey, scval, xdr
 from stellar_sdk.xdr import SCVal, SCValType
 
@@ -88,3 +89,16 @@ def test_storage_without_a_scorer_is_a_definite_none():
 
 def test_an_instance_with_no_storage_at_all_is_a_definite_none():
     assert sc._instance_storage_address(_instance_entry(None), sc._SCORER_STORAGE_KEY) is None
+
+
+def test_an_entry_that_is_not_a_contract_instance_raises():
+    """Could-not-decode must never read as not-stored: None would mean "the
+    ledger has no scorer", which is a claim about the chain."""
+    with pytest.raises(ValueError):
+        sc._instance_storage_address(_contract_data(scval.to_uint32(7)), sc._SCORER_STORAGE_KEY)
+
+
+def test_a_scorer_that_is_not_an_address_raises():
+    entry = _instance_entry([(_key("Scorer"), scval.to_symbol("nobody"))])
+    with pytest.raises(ValueError):
+        sc._instance_storage_address(entry, sc._SCORER_STORAGE_KEY)
