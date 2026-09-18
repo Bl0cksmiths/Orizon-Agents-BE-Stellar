@@ -96,8 +96,9 @@ def _report_cold_start_routability() -> None:
     Reported from lifespan rather than joining config.py's startup-report
     validators for two reasons. The predicate is reputation_svc's arithmetic
     and reputation_svc imports settings, so config.py cannot import it back
-    without a cycle. And this is the only check that sees the value actually
-    in force: the Render dashboard overrides render.yaml, so a floor raised
+    without a cycle. And only a check in the running process sees the value
+    actually in force — this line at boot, and /readiness's `cold_start` on
+    demand: the Render dashboard overrides render.yaml, so a floor raised
     there reaches no test and no repo default — CI would keep passing against
     numbers this deployment does not use.
 
