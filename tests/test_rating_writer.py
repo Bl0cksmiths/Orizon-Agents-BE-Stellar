@@ -13,6 +13,7 @@ network, and an unstubbed read fails the test.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from stellar_sdk import Keypair, StrKey
@@ -181,3 +182,80 @@ def test_nothing_read_yet_is_unchecked(monkeypatch):
     v = rw.verdict()
     assert (v.status, v.signer, v.scorer) == ("unchecked", SIGNER, None)
     assert v.read_error == "not read yet"
+
+
+# ── the cache ───────────────────────────────────────────────────
+
+
+def aged(seconds: float, **fields) -> rw._ScorerRead:
+    """A read of LEDGER that resolved `seconds` ago."""
+    return rw._ScorerRead(LEDGER, time.monotonic() - seconds, **fields)
+
+
+def test_a_fresh_read_is_reused_not_repeated(monkeypatch):
+    configure(monkeypatch)
+    chain = on_chain(monkeypatch, Chain(scorer=SIGNER))
+    for _ in range(3):
+        assert asyncio.run(rw.check()).status == "scorer"
+    assert chain.reads == [LEDGER]
+
+
+def test_a_read_past_its_ttl_is_repeated_and_picks_up_a_set_scorer(monkeypatch):
+    """The TTL exists for exactly this: an admin calls set_scorer, and the
+    verdict follows within one TTL without a restart."""
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "_last_read", aged(rw.SCORER_TTL_SECONDS + 1, scorer=OTHER))
+    assert rw.verdict().status == "not_scorer"  # the stale answer, until re-read
+    chain = on_chain(monkeypatch, Chain(scorer=SIGNER))
+    assert asyncio.run(rw.check()).status == "scorer"
+    assert chain.reads == [LEDGER]
+
+
+def test_a_read_inside_its_ttl_is_trusted(monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "_last_read", aged(rw.SCORER_TTL_SECONDS - 5, scorer=SIGNER))
+    assert asyncio.run(rw.check()).status == "scorer"  # the fixture fails any read
+
+
+def test_a_failed_read_is_retried_on_the_short_clock(monkeypatch):
+    """An RPC blip at boot must not pin `unchecked` for the full TTL."""
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "_last_read", aged(rw.UNCHECKED_RETRY_SECONDS + 1, error="ConnectionError"))
+    chain = on_chain(monkeypatch, Chain(scorer=SIGNER))
+    assert asyncio.run(rw.check()).status == "scorer"
+    assert chain.reads == [LEDGER]
+
+
+def test_a_failed_read_is_not_hammered_inside_the_retry_window(monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "_last_read", aged(rw.UNCHECKED_RETRY_SECONDS - 5, error="ConnectionError"))
+    assert asyncio.run(rw.check()).status == "unchecked"  # the fixture fails any read
+
+
+def test_a_new_ledger_id_is_read_at_once(monkeypatch):
+    """A redeployed ledger is a new contract id; a fresh read of the old one
+    says nothing about it, whatever its age."""
+    configure(monkeypatch)
+    monkeypatch.setattr(rw, "_last_read", rw._ScorerRead("C-OLD-LEDGER", time.monotonic(), scorer=SIGNER))
+    assert rw.verdict().status == "unchecked"
+    chain = on_chain(monkeypatch, Chain(scorer=OTHER))
+    assert asyncio.run(rw.check()).status == "not_scorer"
+    assert chain.reads == [LEDGER]
+
+
+def test_concurrent_askers_share_one_read(monkeypatch):
+    configure(monkeypatch)
+    chain = on_chain(monkeypatch, Chain(scorer=SIGNER))
+
+    async def _three_at_once():
+        return await asyncio.gather(rw.check(), rw.check(), rw.check())
+
+    assert [v.status for v in asyncio.run(_three_at_once())] == ["scorer"] * 3
+    assert chain.reads == [LEDGER]
+
+
+def test_the_ttls_are_the_documented_ones():
+    """Five minutes to follow a set_scorer, thirty seconds to retry a failed
+    read (docs/reputation.md). A change here is a change to that promise."""
+    assert rw.SCORER_TTL_SECONDS == 300.0
+    assert rw.UNCHECKED_RETRY_SECONDS == 30.0
