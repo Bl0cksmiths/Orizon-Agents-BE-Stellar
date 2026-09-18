@@ -546,7 +546,9 @@ async def readiness(response: Response) -> ReadinessResponse:
     the LLM key or the Stellar contract/RPC config. The signing key is
     deliberately informational — read-only deployments are legitimate — and
     so is `cold_start`: a floor that shuts newcomers out is a policy the
-    process serves correctly, not a dependency it lacks."""
+    process serves correctly, not a dependency it lacks. `ratings` is
+    informational on the signing key's own grounds: a deployment that cannot
+    write ratings still serves every request."""
     llm = "ok" if settings.openai_api_key else "missing_key"
 
     contract_ids = (
