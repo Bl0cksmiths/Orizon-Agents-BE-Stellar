@@ -329,8 +329,9 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
     # The same refusal through the router the frontend calls. The request was
     # well-formed and the service cannot serve it, so the answer is a
     # server-side status and never a 200 carrying a plan: a retryable 503 with
-    # its own detail, so a client can tell it apart from a failed upstream call
-    # (502) or a hung planner (504).
+    # its own detail, so a client can tell it apart from a hung planner (504)
+    # or an unexpected fault (502). A planner that merely failed is neither: it
+    # gets the fallback plan, flagged `planner_fallback` (BLO-121).
     #
     # The stand-in planner answers the way a model shown an empty list would:
     # with nothing usable. That is the answer the old hardcoded fallback turned
