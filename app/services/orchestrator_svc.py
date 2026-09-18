@@ -577,6 +577,11 @@ async def decompose(intent: str) -> DecomposeResponse:
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
     shortlist = _routable_registry(reps)
+    if not shortlist.offered:
+        # Checked before the gate, not after the call: an empty AVAILABLE_AGENTS
+        # block can only produce steps the clamp discards, so the LLM call would
+        # be paid for, hold a planning slot, and change nothing.
+        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
     prompt = build_planning_prompt(shortlist.block, intent)
 
     async def _bounded_plan() -> Any:
