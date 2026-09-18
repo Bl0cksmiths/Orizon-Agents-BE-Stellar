@@ -308,6 +308,29 @@ class _Shortlist(NamedTuple):
     offered: frozenset[str]
 
 
+def _unbound_notices() -> list[PlanFloorNotice]:
+    """`unbound_endpoint` notices for the registry as it stands — both paths.
+
+    Unbound on-chain agents are a registry fact, not a floor verdict, so they
+    are read from the whole catalog rather than from a routable subset (which
+    they are by definition absent from), and the fact does not depend on which
+    path planned the intent. One selection, called by both, so the two cannot
+    disagree about which agents it names.
+
+    Seeded agents are skipped: every one ships with a local worker, so an
+    unbound seeded agent is a deployment defect to fix, not a buyer-facing
+    exclusion. Delisted agents are skipped as well — a withdrawn agent gets no
+    notice under any reason code, argued at the call in `_routable_registry`.
+
+    Reads registry and binding state, never reputation, and `unbound_exclusions`
+    orders by id before it caps, so the kit path's determinism promise holds:
+    the same registry yields the same notices.
+    """
+    return unbound_exclusions(
+        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
+    )
+
+
 def _routable_registry(
     reps: dict[str, reputation_svc.RepInfo],
 ) -> _Shortlist:
@@ -386,15 +409,12 @@ def _routable_registry(
         for a in routable
         if not reputation_svc.passes_floor(reps.get(a.id))
     ]
-    # Unbound on-chain agents are a registry fact, not a floor verdict, so they
-    # are read from the whole catalog rather than from `agents` (which is the
-    # dispatchable subset they are by definition absent from). Seeded agents
-    # are skipped: every one ships with a local worker, so an unbound seeded
-    # agent is a deployment defect to fix, not a buyer-facing exclusion.
+    # Unbound on-chain agents, which `_unbound_notices` selects the same way
+    # for both paths, come last.
     #
-    # Delisted agents are skipped for a related but distinct reason, and it is
-    # the reporting half of this lane's decision: a withdrawn agent gets NO
-    # notice at all, under any reason code.
+    # Delisted agents are skipped there for a related but distinct reason, and
+    # it is the reporting half of this lane's decision: a withdrawn agent gets
+    # NO notice at all, under any reason code.
     #
     # ADR 0006 D2 left `inactive` out of the closed `ExclusionReason` vocabulary
     # because routing could not produce that state. This function just changed
@@ -411,12 +431,10 @@ def _routable_registry(
     # a deployment's life, so it would drown the notices this list exists for
     # exactly the way D3 says `not_selected_by_planner` would.
     #
-    # Concretely, that means a delisted-AND-unbound agent is filtered here
-    # rather than reported: "no endpoint bound" is true of it but is not why it
-    # is absent, and it is advice nobody wants acted on.
-    notices += unbound_exclusions(
-        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
-    )
+    # Concretely, that means a delisted-AND-unbound agent is filtered rather
+    # than reported: "no endpoint bound" is true of it but is not why it is
+    # absent, and it is advice nobody wants acted on.
+    notices += _unbound_notices()
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
