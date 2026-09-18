@@ -27,6 +27,7 @@ from typing import Any
 
 from stellar_sdk import (
     Address,
+    Durability,
     Keypair,
     Network,
     SorobanServer,
@@ -36,7 +37,7 @@ from stellar_sdk import (
 from stellar_sdk.client.requests_client import RequestsClient
 from stellar_sdk.exceptions import PrepareTransactionException
 from stellar_sdk.soroban_rpc import GetTransactionStatus, SendTransactionStatus
-from stellar_sdk.xdr import SCVal
+from stellar_sdk.xdr import SCVal, SCValType
 
 from ..config import settings
 
@@ -314,6 +315,33 @@ def _instance_storage_address(entry_xdr: str, key: SCVal) -> str | None:
         if item.key == key:
             return scval.from_address(item.val).address
     return None
+
+
+def ledger_scorer(ledger_id: str) -> str | None:
+    """The address ReputationLedger `ledger_id` stores as its Scorer.
+
+    `submit` accepts a rating only from that address, and the contract has no
+    view that returns it, so it is read straight off the contract's instance
+    ledger entry: one getLedgerEntries round trip on the read profile (5 s, no
+    retry) — no source account, no simulation, nothing signed.
+
+    None means the chain answered and holds no Scorer: no contract instance
+    lives at `ledger_id` on this network, or its storage has no Scorer key.
+    Anything else raises — an RPC failure, or an entry that does not decode —
+    because "could not read" must never be mistaken for "read, and absent".
+    """
+    server = _server()
+    with _rpc_span("read", f"{_contract_label(ledger_id)}.Scorer", slow_ms=SLOW_READ_MS) as span:
+        span["stage"] = "get_ledger_entries"
+        entry = server.get_contract_data(
+            ledger_id,
+            SCVal(SCValType.SCV_LEDGER_KEY_CONTRACT_INSTANCE),
+            Durability.PERSISTENT,
+        )
+        span["stage"] = "decode"
+        scorer = None if entry is None else _instance_storage_address(entry.xdr, _SCORER_STORAGE_KEY)
+        span["stage"] = "ok"
+    return scorer
 
 
 @lru_cache(maxsize=1)
