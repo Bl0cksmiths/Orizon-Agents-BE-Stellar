@@ -121,3 +121,15 @@ def test_advice_is_not_rounded_past_the_ceiling_it_names():
     assert bound == 12.3456789
     assert _settings(decompose_timeout_seconds=123.456789, reputation_batch_timeout_seconds=bound)
     assert _settings(decompose_timeout_seconds=budget, reputation_batch_timeout_seconds=20.0)
+
+
+def test_the_suggested_bound_always_boots():
+    """Every tenth-second budget from 0.1 s to 200 s, refused with a bound
+    half again past its share: lowering the bound to exactly what the message
+    says must boot. This is where the float trap and the rounding trap met —
+    the suggestion was the float ceiling itself, so it failed on the same
+    budgets a typed exact share did."""
+    for tenths in range(1, 2001):
+        decompose = tenths / 10
+        suggested_bound, _ = _advice(decompose, _typed_share(decompose) * 1.5)
+        _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=suggested_bound)
