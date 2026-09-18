@@ -209,3 +209,14 @@ def test_fallback_never_routes_to_a_copywriter_the_floor_excluded(
     assert step.degraded is False
     # Honest about why this agent has the job: it was not chosen for the intent.
     assert step.rationale.startswith("fallback: the planner returned no usable step")
+
+
+def test_fallback_keeps_the_copywriter_when_it_was_offered(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The common case must not move: an invented id cleans to nothing and the
+    # copywriter, offered and clear of the floor, takes the intent as before.
+    resp = _decompose(monkeypatch, _clearing_reps(), _plan_naming("agt_invented"))
+
+    assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert resp.steps[0].rationale == "fallback: generate copy for the intent"
+    assert resp.steps[0].degraded is False
+    assert resp.notices == []
