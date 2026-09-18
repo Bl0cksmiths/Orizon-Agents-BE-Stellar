@@ -56,3 +56,15 @@ def test_public_identifiers_are_never_mistaken_for_secrets() -> None:
     text = f"submitted by {public_key} to {contract_id} in tx {tx_hash}"
 
     assert security.redact_secrets(text) == text
+
+
+def test_a_secret_embedded_in_a_longer_one_is_masked_whole(
+    secrets_configured: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The database password is also configured on its own. Masked shortest
+    # first, the URL would log as "postgresql://orizon:[redacted]@db..." —
+    # host and user leaked, and the "whole URL is secret" rule broken.
+    monkeypatch.setattr(settings, "api_key", "s3cr3t-pa55word")
+    text = f"pool failed: {secrets_configured['database_url']}"
+
+    assert security.redact_secrets(text) == "pool failed: [redacted]"
