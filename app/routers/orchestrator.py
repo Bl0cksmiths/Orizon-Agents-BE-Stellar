@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse
 from ..services.execution_svc import CapacityExhaustedError, execute_plan
-from ..services.orchestrator_svc import decompose
+from ..services.orchestrator_svc import NoRoutableAgentsError, decompose
 from ..state import state
 
 logger = logging.getLogger(__name__)
