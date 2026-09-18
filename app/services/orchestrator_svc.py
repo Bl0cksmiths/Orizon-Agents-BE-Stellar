@@ -672,6 +672,27 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
     )
 
 
+# An OpenAI API key as a provider message may quote it: whole, or `*`-masked.
+_API_KEY_SHAPE = re.compile(r"sk-[A-Za-z0-9_*\-]+")
+
+# Enough of a failure message to say what went wrong, never a whole body.
+_FAILURE_EXCERPT_CHARS = 200
+
+
+def _loggable(text: str) -> str:
+    """Third-party text made fit for a log line: no key in it, and bounded.
+
+    Neither source of a planner failure message is ours. An OpenAI 401 quotes
+    back the key it rejected, only partly masked, and an answer that did not
+    parse is whatever the model wrote, at whatever length. So the configured
+    key and anything shaped like one are redacted, and the excerpt is clamped.
+    """
+    key = settings.openai_api_key
+    if key:
+        text = text.replace(key, "[redacted]")
+    return _API_KEY_SHAPE.sub("sk-[redacted]", text)[:_FAILURE_EXCERPT_CHARS]
+
+
 async def decompose(intent: str) -> DecomposeResponse:
     # One live reputation snapshot per decompose — timeout-bounded and never
     # raises (prior fallback), shared by the kit path, the routing prompt,
