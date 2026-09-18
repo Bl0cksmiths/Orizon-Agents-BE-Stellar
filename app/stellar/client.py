@@ -445,7 +445,11 @@ def _send_server_signed(
         try:
             tx = server.prepare_transaction(tx)
         except PrepareTransactionException as e:
-            raise RuntimeError(f"prepare failed: {e.simulate_transaction_response.error}") from e
+            detail = e.simulate_transaction_response.error
+            code = _contract_error_code(detail)
+            if code is not None:
+                raise ContractError(f"prepare failed: {detail}", code) from e
+            raise RuntimeError(f"prepare failed: {detail}") from e
         tx.sign(kp)
 
         span["stage"] = "send"
