@@ -211,13 +211,15 @@ class Settings(BaseSettings):
     # Wall-clock bound on ONE batched reputation read — the asyncio.wait_for
     # around fetch_reps' gather (services/reputation_svc.py). Lifted out of that
     # function's default argument so a deployment can tune it without a code
-    # change and, more to the point, so _reputation_read_fits_the_planning_budget
-    # below can see the number it is validating: a bound that exists only as a
-    # literal inside a signature is one no validator can check. fetch_reps keeps
-    # its per-call override (the degradation tests drive it to 0.02 s to force the
-    # timeout path); this value and that function's default are pinned equal by
-    # tests/test_reputation_budget.py, so whichever of the two a live read
-    # consults, the validator is checking the bound a read actually uses.
+    # change and, more to the point, so the validators below that bound it can
+    # see the number they are validating: a bound that exists only as a literal
+    # inside a signature is one no validator can check. fetch_reps' default is
+    # now None, which it resolves to this setting on every call, so there is one
+    # number and nothing to keep in step; tests/test_reputation_budget.py fails
+    # if a literal default ever returns and disagrees with this one. An explicit
+    # argument still wins — the degradation tests drive it to 0.02 s to force the
+    # timeout path — and no production caller passes one, so the value validated
+    # here is the bound every live read uses.
     reputation_batch_timeout_seconds: float = 2.5
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
