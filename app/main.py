@@ -506,7 +506,9 @@ class ReadinessResponse(BaseModel):
 async def readiness(response: Response) -> ReadinessResponse:
     """503 only when a dependency the API cannot serve without is missing:
     the LLM key or the Stellar contract/RPC config. The signing key is
-    deliberately informational — read-only deployments are legitimate."""
+    deliberately informational — read-only deployments are legitimate — and
+    so is `cold_start`: a floor that shuts newcomers out is a policy the
+    process serves correctly, not a dependency it lacks."""
     llm = "ok" if settings.openai_api_key else "missing_key"
 
     contract_ids = (
