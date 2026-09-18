@@ -279,6 +279,15 @@ class DecomposeResponse(BaseModel):
     # `PlanFloorNotice.kind`, and a third meaning in one payload is a defect
     # waiting to be written.
     reputation_degraded: bool = False
+    # True when `steps` is the deterministic fallback plan rather than the
+    # planner's own: the planning model failed or answered with something that
+    # is not a plan, or every step it chose was clamped away. The fallback is
+    # still a stored, executable plan — one step, drawn from the same shortlist
+    # under the same floor — but a fixed rule picked it, not a reading of this
+    # intent, and the buyer should know that before paying for it. Why the
+    # planner failed is logged, never returned. Always False on the demo-kit
+    # path, which never asks the planner anything.
+    planner_fallback: bool = False
 
 
 class ExecuteRequest(BaseModel):

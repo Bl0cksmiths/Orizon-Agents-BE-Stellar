@@ -88,6 +88,17 @@ Each plan step also carries the rest of the reputation the floor was judged on, 
 
 The `rep_*` fields are absent (`null`, `rep_degraded` `false`) only for an agent with no reputation entry at all.
 
+The plan as a whole says what shaped it, on both planning paths (all defaulted, so an older client still validates):
+
+| `DecomposeResponse` field | meaning |
+| --- | --- |
+| `notices` | every floor action taken while building the plan — exclusions, substitutions, starvation-backstop re-admissions — plus on-chain agents excluded for having no bound endpoint |
+| `floor_bps` | the routing floor this plan was actually judged against, read from settings at plan time |
+| `reputation_degraded` | at least one reputation read in this plan's snapshot **failed** and the prior was served, so the floor verdicts rest on an estimate |
+| `planner_fallback` | the steps are the deterministic **fallback plan**, not the planner's own — the planning model failed or returned no usable plan, or every step it chose was clamped away. Still stored, executable and held to the floor like any plan; always `false` on the demo-kit path |
+
+A free-form intent does not fail because the model did. A blank `OPENAI_API_KEY`, a refused connection or an upstream error is served the fallback plan with `planner_fallback: true`; the provider's message is logged with any API key redacted, and never returned. Two planning conditions still refuse the request: a planner that outlives `DECOMPOSE_TIMEOUT_SECONDS` (504 `decompose_timeout`), and nothing listed and dispatchable left to route to (503 `no_routable_agents`) — checked before any LLM call is spent, and again before the fallback is built.
+
 After each settled workflow the settler submits one synthetic rating per step (`kind="auto"`), derived from verifiable workflow signals — did the worker deliver output, ship an artifact, trip critic violations — so scores are validation-gated rather than opinion. Submissions run sequentially (one scorer account) and are best-effort: a failed rating logs a trace line and never fails the workflow.
 
 Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /api/stellar/reputation/{id}` (one agent). Tunables:

@@ -25,10 +25,13 @@ async def orchestrator_decompose(req: DecomposeRequest) -> DecomposeResponse:
         # Nothing listed and dispatchable was left to offer the planner. The
         # request was fine and the condition clears when an operator binds or
         # relists an agent, so this is a retryable 503 — not the 502 below,
-        # which means an upstream call failed, and not worth a traceback.
+        # which is a fault, and not worth a traceback.
         logger.warning("decompose refused for intent %r: %s", req.intent, e)
         raise HTTPException(503, "no_routable_agents") from e
     except Exception as e:
+        # A planner that failed never lands here: `decompose` serves the
+        # fallback plan for it and flags it `planner_fallback` (BLO-121). What
+        # is left is a fault nothing anticipated, so it keeps its traceback.
         logger.exception("decompose failed for intent %r", req.intent)
         raise HTTPException(502, "decompose_failed") from e
 

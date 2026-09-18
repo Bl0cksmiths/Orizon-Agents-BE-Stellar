@@ -12,6 +12,9 @@ def test_kit_decompose_returns_deterministic_plan(client):
     assert plan["plan_id"]
     assert len(plan["steps"]) >= 4
     assert plan["total_usdc"] > 0
+    # The kit path never asks the planner, so it can never be serving the
+    # planner's fallback — the flag is present and down.
+    assert plan["planner_fallback"] is False
 
 
 def test_kit_execute_produces_baked_artifact(client):
