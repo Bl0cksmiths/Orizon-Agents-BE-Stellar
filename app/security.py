@@ -77,6 +77,19 @@ class RequestIdLogFilter(logging.Filter):
         return True
 
 
+# Token shapes that are secret wherever they appear, whatever logged them.
+# A shape catches what the configured-value pass cannot: a key that is not
+# this deployment's own (a provider echoing back a rejected key, a pasted
+# seed in an exception message). Both are anchored to whole tokens so a
+# public key, a contract id or a transaction hash is never mistaken for one —
+# Stellar public keys start with G and contract ids with C, and only a
+# secret seed is an S followed by exactly 55 base32 characters.
+_SECRET_SHAPES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"),  # OpenAI-style API keys
+    re.compile(r"\bS[A-Z2-7]{55}\b"),  # Stellar secret seeds (StrKey "S…")
+)
+
+
 # Resolved key for a forwarded chain that is too short to contain a client
 # entry once the trusted hops are removed. A literal, never an address: it
 # cannot collide with a real client, and seeing it as `client=` in the access
