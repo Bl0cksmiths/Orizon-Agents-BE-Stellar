@@ -133,3 +133,13 @@ def test_the_suggested_bound_always_boots():
         decompose = tenths / 10
         suggested_bound, _ = _advice(decompose, _typed_share(decompose) * 1.5)
         _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=suggested_bound)
+
+
+def test_the_suggested_budget_always_boots():
+    """The other way out: keep the bound, raise the planning budget to what
+    the message says. Every hundredth-of-a-second bound from 0.11 s to 20 s
+    against a 1 s budget, so each one is refused and each gets advice."""
+    for hundredths in range(11, 2001):
+        bound = hundredths / 100
+        _, suggested_budget = _advice(1.0, bound)
+        _settings(decompose_timeout_seconds=suggested_budget, reputation_batch_timeout_seconds=bound)
