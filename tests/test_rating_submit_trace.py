@@ -103,3 +103,73 @@ def test_a_skipped_run_traces_why_and_warns_the_operator(monkeypatch, caplog, se
     assert [(ln.level, ln.msg) for ln in lines] == [("error", f"ratings not submitted: {reason}")]
     warnings = [r.getMessage() for r in caplog.records if r.name == WRITER_LOG]
     assert len(warnings) == 1 and problem in warnings[0]
+
+
+# ── a failed submit is named, never quoted ──────────────────────
+
+
+def _submit_raises(monkeypatch, exc: Exception) -> None:
+    async def _fake(agent_id, job_id, rating, weight, payer, kind="auto"):
+        raise exc
+
+    monkeypatch.setattr(sc, "submit_rating_async", _fake)
+
+
+def test_an_unauthorized_rejection_is_named_in_the_trace(monkeypatch):
+    """The live failure mode: a signer that is not the ledger's Scorer.
+    Before this, the buyer saw "failed" and nobody could say why."""
+    _configured(monkeypatch)
+    _submit_raises(monkeypatch, sc.ContractError("prepare failed: HostError: Error(Contract, #1) …", 1))
+    [line] = _rate()
+    assert (line.level, line.msg) == ("error", "reputation submit failed for w.x: Unauthorized")
+
+
+def test_a_replay_rejection_is_named_in_the_trace(monkeypatch):
+    _configured(monkeypatch)
+    _submit_raises(monkeypatch, sc.ContractError("prepare failed: HostError: Error(Contract, #7) …", 7))
+    [line] = _rate()
+    assert line.msg == "reputation submit failed for w.x: Replay"
+
+
+def test_any_other_failure_is_generic_and_its_text_stays_in_the_log(monkeypatch, caplog):
+    """The trace is world-readable; the operator's log is not. The raw text
+    goes to the second and never the first."""
+    _configured(monkeypatch)
+    leak = "https://rpc.example/?apikey=DO-NOT-TRACE"
+    _submit_raises(monkeypatch, RuntimeError(f"load_account {leak}"))
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        [line] = _rate()
+    assert line.msg == "reputation submit failed for w.x: rpc error"
+    assert leak not in line.msg
+    assert any(leak in r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc")
+
+
+# ── a sent rating that did not land is not traced as rated ──────
+
+
+@pytest.mark.parametrize(("status", "reason"), [("FAILED", "transaction failed"), ("timeout", "unconfirmed")])
+def test_a_rating_that_did_not_land_is_an_error_not_a_proof(monkeypatch, caplog, status, reason):
+    _configured(monkeypatch)
+
+    async def _unlanded(agent_id, job_id, rating, weight, payer, kind="auto"):
+        return {"hash": "feedface" * 8, "status": status}
+
+    monkeypatch.setattr(sc, "submit_rating_async", _unlanded)
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        [line] = _rate()
+    assert line.level == "error"
+    assert line.msg == f"reputation submit failed for w.x: {reason} · tx feedfacefe…"
+    logged = [r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc"]
+    assert any(f"status={status}" in m and "did not land" in m for m in logged)
+
+
+def test_a_rating_that_landed_is_still_a_proof(monkeypatch):
+    _configured(monkeypatch)
+
+    async def _landed(agent_id, job_id, rating, weight, payer, kind="auto"):
+        return {"hash": "c0ffee00" * 8, "status": "SUCCESS"}
+
+    monkeypatch.setattr(sc, "submit_rating_async", _landed)
+    [line] = _rate()
+    assert line.level == "proof"
+    assert line.msg.startswith("reputation → w.x rated ")
