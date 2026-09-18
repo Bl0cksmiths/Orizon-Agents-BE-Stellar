@@ -15,8 +15,10 @@ entirely of silence.
 
 CI cannot catch it either: the suite runs against the repo defaults or a
 test-time override, while this deployment takes its floor from the Render
-dashboard, which overrides render.yaml. A check at startup is the only one
-that sees the number actually in force.
+dashboard, which overrides render.yaml. Only a check in the running process
+sees the number actually in force — the startup line, and the `cold_start`
+object /readiness reports on demand, which the last test holds to the same
+verdict.
 
 So these tests pin the check itself: that it runs on the real boot path,
 that it names every number an operator needs to act on without opening
