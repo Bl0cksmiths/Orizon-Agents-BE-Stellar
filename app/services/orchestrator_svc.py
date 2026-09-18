@@ -596,6 +596,11 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
         else:
             notices.append(below_floor_exclusion(agent, info))
+    # Last, as on the free-form path, so both lists group the same way: what
+    # the floor did first, then registry entries nothing could dispatch. This
+    # path used to report none, so a demo intent showed a marketplace with
+    # agents its plan card never accounted for.
+    notices += _unbound_notices()
     steps = [step for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
