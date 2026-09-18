@@ -31,3 +31,14 @@ def test_the_planner_is_told_only_listed_ids_may_be_used() -> None:
     assert "any step naming it is discarded" in text
     # And the agent is actually built with them.
     assert orchestrator_agent.instructions == INSTRUCTIONS
+
+
+def test_the_code_gen_preference_holds_only_while_it_is_listed() -> None:
+    text = _text()
+
+    assert "if `code.gen` (agt_11c0) appears in AVAILABLE_AGENTS, prefer it" in text
+    assert "if it does not appear, it is unavailable for this request" in text
+    assert "pick the listed agent whose skills best fit the build" in text
+    # The conditional is the ONLY place the id appears, so no other sentence
+    # can reinstate the standing order the floor has to fight.
+    assert text.count("agt_11c0") == 1
