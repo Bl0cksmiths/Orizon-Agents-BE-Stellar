@@ -318,8 +318,9 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
 ) -> None:
     # The same refusal through the router the frontend calls. The request was
     # well-formed and the service cannot serve it, so the answer is a
-    # server-side status and never a 200 carrying a plan — pinned as the class
-    # rather than a code, because choosing the code is the router's job.
+    # server-side status and never a 200 carrying a plan: a retryable 503 with
+    # its own detail, so a client can tell it apart from a failed upstream call
+    # (502) or a hung planner (504).
     #
     # The stand-in planner answers the way a model shown an empty list would:
     # with nothing usable. That is the answer the old hardcoded fallback turned
@@ -337,8 +338,8 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
 
     r = client.post("/api/orchestrator/decompose", json={"intent": BUILD_INTENT})
 
-    assert r.status_code >= 500
-    assert "plan_id" not in r.json()
+    assert r.status_code == 503
+    assert r.json()["detail"] == "no_routable_agents"
     assert set(state.plans) == before
     assert calls == []
 
