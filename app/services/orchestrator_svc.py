@@ -466,6 +466,7 @@ def build_planning_prompt(registry_block: str, intent: str) -> str:
 class _DroppedKitRole(NamedTuple):
     """A sub-floor kit role with no substitute, held for the starvation backstop."""
 
+    position: int  # index in _KIT_PIPELINE — where the step goes if re-admitted
     agent: Agent
     rationale: str
     info: reputation_svc.RepInfo | None
@@ -492,7 +493,12 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     """
     await asyncio.sleep(1.4 + random.random() * 1.0)
 
-    steps: list[PlanStep] = []
+    # (pipeline position, step). Execution runs steps in list order and later
+    # roles read earlier ones' output from the run context — code.gen takes its
+    # design tokens from design.figma, code.critic polishes code.gen's draft —
+    # so a step is only coherent at its own position, however late it was
+    # admitted.
+    placed: list[tuple[int, PlanStep]] = []
     notices: list[PlanFloorNotice] = []
     taken: set[str] = set()
     # Sub-floor agents with no substitute — held until after the loop so the
@@ -500,7 +506,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     # recorded as plain exclusions.
     dropped: list[_DroppedKitRole] = []
 
-    for agent_id, rationale in _KIT_PIPELINE:
+    for position, (agent_id, rationale) in enumerate(_KIT_PIPELINE):
         agent = state.agents.get(agent_id)
         if agent is None:
             # The kit pipeline references an agent that isn't seeded — this
@@ -530,7 +536,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         eta = _KIT_ETAS.get(agent_id, 1.0)
         info = reps.get(agent.id)
         if reputation_svc.passes_floor(info):
-            steps.append(_kit_step(agent, rationale, eta, reps))
+            placed.append((position, _kit_step(agent, rationale, eta, reps)))
             taken.add(agent.id)
             continue
 
@@ -538,38 +544,41 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         # shares a skill, else drop the step. Either way the buyer is told.
         sub = _floor_substitute(agent, reps, taken)
         if sub is not None:
-            steps.append(_kit_step(sub, rationale, eta, reps, substituted_for=agent.id))
+            placed.append((position, _kit_step(sub, rationale, eta, reps, substituted_for=agent.id)))
             taken.add(sub.id)
             notices.append(substitution(agent, sub, info))
         else:
-            dropped.append(_DroppedKitRole(agent, rationale, info))
+            dropped.append(_DroppedKitRole(position, agent, rationale, info))
 
     # Starvation backstop — reuse _MIN_ROUTABLE_AGENTS rather than invent a
     # second rule. If the floor left too few steps, re-admit dropped kit agents
     # to cover the deficit and record the degradation; the remainder are
-    # recorded as exclusions. Re-admitted steps are appended in pipeline order
-    # for a coherent plan.
+    # recorded as exclusions. A re-admitted step goes back to its own pipeline
+    # position, never onto the end: appended, design tokens would run AFTER the
+    # code.gen step that needs them, and it would build without them.
     #
     # The builder goes first whatever its score, then `_backstop_rank` — the
     # free-form path's rule. Score alone once turned a battered tetris kit into
     # research + brand + tokens with no code.gen: three paid steps preparing
     # inputs for a build nobody was asked to do, and no artifact at the end.
     by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
-    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(steps))
+    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(placed))
     readmit_ids = {d.agent.id for d in by_priority[:deficit]}
     if readmit_ids:
         logger.warning(
             "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s) by smoothed score",
-            len(steps),
+            len(placed),
             len(readmit_ids),
         )
-    for agent, rationale, info in dropped:
+    for position, agent, rationale, info in dropped:
         if agent.id in readmit_ids:
-            steps.append(_kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True))
+            step = _kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True)
+            placed.append((position, step))
             taken.add(agent.id)
             notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
         else:
             notices.append(below_floor_exclusion(agent, info))
+    steps = [step for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in steps)
