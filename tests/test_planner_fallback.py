@@ -181,3 +181,23 @@ def test_a_hung_planner_still_times_out_and_mints_no_plan(
         _decompose(monkeypatch, _hangs)
     assert set(state.plans) == before
     assert not orchestrator_svc._decompose_gate().locked()
+
+
+def test_a_failed_planner_call_gives_its_planning_slot_back(
+    seeded: object, monkeypatch: pytest.MonkeyPatch, hermetic_settings: object
+) -> None:
+    # One slot, and a budget short enough to fail fast: a slot kept by any
+    # failure below would leave the next request queued behind it until the
+    # budget ran out, and every free-form intent after that a 504.
+    monkeypatch.setattr(hermetic_settings, "decompose_max_concurrent", 1)
+    monkeypatch.setattr(hermetic_settings, "decompose_timeout_seconds", 2.0)
+
+    async def _refused(_prompt: str) -> RunOutput:
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    async def _failed_run(_prompt: str) -> RunOutput:
+        return RunOutput(status=RunStatus.error, content="Connection error.")
+
+    for planner in (_refused, _failed_run, _refused, _failed_run):
+        assert _decompose(monkeypatch, planner).planner_fallback is True
+    assert not orchestrator_svc._decompose_gate().locked()
