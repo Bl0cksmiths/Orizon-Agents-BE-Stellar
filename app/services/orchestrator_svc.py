@@ -827,7 +827,11 @@ async def decompose(intent: str) -> DecomposeResponse:
             )
         )
 
-    if not cleaned:
+    # Whatever emptied it — a planner that failed, or one whose every step the
+    # clamp discarded — the steps served from here on are not the model's
+    # plan, and the response has to say so.
+    planner_fallback = not cleaned
+    if planner_fallback:
         # Fall back to a minimal safe plan so the UI never gets stuck — drawn
         # from the shortlist like any model step, never from outside it. The
         # copywriter used to be hardcoded here on the grounds that nothing
