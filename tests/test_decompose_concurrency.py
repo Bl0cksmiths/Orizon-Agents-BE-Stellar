@@ -72,3 +72,4 @@ def test_kit_decompose_never_takes_the_gate(monkeypatch):
         assert len(plan.steps) >= 4
 
     asyncio.run(scenario())
+    assert llm_calls == [], "kit decompose must never reach the LLM"
