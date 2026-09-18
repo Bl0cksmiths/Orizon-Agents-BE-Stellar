@@ -139,7 +139,8 @@ def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
     `PlanStep.degraded` and `PlanFloorNotice.kind == "degraded"` both mean
     "re-admitted BELOW the floor by the starvation backstop" — a verdict that
     was reached, not one that could not be. A plan can carry either without the
-    other.
+    other. `PlanStep.rep_degraded` is this same fact per step, stamped by
+    `_rep_fields`, so a card can say WHICH agent's numbers are an estimate.
     """
     return any(info.degraded for info in reps.values())
 
