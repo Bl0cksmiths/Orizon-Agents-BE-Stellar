@@ -397,6 +397,7 @@ def test_kit_path_honours_delisting_without_calling_the_llm(seeded: object, monk
     _delist("agt_11c0")
 
     resp = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+    assert llm_calls == [], "kit path must never call the LLM"
 
     assert "agt_11c0" not in [s.agent_id for s in resp.steps]
     assert resp.notices == []
