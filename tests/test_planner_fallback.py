@@ -42,6 +42,15 @@ def seeded() -> object:
     state.agents.update(saved)
 
 
+def _decompose(monkeypatch: pytest.MonkeyPatch, planner: Callable[[str], Awaitable[object]]) -> DecomposeResponse:
+    """Plan FREE_FORM_INTENT through the public entry point, `planner` standing
+    in for the model. Reputation is the hermetic suite's prior for every agent,
+    which clears the floor, so the whole seeded catalog is offered."""
+    assert detect_kit(FREE_FORM_INTENT) is None
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", planner)
+    return asyncio.run(orchestrator_svc.decompose(FREE_FORM_INTENT))
+
+
 def test_a_blank_api_key_serves_the_fallback_plan_not_a_502(
     seeded: object, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
