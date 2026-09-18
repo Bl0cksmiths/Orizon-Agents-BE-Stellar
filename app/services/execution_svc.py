@@ -15,7 +15,7 @@ from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker
+from . import failure_tracker, rating_writer
 from .binding_registry import resolve_worker
 
 logger = logging.getLogger(__name__)
@@ -985,7 +985,15 @@ async def _submit_ratings(
     as traced because a rating that silently never landed skews the on-chain
     reputation the planner reads, and traces do not survive a restart.
     """
-    if not (settings.reputation_enabled and settings.stellar_reputation_ledger and settings.stellar_signing_key):
+    gap = rating_writer.config_gap()
+    if gap is not None:
+        # This used to be a bare `return`: a deployment missing any of these
+        # settings rated nothing and said nothing, which is how the testnet
+        # ledger sat at zero ratings with nobody able to say why. The operator
+        # now gets a WARNING naming the setting (at most hourly), and the
+        # buyer's trace says the ratings were not written and why.
+        rating_writer.note_skipped(task_id, gap)
+        await _emit(task_id, start, "error", f"ratings not submitted: {gap.reason}")
         return
 
     from ..stellar import client as sc
