@@ -51,6 +51,11 @@ def _decompose(monkeypatch: pytest.MonkeyPatch, planner: Callable[[str], Awaitab
     return asyncio.run(orchestrator_svc.decompose(FREE_FORM_INTENT))
 
 
+def _stored_ids(resp: DecomposeResponse) -> list[str]:
+    """What /execute will dispatch — the stored plan, not the response."""
+    return [s.agent_id for s in state.plans[resp.plan_id].plan.steps]
+
+
 def test_a_blank_api_key_serves_the_fallback_plan_not_a_502(
     seeded: object, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
