@@ -10,13 +10,16 @@ boot behind the chain read it needs. Nothing here reaches the network.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 
 import pytest
 from stellar_sdk import Keypair, StrKey
 
 from app.config import settings
 from app.services import rating_writer as rw
+from app.stellar import client as sc
 
 WRITER_LOG = "app.services.rating_writer"
 SIGNER = Keypair.from_raw_ed25519_seed(b"\x0a" * 32).public_key
@@ -28,6 +31,37 @@ LEDGER = StrKey.encode_contract(b"\x0c" * 32)
 def configured_ledger(monkeypatch):
     monkeypatch.setattr(settings, "stellar_reputation_ledger", LEDGER)
     monkeypatch.setattr(settings, "stellar_network", "testnet")
+    # A fresh writer each test, and an unstubbed chain read fails loudly.
+    monkeypatch.setattr(rw, "_last_read", None)
+    monkeypatch.setattr(rw, "_read_task", None)
+    monkeypatch.setattr(rw, "_report_task", None)
+
+    def _unstubbed(ledger: str) -> str | None:
+        raise AssertionError("a test reached the chain without stubbing it")
+
+    monkeypatch.setattr(sc, "ledger_scorer", _unstubbed)
+
+
+def _signs_as(monkeypatch, signer: str) -> None:
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_signing_key", "S-present")
+    monkeypatch.setattr(sc, "signer_public_key", lambda: signer)
+
+
+def _hanging_chain(monkeypatch) -> threading.Event:
+    """A chain read that blocks until the returned event is set."""
+    release = threading.Event()
+
+    def _hung(ledger: str) -> str | None:
+        release.wait(5)
+        return SIGNER
+
+    monkeypatch.setattr(sc, "ledger_scorer", _hung)
+    return release
+
+
+def _writer_records(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == WRITER_LOG]
 
 
 def _line(caplog, v: rw.WriterVerdict) -> logging.LogRecord:
@@ -93,3 +127,64 @@ def test_disabled_says_paid_runs_will_not_be_rated(caplog):
     message = record.getMessage()
     assert "REPUTATION_ENABLED is false" in message
     assert "will not be rated" in message
+
+
+# ── in the background, and gone at shutdown ─────────────────────
+
+
+def test_start_checks_and_reports_without_being_awaited(monkeypatch, caplog):
+    _signs_as(monkeypatch, SIGNER)
+    monkeypatch.setattr(sc, "ledger_scorer", lambda ledger: SIGNER)
+
+    async def _boot():
+        rw.start()
+        task = rw._report_task
+        assert task is not None and not task.done()  # start() returned first
+        await task
+
+    with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
+        asyncio.run(_boot())
+    [record] = _writer_records(caplog)
+    assert record.levelno == logging.INFO
+    assert "ratings writer ok" in record.getMessage()
+
+
+def test_stop_cancels_a_check_still_waiting_on_the_chain(monkeypatch, caplog):
+    _signs_as(monkeypatch, SIGNER)
+    release = _hanging_chain(monkeypatch)
+
+    async def _boot_then_shut_down():
+        rw.start()
+        report_task = rw._report_task
+        await asyncio.sleep(0.05)  # the read is now in flight
+        await rw.stop()
+        release.set()  # let the abandoned worker thread finish
+        return report_task
+
+    with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
+        report_task = asyncio.run(_boot_then_shut_down())
+    assert report_task is not None and report_task.cancelled()
+    assert rw._report_task is None and rw._read_task is None
+    assert _writer_records(caplog) == []
+
+
+def test_a_startup_check_that_dies_is_logged_not_lost(monkeypatch, caplog):
+    """Nothing awaits the task, so without its done-callback an exception
+    inside it would vanish without a line anywhere."""
+    monkeypatch.setattr(settings, "reputation_enabled", False)
+
+    def _boom(v: rw.WriterVerdict) -> None:
+        raise RuntimeError("report broke")
+
+    monkeypatch.setattr(rw, "report", _boom)
+
+    async def _boot():
+        rw.start()
+        task = rw._report_task
+        assert task is not None
+        await asyncio.wait({task})
+        await asyncio.sleep(0)  # let the done-callback run
+
+    with caplog.at_level(logging.ERROR, logger=WRITER_LOG):
+        asyncio.run(_boot())
+    assert any("startup check died" in r.getMessage() for r in _writer_records(caplog))
