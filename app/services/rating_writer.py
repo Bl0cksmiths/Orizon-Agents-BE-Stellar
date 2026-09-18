@@ -29,11 +29,14 @@ reason on every rating a paid run fails to write.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Literal
 
 from ..config import settings
+from ..stellar import client as sc
 
 logger = logging.getLogger(__name__)
 
@@ -70,3 +73,60 @@ def config_gap() -> ConfigGap | None:
     if not settings.stellar_signing_key:
         return _NO_KEY
     return None
+
+
+# ── the chain read ──────────────────────────────────────────────
+# The stored Scorer changes only when the ledger admin calls `set_scorer`, or
+# when the ledger is redeployed — and a redeploy is a new contract id, which
+# the cache below does not match, so it is read at once. The TTL therefore
+# only bounds how long a verdict can lag a `set_scorer`: five minutes is short
+# enough that an operator fixing a mismatch sees /readiness agree before
+# leaving the console, and one getLedgerEntries per five minutes — made only
+# when someone asks — is nothing to the rate-limited SDF RPC.
+SCORER_TTL_SECONDS = 300.0
+# A failed read is retried sooner: an RPC blip at boot must not pin
+# `unchecked` for five minutes, and a probe polled through an outage still
+# costs at most one read per 30 s.
+UNCHECKED_RETRY_SECONDS = 30.0
+# Wall-clock bound on one read. The client's read profile caps each HTTP
+# phase at 5 s, but per phase — connect and read separately — and not DNS;
+# this is the promise that a verdict resolves, to `unchecked` if it must,
+# instead of hanging. Above 5 s so a slow but live RPC still gets to answer.
+SCORER_READ_TIMEOUT_SECONDS = 8.0
+
+
+@dataclass(frozen=True)
+class _ScorerRead:
+    """One attempt to read the ledger's stored Scorer, and how it ended."""
+
+    ledger: str  # the contract id read — a changed id makes this read moot
+    at: float  # time.monotonic() when the attempt resolved
+    scorer: str | None = None  # on success: the Scorer, None if none is stored
+    # On failure: "timed out after 8s" or an exception TYPE name — never the
+    # exception's text, so the cause is safe to repeat anywhere.
+    error: str | None = None
+
+
+# The last attempt, whatever its outcome. None until the first one resolves.
+_last_read: _ScorerRead | None = None
+
+
+async def _read_scorer(ledger: str) -> None:
+    """Read `ledger`'s stored Scorer once and remember the outcome. Never raises.
+
+    `sc.ledger_scorer` is blocking (stellar-sdk is synchronous), so it runs on
+    the bounded executor. `wait_for` stops waiting at the bound; the worker
+    thread it leaves behind runs on until the client's own HTTP timeouts end
+    it, which is why this bound sits above theirs rather than replacing them.
+    """
+    global _last_read
+    try:
+        scorer = await asyncio.wait_for(asyncio.to_thread(sc.ledger_scorer, ledger), SCORER_READ_TIMEOUT_SECONDS)
+    except TimeoutError:
+        _last_read = _ScorerRead(ledger, time.monotonic(), error=f"timed out after {SCORER_READ_TIMEOUT_SECONDS:g}s")
+    except Exception as e:
+        # The client's RPC span has already logged this at ERROR, text and
+        # all; the verdict keeps the type alone.
+        _last_read = _ScorerRead(ledger, time.monotonic(), error=type(e).__name__)
+    else:
+        _last_read = _ScorerRead(ledger, time.monotonic(), scorer=scorer)
