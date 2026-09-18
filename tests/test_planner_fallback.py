@@ -14,9 +14,14 @@ as those suites do themselves, so this file fails for its own reasons only.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+
 import pytest
 from fastapi.testclient import TestClient
 
+from app.demo_kits import detect_kit
+from app.schemas import DecomposeResponse
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.state import state
