@@ -38,7 +38,7 @@ from .security import (
     request_id_var,
 )
 from .seed import seed_registry
-from .services import execution_svc, registry_sync, reputation_svc
+from .services import execution_svc, rating_writer, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 
@@ -156,6 +156,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # blocking Soroban SDK calls without oversubscribing the worker.
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="soroban")
     asyncio.get_running_loop().set_default_executor(executor)
+    # Whether this deployment can write ratings at all — the second silent
+    # failure this boot sequence names (services/rating_writer.py). Its answer
+    # needs one chain read, so it runs in the background, after the executor
+    # bind so that read uses the bounded pool; its line lands a moment after
+    # boot rather than holding the waking request behind the RPC.
+    rating_writer.start()
     # Mirror on-chain registrations into the marketplace (story 1.02). Started
     # after the executor bind so its to_thread reads use the bounded pool; the
     # loop no-ops while STELLAR_AGENT_REGISTRY is blank, which keeps the
