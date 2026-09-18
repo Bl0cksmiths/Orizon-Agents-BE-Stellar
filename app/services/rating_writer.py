@@ -197,3 +197,53 @@ def verdict() -> WriterVerdict:
         signer=signer,
         scorer=read.scorer,
     )
+
+
+# ── keeping it current ──────────────────────────────────────────
+
+# The read in flight, shared by everyone who wants one — the startup check and
+# any number of probes — so concurrent askers cost a single RPC call.
+_read_task: asyncio.Task[None] | None = None
+
+
+def _needs_read() -> bool:
+    """Whether the chain decides the verdict and the cached read cannot answer."""
+    if config_gap() is not None or _signer() is None:
+        return False
+    read = _last_read
+    if read is None or read.ledger != settings.stellar_reputation_ledger:
+        return True
+    ttl = SCORER_TTL_SECONDS if read.error is None else UNCHECKED_RETRY_SECONDS
+    return time.monotonic() - read.at >= ttl
+
+
+def _start_read() -> asyncio.Task[None]:
+    """The read in flight on this loop, starting one if there is none."""
+    global _read_task
+    loop = asyncio.get_running_loop()
+    task = _read_task
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = loop.create_task(_read_scorer(settings.stellar_reputation_ledger))
+        _read_task = task
+    return task
+
+
+async def check() -> WriterVerdict:
+    """The verdict, reading the chain first when the cached read cannot answer.
+
+    Bounded by SCORER_READ_TIMEOUT_SECONDS and never raises: a read that fails
+    or times out is the `unchecked` verdict, not an exception.
+    """
+    if _needs_read():
+        await _start_read()
+    return verdict()
+
+
+def refresh_if_stale() -> None:
+    """Start a background read when the cached one cannot answer. Never waits.
+
+    For /readiness, which stays free of live network calls: the probe reports
+    what is cached, and this is what makes the next probe current.
+    """
+    if _needs_read():
+        _start_read()
