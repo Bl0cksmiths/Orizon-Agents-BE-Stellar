@@ -41,7 +41,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.demo_kits import detect_kit
-from app.schemas import DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep
+from app.schemas import Agent, DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
@@ -515,3 +515,44 @@ def test_both_paths_report_a_degraded_reputation_snapshot(seeded: object, monkey
     # Fail-open, not fail-empty: the outage must not cost the buyer a plan.
     assert kit.steps
     assert free_form.steps
+
+
+def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-6 for the registry half of the vocabulary: `unbound_endpoint`.
+
+    An indexed on-chain agent with no endpoint is marketplace-visible and
+    un-routable. The free-form path told the buyer so; the kit path, which
+    every demo takes, said nothing — so the same registry produced two
+    different accounts of itself depending on the intent. Both paths now draw
+    on one selection and put it in the same place: after the floor's own
+    notices, ordered by id.
+    """
+    # Inserted out of id order, so the order below is the builder's and not
+    # the registry's.
+    for agent_id in ("ext_idx2", "ext_idx1"):
+        state.add_agent(
+            Agent(
+                id=agent_id,
+                name=f"{agent_id}.remote",
+                skills=["remote"],
+                price=0.02,
+                rep=4.99,
+                status="online",
+                runs=0,
+                source="onchain",
+            )
+        )
+    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+
+    kit = _run_kit(monkeypatch, reps)
+    free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
+
+    floor = settings.reputation_floor_bps
+    expected = [
+        ("excluded", UNSUBSTITUTABLE_KIT_AGENT, "below_floor", SUB_FLOOR_LOWER_BPS, floor),
+        ("excluded", "ext_idx1", "unbound_endpoint", None, floor),
+        ("excluded", "ext_idx2", "unbound_endpoint", None, floor),
+    ]
+    for resp in (kit, free_form):
+        # In emitted order, not sorted: the grouping is part of the contract.
+        assert [(n.kind, n.agent_id, n.reason_code, n.lower_bound_bps, n.floor_bps) for n in resp.notices] == expected
