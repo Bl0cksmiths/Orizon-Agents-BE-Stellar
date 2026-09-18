@@ -28,6 +28,7 @@ from app.routers import orchestrator as orchestrator_router
 from app.schemas import DecomposeResponse, Plan, PlanStep, StoredPlan
 from app.seed import seed_registry
 from app.services import orchestrator_svc
+from app.services.reputation_svc import RepInfo
 from app.state import state
 
 # Matches no DemoKit, so decompose() takes the free-form path — the intent
