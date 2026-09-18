@@ -28,6 +28,14 @@ SERVICE_VERSION = "0.1.0"
 # _reputation_read_fits_the_planning_budget, for why 10% and why a share
 # rather than a fixed number of seconds.
 REPUTATION_READ_BUDGET_SHARE = 0.10
+# How far past that share a batch bound may sit and still count as AT it —
+# relative, so it scales with the budget. The ceiling is a binary float product
+# (decompose timeout × 0.10) and neither 0.1 nor most typed decimals are exact in
+# binary, so a bound typed at exactly 10% — 0.07 against 0.7, 5.6 against 56 —
+# can land a few ulps above the product and be refused for a value the rule
+# permits. One part in a billion clears that noise by six orders of magnitude
+# and is nanoseconds on any real budget, so it admits no bound anyone would type.
+REPUTATION_READ_BUDGET_TOLERANCE = 1e-9
 
 
 class Settings(BaseSettings):
@@ -461,7 +469,9 @@ class Settings(BaseSettings):
                 "Set DECOMPOSE_TIMEOUT_SECONDS to a positive number of seconds."
             )
         allowance = self.decompose_timeout_seconds * REPUTATION_READ_BUDGET_SHARE
-        if self.reputation_batch_timeout_seconds > allowance:
+        if self.reputation_batch_timeout_seconds > allowance and not math.isclose(
+            self.reputation_batch_timeout_seconds, allowance, rel_tol=REPUTATION_READ_BUDGET_TOLERANCE
+        ):
             raise ValueError(
                 f"REPUTATION_BATCH_TIMEOUT_SECONDS={self.reputation_batch_timeout_seconds:g} is more than "
                 f"{REPUTATION_READ_BUDGET_SHARE:.0%} of DECOMPOSE_TIMEOUT_SECONDS="
