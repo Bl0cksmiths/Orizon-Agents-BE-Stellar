@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse
 from ..services.execution_svc import CapacityExhaustedError, execute_plan
-from ..services.orchestrator_svc import decompose
+from ..services.orchestrator_svc import NoRoutableAgentsError, decompose
 from ..state import state
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,13 @@ async def orchestrator_decompose(req: DecomposeRequest) -> DecomposeResponse:
         # nothing else failed. Distinct from the blanket 502 below.
         logger.warning("decompose timed out for intent %r", req.intent)
         raise HTTPException(504, "decompose_timeout") from e
+    except NoRoutableAgentsError as e:
+        # Nothing listed and dispatchable was left to offer the planner. The
+        # request was fine and the condition clears when an operator binds or
+        # relists an agent, so this is a retryable 503 — not the 502 below,
+        # which means an upstream call failed, and not worth a traceback.
+        logger.warning("decompose refused for intent %r: %s", req.intent, e)
+        raise HTTPException(503, "no_routable_agents") from e
     except Exception as e:
         logger.exception("decompose failed for intent %r", req.intent)
         raise HTTPException(502, "decompose_failed") from e

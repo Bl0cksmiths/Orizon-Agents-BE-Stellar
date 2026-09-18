@@ -1,6 +1,7 @@
 import base64
 import binascii
 import logging
+import math
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,27 @@ SERVICE_VERSION = "0.1.0"
 # _reputation_read_fits_the_planning_budget, for why 10% and why a share
 # rather than a fixed number of seconds.
 REPUTATION_READ_BUDGET_SHARE = 0.10
+# How far past that share a batch bound may sit and still count as AT it —
+# relative, so it scales with the budget. The ceiling is a binary float product
+# (decompose timeout × 0.10) and neither 0.1 nor most typed decimals are exact in
+# binary, so a bound typed at exactly 10% — 0.07 against 0.7, 5.6 against 56 —
+# can land a few ulps above the product and be refused for a value the rule
+# permits. One part in a billion clears that noise by six orders of magnitude
+# and is nanoseconds on any real budget, so it admits no bound anyone would type.
+REPUTATION_READ_BUDGET_TOLERANCE = 1e-9
+
+
+def _seconds(value: float) -> str:
+    """A duration as a boot error prints it: precise enough to copy back in.
+
+    `:g` keeps six significant digits, so it prints a ceiling of 12.3456789 s
+    as 12.3457 — above the ceiling it names — and a validator whose advice is
+    formatted that way refuses its own suggested fix. Twelve digits bound the
+    rounding at 5e-12 relative, far inside REPUTATION_READ_BUDGET_TOLERANCE,
+    while still hiding binary float noise: 0.7 × 0.1 prints as 0.07, not as
+    the 0.06999999999999999 it is stored as.
+    """
+    return f"{value:.12g}"
 
 
 class Settings(BaseSettings):
@@ -189,13 +211,15 @@ class Settings(BaseSettings):
     # Wall-clock bound on ONE batched reputation read — the asyncio.wait_for
     # around fetch_reps' gather (services/reputation_svc.py). Lifted out of that
     # function's default argument so a deployment can tune it without a code
-    # change and, more to the point, so _reputation_read_fits_the_planning_budget
-    # below can see the number it is validating: a bound that exists only as a
-    # literal inside a signature is one no validator can check. fetch_reps keeps
-    # its per-call override (the degradation tests drive it to 0.02 s to force the
-    # timeout path); this value and that function's default are pinned equal by
-    # tests/test_reputation_budget.py, so whichever of the two a live read
-    # consults, the validator is checking the bound a read actually uses.
+    # change and, more to the point, so the validators below that bound it can
+    # see the number they are validating: a bound that exists only as a literal
+    # inside a signature is one no validator can check. fetch_reps' default is
+    # now None, which it resolves to this setting on every call, so there is one
+    # number and nothing to keep in step; tests/test_reputation_budget.py fails
+    # if a literal default ever returns and disagrees with this one. An explicit
+    # argument still wins — the degradation tests drive it to 0.02 s to force the
+    # timeout path — and no production caller passes one, so the value validated
+    # here is the bound every live read uses.
     reputation_batch_timeout_seconds: float = 2.5
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
@@ -341,6 +365,53 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _reputation_read_has_a_real_bound(self) -> "Settings":
+        """Fail fast when the batched reputation read has no usable deadline.
+
+        fetch_reps (services/reputation_svc.py) hands this number to
+        asyncio.wait_for as the deadline for the whole batch. The budget rule
+        below only ever looked UP — it caps the bound at a share of the
+        planning budget — so nothing stopped it from going down to nothing.
+        wait_for treats a deadline of 0, any negative value, or NaN as already
+        expired: the gather is cancelled before a single rep_state read can
+        answer, every agent falls back to the prior marked degraded, and every
+        plan goes out flagged reputation_degraded. Under the shipped config a
+        prior-only agent clears the floor, so the floor then fails OPEN for
+        the life of the process — an agent the ledger has already rated below
+        it is routable again, with the chain perfectly healthy. The degradation
+        policy accepts failing open because an outage is bounded by the read
+        TTL and by this timeout; a timeout that expires on arrival turns a
+        bounded outage into a permanent one that no RPC recovery can end.
+
+        inf is the opposite failure: no bound at all, so a hung RPC holds every
+        decompose for as long as the socket does — the exact incident this
+        timeout exists to absorb. A finite planning budget happens to catch it
+        in the share rule below, but only as a ratio; refusing it here names
+        the actual problem. NaN is refused here for a sharper reason still: it
+        compares false against everything, so the share rule cannot see it.
+
+        Raised rather than logged, for the budget rule's own reason: it can
+        only reject a number this file declares, which the deploy that typed it
+        can untype, and what it prevents is silent — reads "succeed" at the
+        prior, nothing errors, and the only symptom is a trust gate that has
+        stopped gating.
+        """
+        bound = self.reputation_batch_timeout_seconds
+        if not (math.isfinite(bound) and bound > 0):
+            # Read from the field rather than restated, so the advice cannot
+            # drift from the default it names.
+            default = type(self).model_fields["reputation_batch_timeout_seconds"].default
+            raise ValueError(
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS={bound:g} is not a positive, finite number of seconds. "
+                "A deadline of zero, below zero or NaN expires before any reputation read can answer, so every "
+                "agent is scored on the prior, every plan is flagged reputation_degraded and the routing floor "
+                "stops filtering anyone; inf removes the bound, so a hung Soroban RPC stalls every /decompose. "
+                "Set REPUTATION_BATCH_TIMEOUT_SECONDS to a positive number of seconds within the planning budget "
+                f"(the default is {default:g})."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _reputation_read_fits_the_planning_budget(self) -> "Settings":
         """Fail fast when a reputation read could swallow the planning budget.
 
@@ -397,16 +468,34 @@ class Settings(BaseSettings):
         wrote it returns — that wastes cache hits, breaches no budget, and does
         not earn the power to refuse a boot.
         """
-        allowance = self.decompose_timeout_seconds * REPUTATION_READ_BUDGET_SHARE
-        if self.reputation_batch_timeout_seconds > allowance:
+        # A share of a budget that is not a real duration is not a rule. NaN
+        # compares false against everything and a share of inf is inf, so
+        # either one waved every batch bound through; zero or below was caught,
+        # but by a message advising a batch bound of zero or below — advice the
+        # validator above refuses. Each also breaks planning on its own:
+        # wait_for expires a NaN, zero or negative deadline on arrival, so every
+        # free-form plan is a 504, and inf leaves the call with no bound at all.
+        planning = self.decompose_timeout_seconds
+        if not (math.isfinite(planning) and planning > 0):
             raise ValueError(
-                f"REPUTATION_BATCH_TIMEOUT_SECONDS={self.reputation_batch_timeout_seconds:g} is more than "
+                f"DECOMPOSE_TIMEOUT_SECONDS={planning:g} is not a positive, finite number of seconds. A deadline "
+                "of zero, below zero or NaN expires every planning call the moment it starts and inf never "
+                "expires one, and no share of any of them can bound the reputation read that runs before it. "
+                "Set DECOMPOSE_TIMEOUT_SECONDS to a positive number of seconds."
+            )
+        allowance = self.decompose_timeout_seconds * REPUTATION_READ_BUDGET_SHARE
+        if self.reputation_batch_timeout_seconds > allowance and not math.isclose(
+            self.reputation_batch_timeout_seconds, allowance, rel_tol=REPUTATION_READ_BUDGET_TOLERANCE
+        ):
+            raise ValueError(
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS={_seconds(self.reputation_batch_timeout_seconds)} is more than "
                 f"{REPUTATION_READ_BUDGET_SHARE:.0%} of DECOMPOSE_TIMEOUT_SECONDS="
-                f"{self.decompose_timeout_seconds:g} (at most {allowance:g} s is allowed). Reputation is "
-                "read before the planning call, not inside it, so a Soroban outage would add that long to "
-                "every /decompose with no error code naming it. Lower REPUTATION_BATCH_TIMEOUT_SECONDS to "
-                f"{allowance:g} or less, or raise DECOMPOSE_TIMEOUT_SECONDS to at least "
-                f"{self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE:g}."
+                f"{_seconds(self.decompose_timeout_seconds)} (at most {_seconds(allowance)} s is allowed). "
+                "Reputation is read before the planning call, not inside it, so a Soroban outage would add "
+                "that long to every /decompose with no error code naming it. Lower "
+                f"REPUTATION_BATCH_TIMEOUT_SECONDS to {_seconds(allowance)} or less, or raise "
+                "DECOMPOSE_TIMEOUT_SECONDS to at least "
+                f"{_seconds(self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE)}."
             )
         return self
 

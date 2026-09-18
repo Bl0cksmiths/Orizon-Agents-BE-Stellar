@@ -39,7 +39,7 @@ cp .env.example .env
 | --- | --- | --- |
 | GET  | `/health`                            | liveness probe |
 | GET  | `/api/health`                        | the same liveness probe under the `/api` prefix |
-| GET  | `/readiness`                         | readiness probe — lists missing Stellar settings |
+| GET  | `/readiness`                         | readiness probe — per-dependency config status, plus an informational `cold_start` (can a brand-new agent clear the floor?) |
 | GET  | `/api/agents`                        | registry listing |
 | GET  | `/api/agents/{id}`                   | agent detail |
 | POST | `/api/orchestrator/decompose`        | intent → plan (real LLM) |
@@ -75,6 +75,18 @@ Raw reputation evidence lives on-chain, aggregation lives here (the ERC-8004 spl
 The weight is the step's *quoted* price, not money that changed hands — and the distinction is load-bearing rather than pedantic. A failed step is never billed yet is rated all the same, so weighting by settled value would make every negative rating weightless: non-delivery settles nothing. Weighting by what was at stake is as true of a step that failed as of one that delivered, which is what lets non-delivery carry a cost at all. See `app/services/reputation_svc.py`'s module docstring and [docs/reputation.md](docs/reputation.md).
 
 The backend turns that evidence into routing decisions. A Bayesian prior (default 7000 bps = 3.5/5) smooths sparse evidence so permissionless newcomers start at a meaningful score instead of zero, and a Wilson-style lower bound on the smoothed mean feeds the routing floor: at decompose time, agents whose bound falls below `REPUTATION_FLOOR_BPS` are omitted from the planner's registry (never shrinking the candidate list below 3), and every plan step is stamped with the live smoothed score (`rep_bps` / `rep_source`). If the chain is unreachable the caller gets the prior, marked `source="prior"` — reads never fail.
+
+Each plan step also carries the rest of the reputation the floor was judged on, from the same snapshot, so a plan card never needs a second request (all optional, so older plans and clients still validate):
+
+| `PlanStep` field | meaning |
+| --- | --- |
+| `rep_lower_bound_bps` | the conservative bound the routing floor is applied to — the number that decided routability |
+| `rep_count` | lifetime rating count; `0` with `rep_source="prior"` and `rep_degraded` false is a genuine cold start |
+| `rep_dispute_rate_bps` | share of those ratings that were disputes |
+| `rep_degraded` | the agent's on-chain read **failed** and the prior was served, so the numbers above are an estimate |
+| `degraded` | the step was **re-admitted below the floor** by the starvation backstop — a verdict, unrelated to `rep_degraded` |
+
+The `rep_*` fields are absent (`null`, `rep_degraded` `false`) only for an agent with no reputation entry at all.
 
 After each settled workflow the settler submits one synthetic rating per step (`kind="auto"`), derived from verifiable workflow signals — did the worker deliver output, ship an artifact, trip critic violations — so scores are validation-gated rather than opinion. Submissions run sequentially (one scorer account) and are best-effort: a failed rating logs a trace line and never fails the workflow.
 

@@ -157,6 +157,24 @@ so rejecting the whole payload would trade a rendered plan for no plan.
   frontend release.
 - `inactive` will need adding if, and only if, the orchestrator is ever taught
   to honour the listing flag. Until then its absence is the honest report.
+
+  > **Amended 2026-09-18.** That trigger has fired and the conclusion above
+  > did not follow. Routing now honours delisting everywhere a candidate is
+  > chosen (`_is_listed` in `app/services/orchestrator_svc.py`:
+  > `status != "offline"`), and `inactive` was still not added — D2, amended
+  > 2026-09-17, re-derives why. The rule that shipped is broader than leaving
+  > one value out of the vocabulary: **a delisted agent gets no notice under
+  > any reason code.** That includes `unbound_endpoint` for an agent that is
+  > both withdrawn and unbound — "no endpoint bound" is true of it, but it is
+  > not why the agent is absent, and it is advice nobody wants acted on.
+  >
+  > A withdrawal is the operator's own business decision, not a verdict the
+  > buyer was protected from, and `status` already says so on the agent's own
+  > `GET /api/agents` row. Announcing it on every buyer's plan, for as long as
+  > the operator stays withdrawn, would drown the notices that matter exactly
+  > as D3 argues `not_selected_by_planner` would — worse, because the withdrawn
+  > set only grows. The reasoning lives beside the filter in
+  > `_routable_registry`, and `tests/test_delisted_routing.py` pins it.
 - The notices explain which agents the floor removed. They do not explain which
   agent the planner *preferred* among those that cleared it — that is a model
   decision, and claiming to explain it would be a fiction.

@@ -358,3 +358,18 @@ fallback, and that fallback's sort key still falls back to self-declared
 `Agent.rep` for any agent missing from `reps` (unreachable in production, but
 now guarding a wider set). Changing either is a reputation-policy decision, not
 a routability one.
+
+> **Amended 2026-09-18.** The second consequence no longer holds. The
+> free-form starvation fallback now tops the shortlist up rather than replacing
+> it — every agent that clears the floor stays offered, and only the shortfall
+> below `_MIN_ROUTABLE_AGENTS` is filled from sub-floor agents — and both
+> backstops rank that shortfall with one helper, `_backstop_rank`
+> (`app/services/orchestrator_svc.py`), which orders by smoothed score and
+> counts a missing reputation entry as 0. Neither backstop consults self-declared
+> `Agent.rep` any more: an operator-written number was never evidence, and a key
+> that rewards it is a key an operator can set. (It survives in two places that
+> only matter for an agent with no reputation entry at all, which `fetch_reps`
+> never produces: the kit substitute's sort key and the `rep=` display in
+> AVAILABLE_AGENTS.) The first consequence
+> stands — a bound agent that clears the floor still counts toward the minimum
+> and can keep the backstop from firing.

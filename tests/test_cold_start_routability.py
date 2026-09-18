@@ -442,3 +442,27 @@ def test_a_floor_above_the_prior_drops_the_cold_start_kit_slot(
     assert note.lower_bound_bps == reps[COLD_KIT_AGENT].lower_bound_bps
     assert note.floor_bps == HOSTILE_FLOOR_BPS
     assert resp.floor_bps == HOSTILE_FLOOR_BPS
+
+
+def test_a_cold_start_step_reads_as_new_not_as_a_failed_read(registry: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The enriched step fields must let a card tell a newcomer from an outage.
+
+    A newcomer and an unreadable ledger are both served the prior, so both
+    arrive as `rep_source="prior"` with a count of 0. `rep_degraded` is the one
+    field that separates them, and it has to be False here on both paths: a
+    newcomer shown as a failed read looks broken on the one plan it finally
+    got picked for, and a card that cannot tell the two apart has to hedge on
+    every unrated agent in the market.
+    """
+    reps = _cold_start_snapshot()
+
+    model_resp, _ = _run_model_path(monkeypatch, reps, NEWCOMER)
+    kit_resp = _run_kit_path(monkeypatch, reps)
+
+    for resp, agent_id in ((model_resp, NEWCOMER), (kit_resp, COLD_KIT_AGENT)):
+        step = next(s for s in resp.steps if s.agent_id == agent_id)
+        assert step.rep_source == "prior"
+        assert step.rep_count == 0
+        assert step.rep_dispute_rate_bps == 0
+        assert step.rep_lower_bound_bps == reps[agent_id].lower_bound_bps
+        assert step.rep_degraded is False

@@ -96,8 +96,9 @@ def _report_cold_start_routability() -> None:
     Reported from lifespan rather than joining config.py's startup-report
     validators for two reasons. The predicate is reputation_svc's arithmetic
     and reputation_svc imports settings, so config.py cannot import it back
-    without a cycle. And this is the only check that sees the value actually
-    in force: the Render dashboard overrides render.yaml, so a floor raised
+    without a cycle. And only a check in the running process sees the value
+    actually in force — this line at boot, and /readiness's `cold_start` on
+    demand: the Render dashboard overrides render.yaml, so a floor raised
     there reaches no test and no repo default — CI would keep passing against
     numbers this deployment does not use.
 
@@ -144,8 +145,9 @@ def _report_cold_start_routability() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # First thing in the boot sequence: whether this config admits new agents
-    # at all is the one property no request, probe, or error will ever report,
-    # so it is stated before anything else can bury it.
+    # at all is a property no request or error will ever report — only this
+    # line and /readiness's `cold_start`, which has to be asked — so it is
+    # stated before anything else can bury it.
     _report_cold_start_routability()
     seed_registry()
     # Bound the default executor: asyncio.to_thread otherwise sizes it to
@@ -453,6 +455,36 @@ async def health() -> HealthResponse:
     return health_payload()
 
 
+class ColdStartReadiness(BaseModel):
+    """Whether this deployment can route an agent that has never been rated.
+
+    The startup line from `_report_cold_start_routability` says the same
+    thing, once per boot — and on the free tier a boot is every wake from idle,
+    so by the time anyone asks, the line is buried under a request log or gone
+    with the instance that wrote it. This puts the verdict behind a probe that
+    answers whenever it is asked, for the configuration actually in force: the
+    Render dashboard overrides render.yaml, so no repo file can say what it is.
+
+    Informational only — it never moves `status`, for the startup check's own
+    reason. Readiness answers "can this process serve"; a floor above the
+    prior's bound serves every request correctly and simply hires nobody new,
+    which is a policy an operator may intend (a curated network), not a missing
+    dependency. A not-ready answer would also misfire twice over: it would fail
+    probes on a deployment that is working as configured, and a monitor keyed on
+    the status would page someone about a decision rather than a fault.
+
+    Every field is copied from `reputation_svc.cold_start_margin()` rather than
+    recomputed, so this answer and the startup line cannot disagree. None of it
+    is secret: the floor and the prior inputs are already public on
+    /api/stellar/reputation/params, and the rest is arithmetic over them.
+    """
+
+    routable: bool  # a prior-only newcomer clears the routing floor
+    lower_bound_bps: int  # what a newcomer is scored on: the prior's lower bound
+    floor_bps: int  # REPUTATION_FLOOR_BPS as this process has it
+    margin_bps: int  # lower_bound_bps - floor_bps; negative locks newcomers out
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. Purely config-derived — no live
     network calls, so the probe stays cheap and deterministic."""
@@ -462,6 +494,7 @@ class ReadinessResponse(BaseModel):
     stellar: str  # "configured" | "incomplete"
     signer: str  # "configured" | "absent" — informational, never gates readiness
     pdax: str  # "configured" | "unconfigured" — informational
+    cold_start: ColdStartReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -474,7 +507,9 @@ class ReadinessResponse(BaseModel):
 async def readiness(response: Response) -> ReadinessResponse:
     """503 only when a dependency the API cannot serve without is missing:
     the LLM key or the Stellar contract/RPC config. The signing key is
-    deliberately informational — read-only deployments are legitimate."""
+    deliberately informational — read-only deployments are legitimate — and
+    so is `cold_start`: a floor that shuts newcomers out is a policy the
+    process serves correctly, not a dependency it lacks."""
     llm = "ok" if settings.openai_api_key else "missing_key"
 
     contract_ids = (
@@ -495,10 +530,18 @@ async def readiness(response: Response) -> ReadinessResponse:
     ready = llm == "ok" and stellar_ok
     if not ready:
         response.status_code = 503
+    # Read after the verdict and never folded into it — see ColdStartReadiness.
+    margin = reputation_svc.cold_start_margin()
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         llm=llm,
         stellar="configured" if stellar_ok else "incomplete",
         signer="configured" if settings.stellar_signing_key else "absent",
         pdax="configured" if settings.pdax_username and settings.pdax_password else "unconfigured",
+        cold_start=ColdStartReadiness(
+            routable=margin.clears,
+            lower_bound_bps=margin.lower_bound_bps,
+            floor_bps=margin.floor_bps,
+            margin_bps=margin.margin_bps,
+        ),
     )
