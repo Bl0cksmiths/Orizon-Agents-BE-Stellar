@@ -363,3 +363,39 @@ async def stop() -> None:
     for task in tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+# ── why one rating did not land ─────────────────────────────────
+
+# ReputationLedger's `Error` enum by discriminant
+# (contract/reputation-ledger/src/lib.rs). The names are the contract's own, so
+# a trace line reads exactly like the source an engineer opens next.
+LEDGER_ERRORS: dict[int, str] = {1: "Unauthorized", 2: "NotFound", 7: "Replay", 100: "OutOfRange"}
+# Everything that is not the contract's verdict: the RPC, the network, the
+# signer's account, a sequence collision. Not worth splitting in a trace the
+# buyer reads — the ERROR log beside it carries the detail.
+GENERIC_FAILURE = "rpc error"
+
+
+def failure_reason(exc: BaseException) -> str:
+    """A short, secret-free reason for a rating submit that raised.
+
+    The trace is world-readable, so this never interpolates exception text:
+    a simulation error runs to the whole diagnostic event log, and a signer
+    failure's message can quote the key. The only thing ever turned into words
+    is the contract's error code, which the client has already parsed to an
+    int.
+    """
+    if isinstance(exc, sc.ContractError):
+        return LEDGER_ERRORS.get(exc.code, f"contract error #{exc.code}")
+    return GENERIC_FAILURE
+
+
+def unlanded_reason(status: object) -> str:
+    """The reason for a rating that was sent but did not land.
+
+    `timeout` is the client's word for a transaction still unconfirmed when the
+    poll budget ran out — it may yet land, so it is not called a failure.
+    Anything else short of SUCCESS is the ledger's FAILED.
+    """
+    return "unconfirmed" if status == "timeout" else "transaction failed"
