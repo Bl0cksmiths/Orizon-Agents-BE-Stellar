@@ -96,6 +96,20 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
     }
 
 
+def test_readiness_names_a_lockout_nobody_touched_the_floor_for(client, monkeypatch):
+    """The least visible way in: trimming the prior's evidence mass. The
+    newcomer's displayed score is still 3.5/5 and the floor never moved, yet
+    the bound sinks below it — so the bound itself has to be on the probe."""
+    _pin_shipped_reputation(monkeypatch)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", 4.0)
+    assert client.get("/readiness").json()["cold_start"] == {
+        "routable": False,
+        "lower_bound_bps": 4709,
+        "floor_bps": 5500,
+        "margin_bps": -791,
+    }
+
+
 def test_readiness_503_when_llm_key_missing(client, monkeypatch):
     _configure_stellar(monkeypatch)
     monkeypatch.setattr(settings, "openai_api_key", "")
