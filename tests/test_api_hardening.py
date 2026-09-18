@@ -96,6 +96,7 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "signer": "absent",
         "pdax": "unconfigured",
         "cold_start": {"routable": False, "lower_bound_bps": 5677, "floor_bps": 6000, "margin_bps": -323},
+        "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
     }
 
 
