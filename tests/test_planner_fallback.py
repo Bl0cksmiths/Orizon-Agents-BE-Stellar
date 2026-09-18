@@ -8,6 +8,18 @@ OPENAI_API_KEY, a refused connection or an upstream 5xx surfaced as
 `'str' object has no attribute 'steps'` inside the clamp, and every free-form
 intent answered 502 `decompose_failed`.
 
+What this suite pins, through the public entry points:
+
+  * a planner run with no usable plan — a provider error, a cancelled run, an
+    answer that did not parse, no answer, a plan on a run agno marked failed —
+    and a planner call that raises are all served the fallback plan;
+  * the response says so with `planner_fallback` and never carries the
+    provider's message; the log does, with any API key redacted;
+  * the fallback is stored, executable, and held to the floor like any
+    free-form plan, and the planning slot is given back on every failure;
+  * a hung planner is still a timeout, so the router's 504 stands;
+  * the planner's own plan is not flagged, even when the clamp trims it.
+
 Fixtures are local rather than imported from the neighbouring planner suites,
 as those suites do themselves, so this file fails for its own reasons only.
 """
