@@ -212,6 +212,31 @@ The same pair of numbers appears in the warning emitted when reputation reads
 fall back to the prior, which states which way the floor is failing for the
 duration of the outage.
 
+## Where ratings come from
+
+**Only wallet-authorized runs produce ratings.** When a buyer's wallet
+authorizes a run, the backend settles it and then writes one rating per
+dispatched step to ReputationLedger, signed with `STELLAR_SIGNING_KEY`. A
+simulated run — no wallet, no authorization — never rates, by design: a rating
+is weighted by the USDC at stake on the step that earned it, and a simulated
+run has none. A deployment that has only ever served simulated runs will show
+every agent on the prior, and that is correct, not a fault.
+
+A paid run's ratings still land only if three things line up:
+
+1. Reputation is on (`REPUTATION_ENABLED`) and a ledger is configured
+   (`STELLAR_REPUTATION_LEDGER`).
+2. A signing key is configured (`STELLAR_SIGNING_KEY`) and parses.
+3. That key **is the ledger's Scorer**. `ReputationLedger.submit` accepts a
+   rating only when its caller equals the Scorer address the ledger keeps in
+   its own storage — set when the contract was deployed, changed only by the
+   ledger admin's `set_scorer`. Any other key has every rating reverted with
+   `Unauthorized`.
+
+The first two are config. The third exists only on the chain, which is why a
+key that is present but is not the Scorer used to look perfectly healthy: the
+service reported `signer: configured` while no rating ever landed.
+
 ## Cold start is not a degraded read
 
 Both produce `source: "prior"`. They differ by one flag.
