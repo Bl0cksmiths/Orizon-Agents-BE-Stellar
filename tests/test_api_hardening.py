@@ -69,6 +69,9 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         "pdax": "unconfigured",
         # 5677 - 5500: the shipped margin that keeps open registration real.
         "cold_start": {"routable": True, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177},
+        # A ledger but no key: paid runs cannot rate, and the probe says so
+        # without a chain read and without leaving "ready".
+        "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
     }
 
 
