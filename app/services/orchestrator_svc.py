@@ -717,8 +717,8 @@ def _planner_plan(result: Any) -> Plan | None:
     Plan (agno leaves the raw string in `content`), or with no answer at all.
     There is no dict branch: agno returns a dict only for a dict
     `output_schema`, and this agent's is the `Plan` model. Both fields are read
-    with `getattr`, because `arun` is declared to return a union that includes
-    a stream, and whatever it hands back has to degrade here rather than raise.
+    with `getattr`, so a result of any other shape degrades here too, instead
+    of raising the AttributeError this function exists to prevent.
 
     The failure is logged here, while the run is still in hand, and goes no
     further: the caller serves the fallback plan, and the buyer is told only
