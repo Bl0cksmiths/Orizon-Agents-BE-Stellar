@@ -201,3 +201,20 @@ def test_what_the_floor_prevents_is_real(monkeypatch, bound):
     assert not any(i.degraded for i in asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=1.0)).values())
     degraded = asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=bound))
     assert all(i.degraded for i in degraded.values())
+
+
+# ── the budget it is measured against has to be a duration too ─
+
+
+@pytest.mark.parametrize("planning", [0.0, -1.0, math.nan, math.inf])
+def test_a_planning_budget_that_is_not_a_positive_duration_refuses_to_boot(planning):
+    """NaN and inf booted, and both made the share rule vacuous: NaN compares
+    false against every bound and 10% of inf is inf. Zero and below were
+    refused, but by advice to lower the batch bound to zero or below — a
+    number the floor above refuses. All four now get their own message."""
+    with pytest.raises(ValidationError) as exc:
+        _settings(decompose_timeout_seconds=planning)
+    message = str(exc.value)
+    assert "DECOMPOSE_TIMEOUT_SECONDS=" in message
+    assert "is not a positive, finite number of seconds" in message
+    assert "or less" not in message
