@@ -138,3 +138,11 @@ def test_the_filter_keeps_a_clean_traceback_structured(secrets_configured: dict[
 
     assert record.exc_info is exc
     assert record.getMessage() == "decompose failed"
+
+
+def test_a_provider_masked_key_is_masked_to_the_last_character() -> None:
+    # OpenAI quotes a rejected key back partly starred. The visible tail is
+    # still key material, so the whole token goes, not just its prefix.
+    text = "Incorrect API key provided: sk-proj-abc*****wxyz. Check your key."
+
+    assert security.redact_secrets(text) == "Incorrect API key provided: [redacted]. Check your key."
