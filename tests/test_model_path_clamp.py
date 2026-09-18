@@ -183,3 +183,29 @@ def test_no_plan_carries_a_step_and_an_exclusion_for_the_same_agent(
     # `degraded` exactly when the backstop re-admitted it below the floor.
     relaxed = {n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"}
     assert {s.agent_id for s in resp.steps if s.degraded} == relaxed
+
+
+# ── the empty-plan fallback ─────────────────────────────────────
+
+
+def test_fallback_never_routes_to_a_copywriter_the_floor_excluded(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fallback used to hardcode agt_01h8 on the grounds that nothing
+    # on-chain can delist it. The floor can still exclude it, and then the
+    # "safe" plan was a single step routed to an agent its own card reported
+    # as below the floor.
+    reps = _clearing_reps()
+    reps["agt_01h8"] = _info("agt_01h8", smoothed=6300, lower=100)
+
+    resp = _decompose(monkeypatch, reps, _plan_naming("agt_01h8"))
+
+    assert [n.agent_id for n in resp.notices if n.kind == "excluded"] == ["agt_01h8"]
+    # Every other agent cleared at the same score, so the id breaks the tie —
+    # deterministically, and never towards the excluded copywriter.
+    assert [s.agent_id for s in resp.steps] == ["agt_02k2"]
+    assert _stored_ids(resp) == ["agt_02k2"]
+    step = resp.steps[0]
+    assert step.degraded is False
+    # Honest about why this agent has the job: it was not chosen for the intent.
+    assert step.rationale.startswith("fallback: the planner returned no usable step")
