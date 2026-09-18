@@ -275,3 +275,20 @@ def test_agents_delisted_during_the_planning_call_are_clamped(seeded: object, mo
     assert _stored_ids(resp) == ["agt_02k2"]
     # A withdrawal is never a notice, however it arrives.
     assert resp.notices == []
+
+
+def test_plan_is_refused_when_every_offered_agent_leaves_during_planning(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fallback may only route inside the offer, so when the whole offer is
+    # withdrawn mid-call there is no honest plan left to return — and the old
+    # hardcoded copywriter is exactly the dishonest one.
+    async def _arun(_prompt: str) -> SimpleNamespace:
+        _delist(*(a.id for a in state.list_agents()))
+        return _plan("agt_11c0")
+
+    before = set(state.plans)
+    with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
+        _decompose(monkeypatch, _clearing_reps(), _arun)
+    # Nothing was minted for /execute to find.
+    assert set(state.plans) == before
