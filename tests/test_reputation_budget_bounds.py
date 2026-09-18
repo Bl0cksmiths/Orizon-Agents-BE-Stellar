@@ -23,6 +23,7 @@ assertions."""
 
 from __future__ import annotations
 
+import math
 import re
 from decimal import Decimal
 
@@ -143,3 +144,14 @@ def test_the_suggested_budget_always_boots():
         bound = hundredths / 100
         _, suggested_budget = _advice(1.0, bound)
         _settings(decompose_timeout_seconds=suggested_budget, reputation_batch_timeout_seconds=bound)
+
+
+# ── the bound has a floor ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("bound", [0.0, -0.0, -0.5, -2.5, math.nan, math.inf, -math.inf])
+def test_a_bound_that_is_not_a_positive_duration_refuses_to_boot(bound):
+    """Each of these booted before, and each deletes the bound: 0, anything
+    negative and NaN expire before a read can answer; inf never expires."""
+    with pytest.raises(ValidationError, match="is not a positive, finite number of seconds"):
+        _settings(reputation_batch_timeout_seconds=bound)
