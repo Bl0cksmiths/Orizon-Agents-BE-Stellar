@@ -320,10 +320,17 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
     # well-formed and the service cannot serve it, so the answer is a
     # server-side status and never a 200 carrying a plan — pinned as the class
     # rather than a code, because choosing the code is the router's job.
-    async def _boom(*_a: object, **_k: object) -> SimpleNamespace:
-        raise AssertionError("an empty shortlist must not reach the planner")
+    #
+    # The stand-in planner answers the way a model shown an empty list would:
+    # with nothing usable. That is the answer the old hardcoded fallback turned
+    # into a 200 plan routed to a withdrawn copywriter.
+    calls: list[str] = []
 
-    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _boom)
+    async def _arun(prompt: str) -> SimpleNamespace:
+        calls.append(prompt)
+        return _plan()
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _arun)
     # After the client starts: its lifespan re-seeds the catalog.
     _delist(*(a.id for a in state.list_agents()))
     before = set(state.plans)
@@ -333,6 +340,7 @@ def test_the_api_mints_no_plan_when_nothing_can_be_offered(
     assert r.status_code >= 500
     assert "plan_id" not in r.json()
     assert set(state.plans) == before
+    assert calls == []
 
 
 def test_the_model_cannot_write_its_own_reputation_onto_a_step(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
