@@ -366,3 +366,14 @@ def test_backstop_tops_up_the_agents_that_cleared_the_floor(seeded: object, monk
     assert excluded == {a.id for a in state.list_agents()} - {"agt_01h8", "agt_02k2", "agt_12r0"}
     # An agent that cleared the floor is never the subject of a notice.
     assert not any(n.agent_id in {"agt_01h8", "agt_02k2"} for n in resp.notices)
+
+
+def test_backstop_stays_out_when_enough_agents_clear_the_floor(seeded: object) -> None:
+    # Exactly _MIN_ROUTABLE_AGENTS clear, and the nine below outscore all of
+    # them. Nothing is short, so nothing is re-admitted: a better smoothed
+    # score is never a reason to bend the floor on its own.
+    reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
+    for agent_id in ("agt_01h8", "agt_02k2", "agt_03d9"):
+        reps[agent_id] = _info(agent_id, smoothed=6000, lower=6000)
+
+    assert _offered_ids(reps) == ["agt_01h8", "agt_02k2", "agt_03d9"]
