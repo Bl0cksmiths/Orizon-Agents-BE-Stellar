@@ -32,6 +32,7 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.demo_kits import detect_kit
 from app.schemas import DecomposeResponse, Plan, PlanStep
@@ -309,4 +310,26 @@ def test_plan_is_refused_before_the_llm_when_nothing_can_be_offered(
     before = set(state.plans)
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
         _decompose(monkeypatch, _clearing_reps(), _boom)
+    assert set(state.plans) == before
+
+
+def test_the_api_mints_no_plan_when_nothing_can_be_offered(
+    seeded: object, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same refusal through the router the frontend calls. The request was
+    # well-formed and the service cannot serve it, so the answer is a
+    # server-side status and never a 200 carrying a plan — pinned as the class
+    # rather than a code, because choosing the code is the router's job.
+    async def _boom(*_a: object, **_k: object) -> SimpleNamespace:
+        raise AssertionError("an empty shortlist must not reach the planner")
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _boom)
+    # After the client starts: its lifespan re-seeds the catalog.
+    _delist(*(a.id for a in state.list_agents()))
+    before = set(state.plans)
+
+    r = client.post("/api/orchestrator/decompose", json={"intent": BUILD_INTENT})
+
+    assert r.status_code >= 500
+    assert "plan_id" not in r.json()
     assert set(state.plans) == before
