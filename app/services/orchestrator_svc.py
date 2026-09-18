@@ -12,9 +12,9 @@ from agno.run.base import RunStatus
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
-from ..security import redact_secrets
 from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
+from ..security import redact_secrets
 from ..state import state
 from . import reputation_svc
 from .binding_registry import is_dispatchable
