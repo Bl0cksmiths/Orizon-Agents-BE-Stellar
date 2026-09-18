@@ -292,3 +292,21 @@ def test_plan_is_refused_when_every_offered_agent_leaves_during_planning(
         _decompose(monkeypatch, _clearing_reps(), _arun)
     # Nothing was minted for /execute to find.
     assert set(state.plans) == before
+
+
+def test_plan_is_refused_before_the_llm_when_nothing_can_be_offered(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every operator has withdrawn. The backstop may relax OUR floor but never
+    # their delisting, so the shortlist is empty, and an empty AVAILABLE_AGENTS
+    # block can only yield steps the clamp discards. Refused up front, so the
+    # empty prompt never costs an LLM call or holds a planning slot.
+    _delist(*(a.id for a in state.list_agents()))
+
+    async def _boom(_prompt: str) -> SimpleNamespace:
+        raise AssertionError("an empty shortlist must not reach the planner")
+
+    before = set(state.plans)
+    with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
+        _decompose(monkeypatch, _clearing_reps(), _boom)
+    assert set(state.plans) == before
