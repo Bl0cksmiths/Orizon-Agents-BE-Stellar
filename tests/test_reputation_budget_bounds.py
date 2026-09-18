@@ -23,6 +23,7 @@ assertions."""
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 import pytest
@@ -93,3 +94,30 @@ def test_the_tolerance_admits_no_bound_anyone_would_type(decompose):
     for past in (exact + 0.001, exact * (1 + 1e-6)):
         with pytest.raises(ValidationError, match="REPUTATION_BATCH_TIMEOUT_SECONDS"):
             _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=past)
+
+
+# ── the refusal's advice is advice the validator accepts ────────
+
+# The two ways out the message offers, captured as an operator would copy them.
+_LOWER_THE_BOUND_TO = re.compile(r"Lower REPUTATION_BATCH_TIMEOUT_SECONDS to (\S+) or less")
+_RAISE_THE_BUDGET_TO = re.compile(r"raise DECOMPOSE_TIMEOUT_SECONDS to at least (\S+?)\.(?:\s|$)")
+
+
+def _advice(decompose: float, bound: float) -> tuple[float, float]:
+    """(suggested bound, suggested budget) from the refusal of this config."""
+    with pytest.raises(ValidationError) as exc:
+        _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=bound)
+    message = str(exc.value)
+    lower, higher = _LOWER_THE_BOUND_TO.search(message), _RAISE_THE_BUDGET_TO.search(message)
+    assert lower and higher, message
+    return float(lower.group(1)), float(higher.group(1))
+
+
+def test_advice_is_not_rounded_past_the_ceiling_it_names():
+    """The six-digit trap. A 123.456789 s budget allows 12.3456789 s, which
+    `:g` printed as 12.3457 — above the ceiling — so an operator who did
+    exactly what the deploy log said got the same refusal back."""
+    bound, budget = _advice(123.456789, 20.0)
+    assert bound == 12.3456789
+    assert _settings(decompose_timeout_seconds=123.456789, reputation_batch_timeout_seconds=bound)
+    assert _settings(decompose_timeout_seconds=budget, reputation_batch_timeout_seconds=20.0)
