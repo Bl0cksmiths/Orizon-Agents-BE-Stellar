@@ -20,3 +20,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Mirrors ci.yml's checkout of the (public) contracts repo exactly, so
+      # the two runs compare the same files and cannot disagree about drift.
+      # Default branch, shallow: the question is what the contracts repo says
+      # NOW, and that is precisely what changes without this repo noticing.
+      - name: Checkout contract address book
+        uses: actions/checkout@v4
+        with:
+          repository: Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar
+          path: contracts
+          fetch-depth: 1
