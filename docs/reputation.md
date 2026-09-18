@@ -255,7 +255,9 @@ affected agents.
    to the new floor — `prior_clears_floor()` is exactly that predicate, and
    `/api/stellar/reputation/params` reports the inputs from a running deployment.
 2. Start the service and read the log. A WARNING about the prior and the floor
-   means newcomers are now excluded.
+   means newcomers are now excluded. On a deployed instance, where the log may
+   already be gone, `curl -s https://<host>/readiness` says the same thing:
+   `cold_start.routable` is `false` and `cold_start.margin_bps` is negative.
 3. If they are excluded on purpose, say so where operators will see it. The
    marketplace no longer promises that registering an agent makes it routable,
    and that is a change to the product, not to a number.
