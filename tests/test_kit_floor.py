@@ -16,6 +16,7 @@ import asyncio
 import pytest
 
 from app.demo_kits import detect_kit
+from app.schemas import Agent
 from app.seed import seed_registry
 from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
@@ -229,3 +230,31 @@ def test_re_admitted_kit_steps_keep_their_pipeline_position(seeded: object) -> N
     assert ids == ["agt_09l5", "agt_02k2", "agt_11c0"]
     assert ids.index("agt_02k2") < ids.index("agt_11c0")
     assert [s.degraded for s in resp.steps] == [True, True, False]
+
+
+def test_kit_path_reports_unbound_agents_after_its_floor_notices(seeded: object) -> None:
+    # An on-chain agent indexed but never bound: marketplace-visible, not
+    # dispatchable. The free-form path has reported it since story 3.02; the
+    # kit path said nothing, so the same registry read differently depending on
+    # which path planned the intent. Same selection, same place in the list.
+    state.add_agent(
+        Agent(
+            id="ext_idx1",
+            name="ext_idx1.remote",
+            skills=["remote"],
+            price=0.02,
+            rep=4.99,
+            status="online",
+            runs=0,
+            source="onchain",
+        )
+    )
+
+    resp = _run_kit({"agt_02k2": _sub_floor("agt_02k2")})
+
+    assert [(n.kind, n.reason_code, n.agent_id) for n in resp.notices] == [
+        ("excluded", "below_floor", "agt_02k2"),
+        ("excluded", "unbound_endpoint", "ext_idx1"),
+    ]
+    # Reported, never routed: nothing can execute a step for it.
+    assert "ext_idx1" not in [s.agent_id for s in resp.steps]
