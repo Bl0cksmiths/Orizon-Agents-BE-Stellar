@@ -521,7 +521,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     notices: list[PlanFloorNotice] = []
     taken: set[str] = set()
     # Sub-floor agents with no substitute — held until after the loop so the
-    # starvation backstop can re-admit the strongest before the rest are
+    # starvation backstop can choose which to re-admit before the rest are
     # recorded as plain exclusions.
     dropped: list[_DroppedKitRole] = []
 
