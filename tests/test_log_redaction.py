@@ -68,3 +68,11 @@ def test_a_secret_embedded_in_a_longer_one_is_masked_whole(
     text = f"pool failed: {secrets_configured['database_url']}"
 
     assert security.redact_secrets(text) == "pool failed: [redacted]"
+
+
+def test_a_value_too_short_to_be_a_credential_is_not_masked_everywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A misconfigured short API_KEY must not shred every log line containing
+    # that common string; it is a config error to report, not text to hide.
+    monkeypatch.setattr(settings, "api_key", "demo")
+
+    assert security.redact_secrets("demo intent decomposed") == "demo intent decomposed"
