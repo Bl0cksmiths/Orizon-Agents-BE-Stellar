@@ -561,6 +561,44 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     )
 
 
+# The empty-plan fallback's preferred agent. A copywriter can produce something
+# for any intent, which no other seeded role can promise.
+_FALLBACK_AGENT_ID = "agt_01h8"
+
+
+def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepInfo]) -> Agent | None:
+    """The agent an emptied model plan falls back to — from `offered` only.
+
+    The fallback exists so the UI never gets stuck on a plan the clamp emptied,
+    but it is still a routing decision, and it used to be the one routing
+    decision that skipped the floor: `agt_01h8` was hardcoded, so a copywriter
+    the floor had just excluded took the whole job the moment the model's picks
+    were clamped away. It is held to the clamp's rule now — offered, and still
+    listed and dispatchable at the point of use.
+
+    One deterministic key, so the same snapshot always falls back to the same
+    agent:
+
+      1. `agt_01h8` whenever it is offered, as before;
+      2. an agent that CLEARED the floor ahead of one the backstop re-admitted —
+         a relaxation is a last resort, not a tie-breaker;
+      3. `_backstop_rank`: best smoothed score, id breaking ties.
+
+    None when nothing offered is still routable; the caller refuses the plan.
+    """
+    candidates = [a for a in state.list_agents() if a.id in offered and _is_listed(a) and is_dispatchable(a.id)]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda a: (
+            a.id != _FALLBACK_AGENT_ID,
+            not reputation_svc.passes_floor(reps.get(a.id)),
+            _backstop_rank(a, reps),
+        ),
+    )
+
+
 async def decompose(intent: str) -> DecomposeResponse:
     # One live reputation snapshot per decompose — timeout-bounded and never
     # raises (prior fallback), shared by the kit path, the routing prompt,
