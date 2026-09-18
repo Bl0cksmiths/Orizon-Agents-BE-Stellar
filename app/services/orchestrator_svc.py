@@ -685,13 +685,12 @@ def _loggable(text: str) -> str:
 
     Neither source of a planner failure message is ours. An OpenAI 401 quotes
     back the key it rejected, only partly masked, and an answer that did not
-    parse is whatever the model wrote, at whatever length. So the configured
-    key and anything shaped like one are redacted, and the excerpt is clamped.
+    parse is whatever the model wrote, at whatever length. So every configured
+    secret and anything shaped like a key is redacted — by the same rule the
+    process-wide log filter applies (`app/security.py`), so the two cannot
+    drift — and the excerpt is clamped.
     """
-    key = settings.openai_api_key
-    if key:
-        text = text.replace(key, "[redacted]")
-    return _API_KEY_SHAPE.sub("sk-[redacted]", text)[:_FAILURE_EXCERPT_CHARS]
+    return redact_secrets(text)[:_FAILURE_EXCERPT_CHARS]
 
 
 # Run states in which agno itself reports that the planner call did not finish.
