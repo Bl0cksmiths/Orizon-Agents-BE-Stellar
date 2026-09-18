@@ -41,7 +41,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.demo_kits import detect_kit
-from app.schemas import Agent, DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep
+from app.schemas import Agent, DecomposeResponse, ExclusionReason, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from app.seed import seed_registry
 from app.services import orchestrator_svc, reputation_svc
 from app.services.reputation_svc import RepInfo
@@ -615,3 +615,35 @@ def test_both_paths_stamp_the_same_reputation_on_a_step(seeded: object, monkeypa
 
     assert kit.reputation_degraded is True
     assert free_form.reputation_degraded is True
+
+
+def test_plan_steps_without_the_enriched_fields_still_validate() -> None:
+    """The four reputation fields on a step are additive, like the rest of 3.02.
+
+    `PlanStep` is parsed back from stored plans and is also the planner's
+    output schema, so a required field would reject every plan written before
+    this deploy and every model answer that leaves it out — which is all of
+    them, since the model is never asked for reputation.
+    """
+    step = PlanStep(agent_id="agt_11c0", rationale="build it", est_price_usdc=0.054, est_eta_seconds=2.6)
+    assert (step.rep_lower_bound_bps, step.rep_count, step.rep_dispute_rate_bps, step.rep_degraded) == (
+        None,
+        None,
+        None,
+        False,
+    )
+
+    # And the populated shape survives storage, in memory and over the wire.
+    full = step.model_copy(
+        update={
+            "rep_bps": 8200,
+            "rep_source": "onchain",
+            "rep_lower_bound_bps": 7100,
+            "rep_count": 42,
+            "rep_dispute_rate_bps": 714,
+            "rep_degraded": True,
+        }
+    )
+    stored = StoredPlan(id="pln_beef", intent="build it", plan=Plan(steps=[full]), total_usdc=0.054, total_eta=2.6)
+    assert StoredPlan.model_validate(stored.model_dump()) == stored
+    assert StoredPlan.model_validate_json(stored.model_dump_json()) == stored
