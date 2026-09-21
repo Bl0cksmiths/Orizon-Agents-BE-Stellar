@@ -417,11 +417,17 @@ ORDER BY opened_at, step_index
 # RETURNING is how the caller learns which it was: a row means this insert won
 # the step, no row means another dispute already owns it and open_dispute reads
 # that one back to hand to DuplicateDisputeError.
+#
+# `updated_at` ($17) is the opening moment itself — open_dispute passes
+# `opened_at` — because opening IS the dispute's first change of state, and a
+# receipt reading "last changed: never" beside "opened at 14:32" would be
+# answering a question it has the answer to.
 _INSERT_DISPUTE_SQL = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE)
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+    credited_usdc, updated_at, rating_confirmed, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, TRUE)
 ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
 RETURNING dispute_id
 """
@@ -854,6 +860,9 @@ class InMemoryDisputeStore:
         existing = await self.find_dispute(record.job_id_hex, record.step_index)
         if existing is not None:
             raise DuplicateDisputeError(existing)
+        # Opening is the dispute's first change of state, so it is stamped with
+        # the moment it was opened — the rule _INSERT_DISPUTE_SQL writes.
+        record = replace(record, updated_at=record.opened_at)
         self._disputes[record.id] = record
         while len(self._disputes) > _MAX_IN_MEMORY:
             dropped, _ = self._disputes.popitem(last=False)
@@ -1168,13 +1177,15 @@ class PostgresDisputeStore:
         """Insert the dispute, or raise DuplicateDisputeError with the one that
         beat it to this step.
 
-        The record is returned unchanged on success: nothing about it is
-        assigned by the database, so there is no row to read back. The loser's
-        branch costs one extra read and only ever runs on a genuine collision —
-        a double click, a retried POST, two tabs — which is the moment worth
-        spending a round trip on.
+        The record is returned as written, which is the record given with
+        `updated_at` stamped from its own `opened_at`: nothing about it is
+        assigned by the database, so there is still no row to read back. The
+        loser's branch costs one extra read and only ever runs on a genuine
+        collision — a double click, a retried POST, two tabs — which is the
+        moment worth spending a round trip on.
         """
         pool = await self._ready_pool()
+        record = replace(record, updated_at=record.opened_at)
         won = await pool.fetchrow(
             _INSERT_DISPUTE_SQL,
             record.id,
@@ -1192,6 +1203,9 @@ class PostgresDisputeStore:
             record.refund_tx,
             record.rating_tx,
             record.note,
+            record.credited_usdc,
+            record.updated_at,
+            record.rating_confirmed,
         )
         if won is not None:
             return record
