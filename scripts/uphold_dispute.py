@@ -834,8 +834,8 @@ def rating_not_landed(
 def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     """The block for a rating the ledger refused as a replay of one this dispute never recorded (D4).
 
-    Diagnosed from the LEDGER'S ANSWER, not from the record: `watch_rating`
-    saw this run's submit come back as a Replay, and the record shows no
+    Diagnosed from the LEDGER'S ANSWER, not from the record: `uphold`'s
+    `on_rating` observer heard this run's submit come back as a Replay, and the record shows no
     attempt of this dispute's — the two facts the service itself judges a
     collision by. The record alone could never say it; an empty `rating_tx`
     looks the same after a failure.
