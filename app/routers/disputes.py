@@ -1,0 +1,168 @@
+"""The dispute window's HTTP surface — story 4.02 (ADR 0002).
+
+A buyer who paid for a step that did not deliver what it promised has 24 hours
+from settlement to say so. These four routes are the whole of how they say it:
+mint a challenge, sign it with the wallet that paid, post the dispute, and read
+back what was raised on a task.
+
+**The wallet signature IS the credential** — no API key, no account — for
+`routers/binding.py`'s reason: a shared secret cannot express "this caller is
+*this* job's payer", and gating these routes on `require_api_key` would be a
+no-op on the demo, where API_KEY is unset. It would also be the wrong guard
+entirely: the operator holds that key, and the operator is the party a dispute
+is raised *against*.
+
+Every rule — who may dispute, whether the window is still open, whether the
+step was settled at all — lives in `services/dispute_svc.py`. This module
+validates shapes at the edge, calls one service function, and maps its refusal
+onto a status and a stable code. Nothing here decides anything, because a rule
+enforced in a handler is a rule the next handler forgets.
+
+`POST /disputes` returns **200**, not 201: no route in this API returns 201, and
+a `duplicate_dispute` answers with the dispute that already exists rather than
+minting a second one — so the location the 201 would advertise is not always
+new. That duplicate answer is why `_duplicate_envelope` exists; see it for why
+a 409 here carries a body the generic error envelope has no room for.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter
+from pydantic import BaseModel, Field
+
+from ..services.dispute_store import DisputeRecord, DisputeStatus
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["disputes"])
+
+# A 16-byte job id, hex — the same shape `ChargeReq` and `SealReq` take, so a
+# job id that could never have been charged is refused before any lookup.
+_JOB_ID_PATTERN = r"^[0-9a-fA-F]{32}$"
+
+# A Stellar G-address, as `SealReq.orchestrator` spells it. The payer is
+# claimed, not trusted: the signature is what proves it, and this only bounds
+# what reaches the verifier.
+_PAYER_PATTERN = r"^G[A-Z2-7]{55}$"
+
+# Twice the 32-entry cap `POST /api/stellar/server/seal` puts on a workflow's
+# agents and receipts, so a plan that grows is not refused *here* first. The
+# real check is that the settlement record actually has such a step, which only
+# the service can make.
+_MAX_STEP_INDEX = 63
+
+# The buyer's own words: room for a paragraph of what went wrong, bounded so a
+# dispute record stays a record. The body limiter caps the request as a whole;
+# this caps the one field that is free text.
+_MAX_REASON_CHARS = 2000
+
+
+class DisputeChallengeReq(BaseModel):
+    """What the wallet is about to sign is derived from these two, so both are
+    supplied when the challenge is minted rather than first seen at open time."""
+
+    job_id_hex: str = Field(..., pattern=_JOB_ID_PATTERN)
+    step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
+
+
+class DisputeChallengeResponse(BaseModel):
+    # The exact string the wallet must sign, returned rather than assembled
+    # client-side so the format can version without shipping a new frontend —
+    # `BindChallengeResponse`'s reasoning, and the same trade.
+    message: str
+    nonce: str
+    expires_at: float
+
+
+class OpenDisputeReq(BaseModel):
+    job_id_hex: str = Field(..., pattern=_JOB_ID_PATTERN)
+    step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
+    reason: str = Field(..., min_length=1, max_length=_MAX_REASON_CHARS)
+    payer: str = Field(..., pattern=_PAYER_PATTERN)
+    nonce: str = Field(..., min_length=1, max_length=128)
+    # Upper bound only, exactly as `BindReq.signature` has it: a lower bound
+    # here would be answered as the generic `validation_error`, which is the one
+    # code the frontend cannot map to an inline field error — so the signature's
+    # *shape* is settled by the verifier, which answers the stable
+    # `signature_malformed`. 256 chars still bounds the decode at ~3x an
+    # ed25519 signature's 88, so nothing useful is truncated.
+    signature_b64: str = Field(..., min_length=1, max_length=256, description="base64 ed25519 signature")
+
+
+class DisputeResponse(BaseModel):
+    """One dispute, as the console and the buyer's client read it.
+
+    A flat mirror of `dispute_store.DisputeRecord` rather than the record
+    itself: the record is a storage shape that 4.03 and 4.04 will add columns
+    to, and returning it directly would publish each of those as API the moment
+    it landed.
+    """
+
+    id: str
+    job_id_hex: str
+    task_id: str
+    step_index: int
+    agent_id: str
+    payer: str
+    reason: str
+    status: DisputeStatus
+    # What the step cost and what an upheld dispute credits back under the
+    # policy in force when it was opened — both frozen at opening time, so the
+    # buyer can be shown a number that will not move under them.
+    charged_usdc: float
+    creditable_usdc: float
+    opened_at: float
+    resolved_at: float | None = None
+    refund_tx: str | None = None
+    rating_tx: str | None = None
+
+    @classmethod
+    def of(cls, record: DisputeRecord) -> DisputeResponse:
+        """Project a stored record onto the wire shape."""
+        return cls(
+            id=record.id,
+            job_id_hex=record.job_id_hex,
+            task_id=record.task_id,
+            step_index=record.step_index,
+            agent_id=record.agent_id,
+            payer=record.payer,
+            reason=record.reason,
+            status=record.status,
+            charged_usdc=record.charged_usdc,
+            creditable_usdc=record.creditable_usdc,
+            opened_at=record.opened_at,
+            resolved_at=record.resolved_at,
+            refund_tx=record.refund_tx,
+            rating_tx=record.rating_tx,
+        )
+
+
+class DuplicateDisputeResponse(BaseModel):
+    """The `duplicate_dispute` 409 body: the error envelope, plus the dispute.
+
+    One dispute per `(job_id, step)` is a product rule, and the second attempt
+    is answered with the FIRST dispute unchanged — that is the acceptance
+    criterion, and a bare error code cannot satisfy it. Declared as a model so
+    the schema says so and the frontend can read `dispute` off the 409 instead
+    of issuing a second request to find out what it already has.
+    """
+
+    detail: str
+    error: dict[str, str]
+    dispute: DisputeResponse
+
+
+class TaskDisputesResponse(BaseModel):
+    """A task's dispute window and everything raised against it.
+
+    `window_closes_at` is null until the task settles — a task that was never
+    paid for has nothing to dispute and no deadline to show. It is read from the
+    settlement record rather than recomputed from `DISPUTE_WINDOW_SECONDS`, so
+    retuning that setting cannot move a deadline a buyer was already given.
+    """
+
+    task_id: str
+    window_closes_at: float | None
+    disputes: list[DisputeResponse]
