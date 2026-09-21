@@ -650,6 +650,57 @@ def rating_verdict(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome
     return "failed"
 
 
+def rating_not_landed(
+    dispute: DisputeRecord, verdict: RatingVerdict, outcome: dispute_rating.RatingOutcome | None, rating_id: str
+) -> int:
+    """The block for a credit that landed and a rating that did not — and why re-running is RIGHT.
+
+    Written against the 4.03 timeout block on purpose. An operator who has
+    learned "never re-run after a timeout" from a transfer will apply it here,
+    and here it is wrong: `uphold` never signs a second transfer for a
+    `credited` dispute, so a re-run goes past the refund to the rating alone,
+    and the ledger refuses a second rating under the same id, so a late
+    landing is answered with Replay and confirmed rather than doubled. Said in
+    as many words, because the rule it overrides was said in capitals.
+    """
+    say()
+    say("  " + "#" * 74)
+    say("  #  THE BUYER HAS BEEN PAID — BUT THE AGENT'S DISPUTE RATING DID NOT LAND.")
+    say("  #  RE-RUNNING THIS SCRIPT IS SAFE HERE: IT RETRIES THE RATING, NEVER THE REFUND.")
+    say("  " + "#" * 74)
+    say()
+    if verdict == "unconfirmed":
+        say("  rating:    TIMED OUT — submitted and unconfirmed; it may still land.")
+    elif verdict == "failed":
+        say("  rating:    FAILED — the ledger refused it; nothing was written.")
+    else:
+        say("  rating:    NO ANSWER — the submit never completed; the log lines above name why.")
+    if outcome is not None and outcome.tx_hash:
+        say(f"  its tx:    {outcome.tx_hash}")
+        say(f"  check it:  {expert_url('tx', outcome.tx_hash)}")
+    elif dispute.rating_tx:
+        say(f"  on record: {dispute.rating_tx}   an earlier attempt, never confirmed")
+        say(f"  check it:  {expert_url('tx', dispute.rating_tx)}")
+    say(f"  agent:     {dispute.agent_id}")
+    say(f"  dispute:   {dispute.id}")
+    say(f"  rating id: {rating_id}")
+    say()
+    say(f"  Dispute {dispute.id} is `credited` with its refund on record, so the buyer is paid")
+    say("  in full. It is NOT fully resolved: the agent's consequence is not on-chain yet.")
+    say()
+    say("  Why re-running is right here, when a timed-out CREDIT must never be re-run:")
+    say("    * the refund cannot be paid twice — uphold never signs a second transfer for a")
+    say("      `credited` dispute, so a re-run goes straight to the rating and does nothing else;")
+    say("    * the rating cannot land twice — the ledger refuses a second one under the same")
+    say("      rating id, so if this one lands late the re-run is told so (Replay) and confirms it.")
+    say()
+    say("  Re-run once the cause in the log lines above is fixed (after a timeout, once the")
+    say("  network has caught up):")
+    say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id}")
+    say()
+    return EXIT_RATING_NOT_LANDED
+
+
 async def execute(dispute_id: str, amount: float) -> int:
     """Uphold the dispute, pay the credit, and report the verdict from the store.
 
