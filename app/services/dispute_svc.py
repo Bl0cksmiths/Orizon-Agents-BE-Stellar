@@ -38,6 +38,9 @@ from datetime import datetime, timezone
 
 from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
+from ..schemas import TraceLine
+from ..state import state
+from ..trace_bus import bus
 from . import external_binding as eb
 from . import refund_svc
 from .dispute_store import (
@@ -579,3 +582,65 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
         sanitize_untrusted(note, max_chars=MAX_REASON_CHARS) if note else "-",
     )
     return rejected
+
+
+async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, tx_hash: str | None) -> None:
+    """Best effort: show a landed credit on the workflow it came out of.
+
+    THE DURABLE RECORD OF A REFUND IS THE DISPUTE, NOT THIS LINE. `app/state.py`
+    keeps the newest 200 tasks and drops each one's traces with it, while a
+    dispute window is 24 hours wide — so by the time one is adjudicated the
+    workflow it disputes has usually been evicted, and this is decoration on
+    the ones a console still has on screen. Nothing reads it back, nothing
+    reconciles against it, and it is emitted after the store already holds the
+    credit so it can never be the reason a paid dispute looks unpaid.
+
+    Which is exactly why it is GUARDED on `state.tasks` rather than simply
+    appended. `state.append_trace` is `traces.setdefault(task_id, []).append(line)`,
+    and for an evicted task that does not merely write where nobody looks: it
+    RECREATES a `traces` entry whose task is gone, and eviction only ever
+    removes traces alongside a task still in `task_order`, so nothing will
+    remove it again. A dispute resolved hours later would leak one list per
+    refund for the life of the process, invisibly. Present task only, and never
+    `setdefault` on an absent one.
+
+    `state` and `bus` directly, not `execution_svc._emit`: that helper is keyed
+    on the run's `time.monotonic()` start, which died with the request that
+    held it, so it could not be reused here even if the import were free. And
+    it would not be free — the module holding the dispute RULES would come to
+    depend on the module that RUNS workflows, in the one direction ADR 0002
+    keeps clear, for the sake of four lines. `TraceLine` and the bus are the
+    whole of what the two actually share, so those are the whole of what this
+    imports.
+    """
+    task = state.tasks.get(dispute.task_id)
+    if task is None:
+        return
+    # The same elapsed-since-the-run-started clock every other line on this
+    # task carries, so a credit sorts where it happened rather than at 00.000.
+    elapsed = max(time.time() - task.started_at, 0.0)
+    seconds, millis = divmod(int(elapsed * 1000), 1000)
+    # `cost` because a refund is money, and the wording is the SOW §3.8
+    # standard rather than a turn of phrase: the platform FUNDS this credit out
+    # of its own wallet, and the disputed agent keeps what it was paid. This is
+    # the only message about a refund the buyer ever sees, so it is the one
+    # that has to say so.
+    line = TraceLine(
+        t=f"{seconds:02d}.{millis:03d}",
+        level="cost",
+        msg=(
+            f"dispute {dispute.id} upheld — step {dispute.step_index} credited {amount_usdc:.7f} USDC "
+            f"to the buyer, funded by the platform, not clawed back from agent {dispute.agent_id}"
+            + (f" · tx {tx_hash}" if tx_hash else "")
+        ),
+    )
+    try:
+        state.append_trace(dispute.task_id, line)
+        await bus.publish(dispute.task_id, line)
+    except Exception:
+        # The transfer has already settled and the dispute already reads
+        # `credited` by the time this runs. Letting a cosmetic line raise out
+        # of `uphold` would answer a successful payout with a 500 and invite
+        # the one retry this whole path exists to make safe, so it is logged
+        # and swallowed instead.
+        logger.warning("could not trace the credit for dispute %s on task %s", dispute.id, dispute.task_id)
