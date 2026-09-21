@@ -468,9 +468,9 @@ def test_a_reject_refusal_keeps_its_code_and_its_status(client, adjudicating, mo
 
 
 def test_a_successful_reject_is_rejected_and_resolved(client, adjudicating, monkeypatch):
-    rejects_with(monkeypatch, record(status="rejected", resolved_at=1_700_000_500.0))
+    rejects_with(monkeypatch, record(status="rejected", resolved_at=1_700_000_500.0, note=NOTE))
 
-    r = client.post(REJECT, json={"note": "the delivered file matched the brief"}, headers=AUTH)
+    r = client.post(REJECT, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -478,6 +478,10 @@ def test_a_successful_reject_is_rejected_and_resolved(client, adjudicating, monk
     assert body["resolved_at"] == 1_700_000_500.0
     # Nothing was paid, and the wire says so rather than omitting the field.
     assert body["refund_tx"] is None
+    assert body["credited_usdc"] is None
+    # The adjudicator's answer comes straight back as the buyer will read it,
+    # so the console that wrote it sees exactly what it published.
+    assert body["rejection_reason"] == NOTE
 
 
 def test_the_note_reaches_the_service_by_keyword(client, adjudicating, monkeypatch):
