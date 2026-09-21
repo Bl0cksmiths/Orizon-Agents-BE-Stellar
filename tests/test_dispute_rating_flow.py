@@ -299,3 +299,21 @@ def test_a_timed_out_rating_that_never_landed_is_replaced_by_the_retry(ledger, s
     assert ledger.replays == 0 and len(ledger.submits) == 2
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
+
+
+def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settler, invalidated) -> None:
+    """The other way a timeout ends: the transaction landed after the poll
+    gave up. The retry is refused as a replay, and because this dispute has a
+    hash on record that is CONFIRMATION, not a collision — the recorded hash
+    is kept, and only now is the score known to have moved."""
+    dispute = open_dispute()
+    ledger.script = ["late"]
+    unconfirmed = uphold(dispute.id)
+    assert unconfirmed.rating_tx == "tx_rating_1" and invalidated == []
+
+    confirmed = uphold(dispute.id)
+
+    assert confirmed == unconfirmed
+    assert ledger.replays == 1 and len(ledger.submits) == 1
+    assert invalidated == [AGENT]
+    assert len(settler.transfers) == 1
