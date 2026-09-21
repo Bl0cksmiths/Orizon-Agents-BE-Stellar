@@ -36,6 +36,7 @@ a 409 here carries a body the generic error envelope has no room for.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -333,16 +334,27 @@ class SettlementView(BaseModel):
 
 
 class TaskDisputesResponse(BaseModel):
-    """A task's dispute window and everything raised against it.
+    """A task's settlement, its dispute window, and everything raised against it.
 
-    `window_closes_at` is null until the task settles — a task that was never
-    paid for has nothing to dispute and no deadline to show. It is read from the
-    settlement record rather than recomputed from `DISPUTE_WINDOW_SECONDS`, so
-    retuning that setting cannot move a deadline a buyer was already given.
+    `settlement` and `window_closes_at` are null until the task settles — a
+    task that was never paid for has nothing to dispute and no deadline to
+    show. The deadline is read from the settlement record rather than
+    recomputed from `DISPUTE_WINDOW_SECONDS`, so retuning that setting cannot
+    move a deadline a buyer was already given. It stays at the top level,
+    always equal to `settlement.window_closes_at`, because clients written
+    before 4.05 read it there.
+
+    `now` is this server's clock when the response was built. The window is a
+    deadline the SERVER enforces, so a countdown run off the browser's clock is
+    wrong by however far that clock has drifted: it shows a window open that
+    `open_dispute` will refuse as closed, or closed while there is still time.
+    The console measures the skew from this and corrects by it.
     """
 
     task_id: str
     window_closes_at: float | None
+    now: float
+    settlement: SettlementView | None
     disputes: list[DisputeResponse]
 
 
@@ -528,6 +540,10 @@ async def list_task_disputes(
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
+        # Read after both lookups, so the clock the console corrects by is as
+        # close to the moment the response leaves as this handler can get it.
+        now=time.time(),
+        settlement=SettlementView.of(settlement) if settlement is not None else None,
         disputes=[DisputeResponse.of(d) for d in disputes],
     )
 
