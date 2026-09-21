@@ -36,6 +36,7 @@ from stellar_sdk import Keypair
 
 import app.stellar.client as sc
 from app.config import settings
+from app.schemas import Task
 from app.services import dispute_store, dispute_svc, refund_svc
 from app.services import external_binding as eb
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
@@ -572,3 +573,84 @@ def test_an_id_nobody_issued_is_refused_by_both_decisions(monkeypatch, adjudicat
     assert refused.value.code == "unknown_dispute"
     assert refused.value.status_code == 404
     assert refused.value.existing is None
+
+
+# ── the trace on the workflow the refund came out of ────────────
+
+
+def test_a_credit_is_traced_on_the_workflow_while_it_is_still_on_screen(monkeypatch) -> None:
+    """A refund that never appears on the workflow it disputes is a refund the
+    buyer has to be told about out of band. The line carries the SOW §3.8
+    standard verbatim — the platform FUNDS this credit, the disputed agent
+    keeps what it was paid — because this is the only message about a refund a
+    buyer ever sees."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    # Two hours old, which is what a dispute actually looks like: the window is
+    # 24 hours wide, so a credit lands long after the run it belongs to.
+    state.add_task(
+        Task(
+            id=TASK,
+            intent="write the launch post",
+            agents=2,
+            spent=0.12,
+            status="complete",
+            started_at=time.time() - 7200.0,
+        )
+    )
+
+    async def go() -> tuple[DisputeRecord, Any]:
+        stream = bus.subscribe(TASK)
+        credited = await dispute_svc.uphold(dispute.id)
+        return credited, stream.get_nowait()
+
+    credited, streamed = asyncio.run(go())
+
+    assert credited.status == "credited"
+    # Stored on the task AND pushed to anyone watching it — the same line.
+    assert state.traces[TASK] == [streamed]
+    assert streamed.level == "cost"
+    assert streamed.t.startswith("7200.")  # elapsed since the run began, not 00.000
+    assert dispute.id in streamed.msg
+    assert "0.0500000 USDC" in streamed.msg
+    assert "funded by the platform" in streamed.msg
+    assert "not clawed back from agent agt_writer" in streamed.msg
+    assert "tx_credit" in streamed.msg
+
+
+def test_a_credit_on_an_evicted_task_creates_no_trace_entry(monkeypatch) -> None:
+    """The trap this guard exists for. `state.append_trace` is
+    `traces.setdefault(task_id, []).append(line)`, and eviction only ever drops
+    traces alongside a task still in `task_order` — so appending for a task
+    that is gone would recreate an entry nothing will ever remove again, once
+    per refund, invisibly, for the life of the process. The durable record of a
+    refund is the dispute; the trace is decoration on a task still on screen."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    assert dispute.task_id not in state.tasks  # evicted hours before it was adjudicated
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert credited.status == "credited"
+    assert credited.refund_tx == "tx_credit"  # the credit is recorded where it counts
+    assert state.traces == {}
+
+
+def test_a_trace_that_fails_cannot_undo_a_landed_credit(monkeypatch) -> None:
+    """By the time this line is written the transfer has settled and the store
+    already reads `credited`. Letting a cosmetic failure raise out of `uphold`
+    would answer a successful payout with a 500 and invite the one retry the
+    whole path exists to make safe."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    state.add_task(Task(id=TASK, intent="write the launch post", agents=2, spent=0.12, status="complete"))
+
+    async def _wedged(task_id: str, line: Any) -> None:
+        raise RuntimeError("no subscriber survived")
+
+    monkeypatch.setattr(bus, "publish", _wedged)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert credited.status == "credited"
+    assert credited.refund_tx == "tx_credit"
