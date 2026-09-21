@@ -856,24 +856,36 @@ def stored() -> DisputeRecord:
     return record
 
 
-def test_a_landed_credit_prints_the_hash_the_explorer_url_and_the_new_status(
-    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+def test_a_clean_live_run_prints_both_transactions_as_the_dispute_evidence(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
 ) -> None:
-    """The acceptance criterion, in the one form a grant reviewer can check:
-    a hash, a full Stellar Expert URL, and the dispute's new status — plus the
-    funding disclosure beside them, so the hash is never quoted bare."""
-    uphold.lands()
+    """The acceptance criterion of both stories, in the one form a grant
+    reviewer can check: the credit's hash and full Stellar Expert URL with the
+    funding disclosure beside it (4.03), the rating's hash and URL with the
+    derived id it is filed under (4.04), and then the two links again, side by
+    side, stated as the dispute's on-chain evidence — so neither is ever quoted
+    without the other."""
     seed()
 
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
 
+    refund_url = f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}"
+    rating_url = f"https://stellar.expert/explorer/testnet/tx/{RATING_TX}"
     assert code == uphold_dispute.EXIT_OK
-    assert uphold.calls == [DISPUTE_ID]
+    assert paying == [DISPUTE_ID] and ledger.calls == [DISPUTE_ID]
     assert f"CREDITED — {CREDITABLE_USDC:.7f} USDC paid to {PAYER}" in out
     assert "status:    credited" in out
     assert f"tx:        {REFUND_TX}" in out
-    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
     assert "The disputed agent was NOT charged" in out
+    assert f'RATED — {AGENT} rated {dispute_rating.DISPUTE_RATING}/100, kind "dispute", by this run' in out
+    assert f"rating tx: {RATING_TX}" in out
+    assert f"rating id: {rating_id_hex()}" in out
+
+    evidence = out[out.index("ON-CHAIN EVIDENCE") :]
+    assert f"dispute {DISPUTE_ID}: both transactions, together" in evidence
+    assert f"refund: {refund_url}" in evidence
+    assert f"rating: {rating_url}" in evidence
+    assert stored().rating_tx == RATING_TX
 
 
 def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure(
