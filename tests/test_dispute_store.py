@@ -577,7 +577,8 @@ def test_the_schema_is_created_lazily_and_only_once() -> None:
     asyncio.run(go())
 
     ddl = [s for s in pool.statements if "CREATE TABLE" in s]
-    assert len(ddl) == 2
+    # settlements, dispute events, and the refund mutex.
+    assert len(ddl) == 3
     assert any("CREATE TABLE IF NOT EXISTS workflow_settlements" in s for s in ddl)
     assert any("CREATE TABLE IF NOT EXISTS dispute_events" in s for s in ddl)
 
