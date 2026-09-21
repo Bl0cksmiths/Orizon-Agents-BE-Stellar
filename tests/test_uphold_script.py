@@ -170,6 +170,58 @@ def chain_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return calls
 
 
+def rep(disputed: int, count: int, *, degraded: bool = False) -> reputation_svc.RepInfo:
+    """The agent's reputation as `fetch_rep` reports it, reduced to what the script reads.
+
+    `dispute_rate_bps` is the ledger's own formula (disputed * 10_000 / count),
+    stated here so a test reads as the numbers an operator would see.
+    """
+    return reputation_svc.RepInfo(
+        agent_id=AGENT,
+        smoothed_bps=6_000,
+        lower_bound_bps=5_000,
+        avg_bps=6_000,
+        count=count,
+        weight=700_000 * count,
+        disputed=disputed,
+        dispute_rate_bps=disputed * 10_000 // count if count else 0,
+        source="prior" if degraded else "onchain",
+        degraded=degraded,
+    )
+
+
+class StandingSeam:
+    """What `reputation_svc.fetch_rep` answers, read by read, for one test.
+
+    Stubbed for EVERY test in this file, and unreadable by default — the
+    degraded prior an unreachable ledger really produces — so no test reaches
+    the real read (whose failures would linger in the process-wide negative
+    cache) and every test that wants numbers asks for them. `reads` records
+    each call, which is how the dry run is held to reading nothing at all.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.reads: list[str] = []
+        self._answers: list[reputation_svc.RepInfo | BaseException] = []
+        monkeypatch.setattr(reputation_svc, "fetch_rep", self._fetch)
+
+    def reads_as(self, *answers: reputation_svc.RepInfo | BaseException) -> None:
+        """Answer the next reads in order: a `RepInfo`, or an exception to raise."""
+        self._answers = list(answers)
+
+    async def _fetch(self, agent_id: str) -> reputation_svc.RepInfo:
+        self.reads.append(agent_id)
+        answer = self._answers.pop(0) if self._answers else rep(0, 0, degraded=True)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+@pytest.fixture(autouse=True)
+def standing(monkeypatch: pytest.MonkeyPatch) -> StandingSeam:
+    return StandingSeam(monkeypatch)
+
+
 def seed(
     *,
     status: DisputeStatus = "open",
