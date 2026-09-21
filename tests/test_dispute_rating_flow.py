@@ -500,3 +500,32 @@ def test_a_rating_that_cannot_be_formed_is_a_records_problem_not_a_failed_refund
     (logged,) = svc_errors(caplog)
     assert "could not be formed" in logged and "will not mend" in logged
     assert "derived=underivable" in logged and dispute.id in logged
+
+
+def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
+    monkeypatch, ledger, settler, invalidated, caplog
+) -> None:
+    """The one write after a landed rating. If the store refuses it, the
+    rating is still on-chain — so the score is still dropped, the paid record
+    is still the answer, and the hash is in an ERROR line telling the operator
+    to record it, because a later replay will otherwise find nothing on record
+    and report this dispute's own rating as a collision."""
+    dispute = open_dispute()
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _refuses_the_rating(dispute_id: str, status: Any, **kwargs: Any) -> DisputeRecord:
+        if kwargs.get("rating_tx"):
+            raise ConnectionError("the database went away")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _refuses_the_rating)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        paid = uphold(dispute.id)
+
+    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.rating_tx is None
+    assert invalidated == [AGENT]  # it landed, whatever the store says
+    (logged,) = svc_errors(caplog)
+    assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
