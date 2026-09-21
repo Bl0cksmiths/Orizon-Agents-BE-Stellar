@@ -72,11 +72,12 @@ the route ever being armed.
 What it needs in the environment
 --------------------------------
 `STELLAR_SIGNING_KEY` (the settler, funded via friendbot on testnet),
-`STELLAR_ASSET_SAC`, `STELLAR_REPUTATION_LEDGER` (the settler must be its
-Scorer), `DISPUTE_REFUNDS_ENABLED=true`, and a `DATABASE_URL` pointing at the
-store that actually holds the dispute. Turning that switch on
-with a signing key and a SAC set makes `API_KEY` mandatory — the config refuses
-to boot without it, on every network including testnet
+`STELLAR_ASSET_SAC`, `STELLAR_REPUTATION_LEDGER` with `REPUTATION_ENABLED` left
+on (and the settler registered as the ledger's Scorer, or every rating it signs
+is refused), `DISPUTE_REFUNDS_ENABLED=true`, and a `DATABASE_URL` pointing at
+the store that actually holds the dispute. Turning that switch on with a
+signing key and a SAC set makes `API_KEY` mandatory — the config refuses to
+boot without it, on every network including testnet
 (`config._money_capable_config_requires_api_key`).
 
 No secret ever reaches the terminal: every line goes out through
