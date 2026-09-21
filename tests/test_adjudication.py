@@ -338,6 +338,23 @@ def test_a_credit_records_the_amount_its_transfer_moved(monkeypatch) -> None:
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == credited
 
 
+def test_the_credited_amount_is_what_moved_when_the_d4_clamp_bites(monkeypatch) -> None:
+    """The case the field exists for. The workflow settled 0.03 USDC in all,
+    so the step promised 0.05 at opening can only be paid 0.03 — the real
+    transfer path, clamped by D4 — and the receipt must say 0.03 beside a
+    Stellar Expert link that shows 0.03. Printing the promise there would
+    contradict the receipt's own evidence."""
+    dispute = a_dispute(settled_usdc=0.03)
+    chain = settler(monkeypatch, LANDED)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert chain.calls == [(dispute.payer, 0.03)]
+    assert credited.creditable_usdc == 0.05  # the promise, frozen at opening
+    assert credited.credited_usdc == 0.03  # what moved
+    assert credited.credited_usdc != credited.creditable_usdc
+
+
 # ── the acceptance criterion: a retry cannot double-credit ──────
 
 
