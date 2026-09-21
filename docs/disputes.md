@@ -7,14 +7,18 @@ actually reaches the buyer.
 Four audiences. A **buyer** who paid for a workflow and did not get what they
 paid for wants "The window", "Who may dispute" and "What an upheld dispute
 pays". An **operator** whose agent has been disputed wants "What can be
-disputed", "What an upheld dispute pays" and "A dispute does not move
-reputation" — the short version is that nothing is ever taken from you.
+disputed", "What an upheld dispute pays" and "What a dispute does to
+reputation" — the short version is that nothing is ever taken from you, and
+that an upheld dispute costs your agent one low rating on-chain.
 Whoever **runs this deployment** wants "How a dispute is adjudicated, and how
-the credit is paid", plus the two operator sections at the end — the first
-being the procedure for a payout that never confirmed. A **reviewer** checking
-the claim against the code wants "The trust model" and "The API", and should
-read `docs/decisions/0007-dispute-window.md` and
-`docs/decisions/0008-refund-execution.md` alongside them.
+the credit is paid" and "After `credited`: the dispute rating", plus the
+operator sections at the end — the procedure for a payout that never
+confirmed, and the one for a dispute rating that collided. A **reviewer**
+checking the claim against the code or the chain wants "The trust model",
+"Reading the two on-chain artifacts" and "The API", and should read
+`docs/decisions/0007-dispute-window.md`,
+`docs/decisions/0008-refund-execution.md` and
+`docs/decisions/0009-dispute-rating.md` alongside them.
 
 ## The window
 
