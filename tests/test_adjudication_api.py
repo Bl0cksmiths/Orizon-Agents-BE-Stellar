@@ -510,13 +510,17 @@ def test_a_malformed_note_never_reaches_the_service(client, adjudicating, monkey
 
 def test_a_note_at_the_bound_is_accepted(client, adjudicating, monkeypatch):
     # The bound is inclusive, as `OpenDisputeReq.reason`'s is — pinned so a
-    # future tightening is a deliberate change rather than an off-by-one.
+    # future tightening is a deliberate change rather than an off-by-one. It is
+    # the SERVICE's ceiling, not a number restated here: story 4.05 found the
+    # edge accepting 2000 characters that `reject` then silently trimmed to
+    # this, so the edge now refuses what the service would cut.
     calls = rejects_with(monkeypatch, record(status="rejected"))
+    at_the_bound = "x" * dispute_svc.MAX_REASON_CHARS
 
-    r = client.post(REJECT, json={"note": "x" * 2000}, headers=AUTH)
+    r = client.post(REJECT, json={"note": at_the_bound}, headers=AUTH)
 
     assert r.status_code == 200, r.text
-    assert calls == [(DISPUTE_ID, "x" * 2000)]
+    assert calls == [(DISPUTE_ID, at_the_bound)]
 
 
 # ── the path parameter ──────────────────────────────────────────
