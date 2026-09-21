@@ -129,7 +129,7 @@ from pydantic import ValidationError  # noqa: E402  (after the sys.path bootstra
 try:
     from app.config import settings  # noqa: E402
     from app.security import SecretRedactionLogFilter, redact_secrets  # noqa: E402
-    from app.services import dispute_rating, dispute_svc, refund_svc, reputation_svc  # noqa: E402
+    from app.services import dispute_rating, dispute_svc, rating_writer, refund_svc, reputation_svc  # noqa: E402
     from app.services.dispute_store import (  # noqa: E402
         DisputeRecord,
         SettlementRecord,
@@ -544,10 +544,13 @@ def check_config() -> int:
     Presence only. No value is printed and the signing key is not even read:
     that a secret is set is the whole of what this needs to know.
 
-    The ledger is on the list because the rating is half of what a live run is
-    for (4.04): without it the credit would land and its rating could not, and
-    the run would end with the buyer paid and the dispute unresolvable until
-    somebody noticed. Refused here instead, while nothing has been signed.
+    The rating is checked too, because it is half of what a live run is for
+    (4.04): a deployment that cannot write one would land the credit, skip the
+    rating, and end with the buyer paid and the dispute unresolved until
+    somebody noticed. The check is `rating_writer.config_gap` — the very gate
+    `uphold` applies before it submits a rating — so this refuses exactly the
+    runs the service would pay and then decline to rate, and names the same
+    setting the service's own log line would.
     """
     missing = [
         name
@@ -555,10 +558,14 @@ def check_config() -> int:
             ("DISPUTE_REFUNDS_ENABLED=true", settings.dispute_refunds_enabled),
             ("STELLAR_SIGNING_KEY (the funded settler)", bool(settings.stellar_signing_key.strip())),
             ("STELLAR_ASSET_SAC", bool(settings.stellar_asset_sac.strip())),
-            ("STELLAR_REPUTATION_LEDGER (the rating's ledger)", bool(settings.stellar_reputation_ledger.strip())),
         )
         if not present
     ]
+    gap = rating_writer.config_gap()
+    if gap is not None and gap.status != "no_signer":
+        # `no_signer` is the signing key, already named above in the words
+        # this script uses for it.
+        missing.append(f"{gap.problem} — so the dispute rating could not be written")
     if not missing:
         return EXIT_OK
     return refuse(
