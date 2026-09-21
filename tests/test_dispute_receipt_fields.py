@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Iterator
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import pytest
 from test_dispute_store import FakePool, _pg, a_dispute
@@ -293,3 +293,24 @@ def test_the_credited_amount_and_the_confirmation_are_carried_forward(store: Dis
     assert confirmed.rating_confirmed is True
     assert later.rating_confirmed is True and later.credited_usdc == 1.25
     assert stored == later
+
+
+def test_a_claim_and_a_release_carry_the_receipt_verbatim(store: DisputeStore) -> None:
+    """The behavioural half of the statement pin above, over both stores:
+    the mutex transitions change the status and the moment it changed, and
+    NOTHING else. The upheld dispute here carries receipt facts no real one
+    has yet, set on purpose so that a transition dropping them would have
+    something to lose."""
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        upheld = await store.append_status(
+            opened.id, "upheld", note="kept as given", credited_usdc=0.75, rating_confirmed=False
+        )
+        return upheld, await store.claim_refund(opened.id), await store.release_refund_claim(opened.id)
+
+    upheld, claimed, released = asyncio.run(go())
+
+    assert claimed is not None and released is not None
+    assert claimed == replace(upheld, status="crediting", updated_at=claimed.updated_at)
+    assert released == replace(upheld, status="upheld", updated_at=released.updated_at)
