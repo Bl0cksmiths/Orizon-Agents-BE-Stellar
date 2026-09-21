@@ -94,7 +94,14 @@ class DisputeChallengeResponse(BaseModel):
 class OpenDisputeReq(BaseModel):
     job_id_hex: str = Field(..., pattern=_JOB_ID_PATTERN)
     step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
-    reason: str = Field(..., min_length=1, max_length=_MAX_REASON_CHARS)
+    # Bounded by the service's own ceiling, never a second number. The service
+    # cleans every reason and trims it to MAX_REASON_CHARS, so an edge bound
+    # above that accepted a paragraph and then stored only its start: a
+    # 1,500-character reason was cut to 500 without a word to the buyer. At the
+    # same constant it is a 422 they can see and fix. The one trim left is the
+    # service's marker redaction lengthening a reason already at the bound,
+    # which only text that forges a prompt-fence marker can reach.
+    reason: str = Field(..., min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
     payer: str = Field(..., pattern=_PAYER_PATTERN)
     nonce: str = Field(..., min_length=1, max_length=128)
     # Upper bound only, exactly as `BindReq.signature` has it: a lower bound
