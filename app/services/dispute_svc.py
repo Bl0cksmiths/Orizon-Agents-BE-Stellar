@@ -414,10 +414,11 @@ async def open_dispute(
     # R12, named here so the collision cannot be rediscovered the hard way: the
     # settler has ALREADY auto-rated this job under `Rated(agent_id, job_id)`,
     # and `ReputationLedger.submit` checks that replay guard before it reads
-    # `kind`. So when story 4.04 records this dispute on-chain it must write the
-    # rating under `refund_svc.dispute_job_id(job_id)` — the derived id from
-    # ADR 0002 — or the submission comes back `Error::Replay` and the dispute
-    # silently never lands. Nothing in THIS story writes on-chain at all.
+    # `kind`. So the rating an upheld dispute earns (story 4.04, `uphold`) is
+    # written under `dispute_rating.dispute_job_id(job_id, step_index)` — a
+    # derived id unique to this disputed step — or the submission would come
+    # back `Error::Replay` and the dispute would never land. Opening one writes
+    # nothing on-chain at all.
     record = DisputeRecord(
         id=new_dispute_id(),
         job_id_hex=job_id_hex,
