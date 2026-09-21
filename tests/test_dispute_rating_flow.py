@@ -423,6 +423,45 @@ def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_reso
     assert len(settler.transfers) == 1
 
 
+# ── whether the rating is known to have landed (story 4.06) ─────
+
+
+@pytest.mark.parametrize(
+    ("how", "rating_tx", "rating_confirmed"),
+    [
+        ("land", "tx_rating_1", True),
+        ("lost", "tx_rating_1", False),
+        ("fail", None, None),
+        ("raise", None, None),
+        ("collision", None, None),
+    ],
+    ids=["success", "timeout", "failed", "hashless-timeout", "collision"],
+)
+def test_each_rating_answer_records_whether_the_rating_is_known_to_have_landed(
+    ledger, settler, invalidated, how: str, rating_tx: str | None, rating_confirmed: bool | None
+) -> None:
+    """A hash on the record cannot say whether the rating landed — a SUCCESS
+    and a TIMEOUT both leave one — so a receipt that read it as "the agent was
+    rated" could claim a consequence that never happened. `rating_confirmed`
+    says it, from the ledger's own answer through the real mapping: True for a
+    SUCCESS, False for a timeout whose in-flight hash is recorded, and nothing
+    at all where nothing was recorded — a FAILED rating, a timeout that
+    returned no hash, and a collision."""
+    dispute = open_dispute()
+    if how == "collision":
+        ledger.rated.add((AGENT, derived(0)))
+    else:
+        ledger.script = [how]
+
+    rated = uphold(dispute.id)
+
+    assert rated.status == "credited" and rated.refund_tx == "tx_credit"
+    assert rated.rating_tx == rating_tx
+    assert rated.rating_confirmed is rating_confirmed
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == rated
+    assert len(settler.transfers) == 1
+
+
 # ── across disputes, and across every outcome ───────────────────
 
 
