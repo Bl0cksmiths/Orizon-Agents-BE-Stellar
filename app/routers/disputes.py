@@ -590,15 +590,22 @@ async def list_task_disputes(
     special-case into the same view.
 
     Gated by `require_task_read` like every other `/tasks/{task_id}/...` read:
-    a dispute names its payer and carries the buyer's own words about the work,
-    which is exactly the material that capability token exists to scope. But
-    the dependency is a no-op while TASK_AUTH_REQUIRED is off — the shipped
-    default, and how production runs — so there this read is world-readable,
-    and it fails closed only once enforcement is turned on. That is why the
-    settlement it carries is held to what is already public: the job id and the
-    payer are on-chain (see `SettlementView`), and each output summary is the
-    line the world-readable trace already showed. Nothing belongs on that shape
-    that the chain or the trace does not already publish.
+    a dispute names its payer and carries the buyer's own words about the work
+    — and, once rejected, the adjudicator's answer to them — which is exactly
+    the material that capability token exists to scope. But the dependency is
+    a no-op while TASK_AUTH_REQUIRED is off — the shipped default, and how
+    production runs — so there this read is world-readable, and it fails
+    closed only once enforcement is turned on. That is why the settlement it
+    carries is held to what is already public: the job id and the payer are
+    on-chain (see `SettlementView`), and each output summary is the line the
+    world-readable trace already showed. Nothing belongs on that shape that
+    the chain or the trace does not already publish.
+
+    The disputes are not held to that standard, and this says so rather than
+    implying otherwise: each one's `reason` and `rejection_reason` go to
+    whoever this read admits, which in production is anyone with the task id.
+    The console shows them only to the payer; that is a choice about display,
+    and it narrows nothing this route returns.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
     disputes = await dispute_svc.list_for_task(task_id)
