@@ -35,3 +35,22 @@ def test_the_first_half_is_the_sealed_job_so_a_reviewer_can_see_the_link() -> No
     # SOW §6.1: whoever opens the rating on Stellar Expert must be able to tie
     # it to the attested job without reading this code.
     assert dispute_job_id(_JOB, 5)[:8] == _JOB[:8]
+
+
+def test_each_step_of_one_job_gets_its_own_id() -> None:
+    # The defect 4.04 fixes: one agent serving two steps of a job used to
+    # derive ONE id for both, so the second upheld dispute was refused as a
+    # replay of the first.
+    ids = {dispute_job_id(_JOB, step) for step in range(64)}
+    assert len(ids) == 64
+
+
+def test_the_derived_id_never_lands_on_the_jobs_own_key() -> None:
+    # The settler's auto-rating already holds Rated(agent_id, job_id).
+    for step in range(64):
+        assert dispute_job_id(_JOB, step) != _JOB
+
+
+def test_two_jobs_sharing_a_prefix_still_derive_different_ids() -> None:
+    other = _JOB[:8] + bytes(8)
+    assert dispute_job_id(_JOB, 0) != dispute_job_id(other, 0)
