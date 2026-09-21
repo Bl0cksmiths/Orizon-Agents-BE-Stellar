@@ -221,6 +221,29 @@ CREATE INDEX IF NOT EXISTS dispute_events_task_idx
     ON dispute_events (task_id, dispute_id, id DESC);
 """
 
+# The refund mutex (story 4.03). One row per dispute that is mid-payout, and
+# the PRIMARY KEY is the whole mechanism: `INSERT ... ON CONFLICT DO NOTHING`
+# is atomic in a single statement, so exactly one of any number of concurrent
+# claimants inserts and the rest come back empty.
+#
+# A separate table rather than a partial unique index over `dispute_events`,
+# for two reasons. That table is append-only, so a uniqueness rule scoped to
+# "is crediting" would forbid the SECOND claim after a failed transfer was
+# released — and a buyer who was not paid must stay payable. And an advisory
+# lock would not work here either: this store issues one statement per call,
+# and every CTE in a statement shares the snapshot taken before the lock could
+# be acquired, so the lock would guard nothing.
+#
+# Rows are deleted on release and on completion; a row that outlives its
+# payout is a dispute stuck mid-flight, which is exactly what an operator
+# needs to find during reconciliation.
+_CREATE_REFUND_CLAIMS_SQL = """
+CREATE TABLE IF NOT EXISTS refund_claims (
+    dispute_id  TEXT PRIMARY KEY,
+    claimed_at  DOUBLE PRECISION NOT NULL
+);
+"""
+
 
 # The newest settlement for one job, and for one task.
 #
