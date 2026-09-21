@@ -478,7 +478,12 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallba
 
     if dispute.status == "upheld":
         say()
-        if fallback == EXIT_OK:
+        # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
+        # outcome reached two ways: `uphold` refusing with `refund_failed`, and
+        # a call that returned while leaving the claim released. Both mean the
+        # ledger rejected the transfer, so both get the sentence that matters —
+        # nothing moved, and this is the one case where re-running is right.
+        if fallback in (EXIT_OK, EXIT_TRANSFER_FAILED):
             say(f"  the transfer FAILED — dispute {dispute.id} is back at `upheld` and nothing moved.")
             say("  The claim was released, so running this again once the cause is fixed (settler")
             say("  balance, asset SAC, RPC) pays the credit. The log lines above name it.")
