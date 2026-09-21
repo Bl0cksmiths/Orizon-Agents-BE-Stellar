@@ -389,6 +389,7 @@ def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_reso
     ledger.script = ["raise"]
     lost_track = uphold(dispute.id)
     assert lost_track.rating_tx is None
+    caplog.clear()  # the first attempt's own "unconfirmed" line is not what is under test
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         retried = uphold(dispute.id)
