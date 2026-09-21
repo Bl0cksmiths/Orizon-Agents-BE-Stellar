@@ -103,6 +103,24 @@ class OpenDisputeReq(BaseModel):
     signature_b64: str = Field(..., min_length=1, max_length=256, description="base64 ed25519 signature")
 
 
+class RejectDisputeReq(BaseModel):
+    """The adjudicator's optional word on why a dispute was not upheld.
+
+    Bounded identically to `OpenDisputeReq.reason` — one paragraph, no empty
+    string — because it is the same kind of thing from the other side of the
+    table, and a rejection note that outgrew the complaint it answers would be
+    the one free-text field in this surface nobody had sized.
+
+    Optional, and optional all the way down: the body itself may be absent, so
+    a console that has nothing to add posts no body rather than an empty one.
+    `min_length=1` then means "if you send a note, send a note" — a note of ""
+    is refused rather than stored, so the absence of a reason has exactly one
+    representation in the record instead of two.
+    """
+
+    note: str | None = Field(default=None, min_length=1, max_length=_MAX_REASON_CHARS)
+
+
 class DisputeResponse(BaseModel):
     """One dispute, as the console and the buyer's client read it.
 
@@ -421,5 +439,52 @@ async def uphold_dispute(
         record.status,
         record.creditable_usdc,
         record.refund_tx,
+    )
+    return DisputeResponse.of(record)
+
+
+@router.post(
+    "/disputes/{dispute_id}/reject",
+    response_model=DisputeResponse,
+    summary="Reject a dispute, optionally with a note",
+    dependencies=[Depends(require_adjudicator)],
+)
+async def reject_dispute(
+    dispute_id: str = Path(..., min_length=1, max_length=64),
+    body: RejectDisputeReq | None = None,
+) -> DisputeResponse:
+    """Find for the platform: close the dispute without crediting anything.
+
+    Behind `require_adjudicator` alongside `uphold_dispute`, although nothing
+    here signs. Rejecting is the other half of one decision, and the half that
+    is CHEAP to make is exactly the half an attacker would reach for: a
+    rejection is terminal, so an open reject route would let anyone close
+    every dispute raised against the platform before an adjudicator ever saw
+    one. The refund switch gates it too, for the same reason — a deployment
+    that cannot pay a dispute out must not be able to dispose of one either.
+
+    The note is the adjudicator's, and it is passed through rather than
+    interpreted: this handler does not decide that a rejection needs a reason,
+    because whether one is required is a policy the service owns and would
+    otherwise hold an opinion about in two places.
+    """
+    note = body.note if body is not None else None
+    try:
+        record = await dispute_svc.reject(dispute_id, note=note)
+    except dispute_svc.DisputeError as e:
+        # `uphold_dispute`'s rule, and the note is left out for
+        # `open_dispute`'s: free text written by a human about a specific
+        # complaint does not belong in an operator's log viewer.
+        logger.warning("reject refused: dispute_id=%s reason=%s", dispute_id, e.code)
+        raise _refuse(e) from None
+    logger.info(
+        "dispute rejected: id=%s job_id=%s task_id=%s step=%d payer=%s status=%s noted=%s",
+        record.id,
+        record.job_id_hex,
+        record.task_id,
+        record.step_index,
+        record.payer,
+        record.status,
+        note is not None,
     )
     return DisputeResponse.of(record)
