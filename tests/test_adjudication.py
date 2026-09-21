@@ -29,7 +29,7 @@ import asyncio
 import base64
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from stellar_sdk import Keypair
@@ -863,3 +863,52 @@ def test_the_rating_is_written_only_once_the_credit_is_recorded(monkeypatch, rat
     assert rater.stored_status == ["credited"]
     assert credited.refund_tx == "tx_credit"
     assert credited.rating_tx == "tx_rating"
+
+
+def trap_the_refund(monkeypatch) -> None:
+    """Booby-trap every way back into the refund: the claim, its release, the
+    credit and the transfer beneath it. Installed from INSIDE a rating, so
+    anything that reaches the refund after the rating has started fails."""
+
+    async def _refund_touched(*args: Any, **kwargs: Any) -> None:
+        raise SignedSomething("the rating path reached the refund")
+
+    store = dispute_store.get_dispute_store()
+    monkeypatch.setattr(store, "claim_refund", _refund_touched)
+    monkeypatch.setattr(store, "release_refund_claim", _refund_touched)
+    monkeypatch.setattr(refund_svc, "credit_refund", _refund_touched)
+    no_signing(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("unlanded", "rating_tx"),
+    [("FAILED", None), ("TIMEOUT", "tx_rating_inflight"), ("REPLAY", None), ("raised", None)],
+)
+def test_a_rating_that_does_not_land_never_touches_the_refund(
+    monkeypatch, rater, unlanded: str, rating_tx: str | None
+) -> None:
+    """D3. The buyer has been paid by the time the rating is asked for, and
+    no answer the rating gets — a failure, a timeout, a collision, or an
+    exception out of the attempt itself — may reverse, release or re-sign
+    that. Nor may it be RAISED: a paid refund answered with an error is a
+    refund the caller will think failed. The dispute stays `credited` with its
+    refund hash, and only `rating_tx` says the consequence has not landed."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+
+    async def _rate_with_the_refund_trapped(credited: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
+        trap_the_refund(monkeypatch)
+        if unlanded == "raised":
+            raise RuntimeError("the RPC went away mid-rating")
+        rater.script = [cast(RatingStatus, unlanded)]
+        return await rater(credited, settlement)
+
+    monkeypatch.setattr(dispute_rating, "submit_dispute_rating", _rate_with_the_refund_trapped)
+
+    answered = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert answered.status == "credited"
+    assert answered.refund_tx == "tx_credit"
+    assert answered.rating_tx == rating_tx
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == answered
+    assert len(chain.calls) == 1
