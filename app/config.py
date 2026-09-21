@@ -366,6 +366,13 @@ class Settings(BaseSettings):
         production environment. Testnet signers and uat/stage PDAX move play
         money and stay open, as does a read-only mainnet deployment.
 
+        The refund path (story 4.03) is the exception that applies on testnet
+        as well, because an adjudicated payout spends the platform's OWN
+        balance rather than an allowance a payer already authorised. It is
+        scoped to `dispute_refunds_enabled` so that it names a deliberate
+        operator choice rather than the presence of credentials every test run
+        and laptop already has.
+
         Refusing to boot — rather than reporting not-ready — is both the
         safer option and the one consistent with the validators above.
         Failing /readiness would not actually close the hole: render.yaml
