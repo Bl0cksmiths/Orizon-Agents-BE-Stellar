@@ -594,7 +594,7 @@ readable anywhere; only the deadline was.
 | `window_closes_at` | the stamped closing time, in epoch seconds; null until the task settles. Always equal to `settlement.window_closes_at`, and kept at the top level for clients that read it there |
 | `now` | this server's clock when the response was built, in epoch seconds. The window is enforced by the server, so a countdown run off the browser's clock is wrong by however far that clock has drifted; the console corrects by the difference |
 | `settlement` | null until the task settles; otherwise the object below |
-| `disputes` | every dispute raised on the task, in the order they were opened, each in the shape `GET /api/disputes/{dispute_id}` returns |
+| `disputes` | every dispute raised on the task, in the order they were opened, each in the shape `GET /api/disputes/{dispute_id}` returns — "What a dispute returns" above |
 
 `settlement`:
 
