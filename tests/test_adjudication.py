@@ -845,3 +845,21 @@ def test_a_rejection_without_a_usable_note_records_none_rather_than_nothing(monk
 
     assert asyncio.run(dispute_svc.reject(a_dispute().id)).note is None
     assert asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="  \t \n ")).note is None
+
+
+# ── the dispute rating: after the credit, never instead of it ───
+
+
+def test_the_rating_is_written_only_once_the_credit_is_recorded(monkeypatch, rater) -> None:
+    """Story 4.04's ordering, made visible the way the claim's is above. The
+    rating must find the dispute already `credited` in the store at the
+    instant it is asked for: a rating written first would put a dispute
+    consequence on an agent's record for a buyer who might never be paid."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert rater.stored_status == ["credited"]
+    assert credited.refund_tx == "tx_credit"
+    assert credited.rating_tx == "tx_rating"
