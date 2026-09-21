@@ -64,6 +64,10 @@ cp .env.example .env
 | POST | `/api/stellar/server/charge`         | backend-signed escrow charge (needs `X-API-Key`) |
 | POST | `/api/stellar/server/seal`           | backend-signed attestation seal (needs `X-API-Key`) |
 | GET  | `/api/stellar/new-id`                | fresh random 16-byte id for job/auth ids |
+| POST | `/api/disputes/challenge`            | mint the exact message + nonce the payer's wallet signs to dispute a step |
+| POST | `/api/disputes`                      | open a dispute on a settled step — authorized by that signature, no API key |
+| GET  | `/api/disputes/{id}`                 | read one dispute by the unguessable id opening it returned |
+| GET  | `/api/tasks/{id}/disputes`           | a task's dispute window (`window_closes_at`) and every dispute raised on it |
 | *    | `/api/pdax/*`                        | PDAX PHP↔crypto surface: trade, fiat/crypto funding, ramps, webhooks, reference data |
 
 `/api/health` exists because the frontend reaches this API only through a same-origin rewrite of `/api/*` — the root `/health` sits outside that prefix, so mirroring it under `/api` is what lets the browser and any external uptime monitor pointed at the product domain verify the backend is actually reachable. It returns the identical payload, makes no network or contract calls, and is exempt from rate limiting and access logging just like the root probe.
