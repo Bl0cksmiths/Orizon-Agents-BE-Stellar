@@ -178,6 +178,22 @@ class DisputeResponse(BaseModel):
     # it, false while it is only in flight, null when no rating was submitted
     # or the record predates 4.06 — so null means "not known", never "no".
     rating_confirmed: bool | None = None
+    # Why the adjudicator rejected the claim, for the buyer to read: a
+    # rejection with no explanation is worse than no dispute system at all.
+    # It is the record's `note` under exactly one condition — the status is
+    # `rejected` — and null under every other, so a note recorded at any other
+    # point in a dispute's life is never published by accident, and never
+    # under a second name. Null, too, for a rejection with no note, which only
+    # a record from before the note was required can be.
+    #
+    # Readable wherever the buyer's own `reason` is, and guarded no better:
+    # `GET /api/disputes/{id}` answers whoever holds the id, and the per-task
+    # listing answers whoever may read the task — which, while
+    # TASK_AUTH_REQUIRED is off as it is in production, is anyone with the
+    # task id. The console shows both only to the payer, but that is a choice
+    # about display, not about access. The API does not hide either, and an
+    # adjudicator writes this knowing it.
+    rejection_reason: str | None = None
 
     @classmethod
     def of(cls, record: DisputeRecord) -> DisputeResponse:
@@ -200,6 +216,7 @@ class DisputeResponse(BaseModel):
             credited_usdc=record.credited_usdc,
             updated_at=record.updated_at,
             rating_confirmed=record.rating_confirmed,
+            rejection_reason=record.note if record.status == "rejected" else None,
         )
 
 
