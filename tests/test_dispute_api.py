@@ -10,7 +10,10 @@ service. What is tested HERE is the wire, and only the wire:
     the service's own token, verbatim;
   * `duplicate_dispute` answers with the original dispute — the one acceptance
     criterion the shared error envelope has no room to express;
-  * an unsettled task reads as an empty window rather than an error.
+  * an unsettled task reads as an empty window rather than an error;
+  * a settled one carries everything a buyer's FIRST dispute starts from
+    (story 4.05) — the job id, the payer, each step's credit priced by the
+    refund's own rule, the stated policy and the server's clock.
 
 Every test stubs `dispute_svc` at the seam the router imported. That keeps this
 file passing without the rules lane's implementation present, and keeps it
@@ -22,11 +25,13 @@ tests touch.
 from __future__ import annotations
 
 import base64
+import time
 
 import pytest
 
-from app.services import dispute_svc
-from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
+from app.config import settings
+from app.services import dispute_svc, refund_svc
+from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep, steps_from_json
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -297,7 +302,10 @@ MALFORMED_BODIES = [
     ("payer-not-an-address", {"payer": "not-an-address"}),
     ("payer-wrong-prefix", {"payer": "M" + PAYER[1:]}),
     ("reason-empty", {"reason": ""}),
-    ("reason-too-long", {"reason": "x" * 2001}),
+    ("reason-too-long", {"reason": "x" * (dispute_svc.MAX_REASON_CHARS + 1)}),
+    # The paragraph the old 2,000-character edge let through and the service
+    # then cut to its first 500 without a word: refused now, never trimmed.
+    ("reason-a-paragraph-over", {"reason": "x" * 1500}),
     ("signature-too-long", {"signature_b64": "x" * 257}),
     ("nonce-too-long", {"nonce": "x" * 129}),
 ]
@@ -312,6 +320,19 @@ def test_a_malformed_body_never_reaches_the_service(client, monkeypatch, label, 
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "validation_error"
     assert calls == []
+
+
+def test_a_reason_at_the_service_ceiling_reaches_it_whole(client, monkeypatch):
+    # The edge bound IS the service's MAX_REASON_CHARS, inclusive — so the
+    # longest reason the route accepts is one the service keeps whole, and the
+    # buyer is never told "filed" about words that were quietly dropped.
+    reason = "x" * dispute_svc.MAX_REASON_CHARS
+    calls = opens_with(monkeypatch, record(reason=reason))
+
+    r = client.post("/api/disputes", json=open_body(reason=reason))
+
+    assert r.status_code == 200, r.text
+    assert calls[0]["reason"] == reason
 
 
 def test_a_missing_field_never_reaches_the_service(client, monkeypatch):
@@ -329,7 +350,12 @@ def test_a_missing_field_never_reaches_the_service(client, monkeypatch):
 
 
 def settlement(**overrides: object) -> SettlementRecord:
-    """A settled workflow, as the store recorded it at settlement time."""
+    """A settled workflow, as the store recorded it at settlement time.
+
+    One step that failed and one that delivered, because the receipt has to
+    tell them apart: only the second was billed, so the charge is its price
+    alone and only it has anything to credit.
+    """
     fields: dict = {
         "task_id": "task-1",
         "payer": PAYER,
@@ -337,9 +363,23 @@ def settlement(**overrides: object) -> SettlementRecord:
         "job_id_hex": JOB_ID,
         "charge_tx": "abc123",
         "proof_tx": "def456",
-        "settled_usdc": 0.5,
+        "settled_usdc": 0.25,
         "steps": (
-            SettlementStep(step_index=1, agent_id="code-agent", agent_name="Coder", price_usdc=0.25, delivered=True),
+            SettlementStep(
+                step_index=0,
+                agent_id="research-agent",
+                agent_name="Researcher",
+                price_usdc=0.1,
+                delivered=False,
+            ),
+            SettlementStep(
+                step_index=1,
+                agent_id="code-agent",
+                agent_name="Coder",
+                price_usdc=0.25,
+                delivered=True,
+                output_summary="Built a landing page with a signup form",
+            ),
         ),
         "settled_at": 1_700_000_000.0,
         "window_closes_at": 1_700_086_400.0,
@@ -404,12 +444,146 @@ def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeyp
     assert [d["step_index"] for d in body["disputes"]] == [1, 2]
 
 
-def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
-    # A running or unpaid task: nothing to dispute, no deadline, and NOT a 404
-    # — the console polls this route while the workflow is still going.
-    lists(monkeypatch, found=None, disputes=())
+def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(client, monkeypatch):
+    # Pinned whole, because the frontend's types are frozen to this shape: a
+    # field renamed, dropped or added here breaks them, and an added one may be
+    # something the chain and the trace do not already publish.
+    monkeypatch.setattr(settings, "dispute_credited_fraction", 1.0)
+    lists(monkeypatch, found=settlement(), disputes=())
 
-    r = client.get("/api/tasks/task-unsettled/disputes")
+    r = client.get("/api/tasks/task-1/disputes")
 
     assert r.status_code == 200
-    assert r.json() == {"task_id": "task-unsettled", "window_closes_at": None, "disputes": []}
+    body = r.json()
+    assert body["settlement"] == {
+        "job_id_hex": JOB_ID,
+        "payer": PAYER,
+        "settled_at": 1_700_000_000.0,
+        "window_closes_at": 1_700_086_400.0,
+        "settled_usdc": 0.25,
+        "charge_tx": "abc123",
+        "proof_tx": "def456",
+        "steps": [
+            {
+                "step_index": 0,
+                "agent_id": "research-agent",
+                "agent_name": "Researcher",
+                "price_usdc": 0.1,
+                "delivered": False,
+                "creditable_usdc": 0.0,
+                "output_summary": None,
+            },
+            {
+                "step_index": 1,
+                "agent_id": "code-agent",
+                "agent_name": "Coder",
+                "price_usdc": 0.25,
+                "delivered": True,
+                "creditable_usdc": 0.25,
+                "output_summary": "Built a landing page with a signup form",
+            },
+        ],
+        "policy": {"credited_fraction": 1.0, "funded_by": "platform", "adjudicated_by": "platform"},
+    }
+    # Older clients read the deadline at the top level, and it must be the
+    # same instant the settlement carries, not a second opinion about it.
+    assert body["window_closes_at"] == body["settlement"]["window_closes_at"]
+
+
+# (fraction configured, the credit on the fixture's 0.25 USDC delivered step).
+# A third exercises the 7-decimal rounding, and the out-of-range pair the clamp:
+# the receipt must show exactly what an uphold would compute, never its own
+# re-derivation of it.
+CREDIT_CASES = [
+    (1 / 3, 0.0833333),
+    (0.5, 0.125),
+    (1.5, 0.25),
+    (-0.25, 0.0),
+]
+
+
+@pytest.mark.parametrize(
+    ("fraction", "credit"), CREDIT_CASES, ids=["a-third-rounded", "half", "above-one-clamped", "negative-clamped"]
+)
+def test_a_steps_credit_is_the_refunds_own_number(client, monkeypatch, fraction, credit):
+    monkeypatch.setattr(settings, "dispute_credited_fraction", fraction)
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    steps = client.get("/api/tasks/task-1/disputes").json()["settlement"]["steps"]
+
+    undelivered, delivered = steps
+    assert delivered["creditable_usdc"] == refund_svc.credited_amount_usdc(0.25, fraction) == credit
+    # Never its price times the fraction: it was not billed, it cannot be
+    # disputed, and a receipt that priced a credit for it would promise money
+    # nobody can claim.
+    assert undelivered["delivered"] is False
+    assert undelivered["creditable_usdc"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("fraction", "stated"),
+    [(1 / 3, 0.3333333), (0.5, 0.5), (1.5, 1.0), (-0.25, 0.0)],
+    ids=["a-third-rounded", "half", "above-one-clamped", "negative-clamped"],
+)
+def test_the_policy_states_the_fraction_the_refund_would_apply(client, monkeypatch, fraction, stated):
+    # A misconfigured 1.5 is stated as the 1.0 an uphold would really pay, so
+    # the policy never promises what the payout would refuse to keep; and who
+    # funds and who decides are the trust model, stated with the terms.
+    monkeypatch.setattr(settings, "dispute_credited_fraction", fraction)
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    policy = client.get("/api/tasks/task-1/disputes").json()["settlement"]["policy"]
+
+    assert policy == {"credited_fraction": stated, "funded_by": "platform", "adjudicated_by": "platform"}
+
+
+def test_the_task_listing_reports_the_servers_clock(client, monkeypatch):
+    # The console corrects its countdown by this, so it must be the real clock
+    # read while the request was served — not the settlement time, and not a
+    # value cached from an earlier read.
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    before = time.time()
+    body = client.get("/api/tasks/task-1/disputes").json()
+    after = time.time()
+
+    assert before <= body["now"] <= after
+
+
+def test_a_settlement_recorded_before_summaries_existed_reads_them_as_null(client, monkeypatch):
+    # A row written before 4.05 has no `output_summary` key at all, and those
+    # settlements are still inside their windows. Read back through the store's
+    # own tolerant reader, so this is the row as the route would really get it.
+    legacy = steps_from_json(
+        '[{"step_index":1,"agent_id":"code-agent","agent_name":"Coder","price_usdc":0.25,"delivered":true}]'
+    )
+    lists(monkeypatch, found=settlement(steps=legacy), disputes=())
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200, r.text
+    (step,) = r.json()["settlement"]["steps"]
+    # Present and null rather than omitted, so the frontend's frozen type
+    # holds for every row — and nothing else about the step is lost with it.
+    assert "output_summary" in step
+    assert step["output_summary"] is None
+    assert step["delivered"] is True
+    assert step["creditable_usdc"] == 0.25
+
+
+@pytest.mark.parametrize("task_id", ["task-unsettled", "task-never-ran"], ids=["unsettled", "unknown"])
+def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch, task_id):
+    # A running or unpaid task: nothing to dispute, no deadline, and NOT a 404
+    # — the console polls this route while the workflow is still going. The
+    # store has no settlement for a task it never heard of either, and the
+    # route does not try to tell the two apart: both read as the same nothing.
+    lists(monkeypatch, found=None, disputes=())
+
+    r = client.get(f"/api/tasks/{task_id}/disputes")
+
+    assert r.status_code == 200
+    body = r.json()
+    # The clock is present even with nothing to count down to, so the console
+    # can take its skew from any read rather than only a settled one.
+    assert isinstance(body.pop("now"), float)
+    assert body == {"task_id": task_id, "window_closes_at": None, "settlement": None, "disputes": []}

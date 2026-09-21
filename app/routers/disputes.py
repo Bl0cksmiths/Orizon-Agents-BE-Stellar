@@ -36,14 +36,17 @@ a 409 here carries a body the generic error envelope has no room for.
 from __future__ import annotations
 
 import logging
+import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..security import request_id_var, require_adjudicator
-from ..services import dispute_svc
-from ..services.dispute_store import DisputeRecord, DisputeStatus
+from ..services import dispute_svc, refund_svc
+from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..task_auth import require_task_read
 
 logger = logging.getLogger(__name__)
@@ -64,11 +67,6 @@ _PAYER_PATTERN = r"^G[A-Z2-7]{55}$"
 # real check is that the settlement record actually has such a step, which only
 # the service can make.
 _MAX_STEP_INDEX = 63
-
-# The buyer's own words: room for a paragraph of what went wrong, bounded so a
-# dispute record stays a record. The body limiter caps the request as a whole;
-# this caps the one field that is free text.
-_MAX_REASON_CHARS = 2000
 
 
 class DisputeChallengeReq(BaseModel):
@@ -91,7 +89,14 @@ class DisputeChallengeResponse(BaseModel):
 class OpenDisputeReq(BaseModel):
     job_id_hex: str = Field(..., pattern=_JOB_ID_PATTERN)
     step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
-    reason: str = Field(..., min_length=1, max_length=_MAX_REASON_CHARS)
+    # Bounded by the service's own ceiling, never a second number. The service
+    # cleans every reason and trims it to MAX_REASON_CHARS, so an edge bound
+    # above that accepted a paragraph and then stored only its start: a
+    # 1,500-character reason was cut to 500 without a word to the buyer. At the
+    # same constant it is a 422 they can see and fix. The one trim left is the
+    # service's marker redaction lengthening a reason already at the bound,
+    # which only text that forges a prompt-fence marker can reach.
+    reason: str = Field(..., min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
     payer: str = Field(..., pattern=_PAYER_PATTERN)
     nonce: str = Field(..., min_length=1, max_length=128)
     # Upper bound only, exactly as `BindReq.signature` has it: a lower bound
@@ -109,7 +114,10 @@ class RejectDisputeReq(BaseModel):
     Bounded identically to `OpenDisputeReq.reason` — one paragraph, no empty
     string — because it is the same kind of thing from the other side of the
     table, and a rejection note that outgrew the complaint it answers would be
-    the one free-text field in this surface nobody had sized.
+    the one free-text field in this surface nobody had sized. Identically down
+    to the number: `dispute_svc.reject` cleans and trims the note to the same
+    MAX_REASON_CHARS, so a longer bound here would record an adjudicator's
+    rationale cut short with nothing to say it was.
 
     Optional, and optional all the way down: the body itself may be absent, so
     a console that has nothing to add posts no body rather than an empty one.
@@ -118,7 +126,7 @@ class RejectDisputeReq(BaseModel):
     representation in the record instead of two.
     """
 
-    note: str | None = Field(default=None, min_length=1, max_length=_MAX_REASON_CHARS)
+    note: str | None = Field(default=None, min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
 
 
 class DisputeResponse(BaseModel):
@@ -184,17 +192,174 @@ class DuplicateDisputeResponse(BaseModel):
     dispute: DisputeResponse
 
 
-class TaskDisputesResponse(BaseModel):
-    """A task's dispute window and everything raised against it.
+class CreditPolicy(BaseModel):
+    """The terms an upheld dispute is paid under, as the buyer is shown them.
 
-    `window_closes_at` is null until the task settles — a task that was never
-    paid for has nothing to dispute and no deadline to show. It is read from the
-    settlement record rather than recomputed from `DISPUTE_WINDOW_SECONDS`, so
-    retuning that setting cannot move a deadline a buyer was already given.
+    Exists so the receipt can state the policy BEFORE the buyer signs anything,
+    from the same setting the payout reads: ADR 0002 promises buyer and
+    operator the terms in advance, and a dispute button that only reveals what
+    it pays once it has been pressed does not keep that promise.
+
+    `funded_by` and `adjudicated_by` are the trust model `refund_svc` discloses
+    — the platform's own wallet pays the credit, and the platform decides the
+    claim, with no on-chain arbitration behind it. Single-value literals, so
+    the schema itself says there is no other answer today: the day there is
+    one, widening the literal is a deliberate contract change rather than a
+    string that quietly started meaning something else.
+    """
+
+    credited_fraction: float
+    funded_by: Literal["platform"]
+    adjudicated_by: Literal["platform"]
+
+    @classmethod
+    def in_force(cls, fraction: float) -> CreditPolicy:
+        """The policy under `fraction`, clamped by the refund's own rule.
+
+        `credited_amount_usdc` clamps the fraction inline, so the fraction it
+        really applies is read back as what it credits on one whole USDC rather
+        than re-clamped here. The clamp keeps one home, and a misconfigured 1.5
+        is shown as the 1.0 that would actually be paid instead of a promise
+        the payout would never keep.
+        """
+        return cls(
+            credited_fraction=refund_svc.credited_amount_usdc(1.0, fraction),
+            funded_by="platform",
+            adjudicated_by="platform",
+        )
+
+
+class SettlementStepView(BaseModel):
+    """One settled step, and what disputing it would credit.
+
+    Exists because the trace a buyer reads is evicted from memory long before
+    their window closes, and this is read off the settlement record instead —
+    so it is the one account that survives of which agent ran each step, what
+    it was charged, whether it delivered and what it produced. A mirror of
+    `dispute_store.SettlementStep` rather than the dataclass itself, for
+    `DisputeResponse`'s reason.
+
+    `creditable_usdc` is computed HERE, with the refund's own rule, so the
+    receipt never re-derives the rounding: it is the figure `open_dispute`
+    would freeze onto a dispute opened now. What an uphold transfers is also
+    bounded by the settled total (`refund_svc.creditable_for`), so this is the
+    ceiling the buyer is shown, never a sum the platform could exceed.
+
+    `output_summary` is untrusted — an external agent's own words — and is the
+    line the world-readable trace already showed for the step, cleaned to
+    `OUTPUT_SUMMARY_MAX_CHARS` by its writer before it was stored. It is passed
+    through verbatim and escaped on render like every other stored string.
+    None for a step that delivered nothing, and for every settlement recorded
+    before 4.05.
+    """
+
+    step_index: int
+    agent_id: str
+    agent_name: str | None
+    price_usdc: float
+    delivered: bool
+    creditable_usdc: float
+    output_summary: str | None
+
+    @classmethod
+    def of(cls, step: SettlementStep, fraction: float) -> SettlementStepView:
+        """Project a settled step onto the wire, pricing its credit under `fraction`."""
+        return cls(
+            step_index=step.step_index,
+            agent_id=step.agent_id,
+            agent_name=step.agent_name,
+            price_usdc=step.price_usdc,
+            delivered=step.delivered,
+            # Exactly 0.0 for a step that did not deliver, never its price times
+            # the fraction: it was not billed, `open_dispute` refuses it, and a
+            # receipt that priced a credit for it would promise money nobody
+            # can claim.
+            creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, fraction) if step.delivered else 0.0,
+            output_summary=step.output_summary,
+        )
+
+
+class SettlementView(BaseModel):
+    """What a task settled as: the facts a buyer's FIRST dispute starts from.
+
+    Exists because the per-task read used to carry only the deadline, and a
+    dispute cannot be started from a deadline. The challenge is minted against
+    the job id, only the payer's wallet may sign it, and the buyer has to see
+    which step they are disputing and what it would credit — every one of which
+    lived on the settlement record and nowhere a client could read it.
+
+    A mirror of `dispute_store.SettlementRecord`, for `DisputeResponse`'s
+    reason, and a deliberately narrower one: `auth_id_hex` is left out because
+    nothing a client does needs it, and a field is only ever added to this
+    shape for a reader who does.
+    """
+
+    # Both public already; this read saves a chain lookup and reveals nothing
+    # else. The job id is an argument of `PaymentEscrow.charge` and a field of
+    # the `charged` event it emits (receipt id, auth id, amount, job id). The
+    # payer is NOT in that event: it is in the `authd` event the payer's own
+    # `authorize` emitted (auth id, payer, max amount) and in the escrow's
+    # public `authorization(auth_id)` view, joined to the charge by the auth id
+    # both carry. And `GET /api/tasks/{task_id}` already serves the full
+    # `charge_tx`, so a holder of a task id could walk task, charge tx, job id,
+    # auth id, payer on-chain today. Neither value is a credential either:
+    # minting a challenge against a job id is public by design, and opening a
+    # dispute takes the payer's signature, which knowing the address does not
+    # provide.
+    job_id_hex: str
+    payer: str
+    settled_at: float
+    window_closes_at: float
+    settled_usdc: float
+    charge_tx: str | None
+    proof_tx: str | None
+    steps: list[SettlementStepView]
+    policy: CreditPolicy
+
+    @classmethod
+    def of(cls, record: SettlementRecord) -> SettlementView:
+        """Project a settlement onto the wire, with its credits priced.
+
+        The fraction is read from settings ONCE, so every step's credit and the
+        stated policy come from one reading and cannot disagree within a
+        response.
+        """
+        fraction = settings.dispute_credited_fraction
+        return cls(
+            job_id_hex=record.job_id_hex,
+            payer=record.payer,
+            settled_at=record.settled_at,
+            window_closes_at=record.window_closes_at,
+            settled_usdc=record.settled_usdc,
+            charge_tx=record.charge_tx,
+            proof_tx=record.proof_tx,
+            steps=[SettlementStepView.of(s, fraction) for s in record.steps],
+            policy=CreditPolicy.in_force(fraction),
+        )
+
+
+class TaskDisputesResponse(BaseModel):
+    """A task's settlement, its dispute window, and everything raised against it.
+
+    `settlement` and `window_closes_at` are null until the task settles — a
+    task that was never paid for has nothing to dispute and no deadline to
+    show. The deadline is read from the settlement record rather than
+    recomputed from `DISPUTE_WINDOW_SECONDS`, so retuning that setting cannot
+    move a deadline a buyer was already given. It stays at the top level,
+    always equal to `settlement.window_closes_at`, because clients written
+    before 4.05 read it there.
+
+    `now` is this server's clock when the response was built. The window is a
+    deadline the SERVER enforces, so a countdown run off the browser's clock is
+    wrong by however far that clock has drifted: it shows a window open that
+    `open_dispute` will refuse as closed, or closed while there is still time.
+    The console measures the skew from this and corrects by it.
     """
 
     task_id: str
     window_closes_at: float | None
+    now: float
+    settlement: SettlementView | None
     disputes: list[DisputeResponse]
 
 
@@ -357,29 +522,38 @@ async def get_dispute(
 async def list_task_disputes(
     task_id: str = Path(..., min_length=1, max_length=128),
 ) -> TaskDisputesResponse:
-    """The window and what has been raised, in one read.
+    """The settlement, the window and what has been raised, in one read.
 
     Lives here rather than in `routers/tasks.py` so the dispute surface is one
     module: `tasks.py` owns the in-memory task state and knows nothing about
     settlements, and a route split across the two would have to be found twice.
 
-    An unsettled or unknown task is **not** a 404 — it is a null window and an
-    empty list. The console polls this while a workflow runs, and the honest
-    answer to "can this be disputed yet?" before settlement is "no, and here is
-    nothing", not an error the UI has to special-case into the same view.
+    An unsettled or unknown task is **not** a 404 — it is a null settlement, a
+    null window and an empty list, with `now` still set. The console polls this
+    while a workflow runs, and the honest answer to "can this be disputed yet?"
+    before settlement is "no, and here is nothing", not an error the UI has to
+    special-case into the same view.
 
     Gated by `require_task_read` like every other `/tasks/{task_id}/...` read:
     a dispute names its payer and carries the buyer's own words about the work,
-    which is exactly the material that capability token exists to scope. The
-    dependency is a no-op while TASK_AUTH_REQUIRED is off, which is the public
-    demo's default, so this changes nothing for the frontend today and fails
-    closed the moment enforcement is turned on.
+    which is exactly the material that capability token exists to scope. But
+    the dependency is a no-op while TASK_AUTH_REQUIRED is off — the shipped
+    default, and how production runs — so there this read is world-readable,
+    and it fails closed only once enforcement is turned on. That is why the
+    settlement it carries is held to what is already public: the job id and the
+    payer are on-chain (see `SettlementView`), and each output summary is the
+    line the world-readable trace already showed. Nothing belongs on that shape
+    that the chain or the trace does not already publish.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
     disputes = await dispute_svc.list_for_task(task_id)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
+        # Read after both lookups, so the clock the console corrects by is as
+        # close to the moment the response leaves as this handler can get it.
+        now=time.time(),
+        settlement=SettlementView.of(settlement) if settlement is not None else None,
         disputes=[DisputeResponse.of(d) for d in disputes],
     )
 
