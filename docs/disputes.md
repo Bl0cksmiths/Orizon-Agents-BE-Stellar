@@ -663,8 +663,8 @@ argument.
 **Decide whose it is.** It is this dispute's own rating when every argument
 matches what this dispute would have written: `kind` is `dispute`, the rating
 is `10`, the agent is `agent=`, the payer is `payer=`, and the weight is the
-step's quoted price in stroops — which the uphold dry run prints, for exactly
-this comparison.
+step's quoted price in stroops — the dispute's `charged_usdc` × 10 000 000,
+rounded, which is the same settled step price the rating was weighted from.
 
 - **It is ours.** Record it, and the dispute is fully resolved:
   `append_status(dispute_id, "credited", rating_tx=<hash>)`. The next uphold is
