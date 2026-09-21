@@ -330,6 +330,15 @@ def test_a_nonce_that_was_never_issued_is_not_live() -> None:
     assert eb.dispute_challenge_is_live("job_neverissued", 0, "deadbeef") is False
 
 
+def test_a_non_ascii_nonce_is_refused_rather_than_raised() -> None:
+    """`compare_digest` raises TypeError on non-ASCII text, and this value
+    arrives from a public route — so the predicate has to answer False rather
+    than turn a stray character into a 500."""
+    nonce, _ = issue_dispute_challenge("job_unicode", 0)
+
+    assert eb.dispute_challenge_is_live("job_unicode", 0, "é" * len(nonce)) is False
+
+
 def test_an_expired_nonce_is_not_live() -> None:
     nonce, _ = issue_dispute_challenge("job_liveexp", 0, ttl_seconds=-1)
 
