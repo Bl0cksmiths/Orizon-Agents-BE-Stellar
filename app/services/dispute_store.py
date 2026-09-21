@@ -20,6 +20,7 @@ no timezone conversion sits between what was promised and what is later read.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -620,6 +621,64 @@ def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
         )
         for s in json.loads(raw)
     )
+
+
+class PostgresDisputeStore:
+    """The durable half of story 4.02: a dispute window that outlives the process.
+
+    Deliberately thin — asyncpg, a handful of SQL constants, no ORM and no
+    migration framework — because there are two tables, and a dependency that
+    has to be understood before a deploy can be debugged is worse than the SQL
+    it replaces.
+
+    The pool and the schema are both created LAZILY, on the first call that
+    needs them, so constructing the store never does I/O: importing this module,
+    resolving the singleton and booting the app all stay offline, and a database
+    that is briefly unreachable at boot costs a failed request rather than a
+    failed deploy.
+
+    `pool` is injectable for exactly one reason, stated rather than disguised:
+    the test suite is hermetic and has no database, so it passes a fake pool and
+    asserts the SQL this class actually sends.
+    """
+
+    def __init__(self, dsn: str, *, pool: Any | None = None) -> None:
+        self._dsn = dsn
+        self._pool: Any | None = pool
+        # Whether the DDL has been run against THIS pool. Separate from the pool
+        # itself so close() can reset both and a later call rebuilds them.
+        self._ready = False
+        # Serializes first use: a burst of concurrent settlements on a cold
+        # process must create one pool and run the DDL once, not one per call.
+        self._lock = asyncio.Lock()
+
+    async def _ready_pool(self) -> Any:
+        if self._ready and self._pool is not None:
+            return self._pool
+        async with self._lock:
+            if self._pool is None:
+                self._pool = await self._create_pool()
+            if not self._ready:
+                # Two statements rather than one string, so each table keeps its
+                # own rationale above it. asyncpg runs argument-less queries
+                # through the simple protocol, which is what lets one execute()
+                # carry a table and its indexes together.
+                await self._pool.execute(_CREATE_SETTLEMENTS_SQL)
+                await self._pool.execute(_CREATE_DISPUTES_SQL)
+                self._ready = True
+        return self._pool
+
+    async def _create_pool(self) -> Any:
+        asyncpg = _import_asyncpg()
+        return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+
+    async def close(self) -> None:
+        # Cleared before the await so a close racing a request cannot hand out
+        # the pool that is being torn down, and so a second close is a no-op.
+        pool, self._pool = self._pool, None
+        self._ready = False
+        if pool is not None:
+            await pool.close()
 
 
 _store: DisputeStore | None = None
