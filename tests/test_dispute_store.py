@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import time
 from typing import Any
 
 import pytest
 
+from app.services import dispute_store
 from app.services.dispute_store import (
     DisputeRecord,
     DuplicateDisputeError,
@@ -42,6 +44,8 @@ OTHER_JOB = "cd" * 32
 TASK = "task_alpha"
 PAYER = "G" + "B" * 55
 AGENT = "agt_writer"
+
+STORE_LOGGER = "app.services.dispute_store"
 
 STEPS = (
     SettlementStep(step_index=0, agent_id=AGENT, agent_name="Writer", price_usdc=1.5, delivered=True),
@@ -296,3 +300,65 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
 
     with pytest.raises(KeyError):
         asyncio.run(store.append_status("dsp_never", "upheld"))
+
+
+# ── the bound on the in-memory store ──────────────────────────────────────
+
+
+def _messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == STORE_LOGGER]
+
+
+def test_a_dropped_settlement_is_announced_rather_than_lost_quietly(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The cap is what keeps a long-lived local process bounded, and dropping a
+    settlement silently retires a dispute window a buyer was promised. It is a
+    WARNING naming the record and the fix, the way ramp_store's eviction is."""
+    monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
+    store = InMemoryDisputeStore()
+
+    with caplog.at_level(logging.WARNING, logger=STORE_LOGGER):
+
+        async def go() -> None:
+            for n in range(3):
+                await store.record_settlement(a_settlement(job_id_hex=f"{n:064x}"))
+
+        asyncio.run(go())
+
+    assert len(store._settlements) == 2
+    assert asyncio.run(store.get_settlement(f"{0:064x}")) is None
+    lines = _messages(caplog)
+    assert any(f"{0:064x}" in m and "DATABASE_URL" in m for m in lines)
+
+
+def test_a_dropped_dispute_is_announced_too(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A dispute that evaporates is worse than a feature that was never
+    offered: the buyer believes a complaint is on file."""
+    monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
+    store = InMemoryDisputeStore()
+
+    with caplog.at_level(logging.WARNING, logger=STORE_LOGGER):
+
+        async def go() -> None:
+            for n in range(3):
+                await store.open_dispute(a_dispute(id=f"dsp_{n}", step_index=n))
+
+        asyncio.run(go())
+
+    assert len(store._disputes) == 2
+    assert asyncio.run(store.get_dispute("dsp_0")) is None
+    assert any("dsp_0" in m and "DATABASE_URL" in m for m in _messages(caplog))
+
+
+def test_closing_the_in_memory_store_is_safe_twice() -> None:
+    """There is no pool to release here, but close() must mean the same thing
+    on both sides of the Protocol rather than being callable on only one."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> None:
+        await store.record_settlement(a_settlement())
+        await store.close()
+        await store.close()
+
+    asyncio.run(go())
