@@ -763,7 +763,12 @@ class UpholdSeam:
         self.calls: list[str] = []
 
     def _bind(self, effect: Any) -> None:
-        async def _uphold(dispute_id: str) -> Any:
+        # The real signature, keyword-only observer included, and not a
+        # catch-all: a stand-in that swallowed any argument would keep passing
+        # after the script and the service had drifted apart. These seams write
+        # refund states only, so no rating is ever submitted and the observer —
+        # like the real one on these paths — is never told anything.
+        async def _uphold(dispute_id: str, *, on_rating: dispute_svc.RatingObserver | None = None) -> Any:
             self.calls.append(dispute_id)
             await effect(dispute_id)
             return await dispute_store.get_dispute_store().get_dispute(dispute_id)
