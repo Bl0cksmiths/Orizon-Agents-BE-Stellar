@@ -384,3 +384,67 @@ the dashboard reads the whole registry's reputation on a 15-second poll and
 every read is a Soroban simulation. A bypass would have to be remembered per agent and
 for how long, which is a second cache with worse semantics. Invalidating the
 one key is the change of state the cache already needed a word for.
+
+## Consequences
+
+**Every disputed step carries two ratings, under two keys, and neither amends
+the other.** The settler's automatic rating stays where it was written, under
+the job's own id; the dispute adds `DISPUTE_RATING` (10/100) under the derived
+id, at the same weight (D2). The ledger has no entrypoint that amends a
+rating, so this is the only honest reading available: the first rating says
+what was delivered, the second says the buyer's claim against it stood. At
+equal weight the two average between 15 (against a 20, the non-delivery score)
+and 52.5 (against a 95, the baked-artifact score). Both `count` and `disputed`
+go up by one, so `dispute_rate_bps = disputed × 10 000 / count` includes the
+dispute rating in its own denominator.
+
+**One case in which the dispute rating is the step's only rating — and it is
+not new.** The settler keys every automatic rating on the job's own id, so when
+one agent served two steps of a job, only the first step's automatic rating
+landed; the second was refused as a replay, which the run's trace already
+reports as `… : Replay`. A dispute of that second step is therefore the only
+rating that step has on the ledger. D1 does not share the limit — each disputed
+step derives its own id — but the settler's keying is outside this story and is
+left as it is.
+
+**The derivation is frozen for the life of the ledger.** From the first dispute
+rating that lands, `dispute_job_id` cannot change without rating agents twice
+for disputes retried across the change. The golden vectors hold it; a new
+scheme needs a new tag, a new ADR, and a rule for which disputes it applies to.
+
+**A dispute can be paid and not rated, and the record says so.** `credited`
+with `rating_tx` null is a buyer who has been credited and an agent whose
+reputation consequence is not on-chain. It is visible on `GET
+/api/disputes/{id}`, it is fixed by upholding again, and the one case that
+needs a person — a collision — has its procedure in `docs/disputes.md`. A
+`rating_tx` that was recorded after a timeout is an in-flight hash, not proof
+of landing, until an uphold has been answered `SUCCESS` or `Replay` for it.
+
+**Every upheld dispute costs the Scorer one more submission**, and every repeat
+uphold one more simulation. A repeat that finds the rating already landed is
+refused at simulation and costs nothing on-chain. A deployment whose signer is
+not the ledger's Scorer pays its credits and rates nothing — every dispute
+rating is refused `Unauthorized` and logged naming `set_scorer`, and
+`/readiness` reports the same thing as `ratings.writer = not_scorer`.
+
+**The payer's stake grows too.** The rating is submitted on behalf of the
+dispute's payer, so the ledger's per-payer weight for that agent
+(`payer_weight`) accrues the dispute rating as it does the automatic one. That
+is the raw per-payer figure the ledger keeps for off-chain Sybil analysis, and
+a buyer's upheld disputes now sit in it beside what they paid for.
+
+**The R12 derivation in ADR 0002 and the instruction in ADR 0007 D5 are
+superseded.** ADR 0002 carries a dated amendment pointing here. ADR 0007 D5 and
+the last consequence of ADR 0008 still name `refund_svc.dispute_job_id(job_id)`
+as the id 4.04 would write under; they are the record of what was decided then,
+and this ADR is what replaced it.
+
+Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (why ratings are
+weighted by the quoted price), ADR 0007 (the dispute record the rating is
+derived from), ADR 0008 (the credit the rating follows), `docs/disputes.md`
+(reading the two on-chain artifacts, and the collision procedure),
+`docs/reputation.md` (what a dispute rating does to a score), and the code
+these decisions live in — `app/services/dispute_rating.py` (D1, D2 and the
+outcome classification), `app/services/dispute_svc.py` (`uphold`, D3 and D4),
+`app/services/reputation_svc.py` and `app/stellar/cache.py` (D5), and
+`tests/test_dispute_job_id.py` (the golden vectors).
