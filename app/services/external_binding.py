@@ -22,6 +22,17 @@ requires (`unbinding_message`, domain-separated from the bind one so neither
 signature can be replayed as the other). That reuse is the point: a second way
 to prove ownership of an agent is a second way to get ownership wrong.
 
+DISPUTING a settled step (story 4.02, ADR 0002) is the third purpose, and the
+first whose signer is not an agent owner: the buyer proves themselves with a
+wallet signature over `dispute_message(job_id_hex, step_index, nonce)`, checked
+against the payer the SETTLEMENT RECORD names. It occupies the key
+(job_id_hex, `dispute_subject(step)`) in the same table, with the same TTL, the
+same eviction policy and the same single-use consumption — `app/services/
+dispute_svc.py` holds the rules about when a dispute is allowed, and this module
+holds only the proof that it is the buyer asking. The in-memory task token would
+have been the easy credential and is the wrong one: it dies with the process,
+while the window it would be guarding is 24 h and has to survive a restart.
+
 What 1.06 left to "Epic 2" is now here: the owner is confirmed against the live
 registry (`resolve_owner`), and the bind API endpoint calls into this module.
 Three things about it are load-bearing rather than incidental:
@@ -37,9 +48,10 @@ Three things about it are load-bearing rather than incidental:
     unauthenticated by design, and the key is caller-supplied, so an unbounded
     table is memory exhaustion on a free instance.
 
-The table is still process-local, so a bind in progress does not survive a
-restart (the BINDING itself does — that is `binding_store`'s job). A caller who
-was mid-signature simply asks for a new challenge.
+The table is still process-local, so a proof in progress does not survive a
+restart. What it authorises does: a BINDING is `binding_store`'s job, and a
+dispute WINDOW is `dispute_store`'s. A caller who was mid-signature simply asks
+for a new challenge.
 """
 
 from __future__ import annotations
