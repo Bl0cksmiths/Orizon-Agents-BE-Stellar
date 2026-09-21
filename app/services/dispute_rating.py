@@ -25,8 +25,9 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
+from ..config import settings
 from ..stellar import client as sc
-from . import reputation_svc
+from . import rating_writer, reputation_svc
 from .dispute_store import DisputeRecord, SettlementRecord
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,12 @@ class RatingOutcome:
 # it; it does not erase the evidence of what was delivered.
 DISPUTE_RATING = 10
 
+# The ReputationLedger `Error` discriminants this module branches on, numbered
+# as `rating_writer.LEDGER_ERRORS` names them. Both surface at simulation, so a
+# submit refused with either never became a transaction.
+_LEDGER_UNAUTHORIZED = 1
+_LEDGER_REPLAY = 7
+
 
 async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
     """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
@@ -151,6 +158,12 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
       - `status == "SUCCESS"` with a hash → SUCCESS.
       - `status == "FAILED"` → FAILED: the ledger rejected the transaction after
         simulation passed, so nothing was written.
+      - `ContractError` #7 (`Replay`) → REPLAY, with no hash: the ledger already
+        holds a rating under this agent and derived id, so it refused this one
+        at simulation.
+      - any other `ContractError` → FAILED, with no hash, logged by the
+        contract's own name for it. `Unauthorized` is not about the dispute at
+        all: it means this deployment's signer is not the ledger's Scorer.
       - anything else → TIMEOUT, with the in-flight hash when there is one.
         `"timeout"` is the client's word for submitted-then-lost-track, and an
         unrecognised status or a SUCCESS with no hash is the same unknown. Unlike
@@ -200,7 +213,44 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         f"rating {DISPUTE_RATING}, weight {weight}, payer {dispute.payer}"
     )
 
-    raw = await sc.submit_rating_async(dispute.agent_id, derived, DISPUTE_RATING, weight, dispute.payer, "dispute")
+    try:
+        raw = await sc.submit_rating_async(dispute.agent_id, derived, DISPUTE_RATING, weight, dispute.payer, "dispute")
+    except sc.ContractError as e:
+        if e.code == _LEDGER_REPLAY:
+            # WARNING, not ERROR: on a retry this is the expected answer from an
+            # attempt that already landed. Only the caller, holding the
+            # dispute's history, can tell that apart from a collision.
+            logger.warning(
+                "dispute %s: rating refused as a Replay — the ledger already holds a rating under this "
+                "agent and derived id (%s)",
+                dispute.id,
+                facts,
+            )
+            return RatingOutcome("REPLAY", None, derived_hex, DISPUTE_RATING, weight)
+        reason = rating_writer.failure_reason(e)
+        if e.code == _LEDGER_UNAUTHORIZED:
+            # Spelled out because this exact misconfiguration once left a
+            # deployment's ledger at zero ratings with nobody able to say why:
+            # a signer that is not the Scorer is refused on every rating it signs.
+            logger.error(
+                "dispute %s: rating refused with %s — this deployment's signer is NOT the Scorer of "
+                "ReputationLedger %s, so no rating it submits can land. A misconfiguration, not a verdict on "
+                "the dispute: the ledger admin must call set_scorer with the signer's address (the boot line "
+                "and ratings on /readiness name both). Nothing was written (%s)",
+                dispute.id,
+                reason,
+                settings.stellar_reputation_ledger,
+                facts,
+            )
+        else:
+            logger.error(
+                "dispute %s: rating refused by the ledger with %s, nothing was written (%s)",
+                dispute.id,
+                reason,
+                facts,
+                exc_info=True,
+            )
+        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight)
 
     raw_hash = raw.get("hash")
     tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
