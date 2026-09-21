@@ -449,6 +449,8 @@ class FakePool:
         self.statements: list[str] = []
         self.settlements: list[dict[str, Any]] = []
         self.disputes: list[dict[str, Any]] = []
+        # The refund mutex, as a set because that is all a PRIMARY KEY is here.
+        self.claims: set[str] = set()
         self.closed = 0
 
     async def execute(self, sql: str, *args: Any) -> str:
