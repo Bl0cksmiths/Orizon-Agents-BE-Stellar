@@ -77,7 +77,7 @@ import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # Exit codes, so an operator — or the wrapper script somebody inevitably writes
 # around this — can tell the refusals apart without parsing prose. 1 and 2 are
@@ -613,6 +613,41 @@ def watch_rating() -> Iterator[list[dispute_rating.RatingOutcome]]:
         yield seen
     finally:
         dispute_rating.submit_dispute_rating = submit
+
+
+# What became of the dispute rating, as far as one run can know it:
+#   rated        — landed now, and its hash is on the record;
+#   confirmed    — an earlier attempt's, still on the record, which the ledger
+#                  proved landed by refusing this run's copy as a replay;
+#   unrecorded   — landed now, but the record write after it failed;
+#   unconfirmed  — submitted and timed out: it may still land;
+#   failed       — the ledger refused it, and nothing was written;
+#   collision    — a replay with no attempt of this dispute's on record (D4);
+#   unattempted  — no answer from the ledger at all: the submit raised, or was
+#                  never reached, and the service's log lines say which.
+RatingVerdict = Literal["rated", "confirmed", "unrecorded", "unconfirmed", "failed", "collision", "unattempted"]
+
+
+def rating_verdict(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome | None) -> RatingVerdict:
+    """Classify the rating from the record `uphold` left and the answer it drew.
+
+    The record is read FIRST for everything it can settle. A SUCCESS is only
+    `rated` once the store holds that very hash, because the record is what
+    the API serves and what the next run judges a replay against. A REPLAY is
+    split exactly as the service splits it (D4) — on whether this dispute
+    already records an attempt — so the two can never disagree about whether a
+    collision happened: the service answers both with the record unchanged, so
+    the `rating_tx` read back here is the one it judged by.
+    """
+    if outcome is None:
+        return "unattempted"
+    if outcome.status == "SUCCESS":
+        return "rated" if outcome.tx_hash and dispute.rating_tx == outcome.tx_hash else "unrecorded"
+    if outcome.status == "REPLAY":
+        return "confirmed" if dispute.rating_tx else "collision"
+    if outcome.status == "TIMEOUT":
+        return "unconfirmed"
+    return "failed"
 
 
 async def execute(dispute_id: str, amount: float) -> int:
