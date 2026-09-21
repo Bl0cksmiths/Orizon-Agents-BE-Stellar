@@ -74,8 +74,10 @@ import argparse
 import asyncio
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 # Exit codes, so an operator — or the wrapper script somebody inevitably writes
 # around this — can tell the refusals apart without parsing prose. 1 and 2 are
@@ -566,6 +568,43 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallba
     say("  before re-running anything.")
     say()
     return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+
+
+@contextmanager
+def watch_rating() -> Iterator[list[dispute_rating.RatingOutcome]]:
+    """Collect every dispute-rating outcome `uphold` produces while this is open.
+
+    `uphold` answers with the dispute record alone, deliberately: for an API
+    caller the durable record is the one answer, and `credited` without a
+    `rating_tx` is "paid, not fully resolved". What the record cannot say is
+    which of three different things an operator is looking at. A `rating_tx`
+    is written for a rating that LANDED and equally for one that timed out IN
+    FLIGHT; an empty one means a FAILED rating or a COLLISION. The service
+    names which in an ERROR line, and this script needs it as an exit code.
+
+    So it watches the one call that knows. `submit_dispute_rating` returns the
+    frozen `RatingOutcome`, and it is reached through the module attribute on
+    every call, so wrapping that attribute sees exactly what the service saw
+    and changes nothing: the outcome goes back untouched, and an exception goes
+    through unrecorded. Restored on the way out, however the block exits.
+
+    The record still decides what is ON RECORD — `report_rating` reads the
+    rating hash off the store, as `report` reads the refund's — and the outcome
+    only says what the chain answered.
+    """
+    seen: list[dispute_rating.RatingOutcome] = []
+    submit = dispute_rating.submit_dispute_rating
+
+    async def _watched(*args: Any, **kwargs: Any) -> dispute_rating.RatingOutcome:
+        outcome = await submit(*args, **kwargs)
+        seen.append(outcome)
+        return outcome
+
+    dispute_rating.submit_dispute_rating = _watched
+    try:
+        yield seen
+    finally:
+        dispute_rating.submit_dispute_rating = submit
 
 
 async def execute(dispute_id: str, amount: float) -> int:
