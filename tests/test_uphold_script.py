@@ -768,10 +768,6 @@ class UpholdSeam:
 
         return _effect
 
-    def lands(self, tx: str = REFUND_TX) -> None:
-        """SUCCESS — the dispute ends `credited`, carrying the hash that paid it."""
-        self._bind(self._writes("credited", tx))
-
     def lands_without_a_hash(self) -> None:
         """`credited` with nothing a reviewer could open — a state the store
         permits and the script must not report as evidence."""
