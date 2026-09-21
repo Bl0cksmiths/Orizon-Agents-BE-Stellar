@@ -294,6 +294,36 @@ ORDER BY opened_at, step_index
 """
 
 
+# Open a dispute — the statement the duplicate rule is enforced by.
+#
+# `opening` is TRUE, so this row (and only this row) is covered by
+# dispute_events_one_per_step_idx. Two concurrent requests for the same step
+# therefore cannot both land: the second blocks until the first commits and is
+# then refused by the index, whatever isolation level either of them runs at.
+#
+# ON CONFLICT ... DO NOTHING rather than catching a unique violation, for two
+# reasons. It keeps a loser on the ordinary return path instead of an exception
+# whose class would have to be imported from asyncpg — the one import this
+# module goes out of its way not to make at module scope — and DO NOTHING is
+# the only ON CONFLICT clause that does not modify the conflicting row, so the
+# append-only rule still holds (DO UPDATE would be an UPDATE wearing a hat).
+# The conflict target repeats the index predicate, `WHERE opening`, because
+# that is how Postgres infers a PARTIAL index; without it the statement would
+# not match this index at all.
+#
+# RETURNING is how the caller learns which it was: a row means this insert won
+# the step, no row means another dispute already owns it and open_dispute reads
+# that one back to hand to DuplicateDisputeError.
+_INSERT_DISPUTE_SQL = """
+INSERT INTO dispute_events (
+    dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)
+ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
+RETURNING dispute_id
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
