@@ -27,7 +27,7 @@ from app.config import settings
 from app.services import dispute_store, dispute_svc, refund_svc
 from app.services import external_binding as eb
 from app.services.dispute_store import SettlementRecord, SettlementStep
-from app.services.dispute_svc import dispute_message
+from app.services.dispute_svc import DisputeError, dispute_message
 
 JOB = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # 16 bytes of job id, as hex
 TASK = "tsk_disputed"
@@ -204,3 +204,131 @@ def test_the_read_surface_answers_by_id_and_by_task() -> None:
     assert asyncio.run(dispute_svc.list_for_task("tsk_other")) == ()
     assert asyncio.run(dispute_svc.settlement_for_task(TASK)) == settlement
     assert asyncio.run(dispute_svc.settlement_for_task("tsk_other")) is None
+
+
+# ── rule: the payer proves themselves ───────────────────────────
+
+
+def test_a_signature_from_another_wallet_is_refused() -> None:
+    payer = Keypair.random()
+    impostor = Keypair.random()
+    _seed(payer.public_key)
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    with pytest.raises(DisputeError) as refused:
+        _open(impostor, nonce=nonce, claimed_payer=payer.public_key)
+
+    assert refused.value.code == "not_the_payer"
+    assert refused.value.status_code == 403
+    assert refused.value.existing is None
+    # Nothing was written, and the honest buyer's challenge survived the
+    # attempt — only a proven signature consumes a nonce, so an impostor
+    # cannot burn a dispute the real buyer is mid-way through.
+    assert asyncio.run(dispute_svc.list_for_task(TASK)) == ()
+    assert _open(payer, nonce=nonce).status == "open"
+
+
+def test_a_caller_claiming_someone_else_s_address_is_refused() -> None:
+    """The supplied payer is checked against the RECORDED one before any
+    crypto runs, so a caller who signs correctly for their own wallet cannot
+    open a dispute on somebody else's workflow."""
+    payer = Keypair.random()
+    stranger = Keypair.random()
+    _seed(payer.public_key)
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    with pytest.raises(DisputeError) as refused:
+        _open(stranger, nonce=nonce)
+
+    assert refused.value.code == "not_the_payer"
+    assert refused.value.status_code == 403
+    # The address compare happens BEFORE the signature check, so the buyer's
+    # challenge is still there to use.
+    assert eb.dispute_challenge_is_live(JOB, 0, nonce) is True
+
+
+def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
+    """The signature gate stands in front of every private fact. This job's
+    window has closed and its step was never delivered, and a caller who cannot
+    prove they are the buyer is told neither — the refusal is the same code,
+    status and message they would get against a perfectly healthy job."""
+    payer = Keypair.random()
+    impostor = Keypair.random()
+    _seed(payer.public_key)
+    _seed(
+        payer.public_key,
+        job="dead" * 8,
+        task="tsk_closed",
+        steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.05, delivered=False),),
+        window_seconds=-10.0,
+    )
+
+    with pytest.raises(DisputeError) as healthy:
+        _open(impostor, claimed_payer=payer.public_key)
+    with pytest.raises(DisputeError) as damaged:
+        _open(impostor, job="dead" * 8, claimed_payer=payer.public_key)
+
+    assert (healthy.value.code, healthy.value.status_code) == ("not_the_payer", 403)
+    assert (damaged.value.code, damaged.value.status_code) == ("not_the_payer", 403)
+    assert healthy.value.message == damaged.value.message
+
+
+@pytest.mark.parametrize(
+    ("signature", "why"),
+    [
+        ("not base64 at all!!", "not base64"),
+        (base64.b64encode(b"x" * 32).decode("ascii"), "32 bytes, not 64"),
+        ("A" * 300, "longer than any real signature"),
+    ],
+)
+def test_a_malformed_signature_is_refused_before_anything_is_touched(signature: str, why: str) -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, nonce=nonce, signature=signature)
+
+    assert refused.value.code == "signature_malformed", why
+    assert refused.value.status_code == 400
+    assert eb.dispute_challenge_is_live(JOB, 0, nonce) is True  # a client bug costs the buyer nothing
+
+
+def test_a_dispute_without_a_challenge_is_refused() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    never_issued = "0" * 32
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, nonce=never_issued, signature=_sign(payer, dispute_message(JOB, 0, never_issued)))
+
+    assert refused.value.code == "challenge_expired"
+    assert refused.value.status_code == 400
+
+
+def test_an_expired_challenge_is_refused_and_says_to_ask_for_another() -> None:
+    """Distinguished from a bad signature on purpose: a buyer who spent a
+    minute in a wallet dialog must be told to re-mint, not sent looking for a
+    problem with their wallet."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    nonce, _ = eb.issue_dispute_challenge(JOB, 0, ttl_seconds=-1)  # already expired at issue
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, nonce=nonce)
+
+    assert refused.value.code == "challenge_expired"
+    assert "new one" in refused.value.message
+
+
+def test_a_nonce_that_is_not_the_one_issued_is_refused() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    issued, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+    other, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 1))
+
+    for nonce in ("deadbeef", other):  # wrong shape, then another step's live nonce
+        with pytest.raises(DisputeError) as refused:
+            _open(payer, step=0, nonce=nonce)
+        assert refused.value.code == "challenge_expired"
+    assert eb.dispute_challenge_is_live(JOB, 0, issued) is True
