@@ -626,6 +626,45 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
 
 
+def test_a_confirmation_the_store_would_not_record_is_left_for_the_next_uphold(
+    monkeypatch, ledger, settler, invalidated, caplog
+) -> None:
+    """The write a replay now makes (4.06). If the store refuses it, the
+    rating's hash is already on record and only its confirmation is missing —
+    so there is nothing for a human to write by hand: the paid record is the
+    answer, still unconfirmed, the ERROR says to uphold again rather than to
+    edit the record, and the next uphold is refused as a replay again and
+    records the confirmation then."""
+    dispute = open_dispute()
+    ledger.script = ["late"]
+    unconfirmed = uphold(dispute.id)
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _refuses_the_confirmation(dispute_id: str, status: Any, **kwargs: Any) -> DisputeRecord:
+        if kwargs.get("rating_confirmed") is True:
+            raise ConnectionError("the database went away")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _refuses_the_confirmation)
+    caplog.clear()  # the timeout's own "unconfirmed" line is not what is under test
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        answered = uphold(dispute.id)
+
+    assert answered == unconfirmed and answered.rating_confirmed is False
+    assert invalidated == [AGENT]  # the replay proved it landed, whatever the store says
+    (logged,) = svc_errors(caplog)
+    assert "confirmation could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "by hand" not in logged
+
+    monkeypatch.setattr(store, "append_status", real_append)
+    confirmed = uphold(dispute.id)
+
+    assert confirmed.rating_confirmed is True and confirmed.rating_tx == "tx_rating_1"
+    assert len(settler.transfers) == 1
+
+
 # ── the observer the operator tool reads the ledger's answer through ──
 
 
