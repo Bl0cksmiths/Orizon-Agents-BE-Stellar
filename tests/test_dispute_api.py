@@ -25,6 +25,7 @@ import base64
 
 import pytest
 
+from app.config import settings
 from app.services import dispute_svc
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
 
@@ -437,6 +438,52 @@ def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeyp
     assert body["window_closes_at"] == 1_700_086_400.0
     assert [d["id"] for d in body["disputes"]] == ["dsp_a", "dsp_b"]
     assert [d["step_index"] for d in body["disputes"]] == [1, 2]
+
+
+def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(client, monkeypatch):
+    # Pinned whole, because the frontend's types are frozen to this shape: a
+    # field renamed, dropped or added here breaks them, and an added one may be
+    # something the chain and the trace do not already publish.
+    monkeypatch.setattr(settings, "dispute_credited_fraction", 1.0)
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["settlement"] == {
+        "job_id_hex": JOB_ID,
+        "payer": PAYER,
+        "settled_at": 1_700_000_000.0,
+        "window_closes_at": 1_700_086_400.0,
+        "settled_usdc": 0.25,
+        "charge_tx": "abc123",
+        "proof_tx": "def456",
+        "steps": [
+            {
+                "step_index": 0,
+                "agent_id": "research-agent",
+                "agent_name": "Researcher",
+                "price_usdc": 0.1,
+                "delivered": False,
+                "creditable_usdc": 0.0,
+                "output_summary": None,
+            },
+            {
+                "step_index": 1,
+                "agent_id": "code-agent",
+                "agent_name": "Coder",
+                "price_usdc": 0.25,
+                "delivered": True,
+                "creditable_usdc": 0.25,
+                "output_summary": "Built a landing page with a signup form",
+            },
+        ],
+        "policy": {"credited_fraction": 1.0, "funded_by": "platform", "adjudicated_by": "platform"},
+    }
+    # Older clients read the deadline at the top level, and it must be the
+    # same instant the settlement carries, not a second opinion about it.
+    assert body["window_closes_at"] == body["settlement"]["window_closes_at"]
 
 
 def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
