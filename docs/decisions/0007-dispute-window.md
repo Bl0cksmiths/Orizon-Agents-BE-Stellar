@@ -253,6 +253,24 @@ whoever reviews the dispute is reading evidence rather than reconstructing it.
 
 ### D5 — R12 is resolved, and this is where it is named
 
+> **Amended 2026-09-21 (story 4.04 / BLO-32).** The derivation this section
+> puts in force, and the helpers it names as the ones 4.04 must call, are
+> **superseded by ADR 0009 D1** — and the helpers are retired from
+> `refund_svc`, with the tests that pinned them. `dispute_job_id(job_id)`
+> hashed the job alone, so when one agent served two steps of a job, a second
+> upheld dispute derived the same id as the first and would have been refused
+> as a replay of it: the failure this section was written to prevent, one
+> level down. Story 4.04 writes the dispute rating through
+> `dispute_rating.submit_dispute_rating(dispute, settlement)`, under
+> `dispute_rating.dispute_job_id(job_id, step_index)` =
+> `job_id[:8] ‖ sha256(job_id ‖ "orizon-dispute:v1" ‖ step)[:8]`, pinned by
+> golden vectors in `tests/test_dispute_job_id.py`; the score is
+> `dispute_rating.DISPUTE_RATING`, still 10. What this section guarantees is
+> unchanged, and it is what made the change cheap: a dispute is born with its
+> `job_id_hex`, `step_index` and `agent_id`, so the new pair is as computable
+> from the stored record as the old one was. The requirement stands in the
+> same words — never under the settled job id.
+
 **R12** (ADR 0002): `ReputationLedger.submit` checks its replay guard on
 `Rated(agent_id, job_id)` *before* it reads the `kind` argument, and the settler
 has already auto-rated every step of the settled workflow under that job id. A

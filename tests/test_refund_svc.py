@@ -1,33 +1,18 @@
 """Story 4.01 — partial-credit refund mechanism (app/services/refund_svc.py).
 
-Pins the settler-funded-credit design: the derived dispute job id that clears
-the ReputationLedger replay guard (R12), the stated credit-amount policy, and
-that the two settler-signed invocations are built with the right arguments (a
-SAC transfer settler→buyer, and a dispute rating under the derived id).
+Pins the settler-funded-credit design: the stated credit-amount policy, and
+that the settler-signed transfer is built with the right arguments (a SAC
+transfer settler→buyer). The dispute rating left this module in 4.04; its
+derived id is pinned in test_dispute_job_id.py and its submit in
+test_dispute_rating_submit.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 import app.stellar.client as sc
 from app.services import refund_svc
-
-
-def test_dispute_job_id_is_deterministic_16_bytes_and_distinct() -> None:
-    jid = bytes(range(16))
-    d = refund_svc.dispute_job_id(jid)
-    assert isinstance(d, bytes) and len(d) == 16
-    assert d == refund_svc.dispute_job_id(jid)  # deterministic
-    assert d != jid  # not the settled job's id (clears the replay guard)
-    assert d == hashlib.sha256(jid + b"dispute").digest()[:16]  # documented derivation
-
-
-def test_dispute_job_id_differs_per_job() -> None:
-    a = refund_svc.dispute_job_id(bytes(16))
-    b = refund_svc.dispute_job_id(bytes([1]) + bytes(15))
-    assert a != b
 
 
 def test_credited_amount_full_partial_and_clamped() -> None:
@@ -57,21 +42,3 @@ def test_execute_refund_transfers_from_settler_to_buyer(monkeypatch) -> None:
     assert calls["contract"] == sc.contract_ids().asset_sac
     # settler → buyer, amount in stroops (0.08 USDC = 800_000)
     assert calls["args"] == [("addr", "GSETTLER"), ("addr", "GBUYER"), ("i128", 800_000)]
-
-
-def test_record_dispute_rating_uses_the_derived_job_id(monkeypatch) -> None:
-    calls: dict[str, object] = {}
-
-    async def _fake_submit(agent_id, job_id, rating, weight, payer, kind) -> dict:
-        calls.update(agent_id=agent_id, job_id=job_id, rating=rating, weight=weight, payer=payer, kind=kind)
-        return {"hash": "rating_tx"}
-
-    monkeypatch.setattr(sc, "submit_rating_async", _fake_submit)
-    jid = bytes(range(16))
-    asyncio.run(refund_svc.record_dispute_rating("agt_x", jid, "GBUYER", 5_000_000))
-
-    assert calls["job_id"] == refund_svc.dispute_job_id(jid)  # derived, clears the replay guard
-    assert calls["job_id"] != jid
-    assert calls["kind"] == "dispute"
-    assert calls["rating"] == refund_svc.DISPUTE_RATING
-    assert calls["payer"] == "GBUYER"

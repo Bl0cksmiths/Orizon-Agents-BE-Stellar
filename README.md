@@ -68,6 +68,8 @@ cp .env.example .env
 | POST | `/api/disputes`                      | open a dispute on a settled step — authorized by that signature, no API key |
 | GET  | `/api/disputes/{id}`                 | read one dispute by the unguessable id opening it returned |
 | GET  | `/api/tasks/{id}/disputes`           | a task's dispute window (`window_closes_at`) and every dispute raised on it |
+| POST | `/api/disputes/{id}/uphold`          | adjudicate in the buyer's favour and pay the credit, settler → buyer (needs `X-API-Key`, and **refuses** while it is unset) |
+| POST | `/api/disputes/{id}/reject`          | adjudicate against the claim — records the verdict, signs nothing (needs `X-API-Key`, and **refuses** while it is unset) |
 | *    | `/api/pdax/*`                        | PDAX PHP↔crypto surface: trade, fiat/crypto funding, ramps, webhooks, reference data |
 
 `/api/health` exists because the frontend reaches this API only through a same-origin rewrite of `/api/*` — the root `/health` sits outside that prefix, so mirroring it under `/api` is what lets the browser and any external uptime monitor pointed at the product domain verify the backend is actually reachable. It returns the identical payload, makes no network or contract calls, and is exempt from rate limiting and access logging just like the root probe.
@@ -124,7 +126,9 @@ A settled workflow can be argued with. When a paid workflow settles, the settlem
 
 The deadline is stamped on the settlement record rather than recomputed on read, so retuning `DISPUTE_WINDOW_SECONDS` can never move a closing time a buyer was already given; it only applies to workflows that settle afterwards. One dispute per `(job, step)`: a repeat is answered with the original dispute unchanged, not a second record. `GET /api/tasks/{id}/disputes` returns the window and everything raised on a task, which is what the console shows while the clock runs.
 
-Story 4.02 records the claim and nothing more — no money moves and no rating is written. Paying the credit is 4.03 (`DISPUTE_CREDITED_FRACTION`, default the whole step) and the on-chain `kind="dispute"` rating is 4.04.
+Adjudication is a human decision taken through two authenticated routes — `POST /api/disputes/{id}/uphold` and `POST /api/disputes/{id}/reject` — and it is the one place this service's open-by-default posture does not apply: both refuse while `API_KEY` is unset or `DISPUTE_REFUNDS_ENABLED` is false, on every network including testnet. `/api/stellar/server/charge` can run open because it can only spend an allowance the payer already authorised on-chain; an upheld dispute spends the platform's own balance on an adjudicator's say-so, with nothing on-chain to bound it.
+
+Upholding pays the credit from the settler's own wallet (`DISPUTE_CREDITED_FRACTION`, default the whole step — never more than the charge actually moved, and never above `MAX_REFUND_USDC`), and it pays exactly once: a durable refund claim is taken on the dispute *before* anything is signed, which is what the `crediting` status is. A transfer that times out is never retried automatically — the dispute stays in `crediting` for an operator to reconcile against the chain, because paying late is recoverable and paying twice is not. The on-chain `kind="dispute"` rating is still 4.04. [docs/disputes.md](docs/disputes.md) has the buyer-facing version and the reconciliation procedure; `docs/decisions/0008-refund-execution.md` has the reasoning and the rejected alternatives.
 
 ## Testing
 
@@ -133,19 +137,21 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
 
-489 tests, all hermetic — no OpenAI key, no network, no funded Stellar account needed. `ruff check`, `ruff format --check`, `mypy` (strict-defs), and an 82% coverage floor guard the suite; CI runs all of them on every push and PR, and `make check` runs the same gate locally.
+1,880 tests, all hermetic — no OpenAI key, no network, no funded Stellar account needed. `ruff check`, `ruff format --check`, `mypy` (strict-defs), and an 82% coverage floor guard the suite; CI runs all of them on every push and PR, and `make check` runs the same gate locally.
 
 ## Environment variables
 
 | name | default | purpose |
 | --- | --- | --- |
-| `API_KEY` | *(unset)* | when set, `/api/stellar/server/*` and all non-public `/api/pdax/*` routes require a matching `X-API-Key` header |
+| `API_KEY` | *(unset)* | when set, `/api/stellar/server/*` and all non-public `/api/pdax/*` routes require a matching `X-API-Key` header. The dispute adjudication routes are the exception that **fails closed** — they refuse while it is unset rather than running open |
 | `TASK_AUTH_REQUIRED` | `false` | when true, task/trace/artifact reads require the per-task `read_token` returned by execute |
 | `ORCHESTRATOR_MAX_CONCURRENT` | `8` | in-flight workflow ceiling — excess execute calls get a 503 `capacity_exhausted` |
 | `RATE_LIMIT_PER_MINUTE` | `1200` | request budget per resolved client key (sliding 60 s window) — see below |
 | `TRUSTED_PROXY_HOPS` | `0` | how many **trailing** `X-Forwarded-For` entries are this deployment's own infrastructure and are skipped when resolving the client |
 | `FORWARDED_CHAIN_SAMPLES` | `5` | log the raw forwarded chain + resolved key for the first N non-exempt requests after each restart (`0` disables) |
 | `MAX_CHARGE_USDC` | `100` | server-side ceiling for a single `PaymentEscrow.charge`, in USDC |
+| `DISPUTE_REFUNDS_ENABLED` | `false` | master switch on the refund path — while it is false, `/api/disputes/{id}/uphold` and `/reject` refuse. **Turning it on with a signing key and an asset SAC configured makes `API_KEY` mandatory: the process refuses to boot without one, on every network including testnet.** |
+| `MAX_REFUND_USDC` | `1.0` | ceiling on a single dispute credit, checked before anything is signed — deliberately not `MAX_CHARGE_USDC`, because that bounds what a buyer authorised themselves to spend and this bounds what the platform pays out of its own wallet |
 | `DOCS_ENABLED` | `true` | serve `/docs`, `/redoc`, and `/openapi.json` |
 
 Everything else (model IDs, contract addresses, RPC, PDAX sandbox) is documented in `.env.example` — copy it to `.env` and fill in what you need.

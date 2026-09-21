@@ -20,6 +20,10 @@ Concurrency model — single-flight with shield:
   - Producer failures are negatively cached for a short window so a
     hard-down RPC doesn't fan out a fresh upstream call per request: within
     the window an equivalent exception is raised without spawning work.
+  - `invalidate(key)` is how a caller says the upstream state changed. It
+    drops the key's entry and failure and detaches its flight, and a per-key
+    generation stops that flight — already reading the old state — from
+    writing its outcome back, while its own callers still get their answer.
 """
 
 from __future__ import annotations
@@ -34,6 +38,23 @@ _store: dict[str, tuple[float, Any]] = {}
 
 # In-flight producers: key → the Task computing that key's value.
 _flights: dict[str, asyncio.Task[Any]] = {}
+
+# Per-key generation, bumped by `invalidate`; absent means 0. A flight is
+# spawned under its key's current generation and may write its outcome back
+# only while that generation is still current. A read already in flight when
+# the key was invalidated saw the upstream state from BEFORE the change that
+# prompted the invalidation, and letting it land would quietly undo it.
+_generations: dict[str, int] = {}
+
+# Flights still running per key: the registered one plus any `invalidate`
+# detached. This is what bounds `_generations`. A key's generation only has to
+# outlive the flights that captured it, so both entries go the moment the last
+# of them lands, and both maps are sized by the flights in progress rather than
+# by every key ever invalidated. Restarting a generation at 0 then is safe
+# precisely because nothing that captured an older value is left; dropping it
+# while a stale flight still runs would let the restarted counter land back on
+# that flight's number and wave its write through.
+_running: dict[str, int] = {}
 
 # Negative cache: key → (expiry, exception class, message). Hits within the
 # window raise a FRESH instance — retaining live exception objects would pin
@@ -85,22 +106,42 @@ async def get_or_set(
     if task is None or task.done():
         if len(_store) + len(_failures) > _MAX_ENTRIES:
             _sweep(now)
-        task = asyncio.create_task(_produce(key, ttl_seconds, producer))
+        # The generation is fixed when the flight is registered, not when it
+        # first runs: a flight that `invalidate` detached is stale by
+        # definition, whatever it goes on to read.
+        task = asyncio.create_task(_produce(key, ttl_seconds, producer, _generations.get(key, 0)))
         _flights[key] = task
+        _running[key] = _running.get(key, 0) + 1
         task.add_done_callback(partial(_on_flight_done, key))
     # shield: a cancelled caller must not cancel the shared flight — the
     # producer keeps running and its result still lands in the cache.
     return await asyncio.shield(task)
 
 
-async def _produce(key: str, ttl_seconds: float, producer: Callable[[], Awaitable[Any]]) -> Any:
+async def _produce(key: str, ttl_seconds: float, producer: Callable[[], Awaitable[Any]], generation: int) -> Any:
     try:
         value = await producer()
     except Exception as e:
-        _failures[key] = (time.monotonic() + _NEGATIVE_TTL_SECONDS, type(e), str(e))
+        # A stale failure is fenced too: negatively cached, it would refuse the
+        # first reader after an invalidation with an error from before it.
+        if _is_current(key, generation):
+            _failures[key] = (time.monotonic() + _NEGATIVE_TTL_SECONDS, type(e), str(e))
         raise
-    _store[key] = (time.monotonic() + ttl_seconds, value)
+    if _is_current(key, generation):
+        _store[key] = (time.monotonic() + ttl_seconds, value)
     return value
+
+
+def _is_current(key: str, generation: int) -> bool:
+    """Whether a flight spawned under `generation` may still write `key` back.
+
+    Checked at the write itself, with no await between check and store, so on
+    one event loop nothing can invalidate the key in between. A stale flight
+    still RETURNS its outcome to the callers already awaiting it — they asked
+    before the change and get the answer that was true then; it just stops
+    being the cache's answer for everyone after.
+    """
+    return _generations.get(key, 0) == generation
 
 
 def _rebuild(exc_type: type[BaseException], message: str) -> BaseException:
@@ -119,6 +160,12 @@ def _rebuild(exc_type: type[BaseException], message: str) -> BaseException:
 def _on_flight_done(key: str, task: asyncio.Task[Any]) -> None:
     if _flights.get(key) is task:
         del _flights[key]
+    remaining = _running.get(key, 0) - 1
+    if remaining > 0:
+        _running[key] = remaining
+    else:
+        _running.pop(key, None)
+        _generations.pop(key, None)
     if not task.cancelled():
         # Mark a failure as retrieved even if every caller was cancelled
         # before it landed; the exception lives on in the negative cache.
@@ -159,8 +206,49 @@ def _sweep(now: float) -> None:
             _store.pop(key, None)
 
 
+def invalidate(key: str) -> None:
+    """Forget `key` now, so the next read of it goes upstream.
+
+    For upstream state that changed under the cache — a rating that just
+    landed moves an agent's score, and serving the old value for the rest of
+    its TTL is exactly what a caller acting on the change cannot have.
+    Dropping the stored entry is the easy half. A read already in flight when
+    the state changed is the hard half, and it is:
+
+      - DETACHED from `_flights`, so a caller arriving after this point spawns
+        a fresh read instead of joining one that started too early;
+      - NOT cancelled, so the callers already awaiting it still get their
+        answer (the shield in `get_or_set` keeps it running regardless);
+      - unable to write back, because its captured generation is no longer
+        current (`_is_current`).
+
+    The failure cache goes too: an error from before the change says nothing
+    about the state after it.
+    """
+    _store.pop(key, None)
+    _failures.pop(key, None)
+    _flights.pop(key, None)
+    if key in _running:
+        # Only a running flight can write back, so only then is there anything
+        # to fence. With none, recording a generation would only grow the map:
+        # the next flight is spawned after this call and is fresh by
+        # construction.
+        _generations[key] = _generations.get(key, 0) + 1
+
+
 def clear() -> None:
-    """Drop all cached entries, failures, and flight registrations (tests)."""
+    """Drop all cached entries, failures, and flight registrations (tests).
+
+    Every key is invalidated at once, so a flight still running is fenced
+    exactly as `invalidate` fences one: its generation is bumped and it cannot
+    write into the emptied cache. `_running` is deliberately kept — those
+    tasks still exist and their done callbacks will retire them, whereas
+    zeroing the counts (or the generations) would let a pre-clear read land
+    after the clear, or a finishing flight retire a count that belongs to a
+    newer one.
+    """
     _store.clear()
     _failures.clear()
     _flights.clear()
+    for key in _running:
+        _generations[key] = _generations.get(key, 0) + 1

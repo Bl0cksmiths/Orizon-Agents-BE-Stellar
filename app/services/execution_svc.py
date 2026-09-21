@@ -1105,7 +1105,7 @@ def unsettled_job_id(task_id: str) -> bytes:
     outright when nothing succeeded. That is exactly backwards: a run where
     every step failed is the case the routing floor most needs evidence from.
 
-    Derived rather than random for the same reason `refund_svc.dispute_job_id`
+    Derived rather than random for the same reason `dispute_rating.dispute_job_id`
     is: `ReputationLedger.submit` guards replay on `(agent_id, job_id)`, so a
     deterministic id means re-running the same task cannot double-count the
     same failure, while staying linkable to the run that produced it.

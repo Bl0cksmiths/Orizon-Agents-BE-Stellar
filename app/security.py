@@ -4,6 +4,10 @@ Lightweight, dependency-free hardening primitives.
 - `require_api_key` — optional FastAPI dependency. When `settings.api_key`
   is unset (the default for the public demo) it is a no-op; when set, the
   request must carry a matching `X-API-Key` header or it is rejected 401.
+- `require_adjudicator` — the same header, but FAILING CLOSED: the refund
+  routes it guards spend the platform's own balance, so an unset key is a
+  503 rather than an open door. Its docstring is where that divergence from
+  the testnet-open posture above is argued.
 - `client_key` — resolves who a request belongs to from the X-Forwarded-For
   chain, with the proxy trust boundary set by `TRUSTED_PROXY_HOPS`. Both the
   limiter and the access log key on it, so its docstring is where the
@@ -339,6 +343,67 @@ async def require_api_key(
     # Compare utf-8 bytes, not str: compare_digest raises TypeError on
     # non-ASCII str input (Starlette decodes headers latin-1), which would
     # turn a bad key into a 500 instead of a 401.
+    if x_api_key is None or not secrets.compare_digest(x_api_key.encode("utf-8", "ignore"), expected.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="invalid_api_key")
+
+
+async def require_adjudicator(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """The operator key, enforced — the adjudication routes FAIL CLOSED.
+
+    `require_api_key` above is deliberately a no-op while API_KEY is empty,
+    because the public demo runs open and everything behind that guard either
+    moves play money or spends an allowance the payer already authorised
+    on-chain. `config._money_capable_config_requires_api_key` is what keeps
+    that trade honest: the process refuses to boot if it holds credentials
+    that could move real value anonymously.
+
+    This dependency cannot inherit either half of that posture.
+
+    An upheld dispute is different in KIND, not in degree. It transfers the
+    PLATFORM's own settler balance to the payer's address on an adjudicator's
+    say-so, with no prior on-chain authorisation to bound it — no allowance,
+    no escrow, no signature from the party being debited. Anonymous, that is
+    not a demo affordance, it is a drain of the settler wallet, on testnet as
+    surely as on mainnet. `settings.max_refund_usdc` caps ONE payout; it does
+    not cap how many an open route can be asked for.
+
+    Nor is the boot validator a sufficient backstop here. It only fires when
+    `dispute_refunds_enabled` is set *together with* a signing key and an
+    asset SAC — the configuration that can actually sign. A deployment that
+    turns the switch on before wiring the signer boots happily with API_KEY
+    empty, and would then serve these routes to anyone. So the check is made
+    again, per request, at the door of the routes themselves, and an unset key
+    is answered rather than waved through.
+
+    The three refusals, in the order a caller meets them:
+
+    * switch off -> 503 `dispute_refunds_disabled`. Nothing is adjudicable on
+      this deployment; it is a configuration state, not the caller's mistake.
+    * switch on but no key -> 503 `adjudication_not_configured`. Also the
+      operator's, and NEVER a fall-through to "allow". Logged at ERROR: a live
+      refund switch with no credential behind it is a misconfiguration someone
+      has to see.
+    * key missing or wrong -> 401 `invalid_api_key`, the same token
+      `require_api_key` answers with, so a client needs one mapping, not two.
+
+    The key itself is never logged, and no refusal names whether a key was
+    supplied at all: an adjudication endpoint that distinguishes "no key" from
+    "wrong key" in its body is an oracle.
+    """
+    if not settings.dispute_refunds_enabled:
+        raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
+    expected = settings.api_key
+    if not expected:
+        logger.error(
+            "adjudication refused: DISPUTE_REFUNDS_ENABLED is on but API_KEY is empty, "
+            "so the refund routes have no credential to check and stay closed"
+        )
+        raise HTTPException(status_code=503, detail="adjudication_not_configured")
+    # Compare utf-8 bytes, not str, for `require_api_key`'s reason: Starlette
+    # decodes headers latin-1, and compare_digest raises TypeError on a
+    # non-ASCII str, which would answer a bad key with a 500 instead of a 401.
     if x_api_key is None or not secrets.compare_digest(x_api_key.encode("utf-8", "ignore"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="invalid_api_key")
 

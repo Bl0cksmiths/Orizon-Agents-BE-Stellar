@@ -295,7 +295,8 @@ app = FastAPI(
         {
             "name": "disputes",
             "description": (
-                "Dispute a settled step inside its 24-hour window, proved by the payer's wallet signature."
+                "Dispute a settled step inside its 24-hour window, proved by the payer's wallet signature; "
+                "and the operator-keyed adjudication that upholds one into a credit or rejects it."
             ),
         },
         {"name": "pdax", "description": "PDAX PHP-to-crypto on/off-ramp: trade, funding, withdrawals, webhooks."},

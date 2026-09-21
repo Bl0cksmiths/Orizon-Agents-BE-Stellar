@@ -70,6 +70,11 @@ def a_settlement(**overrides: Any) -> SettlementRecord:
     return dataclasses.replace(base, **overrides)
 
 
+# An adjudicator's note as written, ragged edges and all: the assertions on it
+# are equality assertions, so anything the store trimmed or escaped shows up.
+NOTE = "  step 0 delivered; the brief did not ask for charts\n"
+
+
 def a_dispute(**overrides: Any) -> DisputeRecord:
     """A dispute of step 0 of that workflow, as the endpoint would open one."""
     base = DisputeRecord(
@@ -305,6 +310,47 @@ def test_a_transition_may_name_the_moment_it_resolved() -> None:
     assert asyncio.run(go()).resolved_at == 1_700_009_999.0
 
 
+def test_an_adjudicators_note_is_kept_and_not_erased_by_a_later_transition() -> None:
+    """The platform's half of the argument, made as durable as the buyer's.
+
+    A buyer's `reason` is on the record from the moment they open the dispute.
+    A rejection recorded only a status and a timestamp, which is backwards —
+    rejection is the outcome most likely to be contested — and 4.04's rating
+    lands minutes later, so a transition that blanked the note would take it
+    off the record almost immediately.
+    """
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord]:
+        opened = await store.open_dispute(a_dispute())
+        assert opened.note is None
+        rejected = await store.append_status(opened.id, "rejected", note=NOTE)
+        return rejected, await store.append_status(opened.id, "rejected", rating_tx="tx_rating")
+
+    rejected, rated = asyncio.run(go())
+
+    assert rejected.note == NOTE
+    # The rating transition named no note, so the one already recorded stands.
+    assert rated.note == NOTE
+    assert rated.rating_tx == "tx_rating"
+    # And the buyer's side is untouched by the platform's.
+    assert rated.reason == "the summary was empty"
+
+
+def test_an_adjudicators_note_is_stored_exactly_as_given() -> None:
+    """Bounding and sanitising untrusted text is the caller's job — the
+    adjudication path already does it. A store that trimmed or escaped evidence
+    on its way in would quietly change what the platform is on record as having
+    said."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "rejected", note=NOTE)
+
+    assert asyncio.run(go()).note == NOTE
+
+
 def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
     """Not a silently created record: a dispute id that does not exist is a bug
     in the caller, and a store that invented one would hide it."""
@@ -409,6 +455,7 @@ _DISPUTE_COLUMNS = (
     "resolved_at",
     "refund_tx",
     "rating_tx",
+    "note",
 )
 
 
@@ -449,6 +496,10 @@ class FakePool:
         self.statements: list[str] = []
         self.settlements: list[dict[str, Any]] = []
         self.disputes: list[dict[str, Any]] = []
+        # The refund mutex: dispute_id -> claimed_at, which is the whole of
+        # `refund_claims`. A dict rather than a set because the claim time is
+        # what makes the table readable as a reconciliation queue.
+        self.claims: dict[str, float] = {}
         self.closed = 0
 
     async def execute(self, sql: str, *args: Any) -> str:
@@ -460,6 +511,7 @@ class FakePool:
         assert sql in (
             dispute_store._CREATE_SETTLEMENTS_SQL,
             dispute_store._CREATE_DISPUTES_SQL,
+            dispute_store._CREATE_REFUND_CLAIMS_SQL,
         ), f"unexpected statement: {sql}"
         return "CREATE TABLE"
 
@@ -476,12 +528,23 @@ class FakePool:
             return self._append_status(args)
         if sql == dispute_store._SELECT_DISPUTE_SQL:
             return _newest(self.disputes, dispute_id=args[0])
+        if sql == dispute_store._CLAIM_REFUND_SQL:
+            return await self._claim_refund(args)
+        if sql == dispute_store._RELEASE_REFUND_CLAIM_SQL:
+            return await self._release_refund_claim(args[0])
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
         return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         self.statements.append(sql)
         await asyncio.sleep(0)
+        if sql == dispute_store._SELECT_REFUND_CLAIMS_SQL:
+            # ORDER BY claimed_at, dispute_id: oldest claim first, and a stable
+            # tiebreak for two taken in the same clock tick.
+            return [
+                {"dispute_id": dispute_id, "claimed_at": at}
+                for dispute_id, at in sorted(self.claims.items(), key=lambda claim: (claim[1], claim[0]))
+            ]
         assert sql == dispute_store._SELECT_DISPUTES_FOR_TASK_SQL, f"unexpected statement: {sql}"
         # DISTINCT ON (dispute_id) ... ORDER BY dispute_id, id DESC keeps the
         # newest row per dispute; the outer ORDER BY re-sorts them for the
@@ -489,6 +552,56 @@ class FakePool:
         # newest row.
         newest = {r["dispute_id"]: r for r in self.disputes if r["task_id"] == args[0]}
         return sorted(newest.values(), key=lambda r: (r["opened_at"], r["step_index"]))
+
+    async def _claim_refund(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+        """_CLAIM_REFUND_SQL: the `latest` CTE, the mutex insert and the event
+        insert, as one statement sharing ONE snapshot.
+
+        The snapshot is the part worth modelling. `latest` is read before
+        anything is written, and a claim that commits in between is invisible
+        to it — so the status this reads can rule a claim out but can never
+        separate two claimants. The sleep below IS that window: everything
+        after it runs with a status that may already be stale, and the PRIMARY
+        KEY is the only thing left to arbitrate. An implementation that
+        dropped `refund_claims` and leaned on the status alone would append two
+        `crediting` rows here, which is exactly the double credit the table
+        exists to prevent.
+        """
+        dispute_id, claimed_at = args
+        latest = _newest(self.disputes, dispute_id=dispute_id)
+        await asyncio.sleep(0)
+        # `SELECT $1, $2 FROM latest WHERE latest.status = 'upheld'` selects
+        # nothing, so the mutex row is not written and the main INSERT — which
+        # JOINs `claim` — writes nothing either.
+        if latest is None or latest["status"] != "upheld":
+            return None
+        if dispute_id in self.claims:  # ON CONFLICT (dispute_id) DO NOTHING
+            return None
+        self.claims[dispute_id] = claimed_at
+        # Only the status changes: resolved_at and both transaction hashes are
+        # copied forward, because `crediting` is not a resolution.
+        row = latest | {"status": "crediting", "opening": False}
+        self.disputes.append(row)
+        return row
+
+    async def _release_refund_claim(self, dispute_id: str) -> dict[str, Any] | None:
+        """_RELEASE_REFUND_CLAIM_SQL: the DELETE and the `upheld` row, one
+        statement and one snapshot.
+
+        Both halves are gated on the SAME status from that one snapshot, so
+        the mutex and the dispute cannot end up disagreeing about whether a
+        payout is in flight — and the DELETE is a no-op rather than a
+        precondition, which is what lets a release repair a `crediting`
+        dispute whose claim row went missing.
+        """
+        latest = _newest(self.disputes, dispute_id=dispute_id)
+        await asyncio.sleep(0)
+        if latest is None or latest["status"] != "crediting":
+            return None
+        self.claims.pop(dispute_id, None)
+        row = latest | {"status": "upheld", "opening": False}
+        self.disputes.append(row)
+        return row
 
     def _open_dispute(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
         row = dict(zip(_DISPUTE_COLUMNS, args, strict=True)) | {"opening": True}
@@ -503,8 +616,14 @@ class FakePool:
         return {"dispute_id": row["dispute_id"]}
 
     def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
-        dispute_id, status, refund_tx, rating_tx, resolved_at, now = args
+        dispute_id, status, refund_tx, rating_tx, note, resolved_at, now = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
+        # `finished`: the mutex is dropped by the same statement that ends the
+        # dispute. Being a data-modifying CTE it runs whether or not the INSERT
+        # beside it finds any history to write from, so it is modelled before
+        # the early return rather than after it.
+        if status in ("credited", "rejected"):
+            self.claims.pop(dispute_id, None)
         # `INSERT ... SELECT FROM latest`: with no history there is nothing to
         # select, so nothing is written and nothing comes back.
         if latest is None:
@@ -514,6 +633,7 @@ class FakePool:
             "resolved_at": _coalesce(resolved_at, latest["resolved_at"], now),
             "refund_tx": _coalesce(refund_tx, latest["refund_tx"]),
             "rating_tx": _coalesce(rating_tx, latest["rating_tx"]),
+            "note": _coalesce(note, latest["note"]),
             "opening": False,
         }
         self.disputes.append(row)
@@ -551,7 +671,8 @@ def test_the_schema_is_created_lazily_and_only_once() -> None:
     asyncio.run(go())
 
     ddl = [s for s in pool.statements if "CREATE TABLE" in s]
-    assert len(ddl) == 2
+    # settlements, dispute events, and the refund mutex.
+    assert len(ddl) == 3
     assert any("CREATE TABLE IF NOT EXISTS workflow_settlements" in s for s in ddl)
     assert any("CREATE TABLE IF NOT EXISTS dispute_events" in s for s in ddl)
 
@@ -567,29 +688,51 @@ def test_the_duplicate_rule_is_an_index_and_not_only_a_read() -> None:
     assert "ON dispute_events (job_id_hex, step_index) WHERE opening" in ddl
 
 
-def test_no_sql_in_the_module_mutates_a_row() -> None:
+def test_no_sql_in_the_module_mutates_a_dispute_event() -> None:
     """Belt and braces on the constants themselves, so a later edit that adds
     an UPDATE has to delete this test to land. ON CONFLICT DO NOTHING is the one
     conflict clause that leaves the conflicting row alone; DO UPDATE would be an
-    UPDATE wearing a hat, and is refused here by name."""
-    sql = " ".join(
-        (
-            dispute_store._CREATE_SETTLEMENTS_SQL,
-            dispute_store._CREATE_DISPUTES_SQL,
-            dispute_store._SELECT_SETTLEMENT_BY_JOB_SQL,
-            dispute_store._SELECT_SETTLEMENT_BY_TASK_SQL,
-            dispute_store._INSERT_SETTLEMENT_SQL,
-            dispute_store._SELECT_DISPUTE_SQL,
-            dispute_store._SELECT_DISPUTE_BY_STEP_SQL,
-            dispute_store._SELECT_DISPUTES_FOR_TASK_SQL,
-            dispute_store._INSERT_DISPUTE_SQL,
-            dispute_store._APPEND_STATUS_SQL,
-        )
-    ).upper()
+    UPDATE wearing a hat, and is refused here by name.
 
-    assert "UPDATE " not in sql
-    assert "DELETE " not in sql
-    assert "DO UPDATE" not in sql
+    Every `_*_SQL` constant is checked, found by NAME rather than listed one by
+    one: a statement added later and forgotten here would be exactly the one
+    free to start rewriting the audit trail.
+
+    DELETE is allowed against `refund_claims` and against nothing else. That
+    table is a mutex, not a record — it is MEANT to be released, and releasing
+    it destroys no evidence — while every row of `dispute_events` is part of
+    what a chargeback is answered with."""
+    statements = {name: sql for name, sql in vars(dispute_store).items() if name.endswith("_SQL")}
+
+    # The introspection finding nothing would make every assertion below vacuous.
+    assert {"_INSERT_DISPUTE_SQL", "_APPEND_STATUS_SQL", "_CLAIM_REFUND_SQL"} <= statements.keys()
+    for name, sql in statements.items():
+        upper = sql.upper()
+        assert "UPDATE " not in upper, name
+        assert "DO UPDATE" not in upper, name
+        for after_delete in upper.split("DELETE ")[1:]:
+            assert after_delete.startswith("FROM REFUND_CLAIMS"), name
+
+
+def test_every_statement_that_writes_an_event_names_the_same_columns() -> None:
+    """Four statements INSERT into dispute_events — opening a dispute, a status
+    transition, and the two refund-mutex transitions — and each spells the
+    column list out in full.
+
+    The fake pool below maps this module's INSERT parameters onto those names
+    POSITIONALLY, exactly as Postgres does. A column added to one statement and
+    forgotten in another would store every value after it under the wrong name,
+    which is the kind of drift that reads correctly and pays the wrong amount."""
+    inserts = [
+        sql
+        for name, sql in vars(dispute_store).items()
+        if name.endswith("_SQL") and "INSERT INTO dispute_events" in sql
+    ]
+
+    assert len(inserts) == 4  # opening, transition, claim, release
+    for sql in inserts:
+        named = sql.split("INSERT INTO dispute_events (", 1)[1].split(")", 1)[0]
+        assert tuple(column.strip() for column in named.split(",")) == _DISPUTE_COLUMNS + ("opening",)
 
 
 def test_nothing_is_dated_by_the_database() -> None:
@@ -811,7 +954,10 @@ def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone() -> None:
     # And the new row is NOT an opening, or it would collide with its own
     # dispute in the partial unique index.
     assert pool.disputes[1]["opening"] is False
-    assert not any("UPDATE" in s or "DELETE" in s for s in pool.statements)
+    # `dispute_events` stays append-only. The only DELETE this path may issue
+    # is against `refund_claims`, which is a mutex rather than a record: it is
+    # meant to be released, and releasing it destroys no history.
+    assert not any(("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s for s in pool.statements)
 
 
 def test_the_current_state_is_the_newest_row() -> None:
@@ -877,6 +1023,39 @@ def test_a_caller_may_supply_the_moment_it_resolved() -> None:
         return await store.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
 
     assert asyncio.run(go()).resolved_at == 1_700_009_999.0
+
+
+def test_an_adjudicators_note_is_appended_and_read_back_in_postgres() -> None:
+    """The column, end to end: written by the transition that names it, carried
+    forward by the one that does not, and never written onto the opening row
+    the buyer's complaint lives on."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        rejected = await store.append_status(opened.id, "rejected", note=NOTE)
+        await store.append_status(opened.id, "rejected", rating_tx="tx_rating")
+        return rejected, await store.get_dispute(opened.id)
+
+    rejected, stored = asyncio.run(go())
+
+    assert rejected.note == NOTE
+    assert stored is not None and stored.note == NOTE and stored.rating_tx == "tx_rating"
+    assert [row["note"] for row in pool.disputes] == [None, NOTE, NOTE]
+
+
+def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
+    """`dispute_events` predates the note — 4.02 created it — and CREATE TABLE
+    IF NOT EXISTS does nothing whatever to a table that is already there. This
+    ALTER is the whole of the deploy for this column, since the repo has no
+    migration tool, and without it the first INSERT naming `note` would fail
+    every dispute write on a service that had already run once."""
+    ddl = dispute_store._CREATE_DISPUTES_SQL
+
+    assert "ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT" in ddl
+    # And in the CREATE as well, so a fresh database gets it without the ALTER.
+    assert any(line.strip().startswith("note ") for line in ddl.splitlines())
 
 
 def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None:

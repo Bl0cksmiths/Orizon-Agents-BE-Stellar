@@ -107,3 +107,26 @@ settler key can be rotated (it cannot — write-once).
 > remember are decided in
 > [`0007-dispute-window.md`](0007-dispute-window.md); the buyer- and
 > operator-facing version is [`docs/disputes.md`](../disputes.md).
+
+> **Amended 2026-09-21 (story 4.04 / BLO-32).** The R12 derivation chosen
+> above — `dispute_job_id(job_id) = sha256(job_id || "dispute")[:16]` — is
+> **superseded** by ADR 0009 D1, before a single rating was written under it.
+> It hashed the job alone, while the ledger's replay guard is keyed on
+> `(agent_id, job_id)`: when one agent served two steps of a job, a second
+> upheld dispute derived the same id as the first and would have been refused
+> as a replay of it. It also hid the link this ADR claimed for it — a reviewer
+> on Stellar Expert could tie a dispute rating to its job only by knowing the
+> formula and recomputing it. A dispute rating is now written under
+> `job_id[:8] ‖ sha256(job_id ‖ "orizon-dispute:v1" ‖ step)[:8]`
+> (`app/services/dispute_rating.py`): unique per disputed step, and carrying
+> the sealed job's own first half, so the link is visible rather than computed.
+> The decision itself stands — a derived id that clears the replay guard, with
+> no contract change — and only the formula moved. The helpers named in this
+> ADR's Decision and in the 4.02 amendment above are **retired** from
+> `refund_svc`, with the tests that pinned them: `dispute_job_id(job_id)` is
+> replaced by `dispute_rating.dispute_job_id(job_id, step_index)`,
+> `record_dispute_rating(...)` by
+> `dispute_rating.submit_dispute_rating(dispute, settlement)`, and
+> `DISPUTE_RATING` by `dispute_rating.DISPUTE_RATING`, still 10. Why the old
+> formula could be replaced at no cost, and why the new one can never change
+> once a rating lands, are in [`0009-dispute-rating.md`](0009-dispute-rating.md).
