@@ -17,9 +17,13 @@ Honest trust model, disclosed in every artifact (SOW §3.8 standard):
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any
 
 from ..stellar import client as sc
+from .dispute_store import DisputeRecord
+
+logger = logging.getLogger(__name__)
 
 # Refund policy — the credited fraction of the DISPUTED STEP's settled charge.
 # A dispute credits the buyer for the step that failed; 1.0 = the full step
@@ -53,6 +57,28 @@ class RefundRefused(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _refuse(dispute: DisputeRecord, code: str, detail: str, amount_usdc: float) -> RefundRefused:
+    """Log a refused credit on the money path, and build the error to raise.
+
+    One helper so every refusal reaches the server log carrying the same four
+    facts a reconciliation starts from — dispute, job, payer, amount — in the
+    shape `execution_svc._settle_onchain` logs a skipped charge. ERROR rather
+    than WARNING, for the same reason it is: an upheld dispute that cannot be
+    paid is an operator's problem, and nothing else records it. Never a key,
+    never an API key — only identifiers and the amount.
+    """
+    message = f"refusing to credit dispute {dispute.id}: {detail}"
+    logger.error(
+        "%s (code=%s, job %s, payer %s, %.7f USDC)",
+        message,
+        code,
+        dispute.job_id_hex,
+        dispute.payer,
+        amount_usdc,
+    )
+    return RefundRefused(code, message)
 
 
 def dispute_job_id(job_id: bytes) -> bytes:
