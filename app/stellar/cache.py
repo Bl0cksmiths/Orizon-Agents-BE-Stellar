@@ -42,6 +42,16 @@ _flights: dict[str, asyncio.Task[Any]] = {}
 # prompted the invalidation, and letting it land would quietly undo it.
 _generations: dict[str, int] = {}
 
+# Flights still running per key: the registered one plus any `invalidate`
+# detached. This is what bounds `_generations`. A key's generation only has to
+# outlive the flights that captured it, so both entries go the moment the last
+# of them lands, and both maps are sized by the flights in progress rather than
+# by every key ever invalidated. Restarting a generation at 0 then is safe
+# precisely because nothing that captured an older value is left; dropping it
+# while a stale flight still runs would let the restarted counter land back on
+# that flight's number and wave its write through.
+_running: dict[str, int] = {}
+
 # Negative cache: key → (expiry, exception class, message). Hits within the
 # window raise a FRESH instance — retaining live exception objects would pin
 # their tracebacks (and captured frames) in memory, and re-raising the same
@@ -97,6 +107,7 @@ async def get_or_set(
         # definition, whatever it goes on to read.
         task = asyncio.create_task(_produce(key, ttl_seconds, producer, _generations.get(key, 0)))
         _flights[key] = task
+        _running[key] = _running.get(key, 0) + 1
         task.add_done_callback(partial(_on_flight_done, key))
     # shield: a cancelled caller must not cancel the shared flight — the
     # producer keeps running and its result still lands in the cache.
@@ -145,6 +156,12 @@ def _rebuild(exc_type: type[BaseException], message: str) -> BaseException:
 def _on_flight_done(key: str, task: asyncio.Task[Any]) -> None:
     if _flights.get(key) is task:
         del _flights[key]
+    remaining = _running.get(key, 0) - 1
+    if remaining > 0:
+        _running[key] = remaining
+    else:
+        _running.pop(key, None)
+        _generations.pop(key, None)
     if not task.cancelled():
         # Mark a failure as retrieved even if every caller was cancelled
         # before it landed; the exception lives on in the negative cache.
