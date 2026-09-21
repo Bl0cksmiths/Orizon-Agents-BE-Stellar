@@ -167,9 +167,10 @@ was opened with stays on the record, and nothing is signed or spent. Any other
 status is refused rather than absorbed — a dispute that is already paid, that
 is mid-payout, or that has already been rejected cannot be rejected again,
 because that would be a second adjudicator quietly overruling the first. The
-adjudicator may attach a note; it is logged with the decision rather than
-written onto the dispute, which carries the buyer's evidence and not the
-platform's commentary on it.
+adjudicator may attach a note of up to 500 characters (a longer one is refused,
+not cut). It is kept on the dispute record for audit, so the outcome most
+likely to be contested has its reasoning written down; it is not part of the
+dispute the API returns, and it is never written to the log.
 
 **Upholding** is where money moves, and it happens in a fixed order:
 
