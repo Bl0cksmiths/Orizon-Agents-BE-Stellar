@@ -35,7 +35,7 @@ import pytest
 
 import app.stellar.client as sc
 from app.config import settings
-from app.services import dispute_store, dispute_svc, refund_svc
+from app.services import dispute_rating, dispute_store, dispute_svc, refund_svc, reputation_svc
 from app.services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from scripts import uphold_dispute
 
@@ -512,6 +512,42 @@ def test_the_promise_binds_when_it_is_the_smallest_bound(
     _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
 
     assert _binding_lines(out) == ["    0.0100000 USDC  promised to the buyer when the dispute was opened   <- BINDS"]
+
+
+# ── the dry run shows the rating too: 4.04's half of the evidence ──────────
+
+
+def rating_id_hex(step_index: int = STEP_INDEX) -> str:
+    """The derived id the disputed step's rating is filed under.
+
+    From the frozen derivation itself, so these tests check that the script
+    prints the id the rating lane writes — not a second copy of the formula
+    that could agree with this file and nothing else.
+    """
+    return dispute_rating.dispute_job_id(bytes.fromhex(JOB), step_index).hex()
+
+
+def test_a_dry_run_shows_the_rating_it_would_write(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """Every value the ReputationLedger will be handed, approved before the key
+    is touched: the agent, the rating, its kind, and the weight in both units —
+    stroops because that is what goes on-chain, USDC because that is what an
+    operator can check against the step's price (D2: the quoted price, as every
+    rating is weighted)."""
+    forbid_uphold(monkeypatch)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    weight = reputation_svc.rating_weight_stroops(STEPS[STEP_INDEX].price_usdc)
+    assert code == uphold_dispute.EXIT_OK
+    assert weight == 700_000
+    assert f"agent:     {AGENT}" in out
+    assert f"rating:    {dispute_rating.DISPUTE_RATING} / 100" in out
+    assert 'kind = "dispute"' in out
+    assert f"weight:    {weight} stroops = 0.0700000 USDC" in out
+    assert "then write exactly the rating above" in out
 
 
 # ── the live run: the verdict comes off the STORE, never off the call ──────
