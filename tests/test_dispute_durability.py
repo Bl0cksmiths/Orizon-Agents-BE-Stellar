@@ -30,7 +30,7 @@ import pytest
 from test_dispute_store import JOB, STEPS, TASK, FakePool, a_dispute, a_settlement
 
 from app.services import dispute_store
-from app.services.dispute_store import DisputeStore
+from app.services.dispute_store import DisputeStore, DuplicateDisputeError, InMemoryDisputeStore
 
 DSN = "postgres://user:pw@db.example.invalid/orizon"
 
@@ -138,3 +138,41 @@ def test_a_resolved_dispute_does_not_reopen_after_a_restart(monkeypatch: pytest.
         # what the dispute said when it was opened.
         assert [r["status"] for r in database.disputes] == ["open", "credited"]
         assert restored.reason == "the summary was empty"
+
+
+def test_the_duplicate_rule_still_holds_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule lives in the index, so it is as durable as the rows are. A
+    buyer who disputes a step, waits out a spin-down and disputes it again gets
+    the dispute they already opened — not a second one, and not a second
+    credit."""
+    database = FakePool()
+
+    with process(monkeypatch, database) as store:
+        asyncio.run(store.record_settlement(a_settlement()))
+        first = asyncio.run(store.open_dispute(a_dispute()))
+
+    with process(monkeypatch, database) as store:
+        with pytest.raises(DuplicateDisputeError) as excinfo:
+            asyncio.run(store.open_dispute(a_dispute(id="dsp_after_restart", reason="trying again")))
+
+        assert excinfo.value.existing == first
+        assert len(database.disputes) == 1
+
+
+def test_the_in_memory_default_loses_the_dispute_at_the_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not a bug — the whole reason PostgresDisputeStore exists, stated as a
+    test so the gap is visible rather than assumed. Without DATABASE_URL the
+    criterion above is false, which is what the startup log warns about."""
+    monkeypatch.setattr(dispute_store.settings, "database_url", "")
+
+    first = dispute_store.get_dispute_store()
+    assert isinstance(first, InMemoryDisputeStore)
+    asyncio.run(first.record_settlement(a_settlement()))
+    opened = asyncio.run(first.open_dispute(a_dispute()))
+
+    asyncio.run(dispute_store.close_dispute_store())
+    second = dispute_store.get_dispute_store()
+
+    assert second is not first
+    assert asyncio.run(second.get_dispute(opened.id)) is None
+    assert asyncio.run(second.get_settlement(JOB)) is None
