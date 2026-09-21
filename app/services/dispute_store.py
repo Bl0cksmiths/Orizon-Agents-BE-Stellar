@@ -487,8 +487,41 @@ _CLAIM_REFUND_SQL = _CLAIM_REFUND_CTES + _APPEND_UNRESOLVED_ROW.format(
     gate="JOIN claim ON claim.dispute_id = latest.dispute_id",
 )
 
-# Give it back. Returns the id when a claim was actually held, so the caller
-# can tell "released" from "there was nothing to release".
+# Give the mutex back AND put the dispute back to `upheld`, in ONE statement,
+# for the reason the claim is one: the two are the same fact recorded twice and
+# must not be able to come apart. Dropping the mutex first would let another
+# payer claim a dispute still reading `crediting`, which then refuses the
+# credit a buyer is owed; writing the status first and dying before the DELETE
+# would leave a claim row over an `upheld` dispute, which is the wedge
+# _CLAIM_REFUND_SQL describes and which nothing can undo.
+#
+# The gate is the STATUS rather than the claim row, deliberately. A dispute
+# that somehow reached `crediting` without a mutex row would be stuck forever
+# if a release refused to act without one, and `append_status` is public enough
+# that "somehow" is not hypothetical. Gating on the status makes this call
+# REPAIR that state instead of preserving it: the dispute goes back to `upheld`
+# where it can be claimed again, and the DELETE is a no-op.
+_RELEASE_REFUND_CLAIM_CTES = """
+WITH latest AS (
+    SELECT *
+    FROM dispute_events
+    WHERE dispute_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+),
+released AS (
+    DELETE FROM refund_claims
+    WHERE dispute_id = $1 AND EXISTS (SELECT 1 FROM latest WHERE latest.status = 'crediting')
+    RETURNING dispute_id
+)"""
+
+_RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.format(
+    status="upheld",
+    gate="WHERE latest.status = 'crediting'",
+)
+
+# The last statement standing that touches the mutex on its own: `append_status`
+# drops the claim when a dispute finishes.
 _DELETE_REFUND_CLAIM_SQL = """
 DELETE FROM refund_claims WHERE dispute_id = $1 RETURNING dispute_id
 """
@@ -1035,19 +1068,25 @@ class PostgresDisputeStore:
     async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
         """Put a still-unpaid dispute back where another attempt can find it.
 
-        The status moves back BEFORE the mutex is dropped. A caller that saw
-        the claim gone would otherwise be free to take it while the dispute
-        still read `crediting`, and would refuse to pay a buyer who is owed.
-        In the reverse order the worst case is a claim row that outlives its
-        dispute's status, which blocks a payout rather than losing one.
+        One statement drops the mutex and restores `upheld` together, so no
+        ordering of the two can strand a dispute: there is no moment at which
+        the claim is gone while the status still says a payout is in flight,
+        and none at which the status is back while the claim still blocks it.
+
+        Released ONLY when the caller knows with certainty that nothing was
+        signed, or that what was signed definitively FAILED on-chain — a cap
+        refusal, a rejected submission, a transfer that came back FAILED. In
+        those cases the buyer is still owed, and leaving the dispute stuck in
+        `crediting` would make a retry impossible.
+
+        A submission that TIMED OUT is the case this must not be used for: the
+        transaction may still settle, so the claim stays held and the dispute
+        stays in `crediting` until a human reconciles it. Paying that buyer
+        twice is a worse failure than paying them late.
         """
         pool = await self._ready_pool()
-        current = await self.get_dispute(dispute_id)
-        if current is None or current.status != "crediting":
-            return None
-        released = await self.append_status(dispute_id, "upheld")
-        await pool.fetchrow(_DELETE_REFUND_CLAIM_SQL, dispute_id)
-        return released
+        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id)
+        return None if row is None else self._to_dispute(row)
 
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
