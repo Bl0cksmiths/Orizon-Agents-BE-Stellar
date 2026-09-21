@@ -188,3 +188,26 @@ def test_invalidating_one_key_leaves_every_other_key_alone():
 
     # The other key's flight was neither detached nor fenced: it still lands.
     assert asyncio.run(run()) == "busy-value"
+
+
+def test_invalidate_clears_the_failure_cache_for_that_key():
+    calls = {"n": 0}
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("rpc down")
+        return "recovered"
+
+    async def run():
+        with pytest.raises(RuntimeError):
+            await cache.get_or_set("k", 60.0, flaky)
+        # Inside the negative window this would re-raise without calling
+        # upstream at all; an error from before the change says nothing about
+        # the state after it.
+        cache.invalidate("k")
+        assert "k" not in cache._failures
+        return await cache.get_or_set("k", 60.0, flaky)
+
+    assert asyncio.run(run()) == "recovered"
+    assert calls["n"] == 2
