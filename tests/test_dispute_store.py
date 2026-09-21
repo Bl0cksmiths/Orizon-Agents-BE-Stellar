@@ -738,3 +738,36 @@ def test_a_task_s_disputes_are_listed_oldest_first_and_nobody_else_s() -> None:
     # Sorted by the moment each was opened, not by the order the rows landed.
     assert [d.id for d in listed] == ["dsp_0001", "dsp_0002"]
     assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
+
+
+def test_two_concurrent_disputes_of_one_step_produce_one_dispute() -> None:
+    """The race the index exists for, run as a race.
+
+    Both calls are in flight at once and the fake interleaves their statements
+    the way a pool does, so each one reaches the table having seen a step with
+    no dispute on it. A guard that lived in Python would open two disputes here
+    and credit the buyer twice; the guard that lives in the index lets exactly
+    one row land and tells the other request which dispute already owns the
+    step.
+    """
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> list[Any]:
+        return await asyncio.gather(
+            store.open_dispute(a_dispute(id="dsp_first", reason="the first reason")),
+            store.open_dispute(a_dispute(id="dsp_second", reason="the second reason")),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(go())
+
+    opened = [r for r in results if isinstance(r, DisputeRecord)]
+    refused = [r for r in results if isinstance(r, DuplicateDisputeError)]
+    assert len(opened) == 1
+    assert len(refused) == 1
+    # One row written, and it is the winner's — not a row per request, and not
+    # a row whose reason belongs to the request that lost.
+    assert len(pool.disputes) == 1
+    assert refused[0].existing == opened[0]
+    assert asyncio.run(store.find_dispute(JOB, 0)) == opened[0]
