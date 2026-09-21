@@ -741,47 +741,6 @@ def print_evidence(dispute: DisputeRecord) -> None:
     say()
 
 
-@contextmanager
-def watch_rating() -> Iterator[list[dispute_rating.RatingOutcome]]:
-    """Collect every dispute-rating outcome `uphold` produces while this is open.
-
-    `uphold` answers with the dispute record alone, deliberately: for an API
-    caller the durable record is the one answer, and `credited` without a
-    `rating_tx` is "paid, not fully resolved". What the record cannot say is
-    which of several things an operator is looking at. A `rating_tx` is written
-    for a rating that LANDED and equally for one that timed out IN FLIGHT, so
-    the record alone can never confirm a rating. An empty one covers a FAILED
-    rating, a COLLISION, a rating never submitted, and one that landed but
-    could not be recorded. The service names which in an ERROR line; this
-    script needs it as an exit code, and must not guess it from the record.
-
-    So it watches the one call that knows. `submit_dispute_rating` returns the
-    frozen `RatingOutcome` — the ledger's own answer to this run's attempt —
-    and it is reached through the module attribute on every call, so wrapping
-    that attribute sees exactly what the service saw and changes nothing: the
-    outcome goes back untouched, and an exception goes through unrecorded.
-    Restored on the way out, however the block exits. No outcome seen means
-    nothing reached the ledger, and is reported as exactly that.
-
-    The record still decides what is ON RECORD — `report_rating` reads the
-    rating hash off the store, as `report` reads the refund's — and the outcome
-    only says what the chain answered.
-    """
-    seen: list[dispute_rating.RatingOutcome] = []
-    submit = dispute_rating.submit_dispute_rating
-
-    async def _watched(*args: Any, **kwargs: Any) -> dispute_rating.RatingOutcome:
-        outcome = await submit(*args, **kwargs)
-        seen.append(outcome)
-        return outcome
-
-    dispute_rating.submit_dispute_rating = _watched
-    try:
-        yield seen
-    finally:
-        dispute_rating.submit_dispute_rating = submit
-
-
 # What became of the dispute rating, as far as one run can know it:
 #   rated        — landed now, and its hash is on the record;
 #   confirmed    — an earlier attempt's, still on the record, which the ledger
