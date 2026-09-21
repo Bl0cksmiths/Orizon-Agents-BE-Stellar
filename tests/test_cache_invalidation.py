@@ -93,3 +93,25 @@ def test_a_read_in_flight_at_invalidation_does_not_write_back():
 
     assert asyncio.run(run()) == "post-dispute"
     assert fresh_calls["n"] == 1
+
+
+def test_a_caller_after_invalidation_does_not_join_the_stale_flight():
+    """Joining the stale flight: the old read is still parked in-flight when a
+    new caller arrives. Joining it would hand that caller the pre-dispute score
+    — here it would also block until the timeout, since the old read is never
+    released until the new caller has its answer."""
+    fresh, fresh_calls = _returning("post-dispute")
+
+    async def run():
+        stale, started, release, _ = _parked("pre-dispute")
+        early = asyncio.create_task(cache.get_or_set("k", 60.0, stale))
+        await started.wait()
+        cache.invalidate("k")
+        late = await asyncio.wait_for(cache.get_or_set("k", 60.0, fresh), timeout=1.0)
+        release.set()
+        return late, await early
+
+    late, early = asyncio.run(run())
+    assert late == "post-dispute"
+    assert early == "pre-dispute"
+    assert fresh_calls["n"] == 1
