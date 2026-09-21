@@ -119,3 +119,51 @@ class DisputeRecord:
 def new_dispute_id() -> str:
     """A dispute id: unguessable, so `GET /api/disputes/{id}` needs no account."""
     return f"dsp_{secrets.token_hex(8)}"
+
+
+class DuplicateDisputeError(Exception):
+    """This step already has a dispute. Carries it, so the caller can return it.
+
+    One dispute per `(job_id, step)` is a product rule, not a database detail:
+    the second attempt is answered with the first dispute unchanged rather than
+    an error the buyer cannot act on.
+    """
+
+    def __init__(self, existing: DisputeRecord) -> None:
+        super().__init__(f"step {existing.step_index} of job {existing.job_id_hex} is already disputed")
+        self.existing = existing
+
+
+class DisputeStore(Protocol):
+    """The seam between the dispute rules and wherever the records actually live.
+
+    Every method is awaitable even in the in-memory implementation that needs
+    none of it, so moving to Postgres is a configuration change rather than a
+    rewrite of every call site.
+    """
+
+    async def record_settlement(self, record: SettlementRecord) -> None: ...
+
+    async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None: ...
+
+    async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None: ...
+
+    async def open_dispute(self, record: DisputeRecord) -> DisputeRecord: ...
+
+    async def get_dispute(self, dispute_id: str) -> DisputeRecord | None: ...
+
+    async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None: ...
+
+    async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]: ...
+
+    async def append_status(
+        self,
+        dispute_id: str,
+        status: DisputeStatus,
+        *,
+        refund_tx: str | None = None,
+        rating_tx: str | None = None,
+        resolved_at: float | None = None,
+    ) -> DisputeRecord: ...
+
+    async def close(self) -> None: ...
