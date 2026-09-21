@@ -522,7 +522,10 @@ def test_a_rejection_without_a_note_never_reaches_the_service(client, adjudicati
 # field-level `validation_error` the frontend can render inline — bounded
 # exactly as `OpenDisputeReq.reason` is, because it is the same kind of text.
 MALFORMED_NOTES = [
-    ("note-too-long", {"note": "x" * 2001}),
+    # One over the service's own ceiling, which is the only bound there is:
+    # anything longer would reach the buyer cut short, so the edge refuses it
+    # and the adjudicator is the one who shortens it.
+    ("note-one-over-the-bound", {"note": "x" * (dispute_svc.MAX_REASON_CHARS + 1)}),
     ("note-not-a-string", {"note": 7}),
 ]
 
