@@ -815,7 +815,6 @@ class RatingSeam:
                 reputation_svc.rating_weight_stroops(step.price_usdc),
             )
 
-        self.submit = _submit
         self._monkeypatch.setattr(dispute_rating, "submit_dispute_rating", _submit)
 
 
@@ -1000,16 +999,33 @@ def test_a_credited_dispute_with_no_hash_is_not_treated_as_evidence(
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    ("status", "tx_hash", "expected"),
+    [
+        ("SUCCESS", RATING_TX, uphold_dispute.EXIT_OK),
+        ("FAILED", None, uphold_dispute.EXIT_RATING_NOT_LANDED),
+        ("TIMEOUT", RATING_TX, uphold_dispute.EXIT_RATING_NOT_LANDED),
+        ("REPLAY", None, uphold_dispute.EXIT_RATING_COLLISION),
+    ],
+)
 def test_no_line_of_a_live_run_contains_the_signing_key_or_the_api_key(
-    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+    status: dispute_rating.RatingStatus,
+    tx_hash: str | None,
+    expected: int,
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
 ) -> None:
-    """The whole of a successful run, checked against the two credentials this
-    process holds. Both streams: a key on stderr is as published as one on
-    stdout once the terminal is screenshotted into an evidence bundle."""
-    uphold.lands()
+    """The whole of a run that pays and rates, checked against the two
+    credentials this process holds — once for every answer the rating can get,
+    since each prints its own block. Both streams: a key on stderr is as
+    published as one on stdout once the terminal is screenshotted into an
+    evidence bundle."""
+    ledger.answers(status, tx_hash)
     seed()
 
-    assert uphold_dispute.main(["--dispute-id", DISPUTE_ID]) == uphold_dispute.EXIT_OK
+    assert uphold_dispute.main(["--dispute-id", DISPUTE_ID]) == expected
 
     captured = capsys.readouterr()
     for value in configured.values():
