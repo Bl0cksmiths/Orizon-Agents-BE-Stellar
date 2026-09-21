@@ -226,7 +226,7 @@ makes and the reason `GET /api/disputes/{id}` needs no credential.
 submitted, no rating is written, no reputation moves, and nobody adjudicates.
 The full status vocabulary is defined now — `open → upheld → credited`, or
 `open → rejected` — so the later stories append to a lifecycle rather than
-redesign one, but 4.02 is the only story that never leaves `open`. Story 4.03
+redesign one, but 4.02 never moves a dispute past `open`. Story 4.03
 pays the credit and records `credited` with its refund tx; story 4.04 writes
 the on-chain rating and records `upheld` with its rating tx.
 
