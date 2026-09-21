@@ -549,6 +549,15 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 # claim would date the dispute from the moment a payout was ATTEMPTED — and
 # since COALESCE keeps the first value forever, the row that finally credits
 # the buyer would report that moment instead of its own.
+#
+# `refund_tx` is the one fact deliberately NOT carried: both rows written here
+# are written when no refund has landed. A claim starts a payout that has no
+# transaction yet, and a release happens only when nothing landed — a cap
+# refusal, a definitive FAILED, a timed-out hash reconciled as never settled.
+# Copying the last hash forward put a transaction that FAILED on the buyer's
+# receipt as the refund "in flight" for the whole of the next attempt (found
+# in story 4.06). The dead hash is not lost: the append-only trail still holds
+# it on the row that recorded it.
 _APPEND_UNRESOLVED_ROW = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
@@ -558,7 +567,7 @@ INSERT INTO dispute_events (
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, '{status}',
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
-       latest.resolved_at, latest.refund_tx, latest.rating_tx, latest.note,
+       latest.resolved_at, NULL::text, latest.rating_tx, latest.note,
        latest.credited_usdc, $2::double precision, latest.rating_confirmed,
        FALSE
 FROM latest {gate}
