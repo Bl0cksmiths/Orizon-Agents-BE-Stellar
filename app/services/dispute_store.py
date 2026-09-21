@@ -960,6 +960,9 @@ def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
             agent_name=s.get("agent_name"),
             price_usdc=float(s["price_usdc"]),
             delivered=bool(s["delivered"]),
+            # `.get`, not `[...]`: every row written before story 4.05 lacks the
+            # key, and those settlements are still inside their windows.
+            output_summary=s.get("output_summary"),
         )
         for s in json.loads(raw)
     )
