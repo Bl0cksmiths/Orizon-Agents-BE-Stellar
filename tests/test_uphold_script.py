@@ -701,3 +701,82 @@ def test_a_credited_dispute_with_no_hash_is_not_treated_as_evidence(
 
     assert code == uphold_dispute.EXIT_UNEXPECTED
     assert "reconcile the payer's account on-chain" in out
+
+
+# ── no line of output can carry a secret ───────────────────────────────────
+
+
+def test_no_line_of_a_live_run_contains_the_signing_key_or_the_api_key(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The whole of a successful run, checked against the two credentials this
+    process holds. Both streams: a key on stderr is as published as one on
+    stdout once the terminal is screenshotted into an evidence bundle."""
+    uphold.lands()
+    seed()
+
+    assert uphold_dispute.main(["--dispute-id", DISPUTE_ID]) == uphold_dispute.EXIT_OK
+
+    captured = capsys.readouterr()
+    for value in configured.values():
+        assert value not in captured.out
+        assert value not in captured.err
+
+
+def test_a_secret_quoted_back_inside_an_error_is_masked(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The realistic leak, and the reason the guarantee is made at the output
+    path rather than line by line: an exception from a library quotes back what
+    it was given, and the unexpected-exception branch prints exception text this
+    script never wrote."""
+    key = configured["stellar_signing_key"]
+    uphold.raises(RuntimeError(f"submit rejected for {key}"), leaves=("crediting", REFUND_TX))
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TIMEOUT
+    assert key not in out
+    assert "[redacted]" in out
+
+
+def test_say_masks_a_secret_shaped_token_that_is_not_even_ours(capsys: pytest.CaptureFixture[str]) -> None:
+    """`say` masks by shape as well as by value, so a key pasted into a message
+    from somewhere else — another deployment's, a mnemonic in an error — is
+    caught too. That is what makes the guarantee a property of the helper rather
+    than of what this deployment happens to have configured."""
+    # A StrKey secret seed is an S and exactly 55 more base32 characters —
+    # the shape the redactor recognises, and the one a pasted key really has.
+    foreign = "S" + "CDEFGH2345" * 5 + "ABCDE"
+
+    uphold_dispute.say(f"submit rejected for {foreign}")
+
+    assert foreign not in capsys.readouterr().out
+
+
+def test_nothing_reaches_stdout_except_through_say(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    credit: CreditSeam,
+    uphold: UpholdSeam,
+    configured: dict[str, str],
+) -> None:
+    """The structural half of the guarantee: with `say` diverted, the script
+    prints nothing at all.
+
+    A test that only checked the current output for secrets would pass for as
+    long as nobody added a bare `print`. This one fails the moment somebody
+    does, on the preview and on the report path alike, which is the difference
+    between a promise about today's lines and one about tomorrow's.
+    """
+    printed: list[str] = []
+    monkeypatch.setattr(uphold_dispute, "say", lambda line="": printed.append(line))
+
+    seed()
+    assert uphold_dispute.main(["--dispute-id", DISPUTE_ID, "--dry-run"]) == uphold_dispute.EXIT_OK
+    uphold.lands()
+    assert uphold_dispute.main(["--dispute-id", DISPUTE_ID]) == uphold_dispute.EXIT_OK
+
+    assert printed
+    assert capsys.readouterr().out == ""
