@@ -1029,6 +1029,36 @@ def test_a_credited_dispute_with_no_hash_is_not_treated_as_evidence(
     assert "reconcile the payer's account on-chain" in out
 
 
+# ── the rating half of a live run (4.04): it lands, or it says what it is ──
+
+
+def test_a_rating_that_failed_after_the_credit_landed_says_the_buyer_is_paid_and_rerunning_is_safe(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """The outcome an operator who learned 4.03's "never re-run" will get
+    wrong. The buyer HAS been paid and the rating did not land — and here a
+    re-run is RIGHT, because it retries the rating and never the refund. Both
+    halves are said in as many words, with the reason the rule is reversed,
+    on an exit code of its own."""
+    ledger.answers("FAILED")
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+    assert "THE BUYER HAS BEEN PAID — BUT THE AGENT'S DISPUTE RATING DID NOT LAND." in out
+    assert "RE-RUNNING THIS SCRIPT IS SAFE HERE: IT RETRIES THE RATING, NEVER THE REFUND." in out
+    assert "Why re-running is right here, when a timed-out CREDIT must never be re-run" in out
+    assert "FAILED — the ledger refused it; nothing was written." in out
+    assert f"python scripts/uphold_dispute.py --dispute-id {DISPUTE_ID}" in out
+    # Never the 4.03 advice, never a claim that nothing was signed, never a PASS.
+    assert "DO NOT RE-RUN" not in out
+    assert "nothing was signed" not in out
+    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    record = stored()
+    assert record.status == "credited" and record.refund_tx == REFUND_TX and record.rating_tx is None
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
