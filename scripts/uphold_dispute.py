@@ -867,7 +867,7 @@ def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     say(f"  ledger:    {expert_url('contract', settings.stellar_reputation_ledger)}")
     say()
     say("  The credit stands — the buyer HAS been paid. The dispute is NOT resolved and must not")
-    say("  be reported as resolved: no rating of this dispute's is on-chain.")
+    say("  be reported as resolved: it records no rating of its own, so none can be shown for it.")
     say()
     say("  Find the rating filed under that id on the ledger before anything else:")
     say("    * it is this dispute's own attempt, never recorded (a timeout that returned no hash,")
