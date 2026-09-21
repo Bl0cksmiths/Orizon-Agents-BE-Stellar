@@ -52,6 +52,7 @@ STEP_INDEX = 1
 SETTLED_USDC = 0.12
 CREDITABLE_USDC = 0.07
 REFUND_TX = "b7c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f809"
+LEDGER = "C" + "LEDGER7Q" * 6 + "ABCDEFG"
 
 
 class _Refused(Exception):
@@ -405,6 +406,7 @@ def test_a_live_run_without_a_signing_configuration_is_refused_before_it_upholds
     forbid_uphold(monkeypatch)
     monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
     monkeypatch.setattr(settings, "stellar_asset_sac", "")
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "")
     seed()
 
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
@@ -413,6 +415,8 @@ def test_a_live_run_without_a_signing_configuration_is_refused_before_it_upholds
     assert "DISPUTE_REFUNDS_ENABLED=true" in out
     assert "STELLAR_SIGNING_KEY" in out
     assert "STELLAR_ASSET_SAC" in out
+    # Without the ledger the credit would land and its rating could not.
+    assert "STELLAR_REPUTATION_LEDGER" in out
 
 
 def test_every_refusal_code_is_non_zero_and_distinct() -> None:
@@ -695,6 +699,7 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     }
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
     monkeypatch.setattr(settings, "stellar_asset_sac", "CSAC" + "7Z2Q" * 12)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", LEDGER)
     for name, value in secrets.items():
         monkeypatch.setattr(settings, name, value)
     return secrets
