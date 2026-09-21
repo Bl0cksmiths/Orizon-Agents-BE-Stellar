@@ -551,13 +551,15 @@ def test_a_dry_run_signs_nothing_and_needs_no_signing_configuration(
     monkeypatch: pytest.MonkeyPatch,
     credit: CreditSeam,
     chain_calls: list[str],
+    standing: StandingSeam,
 ) -> None:
     """The run an operator is told to do first, so it has to work on a machine
     that holds no key at all — and it must not reach the chain or the uphold on
     the way. Both are enforced: `forbid_uphold` here, and the stellar client
     booby-trap that every test in this file runs under, whose record of calls
     has to come back empty — not even a read, since the rating preview is
-    computed, never simulated."""
+    computed, never simulated. The reputation read is held to the same: it is
+    a live run's before-and-after, and a dry run makes neither."""
     forbid_uphold(monkeypatch)
     monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
     monkeypatch.setattr(settings, "stellar_signing_key", "")
@@ -569,6 +571,7 @@ def test_a_dry_run_signs_nothing_and_needs_no_signing_configuration(
     assert code == uphold_dispute.EXIT_OK
     assert "DRY RUN — nothing was signed and nothing moved." in out
     assert chain_calls == []
+    assert standing.reads == []
 
 
 def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
