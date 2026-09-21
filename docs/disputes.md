@@ -233,16 +233,32 @@ stay as they were.
 | status | what it means | what it carries | written by |
 | --- | --- | --- | --- |
 | `open` | raised inside the window by the payer, not yet adjudicated | the reason, the step's charge, the creditable amount, the opening time | story 4.02 — the only status it ever writes |
-| `upheld` | adjudicated in the buyer's favour | the on-chain dispute rating's tx, once written | story 4.04 |
-| `credited` | the credit has been paid to the buyer | the refund tx | story 4.03 |
-| `rejected` | adjudicated against the claim | the resolution time; nothing on-chain | adjudication |
+| `upheld` | adjudicated in the buyer's favour | the on-chain dispute rating's tx, once written | adjudication (4.03); 4.04 adds the rating tx |
+| `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx, once one has been submitted | the refund path (4.03) |
+| `credited` | the credit has landed in the buyer's wallet | the refund tx | the refund path (4.03) |
+| `rejected` | adjudicated against the claim | the resolution time; nothing on-chain | adjudication (4.03) |
 
 ```text
-open ──► upheld ──► credited      the claim stood: the buyer is credited and
-  │                               the agent carries a low on-chain rating
-  └────► rejected                 the claim did not stand: nothing on-chain,
-                                  the record and its reason are kept
+open ──► upheld ──► crediting ──► credited   the claim stood: the buyer is
+  │        ▲            │                    credited, and the agent carries
+  │        └── failed ──┘                    a low on-chain rating
+  │
+  └────► rejected                            the claim did not stand: nothing
+                                             on-chain, the record and its
+                                             reason are kept
 ```
+
+**`crediting` is not a verdict.** Nobody adjudicates a dispute *into* it: it is
+the refund claim itself, made durable, and it exists so that a payout can be
+interrupted — by a redeploy, a restart, a second click — without ever being
+paid twice. A buyer who sees it should read "your credit is being paid", not
+"your dispute is being reconsidered".
+
+A dispute leaves `crediting` in one of three ways: the transfer lands and it
+becomes `credited`; the transfer definitively fails, the claim is released and
+it returns to `upheld` to be paid again; or the transfer times out, in which
+case it **stays** in `crediting` until an operator has checked the chain. The
+last of those is the reconciliation case below.
 
 `open` is the only status story 4.02 writes. Everything past it belongs to the
 stories that pay the credit and write the rating, which is why a freshly opened
