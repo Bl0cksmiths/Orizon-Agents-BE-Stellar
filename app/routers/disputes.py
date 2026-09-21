@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..services import dispute_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus
 
 logger = logging.getLogger(__name__)
@@ -166,3 +167,51 @@ class TaskDisputesResponse(BaseModel):
     task_id: str
     window_closes_at: float | None
     disputes: list[DisputeResponse]
+
+
+def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
+    """The rules lane's refusal, as this API's error.
+
+    The code is passed through as the HTTPException *detail* because
+    `app/main.py`'s handler promotes a snake_case detail to `error.code`
+    verbatim — so a code the service adds later reaches the frontend without a
+    mapping table here to forget to update. The status comes from the exception
+    for the same reason: this module must not hold a second opinion about
+    whether a closed window is a 409.
+    """
+    return HTTPException(exc.status_code, exc.code)
+
+
+@router.post(
+    "/disputes/challenge",
+    response_model=DisputeChallengeResponse,
+    summary="Mint a dispute challenge to sign",
+)
+async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeResponse:
+    """Issue the nonce and the exact string the payer's wallet must sign.
+
+    Deliberately **checks nothing**. `bind/challenge` reads the chain first so
+    its bounded challenge table can only hold real agent ids; the opposite
+    trade is right here. A challenge mint that refused unknown or unsettled
+    jobs would answer, to an anonymous caller with no signature, whether any
+    given job id was paid for — and job ids are the one identifier this API
+    hands out publicly (`GET /api/stellar/new-id`, every attestation read). So
+    the mint is blind and free, and every rule is applied at `POST /disputes`,
+    where a signature has been produced and the caller has proved they are the
+    payer.
+
+    A refusal is still mapped rather than swallowed: if the rules lane ever
+    does decide a mint must fail, it answers with its own code instead of a 500.
+    """
+    try:
+        nonce, expires_at = await dispute_svc.issue_dispute_challenge(body.job_id_hex, body.step_index)
+    except dispute_svc.DisputeError as e:
+        raise _refuse(e) from None
+    # The nonce is a live single-use credential for its whole window: returned
+    # to the caller, never written to a log — `bind_challenge`'s rule.
+    logger.info("dispute challenge issued: job_id=%s step=%d", body.job_id_hex, body.step_index)
+    return DisputeChallengeResponse(
+        message=dispute_svc.dispute_message(body.job_id_hex, body.step_index, nonce),
+        nonce=nonce,
+        expires_at=expires_at,
+    )
