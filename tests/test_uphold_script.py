@@ -1245,7 +1245,9 @@ def test_a_rating_that_landed_but_was_never_recorded_asks_for_the_record_before_
 
     assert code == uphold_dispute.EXIT_UNEXPECTED
     assert "THE RATING LANDED — BUT THE DISPUTE DOES NOT RECORD IT." in out
-    assert f"append_status({DISPUTE_ID!r}, 'credited', rating_tx={RATING_TX!r})" in out
+    # The ledger vouched for it, so the hint records it as confirmed — story 4.06's
+    # receipt shows an unconfirmed rating as pending, never as the agent's consequence.
+    assert f"append_status({DISPUTE_ID!r}, 'credited', rating_tx={RATING_TX!r}, rating_confirmed=True)" in out
     assert f"https://stellar.expert/explorer/testnet/tx/{RATING_TX}" in out
     assert "ON-CHAIN EVIDENCE" not in out
 
