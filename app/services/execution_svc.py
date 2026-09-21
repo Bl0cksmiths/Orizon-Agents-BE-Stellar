@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from ..agents.registry import get_worker
@@ -624,6 +625,7 @@ async def _run(
                     proof_tx=proof_tx,
                     total_usdc=spent,
                     delivered_steps=frozenset(delivered_steps),
+                    output_summaries=output_summaries,
                 )
                 # Rated whether or not the money moved, exactly as the
                 # no-success branch above is (ADR 0005 D2). This used to sit
@@ -1032,6 +1034,7 @@ async def _record_settlement(
     proof_tx: str | None,
     total_usdc: float,
     delivered_steps: frozenset[int],
+    output_summaries: Mapping[int, str | None],
 ) -> None:
     """Write the one record a dispute is later judged against (story 4.02).
 
@@ -1084,6 +1087,11 @@ async def _record_settlement(
                         # refuses to dispute it. Same condition that moved
                         # `succeeded` and `spent` in the run loop.
                         delivered=index in delivered_steps,
+                        # Already cleaned and bounded by `_stored_summary` in
+                        # the run loop. Gated on delivery here as well, so "an
+                        # undelivered step has no summary" holds where the
+                        # record is built rather than only where it was fed.
+                        output_summary=output_summaries.get(index) if index in delivered_steps else None,
                     )
                     for index, step in enumerate(plan.plan.steps)
                 ),
