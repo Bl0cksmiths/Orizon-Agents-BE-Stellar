@@ -596,3 +596,67 @@ def test_nothing_is_dated_by_the_database() -> None:
 
     assert "NOW()" not in sql
     assert "CURRENT_TIMESTAMP" not in sql
+
+
+# ── settlements, in Postgres ──────────────────────────────────────────────
+
+
+def test_a_settlement_round_trips_through_the_json_column() -> None:
+    """The step breakdown is stored as one JSON value, so the encode/decode pair
+    is the only thing standing between a settled price and the credit computed
+    from it a day later."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> SettlementRecord | None:
+        await store.record_settlement(a_settlement())
+        return await store.get_settlement(JOB)
+
+    stored = asyncio.run(go())
+
+    assert stored == a_settlement()
+    assert stored is not None and stored.steps == STEPS
+    # It really went through JSON: the row holds text, not the tuple.
+    assert isinstance(pool.settlements[0]["steps"], str)
+
+
+def test_a_settlement_is_also_read_back_by_task() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> SettlementRecord | None:
+        await store.record_settlement(a_settlement())
+        return await store.get_settlement_by_task(TASK)
+
+    stored = asyncio.run(go())
+
+    assert stored is not None
+    assert stored.job_id_hex == JOB
+    assert stored.window_closes_at == 1_700_086_400.0
+
+
+def test_settling_twice_appends_a_row_and_the_newest_one_wins() -> None:
+    """Append-only, on the money path: the second settlement must not fail on a
+    unique key, and the first must stay on the audit trail."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> SettlementRecord | None:
+        await store.record_settlement(a_settlement())
+        await store.record_settlement(a_settlement(job_id_hex=OTHER_JOB, window_closes_at=1_700_172_800.0))
+        return await store.get_settlement_by_task(TASK)
+
+    latest = asyncio.run(go())
+
+    assert latest is not None
+    assert latest.job_id_hex == OTHER_JOB
+    assert len(pool.settlements) == 2
+    assert all("INSERT INTO workflow_settlements" in s for s in pool.writes)
+
+
+def test_an_unsettled_job_or_task_reads_as_none_in_postgres() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    assert asyncio.run(store.get_settlement(OTHER_JOB)) is None
+    assert asyncio.run(store.get_settlement_by_task("task_never")) is None
