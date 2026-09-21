@@ -1023,7 +1023,9 @@ def build_parser() -> argparse.ArgumentParser:
     The description is where an operator who ran `--help` instead of reading the
     module finds the two facts that change what they are about to do: that this
     spends real funds, and that the platform — not the disputed agent — is the
-    one spending them.
+    one spending them. The epilog is where they find what to do AFTER it, and
+    it lists the post-signature codes because those are the ones where the
+    right next move differs — two of them in opposite directions.
 
     Whole, rather than a parser `main` then adds arguments to, so that what a
     test reads out of `format_help()` is the text an operator sees.
@@ -1032,13 +1034,26 @@ def build_parser() -> argparse.ArgumentParser:
         prog="uphold_dispute.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Uphold one dispute and print the evidence for its settler-funded credit (story 4.03).\n"
+            "Uphold one dispute, pay its settler-funded credit, then write the agent's dispute\n"
+            "rating, and print the evidence for both (stories 4.03 and 4.04).\n"
             "\n"
             "THIS MOVES REAL FUNDS on the network this process is configured for.\n"
             "\n"
             "The credit is FUNDED BY THE PLATFORM, not clawed back from the agent: the escrow\n"
             "never takes custody, so an upheld dispute is a new transfer out of the settler's\n"
-            "own wallet to the buyer. The disputed agent's only consequence is reputational.\n"
+            "own wallet to the buyer. The disputed agent's only consequence is reputational:\n"
+            "a dispute rating on the ReputationLedger, written once the credit has landed.\n"
+        ),
+        epilog=(
+            "exit codes after a live run's signature:\n"
+            "   0  credit and rating both landed — the two links printed are the evidence\n"
+            "   9  the credit FAILED, nothing moved — re-run once the cause is fixed\n"
+            "  10  the credit TIMED OUT and may still land — NEVER re-run; reconcile it\n"
+            "  12  the buyer IS paid but the rating did not land — re-running is SAFE and\n"
+            "      retries the rating only, never the refund\n"
+            "  13  rating collision — the agent's consequence did not land; look it up\n"
+            "every other non-zero code is a refusal before anything was signed, except 11,\n"
+            "which asks for the state it prints to be reconciled by hand.\n"
         ),
     )
     parser.add_argument(
@@ -1050,9 +1065,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help=(
-            "resolve everything and print exactly what WOULD be paid — the dispute, the settled "
-            "step, D4's three bounds and which one binds, D5's cap and the payer — then stop. "
-            "Signs nothing, submits nothing, and needs no signing key. Always run this first."
+            "resolve everything and print exactly what WOULD be paid and rated — the dispute, the "
+            "settled step, D4's three bounds and which one binds, D5's cap and the payer, then the "
+            "rating's value, weight and derived id — and stop. Signs nothing, submits nothing, reads "
+            "nothing from the chain, and needs no signing key. Always run this first."
         ),
     )
     return parser
