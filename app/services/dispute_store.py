@@ -205,6 +205,13 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 # EXISTS keeps the whole block idempotent, which is the property this schema is
 # maintained by in place of a migration tool.
 #
+# `credited_usdc`, `updated_at` and `rating_confirmed` arrive with story 4.06's
+# receipt and take the same road for the same reason: the table they join has
+# been live since 4.02. All three are NULLABLE, and that is the migration rather
+# than laxity — ADD COLUMN gives every row already written a NULL, and NULL is
+# exactly what DisputeRecord promises a reader for a row from before 4.06:
+# "not known", never a zero credit or a 1970 timestamp.
+#
 # The three read indexes carry (key..., id DESC) so "the newest row for this
 # dispute / this step / this task" is served from the index without a sort.
 _CREATE_DISPUTES_SQL = """
@@ -225,9 +232,15 @@ CREATE TABLE IF NOT EXISTS dispute_events (
     refund_tx       TEXT,
     rating_tx       TEXT,
     note            TEXT,
+    credited_usdc   DOUBLE PRECISION,
+    updated_at      DOUBLE PRECISION,
+    rating_confirmed BOOLEAN,
     opening         BOOLEAN NOT NULL DEFAULT FALSE
 );
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS credited_usdc DOUBLE PRECISION;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS updated_at DOUBLE PRECISION;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS rating_confirmed BOOLEAN;
 CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
     ON dispute_events (job_id_hex, step_index) WHERE opening;
 CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
