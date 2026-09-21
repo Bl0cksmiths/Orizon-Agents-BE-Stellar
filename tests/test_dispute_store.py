@@ -362,3 +362,158 @@ def test_closing_the_in_memory_store_is_safe_twice() -> None:
         await store.close()
 
     asyncio.run(go())
+
+
+# ── the fake pool ─────────────────────────────────────────────────────────
+
+# The INSERT parameter order, named. `$1..$n` of _INSERT_SETTLEMENT_SQL and
+# _INSERT_DISPUTE_SQL respectively: reordering either statement without
+# reordering these makes the fake store the wrong values, which every read test
+# below then fails on.
+_SETTLEMENT_COLUMNS = (
+    "task_id",
+    "payer",
+    "auth_id_hex",
+    "job_id_hex",
+    "charge_tx",
+    "proof_tx",
+    "settled_usdc",
+    "steps",
+    "settled_at",
+    "window_closes_at",
+)
+_DISPUTE_COLUMNS = (
+    "dispute_id",
+    "job_id_hex",
+    "task_id",
+    "step_index",
+    "agent_id",
+    "payer",
+    "reason",
+    "status",
+    "charged_usdc",
+    "creditable_usdc",
+    "opened_at",
+    "resolved_at",
+    "refund_tx",
+    "rating_tx",
+)
+
+
+def _newest(rows: list[dict[str, Any]], **where: Any) -> dict[str, Any] | None:
+    """`WHERE <where> ORDER BY id DESC LIMIT 1` — list order is `id` order."""
+    matching = [r for r in rows if all(r[column] == value for column, value in where.items())]
+    return matching[-1] if matching else None
+
+
+def _coalesce(*values: Any) -> Any:
+    """SQL COALESCE: the first value that is not NULL."""
+    return next((v for v in values if v is not None), None)
+
+
+class FakePool:
+    """Stands in for an asyncpg pool: records every statement and models the two
+    tables just well enough to answer the queries the store sends.
+
+    Rows are kept in plain lists, and list order IS the BIGSERIAL `id` order the
+    real queries sort by — so "the newest row" means the same thing here as it
+    does in Postgres, and an implementation that started UPDATEing rows instead
+    of appending them would visibly change `disputes`.
+
+    Statements are dispatched by EQUALITY against the module's own constants,
+    never by sniffing for a substring. Three of them contain both `INSERT` and
+    `dispute_events`, so substring matching would route a status transition into
+    the opening branch and the tests would keep passing while asserting the
+    wrong thing; equality means a statement this fake has not been taught fails
+    loudly here instead.
+
+    Every call awaits before it touches a row. That models what a pool really
+    is — each statement atomic, statements interleaved — and it is what lets the
+    concurrent test below tell a guard that lives in the index from one that
+    lives in Python.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.settlements: list[dict[str, Any]] = []
+        self.disputes: list[dict[str, Any]] = []
+        self.closed = 0
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        self.statements.append(sql)
+        await asyncio.sleep(0)
+        if sql == dispute_store._INSERT_SETTLEMENT_SQL:
+            self.settlements.append(dict(zip(_SETTLEMENT_COLUMNS, args, strict=True)))
+            return "INSERT 0 1"
+        assert sql in (
+            dispute_store._CREATE_SETTLEMENTS_SQL,
+            dispute_store._CREATE_DISPUTES_SQL,
+        ), f"unexpected statement: {sql}"
+        return "CREATE TABLE"
+
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+        self.statements.append(sql)
+        await asyncio.sleep(0)
+        if sql == dispute_store._SELECT_SETTLEMENT_BY_JOB_SQL:
+            return _newest(self.settlements, job_id_hex=args[0])
+        if sql == dispute_store._SELECT_SETTLEMENT_BY_TASK_SQL:
+            return _newest(self.settlements, task_id=args[0])
+        if sql == dispute_store._INSERT_DISPUTE_SQL:
+            return self._open_dispute(args)
+        if sql == dispute_store._APPEND_STATUS_SQL:
+            return self._append_status(args)
+        if sql == dispute_store._SELECT_DISPUTE_SQL:
+            return _newest(self.disputes, dispute_id=args[0])
+        assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
+        return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
+
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        self.statements.append(sql)
+        await asyncio.sleep(0)
+        assert sql == dispute_store._SELECT_DISPUTES_FOR_TASK_SQL, f"unexpected statement: {sql}"
+        # DISTINCT ON (dispute_id) ... ORDER BY dispute_id, id DESC keeps the
+        # newest row per dispute; the outer ORDER BY re-sorts them for the
+        # reader. A dict comprehension keeps the LAST occurrence, which is the
+        # newest row.
+        newest = {r["dispute_id"]: r for r in self.disputes if r["task_id"] == args[0]}
+        return sorted(newest.values(), key=lambda r: (r["opened_at"], r["step_index"]))
+
+    def _open_dispute(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+        row = dict(zip(_DISPUTE_COLUMNS, args, strict=True)) | {"opening": True}
+        # dispute_events_one_per_step_idx: UNIQUE (job_id_hex, step_index) WHERE
+        # opening. ON CONFLICT ... DO NOTHING writes nothing and returns nothing.
+        if any(
+            r["opening"] and r["job_id_hex"] == row["job_id_hex"] and r["step_index"] == row["step_index"]
+            for r in self.disputes
+        ):
+            return None
+        self.disputes.append(row)
+        return {"dispute_id": row["dispute_id"]}
+
+    def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+        dispute_id, status, refund_tx, rating_tx, resolved_at, now = args
+        latest = _newest(self.disputes, dispute_id=dispute_id)
+        # `INSERT ... SELECT FROM latest`: with no history there is nothing to
+        # select, so nothing is written and nothing comes back.
+        if latest is None:
+            return None
+        row = latest | {
+            "status": status,
+            "resolved_at": _coalesce(resolved_at, latest["resolved_at"], now),
+            "refund_tx": _coalesce(refund_tx, latest["refund_tx"]),
+            "rating_tx": _coalesce(rating_tx, latest["rating_tx"]),
+            "opening": False,
+        }
+        self.disputes.append(row)
+        return row
+
+    async def close(self) -> None:
+        self.closed += 1
+
+    @property
+    def writes(self) -> list[str]:
+        return [s for s in self.statements if "INSERT" in s or "UPDATE" in s or "DELETE" in s]
+
+
+def _pg(pool: FakePool) -> dispute_store.PostgresDisputeStore:
+    return dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db", pool=pool)
