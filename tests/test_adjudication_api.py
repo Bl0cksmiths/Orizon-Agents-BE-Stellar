@@ -597,8 +597,11 @@ def test_an_oversized_dispute_id_never_reaches_the_service(client, adjudicating,
     calls_reject = rejects_with(monkeypatch, record(status="rejected"))
     oversized = path.replace(DISPUTE_ID, "d" * 65)
 
-    r = client.post(oversized, json={}, headers=AUTH)
+    # A valid note, so on the reject route the 422 can only be the path: the
+    # empty body would be refused on its own now, and would pin nothing here.
+    r = client.post(oversized, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == 422
+    assert [e["loc"] for e in r.json()["detail"]] == [["path", "dispute_id"]]
     assert calls_uphold == []
     assert calls_reject == []
