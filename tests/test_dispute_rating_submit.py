@@ -25,9 +25,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import pytest
 from stellar_sdk import Keypair
 
 import app.stellar.client as sc
+from app.config import settings
 from app.services import reputation_svc
 from app.services.dispute_rating import DISPUTE_RATING, dispute_job_id, submit_dispute_rating
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
@@ -234,3 +236,66 @@ def test_an_unrecognised_or_missing_status_is_a_timeout(monkeypatch) -> None:
 
     _fake_submit(monkeypatch, {"hash": "maybe_tx"})
     assert _rate().status == "TIMEOUT"
+
+
+def _refused(code: int) -> sc.ContractError:
+    """A submit the ledger refused at simulation, as the client raises it."""
+    return sc.ContractError(f"prepare failed: HostError: Error(Contract, #{code}) …", code)
+
+
+def test_a_replay_is_replay_with_no_hash(monkeypatch, caplog) -> None:
+    """The one refusal that can mean success: an earlier attempt under this
+    derived id landed. Refused at simulation, so no transaction and no hash —
+    and not FAILED, which would hide that the rating may be on-chain."""
+    _fake_submit(monkeypatch, _refused(7))
+
+    with caplog.at_level(logging.WARNING, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash, outcome.job_id_hex) == ("REPLAY", None, DERIVED)
+    msgs = [r.getMessage() for r in _records(caplog, logging.WARNING)]
+    assert any("Replay" in m and _names_every_fact(m) for m in msgs), f"a replay was not logged: {msgs}"
+
+
+def test_unauthorized_is_failed_and_named_as_a_scorer_misconfiguration(monkeypatch, caplog) -> None:
+    """The misconfiguration that once left a ledger at zero ratings in silence:
+    the line has to say it is the deployment, not the dispute, and name the
+    ledger and the fix."""
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CLEDGERUNDERTEST")
+    _fake_submit(monkeypatch, _refused(1))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash) == ("FAILED", None)
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "Unauthorized" in m
+        and "NOT the Scorer" in m
+        and "CLEDGERUNDERTEST" in m
+        and "set_scorer" in m
+        and "misconfiguration" in m
+        and _names_every_fact(m)
+        for m in msgs
+    ), f"Unauthorized was not logged as a scorer misconfiguration: {msgs}"
+
+
+@pytest.mark.parametrize(
+    ("code", "name"),
+    [(2, "NotFound"), (100, "OutOfRange"), (42, "contract error #42")],
+)
+def test_any_other_refusal_is_failed_and_logged_by_name(monkeypatch, caplog, code: int, name: str) -> None:
+    """Refused at simulation, so nothing was submitted — FAILED, not the unknown
+    bucket — and logged by the contract's own name, never blamed on the signer."""
+    _fake_submit(monkeypatch, _refused(code))
+
+    with caplog.at_level(logging.WARNING, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash, outcome.job_id_hex) == ("FAILED", None, DERIVED)
+    records = _records(caplog, logging.ERROR)
+    assert any(name in r.getMessage() and _names_every_fact(r.getMessage()) for r in records), (
+        f"the refusal was not logged by name: {[r.getMessage() for r in records]}"
+    )
+    assert not any("Scorer" in r.getMessage() for r in caplog.records), "only Unauthorized is the scorer's fault"
+    assert _records(caplog, logging.WARNING) == [], "only Replay is a warning"
