@@ -385,9 +385,10 @@ rating by the length of that read plus a full TTL.
 
 **Why not bypass the cache for the disputed agent.** The cache exists because
 the dashboard reads the whole registry's reputation on a 15-second poll and
-every read is a Soroban simulation. A bypass would have to be remembered per agent and
-for how long, which is a second cache with worse semantics. Invalidating the
-one key is the change of state the cache already needed a word for.
+every read is a Soroban simulation. A bypass would have to be remembered per
+agent and for how long, which is a second cache with worse semantics.
+Invalidating the one key is the change of state the cache already needed a
+word for.
 
 ## Consequences
 
@@ -410,9 +411,9 @@ scale runs from that 20 — which a billed step can earn too, when it returned a
 empty result or an external reply with nothing checkable in it — through 40–95
 for work it can check (base 70, moved by the artifact and the critic's pass,
 with a baked kit artifact fixed at 95), so at equal weight the two ratings on a
-disputed step average between **15 and 52.5**. Both `count` and `disputed` go up by one, so
-`dispute_rate_bps = disputed × 10 000 / count` includes the dispute rating in
-its own denominator.
+disputed step average between **15 and 52.5**. Both `count` and `disputed` go
+up by one, so `dispute_rate_bps = disputed × 10 000 / count` includes the
+dispute rating in its own denominator.
 
 **One case in which the dispute rating is the step's only rating — and it is
 not new.** The settler keys every automatic rating on the job's own id, so when
