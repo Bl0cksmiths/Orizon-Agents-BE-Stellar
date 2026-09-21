@@ -807,6 +807,39 @@ class PostgresDisputeStore:
             )
         raise DuplicateDisputeError(existing)
 
+    async def append_status(
+        self,
+        dispute_id: str,
+        status: DisputeStatus,
+        *,
+        refund_tx: str | None = None,
+        rating_tx: str | None = None,
+        resolved_at: float | None = None,
+    ) -> DisputeRecord:
+        """Append the transition and return the dispute as it now stands.
+
+        Returning the updated record is what lets 4.03 and 4.04 credit or rate a
+        dispute without reading it back, so the value they act on is the row
+        that was written rather than a second read that a concurrent transition
+        could have moved underneath them.
+
+        KeyError for an unknown id, matching InMemoryDisputeStore: the INSERT
+        selects from the dispute's own history, so no history means no row
+        written and nothing returned. A dispute id that does not exist is a bug
+        in the caller, not a state this store can be in.
+        """
+        pool = await self._ready_pool()
+        # Our own clock, in epoch seconds, for the reason every other timestamp
+        # here is: the record handed back must be the row that was stored, not a
+        # value the database rendered in whatever timezone it happens to run in.
+        # It is only used when neither the caller nor the record already has a
+        # resolution time — see COALESCE in _APPEND_STATUS_SQL.
+        now = time.time()
+        row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, resolved_at, now)
+        if row is None:
+            raise KeyError(dispute_id)
+        return self._to_dispute(row)
+
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
         # the pool that is being torn down, and so a second close is a no-op.
