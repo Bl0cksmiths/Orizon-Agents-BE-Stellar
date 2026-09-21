@@ -1031,7 +1031,9 @@ class InMemoryDisputeStore:
         # in `crediting` without one is repaired rather than stranded — the
         # rule _RELEASE_REFUND_CLAIM_SQL follows, and for the same reason.
         self._refund_claims.pop(dispute_id, None)
-        released = replace(current, status="upheld", updated_at=time.time())
+        # Released only when nothing landed, so the hash of the attempt that
+        # failed must not follow the dispute into its next one.
+        released = replace(current, status="upheld", updated_at=time.time(), refund_tx=None)
         self._disputes[dispute_id] = released
         return released
 
