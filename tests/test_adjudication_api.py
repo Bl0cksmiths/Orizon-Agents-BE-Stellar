@@ -430,6 +430,10 @@ REFUSALS = [
     # the adjudicator as a 504 rather than a 500 because the platform knows
     # exactly what happened and is saying so.
     ("refund_unconfirmed", 504),
+    # A rejection note that cleaning left empty — whitespace, or nothing but
+    # control characters. The edge cannot see that; only the service cleans,
+    # so only the service can refuse it.
+    ("rejection_reason_required", 422),
 ]
 
 
