@@ -612,14 +612,18 @@ development and the test suite need no database; it is not a deployment. It
 says so once at startup, and it logs a warning naming any record it drops, so a
 window that can no longer be honoured is never silent.
 
-One read is weaker than the records behind it. `GET /api/tasks/{task_id}/disputes`
-is gated by the task's read token, and those tokens live in memory with the task
-state, not in Postgres — so after a restart that listing answers as though the
-task were unknown, even though the settlement and its disputes survived. Nothing
-a buyer needs is lost: opening a dispute is gated by their wallet signature and
-never by the task token, and `GET /api/disputes/{dispute_id}` keeps working. The
-per-task view is a convenience for the console, and it is the console that holds
-the token.
+One read is weaker than the records behind it. With `TASK_AUTH_REQUIRED` on,
+`GET /api/tasks/{task_id}/disputes` is gated by the task's read token, and
+those tokens live in memory with the task state, not in Postgres — so after a
+restart that read answers as though the task were unknown, even though the
+settlement and its disputes survived. A dispute already opened is unaffected:
+`GET /api/disputes/{dispute_id}` keeps working, and opening one is gated by the
+payer's wallet signature, never by the task token. A **first** dispute is not
+unaffected, because this read is where the console gets the job id to ask for a
+challenge; after a restart under enforcement, the buyer's console cannot start
+one, and an operator can read the same view with the API key. With enforcement
+off, the default, none of this applies: the read is served from the durable
+records and survives a restart with them.
 
 A settlement is recorded after the charge and the seal have landed, so it can
 never fail the workflow. If it cannot be written, the workflow is paid and
