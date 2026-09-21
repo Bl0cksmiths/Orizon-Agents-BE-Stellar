@@ -32,6 +32,7 @@ import base64
 import itertools
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -469,3 +470,33 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
 
     assert len(settler.transfers) == 1
     assert len(ledger.submits) == 3 and ledger.replays == 2
+
+
+# ── when the rating step itself breaks ──────────────────────────
+
+
+def test_a_rating_that_cannot_be_formed_is_a_records_problem_not_a_failed_refund(
+    ledger, settler, invalidated, caplog
+) -> None:
+    """A settlement whose job id is not the 16 bytes the chain seals cannot
+    derive a dispute id, so `submit_dispute_rating` raises before anything is
+    submitted. By then the buyer has been paid, so it is answered with the
+    paid record — not an error that would call the refund a failure — and the
+    ERROR says a retry will not mend it, rather than inviting one."""
+    dispute = open_dispute()
+    short = JOB[:-2]  # 15 bytes
+    store = dispute_store.get_dispute_store()
+    settlement = asyncio.run(store.get_settlement(JOB))
+    assert settlement is not None
+    asyncio.run(store.record_settlement(replace(settlement, job_id_hex=short)))
+    store._disputes[dispute.id] = replace(dispute, job_id_hex=short)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        paid = uphold(dispute.id)
+
+    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.rating_tx is None
+    assert ledger.submits == [] and invalidated == []
+    (logged,) = svc_errors(caplog)
+    assert "could not be formed" in logged and "will not mend" in logged
+    assert "derived=underivable" in logged and dispute.id in logged
