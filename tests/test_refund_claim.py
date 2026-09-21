@@ -277,3 +277,142 @@ def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeSto
     assert upheld.resolved_at == 1_700_009_999.0
     assert claimed is not None and claimed.resolved_at == 1_700_009_999.0
     assert released is not None and released.resolved_at == 1_700_009_999.0
+
+
+# ── the race the mutex exists for ─────────────────────────────────────────
+
+
+def test_two_concurrent_claims_produce_exactly_one_claim(store: DisputeStore) -> None:
+    """The race, run as a race.
+
+    Both calls are in flight at once. Against the fake pool each statement
+    takes its snapshot, yields, and only then writes — which is what a real
+    statement does, and it is why the status BOTH claimants read says `upheld`.
+    Nothing except the PRIMARY KEY can separate them at that point, so a store
+    that decided on the status alone would pay this buyer twice and fail here.
+    """
+
+    async def go() -> tuple[list[DisputeRecord | None], list[str], DisputeRecord | None]:
+        upheld = await _upheld(store)
+        raced = await asyncio.gather(store.claim_refund(upheld.id), store.claim_refund(upheld.id))
+        return list(raced), await _queued(store), await store.get_dispute(upheld.id)
+
+    raced, queue, stored = asyncio.run(go())
+
+    assert len([result for result in raced if result is not None]) == 1
+    assert len([result for result in raced if result is None]) == 1
+    assert queue == ["dsp_0001"]
+    assert stored is not None and stored.status == "crediting"
+
+
+def test_the_losing_claimant_writes_no_row() -> None:
+    """The loser's INSERT selects through `claim`, which returned nothing, so
+    it appends no event row either.
+
+    One `crediting` transition in the trail rather than a pair — two would read
+    to anyone answering a chargeback as two payouts, which is precisely the
+    thing that must not have happened.
+    """
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> list[DisputeRecord | None]:
+        upheld = await _upheld(store)
+        return list(await asyncio.gather(store.claim_refund(upheld.id), store.claim_refund(upheld.id)))
+
+    raced = asyncio.run(go())
+
+    assert len([result for result in raced if result is not None]) == 1
+    assert [row["status"] for row in pool.disputes] == ["open", "upheld", "crediting"]
+    assert list(pool.claims) == ["dsp_0001"]
+
+
+# ── atomicity, on the shape of the call ───────────────────────────────────
+
+
+def test_a_claim_is_one_statement_and_so_is_a_release() -> None:
+    """Asserted structurally, because behaviour cannot show it.
+
+    A single statement is its own transaction: the claim row and the
+    `crediting` row are written together or not at all. Two statements have a
+    window between them, and a process that died in that window — Render spins
+    a free instance down whenever it idles — would leave a claim held over a
+    dispute still reading `upheld`. No later claim can pay that buyer, because
+    the mutex refuses every claimant and a release refuses a dispute that is
+    not `crediting`. There is no way back from it, so the test is on the shape
+    of the call rather than only on what it returns.
+    """
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[list[str], list[str]]:
+        upheld = await _upheld(store)
+        mark = len(pool.statements)
+        await store.claim_refund(upheld.id)
+        claim = pool.statements[mark:]
+        mark = len(pool.statements)
+        await store.release_refund_claim(upheld.id)
+        return claim, pool.statements[mark:]
+
+    claim, release = asyncio.run(go())
+
+    assert claim == [dispute_store._CLAIM_REFUND_SQL]
+    assert release == [dispute_store._RELEASE_REFUND_CLAIM_SQL]
+
+
+def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
+    """The same argument one step later. A DELETE issued after the transition
+    is a statement that can fail to run, and `refund_claims` would then hold a
+    lock over a dispute that has already been paid — no money lost, but a
+    reconciliation queue listing finished work is one nobody reads."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> list[str]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        mark = len(pool.statements)
+        await store.append_status(upheld.id, "credited", refund_tx="tx_refund")
+        return pool.statements[mark:]
+
+    assert asyncio.run(go()) == [dispute_store._APPEND_STATUS_SQL]
+    assert pool.claims == {}
+
+
+def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice() -> None:
+    """The one state the mutex cannot repair, asserted so that it reads as a
+    decision rather than an accident.
+
+    Nothing in this store produces it — every write keeps the claim and the
+    status together in one statement — but a row inserted from outside, or a
+    dispute dragged back to `upheld` by hand, would leave a claim held over a
+    dispute that reads payable. The claim wins and the refund is REFUSED, which
+    is the direction that fails safe: the alternative is a second transfer out
+    of the platform wallet. A release cannot clear it either, because dropping
+    a claim over a dispute that is not `crediting` is exactly the move that
+    would let a second payer in while the first is still signing.
+
+    What makes that liveable is that the row is in the reconciliation queue,
+    where an operator can see it — and the way out is the only safe one there
+    is: decide from the chain whether the buyer was paid, and record that
+    decision, which drops the claim with it.
+    """
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, list[str]]:
+        upheld = await _upheld(store)
+        pool.claims[upheld.id] = 1_700_000_500.0
+        blocked = await store.claim_refund(upheld.id)
+        return blocked, await store.release_refund_claim(upheld.id), await _queued(store)
+
+    blocked, released, queue = asyncio.run(go())
+
+    assert blocked is None
+    assert released is None
+    assert queue == ["dsp_0001"]
+
+    resolved = asyncio.run(store.append_status("dsp_0001", "credited", refund_tx="tx_found_on_chain"))
+
+    assert resolved.status == "credited"
+    assert asyncio.run(_queued(store)) == []
