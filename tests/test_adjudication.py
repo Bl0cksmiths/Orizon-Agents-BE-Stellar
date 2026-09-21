@@ -626,27 +626,40 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     assert still_rejected is not None and still_rejected.status == "rejected"
 
 
-def test_a_rejection_note_never_reaches_the_log(monkeypatch, caplog) -> None:
-    """The convention `open_dispute` set in 4.02: free text about one complaint
-    goes on the record, never into the operator's log viewer. The line says a
-    rationale was given and who the decision concerns — reproducing the text
-    would put unbounded per-complaint prose into a stream read for incidents.
+def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
+    """The convention `open_dispute` set in 4.02, kept now that the reason is
+    mandatory and written for the buyer: free text about one complaint goes on
+    the record — and from there onto the buyer's receipt — never into the
+    operator's log viewer. The line says an explanation was recorded and whom
+    the decision concerns; reproducing the text would put unbounded
+    per-complaint prose into a stream read for incidents.
 
-    The rationale is not lost by this: it is on the record, where whoever
-    adjudicates reads it. Out of the log and onto the record is one decision
-    with two halves, and this test pins the half the log makes."""
+    The reason is stored exactly as cleaning leaves it — here, the ragged
+    edges an adjudicator's form leaves are trimmed and nothing else is — and
+    a refused rejection logs its code and the dispute, never what was sent."""
     dispute = a_dispute()
+    reason = "the SEO brief was delivered in full"
 
     with caplog.at_level(logging.INFO, logger=SVC_LOGGER):
-        rejected = asyncio.run(dispute_svc.reject(dispute.id, note="the SEO brief was delivered in full"))
+        rejected = asyncio.run(dispute_svc.reject(dispute.id, note=f"  {reason}\n"))
 
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "rejected" in r.getMessage()]
     assert len(logged) == 1
-    assert "the SEO brief was delivered in full" not in logged[0]
+    assert reason not in logged[0]
     assert "noted=yes" in logged[0]
     assert dispute.id in logged[0] and JOB in logged[0] and dispute.payer in logged[0]
-    # ...and it is on the record, which is the other half of the same decision.
-    assert rejected.note == "the SEO brief was delivered in full"
+    # ...and it is on the record, cleaned and otherwise verbatim, which is the
+    # other half of the same decision.
+    assert rejected.note == reason
+
+    caplog.clear()
+    other = a_dispute(step=1)
+    with caplog.at_level(logging.INFO, logger=SVC_LOGGER), pytest.raises(DisputeError):
+        asyncio.run(dispute_svc.reject(other.id, note=" \t\x1b\x07 "))
+
+    (refusal,) = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "refused" in r.getMessage()]
+    assert "rejection_reason_required" in refusal and other.id in refusal
+    assert "\x1b" not in refusal and "\x07" not in refusal
 
 
 @pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
