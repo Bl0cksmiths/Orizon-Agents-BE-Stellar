@@ -29,6 +29,26 @@ def clean_cache():
     cache.clear()
 
 
+def _parked(value: object):
+    """A producer that parks mid-flight until released.
+
+    `started` is set once the read is in progress and `release` lets it
+    return, so a test can invalidate at an exact point inside the flight.
+    Must be built inside the running loop that uses it.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def producer():
+        calls["n"] += 1
+        started.set()
+        await release.wait()
+        return value
+
+    return producer, started, release, calls
+
+
 def _returning(value: object):
     calls = {"n": 0}
 
@@ -50,5 +70,26 @@ def test_invalidate_drops_the_stored_value():
         return await cache.get_or_set("k", 60.0, fresh)
 
     # Well inside the 60 s TTL, so only the invalidation explains the re-read.
+    assert asyncio.run(run()) == "post-dispute"
+    assert fresh_calls["n"] == 1
+
+
+def test_a_read_in_flight_at_invalidation_does_not_write_back():
+    """The stale write-back: the read started before the rating landed and
+    finished after the key was invalidated. Letting it land would restore the
+    pre-dispute score and undo the invalidation without anyone noticing."""
+    fresh, fresh_calls = _returning("post-dispute")
+
+    async def run():
+        stale, started, release, _ = _parked("pre-dispute")
+        caller = asyncio.create_task(cache.get_or_set("k", 60.0, stale))
+        await started.wait()  # the read is mid-flight...
+        cache.invalidate("k")  # ...when the rating lands
+        release.set()
+        assert await caller == "pre-dispute"
+        # The flight has finished; had it written back, it would be here.
+        assert "k" not in cache._store
+        return await cache.get_or_set("k", 60.0, fresh)
+
     assert asyncio.run(run()) == "post-dispute"
     assert fresh_calls["n"] == 1
