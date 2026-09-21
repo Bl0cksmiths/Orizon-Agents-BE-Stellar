@@ -39,7 +39,8 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from test_dispute_store import FakePool, _pg, a_dispute
+from test_dispute_durability import process
+from test_dispute_store import FakePool, _pg, a_dispute, a_settlement
 
 from app.services import dispute_store
 from app.services.dispute_store import DisputeRecord, DisputeStatus, DisputeStore, InMemoryDisputeStore
@@ -416,3 +417,120 @@ def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice() ->
 
     assert resolved.status == "credited"
     assert asyncio.run(_queued(store)) == []
+
+
+# ── across a restart ──────────────────────────────────────────────────────
+
+
+def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure this table is durable for.
+
+    A refund is claimed, the transfer goes out, and the instance is spun down
+    before anything comes back — Render does that to a free service whenever it
+    idles, and a submitted transaction may still land. The next process must
+    not be able to claim that dispute: it cannot know whether the money moved,
+    and the one thing it must not do is send it again.
+
+    Modelled the way tests/test_dispute_durability.py models a restart. The
+    DATABASE survives the boundary; everything the process held — the store
+    object, its pool, the singleton — does not.
+    """
+    database = FakePool()
+
+    with process(monkeypatch, database) as store:
+        asyncio.run(store.record_settlement(a_settlement()))
+        opened = asyncio.run(store.open_dispute(a_dispute()))
+        asyncio.run(store.append_status(opened.id, "upheld"))
+        claimed = asyncio.run(store.claim_refund(opened.id))
+        assert claimed is not None and claimed.status == "crediting"
+        claimed_at = database.claims[opened.id]
+
+    assert dispute_store._store is None
+    assert database.closed == 1
+
+    with process(monkeypatch, database) as store:
+        restored = asyncio.run(store.get_dispute(opened.id))
+        assert restored is not None and restored.status == "crediting"
+        # Still blocked: the mutex came back held, so this process refuses to
+        # pay a buyer the last one may already have paid.
+        assert asyncio.run(store.claim_refund(opened.id)) is None
+        # And still visible, with the moment it was taken — which is how an
+        # operator knows how long this buyer has been waiting on it.
+        queue = asyncio.run(store.list_refund_claims())
+        assert [claim.dispute_id for claim in queue] == [opened.id]
+        assert queue[0].claimed_at == claimed_at
+
+
+def test_a_stuck_payout_can_still_be_released_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blocked is not stranded.
+
+    Once a human has established that the transfer definitively failed, the
+    dispute goes back to `upheld` in a later process exactly as it would have
+    in the one that claimed it — and the buyer, who is still owed, can be paid.
+    """
+    database = FakePool()
+
+    with process(monkeypatch, database) as store:
+        opened = asyncio.run(store.open_dispute(a_dispute()))
+        asyncio.run(store.append_status(opened.id, "upheld"))
+        assert asyncio.run(store.claim_refund(opened.id)) is not None
+
+    with process(monkeypatch, database) as store:
+        released = asyncio.run(store.release_refund_claim(opened.id))
+        assert released is not None and released.status == "upheld"
+        assert asyncio.run(store.list_refund_claims()) == ()
+        reclaimed = asyncio.run(store.claim_refund(opened.id))
+        assert reclaimed is not None and reclaimed.status == "crediting"
+
+
+# ── the two stores, side by side ──────────────────────────────────────────
+
+
+async def _payout_trace(store: DisputeStore) -> list[tuple[str, str | None, tuple[str, ...]]]:
+    """One dispute through every move a payout can make.
+
+    Each step records what the call answered and what the reconciliation queue
+    held afterwards, so two implementations can be compared on the whole path
+    rather than one assertion at a time.
+    """
+    upheld = await _upheld(store)
+    trace: list[tuple[str, str | None, tuple[str, ...]]] = []
+
+    async def note(label: str, record: DisputeRecord | None) -> None:
+        held = await store.list_refund_claims()
+        trace.append((label, None if record is None else record.status, tuple(c.dispute_id for c in held)))
+
+    await note("upheld", upheld)
+    await note("claim", await store.claim_refund(upheld.id))
+    await note("claim again", await store.claim_refund(upheld.id))
+    await note("release", await store.release_refund_claim(upheld.id))
+    await note("release again", await store.release_refund_claim(upheld.id))
+    await note("reclaim", await store.claim_refund(upheld.id))
+    await note("credit", await store.append_status(upheld.id, "credited", refund_tx="tx_refund"))
+    await note("claim after credit", await store.claim_refund(upheld.id))
+    return trace
+
+
+def test_the_two_stores_take_the_same_path_through_a_payout() -> None:
+    """The tests above assert each rule on both stores; this one asserts they
+    agree STEP BY STEP, including on what the queue holds in between.
+
+    That is where a store which inferred the mutex from the status instead of
+    keeping one would drift without failing anything else — and the expected
+    trace is written out rather than only compared, so two stores agreeing on
+    the wrong answer fails as loudly as two that disagree.
+    """
+    in_memory = asyncio.run(_payout_trace(InMemoryDisputeStore()))
+    postgres = asyncio.run(_payout_trace(_pg(FakePool())))
+
+    assert in_memory == postgres
+    assert in_memory == [
+        ("upheld", "upheld", ()),
+        ("claim", "crediting", ("dsp_0001",)),
+        ("claim again", None, ("dsp_0001",)),
+        ("release", "upheld", ()),
+        ("release again", None, ()),
+        ("reclaim", "crediting", ("dsp_0001",)),
+        ("credit", "credited", ()),
+        ("claim after credit", None, ()),
+    ]
