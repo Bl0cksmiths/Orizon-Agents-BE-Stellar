@@ -252,3 +252,71 @@ exactly — the `credited` branch still returns above the claim, so it can never
 reach the transfer — and adds the rating to it. An operator whose dispute
 shows no `rating_tx` retries by upholding again, and the worst that retry can
 do is be told the rating already landed.
+
+### D4 — The replay guard is the idempotency
+
+The refund path needed a durable mutex — `refund_claims`, taken before anything
+is signed (ADR 0008 D2) — because the chain cannot stop a second transfer. The
+asset SAC will move the same amount to the same buyer as many times as it is
+asked, so paying exactly once had to be enforced here, off-chain, and a
+timed-out transfer could never be retried.
+
+**Ratings do not need one.** Once the derived id is unique per dispute (D1),
+the ledger's own replay guard refuses a second rating for it, at simulation,
+before a transaction exists (Context 3). The chain is the mutex, and it is a
+better one than a table: it cannot be released by hand, it cannot drift from
+what actually landed, and it holds across every process and every deployment
+that signs as the Scorer. So a rating is **always safe to retry**, including
+after a timeout — the exact case in which a refund never is. A retry either
+lands, because the first attempt never did, or is refused as a replay, because
+it did. The card's *"one reputation consequence per dispute"* is enforced by
+the contract, not by this service.
+
+That makes `Replay` the one ledger refusal that can mean success, and
+`dispute_rating.RatingStatus` keeps it apart from `FAILED` for that reason.
+What it means for a given dispute turns on that dispute's own history, which
+`submit_dispute_rating` does not hold and does not guess at; `uphold` decides:
+
+| outcome | what the chain said | what `uphold` does |
+| --- | --- | --- |
+| `SUCCESS` | landed, with a hash | records it as `rating_tx`, invalidates the agent's cached score (D5), traces it on the workflow |
+| `TIMEOUT` | submitted, unconfirmed — may still land | records the in-flight hash as `rating_tx` when there is one; the next uphold settles it |
+| `FAILED` | refused or failed, nothing written | records nothing; the next uphold retries |
+| `REPLAY`, `rating_tx` on record | an earlier attempt of ours landed | keeps the recorded hash, invalidates the cached score |
+| `REPLAY`, nothing on record | a rating under this id that this dispute has no record of writing | **a collision** — logged at ERROR, recorded as nothing, never reported as resolved |
+
+**The collision rule is deliberately the loud one.** A `Replay` with no prior
+attempt on record could be one of two things. It could be a genuine collision
+— a rating under this agent and this derived id that some other write put
+there — which is unreachable by chance and therefore means something is wrong
+that a person has to look at. Or it could be **our own attempt whose hash we
+never recorded**: a submit that timed out without returning a hash, a process
+that died between submitting and writing the record, a store that was down at
+the moment it was written. From inside the service those two are
+indistinguishable. Both are answered as a collision, and the error line tells
+the operator which facts decide it.
+
+Failing loud is the right direction for that ambiguity, and the asymmetry is
+the same one ADR 0008 D3 turned on. Read an unrecorded attempt of our own as a
+collision, and an operator spends a few minutes finding the rating on-chain by
+its derived id and recording its hash — the rating was never missing, only its
+receipt. Read a real collision as our own attempt, and a dispute is reported as
+rated when its rating was never written: the agent keeps a clean record, the
+`disputed` counter never moves, and nothing anywhere says so. That is exactly
+the silent failure the card's last acceptance criterion forbids — *"rather than
+swallowing the failure and reporting the dispute as fully resolved"*. A loud
+wrong answer is a support ticket; a quiet wrong answer is a missing fact on a
+public ledger that nobody will ever go looking for.
+
+**Why not take a claim, as the refund does.** It would buy nothing the guard
+does not already give, and it would bring the refund path's worst failure mode
+with it: a lease that outlives the process that took it and has to be
+reconciled by hand. A rating has no state in which a retry is dangerous, so it
+has no need of a lock that makes retries impossible.
+
+**Why not check the ledger before submitting.** The contract exposes no read
+for a single `Rated` key — its views are `rep_state`, `avg_bps`, `rep_bps`,
+`dispute_rate_bps` and `payer_weight` — and a check-then-submit would be a
+read-then-write in any case, deciding on a state a concurrent submit could
+change. Submitting and letting the guard answer is both the only way to ask
+and the atomic one.
