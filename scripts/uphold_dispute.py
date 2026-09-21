@@ -744,6 +744,34 @@ def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     return EXIT_RATING_COLLISION
 
 
+def rating_unrecorded(dispute: DisputeRecord, tx_hash: str, rating_id: str) -> int:
+    """The block for a rating that LANDED while the write recording it failed.
+
+    Both transactions are on-chain, so the evidence exists — but the dispute
+    does not carry the rating's hash, and that record is what the API serves
+    and what the next run judges a replay against. Left alone, a re-run would
+    be refused as a Replay with no attempt on record and report this dispute's
+    own rating as a COLLISION. So it exits on the catch-all, the way a
+    `credited` dispute with no refund hash does, and prints the one write that
+    closes it before anything is re-run.
+    """
+    say()
+    say("  " + "#" * 74)
+    say("  #  THE RATING LANDED — BUT THE DISPUTE DOES NOT RECORD IT.")
+    say("  #  RECORD IT BEFORE ANY RE-RUN, OR THE RE-RUN WILL REPORT A COLLISION.")
+    say("  " + "#" * 74)
+    say()
+    say(f"  rating tx: {tx_hash}")
+    say(f"  evidence:  {expert_url('tx', tx_hash)}")
+    say(f"  rating id: {rating_id}")
+    say()
+    say("  The ledger confirmed the rating; the store write that records it on the dispute")
+    say("  failed, and the log lines above name why. Close it by recording what landed:")
+    say(f"    append_status({dispute.id!r}, 'credited', rating_tx={tx_hash!r})")
+    say()
+    return EXIT_UNEXPECTED
+
+
 async def execute(dispute_id: str, amount: float) -> int:
     """Uphold the dispute, pay the credit, and report the verdict from the store.
 
