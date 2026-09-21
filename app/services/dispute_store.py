@@ -1004,7 +1004,9 @@ class InMemoryDisputeStore:
         # _CLAIM_REFUND_SQL's $2 does.
         now = time.time()
         self._refund_claims[dispute_id] = now
-        claimed = replace(current, status="crediting", updated_at=now)
+        # No refund hash on a claim: this payout has no transaction yet, and the
+        # Postgres statement clears it the same way (see _APPEND_UNRESOLVED_ROW).
+        claimed = replace(current, status="crediting", updated_at=now, refund_tx=None)
         self._disputes[dispute_id] = claimed
         return claimed
 
