@@ -1226,6 +1226,34 @@ def test_a_live_run_prints_how_the_agents_dispute_rate_moved(
     assert "moved:            +1666 bps" in out
 
 
+@pytest.mark.parametrize(
+    "unreadable",
+    [RuntimeError("rpc down"), rep(0, 0, degraded=True)],
+    ids=["raises", "degraded-prior"],
+)
+def test_a_reputation_read_that_fails_never_fails_the_run(
+    unreadable: reputation_svc.RepInfo | BaseException,
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    standing: StandingSeam,
+) -> None:
+    """Both reads fail — one raising, one answering with the degraded prior an
+    unreachable ledger produces — and the run still pays, rates and exits
+    clean: the transactions are the evidence, the rate is a view of their
+    effect. The prior is never printed as a rate, because a cold-start prior
+    would give the agent a clean record the ledger may contradict."""
+    standing.reads_as(unreadable, unreadable)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert "before this run:  could not be read" in out
+    assert "after this run:   could not be read" in out
+    assert "A read never fails this run" in out
+    assert "ON-CHAIN EVIDENCE" in out
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
