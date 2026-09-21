@@ -242,6 +242,10 @@ async def open_dispute(
       4. **The step** — it must exist on the settlement and have been delivered.
          A step that failed was never part of what the buyer paid for, so there
          is nothing to credit (`step_not_settled`, 409).
+      5. **Money actually moved** — the workflow charged something on-chain and
+         this step had a price (`nothing_was_charged`, 409). A credit is a real
+         transfer out of the platform wallet, so a dispute of a step nobody paid
+         for is a withdrawal request, not a remedy.
 
     Returns the stored `DisputeRecord` (status `open`). Writes nothing on-chain
     and touches no reputation: 4.03 pays the credit, 4.04 writes the rating.
@@ -276,6 +280,30 @@ async def open_dispute(
             "step_not_settled",
             409,
             f"step {step_index} produced no output, so nothing was charged for it",
+            job_id_hex,
+            step_index,
+        )
+
+    if settlement.settled_usdc <= 0:
+        # `settled_usdc` is what actually moved on-chain, not the plan's
+        # estimate: `charge` floors its total to dust, and a workflow whose
+        # transfer never landed leaves nothing to credit back. Judged on the
+        # settlement rather than the step because this is a fact about the
+        # payment, and the payment is one transfer for the whole workflow.
+        raise _refuse(
+            "nothing_was_charged",
+            409,
+            "this workflow settled without charging anything, so there is nothing to credit",
+            job_id_hex,
+            step_index,
+        )
+    if step.price_usdc <= 0:
+        # Same rule at step granularity, and the same code: a free step is not
+        # a cheap one to dispute, it is one with no charge to credit back.
+        raise _refuse(
+            "nothing_was_charged",
+            409,
+            f"step {step_index} was free, so there is nothing to credit",
             job_id_hex,
             step_index,
         )
