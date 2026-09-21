@@ -539,7 +539,7 @@ def preview_rating(dispute: DisputeRecord, step: SettlementStep | None) -> bool:
 
 
 def check_config() -> int:
-    """EXIT_OK when this process could actually sign a credit; a refusal otherwise.
+    """EXIT_OK when this process could sign a credit and write its rating; a refusal otherwise.
 
     Checked before the uphold call rather than left to the service, so an
     operator who forgot one environment variable learns it from a sentence
@@ -576,7 +576,7 @@ def check_config() -> int:
     return refuse(
         EXIT_NOT_CONFIGURED,
         "not_configured",
-        "this process cannot sign a credit. Missing:",
+        "this process cannot sign a credit and write its rating. Missing:",
         *(f"    - {name}" for name in missing),
         "Set them, re-run with --dry-run, and only then live. Turning the switch on beside a",
         "signing key and a SAC also makes API_KEY mandatory, on every network including testnet.",
