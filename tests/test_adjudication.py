@@ -355,6 +355,24 @@ def test_the_credited_amount_is_what_moved_when_the_d4_clamp_bites(monkeypatch) 
     assert credited.credited_usdc != credited.creditable_usdc
 
 
+@pytest.mark.parametrize(("answer", "code"), [(REJECTED, "refund_failed"), (LOST, "refund_unconfirmed")])
+def test_a_refund_that_did_not_land_records_no_credited_amount(monkeypatch, answer: dict[str, Any], code: str) -> None:
+    """None until credited. A FAILED transfer moved nothing, and a timed-out
+    one may or may not have — neither is an amount the buyer was paid, so the
+    record carries none rather than one that may be false. The timeout's
+    in-flight hash is recorded; its amount is the reconciler's to establish."""
+    dispute = a_dispute()
+    settler(monkeypatch, answer)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == code
+    stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert stored is not None and stored.status != "credited"
+    assert stored.credited_usdc is None
+
+
 # ── the acceptance criterion: a retry cannot double-credit ──────
 
 
