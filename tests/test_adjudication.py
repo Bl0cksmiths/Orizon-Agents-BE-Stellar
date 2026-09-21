@@ -313,6 +313,31 @@ def test_the_refund_is_claimed_before_anything_is_signed(monkeypatch) -> None:
     assert status_while_signing == ["crediting"]
 
 
+# ── the receipt: the amount that actually moved (story 4.06) ────
+
+
+def test_a_credit_records_the_amount_its_transfer_moved(monkeypatch) -> None:
+    """The receipt prints this number beside the refund hash, so it is read
+    off the transfer's own outcome and never recomputed beside it: whatever
+    `credit_refund` reports it moved is what the record says was credited.
+
+    And it survives the rating: that lands after the credit on a transition of
+    its own, which names no amount and must not blank this one."""
+    dispute = a_dispute()
+    assert dispute.credited_usdc is None  # nothing is credited by opening
+
+    async def _moved(claimed: DisputeRecord, amount_usdc: float) -> refund_svc.RefundOutcome:
+        return refund_svc.RefundOutcome("SUCCESS", "tx_credit", 0.0421)
+
+    monkeypatch.setattr(refund_svc, "credit_refund", _moved)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert credited.credited_usdc == 0.0421
+    assert credited.rating_tx == "tx_rating"  # rated afterwards, and the amount kept
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == credited
+
+
 # ── the acceptance criterion: a retry cannot double-credit ──────
 
 
