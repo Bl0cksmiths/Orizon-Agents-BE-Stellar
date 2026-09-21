@@ -165,3 +165,57 @@ One consequence follows and is accepted: **a buyer who no longer controls the
 wallet that paid cannot dispute.** There is no recovery path, because there is
 no account to recover into. That is the same trade permissionless payment
 already makes everywhere else in this system.
+
+### D3 — Settlement is recorded durably, once, at the moment it happens
+
+`app/services/dispute_store.py` records a `SettlementRecord` inside the
+settlement path, carrying everything a dispute is later judged against:
+
+| field | why it has to be written here |
+|---|---|
+| `payer` | a parameter of `_run`; nothing persisted it, and it is now the credential D2 verifies against |
+| `job_id_hex` | minted inside `_settle_onchain` as a local; it is the dispute key, the attestation key and the rating key |
+| `auth_id_hex` | ties the credit back to the escrow authorization the buyer signed |
+| `charge_tx`, `proof_tx` | the buyer's evidence that this workflow was paid and sealed |
+| `settled_usdc` | the amount that actually moved on-chain |
+| `steps` | per-step `price_usdc` and `delivered` — neither existed anywhere before |
+| `settled_at`, `window_closes_at` | there was no settlement timestamp at all, and D1 needs both |
+
+Two of those rows carry a decision rather than a fact.
+
+**`settled_usdc` is what moved, not what was planned.** `spent` accumulates
+`est_price_usdc` for delivered steps only, and the charge then floors its total
+to dust (`max(total_usdc, 0.000001)`). A credit computed from the plan's
+estimate could therefore exceed what the buyer ever paid — the platform
+refunding money it never took, out of its own wallet, on a workflow where half
+the steps never ran.
+
+**`delivered` is recorded per step** because "this step failed and was never
+charged" is a fact about settlement that nothing else preserves: the trace says
+it, and traces do not survive a restart. Without the flag, the rule that an
+undelivered step cannot be disputed would have nothing to evaluate a day later.
+
+The records are frozen dataclasses because a settlement record is **evidence,
+not state** — the only thing that ever changes about a dispute is its status,
+and that is appended through `append_status` rather than mutated in place. The
+step breakdown is one JSON column rather than a child table: it is only ever
+read whole, with the settlement it belongs to, so a join and a transaction
+would buy nothing.
+
+The store follows `binding_store.py` deliberately — same seam, same lazy driver
+import, same append-only shape, same `DATABASE_URL`-or-in-memory selection, and
+the same module-level singleton rather than an `@lru_cache`d resolver for the
+reason ADR 0003 D1 records. One pattern to learn, one set of failure modes.
+The in-memory fallback is bounded at 500 records and **logs a warning naming
+the record it dropped**, because a dispute that silently evaporates is worse
+than a feature that was never offered — and because the fallback is what local
+dev and the hermetic test suite run on, so the suite stays offline and the
+coverage gate is unaffected.
+
+A `DisputeRecord` freezes `charged_usdc` and `creditable_usdc` at opening time,
+under the policy in force then. `DISPUTE_CREDITED_FRACTION` is a tuning knob
+like the window length, and the same rule applies to it: changing it must not
+rewrite what a buyer was already shown. Its id is
+`dsp_` + `secrets.token_hex(8)` — unguessable, so a buyer can read their own
+dispute back without an account, which is the same trade the task read token
+makes and the reason `GET /api/disputes/{id}` needs no credential.
