@@ -93,3 +93,17 @@ The mechanism is settled and the money-moving core is prototyped + tested, so th
 id — now unblocked), 4.05/4.06 (FE dispute action + receipt). No contract
 redeploy required. Also feeds **5.06**: correct the Litepaper §6.1 claim that the
 settler key can be rotated (it cannot — write-once).
+
+> **Amended 2026-09-21 (story 4.02 / BLO-30).** R12's resolution is no longer
+> only a mechanism with a unit test behind it — it is in force on the path a
+> dispute actually takes. Settlement now records the payer, the job id, the
+> per-step charge and the window's closing time durably
+> (`app/services/dispute_store.py`), and a dispute is opened against that
+> record, so the pair `(agent_id, refund_svc.dispute_job_id(job_id))` is
+> computable from the stored dispute alone. Story 4.04 must write the dispute
+> rating under that derived id — `refund_svc.record_dispute_rating` does — and
+> not under the settled job id, which the ledger's replay guard rejects.
+> The window, the wallet-signature proof of payer and what settlement has to
+> remember are decided in
+> [`0007-dispute-window.md`](0007-dispute-window.md); the buyer- and
+> operator-facing version is [`docs/disputes.md`](../disputes.md).
