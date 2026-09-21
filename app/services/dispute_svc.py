@@ -920,7 +920,7 @@ async def _retry_rating(credited: DisputeRecord) -> DisputeRecord:
 
 
 async def uphold(dispute_id: str) -> DisputeRecord:
-    """Adjudicate a dispute in the BUYER's favour and pay the settler-funded credit.
+    """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
     THE ORDER BELOW IS THE STORY. Each step exists to close one way of paying a
     buyer twice, or of leaving one who is owed unable ever to be paid, so none
@@ -934,14 +934,16 @@ async def uphold(dispute_id: str) -> DisputeRecord:
          credits a buyer without passing through FastAPI at all, and a switch
          that only one door honours is not a switch.
       1. **Load it** — an id nobody issued is `unknown_dispute` (404).
-      2. **Already `credited`** — return the record UNCHANGED, with the
-         `refund_tx` it already carries, and sign nothing. This is the retry
-         acceptance criterion, and it sits ABOVE the claim on purpose: an
-         adjudicator who double-clicks, a proxy that retries a 502, a queue
-         that redelivers — all of them arrive here and none of them may depend
-         on `claim_refund` to be told no. (The claim would also say no, because
-         a credited dispute is not `upheld`. Two independent answers to "has
-         this already been paid" is the point, not redundancy to trim.)
+      2. **Already `credited`** — sign NO transfer: the refund is answered
+         with the `refund_tx` it already carries. This is the retry acceptance
+         criterion, and it sits ABOVE the claim on purpose: an adjudicator who
+         double-clicks, a proxy that retries a 502, a queue that redelivers —
+         all of them arrive here and none of them may depend on `claim_refund`
+         to be told no. (The claim would also say no, because a credited
+         dispute is not `upheld`. Two independent answers to "has this already
+         been paid" is the point, not redundancy to trim.) What IS retried,
+         every time, is the RATING and only the rating (step 9, D3) — safe
+         because the ledger's replay guard makes a second landing impossible.
       3. **`crediting`** — a transfer for this dispute is ON THE NETWORK and
          nobody knows whether it landed (D3). Refuse with `refund_in_flight`
          and never pay: the only two ways out are the network confirming it or
@@ -967,6 +969,18 @@ async def uphold(dispute_id: str) -> DisputeRecord:
          payable; TIMEOUT **keeps the claim**, leaves the dispute `crediting`
          with the in-flight hash recorded, logs ERROR and refuses. Never a
          retry, never a release (D3).
+      9. **Rate the agent** (story 4.04) — only after the credit has landed
+         AND been recorded, so no rating ever exists for a dispute the buyer
+         was not paid for. See `_rate_credited` for its five outcomes. A
+         rating that does not land NEVER reverses or re-touches the refund:
+         the dispute stays `credited` and its `rating_tx` stays empty.
+
+    The return value is the dispute as the store holds it, and it is also how
+    a caller learns whether the reputation consequence landed: `credited` with
+    a `rating_tx` has been rated (or, after a rating timeout, may yet be), and
+    `credited` WITHOUT one is paid but NOT fully resolved — uphold it again to
+    retry the rating alone. A rating failure is never raised: by then the buyer
+    has been paid, and an exception would say otherwise.
 
     The one window that remains is between a SUCCESS and the `append_status`
     that records it: if the store is unreachable at that instant the money has
