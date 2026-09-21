@@ -101,7 +101,7 @@ from pydantic import ValidationError  # noqa: E402  (after the sys.path bootstra
 try:
     from app.config import settings  # noqa: E402
     from app.security import SecretRedactionLogFilter, redact_secrets  # noqa: E402
-    from app.services import dispute_svc, refund_svc  # noqa: E402
+    from app.services import dispute_rating, dispute_svc, refund_svc, reputation_svc  # noqa: E402
     from app.services.dispute_store import (  # noqa: E402
         DisputeRecord,
         SettlementRecord,
@@ -415,6 +415,58 @@ def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementS
     return amount, EXIT_OK
 
 
+# How much of the rating id is the sealed job id's own, in the hex characters an
+# operator reads: the derivation keeps the job's first 8 bytes verbatim (4.04
+# D1), and the preview underlines exactly that span — not whatever longer run
+# the hash half happens to share by chance.
+_SHARED_PREFIX_HEX = 16
+
+
+def preview_rating(dispute: DisputeRecord, step: SettlementStep | None) -> bool:
+    """Print the dispute rating the live run writes once the credit lands (4.04).
+
+    Every value the ReputationLedger will be handed, from the same calls the
+    live path makes — `dispute_rating.dispute_job_id` for the id and
+    `reputation_svc.rating_weight_stroops` for the weight (D2) — for `plan`'s
+    reason: a preview that did its own arithmetic would be decoration.
+
+    The two ids are printed whole and stacked, with the shared prefix
+    underlined. Whole, so either pastes straight into Stellar Expert's search;
+    stacked, because that prefix is the entire reason the derivation was
+    chosen — it is how a grant reviewer who opens the rating transaction ties
+    it to the job it disputes without reading this code.
+
+    False when no rating can be written for this dispute, which the caller
+    refuses before anything is signed: paying a credit whose reputation
+    consequence is already known to be impossible leaves a dispute that can
+    never be fully resolved, and a buyer paid late is recoverable where that
+    is not.
+    """
+    say()
+    say("  4.04 — the agent's consequence: once the credit lands, the settler writes this rating")
+    if step is None:
+        say(f"    step {dispute.step_index} is not in the settlement, so there is no price to weight it by.")
+        return False
+    try:
+        job_id = bytes.fromhex(dispute.job_id_hex)
+        rating_id = dispute_rating.dispute_job_id(job_id, dispute.step_index)
+    except ValueError as exc:
+        say(f"    no rating id can be derived for job {dispute.job_id_hex!r}: {exc}")
+        return False
+    weight = reputation_svc.rating_weight_stroops(step.price_usdc)
+    say(f"    agent:     {dispute.agent_id}")
+    say(f'    rating:    {dispute_rating.DISPUTE_RATING} / 100   kind = "dispute"')
+    say(
+        f"    weight:    {weight} stroops = {weight / reputation_svc.STROOPS_PER_USDC:.7f} USDC"
+        f"  (step {step.step_index}'s quoted price, as every rating is weighted)"
+    )
+    say(f"    job id:    {job_id.hex()}   sealed — the job the settlement attested")
+    say(f"    rating id: {rating_id.hex()}   derived — the key the rating is filed under")
+    underline = "^" * _SHARED_PREFIX_HEX
+    say(f"               {underline} the job's own 8 bytes: they tie this rating to it on Stellar Expert")
+    return True
+
+
 def check_config() -> int:
     """EXIT_OK when this process could actually sign a credit; a refusal otherwise.
 
@@ -622,6 +674,13 @@ async def run(dispute_id: str, dry_run: bool) -> int:
     amount, code = plan(dispute, settlement, step)
     if amount is None:
         return code
+    if not preview_rating(dispute, step):
+        return refuse(
+            EXIT_UNEXPECTED,
+            "rating_not_derivable",
+            f"dispute {dispute.id} could be credited but never rated, so it could never be fully resolved.",
+            "Nothing is paid until that is understood — the line above names what is missing.",
+        )
 
     if dry_run:
         say()
