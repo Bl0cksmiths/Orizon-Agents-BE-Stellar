@@ -254,3 +254,65 @@ class InMemoryDisputeStore:
     async def close(self) -> None:
         """Nothing to release — kept so the seam is one shape, not two."""
         return None
+
+
+def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
+    """The step breakdown as the one JSON column Postgres stores it in.
+
+    A child table would need a join and a transaction for a value that is only
+    ever read whole, with the settlement it belongs to.
+    """
+    return json.dumps(
+        [
+            {
+                "step_index": s.step_index,
+                "agent_id": s.agent_id,
+                "agent_name": s.agent_name,
+                "price_usdc": s.price_usdc,
+                "delivered": s.delivered,
+            }
+            for s in steps
+        ],
+        separators=(",", ":"),
+    )
+
+
+def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
+    """Inverse of `steps_to_json`, tolerant of a row written by an older build."""
+    return tuple(
+        SettlementStep(
+            step_index=int(s["step_index"]),
+            agent_id=str(s["agent_id"]),
+            agent_name=s.get("agent_name"),
+            price_usdc=float(s["price_usdc"]),
+            delivered=bool(s["delivered"]),
+        )
+        for s in json.loads(raw)
+    )
+
+
+_store: DisputeStore | None = None
+
+
+def get_dispute_store() -> DisputeStore:
+    """The process's dispute store, built on first use.
+
+    A module-level singleton rather than `@lru_cache` for the same reason
+    `binding_store` uses one: tests reset it by assigning `_store = None`.
+    """
+    global _store
+    if _store is None:
+        _store = InMemoryDisputeStore()
+        logger.info(
+            "dispute store: in-memory (DATABASE_URL is unset) — settlements and disputes are LOST on restart;"
+            " set DATABASE_URL to persist them"
+        )
+    return _store
+
+
+async def close_dispute_store() -> None:
+    """Close the store and clear the singleton, so the next call rebuilds it."""
+    global _store
+    if _store is not None:
+        await _store.close()
+        _store = None
