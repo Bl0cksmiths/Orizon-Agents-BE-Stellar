@@ -345,3 +345,32 @@ def test_a_failed_rating_records_nothing_and_the_retry_lands_it(ledger, settler,
     assert landed.rating_tx == "tx_rating_2"
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
+
+
+def test_a_replay_with_nothing_on_record_is_a_loud_collision_and_the_buyer_keeps_the_credit(
+    ledger, settler, invalidated, caplog
+) -> None:
+    """D4. The ledger already holds a rating under this dispute's derived id,
+    and this dispute has never recorded writing one — so it is not a retry
+    that landed, and must never be read as one. The credit stands (the buyer
+    was paid, and that is not the rating's to undo), the record shows no
+    rating, the score is not dropped, and the operator gets an ERROR naming
+    the collision and every id. A repeat meets the same wall, loudly again,
+    and still signs no second credit."""
+    dispute = open_dispute()
+    ledger.rated.add((AGENT, derived(0)))
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        collided = uphold(dispute.id)
+        again = uphold(dispute.id)
+
+    assert collided.status == "credited" and collided.refund_tx == "tx_credit"
+    assert collided.rating_tx is None  # never reads as fully resolved
+    assert again == collided
+    assert ledger.submits == [] and ledger.replays == 2
+    assert invalidated == []
+    assert len(settler.transfers) == 1
+    logged = svc_errors(caplog)
+    assert len(logged) == 2
+    for fact in ("COLLISION", dispute.id, AGENT, JOB, derived(0).hex(), dispute.payer):
+        assert fact in logged[0]
