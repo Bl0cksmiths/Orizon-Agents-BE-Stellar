@@ -572,3 +572,19 @@ def test_a_counts_branch_summary_is_cleaned_and_bounded(monkeypatch, store):
     assert len(stored) <= OUTPUT_SUMMARY_MAX_CHARS + len(" …[truncated]")
     assert stored.endswith("[truncated]")
     assert traced.replace("\x07", " ").startswith(stored.removesuffix(" …[truncated]"))
+
+
+def test_a_summary_that_cleans_to_nothing_is_kept_as_none(monkeypatch, store):
+    """Nothing but control characters leaves nothing to show once cleaned. It
+    is kept as None — the value a reader already takes to mean "no summary" —
+    rather than an empty string that a reader would have to test for too. The
+    step itself still delivered, and is still disputable."""
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"summary": "\x00\x1b\x07"}))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_blanksummary"
+
+    _run_paid(_plan(), task_id)
+
+    (step,) = store.recorded[0].steps
+    assert step.delivered is True
+    assert step.output_summary is None
