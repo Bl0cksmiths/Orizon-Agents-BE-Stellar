@@ -399,3 +399,29 @@ def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_reso
     (logged,) = svc_errors(caplog)
     assert "COLLISION" in logged and "timeout with no hash" in logged
     assert len(settler.transfers) == 1
+
+
+# ── across disputes, and across every outcome ───────────────────
+
+
+def test_one_agent_disputed_on_two_steps_is_rated_twice_without_a_collision(ledger, settler, invalidated) -> None:
+    """The case 4.01's job-only derivation broke: one agent served both steps,
+    so both disputes would have shared one key and the second would have been
+    refused as a replay of the first — and, with nothing on record, reported
+    as a collision. Each step derives its own id, so both land, each weighted
+    by its own step's price."""
+    payer = Keypair.random()
+    first = open_dispute(0, payer)
+    second = open_dispute(1, payer)
+
+    rated = [uphold(first.id), uphold(second.id)]
+
+    assert [r.rating_tx for r in rated] == ["tx_rating_1", "tx_rating_2"]
+    assert [s["job_id"] for s in ledger.submits] == [derived(0), derived(1)]
+    assert [s["weight"] for s in ledger.submits] == [
+        reputation_svc.rating_weight_stroops(0.05),
+        reputation_svc.rating_weight_stroops(0.07),
+    ]
+    assert ledger.replays == 0
+    assert invalidated == [AGENT, AGENT]
+    assert len(settler.transfers) == 2  # one credit per dispute, and no more
