@@ -36,6 +36,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
 from . import external_binding as eb
 from . import refund_svc
@@ -67,6 +68,14 @@ NONCE_HEX_CHARS = 32
 # decoded.
 _SIGNATURE_BYTES = 64
 _MAX_SIGNATURE_CHARS = 256
+
+# A dispute reason is MANDATORY (4.02 AC) and bounded. 500 characters mirrors
+# `DecomposeRequest.intent`, which is this repo's existing answer to "how much
+# free text is a field allowed to be": enough to say what was wrong with a
+# step's output, not enough to write a novel into a store whose in-memory
+# fallback holds 500 records and whose rows are read back into every dispute
+# listing.
+MAX_REASON_CHARS = 500
 
 
 class DisputeError(Exception):
@@ -207,6 +216,47 @@ def _authenticate_payer(
         raise _refuse("not_the_payer", 403, "only the payer of a workflow may dispute it", job_id_hex, step_index)
 
 
+def _require_reason(reason: str, job_id_hex: str, step_index: int) -> str:
+    """The buyer's reason, cleaned and bounded — or a refusal if there is none.
+
+    `sanitize_untrusted` is this repo's existing primitive for text somebody
+    else wrote (`app/agents/workers/prompt_safety.py`), used here for
+    `registry_sync`'s reason rather than its own: it strips C0/C1 control
+    characters and clamps the length. Control characters are the part that
+    matters for a dispute — this string is written to a log line an operator
+    reads, is read back into an API response a browser renders, and will be
+    quoted in the dispute receipt, and a bare CR or an escape sequence in any
+    of those forges structure that was never written.
+
+    Deliberately NOT `fence_untrusted`: a reason is a FIELD, not a prompt
+    block, and nothing here sends it to a model. The prompt-fence side effects
+    it does carry (collapsing `====` runs, redacting a forged BEGIN/END marker)
+    cost a buyer nothing to live with and keep one primitive rather than two.
+
+    It is also NOT an escaping function, and must not be mistaken for one: the
+    console escapes on render, as it does for every other stored string. What
+    this decides is what we STORE — evidence the buyer wrote, kept as close to
+    verbatim as is safe.
+
+    Empty after cleaning is a refusal, because "the buyer said what was wrong"
+    is the whole evidentiary content of a dispute that a human will later
+    adjudicate. Its code sits deliberately outside the frozen set of job-state
+    codes: those describe the WORKFLOW's state and each one is final, while this
+    one describes the request and the caller can fix it — 422, the status the
+    router's own field bound produces for the same mistake.
+    """
+    cleaned = sanitize_untrusted(reason, max_chars=MAX_REASON_CHARS)
+    if not cleaned:
+        raise _refuse(
+            "reason_required",
+            422,
+            "a dispute must say what was wrong with the step",
+            job_id_hex,
+            step_index,
+        )
+    return cleaned
+
+
 def _duplicate(existing: DisputeRecord, job_id_hex: str, step_index: int) -> DisputeError:
     """The `duplicate_dispute` refusal, carrying the ORIGINAL dispute.
 
@@ -245,30 +295,37 @@ async def open_dispute(
     principles decide it: cheapest first, and nothing about a workflow's private
     state is answered before the caller has proved they are its buyer.
 
-      1. **The settlement** — one store read, and every rule after it needs the
+      1. **The reason** — pure local text handling: no store read, no crypto,
+         nothing disclosed, so it is the cheapest check there is. It is also
+         the ONLY refusal here the buyer can fix and retry, which is why it
+         must come before step 3 rather than at the end: verifying the
+         signature CONSUMES the challenge, so a buyer refused for an empty
+         reason afterwards would need a fresh nonce and a second trip through
+         their wallet to send the same dispute again.
+      2. **The settlement** — one store read, and every rule after it needs the
          record anyway: the payer to check the signature against, the stamped
          window, the step's price. An unknown job is answered before anything
          else because there is nothing to judge (`unknown_job`, 404). It
          discloses only what the chain already does — a settled job id is public
          in the escrow's `charged` event, and this says no more than "we hold a
          settlement for it".
-      2. **The payer** — see `_authenticate_payer`. Everything after this point
+      3. **The payer** — see `_authenticate_payer`. Everything after this point
          is off-chain state that belongs to the buyer: whether a step was
          delivered, when their window closes, whether they already disputed. A
          caller who cannot prove they are the buyer learns none of it.
-      3. **The window** — judged on the closing time STAMPED on the settlement
+      4. **The window** — judged on the closing time STAMPED on the settlement
          record, never recomputed from `settings.dispute_window_seconds`. The
          buyer was told a deadline at settlement time; tuning the setting
          afterwards must not move it for work already done, in either direction
          (`dispute_window_closed`, 409, and the message says when it closed).
-      4. **The step** — it must exist on the settlement and have been delivered.
+      5. **The step** — it must exist on the settlement and have been delivered.
          A step that failed was never part of what the buyer paid for, so there
          is nothing to credit (`step_not_settled`, 409).
-      5. **Money actually moved** — the workflow charged something on-chain and
+      6. **Money actually moved** — the workflow charged something on-chain and
          this step had a price (`nothing_was_charged`, 409). A credit is a real
          transfer out of the platform wallet, so a dispute of a step nobody paid
          for is a withdrawal request, not a remedy.
-      6. **One dispute per step** — a second attempt is answered with the first
+      7. **One dispute per step** — a second attempt is answered with the first
          dispute, unchanged (`duplicate_dispute`, 409, carrying it). Last
          because it is the only rule whose answer is a whole record, and the
          store re-checks it under the race (see below).
@@ -276,6 +333,8 @@ async def open_dispute(
     Returns the stored `DisputeRecord` (status `open`). Writes nothing on-chain
     and touches no reputation: 4.03 pays the credit, 4.04 writes the rating.
     """
+    reason = _require_reason(reason, job_id_hex, step_index)
+
     store = get_dispute_store()
 
     settlement = await store.get_settlement(job_id_hex)
@@ -357,6 +416,7 @@ async def open_dispute(
         # The RECORDED payer, not the one in the request — they are equal by
         # now, and the record should carry the one the settlement proved.
         payer=settlement.payer,
+        # The cleaned text, which is what every reader of this record gets.
         reason=reason,
         status="open",
         # The step's own price as it settled, never the plan's estimate: the
