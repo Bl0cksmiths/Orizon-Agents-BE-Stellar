@@ -572,20 +572,33 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
     (D1) — the switch is a money control here and an authorisation control
     there, and only one of those is this module's to make.
 
-    `note` is the adjudicator's reason, and it is DELIBERATELY NOT LOGGED.
-    `open_dispute` sets that convention and this follows it: free text about
-    one complaint belongs on the record, never in the operator's log viewer,
-    where it is unbounded, useless for reconstructing an incident, and — for
-    the buyer's `reason`, which arrives over a public route — written by
-    somebody else. Only the FACT that a note was given is recorded here.
+    `note` is the adjudicator's reason, and BOTH halves of what happens to it
+    are deliberate.
 
-    It is also NOT PERSISTED, and no caller may treat it as though it were.
-    `DisputeRecord` carries the BUYER's evidence and has no field for the
-    platform's own commentary; adding one is the store's change to make, not
-    this module's. The parameter exists so the adjudication API can accept a
-    note today without the shape of `reject` changing when a column for it
-    arrives — until then the durable record of a rejection is the status and
-    the moment it resolved.
+    It IS RETAINED, on the dispute record. A rejection that recorded only a
+    status and a timestamp was backwards: the buyer's side of the argument is
+    durable from the moment they raise it (`reason`, frozen there), and an
+    upheld dispute leaves an amount and a transaction hash behind as well — so
+    the one outcome most likely to be contested was the one with nothing
+    written down. It is cleaned HERE and nowhere else, because the store keeps
+    what it is given byte for byte on purpose: bounding this and stripping the
+    control characters out of it is this module's job, exactly as it is for the
+    buyer's `reason`. Empty after cleaning is stored as nothing rather than as
+    an empty string — `append_status` carries a null forward, so a note of pure
+    whitespace must leave an existing one alone rather than blank it.
+
+    It is stored for AUDIT and is not on the API's dispute shape. Surfacing
+    internal adjudication prose — which may reference other disputes or the
+    platform's own reasoning — to the buyer it was written about is a separate
+    decision, and this story does not make it.
+
+    It is DELIBERATELY NOT LOGGED. `open_dispute` sets that convention and this
+    follows it: free text about one complaint belongs on the record, never in
+    the operator's log viewer, where it is unbounded, useless for
+    reconstructing an incident, and — for the buyer's `reason`, which arrives
+    over a public route — written by somebody else. The line below says that a
+    rationale exists and whom the decision concerns; the rationale itself is
+    read from the record by whoever needs it.
     """
     dispute = await _load_for_adjudication(dispute_id)
     if dispute.status != "open":
@@ -597,7 +610,8 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
             amount_usdc=dispute.creditable_usdc,
             tx_hash=dispute.refund_tx,
         )
-    rejected = await get_dispute_store().append_status(dispute_id, "rejected")
+    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS) if note else ""
+    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned or None)
     logger.info(
         "dispute rejected: id=%s job=%s step=%s payer=%s noted=%s",
         rejected.id,
