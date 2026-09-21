@@ -237,3 +237,34 @@ def test_a_stale_read_that_fails_is_not_negatively_cached():
         return await cache.get_or_set("k", 60.0, fresh)
 
     assert asyncio.run(run()) == "post-dispute"
+
+
+def test_the_generation_map_is_bounded_by_the_flights_in_progress():
+    """Keys are caller-influenced (`repstate:{id}`), so a map that remembered
+    every key ever invalidated would grow for the life of the process. It
+    holds a key only while a flight for that key is running."""
+
+    async def run():
+        # Nothing in flight, nothing to fence, nothing recorded.
+        for i in range(cache._MAX_ENTRIES * 2):
+            cache.invalidate(f"idle{i}")
+        assert cache._generations == {}
+
+        callers, releases = [], []
+        for i in range(32):
+            producer, started, release, _ = _parked(i)
+            callers.append(asyncio.create_task(cache.get_or_set(f"busy{i}", 60.0, producer)))
+            await started.wait()
+            cache.invalidate(f"busy{i}")
+            cache.invalidate(f"busy{i}")  # a second bump, not a second entry
+            releases.append(release)
+        assert len(cache._generations) == 32
+
+        for release in releases:
+            release.set()
+        await asyncio.gather(*callers)
+        return dict(cache._generations), dict(cache._running)
+
+    generations, running = asyncio.run(run())
+    assert generations == {}
+    assert running == {}
