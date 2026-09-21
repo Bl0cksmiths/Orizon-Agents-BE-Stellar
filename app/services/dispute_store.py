@@ -765,6 +765,48 @@ class PostgresDisputeStore:
             rating_tx=row["rating_tx"],
         )
 
+    async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
+        """Insert the dispute, or raise DuplicateDisputeError with the one that
+        beat it to this step.
+
+        The record is returned unchanged on success: nothing about it is
+        assigned by the database, so there is no row to read back. The loser's
+        branch costs one extra read and only ever runs on a genuine collision —
+        a double click, a retried POST, two tabs — which is the moment worth
+        spending a round trip on.
+        """
+        pool = await self._ready_pool()
+        won = await pool.fetchrow(
+            _INSERT_DISPUTE_SQL,
+            record.id,
+            record.job_id_hex,
+            record.task_id,
+            record.step_index,
+            record.agent_id,
+            record.payer,
+            record.reason,
+            record.status,
+            record.charged_usdc,
+            record.creditable_usdc,
+            record.opened_at,
+            record.resolved_at,
+            record.refund_tx,
+            record.rating_tx,
+        )
+        if won is not None:
+            return record
+        # The index refused the row, so this step already has a dispute. Read it
+        # and hand it to the caller inside the error: the product rule is that
+        # the second attempt is answered with the first dispute, not with a
+        # failure the buyer cannot act on.
+        existing = await self.find_dispute(record.job_id_hex, record.step_index)
+        if existing is None:  # pragma: no cover — the conflicting row is committed by now
+            raise RuntimeError(
+                f"dispute insert for job {record.job_id_hex} step {record.step_index} conflicted "
+                "with a row that cannot be read back"
+            )
+        raise DuplicateDisputeError(existing)
+
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
         # the pool that is being torn down, and so a second close is a no-op.
