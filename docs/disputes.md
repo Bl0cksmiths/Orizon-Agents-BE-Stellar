@@ -110,12 +110,20 @@ cannot rewrite what the buyer was shown, and it is clamped so a credit can
 never exceed what was actually charged for the step.
 
 What is actually transferred is the **smallest** of three numbers: the amount
-frozen on the dispute when it was opened, the disputed step's price on the
-settlement record, and what the workflow's charge actually moved on-chain.
-With the shipped policy those are normally the same number. They can differ,
-because the per-step figure starts life as the plan's *quoted* price while the
-charge's total is what was really submitted, and when they differ the credit
-follows the smallest — the platform never refunds money it did not collect.
+frozen on the dispute when it was opened, the policy share of that step's price
+under the fraction in force at adjudication time, and what the workflow's
+charge actually moved on-chain. With the shipped policy those are normally the
+same number. They can differ, because the per-step figure starts life as the
+plan's *quoted* price while the charge's total is what was really submitted,
+and when they differ the credit follows the smallest — the platform never
+refunds money it did not collect.
+
+One consequence of that middle term is worth stating rather than discovering.
+Because the frozen amount is only ever an upper bound, *lowering*
+`DISPUTE_CREDITED_FRACTION` does reach disputes that are already open, while
+raising it cannot. The guarantee is one-directional on purpose: a buyer can
+never be paid more than the figure they were shown, and a tuning change can
+never retroactively increase what the platform owes on work already done.
 A credit is also refused outright above `MAX_REFUND_USDC` (shipped at `1.0`),
 checked before anything is signed; a step on this deployment settles for
 hundredths of a USDC, so that ceiling only ever catches something that has gone
