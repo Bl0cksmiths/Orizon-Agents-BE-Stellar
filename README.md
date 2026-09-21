@@ -126,7 +126,9 @@ A settled workflow can be argued with. When a paid workflow settles, the settlem
 
 The deadline is stamped on the settlement record rather than recomputed on read, so retuning `DISPUTE_WINDOW_SECONDS` can never move a closing time a buyer was already given; it only applies to workflows that settle afterwards. One dispute per `(job, step)`: a repeat is answered with the original dispute unchanged, not a second record. `GET /api/tasks/{id}/disputes` returns the window and everything raised on a task, which is what the console shows while the clock runs.
 
-Story 4.02 records the claim and nothing more — no money moves and no rating is written. Paying the credit is 4.03 (`DISPUTE_CREDITED_FRACTION`, default the whole step) and the on-chain `kind="dispute"` rating is 4.04.
+Adjudication is a human decision taken through two authenticated routes — `POST /api/disputes/{id}/uphold` and `POST /api/disputes/{id}/reject` — and it is the one place this service's open-by-default posture does not apply: both refuse while `API_KEY` is unset or `DISPUTE_REFUNDS_ENABLED` is false, on every network including testnet. `/api/stellar/server/charge` can run open because it can only spend an allowance the payer already authorised on-chain; an upheld dispute spends the platform's own balance on an adjudicator's say-so, with nothing on-chain to bound it.
+
+Upholding pays the credit from the settler's own wallet (`DISPUTE_CREDITED_FRACTION`, default the whole step — never more than the charge actually moved, and never above `MAX_REFUND_USDC`), and it pays exactly once: a durable refund claim is taken on the dispute *before* anything is signed, which is what the `crediting` status is. A transfer that times out is never retried automatically — the dispute stays in `crediting` for an operator to reconcile against the chain, because paying late is recoverable and paying twice is not. The on-chain `kind="dispute"` rating is still 4.04. [docs/disputes.md](docs/disputes.md) has the buyer-facing version and the reconciliation procedure; `docs/decisions/0008-refund-execution.md` has the reasoning and the rejected alternatives.
 
 ## Testing
 
