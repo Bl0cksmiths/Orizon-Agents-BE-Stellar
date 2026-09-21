@@ -1180,7 +1180,14 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
 
     if outcome.status == "SUCCESS":
-        credited = await store.append_status(dispute_id, "credited", refund_tx=outcome.tx_hash)
+        # The amount the transfer MOVED, never `creditable_usdc`: that is the
+        # promise frozen at opening, and D4 bounds the payment below it by the
+        # step price at today's fraction and by what the charge settled. The
+        # receipt prints this beside the refund hash, so it must be the number
+        # the hash proves.
+        credited = await store.append_status(
+            dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+        )
         await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
         # Only now, with the credit landed AND recorded, is the agent rated —
         # and against the settlement the credit was just bounded by, so the
