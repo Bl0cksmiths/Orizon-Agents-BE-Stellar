@@ -516,6 +516,23 @@ def test_a_steps_credit_is_the_refunds_own_number(client, monkeypatch, fraction,
     assert undelivered["creditable_usdc"] == 0.0
 
 
+@pytest.mark.parametrize(
+    ("fraction", "stated"),
+    [(1 / 3, 0.3333333), (0.5, 0.5), (1.5, 1.0), (-0.25, 0.0)],
+    ids=["a-third-rounded", "half", "above-one-clamped", "negative-clamped"],
+)
+def test_the_policy_states_the_fraction_the_refund_would_apply(client, monkeypatch, fraction, stated):
+    # A misconfigured 1.5 is stated as the 1.0 an uphold would really pay, so
+    # the policy never promises what the payout would refuse to keep; and who
+    # funds and who decides are the trust model, stated with the terms.
+    monkeypatch.setattr(settings, "dispute_credited_fraction", fraction)
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    policy = client.get("/api/tasks/task-1/disputes").json()["settlement"]["policy"]
+
+    assert policy == {"credited_fraction": stated, "funded_by": "platform", "adjudicated_by": "platform"}
+
+
 def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
     # A running or unpaid task: nothing to dispute, no deadline, and NOT a 404
     # — the console polls this route while the workflow is still going.
