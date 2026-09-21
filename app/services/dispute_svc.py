@@ -983,7 +983,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     return credited
 
 
-async def _retry_rating(credited: DisputeRecord) -> DisputeRecord:
+async def _retry_rating(credited: DisputeRecord, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Re-attempt the rating of a dispute already `credited` — THE RATING ONLY.
 
     The repeat-uphold half of D3: it reads the settlement the rating is
@@ -1007,7 +1007,7 @@ async def _retry_rating(credited: DisputeRecord) -> DisputeRecord:
             credited.rating_tx,
         )
         return credited
-    return await _rate_credited(credited, settlement)
+    return await _rate_credited(credited, settlement, on_rating=on_rating)
 
 
 async def uphold(dispute_id: str) -> DisputeRecord:
