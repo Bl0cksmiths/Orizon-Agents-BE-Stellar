@@ -125,3 +125,22 @@ def test_a_transition_carries_the_receipt_forward_and_dates_its_own_row() -> Non
     assert written["rating_confirmed"] == "COALESCE($9::boolean, latest.rating_confirmed)"
     assert written["updated_at"] == "$7::double precision"
     assert written["resolved_at"] == "COALESCE($6::double precision, latest.resolved_at, $7::double precision)"
+
+
+@pytest.mark.parametrize(
+    ("name", "status"),
+    [("_CLAIM_REFUND_SQL", "'crediting'"), ("_RELEASE_REFUND_CLAIM_SQL", "'upheld'")],
+    ids=["claim", "release"],
+)
+def test_a_claim_and_a_release_change_only_the_status_and_when_it_changed(name: str, status: str) -> None:
+    """4.03's rule for the two mutex transitions, now with the one exception
+    4.06 makes: every column is copied from `latest` verbatim — the credited
+    amount and the rating confirmation included — except the status, the
+    moment the status changed, and the opening flag no transition may claim.
+
+    Asserted as the complement, so a column added later that either statement
+    forgot to carry forward fails here rather than quietly writing NULL."""
+    written = _written(getattr(dispute_store, name))
+
+    moved = {column: expression for column, expression in written.items() if expression != f"latest.{column}"}
+    assert moved == {"status": status, "updated_at": "$2::double precision", "opening": "FALSE"}
