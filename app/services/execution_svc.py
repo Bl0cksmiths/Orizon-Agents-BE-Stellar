@@ -270,6 +270,13 @@ async def _run(
     # local worker and do NOT for a bound external one, whose worker name is
     # "external.<agent_id>" — see _submit_ratings.
     delivered: dict[str, Any] = {}
+    # Plan-step INDEXES that produced output — the same steps that incremented
+    # `succeeded` and `spent`. Kept by index rather than by agent_id like
+    # `delivered` above because a plan may use the same agent twice: keyed by
+    # agent, a step that failed would be settled as delivered on the strength
+    # of a LATER step that succeeded, and story 4.02 would then accept a
+    # dispute over work nobody was ever paid for.
+    delivered_steps: set[int] = set()
     # Agent ids whose step never reached a worker at all — see the resolve
     # branch below. Distinct from "delivered nothing": these are not rated.
     undispatched: set[str] = set()
@@ -302,7 +309,7 @@ async def _run(
                 f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
             )
 
-        for step in plan.plan.steps:
+        for step_index, step in enumerate(plan.plan.steps):
             # Resolution deliberately stays OUTSIDE the per-step try/except
             # below. It is a lookup, not the step's work: resolve_worker fails
             # OPEN — an unreadable binding store logs and returns None — so the
@@ -438,6 +445,7 @@ async def _run(
 
             succeeded += 1
             spent += step.est_price_usdc
+            delivered_steps.add(step_index)
             # Clears the streak and emits one recovery INFO, so an endpoint that
             # comes back is as visible in Render as one that broke.
             failure_tracker.record_success(step.agent_id)
