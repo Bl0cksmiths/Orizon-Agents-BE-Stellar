@@ -95,6 +95,21 @@ UNBINDING_MESSAGE_PREFIX = "orizon-unbind:v1"
 # nothing to disambiguate: an unbind has exactly one meaning per agent.
 UNBIND_SUBJECT = UNBINDING_MESSAGE_PREFIX
 
+# The THIRD purpose, and the first whose signer is not an agent owner: the buyer
+# disputing a step of a workflow they paid for (story 4.02, ADR 0002). The payer
+# proves themselves with a wallet signature for the same reason the operator
+# does — it is the only credential this service can check without holding an
+# account for them — and, specifically here, because the alternative (the
+# in-memory task token) dies with the process, while the dispute window it would
+# be guarding is measured in hours and must survive a restart.
+#
+# A separate domain again, for `UNBINDING_MESSAGE_PREFIX`'s reasons applied to a
+# third pair: a captured bind or unbind signature must not open a dispute, and a
+# captured dispute signature must not bind or revoke anything. Three distinct
+# prefixes make three different byte strings, so the separation is ed25519's to
+# enforce rather than a check a later change could forget.
+DISPUTE_MESSAGE_PREFIX = "orizon-dispute:v1"
+
 # Retention cap for outstanding challenges (insertion-ordered eviction, see
 # issue_challenge). Matches ramp_store._MAX_RAMPS, and for the same reason with
 # sharper teeth: the challenge route is a PUBLIC, unauthenticated POST whose key
@@ -159,6 +174,27 @@ def unbinding_message(agent_id: str, nonce: str) -> str:
     different agent, and cannot be used twice.
     """
     return f"{UNBINDING_MESSAGE_PREFIX}:{agent_id}:{nonce}"
+
+
+def dispute_message(job_id_hex: str, step_index: int, nonce: str) -> str:
+    """The exact UTF-8 string the BUYER signs to open a dispute:
+
+        orizon-dispute:v1:{job_id_hex}:{step_index}:{nonce}
+
+    The STEP is in the signed bytes, on `binding_message`'s reasoning rather
+    than `unbinding_message`'s: a dispute is not unconditional. It names one
+    step of one settled workflow, and that step decides how much is credited
+    (`SettlementStep.price_usdc`) and which agent the 4.04 rating lands on. A
+    signature that named only the job could therefore be replayed against a
+    different — more expensive, or differently owned — step of the same job,
+    which is exactly the D3 replay the bind message exists to stop.
+
+    The job id is the settled job's, as hex, so the message pins the workflow
+    the dispute is about. It is not a secret: the settled job id is already
+    public in the escrow's `charged` event. The secret is the nonce, and the
+    authority is the signature over all of it.
+    """
+    return f"{DISPUTE_MESSAGE_PREFIX}:{job_id_hex}:{step_index}:{nonce}"
 
 
 def issue_challenge(scope: str, subject: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
