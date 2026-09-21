@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from dataclasses import fields, replace
 
 import pytest
+from test_dispute_durability import process
 from test_dispute_store import FakePool, _pg, a_dispute
 
 from app.services import dispute_store
@@ -314,3 +315,44 @@ def test_a_claim_and_a_release_carry_the_receipt_verbatim(store: DisputeStore) -
     assert claimed is not None and released is not None
     assert claimed == replace(upheld, status="crediting", updated_at=claimed.updated_at)
     assert released == replace(upheld, status="upheld", updated_at=released.updated_at)
+
+
+# ── across a restart ──────────────────────────────────────────────────────
+
+
+def test_the_receipt_survives_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dispute window outlives several of this service's processes, and the
+    receipt is read in whichever one the buyer happens to reach. So the three
+    facts are rows, not process state — modelled the way
+    tests/test_dispute_durability.py models a restart: the DATABASE survives
+    the boundary, and the store, its pool and the singleton do not.
+
+    The confirmation also crosses it, which is the case that happens: a rating
+    times out in one process, and the uphold that confirms it runs in a later
+    one."""
+    database = FakePool()
+
+    with process(monkeypatch, database) as store:
+        opened = asyncio.run(store.open_dispute(a_dispute()))
+        asyncio.run(store.append_status(opened.id, "upheld"))
+        asyncio.run(store.claim_refund(opened.id))
+        asyncio.run(store.append_status(opened.id, "credited", refund_tx="tx_refund", credited_usdc=1.25))
+        in_flight = asyncio.run(
+            store.append_status(opened.id, "credited", rating_tx="tx_rating", rating_confirmed=False)
+        )
+
+    assert dispute_store._store is None
+    assert database.closed == 1
+
+    with process(monkeypatch, database) as store:
+        restored = asyncio.run(store.get_dispute(opened.id))
+        assert restored == in_flight
+        assert restored is not None
+        assert restored.credited_usdc == 1.25
+        assert restored.updated_at == in_flight.updated_at
+        assert restored.rating_confirmed is False
+        confirmed = asyncio.run(store.append_status(opened.id, "credited", rating_confirmed=True))
+
+    with process(monkeypatch, database) as store:
+        assert asyncio.run(store.get_dispute(opened.id)) == confirmed
+        assert confirmed.rating_confirmed is True and confirmed.credited_usdc == 1.25
