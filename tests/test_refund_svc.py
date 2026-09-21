@@ -1,9 +1,10 @@
 """Story 4.01 — partial-credit refund mechanism (app/services/refund_svc.py).
 
-Pins the settler-funded-credit design: the derived dispute job id that clears
-the ReputationLedger replay guard (R12), the stated credit-amount policy, and
-that the two settler-signed invocations are built with the right arguments (a
-SAC transfer settler→buyer, and a dispute rating under the derived id).
+Pins the settler-funded-credit design: the stated credit-amount policy, and
+that the settler-signed transfer is built with the right arguments (a SAC
+transfer settler→buyer). The dispute rating left this module in 4.04; its
+derived id is pinned in test_dispute_job_id.py and its submit in
+test_dispute_rating_submit.py.
 """
 
 from __future__ import annotations
