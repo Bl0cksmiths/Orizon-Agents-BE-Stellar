@@ -202,6 +202,36 @@ def _sweep(now: float) -> None:
             _store.pop(key, None)
 
 
+def invalidate(key: str) -> None:
+    """Forget `key` now, so the next read of it goes upstream.
+
+    For upstream state that changed under the cache — a rating that just
+    landed moves an agent's score, and serving the old value for the rest of
+    its TTL is exactly what a caller acting on the change cannot have.
+    Dropping the stored entry is the easy half. A read already in flight when
+    the state changed is the hard half, and it is:
+
+      - DETACHED from `_flights`, so a caller arriving after this point spawns
+        a fresh read instead of joining one that started too early;
+      - NOT cancelled, so the callers already awaiting it still get their
+        answer (the shield in `get_or_set` keeps it running regardless);
+      - unable to write back, because its captured generation is no longer
+        current (`_is_current`).
+
+    The failure cache goes too: an error from before the change says nothing
+    about the state after it.
+    """
+    _store.pop(key, None)
+    _failures.pop(key, None)
+    _flights.pop(key, None)
+    if key in _running:
+        # Only a running flight can write back, so only then is there anything
+        # to fence. With none, recording a generation would only grow the map:
+        # the next flight is spawned after this call and is fresh by
+        # construction.
+        _generations[key] = _generations.get(key, 0) + 1
+
+
 def clear() -> None:
     """Drop all cached entries, failures, and flight registrations (tests)."""
     _store.clear()
