@@ -512,6 +512,32 @@ def test_a_note_on_any_other_status_is_never_published(client, monkeypatch, stat
     assert ADJUDICATOR_NOTE not in r.text
 
 
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        record(status="credited", resolved_at=1_700_000_500.0, refund_tx="3f1b" + "0" * 60),
+        record(status="rejected", resolved_at=1_700_000_500.0),
+    ],
+    ids=["credited-before-4.06", "rejected-before-the-note-was-required"],
+)
+def test_a_record_from_before_the_receipt_fields_reads_them_as_null(client, monkeypatch, legacy):
+    # Built without the four, exactly as a row written before 4.06 reads
+    # back. Each is present and null rather than omitted, so the frontend's
+    # frozen type holds for every dispute ever recorded, and "not known" is
+    # never dressed up as an answer: no credited amount is invented from
+    # `creditable_usdc`, no time from `resolved_at`, no rating from a hash.
+    reads(monkeypatch, dispute=legacy)
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for field in ("credited_usdc", "updated_at", "rating_confirmed", "rejection_reason"):
+        assert field in body, f"{field} was omitted rather than null"
+        assert body[field] is None, f"{field} read {body[field]!r} off a record that never had it"
+    assert body["status"] == legacy.status
+
+
 def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeypatch):
     lists(monkeypatch, found=settlement(), disputes=(record(id="dsp_a"), record(id="dsp_b", step_index=2)))
 
