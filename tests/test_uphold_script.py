@@ -1124,6 +1124,26 @@ def test_an_empty_rating_record_is_never_diagnosed_as_a_collision(
     assert "COLLISION" not in out
 
 
+def test_a_replay_of_a_recorded_rating_confirms_it_landed(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """The other half of D4: a Replay for a dispute that DOES record an
+    attempt is that attempt, landed — the ledger refused a second copy. Here a
+    rating that timed out on an earlier run is re-confirmed by a rating-only
+    re-run, which signs no transfer, and the run ends clean with both links."""
+    seed(status="credited", refund_tx=REFUND_TX, rating_tx=RATING_TX)
+    ledger.answers("REPLAY")
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert paying == []
+    assert "by an earlier run;" in out
+    assert "refused this run's copy as a replay" in out
+    assert f"rating: https://stellar.expert/explorer/testnet/tx/{RATING_TX}" in out
+    assert f"refund: https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
