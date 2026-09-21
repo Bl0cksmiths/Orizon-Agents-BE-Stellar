@@ -21,7 +21,7 @@ import logging
 from typing import Any
 
 from ..stellar import client as sc
-from .dispute_store import DisputeRecord
+from .dispute_store import DisputeRecord, SettlementRecord
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,106 @@ def credited_amount_usdc(step_charged_usdc: float, fraction: float = DEFAULT_CRE
     [0, the step charge]. `fraction` outside [0, 1] is clamped."""
     fraction = min(max(fraction, 0.0), 1.0)
     return round(max(step_charged_usdc, 0.0) * fraction, 7)
+
+
+def creditable_for(
+    settlement: SettlementRecord,
+    dispute: DisputeRecord,
+    fraction: float = DEFAULT_CREDITED_FRACTION,
+) -> float:
+    """The USDC to credit for `dispute`, bounded by what actually settled (D4).
+
+    `min(dispute.creditable_usdc, step.price_usdc × fraction, settlement.settled_usdc)`
+    over the step the dispute names, rounded to the ledger's 7 decimals.
+
+    **The settlement is consulted, never the plan**, and that is the whole point
+    of this function. `step.price_usdc` ORIGINATES AS AN ESTIMATE — the planner
+    priced the step before it ran, `dispute_svc` froze the buyer's creditable
+    figure from it at opening time, and nothing on that path ever asked the
+    chain what moved. `settlement.settled_usdc` is what `PaymentEscrow.charge`
+    ACTUALLY MOVED: `_settle_onchain` floors the total to dust and rounds it to
+    7 decimals, so the two genuinely differ. Only the minimum of the two is safe
+    to pay — this is a settler-funded credit out of the platform's own wallet
+    (see the module docstring), so crediting an estimate that ran above the
+    charge pays the buyer money the platform never took.
+
+    Each of the three bounds says something the others do not:
+
+      - `dispute.creditable_usdc` is the PROMISE the buyer was shown when they
+        opened the dispute, frozen then so a later policy change cannot rewrite
+        it. Never pay more than was promised.
+      - `step.price_usdc × fraction` is the policy share of that one step under
+        the fraction in force NOW, so lowering `DISPUTE_CREDITED_FRACTION`
+        applies to disputes already open (raising it cannot, because the promise
+        above still caps it).
+      - `settlement.settled_usdc` is the hard ceiling of what ever came out of
+        the buyer's escrow for the whole workflow.
+
+    Every clamp that actually bites is logged at WARNING with both numbers,
+    because a clamp means two records disagree about money. Taking the smaller
+    number silently is exactly how an overpayment — or a buyer quietly credited
+    less than they were promised — becomes invisible.
+
+    Raises `RefundRefused("nothing_to_credit")` when the settlement has no such
+    step, when the step never delivered (it was not part of what the buyer paid
+    for, so there is nothing to give back), or when the bounds compute to zero.
+    """
+    step = settlement.step(dispute.step_index)
+    if step is None:
+        raise _refuse(
+            dispute,
+            "nothing_to_credit",
+            f"settlement {settlement.job_id_hex} has no step {dispute.step_index}",
+            0.0,
+        )
+    if not step.delivered:
+        raise _refuse(
+            dispute,
+            "nothing_to_credit",
+            f"step {dispute.step_index} ({step.agent_id}) never delivered, so it was never paid for",
+            0.0,
+        )
+
+    # Start from the promise and clamp downwards, so the running value is always
+    # the smallest bound seen so far and each log line names the pair that moved
+    # it. `credited_amount_usdc` applies the fraction, so this path and the one
+    # `dispute_svc` used to write `creditable_usdc` share one rounding rule.
+    amount = max(dispute.creditable_usdc, 0.0)
+    step_credit = credited_amount_usdc(step.price_usdc, fraction)
+    if step_credit < amount:
+        logger.warning(
+            "dispute %s: credit clamped by the step price — %.7f USDC promised at open time, "
+            "%.7f USDC creditable from step %d now (job %s, payer %s)",
+            dispute.id,
+            amount,
+            step_credit,
+            dispute.step_index,
+            dispute.job_id_hex,
+            dispute.payer,
+        )
+        amount = step_credit
+    if settlement.settled_usdc < amount:
+        logger.warning(
+            "dispute %s: credit clamped by the settled total — %.7f USDC computed for step %d, "
+            "%.7f USDC ever settled on-chain for the workflow (job %s, payer %s)",
+            dispute.id,
+            amount,
+            dispute.step_index,
+            settlement.settled_usdc,
+            dispute.job_id_hex,
+            dispute.payer,
+        )
+        amount = settlement.settled_usdc
+
+    amount = round(amount, 7)
+    if amount <= 0:
+        raise _refuse(
+            dispute,
+            "nothing_to_credit",
+            f"the bounds compute to {amount:.7f} USDC for step {dispute.step_index}",
+            amount,
+        )
+    return amount
 
 
 async def execute_refund(buyer: str, amount_usdc: float) -> dict[str, Any]:
