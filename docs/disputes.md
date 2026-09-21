@@ -374,7 +374,7 @@ stay as they were.
 | `upheld` | adjudicated in the buyer's favour | nothing on-chain yet | adjudication (4.03) |
 | `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx, once one has been submitted | the refund path (4.03) |
 | `credited` | the credit has landed in the buyer's wallet | the refund tx, and the dispute rating's tx once it is written | the refund path (4.03); the rating (4.04) adds its tx to the same status |
-| `rejected` | adjudicated against the claim | the resolution time; nothing on-chain | adjudication (4.03) |
+| `rejected` | adjudicated against the claim | the resolution time and the adjudicator's reason, which the buyer is shown; nothing on-chain | adjudication (4.03); the reason is required and buyer-facing since 4.06 |
 
 ```text
 open ──► upheld ──► crediting ──► credited   the claim stood: the buyer is
