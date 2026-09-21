@@ -406,6 +406,20 @@ for ADR 0007 D5's reason, and nothing here writes a rating. A dispute may reach
 `credited` before its rating exists; the record carries `refund_tx` and
 `rating_tx` separately so neither waits on the other.
 
+> **Amended 2026-09-21 (story 4.04 / BLO-32).** The paragraph above names
+> `refund_svc.dispute_job_id(job_id)` as the id 4.04 would write under. That
+> helper is **retired**, superseded by ADR 0009 D1: the rating is written by
+> `dispute_rating.submit_dispute_rating(dispute, settlement)` under
+> `dispute_rating.dispute_job_id(job_id, step_index)`, which is unique per
+> disputed step where the old id collided whenever one agent served two steps
+> of a job. And 4.04 rates a **`credited`** dispute rather than an `upheld`
+> one: the rating is written only after the credit has landed and been
+> recorded, and it is recorded as `rating_tx` on that same status (ADR 0009
+> D3). The separation the paragraph describes holds as written — neither
+> transaction waits on the other, and a rating that fails never touches the
+> refund — and nothing in this ADR's order changed: the rating comes after all
+> of it.
+
 Related: ADR 0002 (the credit mechanism and the trust model), ADR 0007 (the
 window, the proof of payer and the settlement record), `docs/disputes.md` (the
 buyer- and operator-facing version, including the reconciliation procedure),

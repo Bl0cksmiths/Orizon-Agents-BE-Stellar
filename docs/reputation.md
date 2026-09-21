@@ -5,7 +5,8 @@ protects that, and what would take it away.
 
 Two audiences. **Operators** — deciding whether to register an agent, or whether
 a listed agent with no history will actually be hired — want the first two
-sections. **Engineers** — about to change `REPUTATION_PRIOR_BPS`,
+sections, and an operator whose agent has had a dispute upheld against it wants
+"What an upheld dispute does to an agent". **Engineers** — about to change `REPUTATION_PRIOR_BPS`,
 `REPUTATION_PRIOR_WEIGHT_USDC` or `REPUTATION_FLOOR_BPS` — want "The arithmetic"
 and "How the guarantee breaks", and should treat the table in the latter as the
 check to run before committing any of those three values.
@@ -216,7 +217,10 @@ duration of the outage.
 
 **Only wallet-authorized runs produce ratings.** When a buyer's wallet
 authorizes a run, the backend settles it and then writes one rating per
-dispatched step to ReputationLedger, signed with `STELLAR_SIGNING_KEY`. A
+dispatched step to ReputationLedger, signed with `STELLAR_SIGNING_KEY`. The only
+other rating this backend ever writes is the one an upheld, credited dispute
+adds against a step of such a run — see "What an upheld dispute does to an
+agent". A
 simulated run — no wallet, no authorization — never rates, by design: a rating
 is weighted by the USDC at stake on the step that earned it, and a simulated
 run has none. A deployment that has only ever served simulated runs will show
@@ -314,6 +318,97 @@ wallet-authorized runs at all? Then `curl -s https://<host>/readiness` and read
 what to do. If it is `scorer`, read a paid run's trace for the reason each
 rating did not land.
 
+## What an upheld dispute does to an agent
+
+An **open** or **rejected** dispute does nothing to an agent's reputation:
+nothing is written on-chain, and every number on this page reads exactly as it
+did before. Only a dispute that was upheld **and** whose buyer has been
+credited reaches the ledger, as one more rating from the settler — the rest of
+that lifecycle is in `docs/disputes.md`.
+
+**The rating.** `kind = "dispute"`, scored **10 out of 100**, and weighted by
+the disputed step's **quoted price** — the same weight, from the same helper,
+that the settler gave its own rating of that step at settlement.
+
+- **Why 10.** It sits below the 20 the settler gives a step that delivered
+  nothing, because a disputed step was billed: the buyer's credit is paid out
+  of the platform's wallet, so the agent keeps what it was paid for work that
+  failed the buyer, and a failure somebody paid for is worse evidence than one
+  nobody did. It is not 0, because the verdict is the platform's alone — no
+  on-chain arbitration, no appeal — and a unilateral judgement should not
+  carry the harshest score the scale has.
+- **Why the quoted price.** It is what every rating is weighted by. The card
+  for this story asked for "the settled value, consistent with how every other
+  rating is weighted", and those two halves contradict each other: no rating
+  here is weighted by settled value, because a failed step settles nothing and
+  would then carry no weight at all. Consistency won, so an upheld dispute is
+  exactly as heavy as the step it disputes.
+  `docs/decisions/0009-dispute-rating.md` D2 has the rest.
+
+**It is a second fact, not a correction.** The settler's automatic rating for
+the same step is never retracted — the ledger has no entrypoint that amends a
+rating — so the dispute lands beside it, under its own key, and both count.
+The first says what the step delivered; the second says the buyer's claim
+against it stood. The settler scores work it can check between 40 and 95 (base
+70, moved by the artifact and the critic's pass; a baked kit artifact is fixed
+at 95), and gives 20 to a step that delivered nothing it could credit. A
+disputed step can be one of those: an empty result, or an external reply with
+nothing checkable in it, is billed and so can be disputed, but is scored as the
+non-delivery it is. So at equal weight the two ratings on a disputed step
+average between **15 and 52.5**.
+
+One case is an exception, and it predates disputes. The settler writes every
+automatic rating under the job's own id, so when one agent served two steps of
+a job, only the first step's automatic rating landed — the second was refused
+as a replay, which the run's trace reports as `… : Replay`. A dispute of that
+second step is the only rating the step has. The dispute rating does not share
+the limit: every disputed step gets its own id.
+
+**What moves.**
+
+| field | what the dispute does | decays? |
+| --- | --- | --- |
+| `disputed` | +1 — the ledger bumps it for any rating of `kind = "dispute"` | never: a lifetime count |
+| `count` | +1, like every rating | never |
+| `dispute_rate_bps` | `disputed × 10 000 / count` — so the dispute counts in its own denominator | never, since both inputs are lifetime counts |
+| `smoothed_bps`, `lower_bound_bps` | pulled down by a 10/100 at the step's weight | yes, like all evidence — 92.5 % per weekly epoch |
+
+`disputed` and `dispute_rate_bps` are on `GET /api/stellar/reputation` and
+`GET /api/stellar/reputation/{agent_id}`, and every plan step carries the rate
+as `rep_dispute_rate_bps`. The dispute rate is **reported, not routed on**: the
+floor is applied to `lower_bound_bps` alone, and the dispute moves that only
+through the rating's own weight.
+
+What that is worth, with the shipped prior and floor: an agent with nine clean
+ratings of 85 on 0.054 USDC steps, and one of those steps then disputed and
+upheld, goes from a smoothed 7058 to 7032, from a lower bound of 5768 to 5742,
+and from a dispute rate of 0 to **1000 bps** — one rating in ten. On steps
+priced this low, one dispute is a small dent in the score and a large,
+permanent mark in the dispute rate, and that is the intended shape: the score
+is evidence weighted by what was at stake, the rate is a count that nothing
+ever forgets. The same dispute on a 0.180 USDC step moves the score about
+three times as far.
+
+**The next plan sees it.** Reputation reads are cached for
+`REPUTATION_READ_TTL_SECONDS` (15 s), and a plan decomposed inside that window
+would otherwise be routed on the pre-dispute score. So the moment the rating is
+known to be on-chain, that agent's cached entry is dropped, and the next read —
+the next decompose, the next dashboard poll — goes back to the ledger. A read
+that was already in flight when the rating landed is not allowed to write its
+older answer back over it, and a caller arriving afterwards does not join it;
+ADR 0009 D5 has the mechanism. A plan decomposed **before** the rating landed
+keeps the score it was judged on, because that is what it was judged on.
+
+If the dispute rating's submission is unconfirmed, the entry is dropped when a
+later uphold confirms it. Until then the ordinary TTL applies: once it lands,
+it is on every read within 15 seconds regardless.
+
+**It needs the same three things every rating needs** — reputation on, a
+ledger configured, and a signer that is the ledger's Scorer (see "Where
+ratings come from"). A deployment whose signer is not the Scorer pays its
+buyers' credits and rates no disputed agent, and says so in the log and in
+`ratings.writer` on `/readiness`.
+
 ## Cold start is not a degraded read
 
 Both produce `source: "prior"`. They differ by one flag.
@@ -373,5 +468,8 @@ stall every plan.
    and that is a change to the product, not to a number.
 
 Related: `docs/decisions/0006-floor-visibility.md` (what the buyer is told when
-the floor removes an agent) and the Reputation system section of `README.md`
-(the full tunable list and the on-chain / off-chain split).
+the floor removes an agent), `docs/decisions/0009-dispute-rating.md` (the
+dispute rating's id, its weight, and why the next plan cannot be served a stale
+score), `docs/disputes.md` (the dispute lifecycle a rating comes out of) and the
+Reputation system section of `README.md` (the full tunable list and the
+on-chain / off-chain split).
