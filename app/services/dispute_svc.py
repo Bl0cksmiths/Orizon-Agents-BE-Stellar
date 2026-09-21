@@ -207,6 +207,28 @@ def _authenticate_payer(
         raise _refuse("not_the_payer", 403, "only the payer of a workflow may dispute it", job_id_hex, step_index)
 
 
+def _duplicate(existing: DisputeRecord, job_id_hex: str, step_index: int) -> DisputeError:
+    """The `duplicate_dispute` refusal, carrying the ORIGINAL dispute.
+
+    One builder for both places that raise it — the pre-check and the store's
+    race backstop — so the two cannot answer the same situation differently.
+    Logged at INFO, not WARNING: a buyer pressing a button twice is not a
+    security event, and the dispute they already have is a useful answer.
+    """
+    logger.info(
+        "duplicate dispute: job=%s step=%s answered with %s",
+        job_id_hex,
+        step_index,
+        existing.id,
+    )
+    return DisputeError(
+        "duplicate_dispute",
+        f"step {step_index} of this workflow was already disputed",
+        409,
+        existing,
+    )
+
+
 async def open_dispute(
     *,
     job_id_hex: str,
@@ -246,6 +268,10 @@ async def open_dispute(
          this step had a price (`nothing_was_charged`, 409). A credit is a real
          transfer out of the platform wallet, so a dispute of a step nobody paid
          for is a withdrawal request, not a remedy.
+      6. **One dispute per step** — a second attempt is answered with the first
+         dispute, unchanged (`duplicate_dispute`, 409, carrying it). Last
+         because it is the only rule whose answer is a whole record, and the
+         store re-checks it under the race (see below).
 
     Returns the stored `DisputeRecord` (status `open`). Writes nothing on-chain
     and touches no reputation: 4.03 pays the credit, 4.04 writes the rating.
@@ -308,6 +334,13 @@ async def open_dispute(
             step_index,
         )
 
+    existing = await store.find_dispute(job_id_hex, step_index)
+    if existing is not None:
+        # The buyer gets their own dispute back rather than an error they
+        # cannot act on: one dispute per (job, step) is a product rule (a step
+        # is credited once), and the second press of a button is not a failure.
+        raise _duplicate(existing, job_id_hex, step_index)
+
     # R12, named here so the collision cannot be rediscovered the hard way: the
     # settler has ALREADY auto-rated this job under `Rated(agent_id, job_id)`,
     # and `ReputationLedger.submit` checks that replay guard before it reads
@@ -338,15 +371,11 @@ async def open_dispute(
         stored = await store.open_dispute(record)
     except DuplicateDisputeError as e:
         # The store enforces one dispute per (job, step) as well, and it is the
-        # only check that holds under a race: two requests that both pass the
-        # rules above still meet here, and the second must get the first
-        # dispute back rather than a 500.
-        raise DisputeError(
-            "duplicate_dispute",
-            f"step {step_index} of this workflow was already disputed",
-            409,
-            e.existing,
-        ) from None
+        # only check that holds under a race: two requests that both passed the
+        # pre-check above still meet here, and the loser must get the winner's
+        # dispute back rather than a 500. Same code, same shape, same record —
+        # a race is not a different outcome, only a different path to it.
+        raise _duplicate(e.existing, job_id_hex, step_index) from None
     logger.info(
         "dispute opened: id=%s job=%s step=%s agent=%s creditable=%.7f",
         stored.id,
