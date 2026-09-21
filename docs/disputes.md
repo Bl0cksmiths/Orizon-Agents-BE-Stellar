@@ -182,6 +182,10 @@ platform's commentary on it.
    contract.
 5. On success the dispute moves to `credited` with the refund transaction hash
    on its record, and the claim is dropped.
+6. Only then — the credit landed **and** recorded — the settler writes the
+   dispute rating against the agent, and its transaction hash is added to the
+   same record. "After `credited`" below is what that step does, and why
+   nothing it does can reach back into the five before it.
 
 The claim is what makes a credit payable exactly once. Two adjudicators
 clicking at the same moment, a retried request, a redeployed process mid-flight
