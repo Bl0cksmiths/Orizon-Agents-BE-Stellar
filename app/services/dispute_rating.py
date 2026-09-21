@@ -59,4 +59,12 @@ def dispute_job_id(job_id: bytes, step_index: int) -> bytes:
     if not 0 <= step_index < 2 ** (8 * _STEP_INDEX_BYTES):
         raise ValueError(f"step index {step_index} does not fit the derived id")
     digest = hashlib.sha256(job_id + DISPUTE_ID_TAG + step_index.to_bytes(_STEP_INDEX_BYTES, "big")).digest()
-    return job_id[:_LINKED_PREFIX_BYTES] + digest[:_LINKED_PREFIX_BYTES]
+    derived = job_id[:_LINKED_PREFIX_BYTES] + digest[:_LINKED_PREFIX_BYTES]
+    # Equal only if eight hash bytes happen to reproduce the job id's own tail —
+    # one chance in 2**64. Checked anyway, because if it ever happened the
+    # dispute rating would land on the key the settler's auto-rating already
+    # holds and be refused as a replay of it forever. Refusing to derive is
+    # loud; a rating that can never be written is not.
+    if derived == job_id:
+        raise ValueError(f"the dispute id for job {job_id.hex()} step {step_index} equals the job id itself")
+    return derived
