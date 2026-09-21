@@ -316,3 +316,109 @@ def test_a_repeated_agent_is_judged_per_step_not_per_agent(monkeypatch, store):
     _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
 
     assert [s.delivered for s in store.recorded[0].steps] == [False, True]
+
+
+# ── who paid, recorded; who did not, not recorded ───────────────────────
+def test_a_seal_failure_still_records_the_settlement(monkeypatch, store):
+    """The charge landed and the attestation did not: the buyer paid, so the
+    buyer keeps their recourse. `proof_tx` is None and says so."""
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    _patch_settlement(monkeypatch, proof_tx=None)
+    task_id = "tsk_capture_unsealed"
+
+    _run_paid(_plan(), task_id)
+
+    record = store.recorded[0]
+    assert (record.charge_tx, record.proof_tx) == (CHARGE_TX, None)
+    assert record.job_id_hex == JOB_ID.hex()
+    assert any("dispute window" in ln.msg for ln in state.traces[task_id])
+
+
+@pytest.mark.parametrize("charge_tx", [None, CHARGE_TX], ids=["charge-raised", "charge-not-successful"])
+def test_a_charge_that_never_landed_records_nothing(monkeypatch, store, charge_tx):
+    """No job id means no money moved — `_settle_onchain` mints it inside the
+    charge and returns None when the charge was skipped, raised, or came back
+    non-SUCCESS. There is nothing to dispute and nothing to credit, and a
+    window promised over an empty charge is a lie to the buyer."""
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    _patch_settlement(monkeypatch, charge_tx=charge_tx, proof_tx=None, job_id=None)
+    task_id = "tsk_capture_nocharge"
+
+    _run_paid(_plan(), task_id)
+
+    assert store.recorded == []
+    assert asyncio.run(store.get_settlement_by_task(task_id)) is None
+    assert not any("dispute window" in ln.msg for ln in state.traces[task_id])
+
+
+def test_a_paid_run_that_delivered_nothing_records_nothing(monkeypatch, store):
+    """Every step failed, so `_run` withholds the charge entirely — the payer's
+    authorization was never consumed and no window opens."""
+    _resolves_to(monkeypatch, lambda agent_id: _BoomWorker())
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_allfail"
+
+    _run_paid(_plan((0.05, 0.05)), task_id)
+
+    assert state.tasks[task_id].status == "failed"
+    assert store.recorded == []
+    assert not any("dispute window" in ln.msg for ln in state.traces[task_id])
+
+
+def test_a_simulated_run_records_nothing(monkeypatch, store):
+    """No payer and no authorization: nobody was charged, so there is nobody to
+    refund. The run still completes and still traces its simulated payments."""
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_simulated"
+    _add_task(task_id)
+
+    asyncio.run(execution_svc._run(_plan(), task_id))
+
+    assert state.tasks[task_id].status == "complete"
+    assert store.recorded == []
+    lines = state.traces[task_id]
+    assert any("simulated" in ln.msg for ln in lines)
+    assert not any("dispute window" in ln.msg for ln in lines)
+
+
+# ── recording is best-effort, and loudly so ─────────────────────────────
+class _BrokenStore(_RecordingStore):
+    """A store that takes the write and loses it — a cold Postgres, an
+    exhausted pool. The money has already moved when this happens."""
+
+    async def record_settlement(self, record: SettlementRecord) -> None:
+        self.recorded.append(record)
+        raise RuntimeError("connection pool exhausted")
+
+
+def test_a_store_that_raises_does_not_fail_the_workflow(monkeypatch, caplog):
+    """The charge has already settled by the time the record is written, so a
+    store that is down must not take the workflow down with it — the ratings
+    after it still run and the task still finalizes with its tx hashes.
+
+    It is still the most serious thing that can go wrong here — the buyer has
+    paid and silently has no route to a refund — so it is logged at ERROR with
+    the job, the charge and the payer, and the buyer's trace does not claim a
+    window that cannot be honoured.
+    """
+    broken = _BrokenStore()
+    monkeypatch.setattr(dispute_store, "_store", broken)
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    rating_calls = _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_brokenstore"
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        _run_paid(_plan(), task_id)
+
+    task = state.tasks[task_id]
+    assert task.status == "complete"
+    assert (task.charge_tx, task.proof_tx) == (CHARGE_TX, PROOF_TX)
+    assert rating_calls == [JOB_ID], "the workflow must carry on past a failed recording"
+    msgs = _errors(caplog)
+    assert any(
+        task_id in m and JOB_ID.hex() in m and CHARGE_TX in m and PAYER in m and "NOT recorded" in m for m in msgs
+    ), f"a lost settlement was never logged with its context: {msgs}"
+    lines = state.traces[task_id]
+    assert any(ln.level == "error" and "cannot be disputed" in ln.msg for ln in lines)
+    assert not any("dispute window" in ln.msg for ln in lines)
