@@ -557,6 +557,24 @@ async def _run(
                 charge_tx, proof_tx, job_id = await _settle_onchain(
                     task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
                 )
+                # Recorded here, before the ratings below, because the ratings
+                # are a SEQUENTIAL run of on-chain submits — one per step, each
+                # waiting up to ~30s on a status poll — and a process that dies
+                # partway through them (a Render redeploy, an idle spin-down)
+                # would otherwise take the buyer's only evidence of what they
+                # paid for with it. This touches no chain and cannot raise.
+                await _record_settlement(
+                    task_id,
+                    start,
+                    plan,
+                    payer=payer,
+                    auth_id_hex=auth_id_hex,
+                    job_id=job_id,
+                    charge_tx=charge_tx,
+                    proof_tx=proof_tx,
+                    total_usdc=spent,
+                    delivered_steps=frozenset(delivered_steps),
+                )
                 # Rated whether or not the money moved, exactly as the
                 # no-success branch above is (ADR 0005 D2). This used to sit
                 # behind `if charge_tx and job_id`, which made every rating a
