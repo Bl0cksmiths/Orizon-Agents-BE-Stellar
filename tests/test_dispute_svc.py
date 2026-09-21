@@ -328,7 +328,9 @@ def test_a_nonce_that_is_not_the_one_issued_is_refused() -> None:
     issued, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
     other, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 1))
 
-    for nonce in ("deadbeef", other):  # wrong shape, then another step's live nonce
+    # A wrong shape, a non-ASCII string the length of a real nonce (which the
+    # constant-time compare cannot be handed), then another step's LIVE nonce.
+    for nonce in ("deadbeef", "é" * 32, other):
         with pytest.raises(DisputeError) as refused:
             _open(payer, step=0, nonce=nonce)
         assert refused.value.code == "challenge_expired"
