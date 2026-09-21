@@ -248,6 +248,52 @@ INSERT INTO workflow_settlements (
 """
 
 
+# A dispute's current state is its NEWEST event row, so every read here is the
+# same shape: filter, `ORDER BY id DESC`, take one. No fold over the history and
+# no join, because each row already carries the whole record.
+_SELECT_DISPUTE_SQL = """
+SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+FROM dispute_events
+WHERE dispute_id = $1
+ORDER BY id DESC
+LIMIT 1
+"""
+
+# The dispute of one step, which is how a second "dispute this step" request
+# finds the first one to answer with. Safe as a LIMIT 1 precisely because of the
+# partial unique index: a (job_id_hex, step_index) pair can only ever have had
+# one dispute opened against it, so its newest event row is that dispute's
+# current state rather than one of several disputes' states.
+_SELECT_DISPUTE_BY_STEP_SQL = """
+SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+FROM dispute_events
+WHERE job_id_hex = $1 AND step_index = $2
+ORDER BY id DESC
+LIMIT 1
+"""
+
+# Every dispute of one task, each collapsed to its current state. DISTINCT ON
+# (dispute_id) with ORDER BY dispute_id, id DESC keeps the newest row per
+# dispute — the (task_id, dispute_id, id DESC) index serves that ordering
+# directly — and the outer ORDER BY re-sorts them the way a human reads a
+# receipt: oldest dispute first, and a stable tiebreak by step for two opened in
+# the same clock tick. A caller listing a task's disputes must not see them
+# shuffle between two identical requests.
+_SELECT_DISPUTES_FOR_TASK_SQL = """
+SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+FROM (
+    SELECT DISTINCT ON (dispute_id) *
+    FROM dispute_events
+    WHERE task_id = $1
+    ORDER BY dispute_id, id DESC
+) AS latest
+ORDER BY opened_at, step_index
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
