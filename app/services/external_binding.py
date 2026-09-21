@@ -545,3 +545,65 @@ def verify_unbind_challenge(agent_id: str, owner: str, signature_b64: str) -> bo
         signature_b64,
         lambda nonce: unbinding_message(agent_id, nonce),
     )
+
+
+def dispute_challenge_is_live(job_id_hex: str, step_index: int, nonce: str) -> bool:
+    """True while `nonce` IS the outstanding, unexpired dispute challenge for
+    this (job, step). Does NOT consume it and does NOT look at any signature.
+
+    Only the dispute flow needs this, and only because its API answers a
+    missing or stale challenge with its own code (`challenge_expired`, 400)
+    rather than folding it into "that signature did not verify". A buyer who
+    spent thirty seconds in a wallet dialog and came back past the TTL has to be
+    told to ask for another challenge — "not the payer" would send them looking
+    for a problem with their wallet. Bind and unbind have no such distinction to
+    draw, so they keep the single boolean and nothing about them changes.
+
+    Split out rather than folded into `verify_dispute_challenge` so that the
+    single-use consumption stays where it belongs: this predicate can be called
+    as often as a caller likes without burning the nonce, and the only thing
+    that ever deletes one is a proven signature (or its expiry).
+
+    `compare_digest` because the nonce is a live credential for its window —
+    the comparison is cheap, and leaving a timing oracle on a secret we mint
+    ourselves would be a gift.
+    """
+    entry = _challenges.get((job_id_hex, dispute_subject(step_index)))
+    if entry is None:
+        return False
+    stored, expires_at = entry
+    if time.time() > expires_at:
+        return False
+    return secrets.compare_digest(stored, nonce)
+
+
+def verify_dispute_challenge(job_id_hex: str, step_index: int, payer: str, signature_b64: str) -> bool:
+    """Verify a base64 ed25519 signature over `dispute_message(...)` — the proof
+    that `payer` opened this dispute. Consumes the nonce on success.
+
+    `payer` is the address the SETTLEMENT RECORD names as having paid for the
+    workflow, read by the caller from the dispute store and never taken from the
+    request. That is the whole authority model for a dispute: the only party who
+    may dispute a step is the party whose money moved, and the record of whose
+    money moved was written at settlement time, before any dispute existed.
+
+    A BIND OR UNBIND SIGNATURE CANNOT REACH THIS, and neither can a dispute
+    signature reach those, for `verify_unbind_challenge`'s three reasons applied
+    to a third domain: the bytes differ (`orizon-dispute:v1` and a step index no
+    other message carries), the nonces live under keys neither of the others can
+    name, and a consumed nonce cannot be re-derived from the table at all. There
+    is a fourth here: the signer is a different party — a bind is proved by the
+    agent's owner, a dispute by the buyer — so even a forged domain would be
+    checked against the wrong key.
+
+    Returns False on any failure: no, stale or mismatched nonce, malformed payer
+    address or signature, or a signature that does not verify. A failed attempt
+    leaves the challenge alone, so a guess cannot cancel the real buyer's.
+    """
+    return _verify(
+        job_id_hex,
+        dispute_subject(step_index),
+        payer,
+        signature_b64,
+        lambda nonce: dispute_message(job_id_hex, step_index, nonce),
+    )
