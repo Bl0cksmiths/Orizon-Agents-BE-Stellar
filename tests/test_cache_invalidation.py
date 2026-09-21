@@ -211,3 +211,29 @@ def test_invalidate_clears_the_failure_cache_for_that_key():
 
     assert asyncio.run(run()) == "recovered"
     assert calls["n"] == 2
+
+
+def test_a_stale_read_that_fails_is_not_negatively_cached():
+    """The fence covers failures too: negatively cached, a stale error would
+    refuse the first reader after the invalidation for the whole window."""
+    fresh, _ = _returning("post-dispute")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stale():
+            started.set()
+            await release.wait()
+            raise RuntimeError("rpc down before the rating landed")
+
+        early = asyncio.create_task(cache.get_or_set("k", 60.0, stale))
+        await started.wait()
+        cache.invalidate("k")
+        release.set()
+        with pytest.raises(RuntimeError):
+            await early  # its own caller still hears about it
+        assert "k" not in cache._failures
+        return await cache.get_or_set("k", 60.0, fresh)
+
+    assert asyncio.run(run()) == "post-dispute"
