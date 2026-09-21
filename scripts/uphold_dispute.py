@@ -515,7 +515,7 @@ def check_config() -> int:
     )
 
 
-def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallback: int) -> int:
+def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None, fallback: int) -> int:
     """What the STORE says happened to the money, and the exit code that follows.
 
     The record beats the call, always. A submission that timed out after the
@@ -523,6 +523,10 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallba
     returned or raised, and that is the case an operator must not misread at
     2am — so `crediting` wins first, `credited` next, and only a state that says
     nothing about the money defers to what the call itself reported.
+
+    `amount` is None on a rating-only run — a dispute credited by an earlier
+    one — and the credit is then reported as that earlier run's, so a re-run
+    for the rating can never be read as a second payment.
     """
     if dispute is None:
         say()
@@ -536,7 +540,10 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallba
 
     if dispute.status == "credited" and dispute.refund_tx:
         say()
-        say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
+        if amount is None:
+            say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
+        else:
+            say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
         say(f"  status:    {dispute.status}")
         say(f"  tx:        {dispute.refund_tx}")
         say(f"  evidence:  {expert_url('tx', dispute.refund_tx)}")
@@ -847,7 +854,7 @@ def report_rating(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome 
     return EXIT_OK
 
 
-async def execute(dispute_id: str, amount: float) -> int:
+async def execute(dispute_id: str, amount: float | None) -> int:
     """Uphold the dispute, pay the credit, rate the agent, and report both from the store.
 
     Every path — clean return, refusal, unexpected exception — falls through to
