@@ -216,6 +216,76 @@ own wallet and cannot be reversed, because the asset contract has no more of an
 undo than the escrow does. If a buyer's dispute sits in `crediting`, it has not
 been forgotten — it is waiting on a person with a block explorer.
 
+## After `credited`: the dispute rating
+
+An upheld, paid dispute has one more consequence, and it is the one that falls
+on the agent: the settler writes a rating against it on the ReputationLedger,
+`kind = "dispute"`, scored **10 out of 100**. It is written only **once the
+credit has landed and been recorded** — so no agent is ever rated for a dispute
+whose buyer was not paid — and it lands as a second, separate rating beside the
+one the settler wrote for that step at settlement. What it does to the agent's
+score is in `docs/reputation.md`.
+
+**It never touches the refund.** Whatever happens to the rating, the dispute
+stays `credited`, its refund transaction stays on the record, and the buyer
+keeps the credit. The uphold is answered with the dispute as it stands even
+when the rating did not land, because by then the buyer has been paid and an
+error would say otherwise.
+
+**The record says whether it landed.** `rating_tx` on the dispute is the
+answer:
+
+- **Set** — the rating was submitted under the dispute's derived id and landed,
+  or, if its submission was unconfirmed, is in flight and may still land. Look
+  the hash up, or simply uphold again, which settles it either way.
+- **Empty** — the buyer is paid and the agent's rating is **not** on-chain. The
+  dispute is not fully resolved. Uphold it again; if the log names a
+  **collision**, follow the procedure at the end of this document instead.
+
+**Retrying is always safe, and it retries the rating alone.** Upholding a
+`credited` dispute again signs no transfer — that branch returns before the
+refund claim is ever looked at — and submits the rating once more. The ledger
+refuses a second rating under the same id, so a retry cannot rate the agent
+twice: it lands, because no earlier attempt did, or it is refused as a replay,
+because one did, and the refusal costs nothing on-chain because it happens at
+simulation. This is the exact opposite of the refund, where a retry after an
+unconfirmed transfer is the one thing never allowed. The difference is that the
+ledger can refuse a duplicate and the asset contract cannot;
+`docs/decisions/0009-dispute-rating.md` D4 has the argument.
+
+Every attempt is logged on one line carrying every id needed to find the rating
+on-chain or prove it absent —
+`dispute rating <outcome>: dispute=… job=… derived=… agent=… payer=… tx=…` —
+and the outcome is one of these:
+
+| outcome | level | the record afterwards | what to do |
+| --- | --- | --- | --- |
+| `landed (10/100)` | INFO | `rating_tx` is its hash; the agent's cached score is dropped at once | nothing |
+| `already on-chain — kept` | INFO | unchanged: an earlier attempt of this dispute landed | nothing |
+| `unconfirmed — it may still land` | ERROR | `rating_tx` is the in-flight hash, when the submission returned one | uphold again |
+| `failed (FAILED) — nothing landed` | ERROR | unchanged | uphold again — after fixing the cause, if the line before it names one |
+| `did not complete` | ERROR | unchanged | uphold again |
+| `COLLISION` | ERROR | unchanged, and no `rating_tx` | the collision procedure at the end of this document |
+| `not re-attempted` | ERROR, or WARNING when a `rating_tx` is already on record | unchanged | the settlement that weights the rating is gone; see below |
+
+A `failed` rating whose preceding line says `Unauthorized` is not about the
+dispute at all: the deployment's signer is not the ledger's Scorer, so no
+rating it signs can land. `GET /readiness` reports the same thing as
+`ratings.writer = not_scorer`, and the fix — the ledger admin calling
+`set_scorer` — is in `docs/reputation.md`. Uphold again once it is done.
+
+`not re-attempted` means a repeat uphold found no settlement record for the
+job, so there is no step price to weight the rating with and nothing was
+submitted. It cannot happen on the first attempt, which is made with the
+settlement the credit was just priced from. With `DATABASE_URL` set,
+settlements are never dropped, so it is the in-memory fallback's failure.
+
+When the workflow is still in memory, a landed rating also appears on its
+trace, as `reputation → agent <id> rated 10/100 for upheld dispute <id> on step
+<n> · dispute job <derived id> · tx <hash>`. That line is a convenience for a
+console that still has the run on screen; the dispute record is what holds the
+fact.
+
 ## The trust model, stated plainly
 
 - **The platform funds the credit.** The disputed agent's only consequence is
