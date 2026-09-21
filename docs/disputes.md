@@ -52,9 +52,11 @@ Proof is a **signature from that wallet**, not a password, an account or a
 session. The flow is the same one an operator already uses to bind an agent
 endpoint:
 
-1. Ask for a challenge. The API returns a nonce and the exact message to sign,
-   along with what is being disputed — the step, what it was charged, what a
-   credit would come to, and when the window closes.
+1. Ask for a challenge on the job and the step. The API returns a nonce, the
+   exact message to sign and when the challenge expires. What is being
+   disputed — the job id to ask about, what the step was charged, what a
+   credit would come to, and when the window closes — is on the task's dispute
+   view, `GET /api/tasks/{task_id}/disputes`.
 2. Sign that message with the wallet that paid. The message is
    `orizon-dispute:v1:{job_id_hex}:{step_index}:{nonce}` — it names the
    protocol, the job and the step, so a captured signature cannot be replayed
@@ -466,7 +468,7 @@ stacked, with their shared prefix underlined.
 
 | Route | Who may call it | Purpose |
 | --- | --- | --- |
-| `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign, with the step, its charge, the creditable amount and the window's closing time |
+| `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign and when the challenge expires. The step's charge, the creditable amount and the window's closing time are on the per-task read |
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
 | `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
 | `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
