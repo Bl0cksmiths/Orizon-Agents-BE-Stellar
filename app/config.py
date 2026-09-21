@@ -231,6 +231,11 @@ class Settings(BaseSettings):
     # time, and tuning this must not silently move it for work already done.
     # Changing it therefore only affects workflows that settle afterwards.
     dispute_window_seconds: float = 86_400.0  # 24 hours
+    # Share of the disputed step's settled charge credited back when a dispute
+    # is upheld (story 4.03 pays it; `refund_svc.credited_amount_usdc` clamps
+    # it to [0, 1]). 1.0 = the whole step, which is what ADR 0002 states as the
+    # policy buyer and operator are both told in advance.
+    dispute_credited_fraction: float = 1.0
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
