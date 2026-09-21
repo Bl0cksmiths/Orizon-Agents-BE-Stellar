@@ -484,3 +484,33 @@ def test_a_step_that_delivered_nothing_keeps_no_summary(monkeypatch, store):
     steps = store.recorded[0].steps
     assert [s.delivered for s in steps] == [True, False, False]
     assert [s.output_summary for s in steps] == ["did the thing", None, None]
+
+
+class _TwoPassWorker:
+    """Delivers on both of its steps, with a different result each time — one
+    agent used twice in a plan, which a summary keyed by agent_id would
+    collapse into whichever pass ran last."""
+
+    name = "w.twopass"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, intent, rationale, context=None):
+        self.calls += 1
+        return {"summary": "outline drafted" if self.calls == 1 else "outline polished"}
+
+
+def test_one_agent_on_two_steps_keeps_two_summaries(monkeypatch, store):
+    """The buyer disputes a step, not an agent: disputing the draft must show
+    the draft, not the polish that overwrote it in a map keyed by agent."""
+    worker = _TwoPassWorker()
+    _resolves_to(monkeypatch, lambda agent_id: worker)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_twopass"
+
+    _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
+
+    steps = store.recorded[0].steps
+    assert [s.output_summary for s in steps] == ["outline drafted", "outline polished"]
+    assert _traced(task_id, "w.twopass") == [s.output_summary for s in steps]
