@@ -935,6 +935,22 @@ async def _settle_onchain(
     return (charge_tx, proof_tx, settled_job_id)
 
 
+def _settled_usdc(total_usdc: float) -> float:
+    """What the charge actually moved, back in USDC.
+
+    `_settle_onchain` charges `usdc_to_i128(max(total_usdc, 0.000001))`: the
+    run's estimate floored to dust and rounded to the ledger's 7 decimals. So
+    the sum of the plan's estimates is NOT what the buyer paid, and a dispute
+    credit computed from that sum could hand back more than ever came out of
+    escrow. Derived through the charge's own helper rather than restated, so
+    the two cannot drift apart.
+    """
+    from ..stellar import client as sc
+    from .reputation_svc import STROOPS_PER_USDC
+
+    return sc.usdc_to_i128(max(total_usdc, 0.000001)) / STROOPS_PER_USDC
+
+
 # A failure class is a token, never free text. Validated by SHAPE rather than
 # membership because the run loop must not import a worker's module to classify
 # its exception (ADR 0005) — so anything that is not a plain lowercase token
