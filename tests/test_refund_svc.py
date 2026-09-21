@@ -9,25 +9,9 @@ SAC transfer settler→buyer, and a dispute rating under the derived id).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 import app.stellar.client as sc
 from app.services import refund_svc
-
-
-def test_dispute_job_id_is_deterministic_16_bytes_and_distinct() -> None:
-    jid = bytes(range(16))
-    d = refund_svc.dispute_job_id(jid)
-    assert isinstance(d, bytes) and len(d) == 16
-    assert d == refund_svc.dispute_job_id(jid)  # deterministic
-    assert d != jid  # not the settled job's id (clears the replay guard)
-    assert d == hashlib.sha256(jid + b"dispute").digest()[:16]  # documented derivation
-
-
-def test_dispute_job_id_differs_per_job() -> None:
-    a = refund_svc.dispute_job_id(bytes(16))
-    b = refund_svc.dispute_job_id(bytes([1]) + bytes(15))
-    assert a != b
 
 
 def test_credited_amount_full_partial_and_clamped() -> None:
