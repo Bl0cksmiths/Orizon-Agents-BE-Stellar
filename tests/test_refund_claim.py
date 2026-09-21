@@ -534,3 +534,30 @@ def test_the_two_stores_take_the_same_path_through_a_payout() -> None:
         ("credit", "credited", ()),
         ("claim after credit", None, ()),
     ]
+
+
+def test_an_adjudicators_note_survives_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejection is the outcome most likely to be contested, so the argument
+    for it has to outlive the process that made it exactly as the buyer's
+    `reason` does. A note held only in a log line is a note nobody can produce
+    weeks later, which is the asymmetry the column closes.
+
+    It sits beside the claim's restart test because the restart idiom it needs
+    lives in tests/test_dispute_durability.py, which story 4.03 does not own.
+    """
+    database = FakePool()
+    note = "  step 0 delivered; the brief did not ask for charts\n"
+
+    with process(monkeypatch, database) as store:
+        opened = asyncio.run(store.open_dispute(a_dispute()))
+        asyncio.run(store.append_status(opened.id, "rejected", note=note))
+
+    with process(monkeypatch, database) as store:
+        restored = asyncio.run(store.get_dispute(opened.id))
+        assert restored is not None
+        assert restored.status == "rejected"
+        assert restored.note == note
+        # The opening row never carried one, so the trail still shows a dispute
+        # opened on the buyer's reason alone and refused later, with the
+        # platform's answer on its own line.
+        assert [row["note"] for row in database.disputes] == [None, note]
