@@ -564,6 +564,14 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
     rejection of a dispute that is mid-payout or already paid, which is the one
     thing an adjudicator most needs to be told they cannot do.
 
+    Deliberately NOT gated on `DISPUTE_REFUNDS_ENABLED` the way `uphold` is.
+    That switch guards the platform's WALLET, and a rejection signs nothing and
+    pays nothing; gating it would mean a deployment with the refund path off
+    could not close a dispute at all, leaving buyers with claims nobody is
+    allowed to answer. The route still refuses both under `require_adjudicator`
+    (D1) — the switch is a money control here and an authorisation control
+    there, and only one of those is this module's to make.
+
     `note` is the adjudicator's reason. `DisputeRecord` has no field for it —
     the record carries the BUYER's evidence, and inventing a place for the
     platform's own commentary inside it is not this story's to do — so it is
