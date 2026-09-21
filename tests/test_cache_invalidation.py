@@ -115,3 +115,26 @@ def test_a_caller_after_invalidation_does_not_join_the_stale_flight():
     assert late == "post-dispute"
     assert early == "pre-dispute"
     assert fresh_calls["n"] == 1
+
+
+def test_callers_already_awaiting_the_stale_flight_still_get_their_answer():
+    """Detached, not cancelled. The callers already waiting asked before the
+    rating landed, and the answer that was true then is a correct answer for
+    them; cancelling the flight would turn it into an error for no gain."""
+
+    async def run():
+        stale, started, release, calls = _parked("pre-dispute")
+        callers = [asyncio.create_task(cache.get_or_set("k", 60.0, stale)) for _ in range(3)]
+        await started.wait()
+        flight = cache._flights["k"]
+        cache.invalidate("k")
+        assert "k" not in cache._flights
+        assert not flight.done()
+        release.set()
+        return await asyncio.gather(*callers), flight, calls["n"]
+
+    results, flight, produced = asyncio.run(run())
+    assert results == ["pre-dispute"] * 3
+    assert produced == 1  # they all shared the one flight
+    assert not flight.cancelled()
+    assert flight.result() == "pre-dispute"
