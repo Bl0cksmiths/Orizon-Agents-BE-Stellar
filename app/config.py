@@ -392,7 +392,7 @@ class Settings(BaseSettings):
         # prior authorisation to bound it. Anonymous, that is a drain of the
         # settler wallet on any network, so the refund routes demand a key
         # wherever they can actually sign.
-        if self.stellar_signing_key and self.stellar_asset_sac:
+        if self.dispute_refunds_enabled and self.stellar_signing_key and self.stellar_asset_sac:
             exposures.append(
                 "a signing key and an asset SAC are set, so /api/disputes/{id}/uphold can "
                 "transfer the platform's own funds"
