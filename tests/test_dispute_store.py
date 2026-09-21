@@ -460,6 +460,7 @@ class FakePool:
         assert sql in (
             dispute_store._CREATE_SETTLEMENTS_SQL,
             dispute_store._CREATE_DISPUTES_SQL,
+            dispute_store._CREATE_REFUND_CLAIMS_SQL,
         ), f"unexpected statement: {sql}"
         return "CREATE TABLE"
 
