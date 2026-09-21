@@ -944,6 +944,13 @@ class PostgresDisputeStore:
         row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, resolved_at, now)
         if row is None:
             raise KeyError(dispute_id)
+        if status in ("credited", "rejected"):
+            # A dispute that has finished is not mid-payout, so its mutex is
+            # dropped here rather than left for the caller to remember. What
+            # remains in `refund_claims` is then exactly the set of disputes
+            # still in flight — which is what makes the table readable as a
+            # reconciliation queue instead of a pile of spent locks.
+            await pool.fetchrow(_DELETE_REFUND_CLAIM_SQL, dispute_id)
         return self._to_dispute(row)
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
