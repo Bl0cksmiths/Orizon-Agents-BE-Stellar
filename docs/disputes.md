@@ -253,6 +253,11 @@ unconfirmed transfer is the one thing never allowed. The difference is that the
 ledger can refuse a duplicate and the asset contract cannot;
 `docs/decisions/0009-dispute-rating.md` D4 has the argument.
 
+"Uphold again" means the route, `POST /api/disputes/{dispute_id}/uphold`.
+`scripts/uphold_dispute.py` is not a way to retry a rating: it refuses a
+dispute that is already `credited` before it gets as far as the rating, because
+its job is paying credits and a credited dispute has nothing left to pay.
+
 Every attempt is logged on one line carrying every id needed to find the rating
 on-chain or prove it absent —
 `dispute rating <outcome>: dispute=… job=… derived=… agent=… payer=… tx=…` —
