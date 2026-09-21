@@ -204,6 +204,100 @@ def describe(dispute: DisputeRecord, settlement: SettlementRecord, step: Settlem
     say(f"  settled:   {settlement.settled_usdc:.7f} USDC for the whole workflow, at {settlement.settled_at:.0f}")
 
 
+def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: float | None = None) -> int:
+    """The block for a dispute sitting in `crediting` — a transfer MAY BE IN FLIGHT.
+
+    Reached two ways: a run that found the dispute already parked there, and a
+    run whose own submission timed out. They are the same situation, so they get
+    the same words rather than two half-written versions of them.
+
+    Nothing here tidies up, and that is D3 rather than an unfinished path. A
+    timed-out submission may still settle, so releasing the claim or retrying
+    would credit the buyer twice the moment it does. A buyer credited late is
+    recoverable; a buyer credited twice is not, and the settler's wallet is the
+    platform's own money.
+    """
+    # The promise frozen at opening time is the best figure available when this
+    # is reached before the credit has been computed; a caller that knows the
+    # real one passes it.
+    amount = dispute.creditable_usdc if amount is None else amount
+    say()
+    say("  " + "#" * 74)
+    say(f"  #  {headline}")
+    say("  #  DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE.")
+    say("  " + "#" * 74)
+    say()
+    say(f"  Dispute {dispute.id} is parked in `crediting`, which means the refund claim is")
+    say("  STILL HELD. That is what stops anything — this script, the API, a retry — paying")
+    say("  it a second time, and it is deliberate (D3), not a stuck job.")
+    say()
+    if dispute.refund_tx:
+        say(f"  in-flight tx:  {dispute.refund_tx}")
+        say(f"  check it:      {expert_url('tx', dispute.refund_tx)}")
+    else:
+        say("  in-flight tx:  none recorded — the submission returned no hash at all.")
+    say(f"  the payer:     {expert_url('account', dispute.payer)}")
+    say(f"                 look for a credit of about {amount:.7f} USDC to this account.")
+    say()
+    say("  Reconcile it on-chain first, then:")
+    say("    * it SUCCEEDED — the buyer has been credited. Close the dispute by recording")
+    say(f"      what landed: append_status({dispute.id!r}, 'credited', refund_tx=<hash>).")
+    say("      Re-running this script instead would credit them a second time.")
+    say("    * it FAILED, or the hash is on no explorer and the payer's balance never moved —")
+    say(f"      nothing moved. release_refund_claim({dispute.id!r}) returns it to `upheld`,")
+    say("      and only then may this script be run again.")
+    say("    * you cannot tell — LEAVE IT. Late is recoverable. Twice is not.")
+    say()
+    return code
+
+
+# The two states a credit may legitimately be paid from. `open` is the ordinary
+# case. `upheld` is the resumable one: an earlier run (or an adjudicator over
+# the API) recorded the decision but the credit was never claimed, and
+# `claim_refund` starts from exactly there.
+_ADJUDICABLE = ("open", "upheld")
+
+
+def check_status(dispute: DisputeRecord) -> int:
+    """EXIT_OK while this dispute may still be paid; a refusal code otherwise.
+
+    `claim_refund` is the real lock and refuses every one of these on its own
+    (D2). This gate exists so the operator gets a sentence rather than a silent
+    no-op — and so a preview says the same thing a live run would, which is the
+    only reason to trust a preview at all.
+    """
+    if dispute.status == "credited":
+        lines = [f"dispute {dispute.id} has already been credited — paying it again pays the buyer twice."]
+        if dispute.refund_tx:
+            lines += [f"refund tx:  {dispute.refund_tx}", f"evidence:   {expert_url('tx', dispute.refund_tx)}"]
+        else:
+            lines.append("No refund tx is recorded against it, which is worth reconciling before anything else.")
+        return refuse(EXIT_NOT_ADJUDICABLE, "already_credited", *lines)
+    if dispute.status == "rejected":
+        return refuse(
+            EXIT_NOT_ADJUDICABLE,
+            "already_rejected",
+            f"dispute {dispute.id} was rejected. That is final — adjudication is not re-run from here.",
+        )
+    if dispute.status == "crediting":
+        return unresolved_credit(dispute, EXIT_IN_FLIGHT, "A CREDIT FOR THIS DISPUTE IS ALREADY IN FLIGHT.")
+    if dispute.status not in _ADJUDICABLE:
+        # Not reachable through `DisputeStatus` today. Kept because the status
+        # is read back out of a database, and a money path that assumes its
+        # inputs are well-formed is one schema change away from paying on a
+        # value nobody considered.
+        return refuse(
+            EXIT_NOT_ADJUDICABLE,
+            "not_adjudicable",
+            f"dispute {dispute.id} is {dispute.status!r}, which is not a state a credit is paid from.",
+        )
+    if dispute.status == "upheld":
+        say()
+        say("  note: already upheld by an earlier run — the decision stands and the credit was")
+        say("        never claimed, so this run pays it rather than adjudicating again.")
+    return EXIT_OK
+
+
 def bounds(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep) -> list[tuple[float, str]]:
     """D4's three bounds, each with the thing it alone protects against.
 
@@ -311,6 +405,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     step = settlement.step(dispute.step_index)
     describe(dispute, settlement, step)
+    status_code = check_status(dispute)
+    if status_code != EXIT_OK:
+        return status_code
+
     amount, code = plan(dispute, settlement, step)
     if amount is None:
         return code
