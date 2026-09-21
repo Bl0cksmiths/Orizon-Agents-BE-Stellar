@@ -346,9 +346,9 @@ stay as they were.
 | status | what it means | what it carries | written by |
 | --- | --- | --- | --- |
 | `open` | raised inside the window by the payer, not yet adjudicated | the reason, the step's charge, the creditable amount, the opening time | story 4.02 — the only status it ever writes |
-| `upheld` | adjudicated in the buyer's favour | the on-chain dispute rating's tx, once written | adjudication (4.03); 4.04 adds the rating tx |
+| `upheld` | adjudicated in the buyer's favour | nothing on-chain yet | adjudication (4.03) |
 | `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx, once one has been submitted | the refund path (4.03) |
-| `credited` | the credit has landed in the buyer's wallet | the refund tx | the refund path (4.03) |
+| `credited` | the credit has landed in the buyer's wallet | the refund tx, and the dispute rating's tx once it is written | the refund path (4.03); the rating (4.04) adds its tx to the same status |
 | `rejected` | adjudicated against the claim | the resolution time; nothing on-chain | adjudication (4.03) |
 
 ```text
@@ -360,6 +360,12 @@ open ──► upheld ──► crediting ──► credited   the claim stood: 
                                              on-chain, the record and its
                                              reason are kept
 ```
+
+**The rating does not get a status of its own.** It is written after the
+dispute is `credited` and recorded on it as `rating_tx`, so a `credited`
+dispute is paid either way, and fully resolved only once `rating_tx` is set.
+One without it is a buyer who has their credit and an agent whose rating has
+not landed — retryable, as "After `credited`" describes.
 
 **`crediting` is not a verdict.** Nobody adjudicates a dispute *into* it: it is
 the refund claim itself, made durable, and it exists so that a payout can be
