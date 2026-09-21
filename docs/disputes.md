@@ -643,11 +643,13 @@ produces the same line every time. Run through `scripts/uphold_dispute.py`, it
 ends in a `RATING COLLISION` block naming the agent, the dispute and the rating
 id, and exits `13`.
 
-One case the script catches before it becomes a collision: when a rating lands
-in the same run but the write recording it fails, it prints the hash and the
-exact `append_status` line that records it, and asks for that to be run before
-anything is re-run. Do it — a re-run first would be refused as a replay with
-nothing on record, and read as a collision.
+One case is caught before it becomes a collision. When a rating lands but the
+write recording it on the dispute fails, the service logs
+`dispute rating was SUCCESS but could not be recorded on the dispute — record
+rating_tx by hand` with the hash, and the script prints that hash with the exact
+`append_status` line that records it and asks for it to be run before anything
+is re-run. Do it — a re-run first is refused as a replay with nothing on
+record, and reads as a collision.
 
 **What it means.** The ledger refused the rating as a replay — it already holds
 a rating for this agent under this dispute's derived id — and this dispute has
