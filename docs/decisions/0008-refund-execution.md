@@ -21,7 +21,7 @@ failure mode is paying a buyer twice.
 Three facts about the code this lands on shaped the answers more than the
 card's text did.
 
-### 1. The existing API-key posture is deliberately permissive, and for a reason that does not extend here
+### 1. The existing API-key posture is permissive on purpose, and the reason does not reach here
 
 `require_api_key` (`app/security.py`) is a no-op while `settings.api_key` is
 empty — it returns without checking anything — and the public demo runs that
