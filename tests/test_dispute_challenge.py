@@ -27,6 +27,7 @@ Hermetic: pure crypto and an in-process table, no chain and no network.
 from __future__ import annotations
 
 import base64
+import time
 
 import pytest
 from stellar_sdk import Keypair
@@ -209,3 +210,134 @@ def test_a_signature_from_another_wallet_is_refused() -> None:
     # The honest buyer's challenge survives it — only a proven signature
     # consumes a nonce, so an impostor cannot burn a dispute in progress.
     assert verify_dispute_challenge("job_imp", 0, payer.public_key, _sign_dispute(payer, "job_imp", 0, nonce)) is True
+
+
+# ── the lifecycle the dispute flow inherits ─────────────────────
+
+
+def test_the_buyer_s_signature_verifies_once_and_only_once() -> None:
+    payer = Keypair.random()
+    nonce, _ = issue_dispute_challenge("job_once", 0)
+    signature = _sign_dispute(payer, "job_once", 0, nonce)
+
+    assert verify_dispute_challenge("job_once", 0, payer.public_key, signature) is True
+    # Single use. The rule that matters downstream: one proof opens one dispute,
+    # so a captured signature cannot be replayed to open a second one — and the
+    # duplicate rule in dispute_svc is a product answer, not the security one.
+    assert verify_dispute_challenge("job_once", 0, payer.public_key, signature) is False
+
+
+def test_a_sep53_signature_verifies_too() -> None:
+    # The path a real wallet takes: StellarWalletsKit delegates signMessage to
+    # Freighter, which implements SEP-53. Without this the feature passes CI and
+    # fails against the most common Stellar wallet.
+    payer = Keypair.random()
+    nonce, _ = issue_dispute_challenge("job_sep53", 1)
+
+    assert verify_dispute_challenge(
+        "job_sep53", 1, payer.public_key, _sign_sep53(payer, dispute_message("job_sep53", 1, nonce))
+    )
+
+
+def test_a_dispute_without_a_challenge_is_refused() -> None:
+    payer = Keypair.random()
+    bogus = base64.b64encode(b"x" * 64).decode("ascii")
+
+    assert verify_dispute_challenge("job_nochallenge", 0, payer.public_key, bogus) is False
+
+
+def test_an_expired_dispute_challenge_is_refused() -> None:
+    payer = Keypair.random()
+    nonce, _ = issue_dispute_challenge("job_exp", 0, ttl_seconds=-1)  # already expired at issue
+
+    assert verify_dispute_challenge("job_exp", 0, payer.public_key, _sign_dispute(payer, "job_exp", 0, nonce)) is False
+
+
+def test_re_issuing_inside_the_window_returns_the_same_challenge() -> None:
+    """Inherited from `issue_challenge`, and the reason the public dispute
+    challenge route is safe to leave unauthenticated: without it, anyone who
+    knows a job id (they are public in the escrow's `charged` event) could loop
+    the route and permanently stop the real buyer completing a dispute, because
+    every request would mint a fresh nonce over the one being signed."""
+    first = issue_dispute_challenge("job_idem", 0)
+
+    assert issue_dispute_challenge("job_idem", 0) == first
+
+
+def test_the_ttl_is_the_time_to_sign_not_the_time_to_dispute() -> None:
+    """Five minutes to sign, against a 24 h window to dispute. The two are
+    deliberately different clocks: the window is a promise stamped on the
+    settlement record, and a challenge that lapses is re-minted for free."""
+    _, expires_at = issue_dispute_challenge("job_ttl", 0)
+
+    assert expires_at <= time.time() + eb.CHALLENGE_TTL_SECONDS
+    assert eb.CHALLENGE_TTL_SECONDS < 86_400
+
+
+def test_dispute_challenges_share_the_one_bounded_table() -> None:
+    """The reuse, asserted. The cap that protects a 512 MB instance from the
+    public bind route has to cover the public dispute route too — and it does
+    because there is one table rather than three. A caller who invents job ids
+    (or steps) cannot grow it past the cap."""
+    saved = eb._challenges.copy()
+    eb._challenges.clear()
+    try:
+        for i in range(eb.MAX_CHALLENGES + 20):
+            issue_dispute_challenge(f"flood_{i}", i)
+        assert len(eb._challenges) == eb.MAX_CHALLENGES
+        assert ("flood_0", dispute_subject(0)) not in eb._challenges
+        last = eb.MAX_CHALLENGES + 19
+        assert (f"flood_{last}", dispute_subject(last)) in eb._challenges
+    finally:
+        eb._challenges.clear()
+        eb._challenges.update(saved)
+
+
+def test_one_job_cannot_flood_the_table_past_the_cap_by_inventing_steps() -> None:
+    """The step is caller-supplied, so the per-step key must not be a way around
+    the cap. It is not: the cap is on the table, not on the scope."""
+    saved = eb._challenges.copy()
+    eb._challenges.clear()
+    try:
+        for step in range(eb.MAX_CHALLENGES + 20):
+            issue_dispute_challenge("job_flood", step)
+        assert len(eb._challenges) == eb.MAX_CHALLENGES
+    finally:
+        eb._challenges.clear()
+        eb._challenges.update(saved)
+
+
+# ── the liveness predicate the dispute API needs ────────────────
+
+
+def test_a_live_challenge_reports_live_without_being_consumed() -> None:
+    """`dispute_challenge_is_live` exists so the API can answer a lapsed
+    challenge with `challenge_expired` instead of "not the payer". It must not
+    consume anything: the signature is what consumes a nonce."""
+    payer = Keypair.random()
+    nonce, _ = issue_dispute_challenge("job_live", 0)
+
+    assert eb.dispute_challenge_is_live("job_live", 0, nonce) is True
+    assert eb.dispute_challenge_is_live("job_live", 0, nonce) is True  # still there
+    assert verify_dispute_challenge("job_live", 0, payer.public_key, _sign_dispute(payer, "job_live", 0, nonce)) is True
+    assert eb.dispute_challenge_is_live("job_live", 0, nonce) is False  # consumed by the proof
+
+
+def test_a_nonce_that_was_never_issued_is_not_live() -> None:
+    issue_dispute_challenge("job_wrongnonce", 0)
+
+    assert eb.dispute_challenge_is_live("job_wrongnonce", 0, "deadbeef") is False
+    assert eb.dispute_challenge_is_live("job_neverissued", 0, "deadbeef") is False
+
+
+def test_an_expired_nonce_is_not_live() -> None:
+    nonce, _ = issue_dispute_challenge("job_liveexp", 0, ttl_seconds=-1)
+
+    assert eb.dispute_challenge_is_live("job_liveexp", 0, nonce) is False
+
+
+def test_a_nonce_from_another_step_is_not_live() -> None:
+    nonce, _ = issue_dispute_challenge("job_crossstep", 0)
+    issue_dispute_challenge("job_crossstep", 1)
+
+    assert eb.dispute_challenge_is_live("job_crossstep", 1, nonce) is False
