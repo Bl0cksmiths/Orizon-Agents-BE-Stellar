@@ -528,3 +528,25 @@ def test_a_failed_step_never_borrows_a_later_steps_summary(monkeypatch, store):
     _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
 
     assert [s.output_summary for s in store.recorded[0].steps] == [None, "second time lucky"]
+
+
+def test_a_summary_branch_summary_is_cleaned_before_it_is_kept(monkeypatch, store):
+    """An external agent's own words, with an escape sequence and a NUL in
+    them. `_summarize` cuts this branch at 180, under the store's bound, so
+    nothing more is cut — what is kept is the traced text with only its
+    control characters blanked, because it is read back into an API response
+    and the console for the whole window, where they would forge structure."""
+    raw = "ok \x1b[31mred\x00 " + "x" * 5_000
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"summary": raw}))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_dirtysummary"
+
+    _run_paid(_plan(), task_id)
+
+    (traced,) = _traced(task_id, "w.says")
+    assert len(traced) == 180
+    stored = store.recorded[0].steps[0].output_summary
+    assert stored is not None
+    assert "\x1b" not in stored and "\x00" not in stored
+    assert stored == traced.replace("\x1b", " ").replace("\x00", " ")
+    assert not stored.endswith("[truncated]")
