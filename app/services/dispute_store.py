@@ -353,7 +353,8 @@ INSERT INTO workflow_settlements (
 # no join, because each row already carries the whole record.
 _SELECT_DISPUTE_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+       credited_usdc, updated_at, rating_confirmed
 FROM dispute_events
 WHERE dispute_id = $1
 ORDER BY id DESC
@@ -367,7 +368,8 @@ LIMIT 1
 # current state rather than one of several disputes' states.
 _SELECT_DISPUTE_BY_STEP_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+       credited_usdc, updated_at, rating_confirmed
 FROM dispute_events
 WHERE job_id_hex = $1 AND step_index = $2
 ORDER BY id DESC
@@ -383,7 +385,8 @@ LIMIT 1
 # shuffle between two identical requests.
 _SELECT_DISPUTES_FOR_TASK_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+       credited_usdc, updated_at, rating_confirmed
 FROM (
     SELECT DISTINCT ON (dispute_id) *
     FROM dispute_events
@@ -490,7 +493,8 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        FALSE
 FROM latest
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+          credited_usdc, updated_at, rating_confirmed
 """
 
 
@@ -520,7 +524,8 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        FALSE
 FROM latest {gate}
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+          credited_usdc, updated_at, rating_confirmed
 """
 
 
@@ -1133,7 +1138,10 @@ class PostgresDisputeStore:
         `resolved_at` stays None rather than becoming 0.0 when the column is
         NULL: an open dispute has not been resolved, and an epoch-zero timestamp
         would read as "resolved in 1970" to every caller that only checks
-        whether the value is set.
+        whether the value is set. The receipt's three columns follow the same
+        rule for the reason they are nullable at all — a row written before 4.06
+        says "not known", and a receipt that turned that into a credit of 0.0 or
+        an unconfirmed rating would state a fact nobody recorded.
         """
         return DisputeRecord(
             id=row["dispute_id"],
@@ -1151,6 +1159,9 @@ class PostgresDisputeStore:
             refund_tx=row["refund_tx"],
             rating_tx=row["rating_tx"],
             note=row["note"],
+            credited_usdc=None if row["credited_usdc"] is None else float(row["credited_usdc"]),
+            updated_at=None if row["updated_at"] is None else float(row["updated_at"]),
+            rating_confirmed=None if row["rating_confirmed"] is None else bool(row["rating_confirmed"]),
         )
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
