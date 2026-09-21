@@ -35,6 +35,7 @@ import pytest
 from stellar_sdk import Keypair
 
 import app.stellar.client as sc
+from app.config import settings
 from app.services import dispute_store, dispute_svc, refund_svc
 from app.services import external_binding as eb
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
@@ -72,8 +73,16 @@ class SignedSomething(BaseException):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_state():
-    """Every singleton these paths reach, reset around each test."""
+def _fresh_state(monkeypatch):
+    """Every singleton these paths reach, reset around each test.
+
+    `dispute_refunds_enabled` is turned ON here because it ships OFF: these
+    tests describe a deployment whose operator has deliberately enabled the
+    refund path, which is the only deployment where any of this runs. The test
+    that covers the switch itself turns it back off, so the default is asserted
+    rather than assumed.
+    """
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
     dispute_store._store = None
     eb._challenges.clear()
     state.tasks.clear()
