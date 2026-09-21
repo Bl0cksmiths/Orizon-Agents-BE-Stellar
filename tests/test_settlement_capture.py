@@ -468,3 +468,19 @@ def test_a_delivered_step_keeps_the_summary_its_trace_line_showed(monkeypatch, s
     assert step.output_summary == "12 sources, 3 conflicting"
     assert _traced(task_id, "w.research") == [step.output_summary]
     assert asyncio.run(store.get_settlement_by_task(task_id)).steps[0].output_summary == step.output_summary
+
+
+def test_a_step_that_delivered_nothing_keeps_no_summary(monkeypatch, store):
+    """The second step failed and the third never resolved to a worker: neither
+    produced anything, so there is nothing to show for them — None, never the
+    error line the trace printed in their place mistaken for output."""
+    workers = {"agt_0": _OkWorker("w.gen"), "agt_1": _BoomWorker("w.critic")}
+    _resolves_to(monkeypatch, workers.get)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_nosummary"
+
+    _run_paid(_plan((0.05, 0.02, 0.01)), task_id)
+
+    steps = store.recorded[0].steps
+    assert [s.delivered for s in steps] == [True, False, False]
+    assert [s.output_summary for s in steps] == ["did the thing", None, None]
