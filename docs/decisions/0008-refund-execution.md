@@ -220,14 +220,30 @@ ADR 0007's duplicate rule is an index rather than a check in Python; the
 conclusion here is a different constraint for a different lifetime, not a
 different principle.
 
-**The claim row is cleaned up by the store, not by callers.** Reaching
-`credited` or `rejected` through `append_status` drops the row automatically,
-and `release_refund_claim` moves the status back to `upheld` **before** it
-drops the mutex — in the reverse order a second caller could take the claim
-while the dispute still read `crediting` and would refuse to pay a buyer who is
-owed. What is left in `refund_claims` is therefore exactly the set of disputes
-still in flight, which is what makes the table readable as a reconciliation
-queue rather than a pile of spent locks.
+**The claim row is cleaned up by the store, not by callers**, and always inside
+the statement that writes the transition. `append_status` drops it in the same
+statement that records `credited` or `rejected`; `release_refund_claim` drops
+it in the same statement that puts the dispute back to `upheld`. The reason is
+the one that made the claim a single statement: the mutex and the status are
+the same fact recorded twice, and they must not be able to come apart. Dropping
+the mutex first would let another payer claim a dispute still reading
+`crediting`, which then refuses the credit a buyer is owed; writing the status
+first and dying before the delete leaves the unpayable wedge described above.
+
+The release gates on the **status** rather than on the claim row, and that
+makes it a repair rather than a guard. A dispute that somehow reached
+`crediting` without a mutex row would be stuck for ever if a release refused to
+act without one — and `append_status` is public enough that "somehow" is not
+hypothetical. Gating on the status returns such a dispute to `upheld`, where it
+can be claimed again, and the delete is simply a no-op.
+
+What is left in `refund_claims` is therefore exactly the set of payouts still
+in flight, which is what makes the table a reconciliation queue rather than a
+pile of spent locks. `list_refund_claims()` is the read that makes that true
+rather than aspirational — oldest claim first, with `claimed_at` as the number
+that decides which one needs a human now. D3 forbids retrying an unconfirmed
+transfer, so the only way a buyer whose refund hung ever gets paid is a person
+finding them, and a lock nobody can list is a buyer nobody can find.
 
 ### D3 — A timed-out transfer is never retried automatically
 
