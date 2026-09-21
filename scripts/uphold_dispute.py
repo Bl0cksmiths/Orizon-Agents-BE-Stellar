@@ -641,11 +641,13 @@ def rating_verdict(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome
     """
     if outcome is None:
         return "unattempted"
-    if outcome.status == "SUCCESS":
-        return "rated" if outcome.tx_hash and dispute.rating_tx == outcome.tx_hash else "unrecorded"
+    if outcome.status == "SUCCESS" and outcome.tx_hash:
+        return "rated" if dispute.rating_tx == outcome.tx_hash else "unrecorded"
     if outcome.status == "REPLAY":
         return "confirmed" if dispute.rating_tx else "collision"
-    if outcome.status == "TIMEOUT":
+    # A SUCCESS with no hash is the same unknown the rating service already
+    # files as a TIMEOUT: nothing a reviewer could open says it landed.
+    if outcome.status in ("SUCCESS", "TIMEOUT"):
         return "unconfirmed"
     return "failed"
 
