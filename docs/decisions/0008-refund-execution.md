@@ -209,14 +209,38 @@ queue rather than a pile of spent locks.
 
 `invoke_with_server_key_async` returns `{"status": "timeout", "hash": ...}`
 without raising, and that transaction **may still settle**. The dispute stays
-in `crediting`, the claim is **not** released, the in-flight hash is recorded,
-and the event is logged at ERROR with the dispute id, the job id, the payer and
-the amount. A human reconciles it against the chain.
+in `crediting`, the claim is **not** released, the in-flight hash is recorded
+on the dispute, and the event is logged at ERROR with the dispute id, the job
+id, the payer and the amount. The adjudicator is answered 504
+`refund_unconfirmed`, which says in as many words that it may still land and
+must be reconciled rather than retried. A human reconciles it against the
+chain.
 
-`release_refund_claim` exists and is used, but only where nothing was signed,
-or where what was signed **definitively failed** — a `FAILED` result, which
-says the money did not move. A timeout is not that, and treating it as that is
-the single mistake that pays a buyer twice.
+`credit_refund` classifies the outcome into exactly three, and the third is
+deliberately a catch-all: `SUCCESS` **with a hash**, `FAILED`, and *unknown*.
+Unknown is not only the literal timeout — an exception from the submit, a
+shutdown cancellation landing between the submit and its confirmation, a
+`SUCCESS` with no hash, and any status this code does not recognise all map to
+it. Every one of those has the same property, which is that the transaction may
+be on the network, and a classifier that guessed optimistically about any of
+them would be a classifier that pays twice. The consequence is that a stuck
+dispute may carry **no hash at all**, when the call raised before one existed;
+the reconciliation procedure has to start from the settler account in that
+case, and `docs/disputes.md` says so.
+
+`release_refund_claim` exists and is used, but only where nothing was signed —
+a missing settlement, a refusal from `creditable_for` or from the cap, all of
+which are raised before the transfer — or where what was signed **definitively
+failed**: a `FAILED` result, which is the one answer that says no funds moved.
+That case releases the claim, leaves the dispute `upheld` and answers 502
+`refund_failed`, so a second uphold can pay the buyer who is still owed. An
+unknown outcome is not that, and treating it as that is the single mistake that
+pays a buyer twice.
+
+**The ban is enforced, not merely documented.** An uphold aimed at a dispute
+already in `crediting` is refused with 409 `refund_in_flight` and logged at
+ERROR, rather than being allowed to take a fresh claim — so the operator who
+tries the obvious thing is stopped by the code, not only by this ADR.
 
 Said plainly: **this trades paying late for never paying twice.** A buyer whose
 credit timed out waits for an operator to look, which may be hours. The
