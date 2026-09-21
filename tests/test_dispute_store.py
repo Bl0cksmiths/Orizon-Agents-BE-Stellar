@@ -660,3 +660,81 @@ def test_an_unsettled_job_or_task_reads_as_none_in_postgres() -> None:
 
     assert asyncio.run(store.get_settlement(OTHER_JOB)) is None
     assert asyncio.run(store.get_settlement_by_task("task_never")) is None
+
+
+# ── disputes, in Postgres ─────────────────────────────────────────────────
+
+
+def test_an_opened_dispute_is_read_back_by_id_and_by_step() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        return opened, await store.get_dispute(opened.id), await store.find_dispute(JOB, 0)
+
+    opened, by_id, by_step = asyncio.run(go())
+
+    assert by_id == opened == a_dispute()
+    assert by_step == opened
+    assert len(pool.disputes) == 1
+    assert pool.disputes[0]["opening"] is True
+    assert all("INSERT INTO dispute_events" in s for s in pool.writes)
+
+
+def test_an_unknown_dispute_reads_as_none_in_postgres() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    assert asyncio.run(store.get_dispute("dsp_never")) is None
+    assert asyncio.run(store.find_dispute(JOB, 9)) is None
+
+
+def test_a_duplicate_dispute_is_refused_by_the_index_and_answered_with_the_first() -> None:
+    """The second insert conflicts with dispute_events_one_per_step_idx and does
+    nothing, so the loser writes NO row — and the caller gets the dispute that
+    already exists rather than a failure it cannot explain to the buyer."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    first = asyncio.run(store.open_dispute(a_dispute()))
+
+    with pytest.raises(DuplicateDisputeError) as excinfo:
+        asyncio.run(store.open_dispute(a_dispute(id="dsp_0002", reason="a second try")))
+
+    assert excinfo.value.existing == first
+    assert len(pool.disputes) == 1
+    assert asyncio.run(store.get_dispute("dsp_0002")) is None
+
+
+def test_a_different_step_or_job_is_not_refused_in_postgres() -> None:
+    """The index is on the PAIR — scoping it to the job alone would let one bad
+    step block every other dispute of the same workflow."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> None:
+        await store.open_dispute(a_dispute())
+        await store.open_dispute(a_dispute(id="dsp_0002", step_index=1))
+        await store.open_dispute(a_dispute(id="dsp_0003", job_id_hex=OTHER_JOB))
+
+    asyncio.run(go())
+
+    assert len(pool.disputes) == 3
+
+
+def test_a_task_s_disputes_are_listed_oldest_first_and_nobody_else_s() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord, ...]:
+        await store.open_dispute(a_dispute(id="dsp_0002", step_index=1, opened_at=1_700_000_200.0))
+        await store.open_dispute(a_dispute())
+        await store.open_dispute(a_dispute(id="dsp_0003", task_id="task_beta", job_id_hex=OTHER_JOB))
+        return await store.list_disputes_for_task(TASK)
+
+    listed = asyncio.run(go())
+
+    # Sorted by the moment each was opened, not by the order the rows landed.
+    assert [d.id for d in listed] == ["dsp_0001", "dsp_0002"]
+    assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
