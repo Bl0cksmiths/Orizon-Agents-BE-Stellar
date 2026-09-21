@@ -12,6 +12,10 @@ good. What is tested here is the wire and the door — and only those:
     which is the receipt story 4.06 renders;
   * a REPEAT uphold answers with the same hash rather than a 5xx, because an
     adjudicator who double-clicks must see what happened, not an error;
+  * a rejection carries a note, because the buyer is shown it (story 4.06):
+    no note in any form is the edge's 422 and never reaches the service, a
+    note that cleans to nothing is the service's own 422, and the note comes
+    back on the dispute as `rejection_reason`;
   * every refusal arrives as the service's own code and status, verbatim.
 
 Whether a dispute may be upheld, how much is creditable, and — the part that
