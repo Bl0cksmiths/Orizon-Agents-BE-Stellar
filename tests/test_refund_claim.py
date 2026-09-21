@@ -188,6 +188,35 @@ def test_a_release_restores_upheld_and_a_later_claim_succeeds(store: DisputeStor
     assert after_reclaim == ["dsp_0001"]
 
 
+def test_a_failed_attempts_hash_never_follows_the_dispute_into_the_next_one(store: DisputeStore) -> None:
+    """The refund hash is cleared on a release and on the claim after it.
+
+    The sequence is 4.03's reconciliation path: a transfer times out and its
+    in-flight hash is recorded on the `crediting` row; an operator finds it
+    never settled and releases the claim; the next uphold claims again. Before
+    4.06 the release and the re-claim both copied that hash forward, so for the
+    whole second attempt the buyer's receipt linked a transaction that FAILED
+    as the refund in flight. A release only ever happens when nothing landed,
+    and a claim starts a payout with no transaction yet — neither row has a
+    refund hash to show.
+    """
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        timed_out = await store.append_status(upheld.id, "crediting", refund_tx="tx_never_settled")
+        released = await store.release_refund_claim(upheld.id)
+        reclaimed = await store.claim_refund(upheld.id)
+        return timed_out, released, reclaimed
+
+    timed_out, released, reclaimed = asyncio.run(go())
+
+    assert timed_out.refund_tx == "tx_never_settled"  # the in-flight hash was on record
+    assert released is not None and released.refund_tx is None
+    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert reclaimed.refund_tx is None
+
+
 @pytest.mark.parametrize("status", ["open", "upheld", "credited", "rejected"])
 def test_a_dispute_that_is_not_crediting_cannot_be_released(store: DisputeStore, status: DisputeStatus) -> None:
     """Only a payout in flight can be handed back.
