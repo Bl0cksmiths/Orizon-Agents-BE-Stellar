@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from ..config import settings
 from ..stellar import client as sc
@@ -58,6 +59,35 @@ class RefundRefused(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+# What a submitted refund transfer is known to have done. Three values because
+# the money question has exactly three answers, and collapsing any two of them
+# costs a buyer their credit or pays it twice.
+RefundStatus = Literal["SUCCESS", "FAILED", "TIMEOUT"]
+
+
+@dataclass(frozen=True)
+class RefundOutcome:
+    """The result of one settler-funded credit, as the caller must treat it.
+
+      - `SUCCESS` — the transfer landed and `tx_hash` is its receipt. Record it
+        on the dispute and close it.
+      - `FAILED`  — it definitively did not move funds. Nothing was paid, so the
+        refund claim may be released and the dispute left upheld.
+      - `TIMEOUT` — **the transfer MAY STILL LAND.** The submission is on the
+        network and only the network knows; `tx_hash` is the in-flight hash when
+        the client returned one. It must NEVER be retried automatically and the
+        claim must NEVER be released (D3): either would credit the buyer a
+        second time the moment the first submission settles. The claim stays,
+        the dispute stays in `crediting`, and a human reconciles it.
+
+    Frozen: an outcome is a record of what happened, not a variable.
+    """
+
+    status: RefundStatus
+    tx_hash: str | None
+    amount_usdc: float
 
 
 def _refuse(dispute: DisputeRecord, code: str, detail: str, amount_usdc: float) -> RefundRefused:
