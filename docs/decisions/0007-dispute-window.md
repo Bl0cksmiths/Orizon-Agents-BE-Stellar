@@ -24,7 +24,7 @@ answers more than the card's own text did.
 two transaction hashes; it persists **no payer, no job id, no per-step amount
 and no settlement timestamp**. What it does persist lives in `state.tasks`,
 which `app/state.py` caps at 200 (`task_order = deque(maxlen=200)`), **evicts
-`complete`/`failed` tasks from first** — precisely the set a buyer disputes —
+`complete`/`failed` tasks first** — precisely the set a buyer disputes —
 and loses entirely on restart, which a free-tier Render instance does whenever
 it idles.
 
