@@ -786,6 +786,24 @@ def _log_rating(
     )
 
 
+def _tell_observer(observer: RatingObserver, dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome) -> None:
+    """Hand the ledger's answer to an observer that asked for it, and survive it.
+
+    By the time there is an answer the credit has landed, and this module's
+    rule after that point is that nothing is raised — a paid dispute must never
+    read as a failed one. A caller's observer is the caller's code, so a fault
+    in it is logged against the dispute and goes no further.
+    """
+    try:
+        observer(outcome)
+    except Exception:
+        logger.exception(
+            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s",
+            dispute.id,
+            outcome.status,
+        )
+
+
 async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) -> DisputeRecord:
     """Write the rating an upheld dispute earns, and answer with the dispute.
 
