@@ -429,6 +429,52 @@ def test_reading_an_unknown_dispute_is_404(client, monkeypatch):
     assert r.json()["error"]["code"] == "unknown_dispute"
 
 
+def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch):
+    # Pinned whole, for the settlement test's reason: the frontend's types are
+    # frozen to exactly this shape, so a field renamed, dropped or added here
+    # breaks them. The credited amount deliberately differs from the
+    # creditable one, as it can when the payout is bounded again at payout
+    # time, so a mapping that copied the promise into the payout cannot pass;
+    # and `updated_at` is later than `resolved_at`, as it is for a credit
+    # reconciled after the verdict, so neither can stand in for the other.
+    reads(
+        monkeypatch,
+        dispute=record(
+            status="credited",
+            resolved_at=1_700_000_500.0,
+            refund_tx="3f1b" + "0" * 60,
+            rating_tx="9c2e" + "0" * 60,
+            credited_usdc=0.2,
+            updated_at=1_700_003_600.0,
+            rating_confirmed=True,
+        ),
+    )
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "id": "dsp_00112233445566778",
+        "job_id_hex": JOB_ID,
+        "task_id": "task-1",
+        "step_index": 1,
+        "agent_id": "code-agent",
+        "payer": PAYER,
+        "reason": "the step returned an empty file",
+        "status": "credited",
+        "charged_usdc": 0.25,
+        "creditable_usdc": 0.25,
+        "opened_at": 1_700_000_000.0,
+        "resolved_at": 1_700_000_500.0,
+        "refund_tx": "3f1b" + "0" * 60,
+        "rating_tx": "9c2e" + "0" * 60,
+        "credited_usdc": 0.2,
+        "updated_at": 1_700_003_600.0,
+        "rating_confirmed": True,
+        "rejection_reason": None,
+    }
+
+
 def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeypatch):
     lists(monkeypatch, found=settlement(), disputes=(record(id="dsp_a"), record(id="dsp_b", step_index=2)))
 
