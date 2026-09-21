@@ -615,6 +615,72 @@ will not make it for you: `scripts/uphold_dispute.py` refuses a dispute in
 `crediting` and prints this same block with the explorer links filled in, and
 so does the API, with `refund_in_flight`.
 
+## For operators: a dispute rating that collided
+
+A collision is the one rating outcome that retrying cannot fix, and the one
+that needs a person. It looks like this in the log, at ERROR:
+
+```text
+dispute rating COLLISION — the ledger already holds a rating under this dispute's derived id and this dispute records none, …: dispute=dsp_… job=… derived=… agent=… payer=… tx=-
+```
+
+and the dispute reads `credited` with `rating_tx` empty. Upholding it again
+produces the same line every time.
+
+**What it means.** The ledger refused the rating as a replay — it already holds
+a rating for this agent under this dispute's derived id — and this dispute has
+no record of ever writing one. That is one of two things, and from inside the
+service they look identical:
+
+- **Our own rating, whose hash was never recorded.** A submission that raised
+  or timed out before it returned a hash, a process that died between
+  submitting and recording, or a store that was down at the moment a landed
+  rating was written to it. The rating is on-chain; only its receipt is
+  missing. This is by far the likelier case.
+- **A genuine collision** — a rating under that key that this dispute did not
+  write. The derivation makes that unreachable by chance, so if it is real it
+  means something other than chance: a second writer signing as the Scorer, or
+  a dispute record whose job id is not the one that was settled.
+
+The service reports both as a collision rather than guessing, because the two
+wrong guesses are not equally bad: taking a real collision for our own rating
+would report the dispute as resolved when its rating was never written, and
+nothing would ever say so. `docs/decisions/0009-dispute-rating.md` D4 has the
+argument.
+
+**Find the rating.** Everything needed is on the log line.
+
+1. **Search the log for the dispute id first.** A line
+   `dispute rating landed (10/100)` or `dispute rating unconfirmed` for the same
+   dispute with a `tx=` hash names the attempt directly — a landed rating is
+   logged before the record is written, precisely so this case has a hash to
+   start from. Look that hash up.
+2. **Otherwise, go to the chain.** Search the ReputationLedger's `rated` events
+   for the agent, or the settler account's transactions from around the time
+   the credit landed, for a `submit` whose `job_id` argument is the `derived=`
+   value on the line.
+
+**Decide whose it is.** It is this dispute's own rating when every argument
+matches what this dispute would have written: `kind` is `dispute`, the rating
+is `10`, the agent is `agent=`, the payer is `payer=`, and the weight is the
+step's quoted price in stroops — which the uphold dry run prints, for exactly
+this comparison.
+
+- **It is ours.** Record it, and the dispute is fully resolved:
+  `append_status(dispute_id, "credited", rating_tx=<hash>)`. The next uphold is
+  then answered `already on-chain — kept`, which is the confirmation.
+- **It is not ours, or nothing can be found.** Leave the dispute as it is —
+  `credited`, the buyer paid, no `rating_tx` — and treat it as an incident: find
+  out what else is writing ratings as the Scorer, or why the dispute's job id
+  does not match its settlement. Do **not** work around it by rating the agent
+  under some other id: a dispute gets exactly one reputation consequence, the
+  replay guard is what enforces that, and an id minted to get past it is a
+  second rating the next retry cannot see.
+
+Never record a hash that has not been checked against the chain. A `rating_tx`
+tells every later reader that the agent's consequence landed, and the uphold
+will from then on treat a replay as confirmation of it.
+
 Related: `docs/decisions/0008-refund-execution.md` (why adjudication is an
 authenticated route, why the claim is taken before signing and why a timeout is
 never retried), `docs/decisions/0007-dispute-window.md` (why the window, the
