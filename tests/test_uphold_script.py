@@ -1119,6 +1119,21 @@ def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on
     assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
 
 
+def test_a_rating_success_with_no_hash_is_not_reported_as_landed(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """A SUCCESS that carries no hash leaves nothing a reviewer could open, so
+    it is the same unknown as a timeout — never a PASS, and never evidence."""
+    ledger.answers("SUCCESS", None)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+    assert "submitted and unconfirmed" in out
+    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+
+
 def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_consequence_did_not_land(
     capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
 ) -> None:
