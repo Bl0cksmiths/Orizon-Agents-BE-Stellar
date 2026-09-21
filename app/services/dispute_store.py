@@ -587,6 +587,15 @@ _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.
 )
 
 
+# Ceiling on `SettlementStep.output_summary`. The summary is untrusted — an
+# external agent's own words — and the summarizer bounds only one of its two
+# branches, so the store states the limit a writer must clean to rather than
+# trusting whatever arrives. Long enough for the one line a buyer reads to
+# recognise the step; short enough that a hostile endpoint cannot turn a
+# settlement row into a dumping ground.
+OUTPUT_SUMMARY_MAX_CHARS = 280
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
