@@ -679,3 +679,65 @@ def test_a_trace_that_fails_cannot_undo_a_landed_credit(monkeypatch) -> None:
 
     assert credited.status == "credited"
     assert credited.refund_tx == "tx_credit"
+
+
+def test_a_rejection_keeps_the_adjudicators_reason_on_the_record(monkeypatch) -> None:
+    """The asymmetry this closes: the buyer's side of the argument is durable
+    from the moment they raise it, and an upheld dispute leaves an amount and a
+    hash behind — so a rejection with nothing written down was the outcome most
+    likely to be contested and the one with no answer to contest."""
+    no_signing(monkeypatch)
+    dispute = a_dispute()
+
+    rejected = asyncio.run(dispute_svc.reject(dispute.id, note="the SEO brief was delivered in full"))
+
+    assert rejected.note == "the SEO brief was delivered in full"
+    stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert stored is not None and stored.note == rejected.note
+    # The platform's side is written beside the buyer's, never over it.
+    assert rejected.reason == dispute.reason
+
+
+def test_a_later_transition_does_not_blank_the_rejection_note(monkeypatch) -> None:
+    """4.04 writes the dispute rating onto the same record minutes later. A
+    transition that passed no note must leave the one that is there — erasing
+    it would destroy the only written record of why the claim was refused."""
+    no_signing(monkeypatch)
+    dispute = a_dispute()
+    rejected = asyncio.run(dispute_svc.reject(dispute.id, note="the SEO brief was delivered in full"))
+
+    rated = asyncio.run(dispute_store.get_dispute_store().append_status(dispute.id, "rejected", rating_tx="tx_rating"))
+
+    assert rated.note == rejected.note
+    assert rated.rating_tx == "tx_rating"
+    assert rated.resolved_at == rejected.resolved_at
+
+
+def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch) -> None:
+    """The store keeps a note EXACTLY as given — byte for byte, by design — so
+    whatever this module leaves is precisely what an auditor reads. Bounding it
+    and stripping the control characters is therefore this side's job, and it
+    is the same treatment the buyer's `reason` gets: a paragraph survives,
+    anything that forges structure does not."""
+    no_signing(monkeypatch)
+    messy = asyncio.run(dispute_svc.reject(a_dispute().id, note="checked\nthe \x00brief\x1b[31m in full"))
+
+    assert messy.note is not None
+    assert "\x00" not in messy.note and "\x1b" not in messy.note
+    assert "\n" in messy.note and messy.note.startswith("checked")
+
+    long_note = asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
+
+    assert long_note.note is not None
+    assert len(long_note.note) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
+
+
+def test_a_rejection_without_a_usable_note_records_none_rather_than_nothing(monkeypatch) -> None:
+    """None, never "". `append_status` carries a null forward and stores an
+    empty string, so a note of pure whitespace has to arrive as no note at all
+    — otherwise a later transition could blank a rationale with a stray space
+    bar rather than leave the record as it was."""
+    no_signing(monkeypatch)
+
+    assert asyncio.run(dispute_svc.reject(a_dispute().id)).note is None
+    assert asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="  \t \n ")).note is None
