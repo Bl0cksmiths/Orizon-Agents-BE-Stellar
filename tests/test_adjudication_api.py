@@ -450,9 +450,11 @@ def test_an_uphold_refusal_keeps_its_code_and_its_status(client, adjudicating, m
 
 @pytest.mark.parametrize(("code", "status"), REFUSALS, ids=[c for c, _ in REFUSALS])
 def test_a_reject_refusal_keeps_its_code_and_its_status(client, adjudicating, monkeypatch, code, status):
+    # A valid note, so the edge admits the body and the only answer left is
+    # the service's own.
     rejects_with(monkeypatch, dispute_error(code, status))
 
-    r = client.post(REJECT, json={}, headers=AUTH)
+    r = client.post(REJECT, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == status
     assert r.json()["error"]["code"] == code
