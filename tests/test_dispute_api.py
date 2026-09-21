@@ -26,7 +26,7 @@ import base64
 import pytest
 
 from app.services import dispute_svc
-from app.services.dispute_store import DisputeRecord
+from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -321,3 +321,93 @@ def test_a_missing_field_never_reaches_the_service(client, monkeypatch):
 
     assert r.status_code == 422
     assert calls == []
+
+
+# ── reading disputes back ───────────────────────────────────────
+
+
+def settlement(**overrides: object) -> SettlementRecord:
+    """A settled workflow, as the store recorded it at settlement time."""
+    fields: dict = {
+        "task_id": "task-1",
+        "payer": PAYER,
+        "auth_id_hex": "fedcba0987654321fedcba0987654321",
+        "job_id_hex": JOB_ID,
+        "charge_tx": "abc123",
+        "proof_tx": "def456",
+        "settled_usdc": 0.5,
+        "steps": (
+            SettlementStep(step_index=1, agent_id="code-agent", agent_name="Coder", price_usdc=0.25, delivered=True),
+        ),
+        "settled_at": 1_700_000_000.0,
+        "window_closes_at": 1_700_086_400.0,
+    }
+    fields.update(overrides)
+    return SettlementRecord(**fields)
+
+
+def reads(monkeypatch, *, dispute: DisputeRecord | None = None) -> None:
+    """Point `GET /api/disputes/{id}` at one answer."""
+
+    async def _get(dispute_id: str) -> DisputeRecord | None:
+        return dispute
+
+    monkeypatch.setattr(dispute_svc, "get_dispute", _get)
+
+
+def lists(monkeypatch, *, found: SettlementRecord | None, disputes: tuple[DisputeRecord, ...]) -> None:
+    """Point `GET /api/tasks/{id}/disputes` at one settlement and its disputes."""
+
+    async def _settlement(task_id: str) -> SettlementRecord | None:
+        return found
+
+    async def _disputes(task_id: str) -> tuple[DisputeRecord, ...]:
+        return disputes
+
+    monkeypatch.setattr(dispute_svc, "settlement_for_task", _settlement)
+    monkeypatch.setattr(dispute_svc, "list_for_task", _disputes)
+
+
+def test_reading_a_dispute_returns_it(client, monkeypatch):
+    reads(monkeypatch, dispute=record(id="dsp_readable"))
+
+    r = client.get("/api/disputes/dsp_readable")
+
+    assert r.status_code == 200
+    assert r.json()["id"] == "dsp_readable"
+    assert r.json()["status"] == "open"
+
+
+def test_reading_an_unknown_dispute_is_404(client, monkeypatch):
+    reads(monkeypatch, dispute=None)
+
+    r = client.get("/api/disputes/dsp_nothing_here")
+
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "unknown_dispute"
+
+
+def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeypatch):
+    lists(monkeypatch, found=settlement(), disputes=(record(id="dsp_a"), record(id="dsp_b", step_index=2)))
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["task_id"] == "task-1"
+    # The deadline the buyer was given, read off the settlement record — not
+    # recomputed from DISPUTE_WINDOW_SECONDS, which may since have been retuned.
+    assert body["window_closes_at"] == 1_700_086_400.0
+    assert [d["id"] for d in body["disputes"]] == ["dsp_a", "dsp_b"]
+    assert [d["step_index"] for d in body["disputes"]] == [1, 2]
+
+
+def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
+    # A running or unpaid task: nothing to dispute, no deadline, and NOT a 404
+    # — the console polls this route while the workflow is still going.
+    lists(monkeypatch, found=None, disputes=())
+
+    r = client.get("/api/tasks/task-unsettled/disputes")
+
+    assert r.status_code == 200
+    assert r.json() == {"task_id": "task-unsettled", "window_closes_at": None, "disputes": []}
