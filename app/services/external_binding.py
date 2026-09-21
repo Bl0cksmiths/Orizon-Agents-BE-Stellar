@@ -161,11 +161,19 @@ def unbinding_message(agent_id: str, nonce: str) -> str:
     return f"{UNBINDING_MESSAGE_PREFIX}:{agent_id}:{nonce}"
 
 
-def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
-    """Mint and store a challenge for (agent_id, endpoint_url).
+def issue_challenge(scope: str, subject: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
+    """Mint and store a challenge for the (scope, subject) key.
 
-    Returns (nonce, expires_at); the caller needs the expiry to tell the
-    operator how long the challenge has left to be signed.
+    Deliberately neutral parameter names: this is the shared machinery every
+    purpose goes through, and it now serves three. `scope` is the thing being
+    proved about — the agent id for a bind or an unbind, the JOB id for a
+    dispute — and `subject` is what within that scope the proof authorises: the
+    endpoint url for a bind, `UNBIND_SUBJECT` for an unbind,
+    `dispute_subject(step_index)` for a dispute. The wrappers keep the domain
+    vocabulary; only the table and the lifecycle are generic.
+
+    Returns (nonce, expires_at); the caller needs the expiry to tell the signer
+    how long the challenge has left to be signed.
 
     Near-idempotent inside the window: a live, unexpired challenge for the same
     pair is returned AS IS, with whatever TTL it has left, rather than replaced.
@@ -180,7 +188,7 @@ def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLEN
     challenge, falling back to the oldest overall, so the table cannot exceed
     its cap however many agent ids an anonymous caller invents.
     """
-    key = (agent_id, endpoint_url)
+    key = (scope, subject)
     live = _challenges.get(key)
     if live is not None and live[1] > time.time():
         return live
@@ -223,12 +231,12 @@ def _evict_one() -> None:
     evicted = _challenges.pop(victim, None)
     if evicted is not None and evicted[1] > now:
         if _evicting_live:
-            logger.debug("evicted a live bind challenge: agent_id=%s", victim[0])
+            logger.debug("evicted a live challenge: scope=%s", victim[0])
         else:
             _evicting_live = True
             logger.warning(
-                "bind challenge table full at %d — evicting LIVE challenges (agent_id=%s); a pending "
-                "bind may have to be restarted (coalescing to DEBUG until it clears)",
+                "challenge table full at %d — evicting LIVE challenges (scope=%s); a pending "
+                "bind, unbind or dispute may have to be restarted (coalescing to DEBUG until it clears)",
                 MAX_CHALLENGES,
                 victim[0],
             )
@@ -371,20 +379,26 @@ def _signature_matches(owner: str, message: str, signature_b64: str) -> bool:
         return False
 
 
-def _verify(agent_id: str, subject: str, owner: str, signature_b64: str, message_for: Callable[[str], str]) -> bool:
-    """Nonce lifecycle plus signature check for one (agent_id, subject) key.
+def _verify(scope: str, subject: str, signer: str, signature_b64: str, message_for: Callable[[str], str]) -> bool:
+    """Nonce lifecycle plus signature check for one (scope, subject) key.
 
-    The shared body of `verify_challenge` and `verify_unbind_challenge`. Only
-    the message differs between them, so only the message is a parameter:
-    `message_for` receives the stored nonce and returns the exact bytes that
-    must have been signed. Everything a reviewer has to trust — the expiry, the
-    consume-only-on-success rule, the leave-the-nonce-alone-on-failure rule —
-    exists once, so the two flows cannot drift apart.
+    The shared body of `verify_challenge`, `verify_unbind_challenge` and
+    `verify_dispute_challenge`. Only the message differs between them, so only
+    the message is a parameter: `message_for` receives the stored nonce and
+    returns the exact bytes that must have been signed. Everything a reviewer
+    has to trust — the expiry, the consume-only-on-success rule, the
+    leave-the-nonce-alone-on-failure rule — exists once, so the three flows
+    cannot drift apart.
 
-    Returns False on any failure: no or expired nonce, malformed owner or
-    signature, or a signature that does not verify.
+    `signer` is whoever the purpose says must have signed: the agent's on-chain
+    owner for a bind or an unbind, the settlement's recorded payer for a
+    dispute. This function never decides who that is — the caller resolves it —
+    which is what keeps the authority question in one place per purpose.
+
+    Returns False on any failure: no or expired nonce, malformed signer address
+    or signature, or a signature that does not verify.
     """
-    key = (agent_id, subject)
+    key = (scope, subject)
     entry = _challenges.get(key)
     if entry is None:
         return False
@@ -392,7 +406,7 @@ def _verify(agent_id: str, subject: str, owner: str, signature_b64: str, message
     if time.time() > expires_at:
         del _challenges[key]
         return False
-    if not _signature_matches(owner, message_for(nonce), signature_b64):
+    if not _signature_matches(signer, message_for(nonce), signature_b64):
         return False
     del _challenges[key]  # single use — a proven nonce never verifies twice
     return True
