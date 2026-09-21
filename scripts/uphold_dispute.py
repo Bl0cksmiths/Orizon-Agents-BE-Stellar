@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -96,7 +97,7 @@ from pydantic import ValidationError  # noqa: E402  (after the sys.path bootstra
 
 try:
     from app.config import settings  # noqa: E402
-    from app.security import redact_secrets  # noqa: E402
+    from app.security import SecretRedactionLogFilter, redact_secrets  # noqa: E402
     from app.services import dispute_svc, refund_svc  # noqa: E402
     from app.services.dispute_store import (  # noqa: E402
         DisputeRecord,
@@ -133,6 +134,34 @@ _REFUSAL_EXITS = {
     "nothing_to_credit": EXIT_NOTHING_TO_CREDIT,
     "refund_above_cap": EXIT_ABOVE_CAP,
 }
+
+
+def install_logging() -> None:
+    """Send the service's own log lines to stderr, redacted.
+
+    Half of what happened on a money path is in those lines and nowhere else:
+    which D4 bound clamped the credit and by how much, the ERROR carrying
+    dispute id, job, payer and amount that a refusal writes, and the
+    reconciliation line D3 writes on a timeout. Without a handler, Python drops
+    everything below WARNING and prints the rest bare.
+
+    INFO, because the dispute store announces at INFO which store it resolved —
+    the first thing to check when a dispute id "does not exist" and the answer
+    is an unset DATABASE_URL.
+
+    stderr, so the evidence block on stdout stays clean enough to paste into the
+    bundle. The filter is the same one `app.main` installs, attached here rather
+    than inherited because importing `app.main` would build the entire
+    application just to borrow a log handler.
+
+    Called from `__main__` only, never from `main()`: `basicConfig(force=True)`
+    tears out every root handler, and doing that to a test session would take
+    pytest's log capture with it.
+    """
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("  [%(levelname)s] %(name)s: %(message)s"))
+    handler.addFilter(SecretRedactionLogFilter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
 def say(line: str = "") -> None:
@@ -565,4 +594,5 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    install_logging()
     sys.exit(main())
