@@ -712,6 +712,26 @@ def test_a_credit_is_traced_on_the_workflow_while_it_is_still_on_screen(monkeypa
     assert "tx_credit" in streamed.msg
 
 
+def test_a_landed_rating_is_traced_after_the_credit_in_plain_words(monkeypatch) -> None:
+    """The credit line tells the buyer the agent kept its money; this is the
+    line that says what the agent lost instead. So it states the consequence
+    plainly — the score, that an upheld dispute earned it, and the evidence —
+    at `proof`, the level every other on-chain rating is traced at."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    state.add_task(Task(id=TASK, intent="write the launch post", agents=2, spent=0.12, status="complete"))
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    _, rating_line = state.traces[TASK]
+    assert rating_line.level == "proof"
+    assert f"agent agt_writer rated 10/100 for upheld dispute {dispute.id}" in rating_line.msg
+    # The hash AND the derived id, so a reviewer finds the rating either way.
+    assert "tx tx_rating" in rating_line.msg
+    assert dispute_rating.dispute_job_id(bytes.fromhex(JOB), 0).hex() in rating_line.msg
+    assert credited.rating_tx == "tx_rating"
+
+
 def test_a_credit_on_an_evicted_task_creates_no_trace_entry(monkeypatch) -> None:
     """The trap this guard exists for. `state.append_trace` is
     `traces.setdefault(task_id, []).append(line)`, and eviction only ever drops
