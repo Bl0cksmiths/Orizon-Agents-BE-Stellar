@@ -40,6 +40,11 @@ REFUND_TX = "3f1b" + "0" * 60
 API_KEY = "operator-secret-key"
 AUTH = {"X-API-Key": API_KEY}
 
+# A reason written for the buyer, because that is who reads it: the note is
+# required and comes back as the dispute's `rejection_reason`, so every
+# rejection this file expects to reach the service sends one.
+NOTE = "the delivered file matched the brief"
+
 UPHOLD = f"/api/disputes/{DISPUTE_ID}/uphold"
 REJECT = f"/api/disputes/{DISPUTE_ID}/reject"
 ROUTES = [UPHOLD, REJECT]
@@ -121,11 +126,16 @@ def upholds_with(monkeypatch, result: DisputeRecord | Exception) -> list[str]:
     return calls
 
 
-def rejects_with(monkeypatch, result: DisputeRecord | Exception) -> list[tuple[str, str | None]]:
-    """Point the router's `reject` at one outcome; record id and note."""
-    calls: list[tuple[str, str | None]] = []
+def rejects_with(monkeypatch, result: DisputeRecord | Exception) -> list[tuple[str, str]]:
+    """Point the router's `reject` at one outcome; record id and note.
 
-    async def _reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
+    The stub takes `note` as the service does — keyword-only and with no
+    default — so a router that stopped passing it would fail here with a
+    TypeError rather than quietly reject with nothing to show the buyer.
+    """
+    calls: list[tuple[str, str]] = []
+
+    async def _reject(dispute_id: str, *, note: str) -> DisputeRecord:
         calls.append((dispute_id, note))
         if isinstance(result, Exception):
             raise result
@@ -148,7 +158,7 @@ def sealed(monkeypatch) -> list[str]:
         reached.append("uphold")
         raise AssertionError("uphold reached the service; the guard should have refused first")
 
-    async def _reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
+    async def _reject(dispute_id: str, *, note: str) -> DisputeRecord:
         reached.append("reject")
         raise AssertionError("reject reached the service; the guard should have refused first")
 
