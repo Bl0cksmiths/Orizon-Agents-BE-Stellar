@@ -54,3 +54,32 @@ def test_the_derived_id_never_lands_on_the_jobs_own_key() -> None:
 def test_two_jobs_sharing_a_prefix_still_derive_different_ids() -> None:
     other = _JOB[:8] + bytes(8)
     assert dispute_job_id(_JOB, 0) != dispute_job_id(other, 0)
+
+
+@pytest.mark.parametrize("job_id", [b"", bytes(15), bytes(17), bytes(32)])
+def test_a_job_id_of_the_wrong_width_is_refused(job_id: bytes) -> None:
+    with pytest.raises(ValueError, match="16 bytes"):
+        dispute_job_id(job_id, 0)
+
+
+@pytest.mark.parametrize("step_index", [-1, 65_536])
+def test_a_step_index_that_does_not_fit_is_refused(step_index: int) -> None:
+    with pytest.raises(ValueError, match="does not fit"):
+        dispute_job_id(_JOB, step_index)
+
+
+def test_a_derived_id_equal_to_the_job_id_is_refused_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unreachable by chance (2**-64), so forced: a digest whose first eight
+    # bytes reproduce the job id's own tail.
+    import hashlib
+
+    class _Echo:
+        def __init__(self, data: bytes) -> None:
+            self._tail = data[8:16]
+
+        def digest(self) -> bytes:
+            return self._tail + bytes(24)
+
+    monkeypatch.setattr(hashlib, "sha256", _Echo)
+    with pytest.raises(ValueError, match="equals the job id itself"):
+        dispute_job_id(_JOB, 0)
