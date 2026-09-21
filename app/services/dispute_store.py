@@ -167,3 +167,90 @@ class DisputeStore(Protocol):
     ) -> DisputeRecord: ...
 
     async def close(self) -> None: ...
+
+
+class InMemoryDisputeStore:
+    """The fallback when DATABASE_URL is unset: local dev and the test suite.
+
+    Bounded and insertion-ordered. It is NOT durable, and says so at the one
+    moment that matters — when a record it was given is dropped — because a
+    dispute that silently evaporates is worse than a feature that was never
+    offered.
+    """
+
+    def __init__(self) -> None:
+        self._settlements: OrderedDict[str, SettlementRecord] = OrderedDict()
+        self._disputes: OrderedDict[str, DisputeRecord] = OrderedDict()
+
+    async def record_settlement(self, record: SettlementRecord) -> None:
+        self._settlements[record.job_id_hex] = record
+        self._settlements.move_to_end(record.job_id_hex)
+        while len(self._settlements) > _MAX_IN_MEMORY:
+            dropped, _ = self._settlements.popitem(last=False)
+            logger.warning(
+                "in-memory dispute store full (%d): dropped settlement %s — its window can no longer be honoured;"
+                " set DATABASE_URL to persist settlements",
+                _MAX_IN_MEMORY,
+                dropped,
+            )
+
+    async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
+        return self._settlements.get(job_id_hex)
+
+    async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None:
+        return next(
+            (r for r in reversed(self._settlements.values()) if r.task_id == task_id),
+            None,
+        )
+
+    async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
+        existing = await self.find_dispute(record.job_id_hex, record.step_index)
+        if existing is not None:
+            raise DuplicateDisputeError(existing)
+        self._disputes[record.id] = record
+        while len(self._disputes) > _MAX_IN_MEMORY:
+            dropped, _ = self._disputes.popitem(last=False)
+            logger.warning(
+                "in-memory dispute store full (%d): dropped dispute %s — set DATABASE_URL to persist disputes",
+                _MAX_IN_MEMORY,
+                dropped,
+            )
+        return record
+
+    async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
+        return self._disputes.get(dispute_id)
+
+    async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
+        return next(
+            (d for d in self._disputes.values() if d.job_id_hex == job_id_hex and d.step_index == step_index),
+            None,
+        )
+
+    async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
+        return tuple(d for d in self._disputes.values() if d.task_id == task_id)
+
+    async def append_status(
+        self,
+        dispute_id: str,
+        status: DisputeStatus,
+        *,
+        refund_tx: str | None = None,
+        rating_tx: str | None = None,
+        resolved_at: float | None = None,
+    ) -> DisputeRecord:
+        current = self._disputes.get(dispute_id)
+        if current is None:
+            raise KeyError(dispute_id)
+        updated = replace(
+            current,
+            status=status,
+            refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
+            rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
+            resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or time.time()),
+        )
+        self._disputes[dispute_id] = updated
+        return updated
+
+    async def close(self) -> None:
+        """Nothing to release — kept so the seam is one shape, not two."""
+        return None
