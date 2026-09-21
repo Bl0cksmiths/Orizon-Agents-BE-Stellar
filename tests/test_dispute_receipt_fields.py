@@ -3,6 +3,18 @@
 Each is defaulted so that every record built today — by the store, by 4.02's
 opening path, by every existing test — keeps building unchanged, and so that a
 row read from before 4.06 answers "not known" rather than a wrong value.
+
+And each is PERSISTED, in both stores, by the rules its field comment states:
+added to a `dispute_events` table that already exists; `updated_at` stamped on
+every row every writer appends, from this process's clock; `credited_usdc` and
+`rating_confirmed` carried forward by COALESCE so that no later transition
+blanks them, while a confirmation can still move from False to True; and all
+three surviving a restart. What `dispute_svc` writes INTO them is pinned where
+its paths are — tests/test_adjudication.py for the credited amount,
+tests/test_dispute_rating_flow.py for the confirmation.
+
+Hermetic, and in test_dispute_store.py's idioms: `asyncio.run`, and a fake
+pool that dispatches on the store's SQL constants by equality.
 """
 
 from __future__ import annotations
