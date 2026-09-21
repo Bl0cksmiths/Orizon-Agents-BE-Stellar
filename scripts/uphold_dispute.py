@@ -488,11 +488,13 @@ async def execute(dispute_id: str, amount: float) -> int:
     store = get_dispute_store()
     fallback = EXIT_OK
     try:
-        await dispute_svc.uphold_dispute(dispute_id)
-    except refund_svc.RefundRefused as exc:
-        fallback = refuse(_REFUSAL_EXITS.get(exc.code, EXIT_UNEXPECTED), exc.code, exc.message)
+        await dispute_svc.uphold(dispute_id)
     except dispute_svc.DisputeError as exc:
-        fallback = refuse(EXIT_NOT_ADJUDICABLE, exc.code, exc.message)
+        # Every refusal on this path arrives as a `DisputeError`, including the
+        # two the refund service raises: `uphold` catches `RefundRefused`,
+        # releases the claim and re-raises it in this vocabulary. So there is
+        # one except clause here and not two, and the code carries through.
+        fallback = refuse(_REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE), exc.code, exc.message)
     except Exception as exc:
         # Deliberately broad on a money path: an exception nobody anticipated
         # says nothing about whether the transfer was submitted, and letting it
