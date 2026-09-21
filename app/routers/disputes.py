@@ -42,9 +42,10 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..security import request_id_var, require_adjudicator
 from ..services import dispute_svc, refund_svc
-from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementStep
+from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..task_auth import require_task_read
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,65 @@ class SettlementStepView(BaseModel):
             # can claim.
             creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, fraction) if step.delivered else 0.0,
             output_summary=step.output_summary,
+        )
+
+
+class SettlementView(BaseModel):
+    """What a task settled as: the facts a buyer's FIRST dispute starts from.
+
+    Exists because the per-task read used to carry only the deadline, and a
+    dispute cannot be started from a deadline. The challenge is minted against
+    the job id, only the payer's wallet may sign it, and the buyer has to see
+    which step they are disputing and what it would credit — every one of which
+    lived on the settlement record and nowhere a client could read it.
+
+    A mirror of `dispute_store.SettlementRecord`, for `DisputeResponse`'s
+    reason, and a deliberately narrower one: `auth_id_hex` is left out because
+    nothing a client does needs it, and a field is only ever added to this
+    shape for a reader who does.
+    """
+
+    # Both public already; this read saves a chain lookup and reveals nothing
+    # else. The job id is an argument of `PaymentEscrow.charge` and a field of
+    # the `charged` event it emits (receipt id, auth id, amount, job id). The
+    # payer is NOT in that event: it is in the `authd` event the payer's own
+    # `authorize` emitted (auth id, payer, max amount) and in the escrow's
+    # public `authorization(auth_id)` view, joined to the charge by the auth id
+    # both carry. And `GET /api/tasks/{task_id}` already serves the full
+    # `charge_tx`, so a holder of a task id could walk task, charge tx, job id,
+    # auth id, payer on-chain today. Neither value is a credential either:
+    # minting a challenge against a job id is public by design, and opening a
+    # dispute takes the payer's signature, which knowing the address does not
+    # provide.
+    job_id_hex: str
+    payer: str
+    settled_at: float
+    window_closes_at: float
+    settled_usdc: float
+    charge_tx: str | None
+    proof_tx: str | None
+    steps: list[SettlementStepView]
+    policy: CreditPolicy
+
+    @classmethod
+    def of(cls, record: SettlementRecord) -> SettlementView:
+        """Project a settlement onto the wire, with its credits priced.
+
+        The fraction is read from settings ONCE, so every step's credit and the
+        stated policy come from one reading and cannot disagree within a
+        response.
+        """
+        fraction = settings.dispute_credited_fraction
+        return cls(
+            job_id_hex=record.job_id_hex,
+            payer=record.payer,
+            settled_at=record.settled_at,
+            window_closes_at=record.window_closes_at,
+            settled_usdc=record.settled_usdc,
+            charge_tx=record.charge_tx,
+            proof_tx=record.proof_tx,
+            steps=[SettlementStepView.of(s, fraction) for s in record.steps],
+            policy=CreditPolicy.in_force(fraction),
         )
 
 
