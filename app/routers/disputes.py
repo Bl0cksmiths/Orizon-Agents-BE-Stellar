@@ -155,6 +155,16 @@ class DisputeResponse(BaseModel):
     resolved_at: float | None = None
     refund_tx: str | None = None
     rating_tx: str | None = None
+    # What the refund ACTUALLY transferred — the figure the receipt prints
+    # beside the `refund_tx` link. Not `creditable_usdc`: that is the ceiling
+    # frozen at opening, and the payout is bounded again when it is made, by
+    # the fraction then in force and by what the charge moved, so the two can
+    # differ. A receipt that showed the promise next to an explorer page
+    # showing another sum would contradict its own evidence. Null until the
+    # dispute is credited, and for every dispute credited before 4.06, where
+    # the honest answer is "not recorded" rather than the promise passed off
+    # as the payout.
+    credited_usdc: float | None = None
 
     @classmethod
     def of(cls, record: DisputeRecord) -> DisputeResponse:
@@ -174,6 +184,7 @@ class DisputeResponse(BaseModel):
             resolved_at=record.resolved_at,
             refund_tx=record.refund_tx,
             rating_tx=record.rating_tx,
+            credited_usdc=record.credited_usdc,
         )
 
 
