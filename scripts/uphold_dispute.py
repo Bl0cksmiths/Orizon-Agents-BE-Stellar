@@ -36,7 +36,10 @@ Three reasons, in the order they matter:
    is `require_adjudicator` (D1), whose three refusals are unit-tested and need
    no funded key. What CI *cannot* prove is that a transfer lands, and that part
    is identical either way: one `claim_refund`, one SAC `transfer(settler →
-   buyer)`, signed by the same key.
+   buyer)`, signed by the same key. `DISPUTE_REFUNDS_ENABLED` is not skipped
+   either — `dispute_svc.uphold` checks the switch itself, before it reads the
+   store, precisely because an operator script is the second door onto the money
+   path and a switch only one door honours is not a switch.
 3. **It keeps the money route disarmed.** The HTTP path needs
    `DISPUTE_REFUNDS_ENABLED=true` — and therefore `API_KEY` — set on a
    deployment that is publicly reachable, and left set between evidence runs.
