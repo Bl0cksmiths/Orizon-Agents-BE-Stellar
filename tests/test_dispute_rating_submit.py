@@ -299,3 +299,39 @@ def test_any_other_refusal_is_failed_and_logged_by_name(monkeypatch, caplog, cod
     )
     assert not any("Scorer" in r.getMessage() for r in caplog.records), "only Unauthorized is the scorer's fault"
     assert _records(caplog, logging.WARNING) == [], "only Replay is a warning"
+
+
+def test_a_raising_submit_is_a_timeout_logged_with_its_traceback(monkeypatch, caplog) -> None:
+    """A raise can happen either side of the submission and nothing in it says
+    which, so the rating's fate is unknown — TIMEOUT, never FAILED."""
+    _fake_submit(monkeypatch, RuntimeError("soroban rpc unreachable"))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash, outcome.job_id_hex) == ("TIMEOUT", None, DERIVED)
+    records = _records(caplog, logging.ERROR)
+    assert any(
+        "MAY HAVE LANDED" in r.getMessage()
+        and "soroban rpc unreachable" in r.getMessage()
+        and _names_every_fact(r.getMessage())
+        and r.exc_info is not None
+        for r in records
+    ), f"the raise was not logged with its context and traceback: {[r.getMessage() for r in records]}"
+
+
+def test_cancellation_mid_submit_is_logged_and_reraised(monkeypatch, caplog) -> None:
+    """A deploy-triggered cancel can land between the submit and its
+    confirmation, and CancelledError is a BaseException the generic handler
+    never sees. The reconstruction line fires, and the cancel is not swallowed
+    into an outcome."""
+    _fake_submit(monkeypatch, asyncio.CancelledError())
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        with pytest.raises(asyncio.CancelledError):
+            _rate()
+
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any("cancelled mid-flight" in m and _names_every_fact(m) for m in msgs), (
+        f"a cancelled rating was never logged with its context: {msgs}"
+    )
