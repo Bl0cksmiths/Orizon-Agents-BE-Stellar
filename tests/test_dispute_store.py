@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from typing import Any
 
 import pytest
@@ -227,3 +228,71 @@ def test_every_dispute_of_one_task_is_listed_and_no_other_task_s_is() -> None:
 
     assert [d.id for d in listed] == ["dsp_0001", "dsp_0002"]
     assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
+
+
+# ── status transitions, in memory ─────────────────────────────────────────
+
+
+def test_a_transition_moves_the_status_and_stamps_the_resolution() -> None:
+    """What story 4.03 calls when it upholds a dispute. The updated record is
+    RETURNED, so the caller acts on what was written rather than on a second
+    read."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        assert opened.resolved_at is None
+        updated = await store.append_status(opened.id, "upheld")
+        return updated, await store.get_dispute(opened.id)
+
+    before = time.time()
+    updated, stored = asyncio.run(go())
+    after = time.time()
+
+    assert updated.status == "upheld"
+    assert updated.resolved_at is not None and before <= updated.resolved_at <= after
+    assert stored == updated
+    # Everything the buyer was told at opening time is still exactly what it was.
+    assert updated.reason == "the summary was empty"
+    assert updated.creditable_usdc == 1.5
+    assert updated.opened_at == 1_700_000_100.0
+
+
+def test_a_later_transition_keeps_what_an_earlier_one_recorded() -> None:
+    """4.03 records the refund transaction and 4.04 the rating one, minutes
+    apart. The second must not erase the first, and it must not move the moment
+    the dispute was resolved."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord]:
+        opened = await store.open_dispute(a_dispute())
+        credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+        rated = await store.append_status(opened.id, "credited", rating_tx="tx_rating")
+        return credited, rated
+
+    credited, rated = asyncio.run(go())
+
+    assert rated.refund_tx == "tx_refund"
+    assert rated.rating_tx == "tx_rating"
+    assert rated.resolved_at == credited.resolved_at
+
+
+def test_a_transition_may_name_the_moment_it_resolved() -> None:
+    """A caller that already has the on-chain timestamp passes it rather than
+    letting the store date the row from when it happened to be written."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
+
+    assert asyncio.run(go()).resolved_at == 1_700_009_999.0
+
+
+def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
+    """Not a silently created record: a dispute id that does not exist is a bug
+    in the caller, and a store that invented one would hide it."""
+    store = InMemoryDisputeStore()
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_never", "upheld"))
