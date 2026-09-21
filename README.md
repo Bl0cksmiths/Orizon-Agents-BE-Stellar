@@ -69,7 +69,7 @@ cp .env.example .env
 | GET  | `/api/disputes/{id}`                 | read one dispute by the unguessable id opening it returned |
 | GET  | `/api/tasks/{id}/disputes`           | a task's settlement (job id, payer, each step's charge, credit and output summary, the credit policy), its dispute window (`window_closes_at`), the server clock (`now`), and every dispute raised on it |
 | POST | `/api/disputes/{id}/uphold`          | adjudicate in the buyer's favour and pay the credit, settler → buyer (needs `X-API-Key`, and **refuses** while it is unset) |
-| POST | `/api/disputes/{id}/reject`          | adjudicate against the claim — records the verdict, signs nothing (needs `X-API-Key`, and **refuses** while it is unset) |
+| POST | `/api/disputes/{id}/reject`          | adjudicate against the claim — records the verdict and a **required** `note` that the buyer is shown as `rejection_reason`, signs nothing (needs `X-API-Key`, and **refuses** while it is unset) |
 | *    | `/api/pdax/*`                        | PDAX PHP↔crypto surface: trade, fiat/crypto funding, ramps, webhooks, reference data |
 
 `/api/health` exists because the frontend reaches this API only through a same-origin rewrite of `/api/*` — the root `/health` sits outside that prefix, so mirroring it under `/api` is what lets the browser and any external uptime monitor pointed at the product domain verify the backend is actually reachable. It returns the identical payload, makes no network or contract calls, and is exempt from rate limiting and access logging just like the root probe.
