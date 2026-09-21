@@ -604,6 +604,29 @@ class InMemoryDisputeStore:
         self._disputes[dispute_id] = updated
         return updated
 
+    async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
+        """Take the exclusive right to pay this dispute, or return None.
+
+        The claim is the whole of story 4.03's idempotency, so it is a
+        CONDITIONAL transition and never a read followed by a write: only a
+        dispute sitting in `upheld` can be claimed, and claiming moves it to
+        `crediting` in the same step. A second caller — a retry, a double
+        click, a duplicate webhook — finds it no longer `upheld` and gets None,
+        which is the signal to return the existing record rather than pay
+        again.
+
+        None is deliberately not an error and does not say why: already
+        claimed, already credited, still open and never adjudicated, or
+        rejected all mean the same thing to a payer, which is *do not sign
+        anything*. The caller reads the record back if it needs to explain.
+        """
+        current = self._disputes.get(dispute_id)
+        if current is None or current.status != "upheld":
+            return None
+        claimed = replace(current, status="crediting")
+        self._disputes[dispute_id] = claimed
+        return claimed
+
     async def close(self) -> None:
         """Nothing to release — kept so the seam is one shape, not two."""
         return None
