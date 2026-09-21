@@ -416,6 +416,17 @@ def _log_degraded(agent_ids: list[str], total: int, reason: str) -> None:
     )
 
 
+def _rep_cache_key(agent_id: str) -> str:
+    """The read cache's key for one agent's rep_state.
+
+    Built in exactly one place because two callers depend on agreeing about
+    it: `_read_rep` fills it and `invalidate_rep` drops it. A key that drifted
+    between them would turn invalidation into a silent no-op — the pre-rating
+    score keeps being served, and nothing fails.
+    """
+    return f"repstate:{agent_id}"
+
+
 async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
     """Core single-agent read: returns (info, failure).
 
@@ -440,7 +451,7 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
         )
 
     try:
-        state = await rcache.get_or_set(f"repstate:{agent_id}", settings.reputation_read_ttl_seconds, _read)
+        state = await rcache.get_or_set(_rep_cache_key(agent_id), settings.reputation_read_ttl_seconds, _read)
     except Exception as e:
         return _prior_info(agent_id, degraded=True), _describe(e)
     if not isinstance(state, dict):
