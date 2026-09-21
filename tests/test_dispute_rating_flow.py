@@ -252,3 +252,21 @@ def test_an_upheld_dispute_is_credited_then_rated_under_the_derived_id(ledger, s
     assert settler.transfers == [(dispute.payer, 0.05)]
     assert invalidated == [AGENT]
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == rated
+
+
+def test_a_repeat_uphold_after_a_landed_rating_is_a_replay_and_changes_nothing(ledger, settler, invalidated) -> None:
+    """The retry path's cheap case, and the reason it is safe to take on every
+    uphold: the rating already landed, so the ledger refuses the second at
+    SIMULATION — no transaction, no fee — and the dispute is answered exactly
+    as it was. The replay confirms the landing, so the score is dropped again
+    rather than trusted to still be fresh."""
+    dispute = open_dispute()
+    rated = uphold(dispute.id)
+
+    again = uphold(dispute.id)
+
+    assert again == rated  # the same record, hash and all
+    assert ledger.replays == 1
+    assert len(ledger.submits) == 1  # nothing was submitted the second time
+    assert len(settler.transfers) == 1
+    assert invalidated == [AGENT, AGENT]
