@@ -225,3 +225,36 @@ def test_every_writer_stamps_the_moment_it_wrote(store: DisputeStore) -> None:
     # ...and nothing after it moves the resolution — only the last change.
     assert claimed.resolved_at == released.resolved_at == credited.resolved_at == upheld.resolved_at
     assert asyncio.run(store.get_dispute(opened.id)) == credited
+
+
+def test_every_row_of_the_trail_is_dated_not_only_the_newest() -> None:
+    """The trail is the audit record, and each row states what happened on
+    its own line — binding_store's reason for writing the whole record every
+    time. So each row carries the moment it was appended: a chargeback reader
+    walking the history sees when the payout was claimed, handed back,
+    claimed again and paid, rather than one date for all of it."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.release_refund_claim(opened.id)
+        await store.claim_refund(opened.id)
+        await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+
+    asyncio.run(go())
+
+    assert [row["status"] for row in pool.disputes] == [
+        "open",
+        "upheld",
+        "crediting",
+        "upheld",
+        "crediting",
+        "credited",
+    ]
+    stamps = [row["updated_at"] for row in pool.disputes]
+    assert stamps[0] == pool.disputes[0]["opened_at"]
+    assert None not in stamps
+    assert stamps == sorted(stamps)
