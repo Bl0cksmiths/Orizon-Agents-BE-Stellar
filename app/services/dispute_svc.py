@@ -1036,7 +1036,10 @@ async def uphold(dispute_id: str) -> DisputeRecord:
     if outcome.status == "SUCCESS":
         credited = await store.append_status(dispute_id, "credited", refund_tx=outcome.tx_hash)
         await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
-        return credited
+        # Only now, with the credit landed AND recorded, is the agent rated —
+        # and against the settlement the credit was just bounded by, so the
+        # rating is weighted by the same step it refunded.
+        return await _rate_credited(credited, settlement)
 
     if outcome.status == "FAILED":
         # The ledger rejected it, which is the ONE answer that says no funds
