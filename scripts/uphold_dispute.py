@@ -876,7 +876,9 @@ def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     say("  Find the rating filed under that id on the ledger before anything else:")
     say("    * it is this dispute's own attempt, never recorded (a timeout that returned no hash,")
     say("      or a record write that failed) — record its hash, and the dispute is resolved:")
-    say(f"      append_status({dispute.id!r}, 'credited', rating_tx=<hash>)")
+    # `rating_confirmed=True` because the operator has just found it ON the ledger:
+    # without it the buyer's receipt keeps showing the agent's consequence as pending.
+    say(f"      append_status({dispute.id!r}, 'credited', rating_tx=<hash>, rating_confirmed=True)")
     say("    * it is anything else — a genuine collision. Escalate it. Re-running cannot fix it:")
     say("      the ledger refuses every retry under this id.")
     say()
