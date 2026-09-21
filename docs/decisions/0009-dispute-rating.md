@@ -207,3 +207,48 @@ would silently be tuning how much a dispute hurts. And the credit is
 that have nothing to do with the agent — a clamp against `settled_usdc`, for
 one. Refund policy and reputation policy are separate decisions and keep
 separate numbers.
+
+### D3 — The rating follows the credit, and never touches it
+
+The rating is written only once the dispute is `credited`: after the transfer
+has landed **and** the store has recorded it with its `refund_tx`. It is the
+last thing `uphold` does, and it is weighed against the same settlement the
+credit was just bounded by.
+
+It goes last for two reasons. The card puts it there — *"reputation is written
+only after the dispute is upheld and the credit has moved"* — and the two
+writes have opposite retry properties. A refund must never be retried blind
+(ADR 0008 D3); a rating may always be (D4). Putting the write that can always
+be retried after the one that cannot means nothing about the rating can block,
+delay or undo the payout. It also leaves ADR 0008's order exactly as it was
+reviewed: the rating adds nothing before the claim, nothing between the claim
+and the transfer, and nothing on any path that ends in `crediting`, so every
+argument that ADR makes about paying once still holds word for word.
+
+**A failed rating never reverses the refund.** Whatever the rating does —
+fails, times out, is refused, collides, or raises — the dispute stays
+`credited`, its `refund_tx` stays, and the buyer keeps the credit. There is no
+path from the rating back into the refund code, and `uphold` answers with the
+dispute as it stands rather than with an error: by then the money has moved,
+and a 5xx would tell the adjudicator the adjudication failed when the buyer has
+in fact been paid — inviting exactly the retry ADR 0008 exists to make safe.
+Every rating outcome is logged with the dispute id, the sealed job id, the
+derived id, the agent id and the payer, which is everything needed to find the
+rating on-chain or prove it is absent; the card's *"logged and retried out of
+band"*.
+
+**The record says whether the reputation consequence is on-chain.** A
+`credited` dispute **with** a `rating_tx` had its rating submitted under the
+derived id and landed — or, after a timeout, may still land. A `credited`
+dispute **without** one has paid the buyer and has **not** put its rating on
+the ledger: a failed submit, a collision (D4), or an attempt that raised. That
+dispute is not fully resolved, and it is reported that way everywhere the
+record is read — `GET /api/disputes/{id}` already carries `rating_tx`.
+
+**Re-upholding a credited dispute retries the rating only.** In 4.03 an uphold
+aimed at a `credited` dispute returned it unchanged and signed nothing, which
+is the credit's own retry guarantee. 4.04 keeps the transfer half of that
+exactly — the `credited` branch still returns above the claim, so it can never
+reach the transfer — and adds the rating to it. An operator whose dispute
+shows no `rating_tx` retries by upholding again, and the worst that retry can
+do is be told the rating already landed.
