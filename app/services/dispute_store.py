@@ -528,9 +528,18 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 # Appending a transition row that changes ONLY the status: every other column
 # is copied from `latest` verbatim. Both refund-mutex transitions are that
 # shape and differ in a single clause — what gates the row — so they share one
-# statement instead of spelling the fifteen-column list out twice more, where a
-# column added later would go missing from one of them without failing
+# statement instead of spelling the eighteen-column list out twice more, where
+# a column added later would go missing from one of them without failing
 # anything.
+#
+# `updated_at` ($2) is the one exception, and it is not a fact about the
+# dispute but about this row: the moment the status changed, which is what a
+# claim and a release both do. A buyer whose refund has sat in `crediting`
+# since this morning is owed that time on their receipt, and a row that
+# carried the previous transition's forward would tell them it happened
+# whenever the dispute was upheld. For a claim, $2 is the same reading of the
+# clock that dates the mutex row, so the queue and the trail agree to the
+# instant on when the payout began.
 #
 # `resolved_at` is carried forward rather than stamped, and that is the
 # load-bearing difference from _APPEND_STATUS_SQL. Neither `crediting` nor the
@@ -542,12 +551,14 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 _APPEND_UNRESOLVED_ROW = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+    credited_usdc, updated_at, rating_confirmed, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, '{status}',
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
        latest.resolved_at, latest.refund_tx, latest.rating_tx, latest.note,
+       latest.credited_usdc, $2::double precision, latest.rating_confirmed,
        FALSE
 FROM latest {gate}
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
@@ -974,8 +985,11 @@ class InMemoryDisputeStore:
         current = self._disputes.get(dispute_id)
         if current is None or current.status != "upheld" or dispute_id in self._refund_claims:
             return None
-        self._refund_claims[dispute_id] = time.time()
-        claimed = replace(current, status="crediting")
+        # One reading of the clock dates both the claim and the transition, as
+        # _CLAIM_REFUND_SQL's $2 does.
+        now = time.time()
+        self._refund_claims[dispute_id] = now
+        claimed = replace(current, status="crediting", updated_at=now)
         self._disputes[dispute_id] = claimed
         return claimed
 
@@ -1000,7 +1014,7 @@ class InMemoryDisputeStore:
         # in `crediting` without one is repaired rather than stranded — the
         # rule _RELEASE_REFUND_CLAIM_SQL follows, and for the same reason.
         self._refund_claims.pop(dispute_id, None)
-        released = replace(current, status="upheld")
+        released = replace(current, status="upheld", updated_at=time.time())
         self._disputes[dispute_id] = released
         return released
 
@@ -1350,7 +1364,8 @@ class PostgresDisputeStore:
         twice is a worse failure than paying them late.
         """
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id)
+        # Our own clock for the row's `updated_at`, never the database's.
+        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time())
         return None if row is None else self._to_dispute(row)
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
