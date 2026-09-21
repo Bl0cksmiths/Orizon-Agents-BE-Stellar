@@ -456,6 +456,9 @@ _DISPUTE_COLUMNS = (
     "refund_tx",
     "rating_tx",
     "note",
+    "credited_usdc",
+    "updated_at",
+    "rating_confirmed",
 )
 
 
@@ -531,7 +534,7 @@ class FakePool:
         if sql == dispute_store._CLAIM_REFUND_SQL:
             return await self._claim_refund(args)
         if sql == dispute_store._RELEASE_REFUND_CLAIM_SQL:
-            return await self._release_refund_claim(args[0])
+            return await self._release_refund_claim(*args)
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
         return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
 
@@ -578,13 +581,14 @@ class FakePool:
         if dispute_id in self.claims:  # ON CONFLICT (dispute_id) DO NOTHING
             return None
         self.claims[dispute_id] = claimed_at
-        # Only the status changes: resolved_at and both transaction hashes are
-        # copied forward, because `crediting` is not a resolution.
-        row = latest | {"status": "crediting", "opening": False}
+        # Only the status changes, and the row is dated by the claim's own
+        # clock reading: resolved_at, both transaction hashes and the receipt's
+        # facts are copied forward, because `crediting` is not a resolution.
+        row = latest | {"status": "crediting", "updated_at": claimed_at, "opening": False}
         self.disputes.append(row)
         return row
 
-    async def _release_refund_claim(self, dispute_id: str) -> dict[str, Any] | None:
+    async def _release_refund_claim(self, dispute_id: str, now: float) -> dict[str, Any] | None:
         """_RELEASE_REFUND_CLAIM_SQL: the DELETE and the `upheld` row, one
         statement and one snapshot.
 
@@ -599,7 +603,7 @@ class FakePool:
         if latest is None or latest["status"] != "crediting":
             return None
         self.claims.pop(dispute_id, None)
-        row = latest | {"status": "upheld", "opening": False}
+        row = latest | {"status": "upheld", "updated_at": now, "opening": False}
         self.disputes.append(row)
         return row
 
@@ -616,7 +620,7 @@ class FakePool:
         return {"dispute_id": row["dispute_id"]}
 
     def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
-        dispute_id, status, refund_tx, rating_tx, note, resolved_at, now = args
+        dispute_id, status, refund_tx, rating_tx, note, resolved_at, now, credited_usdc, rating_confirmed = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
         # `finished`: the mutex is dropped by the same statement that ends the
         # dispute. Being a data-modifying CTE it runs whether or not the INSERT
@@ -634,6 +638,9 @@ class FakePool:
             "refund_tx": _coalesce(refund_tx, latest["refund_tx"]),
             "rating_tx": _coalesce(rating_tx, latest["rating_tx"]),
             "note": _coalesce(note, latest["note"]),
+            "credited_usdc": _coalesce(credited_usdc, latest["credited_usdc"]),
+            "updated_at": now,
+            "rating_confirmed": _coalesce(rating_confirmed, latest["rating_confirmed"]),
             "opening": False,
         }
         self.disputes.append(row)
@@ -821,6 +828,9 @@ def test_an_unsettled_job_or_task_reads_as_none_in_postgres() -> None:
 
 
 def test_an_opened_dispute_is_read_back_by_id_and_by_step() -> None:
+    """Round-tripped exactly as given, save the one field the store assigns:
+    opening is the dispute's first change of state, so `updated_at` is the
+    moment it was opened (story 4.06)."""
     pool = FakePool()
     store = _pg(pool)
 
@@ -830,7 +840,7 @@ def test_an_opened_dispute_is_read_back_by_id_and_by_step() -> None:
 
     opened, by_id, by_step = asyncio.run(go())
 
-    assert by_id == opened == a_dispute()
+    assert by_id == opened == a_dispute(updated_at=a_dispute().opened_at)
     assert by_step == opened
     assert len(pool.disputes) == 1
     assert pool.disputes[0]["opening"] is True

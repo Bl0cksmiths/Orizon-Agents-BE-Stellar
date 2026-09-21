@@ -312,18 +312,33 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     """The other way a timeout ends: the transaction landed after the poll
     gave up. The retry is refused as a replay, and because this dispute has a
     hash on record that is CONFIRMATION, not a collision — the recorded hash
-    is kept, and only now is the score known to have moved."""
+    is kept, and only now is the score known to have moved.
+
+    Story 4.06 makes the record say so as well. The timeout recorded its hash
+    as UNCONFIRMED, and the replay moves it to confirmed — False to True, the
+    one change this retry makes to the dispute, and the one a receipt needs
+    before it may say the agent was rated. A further replay finds it already
+    confirmed and writes nothing."""
     dispute = open_dispute()
     ledger.script = ["late"]
     unconfirmed = uphold(dispute.id)
     assert unconfirmed.rating_tx == "tx_rating_1" and invalidated == []
+    assert unconfirmed.rating_confirmed is False
 
     confirmed = uphold(dispute.id)
 
-    assert confirmed == unconfirmed
+    # The hash, the credit and everything else exactly as the timeout left
+    # them: only the confirmation moved, and the moment it was recorded.
+    assert confirmed.rating_confirmed is True
+    assert confirmed == replace(unconfirmed, rating_confirmed=True, updated_at=confirmed.updated_at)
+    assert confirmed.updated_at is not None and unconfirmed.updated_at is not None
+    assert confirmed.updated_at >= unconfirmed.updated_at
     assert ledger.replays == 1 and len(ledger.submits) == 1
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
+
+    assert uphold(dispute.id) == confirmed
+    assert ledger.replays == 2
 
 
 # ── a failure, and a collision ──────────────────────────────────
@@ -408,6 +423,82 @@ def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_reso
     assert len(settler.transfers) == 1
 
 
+# ── whether the rating is known to have landed (story 4.06) ─────
+
+
+@pytest.mark.parametrize(
+    ("how", "rating_tx", "rating_confirmed"),
+    [
+        ("land", "tx_rating_1", True),
+        ("lost", "tx_rating_1", False),
+        ("fail", None, None),
+        ("raise", None, None),
+        ("collision", None, None),
+    ],
+    ids=["success", "timeout", "failed", "hashless-timeout", "collision"],
+)
+def test_each_rating_answer_records_whether_the_rating_is_known_to_have_landed(
+    ledger, settler, invalidated, how: str, rating_tx: str | None, rating_confirmed: bool | None
+) -> None:
+    """A hash on the record cannot say whether the rating landed — a SUCCESS
+    and a TIMEOUT both leave one — so a receipt that read it as "the agent was
+    rated" could claim a consequence that never happened. `rating_confirmed`
+    says it, from the ledger's own answer through the real mapping: True for a
+    SUCCESS, False for a timeout whose in-flight hash is recorded, and nothing
+    at all where nothing was recorded — a FAILED rating, a timeout that
+    returned no hash, and a collision."""
+    dispute = open_dispute()
+    if how == "collision":
+        ledger.rated.add((AGENT, derived(0)))
+    else:
+        ledger.script = [how]
+
+    rated = uphold(dispute.id)
+
+    assert rated.status == "credited" and rated.refund_tx == "tx_credit"
+    assert rated.rating_tx == rating_tx
+    assert rated.rating_confirmed is rating_confirmed
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == rated
+    assert len(settler.transfers) == 1
+
+
+def test_a_failed_retry_leaves_an_unconfirmed_rating_as_it_was(ledger, settler, invalidated) -> None:
+    """FAILED says nothing about an EARLIER attempt, so it changes nothing —
+    including an unconfirmed one already on record. The timeout's hash never
+    landed (the retry passed simulation, which proves it), and this retry did
+    not land either: the dispute still carries that hash, still unconfirmed,
+    and a later uphold still settles it."""
+    dispute = open_dispute()
+    ledger.script = ["lost", "fail"]
+    unconfirmed = uphold(dispute.id)
+
+    failed = uphold(dispute.id)
+
+    assert failed == unconfirmed
+    assert failed.rating_tx == "tx_rating_1" and failed.rating_confirmed is False
+    assert len(ledger.submits) == 2 and ledger.replays == 0
+    assert invalidated == []
+
+
+def test_a_rating_recorded_before_the_confirmation_existed_is_confirmed_by_a_replay(
+    ledger, settler, invalidated
+) -> None:
+    """A dispute rated before 4.06 has a `rating_tx` and no word on whether it
+    landed — None, "not known". The next uphold is refused as a replay, which
+    is the ledger vouching for that hash, so the record is brought up to date
+    rather than left saying "not known" about a rating the chain holds."""
+    dispute = open_dispute()
+    rated = uphold(dispute.id)
+    store = dispute_store.get_dispute_store()
+    store._disputes[dispute.id] = replace(rated, rating_confirmed=None)
+
+    confirmed = uphold(dispute.id)
+
+    assert confirmed.rating_confirmed is True
+    assert confirmed.rating_tx == rated.rating_tx
+    assert ledger.replays == 1 and len(settler.transfers) == 1
+
+
 # ── across disputes, and across every outcome ───────────────────
 
 
@@ -440,11 +531,14 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
     After the first uphold every door back into the refund is booby-trapped,
     so a single stray call on any rating path fails here. And at each step the
     cache is dropped exactly when a rating is KNOWN to have landed — never for
-    a failure, never for a timeout, every time a replay confirms one."""
+    a failure, never for a timeout, every time a replay confirms one — and the
+    record's `rating_confirmed` (4.06) says so at the same steps: nothing
+    after the failure, False while in flight, True from the first replay."""
     dispute = open_dispute()
     ledger.script = ["fail"]
     first = uphold(dispute.id)
     assert (first.status, first.refund_tx, first.rating_tx) == ("credited", "tx_credit", None)
+    assert first.rating_confirmed is None
 
     async def _refund_touched(*args: Any, **kwargs: Any) -> None:
         raise RefundTouched("a rating path reached the refund")
@@ -457,15 +551,16 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
 
     ledger.script = ["lost", "late"]
     walk = [
-        # (rating_tx on the record afterwards, cache drops so far)
-        ("tx_rating_2", 0),  # lost in flight: recorded, not known to have landed
-        ("tx_rating_3", 0),  # the retry passed simulation and landed late: still unknown
-        ("tx_rating_3", 1),  # a replay with a hash on record: it landed
-        ("tx_rating_3", 2),  # and again, confirmed and unchanged
+        # (rating_tx on the record afterwards, rating_confirmed, cache drops so far)
+        ("tx_rating_2", False, 0),  # lost in flight: recorded, not known to have landed
+        ("tx_rating_3", False, 0),  # the retry passed simulation and landed late: still unknown
+        ("tx_rating_3", True, 1),  # a replay with a hash on record: it landed
+        ("tx_rating_3", True, 2),  # and again, confirmed and unchanged
     ]
-    for rating_tx, drops in walk:
+    for rating_tx, confirmed, drops in walk:
         answered = uphold(dispute.id)
         assert (answered.status, answered.refund_tx, answered.rating_tx) == ("credited", "tx_credit", rating_tx)
+        assert answered.rating_confirmed is confirmed
         assert invalidated == [AGENT] * drops
 
     assert len(settler.transfers) == 1
@@ -529,6 +624,45 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     assert invalidated == [AGENT]  # it landed, whatever the store says
     (logged,) = svc_errors(caplog)
     assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
+
+
+def test_a_confirmation_the_store_would_not_record_is_left_for_the_next_uphold(
+    monkeypatch, ledger, settler, invalidated, caplog
+) -> None:
+    """The write a replay now makes (4.06). If the store refuses it, the
+    rating's hash is already on record and only its confirmation is missing —
+    so there is nothing for a human to write by hand: the paid record is the
+    answer, still unconfirmed, the ERROR says to uphold again rather than to
+    edit the record, and the next uphold is refused as a replay again and
+    records the confirmation then."""
+    dispute = open_dispute()
+    ledger.script = ["late"]
+    unconfirmed = uphold(dispute.id)
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _refuses_the_confirmation(dispute_id: str, status: Any, **kwargs: Any) -> DisputeRecord:
+        if kwargs.get("rating_confirmed") is True:
+            raise ConnectionError("the database went away")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _refuses_the_confirmation)
+    caplog.clear()  # the timeout's own "unconfirmed" line is not what is under test
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        answered = uphold(dispute.id)
+
+    assert answered == unconfirmed and answered.rating_confirmed is False
+    assert invalidated == [AGENT]  # the replay proved it landed, whatever the store says
+    (logged,) = svc_errors(caplog)
+    assert "confirmation could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "by hand" not in logged
+
+    monkeypatch.setattr(store, "append_status", real_append)
+    confirmed = uphold(dispute.id)
+
+    assert confirmed.rating_confirmed is True and confirmed.rating_tx == "tx_rating_1"
+    assert len(settler.transfers) == 1
 
 
 # ── the observer the operator tool reads the ledger's answer through ──

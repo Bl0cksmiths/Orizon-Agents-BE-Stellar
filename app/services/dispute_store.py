@@ -205,6 +205,13 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 # EXISTS keeps the whole block idempotent, which is the property this schema is
 # maintained by in place of a migration tool.
 #
+# `credited_usdc`, `updated_at` and `rating_confirmed` arrive with story 4.06's
+# receipt and take the same road for the same reason: the table they join has
+# been live since 4.02. All three are NULLABLE, and that is the migration rather
+# than laxity — ADD COLUMN gives every row already written a NULL, and NULL is
+# exactly what DisputeRecord promises a reader for a row from before 4.06:
+# "not known", never a zero credit or a 1970 timestamp.
+#
 # The three read indexes carry (key..., id DESC) so "the newest row for this
 # dispute / this step / this task" is served from the index without a sort.
 _CREATE_DISPUTES_SQL = """
@@ -225,9 +232,15 @@ CREATE TABLE IF NOT EXISTS dispute_events (
     refund_tx       TEXT,
     rating_tx       TEXT,
     note            TEXT,
+    credited_usdc   DOUBLE PRECISION,
+    updated_at      DOUBLE PRECISION,
+    rating_confirmed BOOLEAN,
     opening         BOOLEAN NOT NULL DEFAULT FALSE
 );
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS credited_usdc DOUBLE PRECISION;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS updated_at DOUBLE PRECISION;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS rating_confirmed BOOLEAN;
 CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
     ON dispute_events (job_id_hex, step_index) WHERE opening;
 CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
@@ -340,7 +353,8 @@ INSERT INTO workflow_settlements (
 # no join, because each row already carries the whole record.
 _SELECT_DISPUTE_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+       credited_usdc, updated_at, rating_confirmed
 FROM dispute_events
 WHERE dispute_id = $1
 ORDER BY id DESC
@@ -354,7 +368,8 @@ LIMIT 1
 # current state rather than one of several disputes' states.
 _SELECT_DISPUTE_BY_STEP_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+       credited_usdc, updated_at, rating_confirmed
 FROM dispute_events
 WHERE job_id_hex = $1 AND step_index = $2
 ORDER BY id DESC
@@ -370,7 +385,8 @@ LIMIT 1
 # shuffle between two identical requests.
 _SELECT_DISPUTES_FOR_TASK_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+       credited_usdc, updated_at, rating_confirmed
 FROM (
     SELECT DISTINCT ON (dispute_id) *
     FROM dispute_events
@@ -401,11 +417,17 @@ ORDER BY opened_at, step_index
 # RETURNING is how the caller learns which it was: a row means this insert won
 # the step, no row means another dispute already owns it and open_dispute reads
 # that one back to hand to DuplicateDisputeError.
+#
+# `updated_at` ($17) is the opening moment itself — open_dispute passes
+# `opened_at` — because opening IS the dispute's first change of state, and a
+# receipt reading "last changed: never" beside "opened at 14:32" would be
+# answering a question it has the answer to.
 _INSERT_DISPUTE_SQL = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE)
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+    credited_usdc, updated_at, rating_confirmed, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, TRUE)
 ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
 RETURNING dispute_id
 """
@@ -427,14 +449,32 @@ RETURNING dispute_id
 # COALESCE is what makes a partial update mean "leave the rest alone": a
 # transition that names only a refund_tx keeps the rating_tx and the
 # adjudicator's note already recorded. The note is carried exactly that way and
-# for the same reason — 4.04's rating lands minutes after 4.03's rejection, and
-# a transition that blanked the reason a dispute was refused would take the
-# platform's half of the argument off the record.
+# for the same reason: it is the explanation the buyer was given for a
+# rejection, and a later transition that blanked it would leave their receipt
+# saying "rejected" with no reason, which is the one thing 4.06 made a
+# rejection unable to say.
 # `resolved_at` falls through three values in order — the one the caller gave,
-# the one already on the record, then $6, this process's clock — so the moment a
+# the one already on the record, then $7, this process's clock — so the moment a
 # dispute was first resolved is stamped once and never moved by a later event.
 # The casts are explicit because an untyped NULL parameter inside COALESCE is
 # ambiguous to the planner.
+#
+# Story 4.06's receipt adds three columns, and they split the same way.
+# `credited_usdc` ($8) and `rating_confirmed` ($9) are facts a transition may
+# or may not know, so they are COALESCEd like the hashes: the rating that lands
+# after a credit names no amount, and must not blank the one the buyer was
+# paid. COALESCE is also what lets a rating move from unconfirmed to confirmed.
+# It returns its first NON-NULL argument, and FALSE is not NULL — so a caller
+# naming TRUE replaces a recorded FALSE, while a caller naming nothing passes
+# NULL and keeps it. The argument order is the whole of that: written the other
+# way round, COALESCE(latest.rating_confirmed, $9) would make the first answer
+# permanent, and a rating that timed out would read "unconfirmed" forever after
+# the ledger vouched for it.
+#
+# `updated_at` is $7 outright and never COALESCEd, because it is the one column
+# every transition exists to move. It is the same reading of the clock as the
+# `resolved_at` fallback, so the transition that first resolves a dispute
+# records the two as equal, and every later one moves only `updated_at`.
 #
 # `opening` is FALSE, and that is load-bearing rather than cosmetic: a
 # transition row that claimed to be an opening would collide with its own
@@ -465,7 +505,8 @@ finished AS (
 )
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+    credited_usdc, updated_at, rating_confirmed, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, $2,
@@ -474,19 +515,32 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        COALESCE($3::text, latest.refund_tx),
        COALESCE($4::text, latest.rating_tx),
        COALESCE($5::text, latest.note),
+       COALESCE($8::double precision, latest.credited_usdc),
+       $7::double precision,
+       COALESCE($9::boolean, latest.rating_confirmed),
        FALSE
 FROM latest
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+          credited_usdc, updated_at, rating_confirmed
 """
 
 
 # Appending a transition row that changes ONLY the status: every other column
 # is copied from `latest` verbatim. Both refund-mutex transitions are that
 # shape and differ in a single clause — what gates the row — so they share one
-# statement instead of spelling the fifteen-column list out twice more, where a
-# column added later would go missing from one of them without failing
+# statement instead of spelling the eighteen-column list out twice more, where
+# a column added later would go missing from one of them without failing
 # anything.
+#
+# `updated_at` ($2) is the one exception, and it is not a fact about the
+# dispute but about this row: the moment the status changed, which is what a
+# claim and a release both do. A buyer whose refund has sat in `crediting`
+# since this morning is owed that time on their receipt, and a row that
+# carried the previous transition's forward would tell them it happened
+# whenever the dispute was upheld. For a claim, $2 is the same reading of the
+# clock that dates the mutex row, so the queue and the trail agree to the
+# instant on when the payout began.
 #
 # `resolved_at` is carried forward rather than stamped, and that is the
 # load-bearing difference from _APPEND_STATUS_SQL. Neither `crediting` nor the
@@ -498,16 +552,19 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 _APPEND_UNRESOLVED_ROW = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+    credited_usdc, updated_at, rating_confirmed, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, '{status}',
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
        latest.resolved_at, latest.refund_tx, latest.rating_tx, latest.note,
+       latest.credited_usdc, $2::double precision, latest.rating_confirmed,
        FALSE
 FROM latest {gate}
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
+          credited_usdc, updated_at, rating_confirmed
 """
 
 
@@ -665,12 +722,17 @@ class DisputeRecord:
     both frozen at opening time so a later policy change cannot rewrite what the
     buyer was shown.
 
-    `note` is the adjudicator's side of the argument: why the dispute was upheld
-    or rejected. The buyer's side is durable from the moment they open it
-    (`reason`, frozen there), and an upheld dispute leaves an amount and a
-    transaction hash behind as well — but a rejection recorded only a status and
-    a timestamp, which is backwards, because a rejection is the outcome most
-    likely to be contested. It is kept EXACTLY as given: bounding and sanitising
+    `note` is the adjudicator's answer TO THE BUYER: why their dispute was
+    rejected, written for them and shown to them on their receipt (story 4.06)
+    — so it is written in words the buyer can read, never in the platform's
+    internal shorthand or about anybody else's dispute. Every rejection carries
+    one, because `dispute_svc.reject` refuses to record a rejection without it:
+    a rejection with no explanation is worse than no dispute system. The
+    buyer's side is durable from the moment they open it (`reason`, frozen
+    there), and an upheld dispute leaves an amount and a transaction hash
+    behind — a refusal that said nothing would make the outcome most likely to
+    be contested the one with nothing to contest. None on a dispute that was
+    never rejected. It is kept EXACTLY as given: bounding and sanitising
     untrusted text is the caller's job, and a store that edited evidence on its
     way in would be a worse store.
     """
@@ -780,6 +842,8 @@ class DisputeStore(Protocol):
         rating_tx: str | None = None,
         note: str | None = None,
         resolved_at: float | None = None,
+        credited_usdc: float | None = None,
+        rating_confirmed: bool | None = None,
     ) -> DisputeRecord: ...
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
@@ -836,6 +900,9 @@ class InMemoryDisputeStore:
         existing = await self.find_dispute(record.job_id_hex, record.step_index)
         if existing is not None:
             raise DuplicateDisputeError(existing)
+        # Opening is the dispute's first change of state, so it is stamped with
+        # the moment it was opened — the rule _INSERT_DISPUTE_SQL writes.
+        record = replace(record, updated_at=record.opened_at)
         self._disputes[record.id] = record
         while len(self._disputes) > _MAX_IN_MEMORY:
             dropped, _ = self._disputes.popitem(last=False)
@@ -870,17 +937,29 @@ class InMemoryDisputeStore:
         rating_tx: str | None = None,
         note: str | None = None,
         resolved_at: float | None = None,
+        credited_usdc: float | None = None,
+        rating_confirmed: bool | None = None,
     ) -> DisputeRecord:
         current = self._disputes.get(dispute_id)
         if current is None:
             raise KeyError(dispute_id)
+        # One reading of the clock for both timestamps, as _APPEND_STATUS_SQL
+        # reads $7 once: the transition that first resolves a dispute must
+        # record the same moment as its resolution and as its last change.
+        now = time.time()
+        # `is not None` throughout, never truthiness, and for rating_confirmed
+        # it is the rule rather than style: False is an answer to record, and
+        # only None means "this transition does not say".
         updated = replace(
             current,
             status=status,
             refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
             rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
             note=note if note is not None else current.note,
-            resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or time.time()),
+            resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or now),
+            credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
+            updated_at=now,
+            rating_confirmed=rating_confirmed if rating_confirmed is not None else current.rating_confirmed,
         )
         self._disputes[dispute_id] = updated
         if status in ("credited", "rejected"):
@@ -912,8 +991,11 @@ class InMemoryDisputeStore:
         current = self._disputes.get(dispute_id)
         if current is None or current.status != "upheld" or dispute_id in self._refund_claims:
             return None
-        self._refund_claims[dispute_id] = time.time()
-        claimed = replace(current, status="crediting")
+        # One reading of the clock dates both the claim and the transition, as
+        # _CLAIM_REFUND_SQL's $2 does.
+        now = time.time()
+        self._refund_claims[dispute_id] = now
+        claimed = replace(current, status="crediting", updated_at=now)
         self._disputes[dispute_id] = claimed
         return claimed
 
@@ -938,7 +1020,7 @@ class InMemoryDisputeStore:
         # in `crediting` without one is repaired rather than stranded — the
         # rule _RELEASE_REFUND_CLAIM_SQL follows, and for the same reason.
         self._refund_claims.pop(dispute_id, None)
-        released = replace(current, status="upheld")
+        released = replace(current, status="upheld", updated_at=time.time())
         self._disputes[dispute_id] = released
         return released
 
@@ -1120,7 +1202,10 @@ class PostgresDisputeStore:
         `resolved_at` stays None rather than becoming 0.0 when the column is
         NULL: an open dispute has not been resolved, and an epoch-zero timestamp
         would read as "resolved in 1970" to every caller that only checks
-        whether the value is set.
+        whether the value is set. The receipt's three columns follow the same
+        rule for the reason they are nullable at all — a row written before 4.06
+        says "not known", and a receipt that turned that into a credit of 0.0 or
+        an unconfirmed rating would state a fact nobody recorded.
         """
         return DisputeRecord(
             id=row["dispute_id"],
@@ -1138,19 +1223,24 @@ class PostgresDisputeStore:
             refund_tx=row["refund_tx"],
             rating_tx=row["rating_tx"],
             note=row["note"],
+            credited_usdc=None if row["credited_usdc"] is None else float(row["credited_usdc"]),
+            updated_at=None if row["updated_at"] is None else float(row["updated_at"]),
+            rating_confirmed=None if row["rating_confirmed"] is None else bool(row["rating_confirmed"]),
         )
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
         """Insert the dispute, or raise DuplicateDisputeError with the one that
         beat it to this step.
 
-        The record is returned unchanged on success: nothing about it is
-        assigned by the database, so there is no row to read back. The loser's
-        branch costs one extra read and only ever runs on a genuine collision —
-        a double click, a retried POST, two tabs — which is the moment worth
-        spending a round trip on.
+        The record is returned as written, which is the record given with
+        `updated_at` stamped from its own `opened_at`: nothing about it is
+        assigned by the database, so there is still no row to read back. The
+        loser's branch costs one extra read and only ever runs on a genuine
+        collision — a double click, a retried POST, two tabs — which is the
+        moment worth spending a round trip on.
         """
         pool = await self._ready_pool()
+        record = replace(record, updated_at=record.opened_at)
         won = await pool.fetchrow(
             _INSERT_DISPUTE_SQL,
             record.id,
@@ -1168,6 +1258,9 @@ class PostgresDisputeStore:
             record.refund_tx,
             record.rating_tx,
             record.note,
+            record.credited_usdc,
+            record.updated_at,
+            record.rating_confirmed,
         )
         if won is not None:
             return record
@@ -1192,6 +1285,8 @@ class PostgresDisputeStore:
         rating_tx: str | None = None,
         note: str | None = None,
         resolved_at: float | None = None,
+        credited_usdc: float | None = None,
+        rating_confirmed: bool | None = None,
     ) -> DisputeRecord:
         """Append the transition and return the dispute as it now stands.
 
@@ -1199,6 +1294,12 @@ class PostgresDisputeStore:
         dispute without reading it back, so the value they act on is the row
         that was written rather than a second read that a concurrent transition
         could have moved underneath them.
+
+        Every keyword is "leave it as recorded" at None, and only at None: the
+        receipt's `credited_usdc` and `rating_confirmed` are carried forward
+        exactly as the hashes are, and a `rating_confirmed=False` is written as
+        the answer it is. `updated_at` is not a keyword at all — every row this
+        appends is stamped with the moment it was appended.
 
         KeyError for an unknown id, matching InMemoryDisputeStore: the INSERT
         selects from the dispute's own history, so no history means no row
@@ -1209,13 +1310,25 @@ class PostgresDisputeStore:
         # Our own clock, in epoch seconds, for the reason every other timestamp
         # here is: the record handed back must be the row that was stored, not a
         # value the database rendered in whatever timezone it happens to run in.
-        # It is only used when neither the caller nor the record already has a
-        # resolution time — see COALESCE in _APPEND_STATUS_SQL.
+        # It is always the row's `updated_at`, and its `resolved_at` only when
+        # neither the caller nor the record already has a resolution time — see
+        # COALESCE in _APPEND_STATUS_SQL.
         now = time.time()
         # The statement also drops the refund mutex when `status` finishes the
         # dispute, so what remains in `refund_claims` is exactly the set of
         # payouts still in flight rather than a pile of spent locks.
-        row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, note, resolved_at, now)
+        row = await pool.fetchrow(
+            _APPEND_STATUS_SQL,
+            dispute_id,
+            status,
+            refund_tx,
+            rating_tx,
+            note,
+            resolved_at,
+            now,
+            credited_usdc,
+            rating_confirmed,
+        )
         if row is None:
             raise KeyError(dispute_id)
         return self._to_dispute(row)
@@ -1257,7 +1370,8 @@ class PostgresDisputeStore:
         twice is a worse failure than paying them late.
         """
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id)
+        # Our own clock for the row's `updated_at`, never the database's.
+        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time())
         return None if row is None else self._to_dispute(row)
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:

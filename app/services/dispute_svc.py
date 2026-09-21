@@ -67,12 +67,14 @@ logger = logging.getLogger(__name__)
 
 # Told the ledger's own answer to a dispute rating, for an in-process caller
 # that needs more than the record can say. The record answers "is a rating on
-# file", and a TIMEOUT that may yet land and a SUCCESS both leave one there, so
-# a tool reporting evidence to a human cannot tell them apart from the record
-# alone. `uphold` keeps its single return type on purpose — an API response
-# must never disagree with a later GET of the same dispute — so the answer is
-# handed out through this declared seam instead, and only to a caller that
-# asks for it.
+# file" and, since 4.06, "is it known to have landed" (`rating_confirmed`) —
+# but not what THIS attempt drew: a FAILED rating and a collision both leave
+# the record exactly as it was, and a timeout that replaced an earlier dead
+# hash reads just like the one before it, so a tool reporting evidence to a
+# human cannot tell them apart from the record alone. `uphold` keeps its
+# single return type on purpose — an API response must never disagree with a
+# later GET of the same dispute — so the answer is handed out through this
+# declared seam instead, and only to a caller that asks for it.
 RatingObserver = Callable[[dispute_rating.RatingOutcome], None]
 
 # Re-exported so the router depends on ONE module for the whole dispute flow and
@@ -562,8 +564,9 @@ async def _load_for_adjudication(dispute_id: str) -> DisputeRecord:
     return record
 
 
-async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
-    """Adjudicate a dispute AGAINST the claim, from `open` and from nowhere else.
+async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
+    """Adjudicate a dispute AGAINST the claim, from `open` and from nowhere else,
+    and tell the buyer why.
 
     A rejection is terminal and it is the one outcome that must never become
     payable again: `store.claim_refund` only ever claims an `upheld` dispute,
@@ -587,34 +590,60 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
     (D1) — the switch is a money control here and an authorisation control
     there, and only one of those is this module's to make.
 
-    `note` is the adjudicator's reason, and BOTH halves of what happens to it
-    are deliberate.
+    `note` is REQUIRED, and it is written FOR THE BUYER. It is the explanation
+    their receipt shows beside the word "rejected" (story 4.06), so it is
+    written in words the buyer can read — never internal adjudication
+    shorthand, and never anything about another dispute. It is mandatory
+    because a rejection with no explanation is worse than no dispute system:
+    the buyer's side of the argument is durable from the moment they raise it
+    (`reason`, frozen there), an upheld dispute leaves an amount and a
+    transaction hash behind, and a refusal that said nothing would hand the
+    buyer the outcome they are most likely to contest with nothing in it to
+    contest. A buyer told "no" without a reason learns only that complaining
+    here is pointless.
 
-    It IS RETAINED, on the dispute record. A rejection that recorded only a
-    status and a timestamp was backwards: the buyer's side of the argument is
-    durable from the moment they raise it (`reason`, frozen there), and an
-    upheld dispute leaves an amount and a transaction hash behind as well — so
-    the one outcome most likely to be contested was the one with nothing
-    written down. It is cleaned HERE and nowhere else, because the store keeps
-    what it is given byte for byte on purpose: bounding this and stripping the
-    control characters out of it is this module's job, exactly as it is for the
-    buyer's `reason`. Empty after cleaning is stored as nothing rather than as
-    an empty string — `append_status` carries a null forward, so a note of pure
-    whitespace must leave an existing one alone rather than blank it.
+    It is checked FIRST, before the dispute is even read: pure text handling
+    is the cheapest check there is, and it is the only refusal here an
+    adjudicator can fix and send again. A note that is empty AFTER cleaning —
+    missing, blank, or nothing but control characters — is refused as
+    `rejection_reason_required` (422, the status the buyer's own missing
+    `reason` carries) before anything is written, because storing it would
+    print an empty explanation on the receipt.
 
-    It is stored for AUDIT and is not on the API's dispute shape. Surfacing
-    internal adjudication prose — which may reference other disputes or the
-    platform's own reasoning — to the buyer it was written about is a separate
-    decision, and this story does not make it.
+    It is cleaned HERE and nowhere else, because the store keeps what it is
+    given byte for byte on purpose: bounding this and stripping the control
+    characters out of it is this module's job, exactly as it is for the
+    buyer's `reason` and for the same reason — it is read back into an API
+    response and rendered in front of a person, where an escape sequence or a
+    NUL forges structure nobody wrote.
 
-    It is DELIBERATELY NOT LOGGED. `open_dispute` sets that convention and this
-    follows it: free text about one complaint belongs on the record, never in
-    the operator's log viewer, where it is unbounded, useless for
+    Redefining it from the audit-only note story 4.03 introduced is safe
+    because nothing has ever been rejected: rejecting requires the refund path
+    — the adjudication route refuses both decisions while
+    DISPUTE_REFUNDS_ENABLED is off — and that path has never been enabled in
+    production. No note exists that was written for an auditor and would now
+    be shown to a buyer.
+
+    It is still DELIBERATELY NOT LOGGED. `open_dispute` sets that convention
+    and this follows it: free text about one complaint belongs on the record,
+    never in the operator's log viewer, where it is unbounded, useless for
     reconstructing an incident, and — for the buyer's `reason`, which arrives
-    over a public route — written by somebody else. The line below says that a
-    rationale exists and whom the decision concerns; the rationale itself is
-    read from the record by whoever needs it.
+    over a public route — written by somebody else. The line below says that
+    an explanation was recorded and whom the decision concerns; the
+    explanation itself is read from the record by whoever needs it.
     """
+    # `sanitize_untrusted` reads a None as "", so a caller that ignores the
+    # annotation is refused below with the right code rather than with a
+    # TypeError the API would answer as a 500.
+    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS)
+    if not cleaned:
+        logger.warning("adjudication refused: dispute=%s reason=rejection_reason_required", dispute_id)
+        raise DisputeError(
+            "rejection_reason_required",
+            "a rejection must tell the buyer why their dispute was not upheld",
+            422,
+        )
+
     dispute = await _load_for_adjudication(dispute_id)
     if dispute.status != "open":
         raise _refuse_credit(
@@ -625,15 +654,17 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
             amount_usdc=dispute.creditable_usdc,
             tx_hash=dispute.refund_tx,
         )
-    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS) if note else ""
-    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned or None)
+    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned)
+    # `noted=` is the presence of the explanation and never its text. It reads
+    # `yes` on every rejection now that none can be recorded without one, and
+    # stays in the line so it reads the same as every rejection logged before.
     logger.info(
         "dispute rejected: id=%s job=%s step=%s payer=%s noted=%s",
         rejected.id,
         rejected.job_id_hex,
         rejected.step_index,
         rejected.payer,
-        "yes" if note else "no",
+        "yes" if rejected.note else "no",
     )
     return rejected
 
@@ -816,19 +847,26 @@ async def _rate_credited(
     its credit lands, and again on every later `uphold` of it. The five
     answers the ledger can give, and what each one means for THIS dispute:
 
-      - **SUCCESS** — it landed. The hash is recorded as `rating_tx`, the
-        agent's cached score is invalidated so routing sees the rating now
-        rather than one read TTL from now, and the workflow is told.
+      - **SUCCESS** — it landed. The hash is recorded as `rating_tx` with
+        `rating_confirmed` True, the agent's cached score is invalidated so
+        routing sees the rating now rather than one read TTL from now, and the
+        workflow is told.
       - **REPLAY, with a `rating_tx` on record** — an earlier attempt of ours
         landed, so this is done: the hash on record is kept and the cache is
         invalidated, because a rating that timed out may have landed since.
+        The replay is the ledger vouching for that hash, so a record that did
+        not yet say so gets `rating_confirmed` True — the one move from
+        unconfirmed to confirmed a rating makes — and one that already does
+        is answered unchanged.
       - **REPLAY, with none** — a COLLISION (D4): the ledger holds a rating
         under this dispute's derived id that this dispute has no record of
         writing. Loud, and never read as resolved.
       - **TIMEOUT** — submitted and unconfirmed: it may still land. The
         in-flight hash is recorded at once, so the evidence exists the moment
-        the rating does, and the next `uphold` settles it — REPLAY if it
-        landed, a fresh SUCCESS that replaces the hash if it never did.
+        the rating does, with `rating_confirmed` False, so a receipt holding
+        that hash does not claim a consequence nobody has seen land. The next
+        `uphold` settles it — REPLAY if it landed, a fresh SUCCESS that
+        replaces the hash if it never did.
       - **FAILED** — nothing landed and nothing is recorded; retryable.
 
     A rating that cannot even be FORMED — `submit_dispute_rating` raises for a
@@ -842,7 +880,8 @@ async def _rate_credited(
     been handed a paid dispute:
 
       - `credited` WITH a `rating_tx`: the rating was submitted under the
-        derived id and landed, or (after a TIMEOUT) may still;
+        derived id — and landed when `rating_confirmed` is True, or, after a
+        TIMEOUT, may still when it is False;
       - `credited` WITHOUT one: the buyer is paid and the reputation
         consequence is NOT on-chain — a FAILED rating, a collision, a
         deployment not configured to rate, or one that could not be formed or
@@ -903,10 +942,25 @@ async def _rate_credited(
     try:
         return await _apply_rating(credited, outcome)
     except Exception:
-        # In practice only the store write after a SUCCESS or a TIMEOUT can
-        # get here, and by then the answer and its hash are already in the
-        # log. The dispute is answered as the store last held it: paid, and
-        # not shown as rated — which a later REPLAY will then report as a
+        # In practice only a store write can get here: the one after a
+        # SUCCESS or a TIMEOUT, or the confirmation after a REPLAY.
+        if outcome.status == "REPLAY":
+            # The hash is already on record and only its confirmation was
+            # lost, so there is nothing to record by hand: the next uphold is
+            # refused as a replay again and writes the confirmation then.
+            _log_rating(
+                logging.ERROR,
+                "was confirmed on-chain but the confirmation could not be recorded on the dispute — its"
+                " rating_tx stands; uphold again to record it",
+                credited,
+                outcome.job_id_hex,
+                credited.rating_tx,
+                exc_info=True,
+            )
+            return credited
+        # After a SUCCESS or a TIMEOUT the answer and its hash are already in
+        # the log. The dispute is answered as the store last held it: paid,
+        # and not shown as rated — which a later REPLAY will then report as a
         # collision, so this line is where that one is explained.
         _log_rating(
             logging.ERROR,
@@ -922,9 +976,9 @@ async def _rate_credited(
 async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingOutcome) -> DisputeRecord:
     """What one rating outcome means for this dispute — `_rate_credited`'s five.
 
-    Keyed off `credited`'s own `rating_tx` — the record as `uphold` read it —
-    never re-read from the store, so a REPLAY is judged against what this
-    dispute had recorded before the attempt that drew it.
+    Keyed off `credited`'s own `rating_tx` and `rating_confirmed` — the record
+    as `uphold` read it — never re-read from the store, so a REPLAY is judged
+    against what this dispute had recorded before the attempt that drew it.
     """
     store = get_dispute_store()
     derived = outcome.job_id_hex
@@ -935,7 +989,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # must be in the log and the score fresh even if the write fails.
         _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
         reputation_svc.invalidate_rep(credited.agent_id)
-        rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash)
+        rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True)
         await _note_rating_on_workflow(rated, outcome)
         return rated
 
@@ -943,7 +997,15 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         if credited.rating_tx:
             reputation_svc.invalidate_rep(credited.agent_id)
             _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx)
-            return credited
+            if credited.rating_confirmed:
+                # Already confirmed: a second row would say nothing new and
+                # would move `updated_at` for a dispute nothing happened to.
+                return credited
+            # A timeout that landed after its poll gave up, or a rating recorded
+            # before 4.06 kept whether it landed: either way the ledger has now
+            # vouched for the hash on record, and only now may the receipt say
+            # the agent was rated.
+            return await store.append_status(credited.id, "credited", rating_confirmed=True)
         _log_rating(
             logging.ERROR,
             "COLLISION — the ledger already holds a rating under this dispute's derived id and this"
@@ -966,7 +1028,10 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             outcome.tx_hash,
         )
         if outcome.tx_hash:
-            return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash)
+            # Evidence, and explicitly NOT confirmation: the hash is the
+            # rating's the moment it lands, but until the ledger vouches for it
+            # the receipt must not say the agent was rated.
+            return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=False)
         return credited
 
     # FAILED — and, deliberately, anything else: for a rating the safe
@@ -1068,10 +1133,12 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
 
     The return value is the dispute as the store holds it, and it is also how
     a caller learns whether the reputation consequence landed: `credited` with
-    a `rating_tx` has been rated (or, after a rating timeout, may yet be), and
-    `credited` WITHOUT one is paid but NOT fully resolved — uphold it again to
-    retry the rating alone. A rating failure is never raised: by then the buyer
-    has been paid, and an exception would say otherwise.
+    a `rating_tx` and `rating_confirmed` True has been rated; with
+    `rating_confirmed` False the rating timed out and may yet land, and the
+    next uphold settles which; and `credited` WITHOUT a `rating_tx` is paid but
+    NOT fully resolved — uphold it again to retry the rating alone. A rating
+    failure is never raised: by then the buyer has been paid, and an exception
+    would say otherwise.
 
     The one window that remains is between a SUCCESS and the `append_status`
     that records it: if the store is unreachable at that instant the money has
@@ -1180,7 +1247,14 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
 
     if outcome.status == "SUCCESS":
-        credited = await store.append_status(dispute_id, "credited", refund_tx=outcome.tx_hash)
+        # The amount the transfer MOVED, never `creditable_usdc`: that is the
+        # promise frozen at opening, and D4 bounds the payment below it by the
+        # step price at today's fraction and by what the charge settled. The
+        # receipt prints this beside the refund hash, so it must be the number
+        # the hash proves.
+        credited = await store.append_status(
+            dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+        )
         await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
         # Only now, with the credit landed AND recorded, is the agent rated —
         # and against the settlement the credit was just bounded by, so the
