@@ -774,6 +774,59 @@ def rating_unrecorded(dispute: DisputeRecord, tx_hash: str, rating_id: str) -> i
     return EXIT_UNEXPECTED
 
 
+def derived_id_hex(dispute: DisputeRecord) -> str:
+    """The rating id, for a report line with no `RatingOutcome` to read it from.
+
+    Never raises: it is reached after money has moved, and the preview has
+    already refused a dispute whose id will not derive — so a failure here is
+    a record that changed mid-run, and the report says so in place of the id
+    rather than dying with the verdict half-printed.
+    """
+    try:
+        return dispute_rating.dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index).hex()
+    except ValueError:
+        return f"(none derives from job {dispute.job_id_hex!r})"
+
+
+def report_rating(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome | None) -> int:
+    """What became of the dispute rating, and the exit code that follows (4.04).
+
+    Reached only once `report` has found the credit landed AND recorded: the
+    rating is written after `credited` and never before (D3), so a run whose
+    refund did not land has no rating to speak of.
+
+    EXIT_OK only when a rating hash is on the record and the ledger has vouched
+    for it during this run — by confirming it, or by refusing a second copy.
+    Everything short of that is one of the three blocks above, because a
+    dispute whose rating is not on-chain must never read as resolved.
+    """
+    verdict = rating_verdict(dispute, outcome)
+    rating_id = outcome.job_id_hex if outcome is not None else derived_id_hex(dispute)
+    if verdict == "collision":
+        return rating_collision(dispute, rating_id)
+    if verdict == "unrecorded" and outcome is not None and outcome.tx_hash:
+        return rating_unrecorded(dispute, outcome.tx_hash, rating_id)
+    if verdict not in ("rated", "confirmed") or outcome is None or not dispute.rating_tx:
+        return rating_not_landed(dispute, verdict, outcome, rating_id)
+
+    say()
+    if verdict == "rated":
+        say(f'  RATED — {dispute.agent_id} rated {outcome.rating}/100, kind "dispute", by this run')
+    else:
+        say(f'  RATED — {dispute.agent_id} rated {outcome.rating}/100, kind "dispute", by an earlier run;')
+        say("           the ledger refused this run's copy as a replay, which is what confirms it landed.")
+    say(
+        f"  weight:    {outcome.weight_stroops} stroops"
+        f" = {outcome.weight_stroops / reputation_svc.STROOPS_PER_USDC:.7f} USDC"
+    )
+    say(f"  rating tx: {dispute.rating_tx}")
+    say(f"  evidence:  {expert_url('tx', dispute.rating_tx)}")
+    say(f"  rating id: {rating_id}   filed under the job's own first 8 bytes")
+    say(f"  job id:    {dispute.job_id_hex}")
+    say()
+    return EXIT_OK
+
+
 async def execute(dispute_id: str, amount: float) -> int:
     """Uphold the dispute, pay the credit, and report the verdict from the store.
 
