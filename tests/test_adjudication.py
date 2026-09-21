@@ -976,3 +976,28 @@ def test_a_repeat_uphold_lands_a_rating_that_failed_without_a_second_credit(monk
     assert resolved.resolved_at == paid.resolved_at  # a rating does not re-date the resolution
     assert invalidated == ["agt_writer"]
     assert len(chain.calls) == 1
+
+
+def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, rater, caplog) -> None:
+    """The weight comes from the settled step's price (D2), so once the
+    settlement is gone there is nothing to submit a rating with. The paid
+    dispute is answered as it stands — still visibly unrated — and an ERROR
+    names every id, because that consequence now needs a human."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    rater.script = ["FAILED"]
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    dispute_store.get_dispute_store()._settlements.clear()
+    trap_the_refund(monkeypatch)
+    caplog.clear()  # the first attempt's own FAILED line is not what is under test
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert again == paid and again.rating_tx is None
+    assert rater.calls == 1  # the first attempt only
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 1
+    derived = dispute_rating.dispute_job_id(bytes.fromhex(JOB), 0).hex()
+    for fact in (dispute.id, JOB, derived, "agt_writer", dispute.payer):
+        assert fact in logged[0]
