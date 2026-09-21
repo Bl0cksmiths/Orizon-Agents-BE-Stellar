@@ -495,6 +495,25 @@ class FakePool:
         newest = {r["dispute_id"]: r for r in self.disputes if r["task_id"] == args[0]}
         return sorted(newest.values(), key=lambda r: (r["opened_at"], r["step_index"]))
 
+    def _claim_refund(self, dispute_id: str) -> dict[str, Any] | None:
+        """refund_claims PRIMARY KEY (dispute_id) + ON CONFLICT DO NOTHING.
+
+        The whole point of the real table is that this is ONE atomic
+        statement, so the fake models it as one indivisible step too: a second
+        claim over a held dispute writes nothing and returns nothing.
+        """
+        if dispute_id in self.claims:
+            return None
+        self.claims.add(dispute_id)
+        return {"dispute_id": dispute_id}
+
+    def _delete_refund_claim(self, dispute_id: str) -> dict[str, Any] | None:
+        """DELETE ... RETURNING dispute_id — empty when no claim was held."""
+        if dispute_id not in self.claims:
+            return None
+        self.claims.discard(dispute_id)
+        return {"dispute_id": dispute_id}
+
     def _open_dispute(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
         row = dict(zip(_DISPUTE_COLUMNS, args, strict=True)) | {"opening": True}
         # dispute_events_one_per_step_idx: UNIQUE (job_id_hex, step_index) WHERE
