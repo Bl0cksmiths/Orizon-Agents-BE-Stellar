@@ -10,7 +10,10 @@ service. What is tested HERE is the wire, and only the wire:
     the service's own token, verbatim;
   * `duplicate_dispute` answers with the original dispute — the one acceptance
     criterion the shared error envelope has no room to express;
-  * an unsettled task reads as an empty window rather than an error.
+  * an unsettled task reads as an empty window rather than an error;
+  * a settled one carries everything a buyer's FIRST dispute starts from
+    (story 4.05) — the job id, the payer, each step's credit priced by the
+    refund's own rule, the stated policy and the server's clock.
 
 Every test stubs `dispute_svc` at the seam the router imported. That keeps this
 file passing without the rules lane's implementation present, and keeps it
