@@ -633,29 +633,30 @@ def test_the_duplicate_rule_is_an_index_and_not_only_a_read() -> None:
     assert "ON dispute_events (job_id_hex, step_index) WHERE opening" in ddl
 
 
-def test_no_sql_in_the_module_mutates_a_row() -> None:
+def test_no_sql_in_the_module_mutates_a_dispute_event() -> None:
     """Belt and braces on the constants themselves, so a later edit that adds
     an UPDATE has to delete this test to land. ON CONFLICT DO NOTHING is the one
     conflict clause that leaves the conflicting row alone; DO UPDATE would be an
-    UPDATE wearing a hat, and is refused here by name."""
-    sql = " ".join(
-        (
-            dispute_store._CREATE_SETTLEMENTS_SQL,
-            dispute_store._CREATE_DISPUTES_SQL,
-            dispute_store._SELECT_SETTLEMENT_BY_JOB_SQL,
-            dispute_store._SELECT_SETTLEMENT_BY_TASK_SQL,
-            dispute_store._INSERT_SETTLEMENT_SQL,
-            dispute_store._SELECT_DISPUTE_SQL,
-            dispute_store._SELECT_DISPUTE_BY_STEP_SQL,
-            dispute_store._SELECT_DISPUTES_FOR_TASK_SQL,
-            dispute_store._INSERT_DISPUTE_SQL,
-            dispute_store._APPEND_STATUS_SQL,
-        )
-    ).upper()
+    UPDATE wearing a hat, and is refused here by name.
 
-    assert "UPDATE " not in sql
-    assert "DELETE " not in sql
-    assert "DO UPDATE" not in sql
+    Every `_*_SQL` constant is checked, found by NAME rather than listed one by
+    one: a statement added later and forgotten here would be exactly the one
+    free to start rewriting the audit trail.
+
+    DELETE is allowed against `refund_claims` and against nothing else. That
+    table is a mutex, not a record — it is MEANT to be released, and releasing
+    it destroys no evidence — while every row of `dispute_events` is part of
+    what a chargeback is answered with."""
+    statements = {name: sql for name, sql in vars(dispute_store).items() if name.endswith("_SQL")}
+
+    # The introspection finding nothing would make every assertion below vacuous.
+    assert {"_INSERT_DISPUTE_SQL", "_APPEND_STATUS_SQL", "_CLAIM_REFUND_SQL"} <= statements.keys()
+    for name, sql in statements.items():
+        upper = sql.upper()
+        assert "UPDATE " not in upper, name
+        assert "DO UPDATE" not in upper, name
+        for after_delete in upper.split("DELETE ")[1:]:
+            assert after_delete.startswith("FROM REFUND_CLAIMS"), name
 
 
 def test_nothing_is_dated_by_the_database() -> None:
