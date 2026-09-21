@@ -1204,6 +1204,28 @@ def test_the_rating_watch_is_removed_after_the_run(paying: list[str], ledger: Ra
     assert dispute_rating.submit_dispute_rating is before
 
 
+# ── the agent's dispute rate, before and after: never a reason to fail ─────
+
+
+def test_a_live_run_prints_how_the_agents_dispute_rate_moved(
+    capsys: pytest.CaptureFixture[str], paying: list[str], standing: StandingSeam
+) -> None:
+    """The card's "the agent's dispute rate moves", on the same screen as the
+    transaction that moved it: read before the uphold and after it, with the
+    lifetime counters beside the rate, since each landed dispute rating adds
+    exactly one to both."""
+    standing.reads_as(rep(0, 5), rep(1, 6))
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert standing.reads == [AGENT, AGENT]
+    assert "before this run:  0 bps   (0 of 5 ratings disputed)" in out
+    assert "after this run:   1666 bps   (1 of 6 ratings disputed)" in out
+    assert "moved:            +1666 bps" in out
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
