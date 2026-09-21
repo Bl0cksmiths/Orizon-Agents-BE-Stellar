@@ -552,3 +552,18 @@ def test_the_rating_observer_is_told_the_ledgers_own_answer(ledger, settler, inv
     assert retried.rating_tx == heard[1].tx_hash  # ...and only the observer says which one landed
     assert heard[0].job_id_hex == derived(0).hex()
     assert settler.transfers == [(dispute.payer, 0.05)]  # told twice, paid once
+
+
+def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(monkeypatch, ledger, settler, invalidated) -> None:
+    """Told only when the ledger was actually asked. A credit refused at the
+    cap never reaches the rating, so there is no answer to hand over — and an
+    observer told something here would be told a verdict nobody gave."""
+    dispute = open_dispute()
+    heard: list[dispute_rating.RatingOutcome] = []
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
+
+    with pytest.raises(dispute_svc.DisputeError):
+        asyncio.run(dispute_svc.uphold(dispute.id, on_rating=heard.append))
+
+    assert heard == []
+    assert ledger.submits == []
