@@ -166,3 +166,48 @@ ledger's 0–100 scale). Two details an operator should know about it:
 A rejected dispute writes nothing on-chain at all. It stays on the record,
 with its reason, as part of the agent's history with that buyer — not as part
 of its score.
+
+## The lifecycle
+
+A dispute has one status at a time, and it only ever moves forward. The record
+is appended to, never rewritten: the reason, the amounts and the opening time
+stay as they were.
+
+| status | what it means | what it carries | written by |
+| --- | --- | --- | --- |
+| `open` | raised inside the window by the payer, not yet adjudicated | the reason, the step's charge, the creditable amount, the opening time | story 4.02 — the only status it ever writes |
+| `upheld` | adjudicated in the buyer's favour | the on-chain dispute rating's tx, once written | story 4.04 |
+| `credited` | the credit has been paid to the buyer | the refund tx | story 4.03 |
+| `rejected` | adjudicated against the claim | the resolution time; nothing on-chain | adjudication |
+
+```text
+open ──► upheld ──► credited      the claim stood: the buyer is credited and
+  │                               the agent carries a low on-chain rating
+  └────► rejected                 the claim did not stand: nothing on-chain,
+                                  the record and its reason are kept
+```
+
+`open` is the only status story 4.02 writes. Everything past it belongs to the
+stories that pay the credit and write the rating, which is why a freshly opened
+dispute shows no transactions: there are none to show yet.
+
+## The API
+
+| Route | Who may call it | Purpose |
+| --- | --- | --- |
+| `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign, with the step, its charge, the creditable amount and the window's closing time |
+| `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
+| `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
+| `GET /api/disputes?task_id=…` | anyone holding the task id | every dispute raised against one workflow |
+
+The read routes take no credential because both ids are unguessable — a dispute
+id is `dsp_` plus 16 random hex characters — which is the same trade the task
+read token makes, and it keeps a buyer able to check their own dispute without
+an account.
+
+A dispute is refused, with the reason said plainly, when: the window has closed
+(the response says when it closed); the signature does not verify against the
+payer recorded at settlement; the nonce is missing, expired or already used;
+the step never delivered and so was never charged; or there is no settlement
+record for the job at all. A **duplicate** is not refused — the original
+dispute comes back unchanged.
