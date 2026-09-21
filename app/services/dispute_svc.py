@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from datetime import datetime, timezone
 
 from ..config import settings
 from . import external_binding as eb
@@ -233,7 +234,12 @@ async def open_dispute(
          is off-chain state that belongs to the buyer: whether a step was
          delivered, when their window closes, whether they already disputed. A
          caller who cannot prove they are the buyer learns none of it.
-      3. **The step** — it must exist on the settlement and have been delivered.
+      3. **The window** — judged on the closing time STAMPED on the settlement
+         record, never recomputed from `settings.dispute_window_seconds`. The
+         buyer was told a deadline at settlement time; tuning the setting
+         afterwards must not move it for work already done, in either direction
+         (`dispute_window_closed`, 409, and the message says when it closed).
+      4. **The step** — it must exist on the settlement and have been delivered.
          A step that failed was never part of what the buyer paid for, so there
          is nothing to credit (`step_not_settled`, 409).
 
@@ -247,6 +253,20 @@ async def open_dispute(
         raise _refuse("unknown_job", 404, "no settled workflow with that job id", job_id_hex, step_index)
 
     _authenticate_payer(settlement, step_index, payer, nonce, signature_b64)
+
+    if time.time() > settlement.window_closes_at:
+        # `>` rather than `>=`: a dispute arriving on the exact stamped second
+        # is inside the window the buyer was promised. The record's own value,
+        # and never `settled_at + settings.dispute_window_seconds` — a promise
+        # that a configuration change can retroactively shorten is not one.
+        closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
+        raise _refuse(
+            "dispute_window_closed",
+            409,
+            f"the dispute window for this workflow closed at {closed_at}",
+            job_id_hex,
+            step_index,
+        )
 
     step = settlement.step(step_index)
     if step is None:
