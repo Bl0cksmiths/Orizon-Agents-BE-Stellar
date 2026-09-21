@@ -43,6 +43,7 @@ from .seed import seed_registry
 from .services import execution_svc, rating_writer, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
+from .services.dispute_store import close_dispute_store
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -219,6 +220,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Release the binding store's connection pool. A no-op for the in-memory
     # store, which is what runs whenever DATABASE_URL is unset.
     await close_binding_store()
+    # The dispute store's pool, on the same terms: also a no-op in-memory, and
+    # also the one place its Postgres connections are handed back — a settlement
+    # is written on the execution path, so this store is live on any deployment
+    # that has settled a workflow, not only one an operator has bound.
+    await close_dispute_store()
     executor.shutdown(wait=False)
 
 
