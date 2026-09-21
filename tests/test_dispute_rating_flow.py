@@ -554,7 +554,9 @@ def test_the_rating_observer_is_told_the_ledgers_own_answer(ledger, settler, inv
     assert settler.transfers == [(dispute.payer, 0.05)]  # told twice, paid once
 
 
-def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(monkeypatch, ledger, settler, invalidated) -> None:
+def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(
+    monkeypatch, ledger, settler, invalidated
+) -> None:
     """Told only when the ledger was actually asked. A credit refused at the
     cap never reaches the rating, so there is no answer to hand over — and an
     observer told something here would be told a verdict nobody gave."""
@@ -569,7 +571,9 @@ def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(monkeypa
     assert ledger.submits == []
 
 
-def test_an_observer_that_raises_cannot_turn_a_paid_dispute_into_a_failure(ledger, settler, invalidated, caplog) -> None:
+def test_an_observer_that_raises_cannot_turn_a_paid_dispute_into_a_failure(
+    ledger, settler, invalidated, caplog
+) -> None:
     """The observer is the caller's code, and it runs after the credit has
     landed — where this module's rule is that nothing is raised. A fault in it
     is logged against the dispute, and the rating it was told about is still
