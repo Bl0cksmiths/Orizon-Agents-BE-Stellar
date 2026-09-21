@@ -29,6 +29,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 # A dispute's lifecycle. `open` is all story 4.02 ever writes; 4.03 pays the
@@ -853,18 +855,36 @@ _store: DisputeStore | None = None
 
 
 def get_dispute_store() -> DisputeStore:
-    """The process's dispute store, built on first use.
+    """The process's dispute store, built on first use from `database_url`.
 
-    A module-level singleton rather than `@lru_cache` for the same reason
-    `binding_store` uses one: tests reset it by assigning `_store = None`.
+    Resolved lazily — at the first call, not at import — so what is read is the
+    configuration the process is actually running with, and picking Postgres
+    dials nothing until something needs it.
+
+    A module-level singleton rather than `@lru_cache`, for binding_store's
+    reason: a cached resolver would pin whichever store the FIRST import
+    happened to resolve, so a DATABASE_URL that arrived later would be silently
+    ignored and the service would keep writing dispute windows to memory while
+    reporting success — precisely the failure this seam exists to prevent.
+    Tests reset it by assigning `_store = None`.
     """
     global _store
     if _store is None:
-        _store = InMemoryDisputeStore()
-        logger.info(
-            "dispute store: in-memory (DATABASE_URL is unset) — settlements and disputes are LOST on restart;"
-            " set DATABASE_URL to persist them"
-        )
+        dsn = settings.database_url.strip()
+        if dsn:
+            _store = PostgresDisputeStore(dsn)
+            # The DSN carries the database password: report the choice, never
+            # the value.
+            logger.info("dispute store: postgres (DATABASE_URL is set) — settlements and disputes survive a restart")
+        else:
+            _store = InMemoryDisputeStore()
+            # The in-memory path cannot honour a window that outlives the
+            # process, so a deployment running it has to be able to find that
+            # out from its own startup log rather than from a lost dispute.
+            logger.info(
+                "dispute store: in-memory (DATABASE_URL is unset) — settlements and disputes are LOST on restart;"
+                " set DATABASE_URL to persist them"
+            )
     return _store
 
 
