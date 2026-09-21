@@ -238,9 +238,10 @@ answer:
 - **Set** — the rating was submitted under the dispute's derived id and landed,
   or, if its submission was unconfirmed, is in flight and may still land. Look
   the hash up, or simply uphold again, which settles it either way.
-- **Empty** — the buyer is paid and the agent's rating is **not** on-chain. The
-  dispute is not fully resolved. Uphold it again; if the log names a
-  **collision**, follow the procedure at the end of this document instead.
+- **Empty** — the buyer is paid and the agent's rating is **not known** to be
+  on-chain. The dispute is not fully resolved. Usually the fix is to uphold it
+  again; the log line for the attempt says when it is not, and the table below
+  says what to do instead.
 
 **Retrying is always safe, and it retries the rating alone.** Upholding a
 `credited` dispute again signs no transfer — that branch returns before the
@@ -273,7 +274,7 @@ and the outcome is one of these:
 | --- | --- | --- | --- |
 | `landed (10/100)` | INFO | `rating_tx` is its hash; the agent's cached score is dropped at once | nothing |
 | `already on-chain — kept` | INFO | unchanged: an earlier attempt of this dispute landed | nothing |
-| `unconfirmed — it may still land` | ERROR | `rating_tx` is the in-flight hash, when the submission returned one | uphold again |
+| `unconfirmed — it may still land` | ERROR | `rating_tx` is the in-flight hash, when the submission returned one | uphold again. With no hash (`tx=-`), a retry that finds the rating landed after all is reported as a collision — expected, and the collision procedure resolves it |
 | `failed (FAILED) — nothing landed` | ERROR | unchanged | uphold again — after fixing the cause, if the line before it names one |
 | `was SUCCESS but could not be recorded on the dispute` (or `was TIMEOUT …`) | ERROR | unchanged — the store write failed, and the line carries the hash | record that hash by hand, **before** any retry: a retry first is refused as a replay with nothing on record, and reads as a collision |
 | `COLLISION` | ERROR | unchanged, and no `rating_tx` | the collision procedure at the end of this document |
