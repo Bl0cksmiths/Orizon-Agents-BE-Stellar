@@ -1107,6 +1107,23 @@ def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_conse
     assert stored().rating_tx is None
 
 
+def test_an_empty_rating_record_is_never_diagnosed_as_a_collision(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """The other side of the same rule. A FAILED rating leaves exactly the
+    record a collision does — `credited`, no `rating_tx` — so a script reading
+    the record alone could not tell them apart and must not try. With the
+    ledger's answer a failure, it is reported as a failure, on 12."""
+    ledger.answers("FAILED")
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert stored().rating_tx is None
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+    assert "COLLISION" not in out
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
