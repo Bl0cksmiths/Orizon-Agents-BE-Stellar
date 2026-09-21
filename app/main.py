@@ -24,7 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import SERVICE_VERSION, settings
 from .pdax.client import aclose_pdax_client
-from .routers import agents, binding, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
+from .routers import agents, binding, disputes, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
 
 # Imported by symbol, not as a module: the root `/health` handler defined
 # below rebinds the name `health` at module scope, which would shadow a
@@ -43,6 +43,7 @@ from .seed import seed_registry
 from .services import execution_svc, rating_writer, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
+from .services.dispute_store import close_dispute_store
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -219,6 +220,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Release the binding store's connection pool. A no-op for the in-memory
     # store, which is what runs whenever DATABASE_URL is unset.
     await close_binding_store()
+    # The dispute store's pool, on the same terms: also a no-op in-memory, and
+    # also the one place its Postgres connections are handed back — a settlement
+    # is written on the execution path, so this store is live on any deployment
+    # that has settled a workflow, not only one an operator has bound.
+    await close_dispute_store()
     executor.shutdown(wait=False)
 
 
@@ -285,6 +291,12 @@ app = FastAPI(
         {
             "name": "binding",
             "description": "Bind an operator HTTPS endpoint to an on-chain agent id, proved by a wallet signature.",
+        },
+        {
+            "name": "disputes",
+            "description": (
+                "Dispute a settled step inside its 24-hour window, proved by the payer's wallet signature."
+            ),
         },
         {"name": "pdax", "description": "PDAX PHP-to-crypto on/off-ramp: trade, funding, withdrawals, webhooks."},
     ],
@@ -456,6 +468,11 @@ app.include_router(agents.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(binding.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(orchestrator.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(tasks.router, prefix="/api", responses=_ERROR_RESPONSES)
+# After tasks.router, which owns the other `/tasks/{task_id}/...` reads. Order
+# is not load-bearing here — `GET /tasks/{task_id}/disputes` is a literal third
+# segment and `tasks.py` declares no catch-all that could swallow it — but
+# keeping the two adjacent is what makes that checkable at a glance.
+app.include_router(disputes.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(trace.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(metrics.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(flow.router, prefix="/api", responses=_ERROR_RESPONSES)

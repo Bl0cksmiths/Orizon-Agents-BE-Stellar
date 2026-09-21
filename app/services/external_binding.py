@@ -22,6 +22,17 @@ requires (`unbinding_message`, domain-separated from the bind one so neither
 signature can be replayed as the other). That reuse is the point: a second way
 to prove ownership of an agent is a second way to get ownership wrong.
 
+DISPUTING a settled step (story 4.02, ADR 0002) is the third purpose, and the
+first whose signer is not an agent owner: the buyer proves themselves with a
+wallet signature over `dispute_message(job_id_hex, step_index, nonce)`, checked
+against the payer the SETTLEMENT RECORD names. It occupies the key
+(job_id_hex, `dispute_subject(step)`) in the same table, with the same TTL, the
+same eviction policy and the same single-use consumption — `app/services/
+dispute_svc.py` holds the rules about when a dispute is allowed, and this module
+holds only the proof that it is the buyer asking. The in-memory task token would
+have been the easy credential and is the wrong one: it dies with the process,
+while the window it would be guarding is 24 h and has to survive a restart.
+
 What 1.06 left to "Epic 2" is now here: the owner is confirmed against the live
 registry (`resolve_owner`), and the bind API endpoint calls into this module.
 Three things about it are load-bearing rather than incidental:
@@ -37,9 +48,10 @@ Three things about it are load-bearing rather than incidental:
     unauthenticated by design, and the key is caller-supplied, so an unbounded
     table is memory exhaustion on a free instance.
 
-The table is still process-local, so a bind in progress does not survive a
-restart (the BINDING itself does — that is `binding_store`'s job). A caller who
-was mid-signature simply asks for a new challenge.
+The table is still process-local, so a proof in progress does not survive a
+restart. What it authorises does: a BINDING is `binding_store`'s job, and a
+dispute WINDOW is `dispute_store`'s. A caller who was mid-signature simply asks
+for a new challenge.
 """
 
 from __future__ import annotations
@@ -94,6 +106,21 @@ UNBINDING_MESSAGE_PREFIX = "orizon-unbind:v1"
 # the same agent all get handed the same nonce they cannot sign. There is also
 # nothing to disambiguate: an unbind has exactly one meaning per agent.
 UNBIND_SUBJECT = UNBINDING_MESSAGE_PREFIX
+
+# The THIRD purpose, and the first whose signer is not an agent owner: the buyer
+# disputing a step of a workflow they paid for (story 4.02, ADR 0002). The payer
+# proves themselves with a wallet signature for the same reason the operator
+# does — it is the only credential this service can check without holding an
+# account for them — and, specifically here, because the alternative (the
+# in-memory task token) dies with the process, while the dispute window it would
+# be guarding is measured in hours and must survive a restart.
+#
+# A separate domain again, for `UNBINDING_MESSAGE_PREFIX`'s reasons applied to a
+# third pair: a captured bind or unbind signature must not open a dispute, and a
+# captured dispute signature must not bind or revoke anything. Three distinct
+# prefixes make three different byte strings, so the separation is ed25519's to
+# enforce rather than a check a later change could forget.
+DISPUTE_MESSAGE_PREFIX = "orizon-dispute:v1"
 
 # Retention cap for outstanding challenges (insertion-ordered eviction, see
 # issue_challenge). Matches ramp_store._MAX_RAMPS, and for the same reason with
@@ -161,11 +188,63 @@ def unbinding_message(agent_id: str, nonce: str) -> str:
     return f"{UNBINDING_MESSAGE_PREFIX}:{agent_id}:{nonce}"
 
 
-def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
-    """Mint and store a challenge for (agent_id, endpoint_url).
+def dispute_message(job_id_hex: str, step_index: int, nonce: str) -> str:
+    """The exact UTF-8 string the BUYER signs to open a dispute:
 
-    Returns (nonce, expires_at); the caller needs the expiry to tell the
-    operator how long the challenge has left to be signed.
+        orizon-dispute:v1:{job_id_hex}:{step_index}:{nonce}
+
+    The STEP is in the signed bytes, on `binding_message`'s reasoning rather
+    than `unbinding_message`'s: a dispute is not unconditional. It names one
+    step of one settled workflow, and that step decides how much is credited
+    (`SettlementStep.price_usdc`) and which agent the 4.04 rating lands on. A
+    signature that named only the job could therefore be replayed against a
+    different — more expensive, or differently owned — step of the same job,
+    which is exactly the D3 replay the bind message exists to stop.
+
+    The job id is the settled job's, as hex, so the message pins the workflow
+    the dispute is about. It is not a secret: the settled job id is already
+    public in the escrow's `charged` event. The secret is the nonce, and the
+    authority is the signature over all of it.
+    """
+    return f"{DISPUTE_MESSAGE_PREFIX}:{job_id_hex}:{step_index}:{nonce}"
+
+
+def dispute_subject(step_index: int) -> str:
+    """The second half of the challenge key for a dispute of `step_index`.
+
+    A bind occupies (agent_id, endpoint_url), an unbind (agent_id,
+    UNBIND_SUBJECT), a dispute (job_id_hex, "orizon-dispute:v1:{step}"). All
+    three live in the ONE bounded table, so what matters is that no two key
+    spaces can overlap, and none of these can:
+
+      - it is not a URL, so no bind challenge can be aimed at it — the value has
+        no scheme `endpoint_policy` accepts, and every endpoint that reaches
+        `issue_challenge` has already passed `validate_endpoint_url`;
+      - it is not `UNBIND_SUBJECT`, which is a different domain prefix with
+        nothing appended, so a dispute subject can never equal it;
+      - it carries the step, so two disputes of the same job do not share a
+        nonce and one cannot cancel the other. Per STEP rather than per job for
+        the same reason a bind is keyed per endpoint: the challenge authorises
+        exactly what the message names.
+
+    `step_index` is an int, so nothing caller-shaped reaches the key text.
+    """
+    return f"{DISPUTE_MESSAGE_PREFIX}:{step_index}"
+
+
+def issue_challenge(scope: str, subject: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
+    """Mint and store a challenge for the (scope, subject) key.
+
+    Deliberately neutral parameter names: this is the shared machinery every
+    purpose goes through, and it now serves three. `scope` is the thing being
+    proved about — the agent id for a bind or an unbind, the JOB id for a
+    dispute — and `subject` is what within that scope the proof authorises: the
+    endpoint url for a bind, `UNBIND_SUBJECT` for an unbind,
+    `dispute_subject(step_index)` for a dispute. The wrappers keep the domain
+    vocabulary; only the table and the lifecycle are generic.
+
+    Returns (nonce, expires_at); the caller needs the expiry to tell the signer
+    how long the challenge has left to be signed.
 
     Near-idempotent inside the window: a live, unexpired challenge for the same
     pair is returned AS IS, with whatever TTL it has left, rather than replaced.
@@ -180,7 +259,7 @@ def issue_challenge(agent_id: str, endpoint_url: str, ttl_seconds: int = CHALLEN
     challenge, falling back to the oldest overall, so the table cannot exceed
     its cap however many agent ids an anonymous caller invents.
     """
-    key = (agent_id, endpoint_url)
+    key = (scope, subject)
     live = _challenges.get(key)
     if live is not None and live[1] > time.time():
         return live
@@ -205,6 +284,26 @@ def issue_unbind_challenge(agent_id: str, ttl_seconds: int = CHALLENGE_TTL_SECON
     return issue_challenge(agent_id, UNBIND_SUBJECT, ttl_seconds)
 
 
+def issue_dispute_challenge(
+    job_id_hex: str, step_index: int, ttl_seconds: int = CHALLENGE_TTL_SECONDS
+) -> tuple[str, float]:
+    """Mint and store a challenge authorizing a DISPUTE of one settled step.
+
+    `issue_unbind_challenge`'s reasoning, a third time: one issuer, so the
+    bounded table, the sweep-on-insert eviction, the idempotency inside the
+    window and the single-use nonce are policy that exists once. A dispute
+    inherits the lot, including the property that makes the public route safe —
+    a live challenge is returned AS IS, so an anonymous flood hands everybody
+    the same nonce they cannot sign instead of destroying the buyer's.
+
+    The TTL is the shared five minutes, which is the time to SIGN, not the time
+    to dispute: the 24 h dispute window is a separate promise stamped on the
+    settlement record, and a buyer whose challenge expires simply asks for
+    another while that window is open.
+    """
+    return issue_challenge(job_id_hex, dispute_subject(step_index), ttl_seconds)
+
+
 def _evict_one() -> None:
     """Drop one challenge to make room: the oldest EXPIRED one, or — if every
     outstanding challenge is still live — the oldest overall, so the table can
@@ -223,12 +322,12 @@ def _evict_one() -> None:
     evicted = _challenges.pop(victim, None)
     if evicted is not None and evicted[1] > now:
         if _evicting_live:
-            logger.debug("evicted a live bind challenge: agent_id=%s", victim[0])
+            logger.debug("evicted a live challenge: scope=%s", victim[0])
         else:
             _evicting_live = True
             logger.warning(
-                "bind challenge table full at %d — evicting LIVE challenges (agent_id=%s); a pending "
-                "bind may have to be restarted (coalescing to DEBUG until it clears)",
+                "challenge table full at %d — evicting LIVE challenges (scope=%s); a pending "
+                "bind, unbind or dispute may have to be restarted (coalescing to DEBUG until it clears)",
                 MAX_CHALLENGES,
                 victim[0],
             )
@@ -371,20 +470,26 @@ def _signature_matches(owner: str, message: str, signature_b64: str) -> bool:
         return False
 
 
-def _verify(agent_id: str, subject: str, owner: str, signature_b64: str, message_for: Callable[[str], str]) -> bool:
-    """Nonce lifecycle plus signature check for one (agent_id, subject) key.
+def _verify(scope: str, subject: str, signer: str, signature_b64: str, message_for: Callable[[str], str]) -> bool:
+    """Nonce lifecycle plus signature check for one (scope, subject) key.
 
-    The shared body of `verify_challenge` and `verify_unbind_challenge`. Only
-    the message differs between them, so only the message is a parameter:
-    `message_for` receives the stored nonce and returns the exact bytes that
-    must have been signed. Everything a reviewer has to trust — the expiry, the
-    consume-only-on-success rule, the leave-the-nonce-alone-on-failure rule —
-    exists once, so the two flows cannot drift apart.
+    The shared body of `verify_challenge`, `verify_unbind_challenge` and
+    `verify_dispute_challenge`. Only the message differs between them, so only
+    the message is a parameter: `message_for` receives the stored nonce and
+    returns the exact bytes that must have been signed. Everything a reviewer
+    has to trust — the expiry, the consume-only-on-success rule, the
+    leave-the-nonce-alone-on-failure rule — exists once, so the three flows
+    cannot drift apart.
 
-    Returns False on any failure: no or expired nonce, malformed owner or
-    signature, or a signature that does not verify.
+    `signer` is whoever the purpose says must have signed: the agent's on-chain
+    owner for a bind or an unbind, the settlement's recorded payer for a
+    dispute. This function never decides who that is — the caller resolves it —
+    which is what keeps the authority question in one place per purpose.
+
+    Returns False on any failure: no or expired nonce, malformed signer address
+    or signature, or a signature that does not verify.
     """
-    key = (agent_id, subject)
+    key = (scope, subject)
     entry = _challenges.get(key)
     if entry is None:
         return False
@@ -392,7 +497,7 @@ def _verify(agent_id: str, subject: str, owner: str, signature_b64: str, message
     if time.time() > expires_at:
         del _challenges[key]
         return False
-    if not _signature_matches(owner, message_for(nonce), signature_b64):
+    if not _signature_matches(signer, message_for(nonce), signature_b64):
         return False
     del _challenges[key]  # single use — a proven nonce never verifies twice
     return True
@@ -451,4 +556,73 @@ def verify_unbind_challenge(agent_id: str, owner: str, signature_b64: str) -> bo
         owner,
         signature_b64,
         lambda nonce: unbinding_message(agent_id, nonce),
+    )
+
+
+def dispute_challenge_is_live(job_id_hex: str, step_index: int, nonce: str) -> bool:
+    """True while `nonce` IS the outstanding, unexpired dispute challenge for
+    this (job, step). Does NOT consume it and does NOT look at any signature.
+
+    Only the dispute flow needs this, and only because its API answers a
+    missing or stale challenge with its own code (`challenge_expired`, 400)
+    rather than folding it into "that signature did not verify". A buyer who
+    spent thirty seconds in a wallet dialog and came back past the TTL has to be
+    told to ask for another challenge — "not the payer" would send them looking
+    for a problem with their wallet. Bind and unbind have no such distinction to
+    draw, so they keep the single boolean and nothing about them changes.
+
+    Split out rather than folded into `verify_dispute_challenge` so that the
+    single-use consumption stays where it belongs: this predicate can be called
+    as often as a caller likes without burning the nonce, and the only thing
+    that ever deletes one is a proven signature (or its expiry).
+
+    `compare_digest` because the nonce is a live credential for its window —
+    the comparison is cheap, and leaving a timing oracle on a secret we mint
+    ourselves would be a gift.
+    """
+    entry = _challenges.get((job_id_hex, dispute_subject(step_index)))
+    if entry is None:
+        return False
+    stored, expires_at = entry
+    if time.time() > expires_at:
+        return False
+    if not nonce.isascii():
+        # `compare_digest` raises TypeError on a str holding non-ASCII
+        # characters, and this one is caller-supplied off a public route. Every
+        # nonce we mint is hex, so anything outside ASCII is simply not the
+        # outstanding challenge — refused here rather than allowed to become a
+        # 500 in a caller that reasonably expects a bool.
+        return False
+    return secrets.compare_digest(stored, nonce)
+
+
+def verify_dispute_challenge(job_id_hex: str, step_index: int, payer: str, signature_b64: str) -> bool:
+    """Verify a base64 ed25519 signature over `dispute_message(...)` — the proof
+    that `payer` opened this dispute. Consumes the nonce on success.
+
+    `payer` is the address the SETTLEMENT RECORD names as having paid for the
+    workflow, read by the caller from the dispute store and never taken from the
+    request. That is the whole authority model for a dispute: the only party who
+    may dispute a step is the party whose money moved, and the record of whose
+    money moved was written at settlement time, before any dispute existed.
+
+    A BIND OR UNBIND SIGNATURE CANNOT REACH THIS, and neither can a dispute
+    signature reach those, for `verify_unbind_challenge`'s three reasons applied
+    to a third domain: the bytes differ (`orizon-dispute:v1` and a step index no
+    other message carries), the nonces live under keys neither of the others can
+    name, and a consumed nonce cannot be re-derived from the table at all. There
+    is a fourth here: the signer is a different party — a bind is proved by the
+    agent's owner, a dispute by the buyer — so even a forged domain would be
+    checked against the wrong key.
+
+    Returns False on any failure: no, stale or mismatched nonce, malformed payer
+    address or signature, or a signature that does not verify. A failed attempt
+    leaves the challenge alone, so a guess cannot cancel the real buyer's.
+    """
+    return _verify(
+        job_id_hex,
+        dispute_subject(step_index),
+        payer,
+        signature_b64,
+        lambda nonce: dispute_message(job_id_hex, step_index, nonce),
     )

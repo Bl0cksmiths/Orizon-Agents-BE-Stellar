@@ -224,6 +224,19 @@ class Settings(BaseSettings):
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
 
+    # ── Disputes (story 4.02 — ADR 0002) ──────────────────────
+    # How long after a paid workflow settles its buyer may dispute a step.
+    # The window a given workflow got is STAMPED ON ITS SETTLEMENT RECORD when
+    # it settles, never recomputed from this value — a buyer was told a closing
+    # time, and tuning this must not silently move it for work already done.
+    # Changing it therefore only affects workflows that settle afterwards.
+    dispute_window_seconds: float = 86_400.0  # 24 hours
+    # Share of the disputed step's settled charge credited back when a dispute
+    # is upheld (story 4.03 pays it; `refund_svc.credited_amount_usdc` clamps
+    # it to [0, 1]). 1.0 = the whole step, which is what ADR 0002 states as the
+    # policy buyer and operator are both told in advance.
+    dispute_credited_fraction: float = 1.0
+
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
     stellar_rpc_url: str = "https://soroban-testnet.stellar.org"
