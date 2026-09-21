@@ -35,6 +35,7 @@ from app.services.refund_svc import RefundRefused
 JOB = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # 16 bytes of job id, as hex
 TASK = "tsk_disputed"
 PAYER = Keypair.random().public_key
+SIGNING_SECRET = Keypair.random().secret
 
 STEPS = (
     SettlementStep(step_index=0, agent_id="agt_writer", agent_name="Copywriter", price_usdc=0.05, delivered=True),
@@ -216,3 +217,121 @@ def test_a_zero_amount_never_reaches_the_signer(monkeypatch) -> None:
     with pytest.raises(RefundRefused) as exc:
         asyncio.run(refund_svc.credit_refund(_dispute(), 0.0))
     assert exc.value.code == "nothing_to_credit"
+
+
+def _fake_transfer(monkeypatch, outcome: dict | Exception) -> list[dict]:
+    """Stand in for the SAC transfer, recording what was submitted.
+
+    Patched at the stellar client, not at `execute_refund`, so the wrapper is
+    exercised through the real transfer builder — which is what makes the
+    "never reached the signer" assertions elsewhere in this file mean anything.
+    """
+    calls: list[dict] = []
+
+    async def _invoke(contract_id: str, function_name: str, args: list) -> dict:
+        calls.append({"contract": contract_id, "fn": function_name, "args": args})
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(sc, "signer_public_key", lambda: "GSETTLER")
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", _invoke)
+    monkeypatch.setattr(sc, "addr", lambda a: ("addr", a))
+    monkeypatch.setattr(sc, "i128", lambda v: ("i128", v))  # usdc_to_i128 stays real
+    return calls
+
+
+def test_a_settled_transfer_is_a_success_outcome(monkeypatch) -> None:
+    calls = _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": "refund_tx"})
+
+    outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash, outcome.amount_usdc) == ("SUCCESS", "refund_tx", 0.05)
+    # settler -> the disputing payer, in stroops: the credit, not a clawback.
+    assert calls[0]["fn"] == "transfer"
+    assert calls[0]["args"] == [("addr", "GSETTLER"), ("addr", PAYER), ("i128", 500_000)]
+
+
+def test_a_rejected_transfer_is_a_failed_outcome(monkeypatch, caplog) -> None:
+    """FAILED is the only answer that says no funds moved, so it is the only
+    one a caller may release the refund claim on."""
+    _fake_transfer(monkeypatch, {"status": "FAILED", "hash": "refund_tx"})
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash) == ("FAILED", "refund_tx")
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "did not settle" in m and "no funds moved" in m and JOB in m and PAYER in m and "0.0500000" in m for m in msgs
+    ), f"a failed credit was not logged with its context: {msgs}"
+
+
+def test_a_timed_out_transfer_is_a_timeout_outcome_and_keeps_its_hash(monkeypatch, caplog) -> None:
+    """The double-credit hazard: submitted, unconfirmed, may still land. The
+    in-flight hash has to survive into the log and the outcome, because manual
+    reconciliation starts from it."""
+    _fake_transfer(monkeypatch, {"status": "timeout", "hash": "inflight_tx"})
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash) == ("TIMEOUT", "inflight_tx")
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "do not retry" in m
+        and "inflight_tx" in m
+        and "dsp_deadbeefdeadbeef" in m
+        and JOB in m
+        and PAYER in m
+        and "0.0500000" in m
+        for m in msgs
+    ), f"an unconfirmed credit was not logged for reconciliation: {msgs}"
+
+
+def test_a_success_without_a_hash_is_a_timeout(monkeypatch) -> None:
+    """No receipt means no proof it landed and no way to check later — the
+    unknown bucket, never FAILED, which would invite a second credit."""
+    _fake_transfer(monkeypatch, {"status": "SUCCESS"})
+    assert asyncio.run(refund_svc.credit_refund(_dispute(), 0.05)).status == "TIMEOUT"
+
+
+def test_an_unrecognised_status_is_a_timeout(monkeypatch) -> None:
+    _fake_transfer(monkeypatch, {"status": "NOT_FOUND", "hash": "maybe_tx"})
+    assert asyncio.run(refund_svc.credit_refund(_dispute(), 0.05)).status == "TIMEOUT"
+
+
+def test_a_raising_transfer_is_a_timeout_and_is_logged(monkeypatch, caplog) -> None:
+    """A raise can happen either side of the submission and the exception does
+    not say which, so it is treated as in-flight: logged, never retried."""
+    _fake_transfer(monkeypatch, RuntimeError("soroban rpc unreachable"))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash) == ("TIMEOUT", None)
+    records = _records(caplog, logging.ERROR)
+    assert records, "a raising credit was never logged"
+    assert any(
+        "do not retry" in r.getMessage() and "soroban rpc unreachable" in r.getMessage() and r.exc_info is not None
+        for r in records
+    ), f"the raise was not logged with its traceback: {[r.getMessage() for r in records]}"
+
+
+def test_refund_logs_never_carry_the_signing_key(monkeypatch, caplog) -> None:
+    """Every line this module writes is about money, and the settler's key is
+    the thing that moves it — message and rendered traceback alike."""
+    monkeypatch.setattr(settings, "stellar_signing_key", SIGNING_SECRET)
+    _fake_transfer(monkeypatch, RuntimeError("soroban rpc unreachable"))
+    formatter = logging.Formatter("%(message)s")
+
+    with caplog.at_level(logging.WARNING, logger="app.services.refund_svc"):
+        amount = refund_svc.creditable_for(_settlement(settled_usdc=0.01), _dispute(creditable_usdc=0.09))
+        asyncio.run(refund_svc.credit_refund(_dispute(), amount))
+        with pytest.raises(RefundRefused):
+            refund_svc.creditable_for(_settlement(), _dispute(step_index=7))
+
+    records = [r for r in caplog.records if r.name == "app.services.refund_svc"]
+    assert records
+    for rec in records:
+        assert SIGNING_SECRET not in formatter.format(rec)
