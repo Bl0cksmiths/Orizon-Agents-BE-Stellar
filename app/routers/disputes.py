@@ -1,16 +1,24 @@
 """The dispute window's HTTP surface — story 4.02 (ADR 0002).
 
 A buyer who paid for a step that did not deliver what it promised has 24 hours
-from settlement to say so. These four routes are the whole of how they say it:
-mint a challenge, sign it with the wallet that paid, post the dispute, and read
-back what was raised on a task.
+from settlement to say so. Four routes are the whole of how they say it: mint a
+challenge, sign it with the wallet that paid, post the dispute, and read back
+what was raised on a task. Two more — added by story 4.03 — are how the
+platform answers: uphold, and credit; or reject, and say so.
 
-**The wallet signature IS the credential** — no API key, no account — for
-`routers/binding.py`'s reason: a shared secret cannot express "this caller is
-*this* job's payer", and gating these routes on `require_api_key` would be a
-no-op on the demo, where API_KEY is unset. It would also be the wrong guard
-entirely: the operator holds that key, and the operator is the party a dispute
-is raised *against*.
+**On the buyer's four, the wallet signature IS the credential** — no API key,
+no account — for `routers/binding.py`'s reason: a shared secret cannot express
+"this caller is *this* job's payer", and gating these routes on
+`require_api_key` would be a no-op on the demo, where API_KEY is unset. It
+would also be the wrong guard entirely: the operator holds that key, and the
+operator is the party a dispute is raised *against*.
+
+**The adjudication pair is the mirror image**, and takes the opposite guard for
+the same reason. The caller there is not the buyer but the house, answering a
+claim made against itself and spending its own settler balance to do it. No
+wallet signature can express that, so `require_adjudicator` is the credential —
+and unlike `require_api_key` it FAILS CLOSED, because an open route that pays
+out is a drain rather than a demo. See its docstring for the whole argument.
 
 Every rule — who may dispute, whether the window is still open, whether the
 step was settled at all — lives in `services/dispute_svc.py`. This module
@@ -33,7 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ..security import request_id_var
+from ..security import request_id_var, require_adjudicator
 from ..services import dispute_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus
 from ..task_auth import require_task_read
@@ -356,3 +364,62 @@ async def list_task_disputes(
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
         disputes=[DisputeResponse.of(d) for d in disputes],
     )
+
+
+@router.post(
+    "/disputes/{dispute_id}/uphold",
+    response_model=DisputeResponse,
+    summary="Uphold a dispute and credit the buyer",
+    dependencies=[Depends(require_adjudicator)],
+)
+async def uphold_dispute(
+    dispute_id: str = Path(..., min_length=1, max_length=64),
+) -> DisputeResponse:
+    """Find for the buyer: credit the step back out of the settler's balance.
+
+    The guard is spelled on the decorator rather than hoisted onto a secured
+    sub-router, `list_task_disputes`-style and for the same reason — with the
+    dependency on the route, what admits a caller is readable at the route,
+    and `tests/test_money_route_auth.py` pins both of this pair so a third
+    adjudication route added without one fails there rather than in
+    production.
+
+    This handler decides nothing about the money, exactly as `open_dispute`
+    decides nothing about the window. Whether the dispute may be upheld at
+    all, how much is creditable once the step price and the settled total are
+    taken into account, and — the part that must never be duplicated — whether
+    a transfer has already been claimed for this dispute, all belong to
+    `dispute_svc.uphold`. A second opinion here would be a second place that
+    could decide to sign.
+
+    So a REPEAT uphold is the service's answer, passed through unchanged: the
+    same terminal record, carrying the same `refund_tx`. Not an error, and
+    emphatically not a second payout — an adjudicator who double-clicks, or a
+    console that retries a dropped response, must be able to see what already
+    happened rather than be told something went wrong.
+    """
+    try:
+        record = await dispute_svc.uphold(dispute_id)
+    except dispute_svc.DisputeError as e:
+        # The id and the code, which is all this layer holds: on a refusal
+        # there is no record here to read a job, a payer or an amount off.
+        # `dispute_svc` has the record and logs the money-path detail the
+        # frozen contract requires; duplicating it here would mean guessing.
+        logger.warning("uphold refused: dispute_id=%s reason=%s", dispute_id, e.code)
+        raise _refuse(e) from None
+    # The payer IS logged here, unlike in `open_dispute` where it is refused a
+    # line: this one came off the stored record, so it is the address a wallet
+    # signature already proved — not an attacker's claim. It is also the
+    # address that was just paid, which is the whole point of the line.
+    logger.info(
+        "dispute upheld: id=%s job_id=%s task_id=%s step=%d payer=%s status=%s creditable_usdc=%s refund_tx=%s",
+        record.id,
+        record.job_id_hex,
+        record.task_id,
+        record.step_index,
+        record.payer,
+        record.status,
+        record.creditable_usdc,
+        record.refund_tx,
+    )
+    return DisputeResponse.of(record)
