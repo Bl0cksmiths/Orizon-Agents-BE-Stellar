@@ -567,3 +567,21 @@ def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(monkeypa
 
     assert heard == []
     assert ledger.submits == []
+
+
+def test_an_observer_that_raises_cannot_turn_a_paid_dispute_into_a_failure(ledger, settler, invalidated, caplog) -> None:
+    """The observer is the caller's code, and it runs after the credit has
+    landed — where this module's rule is that nothing is raised. A fault in it
+    is logged against the dispute, and the rating it was told about is still
+    recorded as the ledger answered it."""
+    dispute = open_dispute()
+
+    def broken(_outcome: dispute_rating.RatingOutcome) -> None:
+        raise RuntimeError("the operator tool's own bug")
+
+    rated = asyncio.run(dispute_svc.uphold(dispute.id, on_rating=broken))
+
+    assert rated.status == "credited"
+    assert rated.rating_tx == "tx_rating_1"
+    assert settler.transfers == [(dispute.payer, 0.05)]
+    assert any("observer raised" in message for message in svc_errors(caplog))
