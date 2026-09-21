@@ -150,6 +150,13 @@ _REFUSAL_EXITS = {
     "refund_unconfirmed": EXIT_TIMEOUT,
 }
 
+# The codes above that are raised on the FAR SIDE of a submission: something was
+# signed, whatever became of it. They must never go out through `refuse`, whose
+# whole message is that nothing was — on a money path that sentence is the one
+# an operator acts on, and being wrong about it is how a timed-out credit gets
+# retried. The report block reads the record and says what actually happened.
+_POST_SIGNING_CODES = frozenset({"refund_failed", "refund_unconfirmed", "refund_in_flight"})
+
 
 def install_logging() -> None:
     """Send the service's own log lines to stderr, redacted.
@@ -512,7 +519,12 @@ async def execute(dispute_id: str, amount: float) -> int:
         # two the refund service raises: `uphold` catches `RefundRefused`,
         # releases the claim and re-raises it in this vocabulary. So there is
         # one except clause here and not two, and the code carries through.
-        fallback = refuse(_REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE), exc.code, exc.message)
+        fallback = _REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE)
+        if exc.code in _POST_SIGNING_CODES:
+            say()
+            say(f"  {exc.code}: {exc.message}")
+        else:
+            refuse(fallback, exc.code, exc.message)
     except Exception as exc:
         # Deliberately broad on a money path: an exception nobody anticipated
         # says nothing about whether the transfer was submitted, and letting it
