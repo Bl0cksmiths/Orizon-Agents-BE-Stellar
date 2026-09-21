@@ -602,6 +602,13 @@ class SettlementStep:
     agent_name: str | None
     price_usdc: float
     delivered: bool
+    # What the step produced, in the one line the trace already showed for it
+    # (story 4.05). Kept HERE because the trace is not: it lives in memory, is
+    # evicted and is lost on restart, while a buyer has the whole window to
+    # dispute — and "what did this step give me" is the evidence a dispute is
+    # about. None for a step that delivered nothing, and for every settlement
+    # recorded before this field existed.
+    output_summary: str | None = None
 
 
 @dataclass(frozen=True)
