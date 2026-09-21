@@ -317,6 +317,11 @@ async def _run(
     # of a LATER step that succeeded, and story 4.02 would then accept a
     # dispute over work nobody was ever paid for.
     delivered_steps: set[int] = set()
+    # What each delivered step produced, as its settlement keeps it (story
+    # 4.05) — by plan-step index for the same reason as `delivered_steps`: one
+    # agent on two steps produced two different things, and keyed by agent the
+    # second would overwrite the first on the step the buyer disputes.
+    output_summaries: dict[int, str | None] = {}
     # Agent ids whose step never reached a worker at all — see the resolve
     # branch below. Distinct from "delivered nothing": these are not rated.
     undispatched: set[str] = set()
@@ -496,7 +501,12 @@ async def _run(
                     "cost",
                     f"x402 payment → {step.agent_id} :: {step.est_price_usdc:.3f} USDC (simulated)",
                 )
-            await _emit(task_id, start, "out", f"{worker.name}: {_summarize(output)}")
+            summary = _summarize(output)
+            await _emit(task_id, start, "out", f"{worker.name}: {summary}")
+            # Kept from the SAME value the line above traced, not re-derived at
+            # settlement, so the dispute form and the trace cannot disagree
+            # about what this step produced. Cannot raise — see the helper.
+            output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
 
             # Surface critic notes / violations if the worker reports them.
             if isinstance(output, dict):
