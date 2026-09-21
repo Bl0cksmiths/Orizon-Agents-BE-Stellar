@@ -204,6 +204,35 @@ CREATE INDEX IF NOT EXISTS dispute_events_task_idx
 """
 
 
+# The newest settlement for one job, and for one task.
+#
+# `ORDER BY id DESC LIMIT 1` rather than a unique key on job_id_hex, because
+# the table is append-only: if a workflow ever settles twice — a retried
+# charge, a replayed callback — the second row is the truth and the first is
+# history. Both reads are served straight off the (key, id DESC) indexes.
+#
+# `steps::text` rather than `steps`: the column is JSONB, and rendering it as
+# text guarantees the value asyncpg hands back is the string steps_from_json
+# parses, whatever json codec a future caller may set on the pool.
+_SELECT_SETTLEMENT_BY_JOB_SQL = """
+SELECT task_id, payer, auth_id_hex, job_id_hex, charge_tx, proof_tx,
+       settled_usdc, steps::text AS steps, settled_at, window_closes_at
+FROM workflow_settlements
+WHERE job_id_hex = $1
+ORDER BY id DESC
+LIMIT 1
+"""
+
+_SELECT_SETTLEMENT_BY_TASK_SQL = """
+SELECT task_id, payer, auth_id_hex, job_id_hex, charge_tx, proof_tx,
+       settled_usdc, steps::text AS steps, settled_at, window_closes_at
+FROM workflow_settlements
+WHERE task_id = $1
+ORDER BY id DESC
+LIMIT 1
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
