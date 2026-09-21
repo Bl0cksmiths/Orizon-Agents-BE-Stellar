@@ -281,3 +281,43 @@ def test_the_duplicate_body_is_the_error_envelope_plus_the_dispute(client, monke
     assert set(duplicate["error"]) == set(plain["error"])
     assert duplicate["error"]["request_id"]
     assert duplicate["error"]["message"] == "duplicate dispute"
+
+
+# Bodies the rules lane must never be asked about. Each one is refused by the
+# edge, so a malformed request costs no settlement read and no signature
+# verification — and the caller gets the field-level `validation_error` list
+# rather than a code invented for it here.
+MALFORMED_BODIES = [
+    ("job-id-not-hex", {"job_id_hex": "zzzz567890abcdef1234567890abcdef"}),
+    ("job-id-too-long", {"job_id_hex": JOB_ID + "ab"}),
+    ("step-negative", {"step_index": -1}),
+    ("step-above-cap", {"step_index": 64}),
+    ("payer-not-an-address", {"payer": "not-an-address"}),
+    ("payer-wrong-prefix", {"payer": "M" + PAYER[1:]}),
+    ("reason-empty", {"reason": ""}),
+    ("reason-too-long", {"reason": "x" * 2001}),
+    ("signature-too-long", {"signature_b64": "x" * 257}),
+    ("nonce-too-long", {"nonce": "x" * 129}),
+]
+
+
+@pytest.mark.parametrize(("label", "overrides"), MALFORMED_BODIES, ids=[label for label, _ in MALFORMED_BODIES])
+def test_a_malformed_body_never_reaches_the_service(client, monkeypatch, label, overrides):
+    calls = opens_with(monkeypatch, record())
+
+    r = client.post("/api/disputes", json=open_body(**overrides))
+
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "validation_error"
+    assert calls == []
+
+
+def test_a_missing_field_never_reaches_the_service(client, monkeypatch):
+    calls = opens_with(monkeypatch, record())
+    body = open_body()
+    del body["signature_b64"]
+
+    r = client.post("/api/disputes", json=body)
+
+    assert r.status_code == 422
+    assert calls == []
