@@ -304,7 +304,7 @@ appeal beyond asking again. And because the credit comes from the platform
 wallet, the platform must hold enough of the asset for an upheld dispute to be
 payable at all.
 
-## A dispute does not move reputation
+## What a dispute does to reputation
 
 **Raising a dispute never changes an agent's score.** Between opening and
 adjudication the disputed agent's reputation reads exactly as it did before:
@@ -316,17 +316,22 @@ competitor's on-chain score would be a free weapon — and because the ledger is
 append-only, the dent could never be taken back when the dispute was rejected.
 
 Only an **upheld** dispute reaches the chain, as a single low rating (10 on the
-ledger's 0–100 scale). Two details an operator should know about it:
+ledger's 0–100 scale), and only once the buyer's credit has landed. Three
+details an operator should know about it:
 
 - The step's original automatic rating stays where it is. The dispute adds a
   second rating rather than amending the first, because the ledger has no
-  entrypoint that amends one. The disputed step therefore carries two ratings,
-  and both count toward the agent's score.
-- It is written under a **derived job id** — `sha256(job_id || "dispute")`,
-  truncated to 16 bytes — because the ledger refuses a second rating for the
-  same `(agent, job)` pair. The dispute stays linkable to the job it disputes,
-  and it is what finally moves the `disputed` count and `dispute_rate_bps` on
-  the agent's reputation row.
+  entrypoint that amends one. Both count toward the agent's score, at the same
+  weight — the step's quoted price, which is what every rating is weighted by.
+- It is written under a **derived job id**, because the ledger refuses a second
+  rating for the same `(agent, job)` pair. The derived id is the job's own first
+  8 bytes followed by 8 bytes of
+  `sha256(job_id ‖ "orizon-dispute:v1" ‖ step)`, so it is different for every
+  disputed step of a job, and the job it disputes is readable in its first
+  sixteen hex characters. "Reading the two on-chain artifacts" below shows how.
+- It is what moves the `disputed` count and `dispute_rate_bps` on the agent's
+  reputation row, and the next plan decomposed after it lands is routed on the
+  new score rather than a cached one.
 
 A rejected dispute writes nothing on-chain at all. It stays on the record,
 with its reason, as part of the agent's history with that buyer — not as part
