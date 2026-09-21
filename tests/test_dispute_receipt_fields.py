@@ -144,3 +144,21 @@ def test_a_claim_and_a_release_change_only_the_status_and_when_it_changed(name: 
 
     moved = {column: expression for column, expression in written.items() if expression != f"latest.{column}"}
     assert moved == {"status": status, "updated_at": "$2::double precision", "opening": "FALSE"}
+
+
+def test_no_statement_dates_a_row_by_the_database_clock() -> None:
+    """`updated_at` is stamped by every writer, so every writer is a place a
+    `now()` could creep in — and the claim and the release, which 4.02's
+    version of this rule never covered, now write a timestamp too. Every
+    `_*_SQL` constant is checked, found by NAME, so a statement added later is
+    covered without anyone remembering to list it."""
+    statements = {name: sql for name, sql in vars(dispute_store).items() if name.endswith("_SQL")}
+
+    # The introspection finding nothing would make every assertion below vacuous.
+    assert {"_INSERT_DISPUTE_SQL", "_APPEND_STATUS_SQL", "_CLAIM_REFUND_SQL", "_RELEASE_REFUND_CLAIM_SQL"} <= (
+        statements.keys()
+    )
+    for name, sql in statements.items():
+        upper = sql.upper()
+        for clock in ("NOW()", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "CLOCK_TIMESTAMP", "STATEMENT_TIMESTAMP"):
+            assert clock not in upper, (name, clock)
