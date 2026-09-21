@@ -823,6 +823,10 @@ async def _rate_credited(
       - **REPLAY, with a `rating_tx` on record** — an earlier attempt of ours
         landed, so this is done: the hash on record is kept and the cache is
         invalidated, because a rating that timed out may have landed since.
+        The replay is the ledger vouching for that hash, so a record that did
+        not yet say so gets `rating_confirmed` True — the one move from
+        unconfirmed to confirmed a rating makes — and one that already does
+        is answered unchanged.
       - **REPLAY, with none** — a COLLISION (D4): the ledger holds a rating
         under this dispute's derived id that this dispute has no record of
         writing. Loud, and never read as resolved.
@@ -845,7 +849,8 @@ async def _rate_credited(
     been handed a paid dispute:
 
       - `credited` WITH a `rating_tx`: the rating was submitted under the
-        derived id and landed, or (after a TIMEOUT) may still;
+        derived id — and landed when `rating_confirmed` is True, or, after a
+        TIMEOUT, may still when it is False;
       - `credited` WITHOUT one: the buyer is paid and the reputation
         consequence is NOT on-chain — a FAILED rating, a collision, a
         deployment not configured to rate, or one that could not be formed or
@@ -906,10 +911,25 @@ async def _rate_credited(
     try:
         return await _apply_rating(credited, outcome)
     except Exception:
-        # In practice only the store write after a SUCCESS or a TIMEOUT can
-        # get here, and by then the answer and its hash are already in the
-        # log. The dispute is answered as the store last held it: paid, and
-        # not shown as rated — which a later REPLAY will then report as a
+        # In practice only a store write can get here: the one after a
+        # SUCCESS or a TIMEOUT, or the confirmation after a REPLAY.
+        if outcome.status == "REPLAY":
+            # The hash is already on record and only its confirmation was
+            # lost, so there is nothing to record by hand: the next uphold is
+            # refused as a replay again and writes the confirmation then.
+            _log_rating(
+                logging.ERROR,
+                "was confirmed on-chain but the confirmation could not be recorded on the dispute — its"
+                " rating_tx stands; uphold again to record it",
+                credited,
+                outcome.job_id_hex,
+                credited.rating_tx,
+                exc_info=True,
+            )
+            return credited
+        # After a SUCCESS or a TIMEOUT the answer and its hash are already in
+        # the log. The dispute is answered as the store last held it: paid,
+        # and not shown as rated — which a later REPLAY will then report as a
         # collision, so this line is where that one is explained.
         _log_rating(
             logging.ERROR,
@@ -946,7 +966,15 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         if credited.rating_tx:
             reputation_svc.invalidate_rep(credited.agent_id)
             _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx)
-            return credited
+            if credited.rating_confirmed:
+                # Already confirmed: a second row would say nothing new and
+                # would move `updated_at` for a dispute nothing happened to.
+                return credited
+            # A timeout that landed after its poll gave up, or a rating recorded
+            # before 4.06 kept whether it landed: either way the ledger has now
+            # vouched for the hash on record, and only now may the receipt say
+            # the agent was rated.
+            return await store.append_status(credited.id, "credited", rating_confirmed=True)
         _log_rating(
             logging.ERROR,
             "COLLISION — the ledger already holds a rating under this dispute's derived id and this"
