@@ -83,6 +83,57 @@ def _import_asyncpg() -> Any:
     return asyncpg
 
 
+# The schema, created on first use with CREATE TABLE IF NOT EXISTS. There is no
+# migration tooling in this repo and two tables do not justify introducing any:
+# the DDL is idempotent, so every boot and every redeploy converges on the same
+# schema with no migration step that could fail a deploy at 3am.
+#
+# `workflow_settlements` is one row per settled workflow and it is APPEND-ONLY,
+# like everything durable in this service. Nothing updates a settlement:
+# `window_closes_at` is the closing time the buyer was promised and
+# `settled_usdc` is what actually moved on-chain, so a row that can be rewritten
+# is a row that can quietly move a deadline or raise a credit ceiling after the
+# fact. A workflow that somehow settles twice appends a second row and the
+# newest one wins (id DESC) — which also means a retried settlement write can
+# never fail the path that has just moved money.
+#
+# `steps` is the whole breakdown in ONE JSONB column (steps_to_json /
+# steps_from_json). A child table would cost a join and a transaction for a
+# value that is only ever read whole, with the settlement it belongs to. JSONB
+# rather than TEXT so the database rejects a malformed breakdown at write time
+# instead of a dispute discovering it a day later; asyncpg's default codec for
+# jsonb is `str` in both directions, so those two helpers remain the whole of
+# the conversion.
+#
+# Timestamps are DOUBLE PRECISION epoch seconds written from OUR clock — never
+# SQL now() — matching SettlementRecord exactly, so no timezone conversion sits
+# between what was promised and what is later read.
+#
+# Both indexes are (key, id DESC) rather than (key): every read here wants the
+# NEWEST row for a key, and ordering is by the surrogate `id` rather than by a
+# timestamp because two writes landing in the same clock tick must still have a
+# defined newest, which a float cannot promise.
+_CREATE_SETTLEMENTS_SQL = """
+CREATE TABLE IF NOT EXISTS workflow_settlements (
+    id               BIGSERIAL PRIMARY KEY,
+    task_id          TEXT NOT NULL,
+    payer            TEXT NOT NULL,
+    auth_id_hex      TEXT NOT NULL,
+    job_id_hex       TEXT NOT NULL,
+    charge_tx        TEXT,
+    proof_tx         TEXT,
+    settled_usdc     DOUBLE PRECISION NOT NULL,
+    steps            JSONB NOT NULL,
+    settled_at       DOUBLE PRECISION NOT NULL,
+    window_closes_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS workflow_settlements_job_idx
+    ON workflow_settlements (job_id_hex, id DESC);
+CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
+    ON workflow_settlements (task_id, id DESC);
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
