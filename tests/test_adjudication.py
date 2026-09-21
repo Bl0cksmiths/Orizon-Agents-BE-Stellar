@@ -15,10 +15,17 @@ credit a buyer twice, or strand one who is owed, is an ordering mistake:
      transfer may still land, so there is no safe retry (D3);
   4. a refusal before the signer — the cap, nothing to credit, a settlement
      that is gone — hands the claim back, because nothing was signed;
-  5. a rejected dispute is never payable.
+  5. a rejected dispute is never payable;
+  6. the dispute rating (4.04) is written only once the credit is recorded,
+     and no answer it gets — failure, timeout, collision, exception — reaches
+     back into the refund or turns a paid credit into an error;
+  7. a repeat uphold of a credited dispute retries the RATING and only the
+     rating (D3), and an open, rejected or unpaid dispute is never rated.
 
 Hermetic: the in-memory dispute store, an in-process challenge table and real
-ed25519 keys, with the settler's SAC transfer stubbed at `execute_refund`. No
+ed25519 keys, with the settler's SAC transfer stubbed at `execute_refund` and
+the dispute rating at `dispute_rating.submit_dispute_rating` (its mapping from
+the chain's answers is `tests/test_dispute_rating_flow.py`'s to prove). No
 chain, no network, no database. Every process singleton these paths touch — the
 store, the challenge table, app state and the trace bus — is reset per test.
 """
@@ -29,7 +36,7 @@ import asyncio
 import base64
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from stellar_sdk import Keypair
@@ -37,8 +44,9 @@ from stellar_sdk import Keypair
 import app.stellar.client as sc
 from app.config import settings
 from app.schemas import Task
-from app.services import dispute_store, dispute_svc, refund_svc
+from app.services import dispute_rating, dispute_store, dispute_svc, refund_svc, reputation_svc
 from app.services import external_binding as eb
+from app.services.dispute_rating import RatingOutcome, RatingStatus
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
 from app.services.dispute_svc import DisputeError, dispute_message
 from app.state import state
@@ -99,6 +107,70 @@ def _fresh_state(monkeypatch):
     state.task_order.clear()
     bus._subs.clear()
     bus._closed.clear()
+
+
+class Rater:
+    """The dispute rating, as `uphold` sees it: `dispute_rating.submit_dispute_rating`.
+
+    Stubbed at the service seam rather than at the chain, because what this
+    file asserts is WHEN the rating is written relative to the refund —
+    `tests/test_dispute_rating_flow.py` fakes the chain beneath it and drives
+    the real mapping. It models the one ledger rule the ordering leans on, the
+    replay guard: once a dispute's rating has landed, every later attempt is
+    answered REPLAY. `script` queues the answers to give before that.
+
+    Each call records the dispute's status AS THE STORE HELD IT at that
+    instant, because "had the credit already been recorded" is the question.
+    """
+
+    def __init__(self) -> None:
+        self.script: list[RatingStatus] = []
+        self.stored_status: list[str] = []
+        self._landed: set[str] = set()
+
+    @property
+    def calls(self) -> int:
+        return len(self.stored_status)
+
+    async def __call__(self, dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
+        stored = await dispute_store.get_dispute_store().get_dispute(dispute.id)
+        self.stored_status.append(stored.status if stored else "missing")
+        step = settlement.step(dispute.step_index)
+        assert step is not None
+        derived = dispute_rating.dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index).hex()
+        weight = reputation_svc.rating_weight_stroops(step.price_usdc)
+        status: RatingStatus = "REPLAY"
+        if dispute.id not in self._landed:
+            status = self.script.pop(0) if self.script else "SUCCESS"
+        if status == "SUCCESS":
+            self._landed.add(dispute.id)
+        tx = {"SUCCESS": "tx_rating", "TIMEOUT": "tx_rating_inflight", "FAILED": "tx_rating_rejected"}.get(status)
+        return RatingOutcome(status, tx, derived, dispute_rating.DISPUTE_RATING, weight)
+
+
+@pytest.fixture(autouse=True)
+def rater(monkeypatch) -> Rater:
+    """Every uphold that credits now rates, so every test here has a rater —
+    one that lands by default, which is what an ordinary credit meets.
+
+    On a deployment configured to rate at all: the conftest blanks the ledger
+    and the signing key to keep the suite offline, and `uphold` checks the
+    same presence-only gate the settler does before it submits. Nothing here
+    reaches either value — the settler and the rater are both stubbed."""
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(settings, "stellar_signing_key", Keypair.random().secret)
+    stub = Rater()
+    monkeypatch.setattr(dispute_rating, "submit_dispute_rating", stub)
+    return stub
+
+
+@pytest.fixture(autouse=True)
+def invalidated(monkeypatch) -> list[str]:
+    """The agents whose cached score was dropped, in order."""
+    dropped: list[str] = []
+    monkeypatch.setattr(reputation_svc, "invalidate_rep", dropped.append)
+    return dropped
 
 
 def _sign(keypair: Keypair, message: str) -> str:
@@ -259,24 +331,35 @@ def test_a_second_uphold_after_a_credit_signs_nothing_and_returns_the_first_hash
     assert len(chain.calls) == 1
 
 
-def test_a_credited_dispute_is_answered_without_consulting_the_claim(monkeypatch) -> None:
+def test_a_credited_dispute_is_answered_without_consulting_the_claim(monkeypatch, rater) -> None:
     """And it must not need the claim to reach that answer. The claim WOULD
     also refuse — a credited dispute is not `upheld` — but making the
     idempotency of a paid dispute depend on a lock in another table means a
     lock that was dropped, expired or never taken becomes a second payment.
     Two independent answers to "has this been paid", and this test is what
-    stops the redundant-looking one being tidied away."""
+    stops the redundant-looking one being tidied away.
+
+    4.04 changed what a repeat uphold DOES, and not this: it now re-attempts
+    the dispute RATING, every time, and nothing else (D3). So every way back
+    into the refund — the claim, its release, the credit and the transfer
+    beneath it — is booby-trapped, and only the rating is let through."""
     dispute = a_dispute()
     settler(monkeypatch, LANDED)
     credited = asyncio.run(dispute_svc.uphold(dispute.id))
 
-    async def _must_not_be_asked(dispute_id: str) -> None:
-        raise SignedSomething("a credited dispute must be answered from its own status")
+    async def _must_not_be_asked(*args: Any, **kwargs: Any) -> None:
+        raise SignedSomething("a credited dispute must never re-enter the refund path")
 
-    monkeypatch.setattr(dispute_store.get_dispute_store(), "claim_refund", _must_not_be_asked)
+    store = dispute_store.get_dispute_store()
+    monkeypatch.setattr(store, "claim_refund", _must_not_be_asked)
+    monkeypatch.setattr(store, "release_refund_claim", _must_not_be_asked)
+    monkeypatch.setattr(refund_svc, "credit_refund", _must_not_be_asked)
     no_signing(monkeypatch)
 
     assert asyncio.run(dispute_svc.uphold(dispute.id)) == credited
+    # The rating WAS asked again — and, having landed the first time, the
+    # ledger refused it as a replay, so the record is exactly as it was.
+    assert rater.calls == 2
 
 
 def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(monkeypatch) -> None:
@@ -624,16 +707,17 @@ def test_a_credit_is_traced_on_the_workflow_while_it_is_still_on_screen(monkeypa
         )
     )
 
-    async def go() -> tuple[DisputeRecord, Any]:
+    async def go() -> tuple[DisputeRecord, Any, Any]:
         stream = bus.subscribe(TASK)
         credited = await dispute_svc.uphold(dispute.id)
-        return credited, stream.get_nowait()
+        return credited, stream.get_nowait(), stream.get_nowait()
 
-    credited, streamed = asyncio.run(go())
+    credited, streamed, rated = asyncio.run(go())
 
     assert credited.status == "credited"
-    # Stored on the task AND pushed to anyone watching it — the same line.
-    assert state.traces[TASK] == [streamed]
+    # Stored on the task AND pushed to anyone watching it — the same lines, and
+    # the credit FIRST: the rating is only written once the credit has landed.
+    assert state.traces[TASK] == [streamed, rated]
     assert streamed.level == "cost"
     assert streamed.t.startswith("7200.")  # elapsed since the run began, not 00.000
     assert dispute.id in streamed.msg
@@ -641,6 +725,41 @@ def test_a_credit_is_traced_on_the_workflow_while_it_is_still_on_screen(monkeypa
     assert "funded by the platform" in streamed.msg
     assert "not clawed back from agent agt_writer" in streamed.msg
     assert "tx_credit" in streamed.msg
+
+
+def test_a_landed_rating_is_traced_after_the_credit_in_plain_words(monkeypatch) -> None:
+    """The credit line tells the buyer the agent kept its money; this is the
+    line that says what the agent lost instead. So it states the consequence
+    plainly — the score, that an upheld dispute earned it, and the evidence —
+    at `proof`, the level every other on-chain rating is traced at."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    state.add_task(Task(id=TASK, intent="write the launch post", agents=2, spent=0.12, status="complete"))
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    _, rating_line = state.traces[TASK]
+    assert rating_line.level == "proof"
+    assert f"agent agt_writer rated 10/100 for upheld dispute {dispute.id}" in rating_line.msg
+    # The hash AND the derived id, so a reviewer finds the rating either way.
+    assert "tx tx_rating" in rating_line.msg
+    assert dispute_rating.dispute_job_id(bytes.fromhex(JOB), 0).hex() in rating_line.msg
+    assert credited.rating_tx == "tx_rating"
+
+
+@pytest.mark.parametrize("unlanded", ["FAILED", "TIMEOUT", "REPLAY"])
+def test_a_rating_that_did_not_land_is_never_traced_as_one(monkeypatch, rater, unlanded: RatingStatus) -> None:
+    """A "rated 10/100" line for evidence that never landed is the lie the
+    settler's own trace was once fixed for. Only a SUCCESS earns the line; a
+    failure, a timeout and a collision leave the credit line on its own."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    rater.script = [unlanded]
+    state.add_task(Task(id=TASK, intent="write the launch post", agents=2, spent=0.12, status="complete"))
+
+    asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert [line.level for line in state.traces[TASK]] == ["cost"]
 
 
 def test_a_credit_on_an_evicted_task_creates_no_trace_entry(monkeypatch) -> None:
@@ -741,3 +860,194 @@ def test_a_rejection_without_a_usable_note_records_none_rather_than_nothing(monk
 
     assert asyncio.run(dispute_svc.reject(a_dispute().id)).note is None
     assert asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="  \t \n ")).note is None
+
+
+# ── the dispute rating: after the credit, never instead of it ───
+
+
+def test_the_rating_is_written_only_once_the_credit_is_recorded(monkeypatch, rater) -> None:
+    """Story 4.04's ordering, made visible the way the claim's is above. The
+    rating must find the dispute already `credited` in the store at the
+    instant it is asked for: a rating written first would put a dispute
+    consequence on an agent's record for a buyer who might never be paid."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert rater.stored_status == ["credited"]
+    assert credited.refund_tx == "tx_credit"
+    assert credited.rating_tx == "tx_rating"
+
+
+def trap_the_refund(monkeypatch) -> None:
+    """Booby-trap every way back into the refund: the claim, its release, the
+    credit and the transfer beneath it. Installed from INSIDE a rating, so
+    anything that reaches the refund after the rating has started fails."""
+
+    async def _refund_touched(*args: Any, **kwargs: Any) -> None:
+        raise SignedSomething("the rating path reached the refund")
+
+    store = dispute_store.get_dispute_store()
+    monkeypatch.setattr(store, "claim_refund", _refund_touched)
+    monkeypatch.setattr(store, "release_refund_claim", _refund_touched)
+    monkeypatch.setattr(refund_svc, "credit_refund", _refund_touched)
+    no_signing(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("unlanded", "rating_tx"),
+    [("FAILED", None), ("TIMEOUT", "tx_rating_inflight"), ("REPLAY", None), ("raised", None)],
+)
+def test_a_rating_that_does_not_land_never_touches_the_refund(
+    monkeypatch, rater, unlanded: str, rating_tx: str | None
+) -> None:
+    """D3. The buyer has been paid by the time the rating is asked for, and
+    no answer the rating gets — a failure, a timeout, a collision, or an
+    exception out of the attempt itself — may reverse, release or re-sign
+    that. Nor may it be RAISED: a paid refund answered with an error is a
+    refund the caller will think failed. The dispute stays `credited` with its
+    refund hash, and only `rating_tx` says the consequence has not landed."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+
+    async def _rate_with_the_refund_trapped(credited: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
+        trap_the_refund(monkeypatch)
+        if unlanded == "raised":
+            raise RuntimeError("the RPC went away mid-rating")
+        rater.script = [cast(RatingStatus, unlanded)]
+        return await rater(credited, settlement)
+
+    monkeypatch.setattr(dispute_rating, "submit_dispute_rating", _rate_with_the_refund_trapped)
+
+    answered = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert answered.status == "credited"
+    assert answered.refund_tx == "tx_credit"
+    assert answered.rating_tx == rating_tx
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == answered
+    assert len(chain.calls) == 1
+
+
+def test_an_open_or_rejected_dispute_is_never_rated(monkeypatch, rater, invalidated) -> None:
+    """A dispute is a CLAIM until it is upheld AND paid, and a claim costs the
+    agent nothing. Opening one never rates; rejecting one never rates; and an
+    uphold of a rejected one is refused before anything could."""
+    no_signing(monkeypatch)
+    opened = a_dispute()
+    rejected = asyncio.run(dispute_svc.reject(a_dispute(step=1).id))
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(rejected.id))
+
+    assert refused.value.code == "dispute_rejected"
+    assert rater.calls == 0
+    assert invalidated == []
+    for dispute_id in (opened.id, rejected.id):
+        stored = asyncio.run(dispute_svc.get_dispute(dispute_id))
+        assert stored is not None and stored.rating_tx is None
+
+
+@pytest.mark.parametrize(("answer", "code"), [(REJECTED, "refund_failed"), (LOST, "refund_unconfirmed")])
+def test_an_upheld_dispute_whose_credit_did_not_land_is_never_rated(
+    monkeypatch, rater, answer: dict[str, Any], code: str
+) -> None:
+    """The rating follows the MONEY, not the decision. An uphold whose
+    transfer failed leaves a dispute that is upheld and unpaid, and one whose
+    transfer timed out leaves one that may or may not be paid — neither is
+    `credited`, so neither is rated, and the repeat uphold a timeout refuses
+    does not rate either."""
+    dispute = a_dispute()
+    settler(monkeypatch, answer)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+    assert refused.value.code == code
+
+    if answer is LOST:
+        with pytest.raises(DisputeError):
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert rater.calls == 0
+
+
+def test_a_repeat_uphold_lands_a_rating_that_failed_without_a_second_credit(monkeypatch, rater, invalidated) -> None:
+    """The retry path in one test: the rating failed, the buyer was paid, and
+    the dispute reads `credited` with no `rating_tx` — paid, not resolved.
+    Upholding it again writes the rating and nothing else: the refund path is
+    trapped for the whole of the second call."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+    rater.script = ["FAILED"]
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    assert paid.status == "credited" and paid.rating_tx is None
+    assert invalidated == []
+
+    trap_the_refund(monkeypatch)
+    resolved = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert resolved.rating_tx == "tx_rating"
+    assert resolved.refund_tx == paid.refund_tx == "tx_credit"
+    assert resolved.resolved_at == paid.resolved_at  # a rating does not re-date the resolution
+    assert invalidated == ["agt_writer"]
+    assert len(chain.calls) == 1
+
+
+def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, rater, caplog) -> None:
+    """The weight comes from the settled step's price (D2), so once the
+    settlement is gone there is nothing to submit a rating with. The paid
+    dispute is answered as it stands — still visibly unrated — and an ERROR
+    names every id, because that consequence now needs a human."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    rater.script = ["FAILED"]
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    dispute_store.get_dispute_store()._settlements.clear()
+    trap_the_refund(monkeypatch)
+    caplog.clear()  # the first attempt's own FAILED line is not what is under test
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert again == paid and again.rating_tx is None
+    assert rater.calls == 1  # the first attempt only
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 1
+    derived = dispute_rating.dispute_job_id(bytes.fromhex(JOB), 0).hex()
+    for fact in (dispute.id, JOB, derived, "agt_writer", dispute.payer):
+        assert fact in logged[0]
+
+
+@pytest.mark.parametrize(
+    ("setting", "blank", "named"),
+    [
+        ("reputation_enabled", False, "REPUTATION_ENABLED is false"),
+        ("stellar_reputation_ledger", "", "STELLAR_REPUTATION_LEDGER is unset"),
+        ("stellar_signing_key", "", "STELLAR_SIGNING_KEY is unset"),
+    ],
+)
+def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
+    monkeypatch, rater, invalidated, caplog, setting: str, blank: object, named: str
+) -> None:
+    """Without the gate, a submit that cannot be signed raises, is classified
+    TIMEOUT, and every uphold reports "unconfirmed" forever when the truth is
+    "not configured". So nothing is submitted — not by the uphold that pays,
+    nor by any repeat — and each one logs ERROR naming the missing setting
+    beside every id, while the dispute stays visibly paid-but-unrated."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+    monkeypatch.setattr(settings, setting, blank)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        paid = asyncio.run(dispute_svc.uphold(dispute.id))
+        again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.rating_tx is None and again == paid
+    assert rater.calls == 0
+    assert invalidated == []
+    assert len(chain.calls) == 1
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 2  # one per uphold: each is a paid dispute left unrated
+    for fact in (named, dispute.id, JOB, "agt_writer", dispute.payer):
+        assert fact in logged[0]
