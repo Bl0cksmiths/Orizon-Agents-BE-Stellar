@@ -477,6 +477,11 @@ def check_config() -> int:
 
     Presence only. No value is printed and the signing key is not even read:
     that a secret is set is the whole of what this needs to know.
+
+    The ledger is on the list because the rating is half of what a live run is
+    for (4.04): without it the credit would land and its rating could not, and
+    the run would end with the buyer paid and the dispute unresolvable until
+    somebody noticed. Refused here instead, while nothing has been signed.
     """
     missing = [
         name
@@ -484,6 +489,7 @@ def check_config() -> int:
             ("DISPUTE_REFUNDS_ENABLED=true", settings.dispute_refunds_enabled),
             ("STELLAR_SIGNING_KEY (the funded settler)", bool(settings.stellar_signing_key.strip())),
             ("STELLAR_ASSET_SAC", bool(settings.stellar_asset_sac.strip())),
+            ("STELLAR_REPUTATION_LEDGER (the rating's ledger)", bool(settings.stellar_reputation_ledger.strip())),
         )
         if not present
     ]
