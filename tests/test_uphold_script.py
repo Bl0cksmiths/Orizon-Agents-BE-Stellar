@@ -1081,6 +1081,32 @@ def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on
     assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
 
 
+def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_consequence_did_not_land(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """A Replay for a dispute that records no attempt of its own (D4): the
+    ledger holds a rating under this dispute's id that this dispute never
+    wrote. Judged exactly as the service judges it — on the answer the ledger
+    gave THIS run and the record it had — and answered on its own exit code,
+    naming the agent, the dispute and the derived id, and saying outright that
+    the reputation consequence did NOT land and the dispute is not resolved."""
+    ledger.answers("REPLAY")
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_RATING_COLLISION
+    assert "RATING COLLISION — THE AGENT'S REPUTATION CONSEQUENCE DID NOT LAND." in out
+    assert "The ledger answered this run's rating with Replay" in out
+    assert f"agent:     {AGENT}" in out
+    assert f"dispute:   {DISPUTE_ID}" in out
+    assert f"rating id: {rating_id_hex()}" in out
+    assert f"https://stellar.expert/explorer/testnet/contract/{LEDGER}" in out
+    assert "must not" in out and "be reported as resolved" in out
+    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert stored().rating_tx is None
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
