@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 
 from ..security import request_id_var, require_adjudicator
 from ..services import dispute_svc, refund_svc
-from ..services.dispute_store import DisputeRecord, DisputeStatus
+from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementStep
 from ..task_auth import require_task_read
 
 logger = logging.getLogger(__name__)
@@ -219,6 +219,56 @@ class CreditPolicy(BaseModel):
             credited_fraction=refund_svc.credited_amount_usdc(1.0, fraction),
             funded_by="platform",
             adjudicated_by="platform",
+        )
+
+
+class SettlementStepView(BaseModel):
+    """One settled step, and what disputing it would credit.
+
+    Exists because the trace a buyer reads is evicted from memory long before
+    their window closes, and this is read off the settlement record instead —
+    so it is the one account that survives of which agent ran each step, what
+    it was charged, whether it delivered and what it produced. A mirror of
+    `dispute_store.SettlementStep` rather than the dataclass itself, for
+    `DisputeResponse`'s reason.
+
+    `creditable_usdc` is computed HERE, with the refund's own rule, so the
+    receipt never re-derives the rounding: it is the figure `open_dispute`
+    would freeze onto a dispute opened now. What an uphold transfers is also
+    bounded by the settled total (`refund_svc.creditable_for`), so this is the
+    ceiling the buyer is shown, never a sum the platform could exceed.
+
+    `output_summary` is untrusted — an external agent's own words — and is the
+    line the world-readable trace already showed for the step, cleaned to
+    `OUTPUT_SUMMARY_MAX_CHARS` by its writer before it was stored. It is passed
+    through verbatim and escaped on render like every other stored string.
+    None for a step that delivered nothing, and for every settlement recorded
+    before 4.05.
+    """
+
+    step_index: int
+    agent_id: str
+    agent_name: str | None
+    price_usdc: float
+    delivered: bool
+    creditable_usdc: float
+    output_summary: str | None
+
+    @classmethod
+    def of(cls, step: SettlementStep, fraction: float) -> SettlementStepView:
+        """Project a settled step onto the wire, pricing its credit under `fraction`."""
+        return cls(
+            step_index=step.step_index,
+            agent_id=step.agent_id,
+            agent_name=step.agent_name,
+            price_usdc=step.price_usdc,
+            delivered=step.delivered,
+            # Exactly 0.0 for a step that did not deliver, never its price times
+            # the fraction: it was not billed, `open_dispute` refuses it, and a
+            # receipt that priced a credit for it would promise money nobody
+            # can claim.
+            creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, fraction) if step.delivered else 0.0,
+            output_summary=step.output_summary,
         )
 
 
