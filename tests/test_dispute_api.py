@@ -345,7 +345,12 @@ def test_a_missing_field_never_reaches_the_service(client, monkeypatch):
 
 
 def settlement(**overrides: object) -> SettlementRecord:
-    """A settled workflow, as the store recorded it at settlement time."""
+    """A settled workflow, as the store recorded it at settlement time.
+
+    One step that failed and one that delivered, because the receipt has to
+    tell them apart: only the second was billed, so the charge is its price
+    alone and only it has anything to credit.
+    """
     fields: dict = {
         "task_id": "task-1",
         "payer": PAYER,
@@ -353,9 +358,23 @@ def settlement(**overrides: object) -> SettlementRecord:
         "job_id_hex": JOB_ID,
         "charge_tx": "abc123",
         "proof_tx": "def456",
-        "settled_usdc": 0.5,
+        "settled_usdc": 0.25,
         "steps": (
-            SettlementStep(step_index=1, agent_id="code-agent", agent_name="Coder", price_usdc=0.25, delivered=True),
+            SettlementStep(
+                step_index=0,
+                agent_id="research-agent",
+                agent_name="Researcher",
+                price_usdc=0.1,
+                delivered=False,
+            ),
+            SettlementStep(
+                step_index=1,
+                agent_id="code-agent",
+                agent_name="Coder",
+                price_usdc=0.25,
+                delivered=True,
+                output_summary="Built a landing page with a signup form",
+            ),
         ),
         "settled_at": 1_700_000_000.0,
         "window_closes_at": 1_700_086_400.0,
