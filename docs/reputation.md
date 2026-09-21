@@ -345,10 +345,12 @@ that the settler gave its own rating of that step at settlement.
 the same step is never retracted — the ledger has no entrypoint that amends a
 rating — so the dispute lands beside it, under its own key, and both count.
 The first says what the step delivered; the second says the buyer's claim
-against it stood. The settler scores delivered work between 40 and 95 (base
+against it stood. The settler scores work it can check between 40 and 95 (base
 70, moved by the artifact and the critic's pass; a baked kit artifact is fixed
-at 95) and a non-delivery at 20, so at equal weight the two ratings on a
-disputed step average between **15 and 52.5**.
+at 95), and gives 20 to a step that delivered nothing — which, for a disputed
+step, means an external reply with nothing checkable in it: that is billed, so
+it can be disputed, but it is scored as the non-delivery it is. So at equal
+weight the two ratings on a disputed step average between **15 and 52.5**.
 
 One case is an exception, and it predates disputes. The settler writes every
 automatic rating under the job's own id, so when one agent served two steps of
