@@ -483,6 +483,8 @@ class FakePool:
             return _newest(self.disputes, dispute_id=args[0])
         if sql == dispute_store._CLAIM_REFUND_SQL:
             return await self._claim_refund(args)
+        if sql == dispute_store._RELEASE_REFUND_CLAIM_SQL:
+            return await self._release_refund_claim(args[0])
         if sql == dispute_store._DELETE_REFUND_CLAIM_SQL:
             return self._delete_refund_claim(args[0])
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
@@ -527,6 +529,25 @@ class FakePool:
         # Only the status changes: resolved_at and both transaction hashes are
         # copied forward, because `crediting` is not a resolution.
         row = latest | {"status": "crediting", "opening": False}
+        self.disputes.append(row)
+        return row
+
+    async def _release_refund_claim(self, dispute_id: str) -> dict[str, Any] | None:
+        """_RELEASE_REFUND_CLAIM_SQL: the DELETE and the `upheld` row, one
+        statement and one snapshot.
+
+        Both halves are gated on the SAME status from that one snapshot, so
+        the mutex and the dispute cannot end up disagreeing about whether a
+        payout is in flight — and the DELETE is a no-op rather than a
+        precondition, which is what lets a release repair a `crediting`
+        dispute whose claim row went missing.
+        """
+        latest = _newest(self.disputes, dispute_id=dispute_id)
+        await asyncio.sleep(0)
+        if latest is None or latest["status"] != "crediting":
+            return None
+        self.claims.pop(dispute_id, None)
+        row = latest | {"status": "upheld", "opening": False}
         self.disputes.append(row)
         return row
 
