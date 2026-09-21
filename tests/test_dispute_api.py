@@ -172,3 +172,112 @@ def test_challenge_validates_before_minting_anything(client, challenge_stub, fie
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "validation_error"
     assert challenge_stub == []
+
+
+# ── opening a dispute ───────────────────────────────────────────
+
+
+def opens_with(monkeypatch, result: DisputeRecord | Exception) -> list[dict]:
+    """Point the router's `open_dispute` at one outcome; record every call."""
+    calls: list[dict] = []
+
+    async def _open(**kwargs: object) -> DisputeRecord:
+        calls.append(kwargs)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(dispute_svc, "open_dispute", _open)
+    return calls
+
+
+def test_a_successful_dispute_is_200_and_open(client, monkeypatch):
+    calls = opens_with(monkeypatch, record())
+
+    r = client.post("/api/disputes", json=open_body())
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "open"
+    assert body["id"] == "dsp_00112233445566778"
+    assert body["task_id"] == "task-1"
+    assert body["charged_usdc"] == 0.25
+    assert body["creditable_usdc"] == 0.25
+    # Nothing is resolved yet, and the wire says so rather than omitting it.
+    assert body["resolved_at"] is None
+    assert body["refund_tx"] is None
+    # Every field arrives at the service by keyword, unmangled — the router
+    # renames nothing, which is what lets the frozen signature be frozen.
+    assert calls == [
+        {
+            "job_id_hex": JOB_ID,
+            "step_index": 1,
+            "reason": "the step returned an empty file",
+            "payer": PAYER,
+            "nonce": NONCE,
+            "signature_b64": SIGNATURE,
+        }
+    ]
+
+
+# Every refusal the rules lane can answer with, and the status it carries. The
+# codes are the frozen half of the 4.02 contract: the console maps each one to
+# a sentence, so a code that silently changed would surface as an unexplained
+# error in the buyer's face.
+FROZEN_REFUSALS = [
+    ("unknown_job", 404),
+    ("not_the_payer", 403),
+    ("dispute_window_closed", 409),
+    ("step_not_settled", 409),
+    ("nothing_was_charged", 409),
+    ("signature_malformed", 400),
+    ("challenge_expired", 400),
+]
+
+
+@pytest.mark.parametrize(("code", "status"), FROZEN_REFUSALS, ids=[c for c, _ in FROZEN_REFUSALS])
+def test_a_refusal_keeps_its_code_and_its_status(client, monkeypatch, code, status):
+    opens_with(monkeypatch, dispute_error(code, status))
+
+    r = client.post("/api/disputes", json=open_body())
+
+    assert r.status_code == status
+    body = r.json()
+    # Verbatim in BOTH halves of the envelope: `error.code` is what the console
+    # switches on, `detail` is what the pre-envelope clients still read.
+    assert body["error"]["code"] == code
+    assert body["detail"] == code
+    assert "dispute" not in body
+
+
+def test_a_duplicate_answers_with_the_original_dispute_unchanged(client, monkeypatch):
+    original = record(id="dsp_first", reason="the first thing I said", opened_at=1_699_000_000.0)
+    opens_with(monkeypatch, dispute_error("duplicate_dispute", 409, existing=original))
+
+    r = client.post("/api/disputes", json=open_body(reason="a second, different complaint"))
+
+    assert r.status_code == 409
+    body = r.json()
+    assert body["error"]["code"] == "duplicate_dispute"
+    # The FIRST dispute, not the second attempt's text: a repeat must not be
+    # able to rewrite what the buyer originally filed.
+    assert body["dispute"]["id"] == "dsp_first"
+    assert body["dispute"]["reason"] == "the first thing I said"
+    assert body["dispute"]["opened_at"] == 1_699_000_000.0
+    assert body["dispute"]["status"] == "open"
+
+
+def test_the_duplicate_body_is_the_error_envelope_plus_the_dispute(client, monkeypatch):
+    # `_duplicate_envelope` assembles this body by hand because the shared
+    # handler in app/main.py cannot carry a payload. Pin the two shapes
+    # together here, or they drift the first time the envelope changes.
+    opens_with(monkeypatch, dispute_error("unknown_job", 404))
+    plain = client.post("/api/disputes", json=open_body()).json()
+
+    opens_with(monkeypatch, dispute_error("duplicate_dispute", 409, existing=record()))
+    duplicate = client.post("/api/disputes", json=open_body()).json()
+
+    assert set(duplicate) == set(plain) | {"dispute"}
+    assert set(duplicate["error"]) == set(plain["error"])
+    assert duplicate["error"]["request_id"]
+    assert duplicate["error"]["message"] == "duplicate dispute"
