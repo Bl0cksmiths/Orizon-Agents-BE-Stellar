@@ -431,11 +431,15 @@ scheme needs a new tag, a new ADR, and a rule for which disputes it applies to.
 
 **A dispute can be paid and not rated, and the record says so.** `credited`
 with `rating_tx` null is a buyer who has been credited and an agent whose
-reputation consequence is not on-chain. It is visible on `GET
-/api/disputes/{id}`, it is fixed by upholding again, and the one case that
-needs a person — a collision — has its procedure in `docs/disputes.md`. A
-`rating_tx` that was recorded after a timeout is an in-flight hash, not proof
-of landing, until an uphold has been answered `SUCCESS` or `Replay` for it.
+reputation consequence is not known to be on-chain. It is visible on `GET
+/api/disputes/{id}`, and most of its causes are fixed by upholding again. The
+ones that are not say so in the log line: a deployment not configured to rate
+names the setting, a rating that could not be formed says the dispute's
+records need a person, a landed rating whose record write failed carries the
+hash to record by hand, and a collision has its own procedure in
+`docs/disputes.md`. A `rating_tx` that was recorded after a timeout is an
+in-flight hash, not proof of landing, until an uphold has been answered
+`SUCCESS` or `Replay` for it.
 
 **Every upheld dispute costs the Scorer one more submission**, and every repeat
 uphold one more simulation. A repeat that finds the rating already landed is
