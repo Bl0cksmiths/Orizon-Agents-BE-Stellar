@@ -724,6 +724,47 @@ class PostgresDisputeStore:
             window_closes_at=float(row["window_closes_at"]),
         )
 
+    async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_SELECT_DISPUTE_SQL, dispute_id)
+        return None if row is None else self._to_dispute(row)
+
+    async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_SELECT_DISPUTE_BY_STEP_SQL, job_id_hex, step_index)
+        return None if row is None else self._to_dispute(row)
+
+    async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
+        pool = await self._ready_pool()
+        rows = await pool.fetch(_SELECT_DISPUTES_FOR_TASK_SQL, task_id)
+        return tuple(self._to_dispute(row) for row in rows)
+
+    @staticmethod
+    def _to_dispute(row: Any) -> DisputeRecord:
+        """Map one event row back to the dispute it is the current state of.
+
+        `resolved_at` stays None rather than becoming 0.0 when the column is
+        NULL: an open dispute has not been resolved, and an epoch-zero timestamp
+        would read as "resolved in 1970" to every caller that only checks
+        whether the value is set.
+        """
+        return DisputeRecord(
+            id=row["dispute_id"],
+            job_id_hex=row["job_id_hex"],
+            task_id=row["task_id"],
+            step_index=int(row["step_index"]),
+            agent_id=row["agent_id"],
+            payer=row["payer"],
+            reason=row["reason"],
+            status=row["status"],
+            charged_usdc=float(row["charged_usdc"]),
+            creditable_usdc=float(row["creditable_usdc"]),
+            opened_at=float(row["opened_at"]),
+            resolved_at=None if row["resolved_at"] is None else float(row["resolved_at"]),
+            refund_tx=row["refund_tx"],
+            rating_tx=row["rating_tx"],
+        )
+
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
         # the pool that is being torn down, and so a second close is a no-op.
