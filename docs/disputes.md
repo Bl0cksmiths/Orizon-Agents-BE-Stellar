@@ -519,6 +519,8 @@ What an adjudicator can be told, and what each answer means:
 | 409 `settlement_missing` | the settlement the dispute was judged against is no longer on record, so the credit cannot be bounded by what was actually charged |
 | 409 `nothing_to_credit` | the settlement has no such step, the step never delivered, or the amount prices to zero |
 | 409 `refund_above_cap` | the amount exceeds `MAX_REFUND_USDC`. Nothing was signed |
+| 422 `validation_error` | a rejection with no reason — no body, no `note`, a null or an empty one — or one over 500 characters. Refused before the dispute is even read |
+| 422 `rejection_reason_required` | a rejection whose note is nothing but whitespace or control characters once cleaned: there is nothing left to show the buyer. Nothing is written |
 | 502 `refund_failed` | the transfer definitively did not settle, so no funds moved. The dispute is back to `upheld` and can be credited again |
 | 504 `refund_unconfirmed` | the transfer was submitted and its outcome is unknown. The dispute stays in `crediting` for reconciliation |
 
