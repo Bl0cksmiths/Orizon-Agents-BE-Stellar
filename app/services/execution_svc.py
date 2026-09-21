@@ -6,10 +6,11 @@ import logging
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from ..agents.registry import get_worker
-from ..agents.workers.prompt_safety import fence_untrusted
+from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
@@ -17,7 +18,7 @@ from ..state import state
 from ..trace_bus import bus
 from . import failure_tracker, rating_writer
 from .binding_registry import resolve_worker
-from .dispute_store import SettlementRecord, SettlementStep, get_dispute_store
+from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,45 @@ def _summarize(output: dict) -> str:
     return "done"
 
 
+def _stored_summary(task_id: str, step_index: int, summary: str) -> str | None:
+    """A delivered step's trace summary as its settlement keeps it (story 4.05).
+
+    `summary` is the text of the step's `out` trace line — the line the buyer
+    watched — so the dispute form shows what the trace showed rather than a
+    second rendering of the output that could disagree with it. It is still
+    untrusted, an external agent's own words, and it outlives the trace: it is
+    read back into an API response and shown in the console for the whole
+    dispute window. So it is cleaned with `sanitize_untrusted`, the primitive
+    `dispute_svc` already uses for the buyer's reason, which blanks the control
+    characters that would forge structure nobody wrote there.
+
+    Bounded at the store's OUTPUT_SUMMARY_MAX_CHARS, not trusted to
+    `_summarize`'s 180. That cap is a trace-formatting choice covering only the
+    `summary` branch — the `counts` branch joins every entry with no limit —
+    and it can change for trace reasons without anyone thinking of the
+    settlement row. The store's constant is the one that states what a row may
+    hold, so it is the one a writer cleans to.
+
+    Never raises. This runs inside the run loop, where an exception reaches the
+    run-level handler: the workflow would finalize as "failed" and the charge
+    that pays every agent in the plan would never run, all for one line of
+    evidence. A summary that cannot be kept is logged and left None; the step
+    is still delivered, and still disputable. An empty result is None too, so
+    a reader has one "nothing to show" value to test for, not two.
+    """
+    try:
+        cleaned = sanitize_untrusted(summary, max_chars=OUTPUT_SUMMARY_MAX_CHARS)
+    except Exception:
+        logger.warning(
+            "task %s step %d: output summary could not be cleaned — settled without it",
+            task_id,
+            step_index,
+            exc_info=True,
+        )
+        return None
+    return cleaned or None
+
+
 async def execute_plan(
     plan: StoredPlan,
     *,
@@ -278,6 +318,11 @@ async def _run(
     # of a LATER step that succeeded, and story 4.02 would then accept a
     # dispute over work nobody was ever paid for.
     delivered_steps: set[int] = set()
+    # What each delivered step produced, as its settlement keeps it (story
+    # 4.05) — by plan-step index for the same reason as `delivered_steps`: one
+    # agent on two steps produced two different things, and keyed by agent the
+    # second would overwrite the first on the step the buyer disputes.
+    output_summaries: dict[int, str | None] = {}
     # Agent ids whose step never reached a worker at all — see the resolve
     # branch below. Distinct from "delivered nothing": these are not rated.
     undispatched: set[str] = set()
@@ -457,7 +502,12 @@ async def _run(
                     "cost",
                     f"x402 payment → {step.agent_id} :: {step.est_price_usdc:.3f} USDC (simulated)",
                 )
-            await _emit(task_id, start, "out", f"{worker.name}: {_summarize(output)}")
+            summary = _summarize(output)
+            await _emit(task_id, start, "out", f"{worker.name}: {summary}")
+            # Kept from the SAME value the line above traced, not re-derived at
+            # settlement, so the dispute form and the trace cannot disagree
+            # about what this step produced. Cannot raise — see the helper.
+            output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
 
             # Surface critic notes / violations if the worker reports them.
             if isinstance(output, dict):
@@ -575,6 +625,7 @@ async def _run(
                     proof_tx=proof_tx,
                     total_usdc=spent,
                     delivered_steps=frozenset(delivered_steps),
+                    output_summaries=output_summaries,
                 )
                 # Rated whether or not the money moved, exactly as the
                 # no-success branch above is (ADR 0005 D2). This used to sit
@@ -983,6 +1034,7 @@ async def _record_settlement(
     proof_tx: str | None,
     total_usdc: float,
     delivered_steps: frozenset[int],
+    output_summaries: Mapping[int, str | None],
 ) -> None:
     """Write the one record a dispute is later judged against (story 4.02).
 
@@ -1035,6 +1087,11 @@ async def _record_settlement(
                         # refuses to dispute it. Same condition that moved
                         # `succeeded` and `spent` in the run loop.
                         delivered=index in delivered_steps,
+                        # Already cleaned and bounded by `_stored_summary` in
+                        # the run loop. Gated on delivery here as well, so "an
+                        # undelivered step has no summary" holds where the
+                        # record is built rather than only where it was fed.
+                        output_summary=output_summaries.get(index) if index in delivered_steps else None,
                     )
                     for index, step in enumerate(plan.plan.steps)
                 ),

@@ -10,6 +10,10 @@ paid, WHICH job, WHAT each step cost and whether it delivered, and UNTIL WHEN �
 plus the rule about when not to write at all: no charge landed, so no money
 moved, so there is nothing to dispute.
 
+Story 4.05 adds a fifth fact — WHAT each delivered step produced — because the
+dispute form has to show it and the trace line that showed it first is evicted
+and lost on restart long before the window closes.
+
 Hermetic like the rest of the suite: `_settle_onchain` and `_submit_ratings` are
 patched out at the seam, so nothing here reaches the network.
 """
@@ -17,6 +21,7 @@ patched out at the seam, so nothing here reaches the network.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 
@@ -26,7 +31,12 @@ from stellar_sdk import Keypair
 from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import dispute_store, execution_svc
-from app.services.dispute_store import InMemoryDisputeStore, SettlementRecord
+from app.services.dispute_store import (
+    OUTPUT_SUMMARY_MAX_CHARS,
+    InMemoryDisputeStore,
+    SettlementRecord,
+    SettlementStep,
+)
 from app.state import state
 
 AUTH_ID_HEX = "ab" * 16
@@ -422,3 +432,232 @@ def test_a_store_that_raises_does_not_fail_the_workflow(monkeypatch, caplog):
     lines = state.traces[task_id]
     assert any(ln.level == "error" and "cannot be disputed" in ln.msg for ln in lines)
     assert not any("dispute window" in ln.msg for ln in lines)
+
+
+# ── what each step produced outlives the trace (story 4.05) ────────────
+class _SaysWorker:
+    """Delivers exactly `output` — the step whose words a settlement keeps."""
+
+    def __init__(self, output: dict, name: str = "w.says") -> None:
+        self.name = name
+        self._output = output
+
+    async def run(self, intent, rationale, context=None):
+        return self._output
+
+
+def _traced(task_id: str, worker_name: str) -> list[str]:
+    """What each of `worker_name`'s `out` lines said, without its name prefix.
+
+    The text a buyer watched for that worker's steps, in step order — the
+    thing a settled summary must agree with.
+    """
+    prefix = f"{worker_name}: "
+    return [
+        ln.msg.removeprefix(prefix)
+        for ln in state.traces[task_id]
+        if ln.level == "out" and ln.msg.startswith(prefix) and "preview →" not in ln.msg
+    ]
+
+
+def test_a_delivered_step_keeps_the_summary_its_trace_line_showed(monkeypatch, store):
+    """The buyer disputes from the settlement, not the trace, so the settlement
+    carries the line — and carries the very text the trace showed, since two
+    renderings of one output are two chances to disagree about it."""
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"summary": "12 sources, 3 conflicting"}, "w.research"))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_summary"
+
+    _run_paid(_plan(), task_id)
+
+    (step,) = store.recorded[0].steps
+    assert step.output_summary == "12 sources, 3 conflicting"
+    assert _traced(task_id, "w.research") == [step.output_summary]
+    assert asyncio.run(store.get_settlement_by_task(task_id)).steps[0].output_summary == step.output_summary
+
+
+def test_a_step_that_delivered_nothing_keeps_no_summary(monkeypatch, store):
+    """The second step failed and the third never resolved to a worker: neither
+    produced anything, so there is nothing to show for them — None, never the
+    error line the trace printed in their place mistaken for output."""
+    workers = {"agt_0": _OkWorker("w.gen"), "agt_1": _BoomWorker("w.critic")}
+    _resolves_to(monkeypatch, workers.get)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_nosummary"
+
+    _run_paid(_plan((0.05, 0.02, 0.01)), task_id)
+
+    steps = store.recorded[0].steps
+    assert [s.delivered for s in steps] == [True, False, False]
+    assert [s.output_summary for s in steps] == ["did the thing", None, None]
+
+
+class _TwoPassWorker:
+    """Delivers on both of its steps, with a different result each time — one
+    agent used twice in a plan, which a summary keyed by agent_id would
+    collapse into whichever pass ran last."""
+
+    name = "w.twopass"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, intent, rationale, context=None):
+        self.calls += 1
+        return {"summary": "outline drafted" if self.calls == 1 else "outline polished"}
+
+
+def test_one_agent_on_two_steps_keeps_two_summaries(monkeypatch, store):
+    """The buyer disputes a step, not an agent: disputing the draft must show
+    the draft, not the polish that overwrote it in a map keyed by agent."""
+    worker = _TwoPassWorker()
+    _resolves_to(monkeypatch, lambda agent_id: worker)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_twopass"
+
+    _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
+
+    steps = store.recorded[0].steps
+    assert [s.output_summary for s in steps] == ["outline drafted", "outline polished"]
+    assert _traced(task_id, "w.twopass") == [s.output_summary for s in steps]
+
+
+def test_a_failed_step_never_borrows_a_later_steps_summary(monkeypatch, store):
+    """The same agent fails and then delivers. Keyed by agent, the failed step
+    would show the later step's output as its own — evidence for work that
+    was never done, on the one step the buyer cannot dispute anyway."""
+    worker = _FlakyWorker()
+    _resolves_to(monkeypatch, lambda agent_id: worker)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_flakysummary"
+
+    _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
+
+    assert [s.output_summary for s in store.recorded[0].steps] == [None, "second time lucky"]
+
+
+def test_a_summary_branch_summary_is_cleaned_before_it_is_kept(monkeypatch, store):
+    """An external agent's own words, with an escape sequence and a NUL in
+    them. `_summarize` cuts this branch at 180, under the store's bound, so
+    nothing more is cut — what is kept is the traced text with only its
+    control characters blanked, because it is read back into an API response
+    and the console for the whole window, where they would forge structure."""
+    raw = "ok \x1b[31mred\x00 " + "x" * 5_000
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"summary": raw}))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_dirtysummary"
+
+    _run_paid(_plan(), task_id)
+
+    (traced,) = _traced(task_id, "w.says")
+    assert len(traced) == 180
+    stored = store.recorded[0].steps[0].output_summary
+    assert stored is not None
+    assert "\x1b" not in stored and "\x00" not in stored
+    assert stored == traced.replace("\x1b", " ").replace("\x00", " ")
+    assert not stored.endswith("[truncated]")
+
+
+def test_a_counts_branch_summary_is_cleaned_and_bounded(monkeypatch, store):
+    """`_summarize`'s other branch joins every `counts` entry with no limit at
+    all, so the trace line can run as long as the worker likes. The store's
+    bound is the one that holds: the kept text is the traced text's start,
+    cleaned, and marked as cut rather than ending mid-word as if complete."""
+    counts = {f"file_{i}\x07": i for i in range(100)}
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"counts": counts}))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_counts"
+
+    _run_paid(_plan(), task_id)
+
+    (traced,) = _traced(task_id, "w.says")
+    assert len(traced) > OUTPUT_SUMMARY_MAX_CHARS, "the trace line was expected to run past the bound"
+    stored = store.recorded[0].steps[0].output_summary
+    assert stored is not None
+    assert "\x07" not in stored
+    assert len(stored) <= OUTPUT_SUMMARY_MAX_CHARS + len(" …[truncated]")
+    assert stored.endswith("[truncated]")
+    assert traced.replace("\x07", " ").startswith(stored.removesuffix(" …[truncated]"))
+
+
+def test_a_summary_that_cleans_to_nothing_is_kept_as_none(monkeypatch, store):
+    """Nothing but control characters leaves nothing to show once cleaned. It
+    is kept as None — the value a reader already takes to mean "no summary" —
+    rather than an empty string that a reader would have to test for too. The
+    step itself still delivered, and is still disputable."""
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"summary": "\x00\x1b\x07"}))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_blanksummary"
+
+    _run_paid(_plan(), task_id)
+
+    (step,) = store.recorded[0].steps
+    assert step.delivered is True
+    assert step.output_summary is None
+
+
+def test_the_summary_changes_nothing_else_the_settlement_records(monkeypatch, store):
+    """4.05 adds one field and moves nothing 4.02 wrote: with the summaries set
+    aside, the record is exactly the one a settled run left before — the same
+    steps, prices and delivery flags, the same amount, job and window — and the
+    trace line the summary was taken from reads exactly as it always did."""
+    workers = {"agt_0": _OkWorker("w.gen"), "agt_1": _BoomWorker("w.critic")}
+    _resolves_to(monkeypatch, workers.get)
+    rating_calls = _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_unchanged"
+
+    _run_paid(_plan((0.05, 0.02)), task_id)
+
+    assert len(store.recorded) == 1
+    record = store.recorded[0]
+    without_summaries = dataclasses.replace(
+        record, steps=tuple(dataclasses.replace(s, output_summary=None) for s in record.steps)
+    )
+    assert without_summaries == SettlementRecord(
+        task_id=task_id,
+        payer=PAYER,
+        auth_id_hex=AUTH_ID_HEX,
+        job_id_hex=JOB_ID.hex(),
+        charge_tx=CHARGE_TX,
+        proof_tx=PROOF_TX,
+        settled_usdc=0.05,
+        steps=(
+            SettlementStep(step_index=0, agent_id="agt_0", agent_name="w.agt_0", price_usdc=0.05, delivered=True),
+            SettlementStep(step_index=1, agent_id="agt_1", agent_name="w.agt_1", price_usdc=0.02, delivered=False),
+        ),
+        settled_at=record.settled_at,
+        window_closes_at=record.settled_at + settings.dispute_window_seconds,
+    )
+    assert _traced(task_id, "w.gen") == ["did the thing"]
+    assert rating_calls == [JOB_ID]
+
+
+def test_a_summary_that_cannot_be_kept_never_fails_the_run(monkeypatch, store, caplog):
+    """Capture runs inside the run loop, where anything that escapes reaches
+    the run-level handler: the workflow would finalize as "failed" and the
+    charge that pays every agent would never run — all for one line of
+    evidence. So a cleaner that raises costs the settlement its summaries and
+    nothing else: the run completes, every step still settles as delivered
+    and disputable, the ratings still run, and the loss is logged."""
+
+    def _broken_sanitizer(text, *, max_chars=None):
+        raise RuntimeError("sanitizer regression")
+
+    monkeypatch.setattr(execution_svc, "sanitize_untrusted", _broken_sanitizer)
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    rating_calls = _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_brokensummary"
+
+    with caplog.at_level(logging.WARNING, logger="app.services.execution_svc"):
+        _run_paid(_plan((0.05, 0.05)), task_id)
+
+    task = state.tasks[task_id]
+    assert task.status == "complete"
+    assert (task.charge_tx, task.proof_tx) == (CHARGE_TX, PROOF_TX)
+    assert rating_calls == [JOB_ID]
+    steps = store.recorded[0].steps
+    assert [(s.delivered, s.output_summary) for s in steps] == [(True, None), (True, None)]
+    assert _traced(task_id, "w.ok") == ["did the thing", "did the thing"]
+    assert any("dispute window" in ln.msg for ln in state.traces[task_id])
+    warnings = [r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc"]
+    assert sum(task_id in m and "summary could not be cleaned" in m for m in warnings) == 2, warnings
