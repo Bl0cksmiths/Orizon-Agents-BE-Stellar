@@ -297,7 +297,10 @@ MALFORMED_BODIES = [
     ("payer-not-an-address", {"payer": "not-an-address"}),
     ("payer-wrong-prefix", {"payer": "M" + PAYER[1:]}),
     ("reason-empty", {"reason": ""}),
-    ("reason-too-long", {"reason": "x" * 2001}),
+    ("reason-too-long", {"reason": "x" * (dispute_svc.MAX_REASON_CHARS + 1)}),
+    # The paragraph the old 2,000-character edge let through and the service
+    # then cut to its first 500 without a word: refused now, never trimmed.
+    ("reason-a-paragraph-over", {"reason": "x" * 1500}),
     ("signature-too-long", {"signature_b64": "x" * 257}),
     ("nonce-too-long", {"nonce": "x" * 129}),
 ]
