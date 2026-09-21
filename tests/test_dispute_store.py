@@ -828,6 +828,9 @@ def test_an_unsettled_job_or_task_reads_as_none_in_postgres() -> None:
 
 
 def test_an_opened_dispute_is_read_back_by_id_and_by_step() -> None:
+    """Round-tripped exactly as given, save the one field the store assigns:
+    opening is the dispute's first change of state, so `updated_at` is the
+    moment it was opened (story 4.06)."""
     pool = FakePool()
     store = _pg(pool)
 
@@ -837,7 +840,7 @@ def test_an_opened_dispute_is_read_back_by_id_and_by_step() -> None:
 
     opened, by_id, by_step = asyncio.run(go())
 
-    assert by_id == opened == a_dispute()
+    assert by_id == opened == a_dispute(updated_at=a_dispute().opened_at)
     assert by_step == opened
     assert len(pool.disputes) == 1
     assert pool.disputes[0]["opening"] is True
