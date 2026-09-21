@@ -66,3 +66,31 @@ permissionless payment makes everywhere else in this marketplace.
 **A reason is mandatory and is kept.** It is the evidence trail — the thing a
 review of the dispute actually reads — and it stays on the record whether the
 dispute is upheld or rejected.
+
+## What can be disputed
+
+**A step that was settled.** A workflow is charged as a whole, but it is
+disputed a step at a time, because a step is the unit that has a price, an
+agent and an outcome.
+
+**A step that never delivered cannot be disputed — because it was never
+charged.** Only steps that produced output are billed: the charge totals the
+delivered steps' prices, and a step that failed, timed out or was never
+dispatched contributes nothing to it. There is no money to credit back, so
+there is nothing to dispute. The settlement record keeps a `delivered` flag per
+step precisely so this stays answerable a day later, when the run's trace is
+long gone.
+
+This is worth stating to buyers directly, because it reads as a refusal when it
+is the opposite: a failed step already cost you nothing. What it costs the
+agent is reputational — a failed step is rated like any other, and a run where
+nothing was delivered is rated too.
+
+**One dispute per step.** A second dispute against the same step of the same
+job is not an error the buyer has to act on: the API answers it with **the
+original dispute, unchanged**, including its status and reason. Disputing a
+different step of the same workflow is a separate dispute and is allowed.
+
+**A workflow that was never paid for cannot be disputed at all.** A simulated
+run — no wallet, no authorization — charges nothing, settles nothing and has no
+window.
