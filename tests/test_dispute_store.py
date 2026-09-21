@@ -409,6 +409,7 @@ _DISPUTE_COLUMNS = (
     "resolved_at",
     "refund_tx",
     "rating_tx",
+    "note",
 )
 
 
@@ -569,7 +570,7 @@ class FakePool:
         return {"dispute_id": row["dispute_id"]}
 
     def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
-        dispute_id, status, refund_tx, rating_tx, resolved_at, now = args
+        dispute_id, status, refund_tx, rating_tx, note, resolved_at, now = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
         # `finished`: the mutex is dropped by the same statement that ends the
         # dispute. Being a data-modifying CTE it runs whether or not the INSERT
@@ -586,6 +587,7 @@ class FakePool:
             "resolved_at": _coalesce(resolved_at, latest["resolved_at"], now),
             "refund_tx": _coalesce(refund_tx, latest["refund_tx"]),
             "rating_tx": _coalesce(rating_tx, latest["rating_tx"]),
+            "note": _coalesce(note, latest["note"]),
             "opening": False,
         }
         self.disputes.append(row)
