@@ -13,7 +13,11 @@ service. What is tested HERE is the wire, and only the wire:
   * an unsettled task reads as an empty window rather than an error;
   * a settled one carries everything a buyer's FIRST dispute starts from
     (story 4.05) — the job id, the payer, each step's credit priced by the
-    refund's own rule, the stated policy and the server's clock.
+    refund's own rule, the stated policy and the server's clock;
+  * a dispute carries its receipt (story 4.06) — what was actually credited,
+    when it last changed, whether its rating landed, and, for a rejection and
+    nothing else, the reason — with every one of them null on a record from
+    before it existed.
 
 Every test stubs `dispute_svc` at the seam the router imported. That keeps this
 file passing without the rules lane's implementation present, and keeps it
