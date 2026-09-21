@@ -578,6 +578,23 @@ def test_the_preview_stacks_the_two_ids_and_underlines_the_bytes_they_share(
     assert "Stellar Expert" in underline[column + 17 :]
 
 
+def test_a_dispute_that_could_never_be_rated_is_refused_before_it_is_paid(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """A step missing from the settlement has no price to weight a rating by.
+    Paying the credit anyway would leave a dispute that can never be fully
+    resolved, so the run stops while nothing is signed — the credit waits,
+    which is recoverable, where a half-resolved dispute is not."""
+    forbid_uphold(monkeypatch)
+    seed(step_index=5)
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_UNEXPECTED
+    assert "rating_not_derivable" in out
+    assert "nothing was signed" in out
+
+
 # ── the live run: the verdict comes off the STORE, never off the call ──────
 
 
