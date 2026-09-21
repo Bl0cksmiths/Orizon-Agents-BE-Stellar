@@ -49,7 +49,7 @@ from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
-from . import dispute_rating, refund_svc
+from . import dispute_rating, refund_svc, reputation_svc
 from . import external_binding as eb
 from .dispute_store import (
     DisputeRecord,
@@ -713,6 +713,183 @@ async def _note_rating_on_workflow(dispute: DisputeRecord, outcome: dispute_rati
         f"reputation → agent {dispute.agent_id} rated {outcome.rating}/100 for upheld dispute {dispute.id}"
         f" on step {dispute.step_index} · dispute job {outcome.job_id_hex} · tx {outcome.tx_hash}",
     )
+
+
+# ── the dispute rating: the reputation consequence (story 4.04) ─
+#
+# Everything below runs only once the buyer has been paid, and nothing in it
+# may undo that (D3): no call on this path reaches `claim_refund`,
+# `release_refund_claim` or `credit_refund`. A rating that fails is a
+# consequence that has not landed YET, never a refund to reverse — and unlike
+# the refund it can always be retried, because the ledger's replay guard on the
+# derived id refuses a second landing, which is the whole of the idempotency
+# the refund path needed a durable mutex to buy.
+
+
+def _derived_id_hex(dispute: DisputeRecord) -> str:
+    """The derived job id this dispute is rated under, for a log line only.
+
+    Recomputed for the one line that has no `RatingOutcome` to read it from —
+    an attempt that raised — and never allowed to raise itself, because the
+    derivation's own refusal may be the very failure that line reports.
+    """
+    try:
+        return dispute_rating.dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index).hex()
+    except ValueError:
+        return "underivable"
+
+
+def _log_rating(
+    level: int,
+    event: str,
+    dispute: DisputeRecord,
+    derived_hex: str,
+    tx_hash: str | None,
+    *,
+    exc_info: bool = False,
+) -> None:
+    """One line per rating outcome, carrying every id a reconciliation needs.
+
+    The dispute, the sealed job it disputes, the DERIVED id the rating lives
+    under on-chain, the agent it rates and the payer it was written for: with
+    those, whoever holds a block explorer can find the rating or prove it is
+    absent from this line alone. The hash joins them whenever there is one.
+    Nothing secret — all of it is public, and the scorer's key never enters
+    this module.
+    """
+    logger.log(
+        level,
+        "dispute rating %s: dispute=%s job=%s derived=%s agent=%s payer=%s tx=%s",
+        event,
+        dispute.id,
+        dispute.job_id_hex,
+        derived_hex,
+        dispute.agent_id,
+        dispute.payer,
+        tx_hash or "-",
+        exc_info=exc_info,
+    )
+
+
+async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) -> DisputeRecord:
+    """Write the rating an upheld dispute earns, and answer with the dispute.
+
+    Only ever called with a dispute that is already `credited`: straight after
+    its credit lands, and again on every later `uphold` of it. The five
+    answers the ledger can give, and what each one means for THIS dispute:
+
+      - **SUCCESS** — it landed. The hash is recorded as `rating_tx`, the
+        agent's cached score is invalidated so routing sees the rating now
+        rather than one read TTL from now, and the workflow is told.
+      - **REPLAY, with a `rating_tx` on record** — an earlier attempt of ours
+        landed, so this is done: the hash on record is kept and the cache is
+        invalidated, because a rating that timed out may have landed since.
+      - **REPLAY, with none** — a COLLISION (D4): the ledger holds a rating
+        under this dispute's derived id that this dispute has no record of
+        writing. Loud, and never read as resolved.
+      - **TIMEOUT** — submitted and unconfirmed: it may still land. The
+        in-flight hash is recorded at once, so the evidence exists the moment
+        the rating does, and the next `uphold` settles it — REPLAY if it
+        landed, a fresh SUCCESS that replaces the hash if it never did.
+      - **FAILED** — nothing landed and nothing is recorded; retryable.
+
+    THE CALLER LEARNS WHETHER THE RATING LANDED FROM THE RECORD, never from an
+    exception, and this never raises — short of a cancellation — once it has
+    been handed a paid dispute:
+
+      - `credited` WITH a `rating_tx`: the rating was submitted under the
+        derived id and landed, or (after a TIMEOUT) may still;
+      - `credited` WITHOUT one: the buyer is paid and the reputation
+        consequence is NOT on-chain — a FAILED rating, a collision, or an
+        attempt that raised. That dispute is not fully resolved, and upholding
+        it again retries the rating alone.
+
+    Not an exception, because by now the money has moved: a 5xx would tell
+    the caller the adjudication failed when the buyer has in fact been paid.
+    Not a second return type either, because it would be a second answer that
+    the record contradicts the moment a response is lost — the record is what
+    `GET /api/disputes/{id}` serves, what `DisputeResponse` already exposes
+    (`status`, `rating_tx`), and what the operator script reads after every
+    run. Durable, and one answer. What distinguishes a collision from a
+    failure is what an OPERATOR does next, not the caller, so it is the ERROR
+    line that names which one it was.
+
+    Keyed off `credited`'s own `rating_tx` — the record as `uphold` read it —
+    never re-read from the store, so a REPLAY is judged against what this
+    dispute had recorded before the attempt that drew it.
+    """
+    store = get_dispute_store()
+    try:
+        outcome = await dispute_rating.submit_dispute_rating(credited, settlement)
+        derived = outcome.job_id_hex
+
+        if outcome.status == "SUCCESS":
+            # Logged and the cache dropped BEFORE the record is written: the
+            # rating is on-chain whatever happens to the store next, so the
+            # hash must be in the log and the score fresh even if the write
+            # below fails.
+            _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
+            reputation_svc.invalidate_rep(credited.agent_id)
+            rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash)
+            await _note_rating_on_workflow(rated, outcome)
+            return rated
+
+        if outcome.status == "REPLAY":
+            if credited.rating_tx:
+                reputation_svc.invalidate_rep(credited.agent_id)
+                _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx)
+                return credited
+            _log_rating(
+                logging.ERROR,
+                "COLLISION — the ledger already holds a rating under this dispute's derived id and this"
+                " dispute records none, so its reputation consequence did NOT land; the credit stands."
+                " Look the derived id up on-chain: if it is this dispute's own unrecorded attempt (a"
+                " timeout with no hash, or a record write that failed), record that hash as rating_tx",
+                credited,
+                derived,
+                None,
+            )
+            return credited
+
+        if outcome.status == "TIMEOUT":
+            # Logged before it is recorded, for the reason SUCCESS is.
+            _log_rating(
+                logging.ERROR,
+                "unconfirmed — it may still land; uphold again to settle it",
+                credited,
+                derived,
+                outcome.tx_hash,
+            )
+            if outcome.tx_hash:
+                return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash)
+            return credited
+
+        # FAILED — and, deliberately, anything else: for a rating the safe
+        # default is "not landed, retry", because the replay guard makes a
+        # retry that double-rates impossible. Any hash an earlier TIMEOUT left
+        # on the record stays, since this attempt says nothing about that one.
+        _log_rating(
+            logging.ERROR,
+            f"failed ({outcome.status}) — nothing landed; uphold again to retry",
+            credited,
+            derived,
+            outcome.tx_hash,
+        )
+        return credited
+    except Exception:
+        # The credit has already landed and is already recorded. Whatever
+        # broke here — the submission, the derivation, the store write after a
+        # rating — is answered with the record as it stands, never with an
+        # exception that would make a paid refund look like a failed one.
+        _log_rating(
+            logging.ERROR,
+            "did not complete — the credit stands and no rating is recorded for it; uphold again to retry",
+            credited,
+            _derived_id_hex(credited),
+            None,
+            exc_info=True,
+        )
+        return credited
 
 
 async def uphold(dispute_id: str) -> DisputeRecord:
