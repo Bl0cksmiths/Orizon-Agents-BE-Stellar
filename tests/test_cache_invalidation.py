@@ -160,3 +160,31 @@ def test_the_stale_read_landing_after_the_fresh_one_does_not_overwrite_it():
         return cache._store["k"][1]
 
     assert asyncio.run(run()) == "post-dispute"
+
+
+def test_invalidating_one_key_leaves_every_other_key_alone():
+    value, _ = _returning("v")
+
+    async def failing():
+        raise RuntimeError("rpc down")
+
+    async def run():
+        busy, started, release, _ = _parked("busy-value")
+        in_flight = asyncio.create_task(cache.get_or_set("busy", 60.0, busy))
+        await started.wait()
+        await cache.get_or_set("other", 60.0, value)
+        with pytest.raises(RuntimeError):
+            await cache.get_or_set("failed", 60.0, failing)
+        await cache.get_or_set("k", 60.0, value)
+
+        cache.invalidate("k")
+
+        assert "other" in cache._store
+        assert "failed" in cache._failures
+        assert "busy" in cache._flights
+        release.set()
+        await in_flight
+        return cache._store["busy"][1]
+
+    # The other key's flight was neither detached nor fenced: it still lands.
+    assert asyncio.run(run()) == "busy-value"
