@@ -134,21 +134,39 @@ def _fresh_store():
 
 
 @pytest.fixture(autouse=True)
-def _no_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+def chain_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Booby-trap the stellar client for every test in this file.
 
-    Every entry point the refund path could reach is replaced with something
-    that fails the test loudly. "The dry run signs nothing" then becomes a
-    property the suite enforces rather than a claim: a line added later that
-    derives the settler's public key, simulates, or submits is caught here
-    instead of on testnet.
+    Every entry point the refund and rating paths could reach is replaced with
+    something that fails the test loudly. "The dry run signs nothing" then
+    becomes a property the suite enforces rather than a claim: a line added
+    later that derives the settler's public key, simulates, or submits is
+    caught here instead of on testnet.
+
+    Every call is also RECORDED, and the list is what a test asserts on. The
+    raise alone is not enough since 4.04: the reputation read swallows any
+    exception into a degraded prior (by design — a dashboard must survive an
+    unreachable ledger), so a trap that only raised would be silenced by the
+    very code it is meant to catch.
     """
+    calls: list[str] = []
 
-    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("the stellar client was called — this path must never reach the chain")
+    def _trap(name: str) -> Any:
+        def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+            calls.append(name)
+            raise AssertionError(f"the stellar client's {name} was called — this path must never reach the chain")
 
-    for name in ("invoke_with_server_key_async", "signer_public_key", "submit_rating_async", "contract_ids"):
-        monkeypatch.setattr(sc, name, _forbidden)
+        return _forbidden
+
+    for name in (
+        "invoke_with_server_key_async",
+        "signer_public_key",
+        "submit_rating_async",
+        "contract_ids",
+        "simulate_read",
+    ):
+        monkeypatch.setattr(sc, name, _trap(name))
+    return calls
 
 
 def seed(
@@ -420,12 +438,17 @@ def _binding_lines(out: str) -> list[str]:
 
 
 def test_a_dry_run_signs_nothing_and_needs_no_signing_configuration(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    credit: CreditSeam,
+    chain_calls: list[str],
 ) -> None:
     """The run an operator is told to do first, so it has to work on a machine
     that holds no key at all — and it must not reach the chain or the uphold on
     the way. Both are enforced: `forbid_uphold` here, and the stellar client
-    booby-trap that every test in this file runs under."""
+    booby-trap that every test in this file runs under, whose record of calls
+    has to come back empty — not even a read, since the rating preview is
+    computed, never simulated."""
     forbid_uphold(monkeypatch)
     monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
     monkeypatch.setattr(settings, "stellar_signing_key", "")
@@ -436,6 +459,7 @@ def test_a_dry_run_signs_nothing_and_needs_no_signing_configuration(
 
     assert code == uphold_dispute.EXIT_OK
     assert "DRY RUN — nothing was signed and nothing moved." in out
+    assert chain_calls == []
 
 
 def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
