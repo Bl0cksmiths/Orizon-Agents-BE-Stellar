@@ -23,6 +23,7 @@ No chain, no network, no database.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from stellar_sdk import Keypair
 
@@ -107,6 +108,16 @@ def _rate(dispute: DisputeRecord | None = None, settlement: SettlementRecord | N
     return asyncio.run(submit_dispute_rating(dispute or _dispute(), settlement or _settlement()))
 
 
+def _records(caplog, level: int) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "app.services.dispute_rating" and r.levelno == level]
+
+
+def _names_every_fact(message: str) -> bool:
+    """Whether a line carries what reconciling a dispute rating starts from."""
+    facts = (DISPUTE_ID, JOB, DERIVED, "agt_writer", PAYER, f"weight {WEIGHT}", f"rating {DISPUTE_RATING}")
+    return all(fact in message for fact in facts)
+
+
 def test_the_submit_carries_the_derived_id_the_settlers_weight_and_the_payer(monkeypatch) -> None:
     calls = _fake_submit(monkeypatch, {"status": "SUCCESS", "hash": "rating_tx"})
 
@@ -163,3 +174,63 @@ def test_the_rating_is_below_what_the_settler_gives_a_non_delivery() -> None:
     constant's comment), measured against what the settler actually awards."""
     non_delivery, _ = reputation_svc.synthetic_rating(None, 0.07)
     assert 0 < DISPUTE_RATING < non_delivery
+
+
+def test_a_landed_rating_is_a_success_with_one_info_line(monkeypatch, caplog) -> None:
+    _fake_submit(monkeypatch, {"status": "SUCCESS", "hash": "rating_tx"})
+
+    with caplog.at_level(logging.INFO, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash) == ("SUCCESS", "rating_tx")
+    # The DERIVED id — the one a reviewer finds on Stellar Expert.
+    assert (outcome.job_id_hex, outcome.rating, outcome.weight_stroops) == (DERIVED, DISPUTE_RATING, WEIGHT)
+    records = [r for r in caplog.records if r.name == "app.services.dispute_rating"]
+    assert [r.levelno for r in records] == [logging.INFO], "a success is exactly one INFO line"
+    assert "rating_tx" in records[0].getMessage() and _names_every_fact(records[0].getMessage())
+
+
+def test_a_ledger_failed_transaction_is_failed_and_keeps_its_hash(monkeypatch, caplog) -> None:
+    """FAILED means the ledger rejected the transaction itself: nothing was
+    written. The hash is kept, because a transaction existed."""
+    _fake_submit(monkeypatch, {"status": "FAILED", "hash": "failed_tx"})
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash, outcome.job_id_hex) == ("FAILED", "failed_tx", DERIVED)
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any("nothing was written" in m and "failed_tx" in m and _names_every_fact(m) for m in msgs), (
+        f"a failed rating was not logged with its context: {msgs}"
+    )
+
+
+def test_a_timed_out_rating_is_a_timeout_and_keeps_its_hash(monkeypatch, caplog) -> None:
+    """Submitted and unconfirmed: it may still land, and the in-flight hash is
+    how anyone finds out."""
+    _fake_submit(monkeypatch, {"status": "timeout", "hash": "inflight_tx"})
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash, outcome.job_id_hex) == ("TIMEOUT", "inflight_tx", DERIVED)
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any("MAY STILL LAND" in m and "inflight_tx" in m and _names_every_fact(m) for m in msgs), (
+        f"an unconfirmed rating was not logged for reconciliation: {msgs}"
+    )
+
+
+def test_a_success_without_a_hash_is_a_timeout(monkeypatch) -> None:
+    """No receipt is no proof it landed — the unknown bucket, not SUCCESS."""
+    _fake_submit(monkeypatch, {"status": "SUCCESS"})
+    outcome = _rate()
+    assert (outcome.status, outcome.tx_hash) == ("TIMEOUT", None)
+
+
+def test_an_unrecognised_or_missing_status_is_a_timeout(monkeypatch) -> None:
+    _fake_submit(monkeypatch, {"status": "NOT_FOUND", "hash": "maybe_tx"})
+    outcome = _rate()
+    assert (outcome.status, outcome.tx_hash) == ("TIMEOUT", "maybe_tx")
+
+    _fake_submit(monkeypatch, {"hash": "maybe_tx"})
+    assert _rate().status == "TIMEOUT"
