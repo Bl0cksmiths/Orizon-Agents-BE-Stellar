@@ -578,6 +578,26 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallba
     return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
 
 
+def print_evidence(dispute: DisputeRecord) -> None:
+    """Both of the dispute's on-chain artifacts, side by side, once both have landed.
+
+    One upheld dispute leaves TWO transactions, and the deliverable is the pair:
+    the credit that made the buyer whole and the rating that is the agent's
+    consequence for it. Printed together, each labelled with who it moves, so
+    the block pastes into the evidence bundle as one unit and neither hash is
+    ever quoted without the other — the credit alone reads as the platform
+    absorbing a failure, the rating alone as a score with nothing behind it.
+    """
+    say("  " + "=" * 74)
+    say(f"  ON-CHAIN EVIDENCE — dispute {dispute.id}: both transactions, together")
+    say(f"    refund: {expert_url('tx', dispute.refund_tx or '')}")
+    say("            the platform credits the buyer — settler-funded; the agent is NOT charged")
+    say(f"    rating: {expert_url('tx', dispute.rating_tx or '')}")
+    say(f"            the agent's consequence — a dispute rating against {dispute.agent_id}")
+    say("  " + "=" * 74)
+    say()
+
+
 @contextmanager
 def watch_rating() -> Iterator[list[dispute_rating.RatingOutcome]]:
     """Collect every dispute-rating outcome `uphold` produces while this is open.
@@ -874,7 +894,10 @@ async def execute(dispute_id: str, amount: float) -> int:
     code = report(dispute, dispute_id, amount, fallback)
     if code != EXIT_OK or dispute is None:
         return code
-    return report_rating(dispute, ratings[-1] if ratings else None)
+    code = report_rating(dispute, ratings[-1] if ratings else None)
+    if code == EXIT_OK:
+        print_evidence(dispute)
+    return code
 
 
 def build_parser() -> argparse.ArgumentParser:
