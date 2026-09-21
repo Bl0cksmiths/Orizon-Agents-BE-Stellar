@@ -639,6 +639,12 @@ takes the payer's signature, which knowing their address does not provide. The
 output summaries are the lines the world-readable trace already showed. The
 authorization id itself is left off, because no client needs it.
 
+The disputes this read lists are the exception, and it is not hidden: each
+carries the buyer's `reason` and, once rejected, the adjudicator's
+`rejection_reason`, which nothing else publishes, and this read serves them to
+whoever it admits. "Who can read what a dispute says" above has what that means
+for anyone writing a rejection.
+
 ## For operators: where the records live
 
 Settlements and disputes are the first things this backend keeps that are not
