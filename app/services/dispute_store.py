@@ -415,15 +415,77 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 """
 
 
-# Take the mutex. `DO NOTHING` (never `DO UPDATE`) keeps the loser on the
-# ordinary empty-result path instead of an exception class this module would
-# have to name, and leaves the winner's row untouched.
-_CLAIM_REFUND_SQL = """
-INSERT INTO refund_claims (dispute_id, claimed_at)
-VALUES ($1, $2)
-ON CONFLICT (dispute_id) DO NOTHING
-RETURNING dispute_id
+# Appending a transition row that changes ONLY the status: every other column
+# is copied from `latest` verbatim. Both refund-mutex transitions are that
+# shape and differ in a single clause — what gates the row — so they share one
+# statement instead of spelling the fifteen-column list out twice more, where a
+# column added later would go missing from one of them without failing
+# anything.
+#
+# `resolved_at` is carried forward rather than stamped, and that is the
+# load-bearing difference from _APPEND_STATUS_SQL. Neither `crediting` nor the
+# `upheld` a release restores is a RESOLUTION: a dispute mid-payout has not
+# been resolved, and one handed back has been resolved even less. Stamping the
+# claim would date the dispute from the moment a payout was ATTEMPTED — and
+# since COALESCE keeps the first value forever, the row that finally credits
+# the buyer would report that moment instead of its own.
+_APPEND_UNRESOLVED_ROW = """
+INSERT INTO dispute_events (
+    dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
+)
+SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
+       latest.agent_id, latest.payer, latest.reason, '{status}',
+       latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
+       latest.resolved_at, latest.refund_tx, latest.rating_tx,
+       FALSE
+FROM latest {gate}
+RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
 """
+
+
+# Take the mutex AND move the dispute to `crediting`, in ONE statement.
+#
+# Two statements cannot do this safely, and the version that tried is worth
+# naming: insert the claim, read the status back, append `crediting`. The gap
+# between the insert and the append is a window the process can die in — Render
+# spins a free instance down whenever it idles — and what it leaves behind is a
+# claim row over a dispute still reading `upheld`. Nothing can pay that buyer
+# afterwards: the claim refuses every later claimant, and a release refuses
+# because the dispute is not `crediting`. They are owed money that no code path
+# can send them.
+#
+# One statement has no such window. A single statement is its own transaction,
+# so either the claim row and the `crediting` row are both there or neither is,
+# whatever happens to the process between them.
+#
+# `claim` is where concurrency is settled, and it is settled by the PRIMARY KEY
+# and not by the status it reads. Both CTEs share one snapshot, taken before
+# either ran, so two claimants racing each other BOTH see `upheld` — a status
+# can rule a claim out, never arbitrate between two. The unique index is not
+# snapshot-based: exactly one insert lands, the loser's ON CONFLICT DO NOTHING
+# returns nothing, and the main INSERT selects through `claim`, so the loser
+# writes no event row either.
+_CLAIM_REFUND_CTES = """
+WITH latest AS (
+    SELECT *
+    FROM dispute_events
+    WHERE dispute_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+),
+claim AS (
+    INSERT INTO refund_claims (dispute_id, claimed_at)
+    SELECT $1, $2 FROM latest WHERE latest.status = 'upheld'
+    ON CONFLICT (dispute_id) DO NOTHING
+    RETURNING dispute_id
+)"""
+
+_CLAIM_REFUND_SQL = _CLAIM_REFUND_CTES + _APPEND_UNRESOLVED_ROW.format(
+    status="crediting",
+    gate="JOIN claim ON claim.dispute_id = latest.dispute_id",
+)
 
 # Give it back. Returns the id when a claim was actually held, so the caller
 # can tell "released" from "there was nothing to release".
@@ -954,28 +1016,21 @@ class PostgresDisputeStore:
         return self._to_dispute(row)
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
-        """Win the mutex, then check the dispute is still payable.
+        """Take the exclusive right to pay this dispute, or return None.
 
-        The order matters and is not the intuitive one. Taking the claim FIRST
-        means the status check below runs with no other payer able to be
-        looking at the same dispute, so a decision made on what it reads stays
-        true until this call releases it. Checking the status first and then
-        claiming would put a window between the two that is precisely the race
-        the claim exists to close.
+        One statement does all of it — win the mutex, check the dispute is
+        still `upheld`, move it to `crediting` — so a process that dies
+        mid-call leaves a dispute that is either fully claimed or untouched,
+        never a claim row stranded over a dispute nobody can pay.
 
-        A claim taken over a dispute that turns out not to be `upheld` is
-        handed straight back, so a mistimed retry cannot wedge a dispute that
-        somebody else is legitimately about to pay.
+        None is deliberately not an error and does not say why: already
+        claimed, already credited, still open and never adjudicated, or
+        rejected all mean the same thing to a payer, which is *do not sign
+        anything*. The caller reads the record back if it needs to explain.
         """
         pool = await self._ready_pool()
-        claimed = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time())
-        if claimed is None:
-            return None
-        current = await self.get_dispute(dispute_id)
-        if current is None or current.status != "upheld":
-            await pool.fetchrow(_DELETE_REFUND_CLAIM_SQL, dispute_id)
-            return None
-        return await self.append_status(dispute_id, "crediting")
+        row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time())
+        return None if row is None else self._to_dispute(row)
 
     async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
         """Put a still-unpaid dispute back where another attempt can find it.
