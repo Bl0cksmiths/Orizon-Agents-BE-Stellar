@@ -375,12 +375,12 @@ with no flight running records no generation at all.
 
 **Why not simply wait out the TTL.** Fifteen seconds is short, but it is not
 what the card promised — *"the next plan"* — and the first race makes it
-worse than it looks: a stale read landing just after the rating resets the
-clock, so the pre-dispute score can outlive the rating by a full TTL beyond
-wherever the old entry would have expired.
+worse than it looks: a read already in flight when the rating lands writes the
+pre-dispute state back with a fresh TTL, so the old score can outlive the
+rating by the length of that read plus a full TTL.
 
 **Why not bypass the cache for the disputed agent.** The cache exists because
-the dashboard polls every agent's reputation every few seconds and each read
-is a Soroban simulation. A bypass would have to be remembered per agent and
+the dashboard reads the whole registry's reputation on a 15-second poll and
+every read is a Soroban simulation. A bypass would have to be remembered per agent and
 for how long, which is a second cache with worse semantics. Invalidating the
 one key is the change of state the cache already needed a word for.
