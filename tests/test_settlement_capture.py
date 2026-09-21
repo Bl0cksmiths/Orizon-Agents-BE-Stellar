@@ -249,3 +249,70 @@ def test_trace_tells_the_buyer_the_window_is_open(monkeypatch, store):
     lines = state.traces[task_id]
     assert any("dispute window" in ln.msg and closes in ln.msg for ln in lines), [ln.msg for ln in lines]
     assert not any(JOB_ID.hex() in ln.msg for ln in lines)
+
+
+# ── the amount is what moved, and the steps are what was bought ─────────
+def test_settled_amount_is_what_moved_not_what_was_estimated(monkeypatch, store):
+    """`spent` is a sum of the plan's ESTIMATES; the charge sends
+    `usdc_to_i128(max(total, 0.000001))`, which rounds to the ledger's 7
+    decimals. A credit computed from the estimate would therefore hand back
+    more than ever left escrow, so the record carries the charged number."""
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_amount"
+
+    _run_paid(_plan((0.050000049,)), task_id)
+
+    record = store.recorded[0]
+    # round(0.050000049 * 10**7) = 500_000 stroops = 0.05 USDC exactly.
+    assert record.settled_usdc == pytest.approx(0.05)
+    assert record.settled_usdc < 0.050000049
+    assert record.settled_usdc < sum(s.price_usdc for s in record.steps)
+
+
+def test_a_free_plan_records_the_dust_the_charge_floors_to(monkeypatch, store):
+    """`max(total_usdc, 0.000001)`: a zero-priced plan still moves one dust
+    unit on-chain, so the ceiling on any credit is dust, not zero."""
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_dust"
+
+    _run_paid(_plan((0.0,)), task_id)
+
+    assert store.recorded[0].settled_usdc == pytest.approx(0.000001)
+
+
+def test_every_plan_step_is_recorded_with_its_price_and_delivery(monkeypatch, store):
+    """All three steps are recorded in the plan's order — a dispute is filed
+    against a step index — but only the one that produced output is disputable:
+    the second failed and the third never resolved to a worker at all, and
+    neither was billed."""
+    workers = {"agt_0": _OkWorker("w.gen"), "agt_1": _BoomWorker("w.critic")}
+    _resolves_to(monkeypatch, workers.get)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_steps"
+
+    _run_paid(_plan((0.05, 0.02, 0.01)), task_id)
+
+    steps = store.recorded[0].steps
+    assert [s.step_index for s in steps] == [0, 1, 2]
+    assert [s.agent_id for s in steps] == ["agt_0", "agt_1", "agt_2"]
+    assert [s.agent_name for s in steps] == ["w.agt_0", "w.agt_1", "w.agt_2"]
+    assert [s.price_usdc for s in steps] == [pytest.approx(0.05), pytest.approx(0.02), pytest.approx(0.01)]
+    assert [s.delivered for s in steps] == [True, False, False]
+    # Only the delivered step was billed, so only its price was charged.
+    assert store.recorded[0].settled_usdc == pytest.approx(0.05)
+
+
+def test_a_repeated_agent_is_judged_per_step_not_per_agent(monkeypatch, store):
+    """One agent, twice in a plan, failing then delivering. Keyed by agent id
+    the failed step would be recorded as delivered on the strength of the
+    later one, and 4.02 would accept a dispute over unpaid work."""
+    worker = _FlakyWorker()
+    _resolves_to(monkeypatch, lambda agent_id: worker)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_dup"
+
+    _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
+
+    assert [s.delivered for s in store.recorded[0].steps] == [False, True]
