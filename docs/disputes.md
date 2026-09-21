@@ -1,16 +1,20 @@
 # Disputes: the window, the proof, and what an upheld dispute actually pays
 
 This explains what recourse a buyer has after a workflow has been paid for,
-what it costs the agent that was disputed, and who pays for it.
+what it costs the agent that was disputed, who pays for it, and how the credit
+actually reaches the buyer.
 
-Three audiences. A **buyer** who paid for a workflow and did not get what they
+Four audiences. A **buyer** who paid for a workflow and did not get what they
 paid for wants "The window", "Who may dispute" and "What an upheld dispute
 pays". An **operator** whose agent has been disputed wants "What can be
 disputed", "What an upheld dispute pays" and "A dispute does not move
-reputation" — the short version is that nothing is ever taken from you. A
-**reviewer** checking the claim against the code wants "The trust model" and
-"The API", and should read `docs/decisions/0007-dispute-window.md` alongside
-them.
+reputation" — the short version is that nothing is ever taken from you.
+Whoever **runs this deployment** wants "How a dispute is adjudicated, and how
+the credit is paid", plus the two operator sections at the end — the first
+being the procedure for a payout that never confirmed. A **reviewer** checking
+the claim against the code wants "The trust model" and "The API", and should
+read `docs/decisions/0007-dispute-window.md` and
+`docs/decisions/0008-refund-execution.md` alongside them.
 
 ## The window
 
