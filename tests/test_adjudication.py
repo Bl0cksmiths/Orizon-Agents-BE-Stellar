@@ -954,3 +954,25 @@ def test_an_upheld_dispute_whose_credit_did_not_land_is_never_rated(
             asyncio.run(dispute_svc.uphold(dispute.id))
 
     assert rater.calls == 0
+
+
+def test_a_repeat_uphold_lands_a_rating_that_failed_without_a_second_credit(monkeypatch, rater, invalidated) -> None:
+    """The retry path in one test: the rating failed, the buyer was paid, and
+    the dispute reads `credited` with no `rating_tx` — paid, not resolved.
+    Upholding it again writes the rating and nothing else: the refund path is
+    trapped for the whole of the second call."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+    rater.script = ["FAILED"]
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    assert paid.status == "credited" and paid.rating_tx is None
+    assert invalidated == []
+
+    trap_the_refund(monkeypatch)
+    resolved = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert resolved.rating_tx == "tx_rating"
+    assert resolved.refund_tx == paid.refund_tx == "tx_credit"
+    assert resolved.resolved_at == paid.resolved_at  # a rating does not re-date the resolution
+    assert invalidated == ["agt_writer"]
+    assert len(chain.calls) == 1
