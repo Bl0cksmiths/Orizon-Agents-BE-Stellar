@@ -320,3 +320,67 @@ for a single `Rated` key — its views are `rep_state`, `avg_bps`, `rep_bps`,
 read-then-write in any case, deciding on a state a concurrent submit could
 change. Submitting and letting the guard answer is both the only way to ask
 and the atomic one.
+
+### D5 — The cached score is invalidated, and a stale read cannot write it back
+
+Every reputation read goes through `app/stellar/cache.py` under one key per
+agent, `repstate:{agent_id}`, for `REPUTATION_READ_TTL_SECONDS` (15 s). That is
+the only cache in front of reputation — the decompose snapshot, both
+`/api/stellar/reputation` routes and the dashboard all read through it — and
+without invalidation, a plan decomposed inside the window after a dispute
+rating lands would be routed and stamped on the very score the dispute was
+meant to change. The card's acceptance criterion is *"the plan should use the
+updated score, not a cached pre-dispute value"*.
+
+So when a dispute rating is known to be on-chain — a `SUCCESS`, or a `Replay`
+against a `rating_tx` already on record, since a rating that timed out may
+have landed since — `uphold` calls `reputation_svc.invalidate_rep(agent_id)`,
+which calls `cache.invalidate(key)`. On `SUCCESS` it does so **before**
+writing `rating_tx` to the store: the rating is on the ledger whatever happens
+to the store next, so the score must be fresh even if that write fails.
+
+**Dropping the entry is the easy half, and on its own it does not work.** The
+cache is single-flight: the first miss on a key spawns one read, every
+concurrent miss awaits that same read, and the result is written back for a
+full TTL when it lands. That leaves two races a plain delete does not close.
+
+1. **A stale in-flight read writes back.** A read that started before the
+   rating landed saw the ledger from before it. If it finishes after the
+   invalidation, it writes the pre-dispute state straight back into the cache —
+   for a full TTL, undoing the invalidation as if it had never happened.
+2. **A later caller joins a stale flight.** A caller arriving after the
+   invalidation, while that same read is still running, finds a flight
+   registered for the key and — single-flight working as designed — joins it,
+   and is handed the pre-dispute state.
+
+**The generation guard closes both.** `invalidate(key)` bumps a per-key
+generation, and every flight captures the generation current when it was
+**registered**. A flight may write its outcome back only while its generation
+is still current, checked at the write itself with no `await` between the check
+and the store, so on one event loop nothing can slip in between. That closes
+the first race. `invalidate` also **detaches** the running flight from the key,
+so the next caller finds none and starts a fresh read, which closes the second.
+The failure cache is fenced the same way, because a negatively cached error
+from before the change says nothing about the state after it.
+
+The stale flight is **not cancelled**. Its own callers asked before the rating
+landed and get the answer that was true when they asked; it simply stops being
+the cache's answer for anyone after. Cancelling it would turn a read that was
+merely early into an error for callers who did nothing wrong.
+
+The generation map is bounded by the flights still running, not by every key
+ever invalidated: a key's generation only has to outlive the flights that
+captured it, so it is dropped when the last of them lands, and an invalidation
+with no flight running records no generation at all.
+
+**Why not simply wait out the TTL.** Fifteen seconds is short, but it is not
+what the card promised — *"the next plan"* — and the first race makes it
+worse than it looks: a stale read landing just after the rating resets the
+clock, so the pre-dispute score can outlive the rating by a full TTL beyond
+wherever the old entry would have expired.
+
+**Why not bypass the cache for the disputed agent.** The cache exists because
+the dashboard polls every agent's reputation every few seconds and each read
+is a Soroban simulation. A bypass would have to be remembered per agent and
+for how long, which is a second cache with worse semantics. Invalidating the
+one key is the change of state the cache already needed a word for.
