@@ -701,6 +701,49 @@ def rating_not_landed(
     return EXIT_RATING_NOT_LANDED
 
 
+def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
+    """The block for a rating the ledger refused as a replay of one this dispute never recorded (D4).
+
+    Loud, and never worded as a resolution: the credit stands, but nothing of
+    this dispute's is on the reputation ledger, and a dispute reported as
+    resolved without its consequence is exactly what D4 forbids. It names the
+    agent, the dispute and the rating id because those are what a lookup on
+    the ledger starts from, and it links the ledger itself because that is
+    where the lookup happens.
+
+    Two causes, and the block gives both their remedies. The benign one is
+    this dispute's own attempt that landed without its hash ever reaching the
+    record — a timeout that returned none, or a store write that failed — and
+    recording that hash resolves it. Anything else is a genuine collision, and
+    a re-run cannot fix one: the ledger refuses every retry under this id.
+    """
+    say()
+    say("  " + "#" * 74)
+    say("  #  RATING COLLISION — THE AGENT'S REPUTATION CONSEQUENCE DID NOT LAND.")
+    say(f"  #  agent {dispute.agent_id} · dispute {dispute.id}")
+    say("  " + "#" * 74)
+    say()
+    say("  The ledger refused the rating as a Replay: it already holds a rating for this agent")
+    say("  under this rating id, and this dispute has no rating of its own on record.")
+    say()
+    say(f"  agent:     {dispute.agent_id}")
+    say(f"  dispute:   {dispute.id}")
+    say(f"  rating id: {rating_id}")
+    say(f"  ledger:    {expert_url('contract', settings.stellar_reputation_ledger)}")
+    say()
+    say("  The credit stands — the buyer HAS been paid. The dispute is NOT resolved and must not")
+    say("  be reported as resolved: no rating of this dispute's is on-chain.")
+    say()
+    say("  Find the rating filed under that id on the ledger before anything else:")
+    say("    * it is this dispute's own attempt, never recorded (a timeout that returned no hash,")
+    say("      or a record write that failed) — record its hash, and the dispute is resolved:")
+    say(f"      append_status({dispute.id!r}, 'credited', rating_tx=<hash>)")
+    say("    * it is anything else — a genuine collision. Escalate it. Re-running cannot fix it:")
+    say("      the ledger refuses every retry under this id.")
+    say()
+    return EXIT_RATING_COLLISION
+
+
 async def execute(dispute_id: str, amount: float) -> int:
     """Uphold the dispute, pay the credit, and report the verdict from the store.
 
