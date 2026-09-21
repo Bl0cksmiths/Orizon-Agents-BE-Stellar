@@ -482,7 +482,7 @@ stacked, with their shared prefix underlined.
 | `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
 | `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
 | `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, transfers the amount to the payer, then writes the dispute rating. On a `credited` dispute it signs no transfer and re-attempts the rating only |
-| `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — records `rejected` with its resolution time; nothing is signed and nothing is spent |
+| `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — body `{"note": "..."}`, **required**, 1 to 500 characters, and **shown to the buyer** as the dispute's `rejection_reason`. Records `rejected` with its resolution time and that reason; nothing is signed and nothing is spent |
 
 The read routes take no credential because both ids are unguessable — a dispute
 id is `dsp_` plus 16 random hex characters — which is the same trade the task
