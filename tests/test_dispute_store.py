@@ -841,9 +841,7 @@ def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone() -> None:
     # `dispute_events` stays append-only. The only DELETE this path may issue
     # is against `refund_claims`, which is a mutex rather than a record: it is
     # meant to be released, and releasing it destroys no history.
-    assert not any(
-        ("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s for s in pool.statements
-    )
+    assert not any(("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s for s in pool.statements)
 
 
 def test_the_current_state_is_the_newest_row() -> None:
