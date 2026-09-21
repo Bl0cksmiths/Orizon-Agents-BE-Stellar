@@ -10,6 +10,10 @@ paid, WHICH job, WHAT each step cost and whether it delivered, and UNTIL WHEN �
 plus the rule about when not to write at all: no charge landed, so no money
 moved, so there is nothing to dispute.
 
+Story 4.05 adds a fifth fact — WHAT each delivered step produced — because the
+dispute form has to show it and the trace line that showed it first is evicted
+and lost on restart long before the window closes.
+
 Hermetic like the rest of the suite: `_settle_onchain` and `_submit_ratings` are
 patched out at the seam, so nothing here reaches the network.
 """
