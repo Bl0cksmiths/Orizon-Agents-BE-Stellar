@@ -672,6 +672,58 @@ class PostgresDisputeStore:
         asyncpg = _import_asyncpg()
         return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
 
+    async def record_settlement(self, record: SettlementRecord) -> None:
+        pool = await self._ready_pool()
+        # Every value written is the record's own. In particular `settled_at`
+        # and `window_closes_at` are NOT re-derived here: the window closes when
+        # the buyer was told it closes, which is a fact about the moment the
+        # workflow settled, not about the moment this row reached the database.
+        await pool.execute(
+            _INSERT_SETTLEMENT_SQL,
+            record.task_id,
+            record.payer,
+            record.auth_id_hex,
+            record.job_id_hex,
+            record.charge_tx,
+            record.proof_tx,
+            record.settled_usdc,
+            steps_to_json(record.steps),
+            record.settled_at,
+            record.window_closes_at,
+        )
+
+    async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_JOB_SQL, job_id_hex)
+        return None if row is None else self._to_settlement(row)
+
+    async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None:
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id)
+        return None if row is None else self._to_settlement(row)
+
+    @staticmethod
+    def _to_settlement(row: Any) -> SettlementRecord:
+        """Map one asyncpg Record back to the record that was stored.
+
+        The floats are coerced explicitly because a DOUBLE PRECISION column can
+        come back as a Decimal through a proxy or a rewritten query, and money
+        that is sometimes a float and sometimes a Decimal is a subtraction that
+        raises in the middle of a refund.
+        """
+        return SettlementRecord(
+            task_id=row["task_id"],
+            payer=row["payer"],
+            auth_id_hex=row["auth_id_hex"],
+            job_id_hex=row["job_id_hex"],
+            charge_tx=row["charge_tx"],
+            proof_tx=row["proof_tx"],
+            settled_usdc=float(row["settled_usdc"]),
+            steps=steps_from_json(row["steps"]),
+            settled_at=float(row["settled_at"]),
+            window_closes_at=float(row["window_closes_at"]),
+        )
+
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
         # the pool that is being torn down, and so a second close is a no-op.
