@@ -318,6 +318,19 @@ def test_help_says_the_platform_funds_it_and_that_it_moves_real_money() -> None:
     assert "Signs nothing" in help_text
 
 
+def test_help_tells_the_two_post_signature_rules_apart() -> None:
+    """After a signature the right next move depends on which half failed, and
+    the two rules point in opposite directions: a timed-out CREDIT is never
+    re-run, a rating that did not land after a paid credit is re-run safely.
+    Both sit in `--help`, beside their codes, so an operator who learned one
+    cannot apply it to the other without reading the line that says otherwise."""
+    help_text = uphold_dispute.build_parser().format_help()
+    assert "10  the credit TIMED OUT and may still land — NEVER re-run" in help_text
+    assert "12  the buyer IS paid but the rating did not land — re-running is SAFE" in help_text
+    assert "retries the rating only, never the refund" in help_text
+    assert "13  the ledger answered the rating with Replay" in help_text
+
+
 def test_the_module_docstring_says_it_too() -> None:
     """`--help` is for the operator; the docstring is for whoever reads the tool
     before trusting its output. Both have to carry the funding disclosure —
