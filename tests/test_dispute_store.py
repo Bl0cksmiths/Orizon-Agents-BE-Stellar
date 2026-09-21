@@ -771,3 +771,109 @@ def test_two_concurrent_disputes_of_one_step_produce_one_dispute() -> None:
     assert len(pool.disputes) == 1
     assert refused[0].existing == opened[0]
     assert asyncio.run(store.find_dispute(JOB, 0)) == opened[0]
+
+
+# ── status transitions, in Postgres ───────────────────────────────────────
+
+
+def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone() -> None:
+    """The append-only rule at its most tempting breaking point: the obvious
+    implementation of "mark this credited" is an UPDATE, and that would erase
+    the evidence of what the dispute said when it was opened."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+
+    credited = asyncio.run(go())
+
+    assert credited.status == "credited"
+    assert credited.refund_tx == "tx_refund"
+    assert len(pool.disputes) == 2
+    # The opening row still says exactly what it always said.
+    assert pool.disputes[0]["status"] == "open"
+    assert pool.disputes[0]["refund_tx"] is None
+    assert pool.disputes[0]["opening"] is True
+    # And the new row is NOT an opening, or it would collide with its own
+    # dispute in the partial unique index.
+    assert pool.disputes[1]["opening"] is False
+    assert not any("UPDATE" in s or "DELETE" in s for s in pool.statements)
+
+
+def test_the_current_state_is_the_newest_row() -> None:
+    """Every read answers with the latest event, so a resolved dispute never
+    reads as open again — and the immutable half of the record is carried
+    forward by the SQL rather than restated by the caller."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, tuple[DisputeRecord, ...]]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+        await store.append_status(opened.id, "credited", rating_tx="tx_rating")
+        return (
+            await store.get_dispute(opened.id),
+            await store.find_dispute(JOB, 0),
+            await store.list_disputes_for_task(TASK),
+        )
+
+    by_id, by_step, listed = asyncio.run(go())
+
+    assert by_id is not None
+    assert by_id.status == "credited"
+    assert by_id.refund_tx == "tx_refund"  # not erased by the transition after it
+    assert by_id.rating_tx == "tx_rating"
+    assert by_id.reason == "the summary was empty"
+    assert by_id.charged_usdc == 1.5
+    assert by_step == by_id
+    # Four rows, one dispute: the list collapses a history to current states.
+    assert len(pool.disputes) == 4
+    assert listed == (by_id,)
+
+
+def test_the_moment_a_dispute_resolved_is_stamped_once_and_never_moved() -> None:
+    """From this process's clock, on the transition that first resolved it. A
+    later event re-dating it would rewrite when the buyer was made whole."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord]:
+        opened = await store.open_dispute(a_dispute())
+        return (
+            await store.append_status(opened.id, "upheld"),
+            await store.append_status(opened.id, "credited", refund_tx="tx_refund"),
+        )
+
+    before = time.time()
+    upheld, credited = asyncio.run(go())
+    after = time.time()
+
+    assert upheld.resolved_at is not None and before <= upheld.resolved_at <= after
+    assert credited.resolved_at == upheld.resolved_at
+    assert pool.disputes[-1]["resolved_at"] == upheld.resolved_at
+
+
+def test_a_caller_may_supply_the_moment_it_resolved() -> None:
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
+
+    assert asyncio.run(go()).resolved_at == 1_700_009_999.0
+
+
+def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None:
+    """`INSERT ... SELECT FROM latest` writes nothing when there is no history,
+    so the store says so instead of inventing a dispute out of an id."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_never", "upheld"))
+
+    assert pool.disputes == []
