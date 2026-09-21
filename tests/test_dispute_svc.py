@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from datetime import datetime, timezone
 
 import pytest
 from stellar_sdk import Keypair
@@ -332,3 +333,135 @@ def test_a_nonce_that_is_not_the_one_issued_is_refused() -> None:
             _open(payer, step=0, nonce=nonce)
         assert refused.value.code == "challenge_expired"
     assert eb.dispute_challenge_is_live(JOB, 0, issued) is True
+
+
+# ── rule: the settlement exists ─────────────────────────────────
+
+
+def test_a_job_that_never_settled_cannot_be_disputed() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    unknown = "ff" * 16
+    nonce = "0" * 32
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, job=unknown, nonce=nonce, signature=_sign(payer, dispute_message(unknown, 0, nonce)))
+
+    assert refused.value.code == "unknown_job"
+    assert refused.value.status_code == 404
+
+
+def test_no_challenge_is_minted_for_a_job_or_step_that_cannot_be_disputed() -> None:
+    """The mint refuses what it cannot key, so the ONE bounded challenge table
+    that bind, unbind and disputes share cannot be filled with invented job ids
+    — and the bind route's cap protects all three."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    with pytest.raises(DisputeError) as unknown:
+        asyncio.run(dispute_svc.issue_dispute_challenge("ff" * 16, 0))
+    with pytest.raises(DisputeError) as no_step:
+        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 7))
+
+    assert (unknown.value.code, unknown.value.status_code) == ("unknown_job", 404)
+    assert (no_step.value.code, no_step.value.status_code) == ("step_not_settled", 409)
+    assert len(eb._challenges) == 0
+
+
+# ── rule: the window is open ────────────────────────────────────
+
+
+def test_a_dispute_after_the_window_closed_is_refused_and_says_when() -> None:
+    payer = Keypair.random()
+    settlement = _seed(payer.public_key, window_seconds=-60.0)
+    closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer)
+
+    assert refused.value.code == "dispute_window_closed"
+    assert refused.value.status_code == 409
+    # The buyer is told the deadline they missed, not just that they missed one.
+    assert closed_at in refused.value.message
+
+
+def test_the_window_is_judged_on_the_stamped_value_not_the_setting(monkeypatch) -> None:
+    """The promise is what the settlement recorded. Tuning the setting later
+    must not reopen a window that closed, nor close one that is still open —
+    `window_closes_at` is stamped per settlement for exactly this reason."""
+    payer = Keypair.random()
+    _seed(payer.public_key, window_seconds=-60.0)
+    _seed(payer.public_key, job="beef" * 8, task="tsk_open", window_seconds=3600.0)
+
+    monkeypatch.setattr(settings, "dispute_window_seconds", 365 * 86_400.0)
+    with pytest.raises(DisputeError) as still_closed:
+        _open(payer)
+    assert still_closed.value.code == "dispute_window_closed"
+
+    monkeypatch.setattr(settings, "dispute_window_seconds", 0.0)
+    assert _open(payer, job="beef" * 8).status == "open"  # still open, as promised
+
+
+# ── rule: the step was settled ──────────────────────────────────
+
+
+def test_a_step_the_workflow_never_had_cannot_be_disputed() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    # Minted straight from the challenge module: the service's own mint refuses
+    # this step, so reaching `open_dispute` with one takes a hand-made nonce.
+    nonce, _ = eb.issue_dispute_challenge(JOB, 9)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, step=9, nonce=nonce)
+
+    assert refused.value.code == "step_not_settled"
+    assert refused.value.status_code == 409
+    assert "no step 9" in refused.value.message
+
+
+def test_a_step_that_produced_no_output_cannot_be_disputed() -> None:
+    """A failed step was never part of what the buyer paid for, so there is
+    nothing to credit — the refund is a credit of a CHARGE, not compensation."""
+    payer = Keypair.random()
+    _seed(
+        payer.public_key,
+        steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.05, delivered=False),),
+    )
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer)
+
+    assert refused.value.code == "step_not_settled"
+    assert refused.value.status_code == 409
+
+
+# ── rule: money actually moved ──────────────────────────────────
+
+
+def test_a_workflow_that_charged_nothing_cannot_be_disputed() -> None:
+    """`settled_usdc` is what moved on-chain, not the plan's estimate. With no
+    transfer there is nothing to credit back, and a credit would be a
+    withdrawal from the platform wallet rather than a remedy."""
+    payer = Keypair.random()
+    _seed(payer.public_key, settled_usdc=0.0)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer)
+
+    assert refused.value.code == "nothing_was_charged"
+    assert refused.value.status_code == 409
+
+
+def test_a_free_step_cannot_be_disputed() -> None:
+    payer = Keypair.random()
+    _seed(
+        payer.public_key,
+        steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.0, delivered=True),),
+    )
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer)
+
+    assert refused.value.code == "nothing_was_charged"
+    assert "free" in refused.value.message
