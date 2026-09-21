@@ -1250,10 +1250,12 @@ def test_a_rating_that_landed_but_was_never_recorded_asks_for_the_record_before_
     assert "ON-CHAIN EVIDENCE" not in out
 
 
-def test_the_rating_watch_is_removed_after_the_run(paying: list[str], ledger: RatingSeam) -> None:
-    """The watch wraps the rating service's module attribute for the length of
-    the uphold and no longer: whatever was bound before the run is bound after
-    it, so nothing else in the process ever calls through it."""
+def test_the_script_never_rebinds_the_rating_service(paying: list[str], ledger: RatingSeam) -> None:
+    """The ledger's answer reaches the script through `uphold`'s declared
+    `on_rating` observer, so an operator tool has no reason to reach into the
+    service and replace one of its functions — and must not: anything else in
+    the process calling through a replaced attribute would be calling the
+    tool's code. Whatever was bound before the run is bound after it."""
     before = dispute_rating.submit_dispute_rating
     seed()
 
