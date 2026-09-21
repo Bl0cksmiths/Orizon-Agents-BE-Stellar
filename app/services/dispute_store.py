@@ -593,6 +593,12 @@ _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.
 # trusting whatever arrives. Long enough for the one line a buyer reads to
 # recognise the step; short enough that a hostile endpoint cannot turn a
 # settlement row into a dumping ground.
+#
+# It bounds the CONTENT, not the stored length: `sanitize_untrusted` cuts at
+# this many characters and then appends its ` …[truncated]` marker, so a cut
+# summary is stored a few characters longer — the same trade the dispute
+# reason makes, and deliberately so, because a reader must be able to tell a
+# summary that was cut from one that simply ended.
 OUTPUT_SUMMARY_MAX_CHARS = 280
 
 
