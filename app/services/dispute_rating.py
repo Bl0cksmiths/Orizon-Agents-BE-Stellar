@@ -20,6 +20,7 @@ with `Replay` is a retry whose earlier attempt already landed.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
@@ -166,9 +167,12 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         all: it means this deployment's signer is not the ledger's Scorer.
       - anything else → TIMEOUT, with the in-flight hash when there is one.
         `"timeout"` is the client's word for submitted-then-lost-track, and an
-        unrecognised status or a SUCCESS with no hash is the same unknown. Unlike
-        a refund's, this unknown is harmless to retry: if the first submit
-        landed, the replay guard refuses the second.
+        unrecognised status or a SUCCESS with no hash is the same unknown, and
+        so is any other exception: it can be raised either side of the
+        submission and nothing in it says which. Unlike a refund's, this unknown
+        is harmless to retry: if the first submit landed, the replay guard
+        refuses the second.
+      - cancellation is logged and re-raised, never turned into an outcome.
 
     Raises instead of returning when the rating cannot even be formed: a
     settlement with no such step (`LookupError`) or a job id that will not
@@ -215,6 +219,13 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
 
     try:
         raw = await sc.submit_rating_async(dispute.agent_id, derived, DISPUTE_RATING, weight, dispute.payer, "dispute")
+    except asyncio.CancelledError:
+        # A shutdown cancel can land between the submit and its confirmation,
+        # as it can for the refund before it, and CancelledError is a
+        # BaseException none of the handlers below see. Leave the line an
+        # operator reconciles from, then let the cancellation through.
+        logger.error("dispute %s: rating submit cancelled mid-flight and MAY HAVE LANDED (%s)", dispute.id, facts)
+        raise
     except sc.ContractError as e:
         if e.code == _LEDGER_REPLAY:
             # WARNING, not ERROR: on a retry this is the expected answer from an
@@ -251,6 +262,15 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
                 exc_info=True,
             )
         return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight)
+    except Exception as e:
+        logger.error(
+            "dispute %s: rating submit raised and MAY HAVE LANDED: %s (%s)",
+            dispute.id,
+            e,
+            facts,
+            exc_info=True,
+        )
+        return RatingOutcome("TIMEOUT", None, derived_hex, DISPUTE_RATING, weight)
 
     raw_hash = raw.get("hash")
     tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
