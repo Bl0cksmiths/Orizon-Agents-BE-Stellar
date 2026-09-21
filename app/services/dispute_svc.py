@@ -816,9 +816,10 @@ async def _rate_credited(
     its credit lands, and again on every later `uphold` of it. The five
     answers the ledger can give, and what each one means for THIS dispute:
 
-      - **SUCCESS** — it landed. The hash is recorded as `rating_tx`, the
-        agent's cached score is invalidated so routing sees the rating now
-        rather than one read TTL from now, and the workflow is told.
+      - **SUCCESS** — it landed. The hash is recorded as `rating_tx` with
+        `rating_confirmed` True, the agent's cached score is invalidated so
+        routing sees the rating now rather than one read TTL from now, and the
+        workflow is told.
       - **REPLAY, with a `rating_tx` on record** — an earlier attempt of ours
         landed, so this is done: the hash on record is kept and the cache is
         invalidated, because a rating that timed out may have landed since.
@@ -827,8 +828,10 @@ async def _rate_credited(
         writing. Loud, and never read as resolved.
       - **TIMEOUT** — submitted and unconfirmed: it may still land. The
         in-flight hash is recorded at once, so the evidence exists the moment
-        the rating does, and the next `uphold` settles it — REPLAY if it
-        landed, a fresh SUCCESS that replaces the hash if it never did.
+        the rating does, with `rating_confirmed` False, so a receipt holding
+        that hash does not claim a consequence nobody has seen land. The next
+        `uphold` settles it — REPLAY if it landed, a fresh SUCCESS that
+        replaces the hash if it never did.
       - **FAILED** — nothing landed and nothing is recorded; retryable.
 
     A rating that cannot even be FORMED — `submit_dispute_rating` raises for a
@@ -935,7 +938,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # must be in the log and the score fresh even if the write fails.
         _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
         reputation_svc.invalidate_rep(credited.agent_id)
-        rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash)
+        rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True)
         await _note_rating_on_workflow(rated, outcome)
         return rated
 
@@ -966,7 +969,10 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             outcome.tx_hash,
         )
         if outcome.tx_hash:
-            return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash)
+            # Evidence, and explicitly NOT confirmation: the hash is the
+            # rating's the moment it lands, but until the ledger vouches for it
+            # the receipt must not say the agent was rated.
+            return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=False)
         return credited
 
     # FAILED — and, deliberately, anything else: for a rating the safe
