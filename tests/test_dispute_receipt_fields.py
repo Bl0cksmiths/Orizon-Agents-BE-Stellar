@@ -258,3 +258,38 @@ def test_every_row_of_the_trail_is_dated_not_only_the_newest() -> None:
     assert stamps[0] == pool.disputes[0]["opened_at"]
     assert None not in stamps
     assert stamps == sorted(stamps)
+
+
+# ── carried forward: credited_usdc and rating_confirmed ───────────────────
+
+
+def test_the_credited_amount_and_the_confirmation_are_carried_forward(store: DisputeStore) -> None:
+    """COALESCE, over both stores. A transition that does not name a receipt
+    fact keeps the recorded one: the rating lands after the credit and names
+    no amount, and must not blank the one the buyer was paid. A False is
+    recorded as the answer it is, not read as "not said" — and a later True
+    replaces it, which is the confirmation a timed-out rating is owed once
+    the ledger vouches for it."""
+
+    async def go() -> tuple[DisputeRecord, ...]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund", credited_usdc=1.25)
+        in_flight = await store.append_status(opened.id, "credited", rating_tx="tx_rating", rating_confirmed=False)
+        silent = await store.append_status(opened.id, "credited")
+        confirmed = await store.append_status(opened.id, "credited", rating_confirmed=True)
+        later = await store.append_status(opened.id, "credited")
+        stored = await store.get_dispute(opened.id)
+        assert stored is not None
+        return credited, in_flight, silent, confirmed, later, stored
+
+    credited, in_flight, silent, confirmed, later, stored = asyncio.run(go())
+
+    assert credited.credited_usdc == 1.25 and credited.rating_confirmed is None
+    # What moved, not the 1.5 promised at opening — and kept by the rating.
+    assert in_flight.credited_usdc == 1.25 and in_flight.creditable_usdc == 1.5
+    assert in_flight.rating_confirmed is False
+    assert silent.rating_confirmed is False and silent.rating_tx == "tx_rating"
+    assert confirmed.rating_confirmed is True
+    assert later.rating_confirmed is True and later.credited_usdc == 1.25
+    assert stored == later
