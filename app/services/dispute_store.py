@@ -753,6 +753,7 @@ class PostgresDisputeStore:
                 # carry a table and its indexes together.
                 await self._pool.execute(_CREATE_SETTLEMENTS_SQL)
                 await self._pool.execute(_CREATE_DISPUTES_SQL)
+                await self._pool.execute(_CREATE_REFUND_CLAIMS_SQL)
                 self._ready = True
         return self._pool
 
