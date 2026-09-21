@@ -236,6 +236,22 @@ class Settings(BaseSettings):
     # it to [0, 1]). 1.0 = the whole step, which is what ADR 0002 states as the
     # policy buyer and operator are both told in advance.
     dispute_credited_fraction: float = 1.0
+    # Hard ceiling on a SINGLE partial-credit refund, checked before anything
+    # is signed (story 4.03). Deliberately NOT `max_charge_usdc`: that one
+    # bounds what a buyer authorised themselves to spend, while this bounds
+    # what the PLATFORM pays out of its own wallet on an adjudicator's say-so,
+    # so sharing a number between them would be a coincidence rather than a
+    # control. A step settles for hundredths of a USDC on this deployment, so
+    # 1.0 is far above anything legitimate and still keeps the blast radius of
+    # a leaked settler key, or a mistaken uphold, small.
+    max_refund_usdc: float = 1.0
+    # The master switch on the refund path (story 4.03). OFF by default, so a
+    # deployment only pays out once an operator has deliberately turned it on
+    # — and turning it on is what makes API_KEY mandatory below. A money path
+    # that is enabled by the mere presence of a signing key would be enabled
+    # in every test run and on every developer's laptop, which is how an
+    # anonymous payout route reaches production without anyone choosing it.
+    dispute_refunds_enabled: bool = False
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
@@ -350,6 +366,13 @@ class Settings(BaseSettings):
         production environment. Testnet signers and uat/stage PDAX move play
         money and stay open, as does a read-only mainnet deployment.
 
+        The refund path (story 4.03) is the exception that applies on testnet
+        as well, because an adjudicated payout spends the platform's OWN
+        balance rather than an allowance a payer already authorised. It is
+        scoped to `dispute_refunds_enabled` so that it names a deliberate
+        operator choice rather than the presence of credentials every test run
+        and laptop already has.
+
         Refusing to boot — rather than reporting not-ready — is both the
         safer option and the one consistent with the validators above.
         Failing /readiness would not actually close the hole: render.yaml
@@ -368,6 +391,26 @@ class Settings(BaseSettings):
             )
         if pdax_moves_real_value(self.pdax_environment) and self.pdax_username and self.pdax_password:
             exposures.append("production PDAX credentials are set, so /api/pdax/* can move real fiat")
+        # Story 4.03, and the one exposure here that bites on TESTNET too. The
+        # branches above leave testnet open because a testnet signer moves play
+        # money on behalf of a payer who already authorised the spend on-chain.
+        # The refund path is different in kind: an adjudicator's say-so moves
+        # the PLATFORM's own balance to an address in the request, with no
+        # prior authorisation to bound it. Anonymous, that is a drain of the
+        # settler wallet on any network, so the refund routes demand a key
+        # wherever they can actually sign.
+        # The switch ALONE, deliberately: conjoining it with the signer and the
+        # SAC would let a deployment that flips refunds on before wiring either
+        # of them boot with an empty key, leaving `require_adjudicator` as the
+        # only thing between an anonymous caller and the payout route. It fails
+        # closed, so the door is shut either way — but a validator that
+        # promises "refunds on implies a key" must not have a hole in it, and
+        # the operator who turns the switch on is the one who should be told.
+        if self.dispute_refunds_enabled:
+            exposures.append(
+                "a signing key and an asset SAC are set, so /api/disputes/{id}/uphold can "
+                "transfer the platform's own funds"
+            )
         if exposures:
             raise ValueError(
                 "API_KEY is required because " + "; and ".join(exposures) + ". Without it every "

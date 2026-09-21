@@ -17,13 +17,20 @@ import and the append-only tables: same seam, same failure modes, one pattern to
 learn. Timestamps are epoch seconds from our own clock, never the database's, so
 no timezone conversion sits between what was promised and what is later read.
 
-Durably, that is two tables. `workflow_settlements` holds one row per settled
+Durably, that is three tables. `workflow_settlements` holds one row per settled
 workflow, the step breakdown in a single JSON column; `dispute_events` holds one
 row per status transition, so a dispute's current state is its newest row and
 its history is the audit trail a chargeback is answered with. One dispute per
 (job_id_hex, step_index) is enforced by a partial UNIQUE INDEX rather than by a
 read in Python, because two requests for the same step arrive at once and only
 the database can settle which of them opened it.
+
+`refund_claims` is the odd one out and the most important (story 4.03): one row
+per dispute currently being paid, and the only table here that is not evidence.
+It is a mutex, held across a transfer that moves platform money to a buyer and
+cannot be undone, and it is written and dropped by the same statements that
+move the dispute in and out of `crediting` so the lock and the status cannot
+disagree. What is left in it is the queue a human reconciles.
 """
 
 from __future__ import annotations
@@ -41,10 +48,17 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
-# A dispute's lifecycle. `open` is all story 4.02 ever writes; 4.03 pays the
-# credit (`credited`) and 4.04 records the on-chain rating, while an
-# adjudication that goes the other way ends at `rejected`.
-DisputeStatus = Literal["open", "upheld", "credited", "rejected"]
+# A dispute's lifecycle. `open` is all story 4.02 ever writes; 4.03 adjudicates
+# (`upheld` or `rejected`) and pays the credit (`credited`), and 4.04 records
+# the on-chain rating.
+#
+# `crediting` is not a state anybody adjudicates INTO — it is the refund claim
+# itself, made durable. A payout has a window between "we decided to pay" and
+# "we know whether the transfer landed", and on the far side of that window a
+# timed-out submission may still settle. Parking the dispute in `crediting`
+# for the duration is what stops a retry paying twice: the claim is the lock,
+# and it outlives the process that took it.
+DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
 
 # Retention for the in-memory fallback ONLY — the store that runs when
 # DATABASE_URL is unset (local dev and the hermetic test suite). Postgres keeps
@@ -95,7 +109,7 @@ def _import_asyncpg() -> Any:
 
 
 # The schema, created on first use with CREATE TABLE IF NOT EXISTS. There is no
-# migration tooling in this repo and two tables do not justify introducing any:
+# migration tooling in this repo and three tables do not justify introducing any:
 # the DDL is idempotent, so every boot and every redeploy converges on the same
 # schema with no migration step that could fail a deploy at 3am.
 #
@@ -183,6 +197,14 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 #   holding after a dispute is resolved, so a rejected dispute cannot be
 #   re-opened as a second dispute of the same step.
 #
+# `note` arrives with story 4.03's adjudication, and `dispute_events` already
+# exists wherever 4.02 ran — so the column needs the ALTER as well as its place
+# in the CREATE. CREATE TABLE IF NOT EXISTS does nothing whatever to a table
+# that is already there, and the first INSERT naming a column the deployed
+# table lacks would fail every dispute write on the service. ADD COLUMN IF NOT
+# EXISTS keeps the whole block idempotent, which is the property this schema is
+# maintained by in place of a migration tool.
+#
 # The three read indexes carry (key..., id DESC) so "the newest row for this
 # dispute / this step / this task" is served from the index without a sort.
 _CREATE_DISPUTES_SQL = """
@@ -202,8 +224,10 @@ CREATE TABLE IF NOT EXISTS dispute_events (
     resolved_at     DOUBLE PRECISION,
     refund_tx       TEXT,
     rating_tx       TEXT,
+    note            TEXT,
     opening         BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
     ON dispute_events (job_id_hex, step_index) WHERE opening;
 CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
@@ -212,6 +236,58 @@ CREATE INDEX IF NOT EXISTS dispute_events_step_idx
     ON dispute_events (job_id_hex, step_index, id DESC);
 CREATE INDEX IF NOT EXISTS dispute_events_task_idx
     ON dispute_events (task_id, dispute_id, id DESC);
+"""
+
+# The refund mutex (story 4.03). One row per dispute that is mid-payout, and
+# the PRIMARY KEY is the whole mechanism: `INSERT ... ON CONFLICT DO NOTHING`
+# is atomic in a single statement, so exactly one of any number of concurrent
+# claimants inserts and the rest come back empty.
+#
+# A separate table rather than a partial unique index over `dispute_events`,
+# for two reasons. That table is append-only, so a uniqueness rule scoped to
+# "is crediting" would forbid the SECOND claim after a failed transfer was
+# released — and a buyer who was not paid must stay payable. And an advisory
+# lock would not work here either: this store issues one statement per call,
+# and every CTE in a statement shares the snapshot taken before the lock could
+# be acquired, so the lock would guard nothing.
+#
+# Rows are deleted on release and on completion, always by the same statement
+# that writes the status the transition implies — so a row that outlives its
+# payout is a dispute genuinely stuck mid-flight, which is exactly what an
+# operator needs to find during reconciliation. `list_refund_claims` is that
+# read, and it is why the claim time is stored.
+#
+# Where the two failure modes cannot both be closed, this table BLOCKS rather
+# than forgets, and that is a decision rather than an accident. A claim that
+# evaporates lets a buyer be paid twice out of the platform wallet, and nothing
+# takes the second transfer back; a claim that outlives its payout only delays
+# one, and the delay is visible in the queue. So a claim held over a dispute
+# that is NOT `crediting` — which no path here can produce, but a hand-written
+# row or a hand-edited status could — refuses every later claim, and cannot be
+# released either, because dropping a claim that another payer may still be
+# signing against is the double payment this table exists to prevent. The way
+# out is deliberately the slow one: establish from the chain whether the buyer
+# was paid, then record that decision with append_status, which drops the claim
+# in the same statement.
+_CREATE_REFUND_CLAIMS_SQL = """
+CREATE TABLE IF NOT EXISTS refund_claims (
+    dispute_id  TEXT PRIMARY KEY,
+    claimed_at  DOUBLE PRECISION NOT NULL
+);
+"""
+
+# The reconciliation queue, oldest claim first — every payout that started and
+# has not finished, which on this path means every buyer who may be waiting on
+# a transfer nobody is going to retry for them.
+#
+# `dispute_id` breaks a tie between two claims taken in the same clock tick, so
+# two reads of an unchanged table cannot come back in different orders. No
+# LIMIT: a queue with enough rows to need paging is an incident, and truncating
+# it would hide exactly the row that made it one.
+_SELECT_REFUND_CLAIMS_SQL = """
+SELECT dispute_id, claimed_at
+FROM refund_claims
+ORDER BY claimed_at, dispute_id
 """
 
 
@@ -264,7 +340,7 @@ INSERT INTO workflow_settlements (
 # no join, because each row already carries the whole record.
 _SELECT_DISPUTE_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 FROM dispute_events
 WHERE dispute_id = $1
 ORDER BY id DESC
@@ -278,7 +354,7 @@ LIMIT 1
 # current state rather than one of several disputes' states.
 _SELECT_DISPUTE_BY_STEP_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 FROM dispute_events
 WHERE job_id_hex = $1 AND step_index = $2
 ORDER BY id DESC
@@ -294,7 +370,7 @@ LIMIT 1
 # shuffle between two identical requests.
 _SELECT_DISPUTES_FOR_TASK_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 FROM (
     SELECT DISTINCT ON (dispute_id) *
     FROM dispute_events
@@ -328,8 +404,8 @@ ORDER BY opened_at, step_index
 _INSERT_DISPUTE_SQL = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE)
 ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
 RETURNING dispute_id
 """
@@ -349,7 +425,11 @@ RETURNING dispute_id
 # WRONGLY, and this table is evidence.
 #
 # COALESCE is what makes a partial update mean "leave the rest alone": a
-# transition that names only a refund_tx keeps the rating_tx already recorded.
+# transition that names only a refund_tx keeps the rating_tx and the
+# adjudicator's note already recorded. The note is carried exactly that way and
+# for the same reason — 4.04's rating lands minutes after 4.03's rejection, and
+# a transition that blanked the reason a dispute was refused would take the
+# platform's half of the argument off the record.
 # `resolved_at` falls through three values in order — the one the caller gave,
 # the one already on the record, then $6, this process's clock — so the moment a
 # dispute was first resolved is stamped once and never moved by a later event.
@@ -360,6 +440,16 @@ RETURNING dispute_id
 # transition row that claimed to be an opening would collide with its own
 # dispute's opening row in the partial unique index, and every resolution in
 # the system would fail.
+#
+# `finished` drops the refund mutex when this transition ends the dispute, in
+# the same statement rather than in a second call after it. A dispute that has
+# been credited or rejected is not mid-payout, and a claim row that outlived
+# the credit it was taken for would leave `refund_claims` holding a lock over a
+# dispute that is already paid — which costs nobody money but makes the
+# reconciliation queue lie, and a queue that lists finished work is a queue
+# operators learn to ignore. The rule lives in the SQL and not in an `if` above
+# the call, so a future transition cannot forget it. It runs even when `latest`
+# is empty, which is harmless: a dispute that does not exist holds no mutex.
 _APPEND_STATUS_SQL = """
 WITH latest AS (
     SELECT *
@@ -367,22 +457,134 @@ WITH latest AS (
     WHERE dispute_id = $1
     ORDER BY id DESC
     LIMIT 1
+),
+finished AS (
+    DELETE FROM refund_claims
+    WHERE dispute_id = $1 AND $2 IN ('credited', 'rejected')
+    RETURNING dispute_id
 )
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, $2,
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
-       COALESCE($5::double precision, latest.resolved_at, $6::double precision),
+       COALESCE($6::double precision, latest.resolved_at, $7::double precision),
        COALESCE($3::text, latest.refund_tx),
        COALESCE($4::text, latest.rating_tx),
+       COALESCE($5::text, latest.note),
        FALSE
 FROM latest
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 """
+
+
+# Appending a transition row that changes ONLY the status: every other column
+# is copied from `latest` verbatim. Both refund-mutex transitions are that
+# shape and differ in a single clause — what gates the row — so they share one
+# statement instead of spelling the fifteen-column list out twice more, where a
+# column added later would go missing from one of them without failing
+# anything.
+#
+# `resolved_at` is carried forward rather than stamped, and that is the
+# load-bearing difference from _APPEND_STATUS_SQL. Neither `crediting` nor the
+# `upheld` a release restores is a RESOLUTION: a dispute mid-payout has not
+# been resolved, and one handed back has been resolved even less. Stamping the
+# claim would date the dispute from the moment a payout was ATTEMPTED — and
+# since COALESCE keeps the first value forever, the row that finally credits
+# the buyer would report that moment instead of its own.
+_APPEND_UNRESOLVED_ROW = """
+INSERT INTO dispute_events (
+    dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
+)
+SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
+       latest.agent_id, latest.payer, latest.reason, '{status}',
+       latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
+       latest.resolved_at, latest.refund_tx, latest.rating_tx, latest.note,
+       FALSE
+FROM latest {gate}
+RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
+"""
+
+
+# Take the mutex AND move the dispute to `crediting`, in ONE statement.
+#
+# Two statements cannot do this safely, and the version that tried is worth
+# naming: insert the claim, read the status back, append `crediting`. The gap
+# between the insert and the append is a window the process can die in — Render
+# spins a free instance down whenever it idles — and what it leaves behind is a
+# claim row over a dispute still reading `upheld`. Nothing can pay that buyer
+# afterwards: the claim refuses every later claimant, and a release refuses
+# because the dispute is not `crediting`. They are owed money that no code path
+# can send them.
+#
+# One statement has no such window. A single statement is its own transaction,
+# so either the claim row and the `crediting` row are both there or neither is,
+# whatever happens to the process between them.
+#
+# `claim` is where concurrency is settled, and it is settled by the PRIMARY KEY
+# and not by the status it reads. Both CTEs share one snapshot, taken before
+# either ran, so two claimants racing each other BOTH see `upheld` — a status
+# can rule a claim out, never arbitrate between two. The unique index is not
+# snapshot-based: exactly one insert lands, the loser's ON CONFLICT DO NOTHING
+# returns nothing, and the main INSERT selects through `claim`, so the loser
+# writes no event row either.
+_CLAIM_REFUND_CTES = """
+WITH latest AS (
+    SELECT *
+    FROM dispute_events
+    WHERE dispute_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+),
+claim AS (
+    INSERT INTO refund_claims (dispute_id, claimed_at)
+    SELECT $1, $2 FROM latest WHERE latest.status = 'upheld'
+    ON CONFLICT (dispute_id) DO NOTHING
+    RETURNING dispute_id
+)"""
+
+_CLAIM_REFUND_SQL = _CLAIM_REFUND_CTES + _APPEND_UNRESOLVED_ROW.format(
+    status="crediting",
+    gate="JOIN claim ON claim.dispute_id = latest.dispute_id",
+)
+
+# Give the mutex back AND put the dispute back to `upheld`, in ONE statement,
+# for the reason the claim is one: the two are the same fact recorded twice and
+# must not be able to come apart. Dropping the mutex first would let another
+# payer claim a dispute still reading `crediting`, which then refuses the
+# credit a buyer is owed; writing the status first and dying before the DELETE
+# would leave a claim row over an `upheld` dispute, which is the wedge
+# _CLAIM_REFUND_SQL describes and which nothing can undo.
+#
+# The gate is the STATUS rather than the claim row, deliberately. A dispute
+# that somehow reached `crediting` without a mutex row would be stuck forever
+# if a release refused to act without one, and `append_status` is public enough
+# that "somehow" is not hypothetical. Gating on the status makes this call
+# REPAIR that state instead of preserving it: the dispute goes back to `upheld`
+# where it can be claimed again, and the DELETE is a no-op.
+_RELEASE_REFUND_CLAIM_CTES = """
+WITH latest AS (
+    SELECT *
+    FROM dispute_events
+    WHERE dispute_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+),
+released AS (
+    DELETE FROM refund_claims
+    WHERE dispute_id = $1 AND EXISTS (SELECT 1 FROM latest WHERE latest.status = 'crediting')
+    RETURNING dispute_id
+)"""
+
+_RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.format(
+    status="upheld",
+    gate="WHERE latest.status = 'crediting'",
+)
 
 
 @dataclass(frozen=True)
@@ -440,6 +642,15 @@ class DisputeRecord:
     dispute would credit back under the policy in force when it was opened —
     both frozen at opening time so a later policy change cannot rewrite what the
     buyer was shown.
+
+    `note` is the adjudicator's side of the argument: why the dispute was upheld
+    or rejected. The buyer's side is durable from the moment they open it
+    (`reason`, frozen there), and an upheld dispute leaves an amount and a
+    transaction hash behind as well — but a rejection recorded only a status and
+    a timestamp, which is backwards, because a rejection is the outcome most
+    likely to be contested. It is kept EXACTLY as given: bounding and sanitising
+    untrusted text is the caller's job, and a store that edited evidence on its
+    way in would be a worse store.
     """
 
     id: str
@@ -456,6 +667,24 @@ class DisputeRecord:
     resolved_at: float | None = None
     refund_tx: str | None = None
     rating_tx: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class RefundClaim:
+    """One payout that started and has not finished.
+
+    A claim is taken before anything is signed and dropped when the dispute is
+    credited or rejected, so a claim that is still held is a refund that began
+    and did not end: a transfer that timed out and by D3 is never retried
+    automatically, a process that died mid-payout, a buyer still waiting.
+
+    `claimed_at` is how long they have been waiting, which is the number that
+    decides whether this one needs a human now.
+    """
+
+    dispute_id: str
+    claimed_at: float
 
 
 def new_dispute_id() -> str:
@@ -505,8 +734,15 @@ class DisputeStore(Protocol):
         *,
         refund_tx: str | None = None,
         rating_tx: str | None = None,
+        note: str | None = None,
         resolved_at: float | None = None,
     ) -> DisputeRecord: ...
+
+    async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
+
+    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None: ...
+
+    async def list_refund_claims(self) -> tuple[RefundClaim, ...]: ...
 
     async def close(self) -> None: ...
 
@@ -523,6 +759,13 @@ class InMemoryDisputeStore:
     def __init__(self) -> None:
         self._settlements: OrderedDict[str, SettlementRecord] = OrderedDict()
         self._disputes: OrderedDict[str, DisputeRecord] = OrderedDict()
+        # `refund_claims`, modelled rather than inferred from the status. The
+        # status alone would be enough to make this store behave correctly, and
+        # that is the trap: the two implementations would then differ in what
+        # they HOLD, and a case that only one of them gets right is a case the
+        # hermetic suite cannot find. Insertion order is claim order, which is
+        # the order a reconciliation queue is read in.
+        self._refund_claims: dict[str, float] = {}
 
     async def record_settlement(self, record: SettlementRecord) -> None:
         self._settlements[record.job_id_hex] = record
@@ -552,6 +795,9 @@ class InMemoryDisputeStore:
         self._disputes[record.id] = record
         while len(self._disputes) > _MAX_IN_MEMORY:
             dropped, _ = self._disputes.popitem(last=False)
+            # Its mutex goes with it: a claim over a dispute that no longer
+            # exists would sit in the queue as a payout nobody can look up.
+            self._refund_claims.pop(dropped, None)
             logger.warning(
                 "in-memory dispute store full (%d): dropped dispute %s — set DATABASE_URL to persist disputes",
                 _MAX_IN_MEMORY,
@@ -578,6 +824,7 @@ class InMemoryDisputeStore:
         *,
         refund_tx: str | None = None,
         rating_tx: str | None = None,
+        note: str | None = None,
         resolved_at: float | None = None,
     ) -> DisputeRecord:
         current = self._disputes.get(dispute_id)
@@ -588,10 +835,78 @@ class InMemoryDisputeStore:
             status=status,
             refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
             rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
+            note=note if note is not None else current.note,
             resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or time.time()),
         )
         self._disputes[dispute_id] = updated
+        if status in ("credited", "rejected"):
+            # A dispute that has finished is not mid-payout. Postgres drops the
+            # mutex inside the statement that writes this row; here there is no
+            # statement to be inside, but the rule is the same one.
+            self._refund_claims.pop(dispute_id, None)
         return updated
+
+    async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
+        """Take the exclusive right to pay this dispute, or return None.
+
+        The claim is the whole of story 4.03's idempotency, so it is a
+        CONDITIONAL transition and never a read followed by a write: only a
+        dispute sitting in `upheld` and held by nobody can be claimed, and
+        claiming moves it to `crediting` in the same step. A second caller — a
+        retry, a double click, a duplicate webhook — gets None, which is the
+        signal to return the existing record rather than pay again.
+
+        Atomic for free, where Postgres buys the same guarantee with a PRIMARY
+        KEY: there is no await between reading the status and writing it, so
+        no second caller can be running in between.
+
+        None is deliberately not an error and does not say why: already
+        claimed, already credited, still open and never adjudicated, or
+        rejected all mean the same thing to a payer, which is *do not sign
+        anything*. The caller reads the record back if it needs to explain.
+        """
+        current = self._disputes.get(dispute_id)
+        if current is None or current.status != "upheld" or dispute_id in self._refund_claims:
+            return None
+        self._refund_claims[dispute_id] = time.time()
+        claimed = replace(current, status="crediting")
+        self._disputes[dispute_id] = claimed
+        return claimed
+
+    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+        """Hand the claim back, so an unpaid dispute can be paid later.
+
+        Released ONLY when the caller knows with certainty that nothing was
+        signed, or that what was signed definitively failed on-chain — a cap
+        refusal, a rejected submission, a transfer that came back FAILED. In
+        those cases the buyer is still owed, and leaving the dispute stuck in
+        `crediting` would make a retry impossible.
+
+        A submission that TIMED OUT is the case this must not be used for: the
+        transaction may still settle, so the claim stays held and the dispute
+        stays in `crediting` until a human reconciles it. Paying that buyer
+        twice is a worse failure than paying them late.
+        """
+        current = self._disputes.get(dispute_id)
+        if current is None or current.status != "crediting":
+            return None
+        # Gated on the STATUS and never on the claim, so a dispute somehow left
+        # in `crediting` without one is repaired rather than stranded — the
+        # rule _RELEASE_REFUND_CLAIM_SQL follows, and for the same reason.
+        self._refund_claims.pop(dispute_id, None)
+        released = replace(current, status="upheld")
+        self._disputes[dispute_id] = released
+        return released
+
+    async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
+        """Every payout still in flight, oldest first.
+
+        Insertion order is claim order, so the dict needs no sorting to read
+        the way the Postgres queue does.
+        """
+        return tuple(
+            RefundClaim(dispute_id=dispute_id, claimed_at=at) for dispute_id, at in self._refund_claims.items()
+        )
 
     async def close(self) -> None:
         """Nothing to release — kept so the seam is one shape, not two."""
@@ -675,6 +990,7 @@ class PostgresDisputeStore:
                 # carry a table and its indexes together.
                 await self._pool.execute(_CREATE_SETTLEMENTS_SQL)
                 await self._pool.execute(_CREATE_DISPUTES_SQL)
+                await self._pool.execute(_CREATE_REFUND_CLAIMS_SQL)
                 self._ready = True
         return self._pool
 
@@ -773,6 +1089,7 @@ class PostgresDisputeStore:
             resolved_at=None if row["resolved_at"] is None else float(row["resolved_at"]),
             refund_tx=row["refund_tx"],
             rating_tx=row["rating_tx"],
+            note=row["note"],
         )
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
@@ -802,6 +1119,7 @@ class PostgresDisputeStore:
             record.resolved_at,
             record.refund_tx,
             record.rating_tx,
+            record.note,
         )
         if won is not None:
             return record
@@ -824,6 +1142,7 @@ class PostgresDisputeStore:
         *,
         refund_tx: str | None = None,
         rating_tx: str | None = None,
+        note: str | None = None,
         resolved_at: float | None = None,
     ) -> DisputeRecord:
         """Append the transition and return the dispute as it now stands.
@@ -845,10 +1164,66 @@ class PostgresDisputeStore:
         # It is only used when neither the caller nor the record already has a
         # resolution time — see COALESCE in _APPEND_STATUS_SQL.
         now = time.time()
-        row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, resolved_at, now)
+        # The statement also drops the refund mutex when `status` finishes the
+        # dispute, so what remains in `refund_claims` is exactly the set of
+        # payouts still in flight rather than a pile of spent locks.
+        row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, note, resolved_at, now)
         if row is None:
             raise KeyError(dispute_id)
         return self._to_dispute(row)
+
+    async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
+        """Take the exclusive right to pay this dispute, or return None.
+
+        One statement does all of it — win the mutex, check the dispute is
+        still `upheld`, move it to `crediting` — so a process that dies
+        mid-call leaves a dispute that is either fully claimed or untouched,
+        never a claim row stranded over a dispute nobody can pay.
+
+        None is deliberately not an error and does not say why: already
+        claimed, already credited, still open and never adjudicated, or
+        rejected all mean the same thing to a payer, which is *do not sign
+        anything*. The caller reads the record back if it needs to explain.
+        """
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time())
+        return None if row is None else self._to_dispute(row)
+
+    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+        """Put a still-unpaid dispute back where another attempt can find it.
+
+        One statement drops the mutex and restores `upheld` together, so no
+        ordering of the two can strand a dispute: there is no moment at which
+        the claim is gone while the status still says a payout is in flight,
+        and none at which the status is back while the claim still blocks it.
+
+        Released ONLY when the caller knows with certainty that nothing was
+        signed, or that what was signed definitively FAILED on-chain — a cap
+        refusal, a rejected submission, a transfer that came back FAILED. In
+        those cases the buyer is still owed, and leaving the dispute stuck in
+        `crediting` would make a retry impossible.
+
+        A submission that TIMED OUT is the case this must not be used for: the
+        transaction may still settle, so the claim stays held and the dispute
+        stays in `crediting` until a human reconciles it. Paying that buyer
+        twice is a worse failure than paying them late.
+        """
+        pool = await self._ready_pool()
+        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id)
+        return None if row is None else self._to_dispute(row)
+
+    async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
+        """Every payout still in flight, oldest first.
+
+        The mutex doubles as the reconciliation queue, and this is the read
+        that makes that true rather than aspirational. D3 forbids retrying a
+        timed-out transfer, so the ONLY way a buyer whose refund hung gets
+        paid is a human finding them — and a lock nobody can list is a buyer
+        nobody can find.
+        """
+        pool = await self._ready_pool()
+        rows = await pool.fetch(_SELECT_REFUND_CLAIMS_SQL)
+        return tuple(RefundClaim(dispute_id=row["dispute_id"], claimed_at=float(row["claimed_at"])) for row in rows)
 
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
