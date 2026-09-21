@@ -26,7 +26,7 @@ import base64
 import pytest
 
 from app.config import settings
-from app.services import dispute_svc
+from app.services import dispute_svc, refund_svc
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
@@ -484,6 +484,36 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
     # Older clients read the deadline at the top level, and it must be the
     # same instant the settlement carries, not a second opinion about it.
     assert body["window_closes_at"] == body["settlement"]["window_closes_at"]
+
+
+# (fraction configured, the credit on the fixture's 0.25 USDC delivered step).
+# A third exercises the 7-decimal rounding, and the out-of-range pair the clamp:
+# the receipt must show exactly what an uphold would compute, never its own
+# re-derivation of it.
+CREDIT_CASES = [
+    (1 / 3, 0.0833333),
+    (0.5, 0.125),
+    (1.5, 0.25),
+    (-0.25, 0.0),
+]
+
+
+@pytest.mark.parametrize(
+    ("fraction", "credit"), CREDIT_CASES, ids=["a-third-rounded", "half", "above-one-clamped", "negative-clamped"]
+)
+def test_a_steps_credit_is_the_refunds_own_number(client, monkeypatch, fraction, credit):
+    monkeypatch.setattr(settings, "dispute_credited_fraction", fraction)
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    steps = client.get("/api/tasks/task-1/disputes").json()["settlement"]["steps"]
+
+    undelivered, delivered = steps
+    assert delivered["creditable_usdc"] == refund_svc.credited_amount_usdc(0.25, fraction) == credit
+    # Never its price times the fraction: it was not billed, it cannot be
+    # disputed, and a receipt that priced a credit for it would promise money
+    # nobody can claim.
+    assert undelivered["delivered"] is False
+    assert undelivered["creditable_usdc"] == 0.0
 
 
 def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
