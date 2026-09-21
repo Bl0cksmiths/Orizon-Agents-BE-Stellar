@@ -135,6 +135,49 @@ anything the agent was paid:
 The full reasoning, the rejected alternatives and the testnet proof that a real
 credit lands are in `docs/decisions/0002-partial-credit-refund.md`.
 
+## How a dispute is adjudicated, and how the credit is paid
+
+A person decides, through an authenticated route, and the payout that follows
+is ordered by that decision alone. There is no automatic rule that upholds a
+dispute, and nothing on-chain weighs the claim.
+
+**Rejecting** is one write: the dispute moves to `rejected` with its resolution
+time, the reason it was opened with stays on the record, and nothing is signed
+or spent.
+
+**Upholding** is where money moves, and it happens in a fixed order:
+
+1. The dispute is recorded `upheld`. That is the verdict, and it is durable
+   before anything else is attempted.
+2. A **refund claim** is taken on that dispute. It is a row in a table, so it
+   survives a restart, and only one caller can ever hold it. Taking it moves
+   the dispute to `crediting`. If the claim cannot be taken — because another
+   payout already holds it, or because the dispute is not in a state that can
+   be paid — nothing is signed at all.
+3. The amount is computed and checked against `MAX_REFUND_USDC` **before** any
+   transaction is built.
+4. The settler signs a transfer of that amount to the buyer over the asset
+   contract.
+5. On success the dispute moves to `credited` with the refund transaction hash
+   on its record, and the claim is dropped.
+
+The claim is what makes a credit payable exactly once. Two adjudicators
+clicking at the same moment, a retried request, a redeployed process mid-flight
+— all of them meet the same row, and only one gets past it.
+
+**When the transfer definitively fails** — the network rejected it, so no money
+moved — the claim is released and the dispute goes back to `upheld`, payable
+again. A buyer who was not paid stays payable.
+
+**When the transfer times out, nothing is retried.** A submission that timed
+out may still settle, so the dispute stays in `crediting` with the in-flight
+transaction hash recorded, and an operator reconciles it against the chain.
+This is a deliberate trade: **paying late rather than ever paying twice.** A
+late credit is a support question; a double credit comes out of the platform's
+own wallet and cannot be reversed, because the asset contract has no more of an
+undo than the escrow does. If a buyer's dispute sits in `crediting`, it has not
+been forgotten — it is waiting on a person with a block explorer.
+
 ## The trust model, stated plainly
 
 - **The platform funds the credit.** The disputed agent's only consequence is
