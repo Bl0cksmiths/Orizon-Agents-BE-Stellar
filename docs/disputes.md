@@ -275,7 +275,7 @@ and the outcome is one of these:
 | `already on-chain — kept` | INFO | unchanged: an earlier attempt of this dispute landed | nothing |
 | `unconfirmed — it may still land` | ERROR | `rating_tx` is the in-flight hash, when the submission returned one | uphold again |
 | `failed (FAILED) — nothing landed` | ERROR | unchanged | uphold again — after fixing the cause, if the line before it names one |
-| `did not complete` | ERROR | unchanged | uphold again |
+| `did not complete` | ERROR | unchanged | if a `landed` line for the same dispute comes just before it, the rating is on-chain and only the write recording it failed: record that hash first, as the collision procedure does, or the retry will read as a collision. Otherwise uphold again |
 | `COLLISION` | ERROR | unchanged, and no `rating_tx` | the collision procedure at the end of this document |
 | `not re-attempted` | ERROR, or WARNING when a `rating_tx` is already on record | unchanged | the settlement that weights the rating is gone; see below |
 
