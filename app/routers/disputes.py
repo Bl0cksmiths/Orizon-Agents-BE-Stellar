@@ -517,23 +517,28 @@ async def get_dispute(
 async def list_task_disputes(
     task_id: str = Path(..., min_length=1, max_length=128),
 ) -> TaskDisputesResponse:
-    """The window and what has been raised, in one read.
+    """The settlement, the window and what has been raised, in one read.
 
     Lives here rather than in `routers/tasks.py` so the dispute surface is one
     module: `tasks.py` owns the in-memory task state and knows nothing about
     settlements, and a route split across the two would have to be found twice.
 
-    An unsettled or unknown task is **not** a 404 — it is a null window and an
-    empty list. The console polls this while a workflow runs, and the honest
-    answer to "can this be disputed yet?" before settlement is "no, and here is
-    nothing", not an error the UI has to special-case into the same view.
+    An unsettled or unknown task is **not** a 404 — it is a null settlement, a
+    null window and an empty list, with `now` still set. The console polls this
+    while a workflow runs, and the honest answer to "can this be disputed yet?"
+    before settlement is "no, and here is nothing", not an error the UI has to
+    special-case into the same view.
 
     Gated by `require_task_read` like every other `/tasks/{task_id}/...` read:
     a dispute names its payer and carries the buyer's own words about the work,
-    which is exactly the material that capability token exists to scope. The
-    dependency is a no-op while TASK_AUTH_REQUIRED is off, which is the public
-    demo's default, so this changes nothing for the frontend today and fails
-    closed the moment enforcement is turned on.
+    which is exactly the material that capability token exists to scope. But
+    the dependency is a no-op while TASK_AUTH_REQUIRED is off — the shipped
+    default, and how production runs — so there this read is world-readable,
+    and it fails closed only once enforcement is turned on. That is why the
+    settlement it carries is held to what is already public: the job id and the
+    payer are on-chain (see `SettlementView`), and each output summary is the
+    line the world-readable trace already showed. Nothing belongs on that shape
+    that the chain or the trace does not already publish.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
     disputes = await dispute_svc.list_for_task(task_id)
