@@ -245,6 +245,13 @@ class Settings(BaseSettings):
     # 1.0 is far above anything legitimate and still keeps the blast radius of
     # a leaked settler key, or a mistaken uphold, small.
     max_refund_usdc: float = 1.0
+    # The master switch on the refund path (story 4.03). OFF by default, so a
+    # deployment only pays out once an operator has deliberately turned it on
+    # — and turning it on is what makes API_KEY mandatory below. A money path
+    # that is enabled by the mere presence of a signing key would be enabled
+    # in every test run and on every developer's laptop, which is how an
+    # anonymous payout route reaches production without anyone choosing it.
+    dispute_refunds_enabled: bool = False
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
