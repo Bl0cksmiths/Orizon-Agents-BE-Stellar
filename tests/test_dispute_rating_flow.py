@@ -317,3 +317,31 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     assert ledger.replays == 1 and len(ledger.submits) == 1
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
+
+
+# ── a failure, and a collision ──────────────────────────────────
+
+
+def test_a_failed_rating_records_nothing_and_the_retry_lands_it(ledger, settler, invalidated, caplog) -> None:
+    """The ledger FAILED the transaction, which means nothing was written — so
+    nothing is recorded, not even the failed hash, and the dispute reads paid
+    but unrated. The ERROR line carries every id a reconciliation needs. The
+    retry lands it, and the refund is not touched by either."""
+    dispute = open_dispute()
+    ledger.script = ["fail"]
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        failed = uphold(dispute.id)
+
+    assert failed.status == "credited" and failed.refund_tx == "tx_credit"
+    assert failed.rating_tx is None
+    assert invalidated == []
+    (logged,) = svc_errors(caplog)
+    for fact in ("failed", dispute.id, JOB, derived(0).hex(), AGENT, dispute.payer):
+        assert fact in logged
+
+    landed = uphold(dispute.id)
+
+    assert landed.rating_tx == "tx_rating_2"
+    assert invalidated == [AGENT]
+    assert len(settler.transfers) == 1
