@@ -226,3 +226,64 @@ def test_the_refund_is_claimed_before_anything_is_signed(monkeypatch) -> None:
 
     assert asyncio.run(dispute_svc.uphold(dispute.id)).status == "credited"
     assert status_while_signing == ["crediting"]
+
+
+# ── the acceptance criterion: a retry cannot double-credit ──────
+
+
+def test_a_second_uphold_after_a_credit_signs_nothing_and_returns_the_first_hash(monkeypatch) -> None:
+    """THE acceptance criterion of 4.03. An adjudicator double-clicks, a proxy
+    retries a 502, a queue redelivers — the second uphold must answer with the
+    dispute exactly as the first one left it and sign nothing at all."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    no_signing(monkeypatch)
+    again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert again == credited  # the same record, byte for byte
+    assert again.refund_tx == "tx_credit"
+    assert again.resolved_at == credited.resolved_at
+    assert len(chain.calls) == 1
+
+
+def test_a_credited_dispute_is_answered_without_consulting_the_claim(monkeypatch) -> None:
+    """And it must not need the claim to reach that answer. The claim WOULD
+    also refuse — a credited dispute is not `upheld` — but making the
+    idempotency of a paid dispute depend on a lock in another table means a
+    lock that was dropped, expired or never taken becomes a second payment.
+    Two independent answers to "has this been paid", and this test is what
+    stops the redundant-looking one being tidied away."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    async def _must_not_be_asked(dispute_id: str) -> None:
+        raise SignedSomething("a credited dispute must be answered from its own status")
+
+    monkeypatch.setattr(dispute_store.get_dispute_store(), "claim_refund", _must_not_be_asked)
+    no_signing(monkeypatch)
+
+    assert asyncio.run(dispute_svc.uphold(dispute.id)) == credited
+
+
+def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(monkeypatch) -> None:
+    """The race the claim exists to close, forced rather than raced: another
+    caller took it between the adjudication and this claim. They are paying, so
+    this caller returns what the dispute now says instead of signing a second
+    transfer — and it is not an error, because the buyer is being paid."""
+    dispute = a_dispute()
+
+    async def _lost_the_race(dispute_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(dispute_store.get_dispute_store(), "claim_refund", _lost_the_race)
+    no_signing(monkeypatch)
+
+    answered = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    # The adjudication itself still stands — the dispute is upheld, and the
+    # winner of the claim is the one paying it.
+    assert answered.status == "upheld"
+    assert answered.refund_tx is None
