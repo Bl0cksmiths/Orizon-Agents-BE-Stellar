@@ -158,3 +158,122 @@ def test_claiming_a_dispute_that_does_not_exist_is_none(store: DisputeStore) -> 
 
     assert claimed is None
     assert queue == []
+
+
+# ── giving it back ────────────────────────────────────────────────────────
+
+
+def test_a_release_restores_upheld_and_a_later_claim_succeeds(store: DisputeStore) -> None:
+    """What a transfer that definitively FAILED has to leave behind.
+
+    The buyer is still owed, so the dispute has to end up back where a second
+    attempt can find it — and the mutex has to be gone with it, or that second
+    attempt would be refused and the credit would never be paid.
+    """
+
+    async def go() -> tuple[DisputeRecord | None, list[str], DisputeRecord | None, list[str]]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        released = await store.release_refund_claim(upheld.id)
+        after_release = await _queued(store)
+        reclaimed = await store.claim_refund(upheld.id)
+        return released, after_release, reclaimed, await _queued(store)
+
+    released, after_release, reclaimed, after_reclaim = asyncio.run(go())
+
+    assert released is not None and released.status == "upheld"
+    assert after_release == []
+    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert after_reclaim == ["dsp_0001"]
+
+
+@pytest.mark.parametrize("status", ["open", "upheld", "credited", "rejected"])
+def test_a_dispute_that_is_not_crediting_cannot_be_released(store: DisputeStore, status: DisputeStatus) -> None:
+    """Only a payout in flight can be handed back.
+
+    `upheld` is the case that matters: a release that answered it would let a
+    caller rewind a dispute it never claimed, and on this path rewinding means
+    making a dispute somebody else may be paying claimable by a second payer.
+    """
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, list[str]]:
+        opened = await store.open_dispute(a_dispute())
+        if status != "open":
+            await store.append_status(opened.id, status)
+        released = await store.release_refund_claim(opened.id)
+        return released, await store.get_dispute(opened.id), await _queued(store)
+
+    released, stored, queue = asyncio.run(go())
+
+    assert released is None
+    assert stored is not None and stored.status == status
+    assert queue == []
+
+
+def test_releasing_twice_does_not_rewind_a_second_time(store: DisputeStore) -> None:
+    """The second release finds a dispute that is no longer `crediting` and
+    says so, rather than appending another transition to a settled trail."""
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        return await store.release_refund_claim(upheld.id), await store.release_refund_claim(upheld.id)
+
+    first, second = asyncio.run(go())
+
+    assert first is not None and first.status == "upheld"
+    assert second is None
+
+
+def test_releasing_a_dispute_that_does_not_exist_is_none(store: DisputeStore) -> None:
+    assert asyncio.run(store.release_refund_claim("dsp_never")) is None
+
+
+# ── ending the payout ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("status", ["credited", "rejected"])
+def test_finishing_a_dispute_drops_its_claim(store: DisputeStore, status: DisputeStatus) -> None:
+    """A dispute that has finished is not mid-payout, so it leaves the queue —
+    and it leaves without the caller remembering to do anything, because a
+    reconciliation queue that lists finished work is one operators learn to
+    ignore."""
+
+    async def go() -> tuple[list[str], DisputeRecord, list[str], DisputeRecord | None]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        held = await _queued(store)
+        finished = await store.append_status(upheld.id, status, refund_tx="tx_refund")
+        return held, finished, await _queued(store), await store.claim_refund(upheld.id)
+
+    held, finished, queue, reclaimed = asyncio.run(go())
+
+    assert held == ["dsp_0001"]
+    assert finished.status == status
+    assert queue == []
+    # Dropping the mutex does not make the dispute payable again. The status
+    # refuses now, and it refuses forever.
+    assert reclaimed is None
+
+
+def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeStore) -> None:
+    """`crediting` is not a resolution, and neither is the `upheld` a release
+    restores.
+
+    A transition that re-dated the dispute would record the moment a payout was
+    ATTEMPTED as the moment the buyer was made whole — and since resolved_at is
+    stamped once and never moved, the row that finally credits them would carry
+    that wrong moment too.
+    """
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        upheld = await store.append_status(opened.id, "upheld", resolved_at=1_700_009_999.0)
+        claimed = await store.claim_refund(opened.id)
+        return upheld, claimed, await store.release_refund_claim(opened.id)
+
+    upheld, claimed, released = asyncio.run(go())
+
+    assert upheld.resolved_at == 1_700_009_999.0
+    assert claimed is not None and claimed.resolved_at == 1_700_009_999.0
+    assert released is not None and released.resolved_at == 1_700_009_999.0
