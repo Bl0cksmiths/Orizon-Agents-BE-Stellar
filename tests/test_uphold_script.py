@@ -1108,24 +1108,25 @@ def test_say_masks_a_secret_shaped_token_that_is_not_even_ours(capsys: pytest.Ca
 def test_nothing_reaches_stdout_except_through_say(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    credit: CreditSeam,
-    uphold: UpholdSeam,
-    configured: dict[str, str],
+    paying: list[str],
+    standing: StandingSeam,
 ) -> None:
     """The structural half of the guarantee: with `say` diverted, the script
     prints nothing at all.
 
     A test that only checked the current output for secrets would pass for as
     long as nobody added a bare `print`. This one fails the moment somebody
-    does, on the preview and on the report path alike, which is the difference
-    between a promise about today's lines and one about tomorrow's.
+    does, on the preview and on the report path alike — the rating's blocks and
+    the dispute-rate lines included, since the live run here pays, rates and
+    reads the ledger both sides — which is the difference between a promise
+    about today's lines and one about tomorrow's.
     """
     printed: list[str] = []
     monkeypatch.setattr(uphold_dispute, "say", lambda line="": printed.append(line))
 
     seed()
+    standing.reads_as(rep(0, 5), rep(1, 6))
     assert uphold_dispute.main(["--dispute-id", DISPUTE_ID, "--dry-run"]) == uphold_dispute.EXIT_OK
-    uphold.lands()
     assert uphold_dispute.main(["--dispute-id", DISPUTE_ID]) == uphold_dispute.EXIT_OK
 
     assert printed
