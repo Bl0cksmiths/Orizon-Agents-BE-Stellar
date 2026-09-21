@@ -111,6 +111,12 @@ class Ledger:
         return {"status": "timeout", "hash": tx}
 
 
+class RefundTouched(BaseException):
+    """A rating path reached the refund. A BaseException on purpose: the
+    rating step answers every `Exception` with the paid record rather than an
+    error, so an ordinary trap would be swallowed and the test would pass."""
+
+
 class Settler:
     """The settler's credit transfer, counted: the refund must be signed once."""
 
@@ -440,7 +446,7 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
     assert (first.status, first.refund_tx, first.rating_tx) == ("credited", "tx_credit", None)
 
     async def _refund_touched(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("a rating path reached the refund")
+        raise RefundTouched("a rating path reached the refund")
 
     store = dispute_store.get_dispute_store()
     monkeypatch.setattr(store, "claim_refund", _refund_touched)
