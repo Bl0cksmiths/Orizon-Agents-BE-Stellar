@@ -335,3 +335,42 @@ def test_cancellation_mid_submit_is_logged_and_reraised(monkeypatch, caplog) -> 
     assert any("cancelled mid-flight" in m and _names_every_fact(m) for m in msgs), (
         f"a cancelled rating was never logged with its context: {msgs}"
     )
+
+
+def _no_submit(monkeypatch) -> None:
+    """Make the ledger explode if anything reaches it."""
+
+    async def _exploding_submit(*args, **kwargs) -> dict:
+        raise AssertionError("a rating that cannot be formed must never reach the stellar client")
+
+    monkeypatch.setattr(sc, "submit_rating_async", _exploding_submit)
+
+
+def test_a_step_the_settlement_lacks_raises_instead_of_rating(monkeypatch, caplog) -> None:
+    """The refund was paid against this step, so its absence is a record that
+    changed under a paid dispute. An outcome would file it as a rating to try
+    again; only a raise stops the caller treating it as routine."""
+    _no_submit(monkeypatch)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        with pytest.raises(LookupError):
+            _rate(_dispute(step_index=7))
+
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(DISPUTE_ID in m and JOB in m and "no step 7" in m and PAYER in m for m in msgs), (
+        f"the unratable dispute was not logged with its context: {msgs}"
+    )
+
+
+@pytest.mark.parametrize("job_id_hex", ["9f8e7d6c", "not hex at all"])
+def test_a_job_id_that_will_not_derive_raises_instead_of_rating(monkeypatch, caplog, job_id_hex: str) -> None:
+    _no_submit(monkeypatch)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        with pytest.raises(ValueError):
+            _rate(_dispute(job_id_hex=job_id_hex))
+
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(DISPUTE_ID in m and job_id_hex in m and PAYER in m for m in msgs), (
+        f"the underivable dispute was not logged with its context: {msgs}"
+    )
