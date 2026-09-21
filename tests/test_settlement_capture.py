@@ -30,7 +30,7 @@ from stellar_sdk import Keypair
 from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import dispute_store, execution_svc
-from app.services.dispute_store import InMemoryDisputeStore, SettlementRecord
+from app.services.dispute_store import OUTPUT_SUMMARY_MAX_CHARS, InMemoryDisputeStore, SettlementRecord
 from app.state import state
 
 AUTH_ID_HEX = "ab" * 16
@@ -550,3 +550,25 @@ def test_a_summary_branch_summary_is_cleaned_before_it_is_kept(monkeypatch, stor
     assert "\x1b" not in stored and "\x00" not in stored
     assert stored == traced.replace("\x1b", " ").replace("\x00", " ")
     assert not stored.endswith("[truncated]")
+
+
+def test_a_counts_branch_summary_is_cleaned_and_bounded(monkeypatch, store):
+    """`_summarize`'s other branch joins every `counts` entry with no limit at
+    all, so the trace line can run as long as the worker likes. The store's
+    bound is the one that holds: the kept text is the traced text's start,
+    cleaned, and marked as cut rather than ending mid-word as if complete."""
+    counts = {f"file_{i}\x07": i for i in range(100)}
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"counts": counts}))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_counts"
+
+    _run_paid(_plan(), task_id)
+
+    (traced,) = _traced(task_id, "w.says")
+    assert len(traced) > OUTPUT_SUMMARY_MAX_CHARS, "the trace line was expected to run past the bound"
+    stored = store.recorded[0].steps[0].output_summary
+    assert stored is not None
+    assert "\x07" not in stored
+    assert len(stored) <= OUTPUT_SUMMARY_MAX_CHARS + len(" …[truncated]")
+    assert stored.endswith("[truncated]")
+    assert traced.replace("\x07", " ").startswith(stored.removesuffix(" …[truncated]"))
