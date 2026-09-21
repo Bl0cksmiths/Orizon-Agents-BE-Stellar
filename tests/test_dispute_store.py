@@ -26,8 +26,11 @@ import asyncio
 import dataclasses
 from typing import Any
 
+import pytest
+
 from app.services.dispute_store import (
     DisputeRecord,
+    DuplicateDisputeError,
     InMemoryDisputeStore,
     SettlementRecord,
     SettlementStep,
@@ -141,3 +144,86 @@ def test_the_step_breakdown_is_addressable_by_step_index() -> None:
     assert settled.step(0) is not None and settled.step(0).price_usdc == 1.5  # type: ignore[union-attr]
     assert settled.step(1) is not None and settled.step(1).delivered is False  # type: ignore[union-attr]
     assert settled.step(7) is None
+
+
+# ── disputes, in memory ───────────────────────────────────────────────────
+
+
+def test_an_opened_dispute_is_found_by_its_id_and_by_its_step() -> None:
+    """Two lookups, two callers: `GET /api/disputes/{id}` has the id the buyer
+    was given, and a second "dispute this step" request has only the step."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        return opened, await store.get_dispute(opened.id), await store.find_dispute(JOB, 0)
+
+    opened, by_id, by_step = asyncio.run(go())
+
+    assert opened.status == "open"
+    assert by_id == opened
+    assert by_step == opened
+
+
+def test_an_unknown_dispute_is_none_rather_than_an_error() -> None:
+    store = InMemoryDisputeStore()
+
+    assert asyncio.run(store.get_dispute("dsp_never")) is None
+    assert asyncio.run(store.find_dispute(JOB, 3)) is None
+
+
+def test_a_second_dispute_of_the_same_step_is_refused_with_the_first() -> None:
+    """The product rule: the second attempt is answered WITH the first dispute,
+    unchanged, so a double click shows the buyer what they already opened rather
+    than an error they cannot act on."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord:
+        return await store.open_dispute(a_dispute())
+
+    first = asyncio.run(go())
+
+    with pytest.raises(DuplicateDisputeError) as excinfo:
+        asyncio.run(store.open_dispute(a_dispute(id="dsp_0002", reason="a second try")))
+
+    assert excinfo.value.existing == first
+    assert excinfo.value.existing.reason == "the summary was empty"
+    # The loser left nothing behind: one dispute, and the id it was given never
+    # became a record.
+    assert asyncio.run(store.get_dispute("dsp_0002")) is None
+
+
+def test_a_different_step_or_a_different_job_is_not_a_duplicate() -> None:
+    """The identity is the PAIR. One bad step in a five-step workflow must not
+    stop the buyer disputing another, and two workflows are never each other's
+    duplicate however their steps line up."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord]:
+        await store.open_dispute(a_dispute())
+        other_step = await store.open_dispute(a_dispute(id="dsp_0002", step_index=1))
+        other_job = await store.open_dispute(a_dispute(id="dsp_0003", job_id_hex=OTHER_JOB))
+        return other_step, other_job
+
+    other_step, other_job = asyncio.run(go())
+
+    assert other_step.id == "dsp_0002"
+    assert other_job.id == "dsp_0003"
+    assert len(store._disputes) == 3
+
+
+def test_every_dispute_of_one_task_is_listed_and_no_other_task_s_is() -> None:
+    """What the task view reads. A dispute of another task appearing here would
+    show one buyer another buyer's complaint."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, ...]:
+        await store.open_dispute(a_dispute())
+        await store.open_dispute(a_dispute(id="dsp_0002", step_index=1))
+        await store.open_dispute(a_dispute(id="dsp_0003", task_id="task_beta", job_id_hex=OTHER_JOB))
+        return await store.list_disputes_for_task(TASK)
+
+    listed = asyncio.run(go())
+
+    assert [d.id for d in listed] == ["dsp_0001", "dsp_0002"]
+    assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
