@@ -16,10 +16,21 @@ pass by luck proves nothing.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
+from app.config import settings
+from app.services import reputation_svc
+from app.services.reputation_svc import STROOPS_PER_USDC
 from app.stellar import cache
+from app.stellar import client as sc
+
+# rep_state as the ledger returns it: sum_w is rating-bps x weight. Before the
+# dispute, four good ratings over 10 USDC of work; after it, the same plus one
+# 0/100 dispute rating weighted at a 1 USDC step.
+PRE_DISPUTE = {"sum_w": 9000 * 10 * STROOPS_PER_USDC, "weight": 10 * STROOPS_PER_USDC, "count": 4, "disputed": 0}
+POST_DISPUTE = {"sum_w": 9000 * 10 * STROOPS_PER_USDC, "weight": 11 * STROOPS_PER_USDC, "count": 5, "disputed": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -288,3 +299,56 @@ def test_clear_fences_a_flight_that_is_still_running():
     # And the bookkeeping drained with the flight, as for any invalidation.
     assert generations == {}
     assert running == {}
+
+
+# ── reputation ──────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, int]]:
+    """A fake ReputationLedger, read through the REAL cache.
+
+    Patched below the cache (at `simulate_read`) rather than at `get_or_set`,
+    which is the seam the other reputation tests use: the point here is that
+    the cache itself serves, keeps and drops the right entry. `contract_ids`
+    is stubbed rather than called, since it is lru_cached and a fake ledger
+    id must not outlive this test. Returns the agent → rep_state map a test
+    writes to in order to land a rating.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    chain: dict[str, dict[str, int]] = {}
+
+    def simulate_read(contract_id: str, method: str, args: list[str]) -> dict[str, int]:
+        assert (contract_id, method) == ("CFAKELEDGER", "rep_state")
+        return dict(chain.get(args[0], {}))
+
+    monkeypatch.setattr(sc, "simulate_read", simulate_read)
+    return chain
+
+
+def test_invalidate_rep_makes_the_next_batch_read_see_the_landed_rating(ledger):
+    """`fetch_reps` is the batched read decompose takes its snapshot from.
+    `invalidate_rep` has to drop exactly the key `_read_rep` fills — the key
+    format lives in one helper so the two cannot drift apart."""
+    agent = "agt_01h8"
+    ledger[agent] = PRE_DISPUTE
+
+    async def run():
+        before = (await reputation_svc.fetch_reps([agent]))[agent]
+        ledger[agent] = POST_DISPUTE  # the dispute rating lands on-chain
+        cached = (await reputation_svc.fetch_reps([agent]))[agent]
+        reputation_svc.invalidate_rep(agent)
+        after = (await reputation_svc.fetch_reps([agent]))[agent]
+        return before, cached, after
+
+    before, cached, after = asyncio.run(run())
+    assert before.source == "onchain" and before.disputed == 0
+    # Without the invalidation the TTL cache serves the pre-dispute score —
+    # the exact failure this story closes.
+    assert cached == before
+    assert after.disputed == 1
+    assert after.dispute_rate_bps == 2000
+    assert after.smoothed_bps < before.smoothed_bps
