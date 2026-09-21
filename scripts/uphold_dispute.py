@@ -93,6 +93,7 @@ from pydantic import ValidationError  # noqa: E402  (after the sys.path bootstra
 try:
     from app.config import settings  # noqa: E402
     from app.security import redact_secrets  # noqa: E402
+    from app.services import refund_svc  # noqa: E402
     from app.services.dispute_store import (  # noqa: E402
         DisputeRecord,
         SettlementRecord,
@@ -117,6 +118,17 @@ except ValidationError:
         "  of the settings, which includes the tail of the signing key.)\n"
     )
     raise SystemExit(EXIT_NOT_CONFIGURED) from None
+
+
+# `refund_svc.RefundRefused.code` is the service's stable vocabulary for a
+# credit that must not be signed; this maps it onto the exit table above. An
+# unmapped code falls to EXIT_UNEXPECTED rather than to any of the specific
+# ones, so a refusal the service grows later cannot be mistaken for a refusal
+# this script already understands.
+_REFUSAL_EXITS = {
+    "nothing_to_credit": EXIT_NOTHING_TO_CREDIT,
+    "refund_above_cap": EXIT_ABOVE_CAP,
+}
 
 
 def say(line: str = "") -> None:
@@ -192,6 +204,62 @@ def describe(dispute: DisputeRecord, settlement: SettlementRecord, step: Settlem
     say(f"  settled:   {settlement.settled_usdc:.7f} USDC for the whole workflow, at {settlement.settled_at:.0f}")
 
 
+def bounds(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep) -> list[tuple[float, str]]:
+    """D4's three bounds, each with the thing it alone protects against.
+
+    Listed rather than folded because an operator approving a payout needs to
+    see WHICH record is holding the number down: a credit clamped by the settled
+    total means the buyer was promised more than the chain ever took, and that
+    is a fact about the settlement, not a rounding detail.
+
+    The fraction is read from `settings` and not from `refund_svc`'s module
+    default, because the deployment's configured share is what the live path
+    applies; a preview using the default would agree with it only by accident.
+    """
+    return [
+        (max(dispute.creditable_usdc, 0.0), "promised to the buyer when the dispute was opened"),
+        (
+            refund_svc.credited_amount_usdc(step.price_usdc, settings.dispute_credited_fraction),
+            f"step {step.step_index} price x DISPUTE_CREDITED_FRACTION={settings.dispute_credited_fraction:g}",
+        ),
+        (settlement.settled_usdc, "ever settled on-chain for the whole workflow"),
+    ]
+
+
+def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep | None) -> tuple[float | None, int]:
+    """Print what would be paid and why, and return it alongside an exit code.
+
+    `refund_svc.creditable_for` is the AUTHORITY for the number — the same call
+    the live path makes — and the table above it only names the bounds that
+    produced it. That split is the point: a preview that computed its own total
+    would be a second implementation of D4, and two implementations of a money
+    rule drift apart on the day it matters.
+
+    Returns `(amount, EXIT_OK)` when there is a credit to pay, and
+    `(None, <exit code>)` when `creditable_for` refuses. Every code it raises is
+    raised before the amount reaches the settler's key, so the refusal goes out
+    through `refuse`.
+    """
+    if step is not None:
+        say()
+        say("  D4 — the credit is the SMALLEST of three bounds:")
+        bounded = bounds(dispute, settlement, step)
+        smallest = min(value for value, _ in bounded)
+        for value, why in bounded:
+            say(f"    {value:.7f} USDC  {why}{'   <- BINDS' if value <= smallest else ''}")
+        say(f"  D5 — cap on ONE credit: MAX_REFUND_USDC = {settings.max_refund_usdc:.7f} USDC")
+
+    try:
+        amount = refund_svc.creditable_for(settlement, dispute, settings.dispute_credited_fraction)
+    except refund_svc.RefundRefused as exc:
+        return None, refuse(_REFUSAL_EXITS.get(exc.code, EXIT_UNEXPECTED), exc.code, exc.message)
+
+    say()
+    say(f"  credit:    {amount:.7f} USDC  ->  {dispute.payer}")
+    say(f"  funded by: the PLATFORM settler wallet — not clawed back from {dispute.agent_id}")
+    return amount, EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI.
 
@@ -241,7 +309,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Nothing can be computed without one: the credit is bounded by what actually settled.",
         )
 
-    describe(dispute, settlement, settlement.step(dispute.step_index))
+    step = settlement.step(dispute.step_index)
+    describe(dispute, settlement, step)
+    amount, code = plan(dispute, settlement, step)
+    if amount is None:
+        return code
     say()
     return EXIT_OK
 
