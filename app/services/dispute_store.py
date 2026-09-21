@@ -449,9 +449,10 @@ RETURNING dispute_id
 # COALESCE is what makes a partial update mean "leave the rest alone": a
 # transition that names only a refund_tx keeps the rating_tx and the
 # adjudicator's note already recorded. The note is carried exactly that way and
-# for the same reason — 4.04's rating lands minutes after 4.03's rejection, and
-# a transition that blanked the reason a dispute was refused would take the
-# platform's half of the argument off the record.
+# for the same reason: it is the explanation the buyer was given for a
+# rejection, and a later transition that blanked it would leave their receipt
+# saying "rejected" with no reason, which is the one thing 4.06 made a
+# rejection unable to say.
 # `resolved_at` falls through three values in order — the one the caller gave,
 # the one already on the record, then $7, this process's clock — so the moment a
 # dispute was first resolved is stamped once and never moved by a later event.
@@ -721,12 +722,17 @@ class DisputeRecord:
     both frozen at opening time so a later policy change cannot rewrite what the
     buyer was shown.
 
-    `note` is the adjudicator's side of the argument: why the dispute was upheld
-    or rejected. The buyer's side is durable from the moment they open it
-    (`reason`, frozen there), and an upheld dispute leaves an amount and a
-    transaction hash behind as well — but a rejection recorded only a status and
-    a timestamp, which is backwards, because a rejection is the outcome most
-    likely to be contested. It is kept EXACTLY as given: bounding and sanitising
+    `note` is the adjudicator's answer TO THE BUYER: why their dispute was
+    rejected, written for them and shown to them on their receipt (story 4.06)
+    — so it is written in words the buyer can read, never in the platform's
+    internal shorthand or about anybody else's dispute. Every rejection carries
+    one, because `dispute_svc.reject` refuses to record a rejection without it:
+    a rejection with no explanation is worse than no dispute system. The
+    buyer's side is durable from the moment they open it (`reason`, frozen
+    there), and an upheld dispute leaves an amount and a transaction hash
+    behind — a refusal that said nothing would make the outcome most likely to
+    be contested the one with nothing to contest. None on a dispute that was
+    never rejected. It is kept EXACTLY as given: bounding and sanitising
     untrusted text is the caller's job, and a store that edited evidence on its
     way in would be a worse store.
     """
