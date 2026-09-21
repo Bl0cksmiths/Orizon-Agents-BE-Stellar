@@ -1010,7 +1010,7 @@ async def _retry_rating(credited: DisputeRecord, *, on_rating: RatingObserver | 
     return await _rate_credited(credited, settlement, on_rating=on_rating)
 
 
-async def uphold(dispute_id: str) -> DisputeRecord:
+async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
     THE ORDER BELOW IS THE STORY. Each step exists to close one way of paying a
@@ -1078,6 +1078,13 @@ async def uphold(dispute_id: str) -> DisputeRecord:
     moved and the dispute stays `crediting` with its claim held. That is the
     safe side of the trade — the claim blocks a second payment, and
     `refund_svc` has already logged the hash for reconciliation.
+
+    `on_rating`, when given, is handed the ledger's answer to the rating the
+    moment there is one — at most once per call, and never when no rating was
+    submitted. It exists for the operator tool, which must tell a human whether
+    the reputation consequence actually landed, and the record cannot say that
+    on its own. The HTTP route passes nothing, so what it answers stays exactly
+    what a later `GET` of the dispute will answer.
     """
     if not settings.dispute_refunds_enabled:
         # Fails closed, and first: nothing below this line may run on a
