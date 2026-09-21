@@ -542,6 +542,29 @@ the step never delivered and so was never charged; or there is no settlement
 record for the job at all. A **duplicate** is not refused — the original
 dispute comes back unchanged.
 
+### What a dispute returns
+
+`GET /api/disputes/{dispute_id}`, both adjudication routes, the duplicate
+answer to `POST /api/disputes` and every entry in the per-task read's
+`disputes` return a dispute in this one shape. No field is ever omitted: one
+that does not apply yet, or that a dispute recorded before the field existed
+does not have, is null.
+
+| field | what it is |
+| --- | --- |
+| `id` | the dispute's own id: `dsp_` and 16 random hex characters |
+| `job_id_hex`, `step_index`, `task_id`, `agent_id` | the job the step was charged under, which step, the task it ran in and the agent that ran it |
+| `payer` | the wallet that paid, and that signed the dispute |
+| `reason` | the buyer's own words about what was wrong, cleaned and bounded to 500 characters |
+| `status` | where the dispute stands — see "The lifecycle" |
+| `charged_usdc`, `creditable_usdc` | what the step cost, and what an upheld dispute credits under the policy in force when it was opened. Both frozen at opening, so neither moves under the buyer |
+| `opened_at`, `resolved_at` | when it was opened, and when it was first decided — stamped once, at the verdict. Epoch seconds |
+| `refund_tx`, `rating_tx` | the refund transfer and the dispute rating, once each exists — see "Reading the two on-chain artifacts" |
+| `credited_usdc` | what the refund **actually** transferred. Not `creditable_usdc`: that is the ceiling promised at opening, and the payout is bounded again when it is made — by the fraction then in force and by what the charge moved — so the two can differ, and this is the one that matches the transfer on-chain. Null until the dispute is credited, and for a dispute credited before the field existed: "not recorded", never the promise standing in for it |
+| `updated_at` | when the dispute last changed state, in epoch seconds. Unlike `resolved_at` it moves: a credit reconciled hours after the verdict carries the time it was credited. Null only for a dispute last written before the field existed |
+| `rating_confirmed` | whether the dispute rating is known to have **landed**. `rating_tx` cannot say on its own, because it is recorded for a submission that timed out as well as for one that succeeded. `true` once the ledger has vouched for it, `false` while it is only in flight, null when no rating was submitted or the dispute predates the field. Null means "not known", never "no" |
+| `rejection_reason` | on a `rejected` dispute, the adjudicator's reason — **shown to the buyer**. Null under every other status, whatever the record holds, and for a rejection recorded before a reason was required |
+
 ### What the per-task read returns
 
 `GET /api/tasks/{task_id}/disputes` is the one read a dispute receipt is built
