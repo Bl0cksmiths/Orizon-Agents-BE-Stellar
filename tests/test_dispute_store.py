@@ -517,3 +517,82 @@ class FakePool:
 
 def _pg(pool: FakePool) -> dispute_store.PostgresDisputeStore:
     return dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db", pool=pool)
+
+
+# ── the schema, in Postgres ───────────────────────────────────────────────
+
+
+def test_the_schema_is_created_lazily_and_only_once() -> None:
+    """No migration tooling exists in this repo, so the DDL ships with the
+    store — but constructing it must not do I/O, and a hot process must not
+    re-run the DDL on every settlement."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    assert pool.statements == []  # construction alone talks to nothing
+
+    async def go() -> None:
+        await store.record_settlement(a_settlement())
+        await store.open_dispute(a_dispute())
+        await store.get_settlement(JOB)
+
+    asyncio.run(go())
+
+    ddl = [s for s in pool.statements if "CREATE TABLE" in s]
+    assert len(ddl) == 2
+    assert any("CREATE TABLE IF NOT EXISTS workflow_settlements" in s for s in ddl)
+    assert any("CREATE TABLE IF NOT EXISTS dispute_events" in s for s in ddl)
+
+
+def test_the_duplicate_rule_is_an_index_and_not_only_a_read() -> None:
+    """The constraint itself, asserted on the DDL: two requests racing for one
+    step is a thing users do, and only the database can settle it."""
+    ddl = dispute_store._CREATE_DISPUTES_SQL
+
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx" in ddl
+    # PARTIAL — the table is append-only, so a total unique index on the pair
+    # would reject every status transition after the opening row.
+    assert "ON dispute_events (job_id_hex, step_index) WHERE opening" in ddl
+
+
+def test_no_sql_in_the_module_mutates_a_row() -> None:
+    """Belt and braces on the constants themselves, so a later edit that adds
+    an UPDATE has to delete this test to land. ON CONFLICT DO NOTHING is the one
+    conflict clause that leaves the conflicting row alone; DO UPDATE would be an
+    UPDATE wearing a hat, and is refused here by name."""
+    sql = " ".join(
+        (
+            dispute_store._CREATE_SETTLEMENTS_SQL,
+            dispute_store._CREATE_DISPUTES_SQL,
+            dispute_store._SELECT_SETTLEMENT_BY_JOB_SQL,
+            dispute_store._SELECT_SETTLEMENT_BY_TASK_SQL,
+            dispute_store._INSERT_SETTLEMENT_SQL,
+            dispute_store._SELECT_DISPUTE_SQL,
+            dispute_store._SELECT_DISPUTE_BY_STEP_SQL,
+            dispute_store._SELECT_DISPUTES_FOR_TASK_SQL,
+            dispute_store._INSERT_DISPUTE_SQL,
+            dispute_store._APPEND_STATUS_SQL,
+        )
+    ).upper()
+
+    assert "UPDATE " not in sql
+    assert "DELETE " not in sql
+    assert "DO UPDATE" not in sql
+
+
+def test_nothing_is_dated_by_the_database() -> None:
+    """Every timestamp is epoch seconds from this process's clock. A now() in
+    the SQL would date a record in whatever timezone the database runs in, and
+    the window a buyer was promised would stop matching the window stored."""
+    sql = " ".join(
+        (
+            dispute_store._CREATE_SETTLEMENTS_SQL,
+            dispute_store._CREATE_DISPUTES_SQL,
+            dispute_store._INSERT_SETTLEMENT_SQL,
+            dispute_store._INSERT_DISPUTE_SQL,
+            dispute_store._APPEND_STATUS_SQL,
+        )
+    ).upper()
+
+    assert "NOW()" not in sql
+    assert "CURRENT_TIMESTAMP" not in sql
