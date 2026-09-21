@@ -312,18 +312,33 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     """The other way a timeout ends: the transaction landed after the poll
     gave up. The retry is refused as a replay, and because this dispute has a
     hash on record that is CONFIRMATION, not a collision — the recorded hash
-    is kept, and only now is the score known to have moved."""
+    is kept, and only now is the score known to have moved.
+
+    Story 4.06 makes the record say so as well. The timeout recorded its hash
+    as UNCONFIRMED, and the replay moves it to confirmed — False to True, the
+    one change this retry makes to the dispute, and the one a receipt needs
+    before it may say the agent was rated. A further replay finds it already
+    confirmed and writes nothing."""
     dispute = open_dispute()
     ledger.script = ["late"]
     unconfirmed = uphold(dispute.id)
     assert unconfirmed.rating_tx == "tx_rating_1" and invalidated == []
+    assert unconfirmed.rating_confirmed is False
 
     confirmed = uphold(dispute.id)
 
-    assert confirmed == unconfirmed
+    # The hash, the credit and everything else exactly as the timeout left
+    # them: only the confirmation moved, and the moment it was recorded.
+    assert confirmed.rating_confirmed is True
+    assert confirmed == replace(unconfirmed, rating_confirmed=True, updated_at=confirmed.updated_at)
+    assert confirmed.updated_at is not None and unconfirmed.updated_at is not None
+    assert confirmed.updated_at >= unconfirmed.updated_at
     assert ledger.replays == 1 and len(ledger.submits) == 1
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
+
+    assert uphold(dispute.id) == confirmed
+    assert ledger.replays == 2
 
 
 # ── a failure, and a collision ──────────────────────────────────
