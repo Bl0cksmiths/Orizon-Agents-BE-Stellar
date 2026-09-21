@@ -586,6 +586,13 @@ def dispute_challenge_is_live(job_id_hex: str, step_index: int, nonce: str) -> b
     stored, expires_at = entry
     if time.time() > expires_at:
         return False
+    if not nonce.isascii():
+        # `compare_digest` raises TypeError on a str holding non-ASCII
+        # characters, and this one is caller-supplied off a public route. Every
+        # nonce we mint is hex, so anything outside ASCII is simply not the
+        # outstanding challenge — refused here rather than allowed to become a
+        # 500 in a caller that reasonably expects a bool.
+        return False
     return secrets.compare_digest(stored, nonce)
 
 
