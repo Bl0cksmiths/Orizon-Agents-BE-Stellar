@@ -942,7 +942,7 @@ def report_rating(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome 
     return EXIT_OK
 
 
-async def execute(dispute_id: str, amount: float | None) -> int:
+async def execute(dispute_id: str, agent_id: str, amount: float | None) -> int:
     """Uphold the dispute, pay the credit, rate the agent, and report both from the store.
 
     Every path — clean return, refusal, unexpected exception — falls through to
@@ -957,6 +957,9 @@ async def execute(dispute_id: str, amount: float | None) -> int:
     """
     store = get_dispute_store()
     fallback = EXIT_OK
+    # Before the uphold, so the "before" is the ledger as it stood when nothing
+    # of this run's had been written.
+    before = await read_standing(agent_id)
     with watch_rating() as ratings:
         try:
             await dispute_svc.uphold(dispute_id)
@@ -990,6 +993,7 @@ async def execute(dispute_id: str, amount: float | None) -> int:
     if code != EXIT_OK or dispute is None:
         return code
     code = report_rating(dispute, ratings[-1] if ratings else None)
+    report_standing(agent_id, before, await read_standing(agent_id))
     if code == EXIT_OK:
         print_evidence(dispute)
     return code
@@ -1097,7 +1101,7 @@ async def run(dispute_id: str, dry_run: bool) -> int:
     config_code = check_config()
     if config_code != EXIT_OK:
         return config_code
-    return await execute(dispute_id, amount)
+    return await execute(dispute_id, dispute.agent_id, amount)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
