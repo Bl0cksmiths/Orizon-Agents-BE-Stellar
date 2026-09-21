@@ -17,6 +17,7 @@ from ..state import state
 from ..trace_bus import bus
 from . import failure_tracker, rating_writer
 from .binding_registry import resolve_worker
+from .dispute_store import SettlementRecord, SettlementStep, get_dispute_store
 
 logger = logging.getLogger(__name__)
 
@@ -949,6 +950,108 @@ def _settled_usdc(total_usdc: float) -> float:
     from .reputation_svc import STROOPS_PER_USDC
 
     return sc.usdc_to_i128(max(total_usdc, 0.000001)) / STROOPS_PER_USDC
+
+
+async def _record_settlement(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    *,
+    payer: str,
+    auth_id_hex: str,
+    job_id: bytes | None,
+    charge_tx: str | None,
+    proof_tx: str | None,
+    total_usdc: float,
+    delivered_steps: frozenset[int],
+) -> None:
+    """Write the one record a dispute is later judged against (story 4.02).
+
+    Nothing else keeps these facts. The job id is minted inside the charge and
+    dies with `_settle_onchain`'s frame, the payer is a parameter of `_run`,
+    and `state.tasks` holds no per-step price, no link back to the plan and no
+    settlement time — it evicts finished tasks first and is lost on restart,
+    which is exactly the set and exactly the moment a buyer disputes.
+
+    Written only when the charge actually landed: `job_id` comes back None when
+    the charge was skipped (no signing key, over the cap), raised, or returned
+    non-SUCCESS, and none of those took the buyer's money — there is nothing to
+    dispute and nothing to credit. A charge that landed and a seal that then
+    failed DOES record, with `proof_tx` None: the buyer paid, so the buyer has
+    recourse, attested or not.
+
+    Best-effort in the same sense as `_submit_ratings`, and for a stronger
+    reason: the money has already moved by the time this runs, so a store that
+    is down must not fail or stall the workflow on top of it. It is logged at
+    ERROR — not warning — because the buyer silently loses every route to a
+    refund, and the trace line that says so is evicted long before they notice.
+    """
+    if job_id is None:
+        return
+
+    settled_at = time.time()
+    # Stamped, never recomputed on read: the buyer is told a closing time in
+    # the trace below, and tuning DISPUTE_WINDOW_SECONDS afterwards must not
+    # move the deadline for work that is already paid for.
+    window_closes_at = settled_at + settings.dispute_window_seconds
+
+    try:
+        await get_dispute_store().record_settlement(
+            SettlementRecord(
+                task_id=task_id,
+                payer=payer,
+                auth_id_hex=auth_id_hex,
+                job_id_hex=job_id.hex(),
+                charge_tx=charge_tx,
+                proof_tx=proof_tx,
+                settled_usdc=_settled_usdc(total_usdc),
+                steps=tuple(
+                    SettlementStep(
+                        step_index=index,
+                        agent_id=step.agent_id,
+                        agent_name=step.agent_name,
+                        price_usdc=step.est_price_usdc,
+                        # A step that failed, or that no worker ever resolved
+                        # for, delivered nothing and was never billed — 4.02
+                        # refuses to dispute it. Same condition that moved
+                        # `succeeded` and `spent` in the run loop.
+                        delivered=index in delivered_steps,
+                    )
+                    for index, step in enumerate(plan.plan.steps)
+                ),
+                settled_at=settled_at,
+                window_closes_at=window_closes_at,
+            )
+        )
+    except Exception as e:
+        logger.error(
+            "task %s: settlement NOT recorded: %s — the buyer has no way to dispute this run "
+            "(job %s, charge_tx %s, proof_tx %s, auth %s, payer %s, %.6f USDC)",
+            task_id,
+            e,
+            job_id.hex(),
+            charge_tx,
+            proof_tx,
+            auth_id_hex,
+            payer,
+            total_usdc,
+            exc_info=True,
+        )
+        # The buyer is told too: a window they cannot actually use must not
+        # appear in their trace as if it were open.
+        await _emit(task_id, start, "error", "settlement not recorded — this run cannot be disputed")
+        return
+
+    # The window is a promise, so it is made in the buyer's own record of the
+    # run. The job id stays OUT of it: trace lines are world-readable when
+    # TASK_AUTH_REQUIRED is off, and the dispute is filed against that id.
+    await _emit(
+        task_id,
+        start,
+        "cost",
+        "dispute window open — any delivered step can be disputed until "
+        f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(window_closes_at))}",
+    )
 
 
 # A failure class is a token, never free text. Validated by SHAPE rather than
