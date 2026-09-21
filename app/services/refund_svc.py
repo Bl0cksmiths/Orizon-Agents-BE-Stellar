@@ -33,10 +33,6 @@ logger = logging.getLogger(__name__)
 # rather than a case-by-case judgement (product rule).
 DEFAULT_CREDITED_FRACTION = 1.0
 
-# Rating written for an upheld dispute, on the same 0..100 scale the settler's
-# synthetic rating uses — low, so a disputed agent's reputation reflects it.
-DISPUTE_RATING = 10
-
 
 class RefundRefused(Exception):
     """A refund that must NOT be signed, with a stable `code` the caller branches on.
