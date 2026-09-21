@@ -946,6 +946,30 @@ class PostgresDisputeStore:
             raise KeyError(dispute_id)
         return self._to_dispute(row)
 
+    async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
+        """Win the mutex, then check the dispute is still payable.
+
+        The order matters and is not the intuitive one. Taking the claim FIRST
+        means the status check below runs with no other payer able to be
+        looking at the same dispute, so a decision made on what it reads stays
+        true until this call releases it. Checking the status first and then
+        claiming would put a window between the two that is precisely the race
+        the claim exists to close.
+
+        A claim taken over a dispute that turns out not to be `upheld` is
+        handed straight back, so a mistimed retry cannot wedge a dispute that
+        somebody else is legitimately about to pay.
+        """
+        pool = await self._ready_pool()
+        claimed = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time())
+        if claimed is None:
+            return None
+        current = await self.get_dispute(dispute_id)
+        if current is None or current.status != "upheld":
+            await pool.fetchrow(_DELETE_REFUND_CLAIM_SQL, dispute_id)
+            return None
+        return await self.append_status(dispute_id, "crediting")
+
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
         # the pool that is being torn down, and so a second close is a no-op.
