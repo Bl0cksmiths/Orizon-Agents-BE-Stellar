@@ -315,6 +315,29 @@ Turning the money path on without a key is not a silent weakness: with
 `DISPUTE_REFUNDS_ENABLED=true`, a signing key and an asset SAC configured, the
 process **refuses to start** unless `API_KEY` is set, and says why.
 
+What an adjudicator can be told, and what each answer means:
+
+| refusal | when |
+| --- | --- |
+| 503 `dispute_refunds_disabled` | the switch is off — nothing on this deployment is adjudicable. A configuration state, not the caller's mistake |
+| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see |
+| 401 `invalid_api_key` | the key is missing or wrong. The answer is the same either way — an adjudication route that distinguished them would be an oracle |
+| 404 `unknown_dispute` | no dispute with that id |
+| 409 `dispute_not_open` | a rejection aimed at a dispute that is no longer `open` |
+| 409 `dispute_rejected` | an uphold aimed at a rejected dispute: it can never be credited |
+| 409 `refund_in_flight` | an uphold aimed at a dispute in `crediting`. Reconcile it by hand; never retry it |
+| 409 `settlement_missing` | the settlement the dispute was judged against is no longer on record, so the credit cannot be bounded by what was actually charged |
+| 409 `nothing_to_credit` | the settlement has no such step, the step never delivered, or the amount prices to zero |
+| 409 `refund_above_cap` | the amount exceeds `MAX_REFUND_USDC`. Nothing was signed |
+| 502 `refund_failed` | the transfer definitively did not settle, so no funds moved. The dispute is back to `upheld` and can be credited again |
+| 504 `refund_unconfirmed` | the transfer was submitted and its outcome is unknown. The dispute stays in `crediting` for reconciliation |
+
+`settlement_missing`, `nothing_to_credit` and `refund_above_cap` are all raised
+**before** anything is signed, and each hands the refund claim back, so the
+dispute stays payable once whatever caused them is fixed. Only `refund_failed`
+and `refund_unconfirmed` describe a transaction that was actually submitted,
+and only the second of those leaves the claim held.
+
 A dispute is refused, with the reason said plainly, when: the window has closed
 (the response says when it closed); the signature does not verify against the
 payer recorded at settlement; the nonce is missing, expired or already used;
