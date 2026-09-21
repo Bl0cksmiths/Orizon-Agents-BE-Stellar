@@ -109,24 +109,36 @@ class OpenDisputeReq(BaseModel):
 
 
 class RejectDisputeReq(BaseModel):
-    """The adjudicator's optional word on why a dispute was not upheld.
+    """The adjudicator's word on why a dispute was not upheld — which the buyer reads.
 
-    Bounded identically to `OpenDisputeReq.reason` — one paragraph, no empty
-    string — because it is the same kind of thing from the other side of the
-    table, and a rejection note that outgrew the complaint it answers would be
-    the one free-text field in this surface nobody had sized. Identically down
-    to the number: `dispute_svc.reject` cleans and trims the note to the same
-    MAX_REASON_CHARS, so a longer bound here would record an adjudicator's
-    rationale cut short with nothing to say it was.
+    REQUIRED, because it is the buyer's answer: it comes back on the dispute
+    as `rejection_reason`, and a rejection with no explanation is worse than
+    no dispute system at all. So a body with no note, a null note or an empty
+    one is the field-level `validation_error` here, before anything is read.
+    The edge settles only the shape; what cleaning leaves of the text is the
+    service's to judge, since only it cleans — a note of whitespace or control
+    characters passes this bound, cleans to nothing, and is refused there as
+    `rejection_reason_required`.
 
-    Optional, and optional all the way down: the body itself may be absent, so
-    a console that has nothing to add posts no body rather than an empty one.
-    `min_length=1` then means "if you send a note, send a note" — a note of ""
-    is refused rather than stored, so the absence of a reason has exactly one
-    representation in the record instead of two.
+    Bounded identically to `OpenDisputeReq.reason` — one paragraph — because
+    it is the same kind of thing from the other side of the table, and a
+    rejection that outgrew the complaint it answers would be the one free-text
+    field in this surface nobody had sized. Identically down to the number:
+    `dispute_svc.reject` cleans and trims the note to the same
+    MAX_REASON_CHARS, so a longer bound here would show the buyer an
+    adjudicator's reason cut short with nothing to say it was.
     """
 
-    note: str | None = Field(default=None, min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
+    note: str = Field(
+        ...,
+        min_length=1,
+        max_length=dispute_svc.MAX_REASON_CHARS,
+        description=(
+            "Why the dispute was rejected. SHOWN TO THE BUYER as the dispute's "
+            "`rejection_reason`, and readable by anyone who can read the task's "
+            "disputes — write it for the buyer."
+        ),
+    )
 
 
 class DisputeResponse(BaseModel):
