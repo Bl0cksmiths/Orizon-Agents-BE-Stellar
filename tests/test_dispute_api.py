@@ -553,6 +553,31 @@ def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeyp
     assert [d["step_index"] for d in body["disputes"]] == [1, 2]
 
 
+def test_the_task_listing_answers_with_the_same_rejection_reason(client, monkeypatch):
+    # Same projection, same rule: the rejected dispute carries its reason and
+    # the open one, note or not, does not. Pinned for its other half too —
+    # this read is world-readable while TASK_AUTH_REQUIRED is off, so the
+    # reason reaches anyone with the task id. That is the product decision,
+    # made knowingly: the console shows it only to the payer, and nothing here
+    # does, so a change to who may read it has to start at `require_task_read`.
+    lists(
+        monkeypatch,
+        found=settlement(),
+        disputes=(
+            record(id="dsp_rejected", status="rejected", note=ADJUDICATOR_NOTE),
+            record(id="dsp_open", step_index=2, note=ADJUDICATOR_NOTE),
+        ),
+    )
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200, r.text
+    assert [(d["id"], d["rejection_reason"]) for d in r.json()["disputes"]] == [
+        ("dsp_rejected", ADJUDICATOR_NOTE),
+        ("dsp_open", None),
+    ]
+
+
 def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(client, monkeypatch):
     # Pinned whole, because the frontend's types are frozen to this shape: a
     # field renamed, dropped or added here breaks them, and an added one may be
