@@ -374,3 +374,27 @@ def test_a_replay_with_nothing_on_record_is_a_loud_collision_and_the_buyer_keeps
     assert len(logged) == 2
     for fact in ("COLLISION", dispute.id, AGENT, JOB, derived(0).hex(), dispute.payer):
         assert fact in logged[0]
+
+
+def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_resolved(
+    ledger, settler, invalidated, caplog
+) -> None:
+    """The one case the record cannot tell apart, pinned so it stays on the
+    safe side. A submit that raised leaves no hash to record, so when it did
+    land the retry's replay finds nothing on record — indistinguishable here
+    from somebody else's rating under the same key. D4 decides it: a
+    collision, loud, with the unrecorded-attempt explanation in the line, and
+    never a dispute that reads as resolved without evidence behind it."""
+    dispute = open_dispute()
+    ledger.script = ["raise"]
+    lost_track = uphold(dispute.id)
+    assert lost_track.rating_tx is None
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        retried = uphold(dispute.id)
+
+    assert retried.rating_tx is None
+    assert invalidated == []
+    (logged,) = svc_errors(caplog)
+    assert "COLLISION" in logged and "timeout with no hash" in logged
+    assert len(settler.transfers) == 1
