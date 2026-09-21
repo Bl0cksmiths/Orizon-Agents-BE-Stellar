@@ -1016,3 +1016,38 @@ def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, 
     derived = dispute_rating.dispute_job_id(bytes.fromhex(JOB), 0).hex()
     for fact in (dispute.id, JOB, derived, "agt_writer", dispute.payer):
         assert fact in logged[0]
+
+
+@pytest.mark.parametrize(
+    ("setting", "blank", "named"),
+    [
+        ("reputation_enabled", False, "REPUTATION_ENABLED is false"),
+        ("stellar_reputation_ledger", "", "STELLAR_REPUTATION_LEDGER is unset"),
+        ("stellar_signing_key", "", "STELLAR_SIGNING_KEY is unset"),
+    ],
+)
+def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
+    monkeypatch, rater, invalidated, caplog, setting: str, blank: object, named: str
+) -> None:
+    """Without the gate, a submit that cannot be signed raises, is classified
+    TIMEOUT, and every uphold reports "unconfirmed" forever when the truth is
+    "not configured". So nothing is submitted — not by the uphold that pays,
+    nor by any repeat — and each one logs ERROR naming the missing setting
+    beside every id, while the dispute stays visibly paid-but-unrated."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+    monkeypatch.setattr(settings, setting, blank)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        paid = asyncio.run(dispute_svc.uphold(dispute.id))
+        again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.rating_tx is None and again == paid
+    assert rater.calls == 0
+    assert invalidated == []
+    assert len(chain.calls) == 1
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 2  # one per uphold: each is a paid dispute left unrated
+    for fact in (named, dispute.id, JOB, "agt_writer", dispute.payer):
+        assert fact in logged[0]
