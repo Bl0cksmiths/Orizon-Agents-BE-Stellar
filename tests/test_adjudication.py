@@ -316,24 +316,35 @@ def test_a_second_uphold_after_a_credit_signs_nothing_and_returns_the_first_hash
     assert len(chain.calls) == 1
 
 
-def test_a_credited_dispute_is_answered_without_consulting_the_claim(monkeypatch) -> None:
+def test_a_credited_dispute_is_answered_without_consulting_the_claim(monkeypatch, rater) -> None:
     """And it must not need the claim to reach that answer. The claim WOULD
     also refuse — a credited dispute is not `upheld` — but making the
     idempotency of a paid dispute depend on a lock in another table means a
     lock that was dropped, expired or never taken becomes a second payment.
     Two independent answers to "has this been paid", and this test is what
-    stops the redundant-looking one being tidied away."""
+    stops the redundant-looking one being tidied away.
+
+    4.04 changed what a repeat uphold DOES, and not this: it now re-attempts
+    the dispute RATING, every time, and nothing else (D3). So every way back
+    into the refund — the claim, its release, the credit and the transfer
+    beneath it — is booby-trapped, and only the rating is let through."""
     dispute = a_dispute()
     settler(monkeypatch, LANDED)
     credited = asyncio.run(dispute_svc.uphold(dispute.id))
 
-    async def _must_not_be_asked(dispute_id: str) -> None:
-        raise SignedSomething("a credited dispute must be answered from its own status")
+    async def _must_not_be_asked(*args: Any, **kwargs: Any) -> None:
+        raise SignedSomething("a credited dispute must never re-enter the refund path")
 
-    monkeypatch.setattr(dispute_store.get_dispute_store(), "claim_refund", _must_not_be_asked)
+    store = dispute_store.get_dispute_store()
+    monkeypatch.setattr(store, "claim_refund", _must_not_be_asked)
+    monkeypatch.setattr(store, "release_refund_claim", _must_not_be_asked)
+    monkeypatch.setattr(refund_svc, "credit_refund", _must_not_be_asked)
     no_signing(monkeypatch)
 
     assert asyncio.run(dispute_svc.uphold(dispute.id)) == credited
+    # The rating WAS asked again — and, having landed the first time, the
+    # ledger refused it as a replay, so the record is exactly as it was.
+    assert rater.calls == 2
 
 
 def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(monkeypatch) -> None:
