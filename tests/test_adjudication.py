@@ -364,7 +364,9 @@ def test_a_timeout_logs_what_a_human_needs_to_reconcile_it(monkeypatch, caplog) 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER), pytest.raises(DisputeError):
         asyncio.run(dispute_svc.uphold(dispute.id))
 
-    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER]
+    # ERROR only, and from this module only: `a_dispute` logs the opening at
+    # INFO and `refund_svc` logs its own view of the same timeout.
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 1
     assert dispute.id in logged[0]
     assert JOB in logged[0]
