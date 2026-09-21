@@ -22,6 +22,7 @@ tests touch.
 from __future__ import annotations
 
 import base64
+import time
 
 import pytest
 
@@ -531,6 +532,19 @@ def test_the_policy_states_the_fraction_the_refund_would_apply(client, monkeypat
     policy = client.get("/api/tasks/task-1/disputes").json()["settlement"]["policy"]
 
     assert policy == {"credited_fraction": stated, "funded_by": "platform", "adjudicated_by": "platform"}
+
+
+def test_the_task_listing_reports_the_servers_clock(client, monkeypatch):
+    # The console corrects its countdown by this, so it must be the real clock
+    # read while the request was served — not the settlement time, and not a
+    # value cached from an earlier read.
+    lists(monkeypatch, found=settlement(), disputes=())
+
+    before = time.time()
+    body = client.get("/api/tasks/task-1/disputes").json()
+    after = time.time()
+
+    assert before <= body["now"] <= after
 
 
 def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
