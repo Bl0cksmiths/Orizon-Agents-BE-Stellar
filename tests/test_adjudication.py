@@ -387,3 +387,31 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
     stuck = asyncio.run(dispute_svc.get_dispute(dispute.id))
     assert stuck is not None and stuck.status == "crediting"
     assert stuck.refund_tx == "tx_who_knows"
+
+
+# ── the master switch ───────────────────────────────────────────
+
+
+def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) -> None:
+    """`DISPUTE_REFUNDS_ENABLED` ships OFF and gates the SERVICE, not only the
+    route. An operator script that imports this module pays a buyer without
+    ever reaching `require_adjudicator`, so the switch is checked here too —
+    and checked first, so its answer cannot depend on any dispute's state."""
+    dispute = a_dispute()
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+
+    async def _must_not_be_read(dispute_id: str) -> None:
+        raise AssertionError("the switch is checked before the store is touched")
+
+    store = dispute_store.get_dispute_store()
+    monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
+    no_signing(monkeypatch)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refunds_disabled"
+    assert refused.value.status_code == 503
+    # Not adjudicated, not claimed, not paid — the dispute is exactly as the
+    # buyer left it.
+    assert store._disputes[dispute.id].status == "open"
