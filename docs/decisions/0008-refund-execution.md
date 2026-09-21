@@ -234,40 +234,53 @@ because the person who meets it is on call, not reading decision records.
 
 ### D4 — The credit is the minimum of three numbers
 
-The amount transferred is
+`refund_svc.creditable_for(settlement, dispute, fraction)` is the only place an
+amount is produced, and it produces
 
 ```
-min(dispute.creditable_usdc, step.price_usdc, settlement.settled_usdc)
+min(dispute.creditable_usdc, step.price_usdc × fraction, settlement.settled_usdc)
 ```
 
-— the fraction frozen on the dispute when it was opened, the disputed step's
-price on the settlement record, and what the charge actually moved. Clamping
-is logged, so an amount that came out lower than the record's headline figure
-is explainable afterwards rather than a number nobody can source.
+over the step the dispute names — the amount frozen on the dispute when it was
+opened, the policy share of that step's price under the fraction in force now,
+and what the charge actually moved — rounded to the ledger's seven decimals.
+**Every clamp that actually bites is logged at WARNING with both numbers**,
+because a clamp means two records disagree about money, and taking the smaller
+one silently is how an overpayment, or a buyer quietly credited less than they
+were promised, becomes invisible.
 
 Each term is there for its own reason.
 
-`creditable_usdc` is the policy the buyer was shown. ADR 0007 froze it at
-opening precisely so a later change to `DISPUTE_CREDITED_FRACTION` cannot
-rewrite what a buyer was promised, and paying from the record rather than
+`dispute.creditable_usdc` is the **promise** the buyer was shown. ADR 0007
+froze it at opening precisely so a later change to `DISPUTE_CREDITED_FRACTION`
+cannot rewrite what a buyer was told, and paying from the record rather than
 recomputing from config is what honours that.
 
-`step.price_usdc` bounds the credit to the step being disputed. With the
-shipped fraction of `1.0` the first two terms are equal, which is exactly why
-the term is worth keeping: it is the one that still holds if a record is ever
-written under a policy this code did not compute.
+`step.price_usdc × fraction` is the **policy share of that one step, now**.
+Keeping a live term alongside the frozen one gives the asymmetry that matters:
+*lowering* `DISPUTE_CREDITED_FRACTION` applies to disputes that are already
+open, while raising it cannot, because the frozen promise still caps the
+result. A knob that can only ever reduce the platform's exposure on work
+already done is a safe knob; one that can retroactively increase it is not.
 
 `settlement.settled_usdc` is the term that does the real work, and Context 3 is
 why. The per-step figure **originates as an estimate** — `est_price_usdc`, the
-plan's quote — while `settled_usdc` is derived through the charge's own helper
-from what was actually submitted, floored to dust and rounded to seven
-decimals. The two are computed by different code from different inputs and are
-not guaranteed to agree. Refunding the estimate would mean the platform paying
-back money it never took, out of its own wallet.
+plan's quote, which the planner wrote before the step ran and which
+`dispute_svc` froze the buyer's figure from at opening — while `settled_usdc`
+is derived through the charge's own helper from what was actually submitted,
+floored to dust and rounded to seven decimals. The two are computed by
+different code from different inputs and are not guaranteed to agree. Refunding
+the estimate would mean the platform paying back money it never took, out of
+its own wallet.
 
 No single one of the three is safe on its own, so the rule is the minimum of
 all three rather than a preference order between them. It costs two
 comparisons.
+
+Two refusals fall out of the same function and are raised before anything is
+signed: `nothing_to_credit` when the settlement has no such step, when the step
+never delivered — it was never part of what the buyer paid for — or when the
+bounds compute to zero, and `refund_above_cap` for D5.
 
 ### D5 — A dedicated refund cap, separate from the charge cap
 
