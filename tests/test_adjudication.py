@@ -436,3 +436,68 @@ def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
 
     unaccounted = asyncio.run(dispute_svc.get_dispute(dispute.id))
     assert unaccounted is not None and unaccounted.status == "crediting"
+
+
+# ── refusals raised before the settler's key is touched ─────────
+
+
+def test_a_credit_above_the_cap_never_reaches_the_signer(monkeypatch) -> None:
+    """D5. The ceiling on ONE refund is checked while the number is being
+    computed, so there is no amount in the service that has not been through
+    it — and a refusal, never a clamp, because quietly paying the ceiling would
+    hide the mistaken uphold the ceiling exists to catch."""
+    dispute = a_dispute()
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.01)  # the step settled for 0.05
+    no_signing(monkeypatch)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refund_above_cap"
+    assert refused.value.status_code == 409
+    # Nothing was signed, so the claim went back: the buyer is still owed, and
+    # raising the ceiling makes this dispute payable without touching it.
+    unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid.refund_tx is None
+
+    monkeypatch.setattr(settings, "max_refund_usdc", 1.0)
+    settler(monkeypatch, LANDED)
+    assert asyncio.run(dispute_svc.uphold(dispute.id)).status == "credited"
+
+
+def test_a_credit_that_computes_to_nothing_is_refused_and_hands_the_claim_back(monkeypatch) -> None:
+    """A fraction of zero means the policy now credits nothing for this step.
+    That is not a transfer of 0 USDC to the ledger — it is a refusal, and like
+    every other pre-signature refusal it releases the claim, because nothing
+    was signed and the dispute must stay payable if the policy changes back."""
+    dispute = a_dispute()
+    monkeypatch.setattr(settings, "dispute_credited_fraction", 0.0)
+    no_signing(monkeypatch)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "nothing_to_credit"
+    assert refused.value.status_code == 409
+    unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert unpaid is not None and unpaid.status == "upheld"
+
+
+def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> None:
+    """The amount is bounded by what the settlement says actually moved (D4),
+    so with the settlement gone there is no number that is safe to pay. The
+    in-memory store drops the oldest records under load and a dispute window is
+    24 hours wide, so this is a state a real deployment reaches. The claim goes
+    back, because a human may still be able to pay this buyer."""
+    dispute = a_dispute()
+    dispute_store.get_dispute_store()._settlements.clear()
+    no_signing(monkeypatch)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "settlement_missing"
+    assert refused.value.status_code == 409
+    unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert unpaid is not None and unpaid.status == "upheld"
