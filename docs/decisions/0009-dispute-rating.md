@@ -154,3 +154,56 @@ it. And how a memo behaves on a Soroban `InvokeHostFunction` transaction had
 not been verified live: an evidence mechanism whose evidence value was
 unproven, bought with a change to the shared signer. The prefix needs no change
 outside `dispute_rating.py`.
+
+### D2 — The weight is the settler's own, over the step's quoted price
+
+The dispute rating is weighted `reputation_svc.rating_weight_stroops(step.price_usdc)`
+— the same helper, over the same number, that weighted the settler's automatic
+rating of the same step. `SettlementStep.price_usdc` is written from
+`step.est_price_usdc` in `_record_settlement`, and `est_price_usdc` is exactly
+what `_submit_ratings` hands `synthetic_rating`, so the two ratings a disputed
+step ends up carrying weigh the same. The helper's cap and floor come with it:
+`REPUTATION_MAX_RATING_WEIGHT_USDC` (100 USDC, the ledger's own `MAX_WEIGHT`)
+above, one stroop below.
+
+**The card contradicts itself on this point, and this records which half
+won.** Its product rule reads *"Weight by the settled value, consistent with
+how every other rating in the system is weighted."* Every other rating in the
+system is **not** weighted by the settled value. It is weighted by the step's
+*quoted* price, on purpose — `rating_weight_stroops` says so in its docstring
+and the README's reputation section says why: a failed step is never billed
+(ADR 0005 D1) and is rated all the same, so weighting by settled value would
+make every non-delivery rating weightless. Non-delivery settles nothing. The
+two halves of the sentence cannot both be honoured, and **consistency won**.
+
+It won for three reasons.
+
+1. **The two ratings on one step are read on one scale.** The ledger's mean is
+   `sum_w / weight` over every rating the agent has, and a disputed step
+   contributes two to it: the automatic rating that says the step was paid
+   for, and the dispute rating that says the buyer's claim against it stood.
+   Weigh them by different measures of the same step and the relative force of
+   those two facts depends on how far the quote and the charge happened to
+   drift — which says nothing about the dispute. Weigh them by the same number
+   and an upheld dispute is exactly as heavy as the work it disputes.
+2. **There is no per-step settled value to weigh by.** What moved on-chain is
+   `settled_usdc`, the *workflow's* total, floored to dust and rounded to seven
+   decimals (ADR 0008 Context 3). The only per-step figure anywhere in the
+   record is the quote. "The disputed step's settled value" would have to be
+   invented, and any invention — a pro-rata share of the total, say — is a
+   second weighting rule living beside the first.
+3. **The card's underlying intent survives.** The assumption behind the rule is
+   that *"a dispute on a large job should move the score more than one on a
+   trivial job"*. The quoted price does exactly that; it is the price the buyer
+   agreed to for that step.
+
+**Why not weigh it by the amount credited.** That *is* a per-step number that
+reflects what actually moved, which makes it the most tempting reading of
+"settled value". It would tie the force of a reputational fact to a refund
+policy knob: at `DISPUTE_CREDITED_FRACTION = 0.5` an upheld dispute would weigh
+half of the work it disputes, and an operator tuning how generous credits are
+would silently be tuning how much a dispute hurts. And the credit is
+`min(...)` of three numbers (ADR 0008 D4), so its size can change for reasons
+that have nothing to do with the agent — a clamp against `settled_usdc`, for
+one. Refund policy and reputation policy are separate decisions and keep
+separate numbers.
