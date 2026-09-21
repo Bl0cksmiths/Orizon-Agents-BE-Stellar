@@ -272,11 +272,29 @@ dispute shows no transactions: there are none to show yet.
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
 | `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
 | `GET /api/tasks/{task_id}/disputes` | the task's own token, or an operator API key | one workflow's dispute window and every dispute raised against it; an unknown or unsettled task is a null window and an empty list, not a 404 |
+| `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, and transfers the amount to the payer |
+| `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — records `rejected` with its resolution time; nothing is signed and nothing is spent |
 
 The read routes take no credential because both ids are unguessable — a dispute
 id is `dsp_` plus 16 random hex characters — which is the same trade the task
 read token makes, and it keeps a buyer able to check their own dispute without
 an account.
+
+**The two adjudication routes are the exception to everything above, and they
+fail closed.** Every other route in this service treats an unset `API_KEY` as
+"the demo is open"; these two treat it as "refuse", on every network including
+testnet. They also refuse while `DISPUTE_REFUNDS_ENABLED` is false, which is
+the shipped default — so a deployment that has not deliberately turned the
+money path on cannot be talked into adjudicating by someone who knows a dispute
+id. The reason for the divergence is that `/api/stellar/server/charge` can only
+spend an allowance the payer already authorised on-chain, while an upheld
+dispute spends the platform's own balance on an adjudicator's say-so with
+nothing on-chain to bound it. `docs/decisions/0008-refund-execution.md` D1 has
+the argument in full.
+
+Turning the money path on without a key is not a silent weakness: with
+`DISPUTE_REFUNDS_ENABLED=true`, a signing key and an asset SAC configured, the
+process **refuses to start** unless `API_KEY` is set, and says why.
 
 A dispute is refused, with the reason said plainly, when: the window has closed
 (the response says when it closed); the signature does not verify against the
