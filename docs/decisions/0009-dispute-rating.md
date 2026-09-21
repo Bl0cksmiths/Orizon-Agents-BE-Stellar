@@ -58,9 +58,9 @@ the connection only by knowing our formula and recomputing it.
 
 `Rated(agent_id, job_id)` lives in persistent storage — v2 moved it there after
 v1's temporary guard expired and reopened the window — and the contract has no
-entrypoint that removes it. It is checked after the caller, the rating range and the weight, and
-**before `kind` is read**, and a hit is `Error::Replay` at simulation, before
-any transaction exists.
+entrypoint that removes it. It is checked after the caller, the rating range
+and the weight, and **before `kind` is read**, and a hit is `Error::Replay` at
+simulation, before any transaction exists.
 
 Two consequences follow, and the decisions below lean on both. Every id a
 rating has ever been written under is spent **for ever**: there is no undo, no
@@ -68,3 +68,89 @@ expiry and no admin override. And a second submit under the same id is refused
 by the chain itself. ADR 0008 needed a durable mutex because the asset SAC will
 execute a second transfer as readily as the first; the ledger will not execute
 a second rating.
+
+## Decision
+
+### D1 — The derived id: the job's own first half, and a hash of the job and the step
+
+```
+dispute_job_id(job_id, step) = job_id[:8] ‖ sha256(job_id ‖ "orizon-dispute:v1" ‖ step)[:8]
+```
+
+with the step packed as two big-endian bytes. It lives in
+`app/services/dispute_rating.py`, it replaces `refund_svc.dispute_job_id(job_id)`
+outright, and `tests/test_dispute_job_id.py` pins it against golden vectors
+computed independently of the function.
+
+**The second half carries the step**, which is what closes Context 1. Each
+disputed step of a job derives its own id, so two upheld disputes against one
+agent in one job are two ratings rather than one rating and a refusal. The tag
+is domain-separated and versioned, for the reason every other `orizon-*:v1`
+string in this service is: a future scheme under another tag derives ids that
+have nothing to do with these. Two bytes of step bound a plan at 65,536 steps,
+which is far past anything a plan has; a step that does not fit is refused
+rather than truncated into a neighbour's id.
+
+**The first half is the sealed job's own bytes**, which is what closes
+Context 2. The job id is minted once, in `_settle_onchain`, and appears
+verbatim as an argument of the charge, of the attestation seal and of every
+automatic rating the settler wrote for that job. A reviewer who opens the
+dispute rating on Stellar Expert reads a job id whose **first sixteen hex
+characters are that job's**, and makes the link by eye. The rest of the check —
+that the second half is the hash of this job and this step — is open to anyone
+who wants it, from the formula above, but it is confirmation rather than the
+link itself.
+
+Half is the trade between the two jobs the id has. Eight bytes is enough to
+match by eye across a handful of transactions and far more than enough to tell
+this job from any other (two random 16-byte job ids share a prefix with
+probability 2⁻⁶⁴). The other eight are the hash, and they are what separates
+one step of the job from the next.
+
+**It is never the job id itself, and that is checked.** The derived id equals
+the job id only if eight bytes of SHA-256 happen to reproduce the job id's own
+second half — one chance in 2⁶⁴. `dispute_job_id` checks anyway and raises
+`ValueError` rather than returning it, because a derived id equal to the job id
+lands on the exact key the settler's automatic rating already holds, and would
+be refused as a replay of it for ever. A refusal to derive names the job and
+the step; a rating that can never be written names nothing. The same function
+refuses a job id that is not sixteen bytes, because the ledger's key is.
+
+**The derivation is permanent.** The replay guard remembers every key it has
+ever seen (Context 3). Change the formula after a single dispute rating has
+landed, and a retry of that dispute derives a **new** id, the guard does not
+recognise it, and the agent is rated twice for one dispute — precisely the
+outcome the card forbids when it says *"do not work around it by minting fresh
+ids per retry"*. So the golden vectors are not an ordinary test: a failure
+there means ratings already on the ledger no longer match the code, and the
+test file says so. Should a new scheme ever be needed, it ships under a new tag
+and applies only to disputes that have never been rated.
+
+**Why not keep 4.01's derivation.** It was already in the code, ADR 0002 chose
+it, and ADR 0007 D5 told this story to write under it, so keeping it was the
+default. It fails both requirements above. It collides whenever one agent
+serves two steps of a job, which would leave the second upheld dispute in such
+a job permanently unratable; and it hides the link, so a reviewer could tie a
+dispute rating to its job only by reading our code. Replacing it cost nothing
+because nothing had been written under it — which is exactly why it had to be
+replaced now rather than after the first rating landed.
+
+**Why not a hash-only id, with the formula documented.**
+`sha256(job_id ‖ tag ‖ step)[:16]` fixes the collision just as well, and the
+formula could be published beside it. But the link is then something a
+reviewer has to **compute** — take the job id from the seal, append a tag and
+two bytes, hash, truncate, compare — and knowing that recipe is arguably the
+insider knowledge the card rules out. A reviewer who has to trust our
+documentation to see the link has not verified it. The prefix makes the link
+visible and leaves the hash as a check anyone can run.
+
+**Why not carry the job id in a transaction memo.** Keep an opaque id and put
+the job id in the memo, where Stellar Expert displays it. The memo would have
+to be written by `invoke_with_server_key_async`, which builds and signs every
+transaction this backend submits — the charge, the seal, the refund transfer
+and every rating. Adding one would change the function the whole money path
+shares, for the benefit of one caller, in the week the refund path landed on
+it. And how a memo behaves on a Soroban `InvokeHostFunction` transaction had
+not been verified live: an evidence mechanism whose evidence value was
+unproven, bought with a change to the shared signer. The prefix needs no change
+outside `dispute_rating.py`.
