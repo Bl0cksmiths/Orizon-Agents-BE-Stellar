@@ -636,7 +636,15 @@ dispute rating COLLISION — the ledger already holds a rating under this disput
 ```
 
 and the dispute reads `credited` with `rating_tx` empty. Upholding it again
-produces the same line every time.
+produces the same line every time. Run through `scripts/uphold_dispute.py`, it
+ends in a `RATING COLLISION` block naming the agent, the dispute and the rating
+id, and exits `13`.
+
+One case the script catches before it becomes a collision: when a rating lands
+in the same run but the write recording it fails, it prints the hash and the
+exact `append_status` line that records it, and asks for that to be run before
+anything is re-run. Do it — a re-run first would be refused as a replay with
+nothing on record, and read as a collision.
 
 **What it means.** The ledger refused the rating as a replay — it already holds
 a rating for this agent under this dispute's derived id — and this dispute has
@@ -675,7 +683,8 @@ argument.
 matches what this dispute would have written: `kind` is `dispute`, the rating
 is `10`, the agent is `agent=`, the payer is `payer=`, and the weight is the
 step's quoted price in stroops — the dispute's `charged_usdc` × 10 000 000,
-rounded, which is the same settled step price the rating was weighted from.
+rounded, which is the same settled step price the rating was weighted from, and
+which the script's `--dry-run` prints beside the rating id.
 
 - **It is ours.** Record it, and the dispute is fully resolved:
   `append_status(dispute_id, "credited", rating_tx=<hash>)`. The next uphold is
