@@ -1112,7 +1112,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
             dispute.id,
             dispute.refund_tx,
         )
-        return await _retry_rating(dispute)
+        return await _retry_rating(dispute, on_rating=on_rating)
 
     if dispute.status == "crediting":
         raise _refuse_credit(
@@ -1185,7 +1185,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # Only now, with the credit landed AND recorded, is the agent rated —
         # and against the settlement the credit was just bounded by, so the
         # rating is weighted by the same step it refunded.
-        return await _rate_credited(credited, settlement)
+        return await _rate_credited(credited, settlement, on_rating=on_rating)
 
     if outcome.status == "FAILED":
         # The ledger rejected it, which is the ONE answer that says no funds
