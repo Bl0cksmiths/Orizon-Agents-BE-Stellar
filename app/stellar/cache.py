@@ -233,7 +233,18 @@ def invalidate(key: str) -> None:
 
 
 def clear() -> None:
-    """Drop all cached entries, failures, and flight registrations (tests)."""
+    """Drop all cached entries, failures, and flight registrations (tests).
+
+    Every key is invalidated at once, so a flight still running is fenced
+    exactly as `invalidate` fences one: its generation is bumped and it cannot
+    write into the emptied cache. `_running` is deliberately kept — those
+    tasks still exist and their done callbacks will retire them, whereas
+    zeroing the counts (or the generations) would let a pre-clear read land
+    after the clear, or a finishing flight retire a count that belongs to a
+    newer one.
+    """
     _store.clear()
     _failures.clear()
     _flights.clear()
+    for key in _running:
+        _generations[key] = _generations.get(key, 0) + 1
