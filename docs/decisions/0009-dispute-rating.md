@@ -240,10 +240,14 @@ band"*.
 **The record says whether the reputation consequence is on-chain.** A
 `credited` dispute **with** a `rating_tx` had its rating submitted under the
 derived id and landed — or, after a timeout, may still land. A `credited`
-dispute **without** one has paid the buyer and has **not** put its rating on
-the ledger: a failed submit, a collision (D4), or an attempt that raised. That
-dispute is not fully resolved, and it is reported that way everywhere the
-record is read — `GET /api/disputes/{id}` already carries `rating_tx`.
+dispute **without** one has paid the buyer and has no rating it can vouch for:
+a failed submit, a collision (D4), a submission that timed out without
+returning a hash, a deployment not configured to rate, a rating that could not
+be formed from the dispute's records, or one that landed while the write
+recording it failed — the one case with a rating on-chain and none on record,
+which is logged with its hash for exactly that reason. That dispute is not
+fully resolved, and it is reported that way everywhere the record is read —
+`GET /api/disputes/{id}` already carries `rating_tx`.
 
 **Re-upholding a credited dispute retries the rating only.** In 4.03 an uphold
 aimed at a `credited` dispute returned it unchanged and signed nothing, which
