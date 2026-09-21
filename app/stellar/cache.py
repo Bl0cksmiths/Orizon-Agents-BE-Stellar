@@ -20,6 +20,10 @@ Concurrency model — single-flight with shield:
   - Producer failures are negatively cached for a short window so a
     hard-down RPC doesn't fan out a fresh upstream call per request: within
     the window an equivalent exception is raised without spawning work.
+  - `invalidate(key)` is how a caller says the upstream state changed. It
+    drops the key's entry and failure and detaches its flight, and a per-key
+    generation stops that flight — already reading the old state — from
+    writing its outcome back, while its own callers still get their answer.
 """
 
 from __future__ import annotations
