@@ -412,4 +412,8 @@ def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypat
     r = client.get("/api/tasks/task-unsettled/disputes")
 
     assert r.status_code == 200
-    assert r.json() == {"task_id": "task-unsettled", "window_closes_at": None, "disputes": []}
+    body = r.json()
+    # The clock is present even with nothing to count down to, so the console
+    # can take its skew from any read rather than only a settled one.
+    assert isinstance(body.pop("now"), float)
+    assert body == {"task_id": "task-unsettled", "window_closes_at": None, "settlement": None, "disputes": []}
