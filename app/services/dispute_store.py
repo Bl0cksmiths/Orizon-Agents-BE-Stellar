@@ -234,9 +234,24 @@ CREATE INDEX IF NOT EXISTS dispute_events_task_idx
 # and every CTE in a statement shares the snapshot taken before the lock could
 # be acquired, so the lock would guard nothing.
 #
-# Rows are deleted on release and on completion; a row that outlives its
-# payout is a dispute stuck mid-flight, which is exactly what an operator
-# needs to find during reconciliation.
+# Rows are deleted on release and on completion, always by the same statement
+# that writes the status the transition implies — so a row that outlives its
+# payout is a dispute genuinely stuck mid-flight, which is exactly what an
+# operator needs to find during reconciliation. `list_refund_claims` is that
+# read, and it is why the claim time is stored.
+#
+# Where the two failure modes cannot both be closed, this table BLOCKS rather
+# than forgets, and that is a decision rather than an accident. A claim that
+# evaporates lets a buyer be paid twice out of the platform wallet, and nothing
+# takes the second transfer back; a claim that outlives its payout only delays
+# one, and the delay is visible in the queue. So a claim held over a dispute
+# that is NOT `crediting` — which no path here can produce, but a hand-written
+# row or a hand-edited status could — refuses every later claim, and cannot be
+# released either, because dropping a claim that another payer may still be
+# signing against is the double payment this table exists to prevent. The way
+# out is deliberately the slow one: establish from the chain whether the buyer
+# was paid, then record that decision with append_status, which drops the claim
+# in the same statement.
 _CREATE_REFUND_CLAIMS_SQL = """
 CREATE TABLE IF NOT EXISTS refund_claims (
     dispute_id  TEXT PRIMARY KEY,
