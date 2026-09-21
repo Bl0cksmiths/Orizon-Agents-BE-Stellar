@@ -233,6 +233,21 @@ LIMIT 1
 """
 
 
+# Record a settlement. A plain INSERT with no RETURNING: the caller already
+# holds the record it handed us — settled_at and window_closes_at included,
+# both stamped by the execution path's own clock — so there is nothing to read
+# back, and nothing here is derived from the row.
+#
+# `$8::jsonb` states the cast rather than leaving it to inference, so the
+# breakdown is validated as JSON by the database on the way in.
+_INSERT_SETTLEMENT_SQL = """
+INSERT INTO workflow_settlements (
+    task_id, payer, auth_id_hex, job_id_hex, charge_tx, proof_tx,
+    settled_usdc, steps, settled_at, window_closes_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
