@@ -166,11 +166,17 @@ dispute, and nothing on-chain weighs the claim.
 was opened with stays on the record, and nothing is signed or spent. Any other
 status is refused rather than absorbed — a dispute that is already paid, that
 is mid-payout, or that has already been rejected cannot be rejected again,
-because that would be a second adjudicator quietly overruling the first. The
-adjudicator may attach a note of up to 500 characters (a longer one is refused,
-not cut). It is kept on the dispute record for audit, so the outcome most
-likely to be contested has its reasoning written down; it is not part of the
-dispute the API returns, and it is never written to the log.
+because that would be a second adjudicator quietly overruling the first.
+
+**A rejection must say why, and the buyer is shown it.** The adjudicator's note
+is required, up to 500 characters (a longer one is refused, not cut), and it
+comes back on the dispute as `rejection_reason` — because a rejection with no
+explanation is worse than no dispute system at all. A rejection without one is
+refused before anything is read: no body, no `note`, a null note or an empty
+one. So is a note that is nothing but whitespace or control characters once it
+is cleaned (`rejection_reason_required`). Write it for the buyer: it is the only
+word they get, and it can be read wherever the dispute can — see "Who can read
+what a dispute says" below. It is never written to the log.
 
 **Upholding** is where money moves, and it happens in a fixed order:
 
