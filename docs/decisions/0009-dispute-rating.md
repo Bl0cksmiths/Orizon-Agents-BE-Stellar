@@ -79,8 +79,9 @@ dispute_job_id(job_id, step) = job_id[:8] ‖ sha256(job_id ‖ "orizon-dispute:
 
 with the step packed as two big-endian bytes. It lives in
 `app/services/dispute_rating.py`, it replaces `refund_svc.dispute_job_id(job_id)`
-outright, and `tests/test_dispute_job_id.py` pins it against golden vectors
-computed independently of the function.
+on the only path that writes a dispute rating, and
+`tests/test_dispute_job_id.py` pins it against golden vectors computed
+independently of the function.
 
 **The second half carries the step**, which is what closes Context 1. Each
 disputed step of a job derives its own id, so two upheld disputes against one
@@ -437,7 +438,11 @@ a buyer's upheld disputes now sit in it beside what they paid for.
 superseded.** ADR 0002 carries a dated amendment pointing here. ADR 0007 D5 and
 the last consequence of ADR 0008 still name `refund_svc.dispute_job_id(job_id)`
 as the id 4.04 would write under; they are the record of what was decided then,
-and this ADR is what replaced it.
+and this ADR is what replaced it. The old helpers themselves —
+`refund_svc.dispute_job_id` and `refund_svc.record_dispute_rating` — are still
+in the code with no caller outside their own tests, and the second still writes
+under the superseded id. Nothing reaches them; anything that did would rate
+under a scheme this ADR retired, so they should go rather than be reused.
 
 Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (why ratings are
 weighted by the quoted price), ADR 0007 (the dispute record the rating is
