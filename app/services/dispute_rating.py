@@ -21,6 +21,8 @@ with `Replay` is a retry whose earlier attempt already landed.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from typing import Literal
 
 # Domain separation for the derived id. Versioned, so a future change to the
 # derivation can never produce an id that collides with one already written
@@ -68,3 +70,35 @@ def dispute_job_id(job_id: bytes, step_index: int) -> bytes:
     if derived == job_id:
         raise ValueError(f"the dispute id for job {job_id.hex()} step {step_index} equals the job id itself")
     return derived
+
+
+# What the chain said about one dispute-rating submit.
+#
+# REPLAY is kept apart from FAILED because it is the one failure that can mean
+# success: the contract refuses a second rating under a derived id it has
+# already seen, so a retry answered with REPLAY is a retry whose earlier attempt
+# landed. Whether it means THAT, or a genuine collision with somebody else's
+# key, is not something this module can tell — it depends on whether the
+# dispute has a prior attempt on record, which only the caller holds.
+#
+# TIMEOUT means submitted and unconfirmed: it may still land. A rating is safe
+# to retry after one, unlike a refund, because the replay guard makes a second
+# landing impossible.
+RatingStatus = Literal["SUCCESS", "FAILED", "TIMEOUT", "REPLAY"]
+
+
+@dataclass(frozen=True)
+class RatingOutcome:
+    """The result of one attempt to write a dispute rating.
+
+    `tx_hash` is None whenever nothing was submitted — a REPLAY is refused at
+    simulation, before any transaction exists — and is the in-flight hash on a
+    TIMEOUT. `job_id_hex` is the DERIVED id the rating was written under, the
+    one a reviewer finds on Stellar Expert.
+    """
+
+    status: RatingStatus
+    tx_hash: str | None
+    job_id_hex: str
+    rating: int
+    weight_stroops: int
