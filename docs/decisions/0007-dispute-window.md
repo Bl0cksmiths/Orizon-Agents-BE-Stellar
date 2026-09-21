@@ -89,8 +89,8 @@ ordinary reason — shortening it to cut platform exposure, lengthening it for a
 support case — would silently move the deadline for work already done, in both
 directions. Shortening it closes windows the platform promised were open;
 lengthening it reopens windows an operator was told had closed and whose
-earnings they believed final. Neither is a deployment anyone would connect to
-the config change that caused it.
+earnings they believed final. Neither outcome is one anyone would trace back
+to the config change that caused it.
 
 The stamp makes the tuning knob mean exactly what an operator expects: it
 governs workflows that settle *after* the change, and nothing that already
