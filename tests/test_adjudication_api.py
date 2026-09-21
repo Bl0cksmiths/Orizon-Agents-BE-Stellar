@@ -12,6 +12,10 @@ good. What is tested here is the wire and the door — and only those:
     which is the receipt story 4.06 renders;
   * a REPEAT uphold answers with the same hash rather than a 5xx, because an
     adjudicator who double-clicks must see what happened, not an error;
+  * a rejection carries a note, because the buyer is shown it (story 4.06):
+    no note in any form is the edge's 422 and never reaches the service, a
+    note that cleans to nothing is the service's own 422, and the note comes
+    back on the dispute as `rejection_reason`;
   * every refusal arrives as the service's own code and status, verbatim.
 
 Whether a dispute may be upheld, how much is creditable, and — the part that
@@ -39,6 +43,11 @@ REFUND_TX = "3f1b" + "0" * 60
 
 API_KEY = "operator-secret-key"
 AUTH = {"X-API-Key": API_KEY}
+
+# A reason written for the buyer, because that is who reads it: the note is
+# required and comes back as the dispute's `rejection_reason`, so every
+# rejection this file expects to reach the service sends one.
+NOTE = "the delivered file matched the brief"
 
 UPHOLD = f"/api/disputes/{DISPUTE_ID}/uphold"
 REJECT = f"/api/disputes/{DISPUTE_ID}/reject"
@@ -121,11 +130,16 @@ def upholds_with(monkeypatch, result: DisputeRecord | Exception) -> list[str]:
     return calls
 
 
-def rejects_with(monkeypatch, result: DisputeRecord | Exception) -> list[tuple[str, str | None]]:
-    """Point the router's `reject` at one outcome; record id and note."""
-    calls: list[tuple[str, str | None]] = []
+def rejects_with(monkeypatch, result: DisputeRecord | Exception) -> list[tuple[str, str]]:
+    """Point the router's `reject` at one outcome; record id and note.
 
-    async def _reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
+    The stub takes `note` as the service does — keyword-only and with no
+    default — so a router that stopped passing it would fail here with a
+    TypeError rather than quietly reject with nothing to show the buyer.
+    """
+    calls: list[tuple[str, str]] = []
+
+    async def _reject(dispute_id: str, *, note: str) -> DisputeRecord:
         calls.append((dispute_id, note))
         if isinstance(result, Exception):
             raise result
@@ -148,7 +162,7 @@ def sealed(monkeypatch) -> list[str]:
         reached.append("uphold")
         raise AssertionError("uphold reached the service; the guard should have refused first")
 
-    async def _reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
+    async def _reject(dispute_id: str, *, note: str) -> DisputeRecord:
         reached.append("reject")
         raise AssertionError("reject reached the service; the guard should have refused first")
 
@@ -338,12 +352,15 @@ def test_the_key_admits_the_caller_to_uphold(client, adjudicating, monkeypatch):
 
 
 def test_the_key_admits_the_caller_to_reject(client, adjudicating, monkeypatch):
+    # With a note, because a rejection without one is refused at the edge: the
+    # only thing this may pin is the door, so the body has to be one the door
+    # would otherwise admit.
     calls = rejects_with(monkeypatch, record(status="rejected", resolved_at=1_700_000_500.0))
 
-    r = client.post(REJECT, json={}, headers=AUTH)
+    r = client.post(REJECT, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == 200, r.text
-    assert calls == [(DISPUTE_ID, None)]
+    assert calls == [(DISPUTE_ID, NOTE)]
 
 
 # ── upholding ───────────────────────────────────────────────────
@@ -417,6 +434,10 @@ REFUSALS = [
     # the adjudicator as a 504 rather than a 500 because the platform knows
     # exactly what happened and is saying so.
     ("refund_unconfirmed", 504),
+    # A rejection note that cleaning left empty — whitespace, or nothing but
+    # control characters. The edge cannot see that; only the service cleans,
+    # so only the service can refuse it.
+    ("rejection_reason_required", 422),
 ]
 
 
@@ -437,9 +458,11 @@ def test_an_uphold_refusal_keeps_its_code_and_its_status(client, adjudicating, m
 
 @pytest.mark.parametrize(("code", "status"), REFUSALS, ids=[c for c, _ in REFUSALS])
 def test_a_reject_refusal_keeps_its_code_and_its_status(client, adjudicating, monkeypatch, code, status):
+    # A valid note, so the edge admits the body and the only answer left is
+    # the service's own.
     rejects_with(monkeypatch, dispute_error(code, status))
 
-    r = client.post(REJECT, json={}, headers=AUTH)
+    r = client.post(REJECT, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == status
     assert r.json()["error"]["code"] == code
@@ -449,9 +472,9 @@ def test_a_reject_refusal_keeps_its_code_and_its_status(client, adjudicating, mo
 
 
 def test_a_successful_reject_is_rejected_and_resolved(client, adjudicating, monkeypatch):
-    rejects_with(monkeypatch, record(status="rejected", resolved_at=1_700_000_500.0))
+    rejects_with(monkeypatch, record(status="rejected", resolved_at=1_700_000_500.0, note=NOTE))
 
-    r = client.post(REJECT, json={"note": "the delivered file matched the brief"}, headers=AUTH)
+    r = client.post(REJECT, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -459,6 +482,10 @@ def test_a_successful_reject_is_rejected_and_resolved(client, adjudicating, monk
     assert body["resolved_at"] == 1_700_000_500.0
     # Nothing was paid, and the wire says so rather than omitting the field.
     assert body["refund_tx"] is None
+    assert body["credited_usdc"] is None
+    # The adjudicator's answer comes straight back as the buyer will read it,
+    # so the console that wrote it sees exactly what it published.
+    assert body["rejection_reason"] == NOTE
 
 
 def test_the_note_reaches_the_service_by_keyword(client, adjudicating, monkeypatch):
@@ -471,28 +498,42 @@ def test_the_note_reaches_the_service_by_keyword(client, adjudicating, monkeypat
     assert calls == [(DISPUTE_ID, "the delivered file matched the brief")]
 
 
-@pytest.mark.parametrize(
-    ("label", "payload"),
-    [("no-body-at-all", None), ("empty-object", {}), ("explicit-null", {"note": None})],
-    ids=["no-body-at-all", "empty-object", "explicit-null"],
-)
-def test_an_absent_note_is_none_however_it_is_absent(client, adjudicating, monkeypatch, label, payload):
-    # Three ways a client can say "no note", and one representation in the
-    # record. A console with nothing to add must not have to send a body.
+# Every way a client can say "no note", and one answer to all of them. 4.03
+# pinned that however a note is absent it is absent the same way, and that
+# still holds — but the answer is now a refusal, because the note is what the
+# buyer is shown and a rejection with nothing to show them is not one. The
+# empty string moved here from the malformed notes below: it is not a note
+# of the wrong shape, it is no note at all.
+NO_NOTE = [
+    ("no-body-at-all", None),
+    ("empty-object", {}),
+    ("explicit-null", {"note": None}),
+    ("empty-string", {"note": ""}),
+]
+
+
+@pytest.mark.parametrize(("label", "payload"), NO_NOTE, ids=[label for label, _ in NO_NOTE])
+def test_a_rejection_without_a_note_never_reaches_the_service(client, adjudicating, monkeypatch, label, payload):
     calls = rejects_with(monkeypatch, record(status="rejected"))
 
     r = client.post(REJECT, headers=AUTH) if payload is None else client.post(REJECT, json=payload, headers=AUTH)
 
-    assert r.status_code == 200, r.text
-    assert calls == [(DISPUTE_ID, None)]
+    assert r.status_code == 422, f"a rejection with {label} was admitted"
+    # The field-level code, not the service's `rejection_reason_required`:
+    # that one answers a note the edge admitted and cleaning emptied, and
+    # seeing it here would mean the service had been asked.
+    assert r.json()["error"]["code"] == "validation_error"
+    assert calls == []
 
 
 # Notes the service must never be asked about, refused at the edge with the
 # field-level `validation_error` the frontend can render inline — bounded
 # exactly as `OpenDisputeReq.reason` is, because it is the same kind of text.
 MALFORMED_NOTES = [
-    ("note-empty", {"note": ""}),
-    ("note-too-long", {"note": "x" * 2001}),
+    # One over the service's own ceiling, which is the only bound there is:
+    # anything longer would reach the buyer cut short, so the edge refuses it
+    # and the adjudicator is the one who shortens it.
+    ("note-one-over-the-bound", {"note": "x" * (dispute_svc.MAX_REASON_CHARS + 1)}),
     ("note-not-a-string", {"note": 7}),
 ]
 
@@ -506,6 +547,31 @@ def test_a_malformed_note_never_reaches_the_service(client, adjudicating, monkey
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "validation_error"
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("label", "note"),
+    [("whitespace", "   \n\t "), ("control-characters", "\x00\x07\x1b")],
+    ids=["whitespace", "control-characters"],
+)
+def test_a_note_that_cleans_to_nothing_is_the_services_422(client, adjudicating, monkeypatch, label, note):
+    """The half of the rule the edge cannot enforce, and must not try to.
+
+    `min_length` counts characters before cleaning, so a note of blanks is a
+    note to the edge and reaches the service byte for byte — the router trims
+    nothing, or the service's cleaning would stop being the one definition of
+    "empty". The service's refusal then arrives as its own code at 422,
+    distinct from `validation_error`, so the console can say "that reason is
+    blank" rather than "the request was malformed".
+    """
+    calls = rejects_with(monkeypatch, dispute_error("rejection_reason_required", 422))
+
+    r = client.post(REJECT, json={"note": note}, headers=AUTH)
+
+    assert calls == [(DISPUTE_ID, note)], f"a {label} note did not reach the service unchanged"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "rejection_reason_required"
+    assert r.json()["detail"] == "rejection_reason_required"
 
 
 def test_a_note_at_the_bound_is_accepted(client, adjudicating, monkeypatch):
@@ -535,8 +601,11 @@ def test_an_oversized_dispute_id_never_reaches_the_service(client, adjudicating,
     calls_reject = rejects_with(monkeypatch, record(status="rejected"))
     oversized = path.replace(DISPUTE_ID, "d" * 65)
 
-    r = client.post(oversized, json={}, headers=AUTH)
+    # A valid note, so on the reject route the 422 can only be the path: the
+    # empty body would be refused on its own now, and would pin nothing here.
+    r = client.post(oversized, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == 422
+    assert [e["loc"] for e in r.json()["detail"]] == [["path", "dispute_id"]]
     assert calls_uphold == []
     assert calls_reject == []
