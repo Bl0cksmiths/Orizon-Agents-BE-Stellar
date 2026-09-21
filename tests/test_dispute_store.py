@@ -70,6 +70,11 @@ def a_settlement(**overrides: Any) -> SettlementRecord:
     return dataclasses.replace(base, **overrides)
 
 
+# An adjudicator's note as written, ragged edges and all: the assertions on it
+# are equality assertions, so anything the store trimmed or escaped shows up.
+NOTE = "  step 0 delivered; the brief did not ask for charts\n"
+
+
 def a_dispute(**overrides: Any) -> DisputeRecord:
     """A dispute of step 0 of that workflow, as the endpoint would open one."""
     base = DisputeRecord(
@@ -303,6 +308,47 @@ def test_a_transition_may_name_the_moment_it_resolved() -> None:
         return await store.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
 
     assert asyncio.run(go()).resolved_at == 1_700_009_999.0
+
+
+def test_an_adjudicators_note_is_kept_and_not_erased_by_a_later_transition() -> None:
+    """The platform's half of the argument, made as durable as the buyer's.
+
+    A buyer's `reason` is on the record from the moment they open the dispute.
+    A rejection recorded only a status and a timestamp, which is backwards —
+    rejection is the outcome most likely to be contested — and 4.04's rating
+    lands minutes later, so a transition that blanked the note would take it
+    off the record almost immediately.
+    """
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord]:
+        opened = await store.open_dispute(a_dispute())
+        assert opened.note is None
+        rejected = await store.append_status(opened.id, "rejected", note=NOTE)
+        return rejected, await store.append_status(opened.id, "rejected", rating_tx="tx_rating")
+
+    rejected, rated = asyncio.run(go())
+
+    assert rejected.note == NOTE
+    # The rating transition named no note, so the one already recorded stands.
+    assert rated.note == NOTE
+    assert rated.rating_tx == "tx_rating"
+    # And the buyer's side is untouched by the platform's.
+    assert rated.reason == "the summary was empty"
+
+
+def test_an_adjudicators_note_is_stored_exactly_as_given() -> None:
+    """Bounding and sanitising untrusted text is the caller's job — the
+    adjudication path already does it. A store that trimmed or escaped evidence
+    on its way in would quietly change what the platform is on record as having
+    said."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "rejected", note=NOTE)
+
+    assert asyncio.run(go()).note == NOTE
 
 
 def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
@@ -977,6 +1023,39 @@ def test_a_caller_may_supply_the_moment_it_resolved() -> None:
         return await store.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
 
     assert asyncio.run(go()).resolved_at == 1_700_009_999.0
+
+
+def test_an_adjudicators_note_is_appended_and_read_back_in_postgres() -> None:
+    """The column, end to end: written by the transition that names it, carried
+    forward by the one that does not, and never written onto the opening row
+    the buyer's complaint lives on."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        rejected = await store.append_status(opened.id, "rejected", note=NOTE)
+        await store.append_status(opened.id, "rejected", rating_tx="tx_rating")
+        return rejected, await store.get_dispute(opened.id)
+
+    rejected, stored = asyncio.run(go())
+
+    assert rejected.note == NOTE
+    assert stored is not None and stored.note == NOTE and stored.rating_tx == "tx_rating"
+    assert [row["note"] for row in pool.disputes] == [None, NOTE, NOTE]
+
+
+def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
+    """`dispute_events` predates the note — 4.02 created it — and CREATE TABLE
+    IF NOT EXISTS does nothing whatever to a table that is already there. This
+    ALTER is the whole of the deploy for this column, since the repo has no
+    migration tool, and without it the first INSERT naming `note` would fail
+    every dispute write on a service that had already run once."""
+    ddl = dispute_store._CREATE_DISPUTES_SQL
+
+    assert "ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT" in ddl
+    # And in the CREATE as well, so a fresh database gets it without the ALTER.
+    assert any(line.strip().startswith("note ") for line in ddl.splitlines())
 
 
 def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None:
