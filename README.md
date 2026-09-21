@@ -67,7 +67,7 @@ cp .env.example .env
 | POST | `/api/disputes/challenge`            | mint the exact message + nonce the payer's wallet signs to dispute a step |
 | POST | `/api/disputes`                      | open a dispute on a settled step — authorized by that signature, no API key |
 | GET  | `/api/disputes/{id}`                 | read one dispute by the unguessable id opening it returned |
-| GET  | `/api/tasks/{id}/disputes`           | a task's dispute window (`window_closes_at`) and every dispute raised on it |
+| GET  | `/api/tasks/{id}/disputes`           | a task's settlement (job id, payer, each step's charge, credit and output summary, the credit policy), its dispute window (`window_closes_at`), the server clock (`now`), and every dispute raised on it |
 | POST | `/api/disputes/{id}/uphold`          | adjudicate in the buyer's favour and pay the credit, settler → buyer (needs `X-API-Key`, and **refuses** while it is unset) |
 | POST | `/api/disputes/{id}/reject`          | adjudicate against the claim — records the verdict, signs nothing (needs `X-API-Key`, and **refuses** while it is unset) |
 | *    | `/api/pdax/*`                        | PDAX PHP↔crypto surface: trade, fiat/crypto funding, ramps, webhooks, reference data |
