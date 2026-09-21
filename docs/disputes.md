@@ -94,3 +94,47 @@ different step of the same workflow is a separate dispute and is allowed.
 **A workflow that was never paid for cannot be disputed at all.** A simulated
 run — no wallet, no authorization — charges nothing, settles nothing and has no
 window.
+
+## What an upheld dispute pays, and who pays it
+
+**The credit is the disputed step's settled charge**, under a stated policy
+rather than a case-by-case judgement: `DISPUTE_CREDITED_FRACTION` ships at
+`1.0`, the whole of what that step cost. The amount is computed when the
+dispute is opened and frozen on its record, so a later change to the policy
+cannot rewrite what the buyer was shown, and it is clamped so a credit can
+never exceed what was actually charged for the step.
+
+Crediting one step is what makes this a *partial* refund: the rest of the
+workflow — the steps that did deliver — stays paid, and their agents keep their
+earnings.
+
+**The platform pays it.** The credit is a transfer from the settler's own
+wallet to the buyer over the asset contract. It is **not** a reversal of the
+original charge and **not** a clawback from the agent:
+
+- The deployed `PaymentEscrow` has no refund entrypoint and never takes
+  custody — `charge` sends USDC from the payer straight to the agent's owner,
+  so there is nothing held anywhere to reverse.
+- Nothing in the system can take funds back out of an agent owner's wallet, and
+  nothing tries to. An operator's settled earnings are final.
+
+The full reasoning, the rejected alternatives and the testnet proof that a real
+credit lands are in `docs/decisions/0002-partial-credit-refund.md`.
+
+## The trust model, stated plainly
+
+- **The platform funds the credit.** The disputed agent's only consequence is
+  reputational — never a seizure of its funds.
+- **The platform adjudicates the dispute.** A human reviews the reason and the
+  settled record and decides. There is **no on-chain arbitration** in this
+  sprint: no contract weighs the claim, and no escrow releases on a verdict.
+  This is a permissioned, trusted operation, and it is disclosed everywhere
+  rather than implied by the word "dispute".
+- **Opening a dispute proves nothing and costs the agent nothing.** It records
+  a claim; it does not establish that the claim is true.
+
+Two things follow that are worth being honest about. Adjudication is only as
+good as the person doing it, and a buyer who disagrees with a rejection has no
+appeal beyond asking again. And because the credit comes from the platform
+wallet, the platform must hold enough of the asset for an upheld dispute to be
+payable at all.
