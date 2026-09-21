@@ -6,7 +6,8 @@ what it costs the agent that was disputed, and who pays for it.
 Three audiences. A **buyer** who paid for a workflow and did not get what they
 paid for wants "The window", "Who may dispute" and "What an upheld dispute
 pays". An **operator** whose agent has been disputed wants "What can be
-disputed", "Who pays" and "A dispute does not move reputation" — the short
+disputed", "What an upheld dispute pays" and "A dispute does not move
+reputation" — the short
 version is that nothing is ever taken from you. A **reviewer** checking the
 claim against the code wants "The trust model" and "The API", and should read
 `docs/decisions/0007-dispute-window.md` alongside them.
