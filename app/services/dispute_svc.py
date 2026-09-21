@@ -52,7 +52,7 @@ from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
-from . import dispute_rating, refund_svc, reputation_svc
+from . import dispute_rating, rating_writer, refund_svc, reputation_svc
 from . import external_binding as eb
 from .dispute_store import (
     DisputeRecord,
@@ -798,7 +798,9 @@ async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) 
 
     A rating that cannot even be FORMED — `submit_dispute_rating` raises for a
     settlement with no such step or a job id that will not derive — is none of
-    those, and is logged as the records problem it is.
+    those, and is logged as the records problem it is. Nor is one this
+    deployment is not configured to write (`rating_writer.config_gap`), which
+    is never submitted at all.
 
     THE CALLER LEARNS WHETHER THE RATING LANDED FROM THE RECORD, never from an
     exception, and this never raises — short of a cancellation — once it has
@@ -807,9 +809,10 @@ async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) 
       - `credited` WITH a `rating_tx`: the rating was submitted under the
         derived id and landed, or (after a TIMEOUT) may still;
       - `credited` WITHOUT one: the buyer is paid and the reputation
-        consequence is NOT on-chain — a FAILED rating, a collision, or one
-        that could not be formed or recorded. That dispute is not fully
-        resolved, and upholding it again retries the rating alone.
+        consequence is NOT on-chain — a FAILED rating, a collision, a
+        deployment not configured to rate, or one that could not be formed or
+        recorded. That dispute is not fully resolved, and upholding it again
+        retries the rating alone.
 
     Not an exception, because by now the money has moved: a 5xx would tell
     the caller the adjudication failed when the buyer has in fact been paid.
@@ -821,6 +824,26 @@ async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) 
     failure is what an OPERATOR does next, not the caller, so it is the ERROR
     line that names which one it was.
     """
+    gap = rating_writer.config_gap()
+    if gap is not None:
+        # The presence-only gate the settler's own ratings pass
+        # (`execution_svc._submit_ratings`). Without it a deployment that
+        # cannot sign a rating still submits, the submit raises, and the
+        # outcome is a TIMEOUT — "unconfirmed" on every uphold, forever, when
+        # the truth is "not configured". So nothing is submitted and the line
+        # names the setting. ERROR per dispute rather than the settler's
+        # hourly note: an upheld dispute whose agent is never rated breaks the
+        # disclosed model's one promise about the agent — that its
+        # consequence is reputational — and each one needs finding.
+        _log_rating(
+            logging.ERROR,
+            f"not submitted — {gap.problem}; the credit stands and the agent is NOT rated until it is set"
+            " and the dispute is upheld again",
+            credited,
+            _derived_id_hex(credited),
+            None,
+        )
+        return credited
     try:
         outcome = await dispute_rating.submit_dispute_rating(credited, settlement)
     except Exception:
