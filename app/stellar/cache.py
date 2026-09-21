@@ -35,6 +35,13 @@ _store: dict[str, tuple[float, Any]] = {}
 # In-flight producers: key → the Task computing that key's value.
 _flights: dict[str, asyncio.Task[Any]] = {}
 
+# Per-key generation, bumped by `invalidate`; absent means 0. A flight is
+# spawned under its key's current generation and may write its outcome back
+# only while that generation is still current. A read already in flight when
+# the key was invalidated saw the upstream state from BEFORE the change that
+# prompted the invalidation, and letting it land would quietly undo it.
+_generations: dict[str, int] = {}
+
 # Negative cache: key → (expiry, exception class, message). Hits within the
 # window raise a FRESH instance — retaining live exception objects would pin
 # their tracebacks (and captured frames) in memory, and re-raising the same
@@ -85,7 +92,10 @@ async def get_or_set(
     if task is None or task.done():
         if len(_store) + len(_failures) > _MAX_ENTRIES:
             _sweep(now)
-        task = asyncio.create_task(_produce(key, ttl_seconds, producer))
+        # The generation is fixed when the flight is registered, not when it
+        # first runs: a flight that `invalidate` detached is stale by
+        # definition, whatever it goes on to read.
+        task = asyncio.create_task(_produce(key, ttl_seconds, producer, _generations.get(key, 0)))
         _flights[key] = task
         task.add_done_callback(partial(_on_flight_done, key))
     # shield: a cancelled caller must not cancel the shared flight — the
@@ -93,14 +103,30 @@ async def get_or_set(
     return await asyncio.shield(task)
 
 
-async def _produce(key: str, ttl_seconds: float, producer: Callable[[], Awaitable[Any]]) -> Any:
+async def _produce(key: str, ttl_seconds: float, producer: Callable[[], Awaitable[Any]], generation: int) -> Any:
     try:
         value = await producer()
     except Exception as e:
-        _failures[key] = (time.monotonic() + _NEGATIVE_TTL_SECONDS, type(e), str(e))
+        # A stale failure is fenced too: negatively cached, it would refuse the
+        # first reader after an invalidation with an error from before it.
+        if _is_current(key, generation):
+            _failures[key] = (time.monotonic() + _NEGATIVE_TTL_SECONDS, type(e), str(e))
         raise
-    _store[key] = (time.monotonic() + ttl_seconds, value)
+    if _is_current(key, generation):
+        _store[key] = (time.monotonic() + ttl_seconds, value)
     return value
+
+
+def _is_current(key: str, generation: int) -> bool:
+    """Whether a flight spawned under `generation` may still write `key` back.
+
+    Checked at the write itself, with no await between check and store, so on
+    one event loop nothing can invalidate the key in between. A stale flight
+    still RETURNS its outcome to the callers already awaiting it — they asked
+    before the change and get the answer that was true then; it just stops
+    being the cache's answer for everyone after.
+    """
+    return _generations.get(key, 0) == generation
 
 
 def _rebuild(exc_type: type[BaseException], message: str) -> BaseException:
