@@ -31,13 +31,19 @@ learn, and the service holds no credential it could lose.
 
 from __future__ import annotations
 
+import base64
 import logging
+import time
 
+from ..config import settings
 from . import external_binding as eb
+from . import refund_svc
 from .dispute_store import (
     DisputeRecord,
+    DuplicateDisputeError,
     SettlementRecord,
     get_dispute_store,
+    new_dispute_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +54,18 @@ logger = logging.getLogger(__name__)
 # step, and the format only stays trustworthy while there is exactly one.
 DISPUTE_MESSAGE_PREFIX = eb.DISPUTE_MESSAGE_PREFIX
 dispute_message = eb.dispute_message
+
+# `secrets.token_hex(16)`, so 32 hex characters. Checked before the nonce is
+# looked up: the value is caller-supplied, and a table lookup is not the place
+# to discover that somebody sent a megabyte.
+NONCE_HEX_CHARS = 32
+
+# An ed25519 signature is 64 bytes — 88 characters in base64. Bounded before the
+# decode for the reason `BindReq.signature` gives: 256 characters is ~3x what a
+# real signature needs, so nothing legitimate is refused and nothing enormous is
+# decoded.
+_SIGNATURE_BYTES = 64
+_MAX_SIGNATURE_CHARS = 256
 
 
 class DisputeError(Exception):
@@ -118,6 +136,178 @@ async def issue_dispute_challenge(job_id_hex: str, step_index: int) -> tuple[str
     if settlement.step(step_index) is None:
         raise _refuse("step_not_settled", 409, f"that workflow has no step {step_index}", job_id_hex, step_index)
     return eb.issue_dispute_challenge(job_id_hex, step_index)
+
+
+def _authenticate_payer(
+    settlement: SettlementRecord,
+    step_index: int,
+    payer: str,
+    nonce: str,
+    signature_b64: str,
+) -> None:
+    """Prove that the caller is the party whose money moved, or refuse.
+
+    The authority is `settlement.payer` — written when the workflow settled,
+    before any dispute existed — never the `payer` in the request, which is
+    checked against it and otherwise unused. A dispute is the buyer's remedy
+    and only the buyer's: nobody else may spend the platform's credit budget,
+    and nobody else may put a dispute rating on an agent's record.
+
+    Four steps, cheapest first, and each one refuses with its own code because
+    the three failures need different things from the caller:
+
+      1. the signature's SHAPE — a pure decode, no table touched, so a client
+         bug costs nothing (`signature_malformed`, 400);
+      2. the challenge is LIVE and is the one this caller was given
+         (`challenge_expired`, 400). Distinguished from a bad signature on
+         purpose: a buyer who spent a minute in a wallet dialog needs to be told
+         to ask for a new challenge, and "not the payer" would send them looking
+         for a problem with their wallet instead;
+      3. the address the caller claims IS the recorded payer — a string compare
+         before any crypto, and before anything can consume the nonce
+         (`not_the_payer`, 403);
+      4. the signature verifies against that recorded payer, which consumes the
+         nonce (`not_the_payer`, 403).
+
+    3 and 4 share one code deliberately. "That is not the payer's address" and
+    "that is not the payer's signature" are the same fact to anyone entitled to
+    an answer, and two codes would turn this into an oracle for which addresses
+    paid for which jobs — job ids are public in the escrow's `charged` event,
+    so an enumerator would need nothing but patience.
+    """
+    job_id_hex = settlement.job_id_hex
+    if len(signature_b64) > _MAX_SIGNATURE_CHARS:
+        raise _refuse("signature_malformed", 400, "that is not an ed25519 signature", job_id_hex, step_index)
+    try:
+        raw = base64.b64decode(signature_b64, validate=True)
+    except ValueError:
+        # binascii.Error is a ValueError, so one handler covers a non-base64
+        # body without masking a real bug.
+        raise _refuse("signature_malformed", 400, "the signature is not valid base64", job_id_hex, step_index) from None
+    if len(raw) != _SIGNATURE_BYTES:
+        raise _refuse(
+            "signature_malformed",
+            400,
+            f"an ed25519 signature is {_SIGNATURE_BYTES} bytes",
+            job_id_hex,
+            step_index,
+        )
+    if len(nonce) != NONCE_HEX_CHARS or not eb.dispute_challenge_is_live(job_id_hex, step_index, nonce):
+        raise _refuse(
+            "challenge_expired",
+            400,
+            "that challenge has expired or was already used — ask for a new one",
+            job_id_hex,
+            step_index,
+        )
+    if payer != settlement.payer:
+        raise _refuse("not_the_payer", 403, "only the payer of a workflow may dispute it", job_id_hex, step_index)
+    if not eb.verify_dispute_challenge(job_id_hex, step_index, settlement.payer, signature_b64):
+        raise _refuse("not_the_payer", 403, "only the payer of a workflow may dispute it", job_id_hex, step_index)
+
+
+async def open_dispute(
+    *,
+    job_id_hex: str,
+    step_index: int,
+    reason: str,
+    payer: str,
+    nonce: str,
+    signature_b64: str,
+) -> DisputeRecord:
+    """Open a dispute against one settled step, or refuse with a `DisputeError`.
+
+    THE ORDER OF THE CHECKS BELOW IS LOAD-BEARING, not house style — the bind
+    route's docstring makes the same point about the same kind of gate. Two
+    principles decide it: cheapest first, and nothing about a workflow's private
+    state is answered before the caller has proved they are its buyer.
+
+      1. **The settlement** — one store read, and every rule after it needs the
+         record anyway: the payer to check the signature against, the stamped
+         window, the step's price. An unknown job is answered before anything
+         else because there is nothing to judge (`unknown_job`, 404). It
+         discloses only what the chain already does — a settled job id is public
+         in the escrow's `charged` event, and this says no more than "we hold a
+         settlement for it".
+      2. **The payer** — see `_authenticate_payer`. Everything after this point
+         is off-chain state that belongs to the buyer: whether a step was
+         delivered, when their window closes, whether they already disputed. A
+         caller who cannot prove they are the buyer learns none of it.
+      3. **The step** — it must exist on the settlement and have been delivered.
+         A step that failed was never part of what the buyer paid for, so there
+         is nothing to credit (`step_not_settled`, 409).
+
+    Returns the stored `DisputeRecord` (status `open`). Writes nothing on-chain
+    and touches no reputation: 4.03 pays the credit, 4.04 writes the rating.
+    """
+    store = get_dispute_store()
+
+    settlement = await store.get_settlement(job_id_hex)
+    if settlement is None:
+        raise _refuse("unknown_job", 404, "no settled workflow with that job id", job_id_hex, step_index)
+
+    _authenticate_payer(settlement, step_index, payer, nonce, signature_b64)
+
+    step = settlement.step(step_index)
+    if step is None:
+        raise _refuse("step_not_settled", 409, f"that workflow has no step {step_index}", job_id_hex, step_index)
+    if not step.delivered:
+        raise _refuse(
+            "step_not_settled",
+            409,
+            f"step {step_index} produced no output, so nothing was charged for it",
+            job_id_hex,
+            step_index,
+        )
+
+    # R12, named here so the collision cannot be rediscovered the hard way: the
+    # settler has ALREADY auto-rated this job under `Rated(agent_id, job_id)`,
+    # and `ReputationLedger.submit` checks that replay guard before it reads
+    # `kind`. So when story 4.04 records this dispute on-chain it must write the
+    # rating under `refund_svc.dispute_job_id(job_id)` — the derived id from
+    # ADR 0002 — or the submission comes back `Error::Replay` and the dispute
+    # silently never lands. Nothing in THIS story writes on-chain at all.
+    record = DisputeRecord(
+        id=new_dispute_id(),
+        job_id_hex=job_id_hex,
+        task_id=settlement.task_id,
+        step_index=step_index,
+        agent_id=step.agent_id,
+        # The RECORDED payer, not the one in the request — they are equal by
+        # now, and the record should carry the one the settlement proved.
+        payer=settlement.payer,
+        reason=reason,
+        status="open",
+        # The step's own price as it settled, never the plan's estimate: the
+        # credit is computed from this, and a credit larger than what was
+        # charged would be the platform paying for work it never billed.
+        charged_usdc=step.price_usdc,
+        creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, settings.dispute_credited_fraction),
+        opened_at=time.time(),
+    )
+
+    try:
+        stored = await store.open_dispute(record)
+    except DuplicateDisputeError as e:
+        # The store enforces one dispute per (job, step) as well, and it is the
+        # only check that holds under a race: two requests that both pass the
+        # rules above still meet here, and the second must get the first
+        # dispute back rather than a 500.
+        raise DisputeError(
+            "duplicate_dispute",
+            f"step {step_index} of this workflow was already disputed",
+            409,
+            e.existing,
+        ) from None
+    logger.info(
+        "dispute opened: id=%s job=%s step=%s agent=%s creditable=%.7f",
+        stored.id,
+        job_id_hex,
+        step_index,
+        step.agent_id,
+        stored.creditable_usdc,
+    )
+    return stored
 
 
 async def get_dispute(dispute_id: str) -> DisputeRecord | None:
