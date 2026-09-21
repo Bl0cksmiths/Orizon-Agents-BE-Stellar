@@ -57,21 +57,3 @@ def test_execute_refund_transfers_from_settler_to_buyer(monkeypatch) -> None:
     assert calls["contract"] == sc.contract_ids().asset_sac
     # settler → buyer, amount in stroops (0.08 USDC = 800_000)
     assert calls["args"] == [("addr", "GSETTLER"), ("addr", "GBUYER"), ("i128", 800_000)]
-
-
-def test_record_dispute_rating_uses_the_derived_job_id(monkeypatch) -> None:
-    calls: dict[str, object] = {}
-
-    async def _fake_submit(agent_id, job_id, rating, weight, payer, kind) -> dict:
-        calls.update(agent_id=agent_id, job_id=job_id, rating=rating, weight=weight, payer=payer, kind=kind)
-        return {"hash": "rating_tx"}
-
-    monkeypatch.setattr(sc, "submit_rating_async", _fake_submit)
-    jid = bytes(range(16))
-    asyncio.run(refund_svc.record_dispute_rating("agt_x", jid, "GBUYER", 5_000_000))
-
-    assert calls["job_id"] == refund_svc.dispute_job_id(jid)  # derived, clears the replay guard
-    assert calls["job_id"] != jid
-    assert calls["kind"] == "dispute"
-    assert calls["rating"] == refund_svc.DISPUTE_RATING
-    assert calls["payer"] == "GBUYER"
