@@ -402,10 +402,11 @@ for work that failed the buyer, and a failure somebody paid for is worse
 evidence than one nobody did. It is not 0, because the verdict is the
 platform's alone, with no on-chain arbitration and no appeal, and a unilateral
 judgement should not carry the harshest score the scale has. The settler's own
-scale runs from that 20 through 40–95 for delivered work (base 70, moved by the
-artifact and the critic's pass, with a baked kit artifact fixed at 95), so at
-equal weight the two ratings on a disputed step average between **15 and
-52.5**. Both `count` and `disputed` go up by one, so
+scale runs from that 20 — which a billed step can earn too, when it returned an
+empty result or an external reply with nothing checkable in it — through 40–95
+for work it can check (base 70, moved by the artifact and the critic's pass,
+with a baked kit artifact fixed at 95), so at equal weight the two ratings on a
+disputed step average between **15 and 52.5**. Both `count` and `disputed` go up by one, so
 `dispute_rate_bps = disputed × 10 000 / count` includes the dispute rating in
 its own denominator.
 
