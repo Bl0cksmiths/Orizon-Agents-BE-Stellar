@@ -503,6 +503,27 @@ def test_a_live_run_without_a_signing_configuration_is_refused_before_it_upholds
     assert "STELLAR_REPUTATION_LEDGER" in out
 
 
+def test_a_deployment_that_could_not_rate_is_refused_before_it_pays(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    credit: CreditSeam,
+    configured: dict[str, str],
+) -> None:
+    """Everything a CREDIT needs is set, but ratings are switched off — so the
+    service would pay and then decline to rate (`rating_writer.config_gap`),
+    leaving a paid dispute that is not resolved. Refused while nothing has been
+    signed, naming the setting in the service's own words."""
+    forbid_uphold(monkeypatch)
+    monkeypatch.setattr(settings, "reputation_enabled", False)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_NOT_CONFIGURED
+    assert "REPUTATION_ENABLED is false — so the dispute rating could not be written" in out
+    assert "nothing was signed" in out
+
+
 def test_every_refusal_code_is_non_zero_and_distinct() -> None:
     """The table an operator greps. Zero would read as success and a duplicate
     would make two different refusals indistinguishable to a wrapper script."""
