@@ -462,6 +462,24 @@ def test_each_rating_answer_records_whether_the_rating_is_known_to_have_landed(
     assert len(settler.transfers) == 1
 
 
+def test_a_failed_retry_leaves_an_unconfirmed_rating_as_it_was(ledger, settler, invalidated) -> None:
+    """FAILED says nothing about an EARLIER attempt, so it changes nothing —
+    including an unconfirmed one already on record. The timeout's hash never
+    landed (the retry passed simulation, which proves it), and this retry did
+    not land either: the dispute still carries that hash, still unconfirmed,
+    and a later uphold still settles it."""
+    dispute = open_dispute()
+    ledger.script = ["lost", "fail"]
+    unconfirmed = uphold(dispute.id)
+
+    failed = uphold(dispute.id)
+
+    assert failed == unconfirmed
+    assert failed.rating_tx == "tx_rating_1" and failed.rating_confirmed is False
+    assert len(ledger.submits) == 2 and ledger.replays == 0
+    assert invalidated == []
+
+
 # ── across disputes, and across every outcome ───────────────────
 
 
