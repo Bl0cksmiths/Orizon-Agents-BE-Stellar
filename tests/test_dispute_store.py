@@ -449,8 +449,10 @@ class FakePool:
         self.statements: list[str] = []
         self.settlements: list[dict[str, Any]] = []
         self.disputes: list[dict[str, Any]] = []
-        # The refund mutex, as a set because that is all a PRIMARY KEY is here.
-        self.claims: set[str] = set()
+        # The refund mutex: dispute_id -> claimed_at, which is the whole of
+        # `refund_claims`. A dict rather than a set because the claim time is
+        # what makes the table readable as a reconciliation queue.
+        self.claims: dict[str, float] = {}
         self.closed = 0
 
     async def execute(self, sql: str, *args: Any) -> str:
@@ -480,7 +482,7 @@ class FakePool:
         if sql == dispute_store._SELECT_DISPUTE_SQL:
             return _newest(self.disputes, dispute_id=args[0])
         if sql == dispute_store._CLAIM_REFUND_SQL:
-            return self._claim_refund(args[0])
+            return await self._claim_refund(args)
         if sql == dispute_store._DELETE_REFUND_CLAIM_SQL:
             return self._delete_refund_claim(args[0])
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
@@ -497,23 +499,42 @@ class FakePool:
         newest = {r["dispute_id"]: r for r in self.disputes if r["task_id"] == args[0]}
         return sorted(newest.values(), key=lambda r: (r["opened_at"], r["step_index"]))
 
-    def _claim_refund(self, dispute_id: str) -> dict[str, Any] | None:
-        """refund_claims PRIMARY KEY (dispute_id) + ON CONFLICT DO NOTHING.
+    async def _claim_refund(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+        """_CLAIM_REFUND_SQL: the `latest` CTE, the mutex insert and the event
+        insert, as one statement sharing ONE snapshot.
 
-        The whole point of the real table is that this is ONE atomic
-        statement, so the fake models it as one indivisible step too: a second
-        claim over a held dispute writes nothing and returns nothing.
+        The snapshot is the part worth modelling. `latest` is read before
+        anything is written, and a claim that commits in between is invisible
+        to it — so the status this reads can rule a claim out but can never
+        separate two claimants. The sleep below IS that window: everything
+        after it runs with a status that may already be stale, and the PRIMARY
+        KEY is the only thing left to arbitrate. An implementation that
+        dropped `refund_claims` and leaned on the status alone would append two
+        `crediting` rows here, which is exactly the double credit the table
+        exists to prevent.
         """
-        if dispute_id in self.claims:
+        dispute_id, claimed_at = args
+        latest = _newest(self.disputes, dispute_id=dispute_id)
+        await asyncio.sleep(0)
+        # `SELECT $1, $2 FROM latest WHERE latest.status = 'upheld'` selects
+        # nothing, so the mutex row is not written and the main INSERT — which
+        # JOINs `claim` — writes nothing either.
+        if latest is None or latest["status"] != "upheld":
             return None
-        self.claims.add(dispute_id)
-        return {"dispute_id": dispute_id}
+        if dispute_id in self.claims:  # ON CONFLICT (dispute_id) DO NOTHING
+            return None
+        self.claims[dispute_id] = claimed_at
+        # Only the status changes: resolved_at and both transaction hashes are
+        # copied forward, because `crediting` is not a resolution.
+        row = latest | {"status": "crediting", "opening": False}
+        self.disputes.append(row)
+        return row
 
     def _delete_refund_claim(self, dispute_id: str) -> dict[str, Any] | None:
         """DELETE ... RETURNING dispute_id — empty when no claim was held."""
         if dispute_id not in self.claims:
             return None
-        self.claims.discard(dispute_id)
+        self.claims.pop(dispute_id, None)
         return {"dispute_id": dispute_id}
 
     def _open_dispute(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
