@@ -138,3 +138,31 @@ good as the person doing it, and a buyer who disagrees with a rejection has no
 appeal beyond asking again. And because the credit comes from the platform
 wallet, the platform must hold enough of the asset for an upheld dispute to be
 payable at all.
+
+## A dispute does not move reputation
+
+**Raising a dispute never changes an agent's score.** Between opening and
+adjudication the disputed agent's reputation reads exactly as it did before:
+nothing is written on-chain, and the planner's view of that agent does not
+change.
+
+This is deliberate. A dispute anyone could raise that immediately dented a
+competitor's on-chain score would be a free weapon — and because the ledger is
+append-only, the dent could never be taken back when the dispute was rejected.
+
+Only an **upheld** dispute reaches the chain, as a single low rating (10 on the
+ledger's 0–100 scale). Two details an operator should know about it:
+
+- The step's original automatic rating stays where it is. The dispute adds a
+  second rating rather than amending the first, because the ledger has no
+  entrypoint that amends one. The disputed step therefore carries two ratings,
+  and both count toward the agent's score.
+- It is written under a **derived job id** — `sha256(job_id || "dispute")`,
+  truncated to 16 bytes — because the ledger refuses a second rating for the
+  same `(agent, job)` pair. The dispute stays linkable to the job it disputes,
+  and it is what finally moves the `disputed` count and `dispute_rate_bps` on
+  the agent's reputation row.
+
+A rejected dispute writes nothing on-chain at all. It stays on the record,
+with its reason, as part of the agent's history with that buyer — not as part
+of its score.
