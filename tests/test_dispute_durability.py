@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
-from test_dispute_store import JOB, FakePool, a_dispute, a_settlement
+from test_dispute_store import JOB, STEPS, TASK, FakePool, a_dispute, a_settlement
 
 from app.services import dispute_store
 from app.services.dispute_store import DisputeStore
@@ -91,3 +91,50 @@ def test_a_dispute_opened_before_a_restart_is_still_there_after_it(monkeypatch: 
         # And found by the step as well, which is the lookup the second
         # "dispute this step" request makes.
         assert asyncio.run(store.find_dispute(JOB, 0)) == opened
+
+
+def test_the_window_a_buyer_was_promised_is_the_window_after_the_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The settlement is what the window is measured from, and the step prices
+    are what a credit is computed from. Losing either turns a live dispute into
+    one nothing can be decided about — the state app/state.py would leave it in,
+    since it evicts FINISHED tasks first."""
+    database = FakePool()
+
+    with process(monkeypatch, database) as store:
+        asyncio.run(store.record_settlement(a_settlement()))
+
+    with process(monkeypatch, database) as store:
+        settled = asyncio.run(store.get_settlement(JOB))
+        assert settled is not None
+        # Not recomputed from DISPUTE_WINDOW_SECONDS at read time: the buyer was
+        # told a closing time, and a restart must not move it either.
+        assert settled.window_closes_at == 1_700_086_400.0
+        assert settled.settled_usdc == 3.75
+        assert settled.steps == STEPS
+        assert settled.charge_tx == "tx_charge"
+        # And reachable from the task id too, which is all the task view has.
+        assert asyncio.run(store.get_settlement_by_task(TASK)) == settled
+
+
+def test_a_resolved_dispute_does_not_reopen_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dangerous direction. A credited dispute that came back as `open`
+    would be paid a second time by the next run of story 4.03, and the refund
+    transaction proving the first payment would be gone."""
+    database = FakePool()
+
+    with process(monkeypatch, database) as store:
+        asyncio.run(store.record_settlement(a_settlement()))
+        opened = asyncio.run(store.open_dispute(a_dispute()))
+        asyncio.run(store.append_status(opened.id, "credited", refund_tx="tx_refund"))
+
+    with process(monkeypatch, database) as store:
+        restored = asyncio.run(store.get_dispute(opened.id))
+        assert restored is not None
+        assert restored.status == "credited"
+        assert restored.refund_tx == "tx_refund"
+        assert restored.resolved_at is not None
+        # The opening row survived the restart as well: the audit trail is what
+        # a chargeback is answered with, so a transition must not have replaced
+        # what the dispute said when it was opened.
+        assert [r["status"] for r in database.disputes] == ["open", "credited"]
+        assert restored.reason == "the summary was empty"
