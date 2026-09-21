@@ -7,12 +7,16 @@ row read from before 4.06 answers "not known" rather than a wrong value.
 
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import Iterator
 from dataclasses import fields
 
 import pytest
+from test_dispute_store import FakePool, _pg, a_dispute
 
 from app.services import dispute_store
-from app.services.dispute_store import DisputeRecord
+from app.services.dispute_store import DisputeRecord, DisputeStore, InMemoryDisputeStore, RefundClaim
 
 # The receipt's columns and the SQL type each is added with — the type a
 # DisputeRecord field of that name round-trips through.
@@ -21,6 +25,22 @@ RECEIPT_COLUMNS = (
     ("updated_at", "DOUBLE PRECISION"),
     ("rating_confirmed", "BOOLEAN"),
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_singleton() -> Iterator[None]:
+    """The resolver is a module-level singleton; no test may inherit another's."""
+    dispute_store._store = None
+    yield
+    dispute_store._store = None
+
+
+@pytest.fixture(params=["in-memory", "postgres"])
+def store(request: pytest.FixtureRequest) -> DisputeStore:
+    """The same rules, asserted against both implementations: a receipt field
+    that one store stamped and the other forgot would read correctly in the
+    hermetic suite and wrongly in production."""
+    return InMemoryDisputeStore() if request.param == "in-memory" else _pg(FakePool())
 
 
 def _opened() -> DisputeRecord:
@@ -162,3 +182,46 @@ def test_no_statement_dates_a_row_by_the_database_clock() -> None:
         upper = sql.upper()
         for clock in ("NOW()", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "CLOCK_TIMESTAMP", "STATEMENT_TIMESTAMP"):
             assert clock not in upper, (name, clock)
+
+
+# ── updated_at: every writer, every row ───────────────────────────────────
+
+
+def test_every_writer_stamps_the_moment_it_wrote(store: DisputeStore) -> None:
+    """`updated_at` is when the dispute last changed state, so every writer
+    that changes it stamps it — the opening, a transition, the claim and the
+    release — and from this process's clock.
+
+    The opening is the one that does NOT read the clock: opening IS the first
+    change, so it is stamped with the record's own `opened_at`, which the
+    fixture sets far in the past so that a clock reading could not pass for
+    it. Every later writer is bracketed by two readings of the real clock."""
+
+    async def go() -> tuple[DisputeRecord, DisputeRecord, DisputeRecord, DisputeRecord, DisputeRecord, RefundClaim]:
+        opened = await store.open_dispute(a_dispute())
+        upheld = await store.append_status(opened.id, "upheld")
+        claimed = await store.claim_refund(opened.id)
+        assert claimed is not None
+        (claim,) = await store.list_refund_claims()
+        released = await store.release_refund_claim(opened.id)
+        assert released is not None
+        await store.claim_refund(opened.id)
+        credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+        return opened, upheld, claimed, released, credited, claim
+
+    before = time.time()
+    opened, upheld, claimed, released, credited, claim = asyncio.run(go())
+    after = time.time()
+
+    assert opened.updated_at == opened.opened_at == 1_700_000_100.0
+    stamped = [upheld.updated_at, claimed.updated_at, released.updated_at, credited.updated_at]
+    assert all(at is not None and before <= at <= after for at in stamped)
+    assert stamped == sorted(stamped)  # each no earlier than the row before it
+    # A claim is dated by the very reading that dates its mutex row, so the
+    # reconciliation queue and the trail agree on when the payout began.
+    assert claimed.updated_at == claim.claimed_at
+    # The first resolution and the change that made it are one reading...
+    assert upheld.resolved_at == upheld.updated_at
+    # ...and nothing after it moves the resolution — only the last change.
+    assert claimed.resolved_at == released.resolved_at == credited.resolved_at == upheld.resolved_at
+    assert asyncio.run(store.get_dispute(opened.id)) == credited
