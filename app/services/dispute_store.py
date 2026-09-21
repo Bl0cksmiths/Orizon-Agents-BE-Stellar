@@ -415,6 +415,23 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 """
 
 
+# Take the mutex. `DO NOTHING` (never `DO UPDATE`) keeps the loser on the
+# ordinary empty-result path instead of an exception class this module would
+# have to name, and leaves the winner's row untouched.
+_CLAIM_REFUND_SQL = """
+INSERT INTO refund_claims (dispute_id, claimed_at)
+VALUES ($1, $2)
+ON CONFLICT (dispute_id) DO NOTHING
+RETURNING dispute_id
+"""
+
+# Give it back. Returns the id when a claim was actually held, so the caller
+# can tell "released" from "there was nothing to release".
+_DELETE_REFUND_CLAIM_SQL = """
+DELETE FROM refund_claims WHERE dispute_id = $1 RETURNING dispute_id
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
