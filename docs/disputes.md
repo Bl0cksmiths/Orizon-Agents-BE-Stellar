@@ -211,3 +211,28 @@ payer recorded at settlement; the nonce is missing, expired or already used;
 the step never delivered and so was never charged; or there is no settlement
 record for the job at all. A **duplicate** is not refused — the original
 dispute comes back unchanged.
+
+## For operators: where the records live
+
+Settlements and disputes are the first things this backend keeps that are not
+on-chain and not disposable. They live in Postgres when `DATABASE_URL` is set,
+behind the same store seam the endpoint bindings use, in append-only tables.
+
+**Without `DATABASE_URL` the service falls back to an in-memory store**, and
+the whole of this document becomes true only until the next restart — which a
+free-tier instance performs whenever it idles. The fallback is there so local
+development and the test suite need no database; it is not a deployment. It
+says so once at startup, and it logs a warning naming any record it drops, so a
+window that can no longer be honoured is never silent.
+
+A settlement is recorded after the charge and the seal have landed, so it can
+never fail the workflow. If it cannot be written, the workflow is paid and
+attested but has **no dispute window**, and the only trace of that is the error
+log — which is why that failure is logged with the same weight as an
+attestation that did not settle.
+
+Related: `docs/decisions/0007-dispute-window.md` (why the window, the
+signature and the settlement record are shaped this way),
+`docs/decisions/0002-partial-credit-refund.md` (where the credit comes from and
+what was rejected) and `docs/reputation.md` (what a rating is worth and how the
+floor uses it).
