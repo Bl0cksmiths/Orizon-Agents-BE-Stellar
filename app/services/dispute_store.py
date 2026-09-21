@@ -197,6 +197,14 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 #   holding after a dispute is resolved, so a rejected dispute cannot be
 #   re-opened as a second dispute of the same step.
 #
+# `note` arrives with story 4.03's adjudication, and `dispute_events` already
+# exists wherever 4.02 ran — so the column needs the ALTER as well as its place
+# in the CREATE. CREATE TABLE IF NOT EXISTS does nothing whatever to a table
+# that is already there, and the first INSERT naming a column the deployed
+# table lacks would fail every dispute write on the service. ADD COLUMN IF NOT
+# EXISTS keeps the whole block idempotent, which is the property this schema is
+# maintained by in place of a migration tool.
+#
 # The three read indexes carry (key..., id DESC) so "the newest row for this
 # dispute / this step / this task" is served from the index without a sort.
 _CREATE_DISPUTES_SQL = """
@@ -216,8 +224,10 @@ CREATE TABLE IF NOT EXISTS dispute_events (
     resolved_at     DOUBLE PRECISION,
     refund_tx       TEXT,
     rating_tx       TEXT,
+    note            TEXT,
     opening         BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
     ON dispute_events (job_id_hex, step_index) WHERE opening;
 CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
@@ -330,7 +340,7 @@ INSERT INTO workflow_settlements (
 # no join, because each row already carries the whole record.
 _SELECT_DISPUTE_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 FROM dispute_events
 WHERE dispute_id = $1
 ORDER BY id DESC
@@ -344,7 +354,7 @@ LIMIT 1
 # current state rather than one of several disputes' states.
 _SELECT_DISPUTE_BY_STEP_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 FROM dispute_events
 WHERE job_id_hex = $1 AND step_index = $2
 ORDER BY id DESC
@@ -360,7 +370,7 @@ LIMIT 1
 # shuffle between two identical requests.
 _SELECT_DISPUTES_FOR_TASK_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+       charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 FROM (
     SELECT DISTINCT ON (dispute_id) *
     FROM dispute_events
@@ -394,8 +404,8 @@ ORDER BY opened_at, step_index
 _INSERT_DISPUTE_SQL = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE)
 ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
 RETURNING dispute_id
 """
@@ -415,7 +425,11 @@ RETURNING dispute_id
 # WRONGLY, and this table is evidence.
 #
 # COALESCE is what makes a partial update mean "leave the rest alone": a
-# transition that names only a refund_tx keeps the rating_tx already recorded.
+# transition that names only a refund_tx keeps the rating_tx and the
+# adjudicator's note already recorded. The note is carried exactly that way and
+# for the same reason — 4.04's rating lands minutes after 4.03's rejection, and
+# a transition that blanked the reason a dispute was refused would take the
+# platform's half of the argument off the record.
 # `resolved_at` falls through three values in order — the one the caller gave,
 # the one already on the record, then $6, this process's clock — so the moment a
 # dispute was first resolved is stamped once and never moved by a later event.
@@ -451,18 +465,19 @@ finished AS (
 )
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, $2,
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
-       COALESCE($5::double precision, latest.resolved_at, $6::double precision),
+       COALESCE($6::double precision, latest.resolved_at, $7::double precision),
        COALESCE($3::text, latest.refund_tx),
        COALESCE($4::text, latest.rating_tx),
+       COALESCE($5::text, latest.note),
        FALSE
 FROM latest
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 """
 
 
@@ -483,16 +498,16 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 _APPEND_UNRESOLVED_ROW = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, '{status}',
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
-       latest.resolved_at, latest.refund_tx, latest.rating_tx,
+       latest.resolved_at, latest.refund_tx, latest.rating_tx, latest.note,
        FALSE
 FROM latest {gate}
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
-          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note
 """
 
 
@@ -627,6 +642,15 @@ class DisputeRecord:
     dispute would credit back under the policy in force when it was opened —
     both frozen at opening time so a later policy change cannot rewrite what the
     buyer was shown.
+
+    `note` is the adjudicator's side of the argument: why the dispute was upheld
+    or rejected. The buyer's side is durable from the moment they open it
+    (`reason`, frozen there), and an upheld dispute leaves an amount and a
+    transaction hash behind as well — but a rejection recorded only a status and
+    a timestamp, which is backwards, because a rejection is the outcome most
+    likely to be contested. It is kept EXACTLY as given: bounding and sanitising
+    untrusted text is the caller's job, and a store that edited evidence on its
+    way in would be a worse store.
     """
 
     id: str
@@ -643,6 +667,7 @@ class DisputeRecord:
     resolved_at: float | None = None
     refund_tx: str | None = None
     rating_tx: str | None = None
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -709,6 +734,7 @@ class DisputeStore(Protocol):
         *,
         refund_tx: str | None = None,
         rating_tx: str | None = None,
+        note: str | None = None,
         resolved_at: float | None = None,
     ) -> DisputeRecord: ...
 
@@ -798,6 +824,7 @@ class InMemoryDisputeStore:
         *,
         refund_tx: str | None = None,
         rating_tx: str | None = None,
+        note: str | None = None,
         resolved_at: float | None = None,
     ) -> DisputeRecord:
         current = self._disputes.get(dispute_id)
@@ -808,6 +835,7 @@ class InMemoryDisputeStore:
             status=status,
             refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
             rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
+            note=note if note is not None else current.note,
             resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or time.time()),
         )
         self._disputes[dispute_id] = updated
@@ -1061,6 +1089,7 @@ class PostgresDisputeStore:
             resolved_at=None if row["resolved_at"] is None else float(row["resolved_at"]),
             refund_tx=row["refund_tx"],
             rating_tx=row["rating_tx"],
+            note=row["note"],
         )
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
@@ -1090,6 +1119,7 @@ class PostgresDisputeStore:
             record.resolved_at,
             record.refund_tx,
             record.rating_tx,
+            record.note,
         )
         if won is not None:
             return record
@@ -1112,6 +1142,7 @@ class PostgresDisputeStore:
         *,
         refund_tx: str | None = None,
         rating_tx: str | None = None,
+        note: str | None = None,
         resolved_at: float | None = None,
     ) -> DisputeRecord:
         """Append the transition and return the dispute as it now stands.
@@ -1136,7 +1167,7 @@ class PostgresDisputeStore:
         # The statement also drops the refund mutex when `status` finishes the
         # dispute, so what remains in `refund_claims` is exactly the set of
         # payouts still in flight rather than a pile of spent locks.
-        row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, resolved_at, now)
+        row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, note, resolved_at, now)
         if row is None:
             raise KeyError(dispute_id)
         return self._to_dispute(row)
