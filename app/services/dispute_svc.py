@@ -804,7 +804,12 @@ def _tell_observer(observer: RatingObserver, dispute: DisputeRecord, outcome: di
         )
 
 
-async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) -> DisputeRecord:
+async def _rate_credited(
+    credited: DisputeRecord,
+    settlement: SettlementRecord,
+    *,
+    on_rating: RatingObserver | None = None,
+) -> DisputeRecord:
     """Write the rating an upheld dispute earns, and answer with the dispute.
 
     Only ever called with a dispute that is already `credited`: straight after
@@ -893,6 +898,8 @@ async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) 
             exc_info=True,
         )
         return credited
+    if on_rating is not None:
+        _tell_observer(on_rating, credited, outcome)
     try:
         return await _apply_rating(credited, outcome)
     except Exception:
