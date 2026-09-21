@@ -17,7 +17,6 @@ Honest trust model, disclosed in every artifact (SOW §3.8 standard):
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -111,18 +110,6 @@ def _refuse(dispute: DisputeRecord, code: str, detail: str, amount_usdc: float) 
         amount_usdc,
     )
     return RefundRefused(code, message)
-
-
-def dispute_job_id(job_id: bytes) -> bytes:
-    """Derive the dispute's job id from the settled job's id (R12).
-
-    `ReputationLedger.submit` checks its replay guard on `Rated(agent_id,
-    job_id)` before it reads `kind`, and the settler has already auto-rated the
-    settled job under `job_id` — so a dispute rating on the same pair returns
-    `Error::Replay`. A distinct but deterministic derived id lets the dispute be
-    recorded on-chain, still linkable to the job it disputes.
-    """
-    return hashlib.sha256(job_id + b"dispute").digest()[:16]
 
 
 def credited_amount_usdc(step_charged_usdc: float, fraction: float = DEFAULT_CREDITED_FRACTION) -> float:
