@@ -17,13 +17,20 @@ import and the append-only tables: same seam, same failure modes, one pattern to
 learn. Timestamps are epoch seconds from our own clock, never the database's, so
 no timezone conversion sits between what was promised and what is later read.
 
-Durably, that is two tables. `workflow_settlements` holds one row per settled
+Durably, that is three tables. `workflow_settlements` holds one row per settled
 workflow, the step breakdown in a single JSON column; `dispute_events` holds one
 row per status transition, so a dispute's current state is its newest row and
 its history is the audit trail a chargeback is answered with. One dispute per
 (job_id_hex, step_index) is enforced by a partial UNIQUE INDEX rather than by a
 read in Python, because two requests for the same step arrive at once and only
 the database can settle which of them opened it.
+
+`refund_claims` is the odd one out and the most important (story 4.03): one row
+per dispute currently being paid, and the only table here that is not evidence.
+It is a mutex, held across a transfer that moves platform money to a buyer and
+cannot be undone, and it is written and dropped by the same statements that
+move the dispute in and out of `crediting` so the lock and the status cannot
+disagree. What is left in it is the queue a human reconciles.
 """
 
 from __future__ import annotations
@@ -102,7 +109,7 @@ def _import_asyncpg() -> Any:
 
 
 # The schema, created on first use with CREATE TABLE IF NOT EXISTS. There is no
-# migration tooling in this repo and two tables do not justify introducing any:
+# migration tooling in this repo and three tables do not justify introducing any:
 # the DDL is idempotent, so every boot and every redeploy converges on the same
 # schema with no migration step that could fail a deploy at 3am.
 #
