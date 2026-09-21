@@ -165,6 +165,12 @@ class DisputeResponse(BaseModel):
     # the honest answer is "not recorded" rather than the promise passed off
     # as the payout.
     credited_usdc: float | None = None
+    # When the dispute last changed state, in epoch seconds on this server's
+    # clock. `resolved_at` is stamped once, at the first verdict, so a refund
+    # that timed out and was reconciled hours later would otherwise show the
+    # buyer the time of a step they are no longer looking at. Null only for a
+    # record written before 4.06.
+    updated_at: float | None = None
 
     @classmethod
     def of(cls, record: DisputeRecord) -> DisputeResponse:
@@ -185,6 +191,7 @@ class DisputeResponse(BaseModel):
             refund_tx=record.refund_tx,
             rating_tx=record.rating_tx,
             credited_usdc=record.credited_usdc,
+            updated_at=record.updated_at,
         )
 
 
