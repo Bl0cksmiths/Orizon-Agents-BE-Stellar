@@ -197,6 +197,29 @@ def dispute_message(job_id_hex: str, step_index: int, nonce: str) -> str:
     return f"{DISPUTE_MESSAGE_PREFIX}:{job_id_hex}:{step_index}:{nonce}"
 
 
+def dispute_subject(step_index: int) -> str:
+    """The second half of the challenge key for a dispute of `step_index`.
+
+    A bind occupies (agent_id, endpoint_url), an unbind (agent_id,
+    UNBIND_SUBJECT), a dispute (job_id_hex, "orizon-dispute:v1:{step}"). All
+    three live in the ONE bounded table, so what matters is that no two key
+    spaces can overlap, and none of these can:
+
+      - it is not a URL, so no bind challenge can be aimed at it — the value has
+        no scheme `endpoint_policy` accepts, and every endpoint that reaches
+        `issue_challenge` has already passed `validate_endpoint_url`;
+      - it is not `UNBIND_SUBJECT`, which is a different domain prefix with
+        nothing appended, so a dispute subject can never equal it;
+      - it carries the step, so two disputes of the same job do not share a
+        nonce and one cannot cancel the other. Per STEP rather than per job for
+        the same reason a bind is keyed per endpoint: the challenge authorises
+        exactly what the message names.
+
+    `step_index` is an int, so nothing caller-shaped reaches the key text.
+    """
+    return f"{DISPUTE_MESSAGE_PREFIX}:{step_index}"
+
+
 def issue_challenge(scope: str, subject: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
     """Mint and store a challenge for the (scope, subject) key.
 
@@ -247,6 +270,26 @@ def issue_unbind_challenge(agent_id: str, ttl_seconds: int = CHALLENGE_TTL_SECON
     nonce — is policy nobody should have to re-derive and keep in step.
     """
     return issue_challenge(agent_id, UNBIND_SUBJECT, ttl_seconds)
+
+
+def issue_dispute_challenge(
+    job_id_hex: str, step_index: int, ttl_seconds: int = CHALLENGE_TTL_SECONDS
+) -> tuple[str, float]:
+    """Mint and store a challenge authorizing a DISPUTE of one settled step.
+
+    `issue_unbind_challenge`'s reasoning, a third time: one issuer, so the
+    bounded table, the sweep-on-insert eviction, the idempotency inside the
+    window and the single-use nonce are policy that exists once. A dispute
+    inherits the lot, including the property that makes the public route safe —
+    a live challenge is returned AS IS, so an anonymous flood hands everybody
+    the same nonce they cannot sign instead of destroying the buyer's.
+
+    The TTL is the shared five minutes, which is the time to SIGN, not the time
+    to dispute: the 24 h dispute window is a separate promise stamped on the
+    settlement record, and a buyer whose challenge expires simply asks for
+    another while that window is open.
+    """
+    return issue_challenge(job_id_hex, dispute_subject(step_index), ttl_seconds)
 
 
 def _evict_one() -> None:
