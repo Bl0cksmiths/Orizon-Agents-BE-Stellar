@@ -21,10 +21,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.services import reputation_svc
+from app.seed import seed_registry
+from app.services import orchestrator_svc, reputation_svc
 from app.services.reputation_svc import STROOPS_PER_USDC
+from app.state import state
 from app.stellar import cache
 from app.stellar import client as sc
+
+KIT_INTENT = "tetris game in html"
 
 # rep_state as the ledger returns it: sum_w is rating-bps x weight. Before the
 # dispute, four good ratings over 10 USDC of work; after it, the same plus one
@@ -352,3 +356,43 @@ def test_invalidate_rep_makes_the_next_batch_read_see_the_landed_rating(ledger):
     assert after.disputed == 1
     assert after.dispute_rate_bps == 2000
     assert after.smoothed_bps < before.smoothed_bps
+
+
+async def _noop(*_a: object, **_k: object) -> None:
+    return None
+
+
+@pytest.fixture()
+def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
+    """Fresh seeded registry, restored after; kit thinking-sleep no-op'd."""
+    saved = dict(state.agents)
+    state.agents.clear()
+    seed_registry()
+    monkeypatch.setattr(orchestrator_svc.asyncio, "sleep", _noop)
+    yield
+    state.agents.clear()
+    state.agents.update(saved)
+
+
+def test_a_plan_decomposed_after_a_dispute_rating_lands_uses_the_updated_score(ledger, seeded):
+    """The acceptance criterion end to end: given a dispute rating has landed
+    on-chain, a buyer decomposing a new intent gets a plan stamped with the
+    updated score, not a cached pre-dispute value."""
+    for agent in state.list_agents():
+        ledger[agent.id] = PRE_DISPUTE
+
+    def stamp(resp: orchestrator_svc.DecomposeResponse, agent_id: str) -> tuple[int | None, int | None]:
+        step = next(s for s in resp.steps if s.agent_id == agent_id)
+        return step.rep_count, step.rep_dispute_rate_bps
+
+    async def run():
+        first = await orchestrator_svc.decompose(KIT_INTENT)
+        disputed = first.steps[0].agent_id
+        ledger[disputed] = POST_DISPUTE  # the dispute rating lands on-chain
+        reputation_svc.invalidate_rep(disputed)
+        second = await orchestrator_svc.decompose(KIT_INTENT)
+        return stamp(first, disputed), stamp(second, disputed)
+
+    before, after = asyncio.run(run())
+    assert before == (4, 0)
+    assert after == (5, 2000)
