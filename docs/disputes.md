@@ -277,7 +277,7 @@ and the outcome is one of these:
 | `failed (FAILED) — nothing landed` | ERROR | unchanged | uphold again — after fixing the cause, if the line before it names one |
 | `was SUCCESS but could not be recorded on the dispute` (or `was TIMEOUT …`) | ERROR | unchanged — the store write failed, and the line carries the hash | record that hash by hand, **before** any retry: a retry first is refused as a replay with nothing on record, and reads as a collision |
 | `COLLISION` | ERROR | unchanged, and no `rating_tx` | the collision procedure at the end of this document |
-| `not submitted — <setting> …` | ERROR | unchanged; nothing was sent | set the setting the line names — `REPUTATION_ENABLED` or `STELLAR_REPUTATION_LEDGER` — then uphold again |
+| `not submitted — <setting> …` | ERROR | unchanged; nothing was sent | set the setting the line names, then uphold again |
 | `could not be formed` | ERROR | unchanged; nothing was sent | a retry will not mend it: the settlement no longer has the disputed step, or the job id does not derive. The dispute's records changed under it, and a person has to look |
 | `not re-attempted` | ERROR, or WARNING when a `rating_tx` is already on record | unchanged; nothing was sent | the settlement that weights the rating is gone; see below |
 
@@ -672,10 +672,11 @@ argument.
 **Find the rating.** Everything needed is on the log line.
 
 1. **Search the log for the dispute id first.** A line
-   `dispute rating landed (10/100)` or `dispute rating unconfirmed` for the same
-   dispute with a `tx=` hash names the attempt directly — a landed rating is
-   logged before the record is written, precisely so this case has a hash to
-   start from. Look that hash up.
+   `dispute rating landed (10/100)`, `dispute rating unconfirmed` or
+   `dispute rating was SUCCESS but could not be recorded on the dispute` for
+   the same dispute, with a `tx=` hash, names the attempt directly — a landed
+   rating is logged before the record is written, precisely so this case has a
+   hash to start from. Look that hash up.
 2. **Otherwise, go to the chain.** Search the ReputationLedger's `rated` events
    for the agent, or the settler account's transactions from around the time
    the credit landed, for a `submit` whose `job_id` argument is the `derived=`
