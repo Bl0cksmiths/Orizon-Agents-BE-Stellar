@@ -518,3 +518,19 @@ def _refuse_credit(
         code,
     )
     return DisputeError(code, message, status_code)
+
+
+async def _load_for_adjudication(dispute_id: str) -> DisputeRecord:
+    """The dispute an adjudicator named, or `unknown_dispute` (404).
+
+    Shared by `uphold` and `reject` so the two cannot answer an id that does
+    not exist differently — a 404 from one and a 409 from the other would make
+    the two routes disagree about the same fact. 404 discloses nothing here:
+    the id is unguessable (`new_dispute_id`), and this route is adjudicator-only
+    (D1) rather than something a stranger can probe.
+    """
+    record = await get_dispute_store().get_dispute(dispute_id)
+    if record is None:
+        logger.warning("adjudication refused: dispute=%s reason=unknown_dispute", dispute_id)
+        raise DisputeError("unknown_dispute", "no dispute with that id", 404)
+    return record
