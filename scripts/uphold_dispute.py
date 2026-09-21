@@ -503,14 +503,17 @@ async def execute(dispute_id: str, amount: float) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The CLI.
+    """The CLI, arguments and all.
 
     The description is where an operator who ran `--help` instead of reading the
     module finds the two facts that change what they are about to do: that this
     spends real funds, and that the platform — not the disputed agent — is the
     one spending them.
+
+    Whole, rather than a parser `main` then adds arguments to, so that what a
+    test reads out of `format_help()` is the text an operator sees.
     """
-    return argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="uphold_dispute.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
@@ -523,6 +526,21 @@ def build_parser() -> argparse.ArgumentParser:
             "own wallet to the buyer. The disputed agent's only consequence is reputational.\n"
         ),
     )
+    parser.add_argument(
+        "--dispute-id",
+        required=True,
+        help="the dispute to uphold, as GET /api/disputes/{id} reports it",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "resolve everything and print exactly what WOULD be paid — the dispute, the settled "
+            "step, D4's three bounds and which one binds, D5's cap and the payer — then stop. "
+            "Signs nothing, submits nothing, and needs no signing key. Always run this first."
+        ),
+    )
+    return parser
 
 
 async def run(dispute_id: str, dry_run: bool) -> int:
@@ -574,22 +592,7 @@ async def run(dispute_id: str, dry_run: bool) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    parser.add_argument(
-        "--dispute-id",
-        required=True,
-        help="the dispute to uphold, as GET /api/disputes/{id} reports it",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "resolve everything and print exactly what WOULD be paid — the dispute, the settled "
-            "step, D4's three bounds and which one binds, D5's cap and the payer — then stop. "
-            "Signs nothing, submits nothing, and needs no signing key. Always run this first."
-        ),
-    )
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
     return asyncio.run(run(args.dispute_id, args.dry_run))
 
 
