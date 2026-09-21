@@ -686,10 +686,13 @@ Never record a hash that has not been checked against the chain. A `rating_tx`
 tells every later reader that the agent's consequence landed, and the uphold
 will from then on treat a replay as confirmation of it.
 
-Related: `docs/decisions/0008-refund-execution.md` (why adjudication is an
+Related: `docs/decisions/0009-dispute-rating.md` (why the rating's id keeps
+the job's prefix, why it is weighted by the quoted price, why it follows the
+credit, and why a rating may always be retried when a refund never may),
+`docs/decisions/0008-refund-execution.md` (why adjudication is an
 authenticated route, why the claim is taken before signing and why a timeout is
 never retried), `docs/decisions/0007-dispute-window.md` (why the window, the
 signature and the settlement record are shaped this way),
 `docs/decisions/0002-partial-credit-refund.md` (where the credit comes from and
-what was rejected) and `docs/reputation.md` (what a rating is worth and how the
-floor uses it).
+what was rejected) and `docs/reputation.md` (what a rating is worth, what a
+dispute rating does to a score, and how the floor uses it).
