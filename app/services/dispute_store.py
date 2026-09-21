@@ -678,6 +678,13 @@ class InMemoryDisputeStore:
     def __init__(self) -> None:
         self._settlements: OrderedDict[str, SettlementRecord] = OrderedDict()
         self._disputes: OrderedDict[str, DisputeRecord] = OrderedDict()
+        # `refund_claims`, modelled rather than inferred from the status. The
+        # status alone would be enough to make this store behave correctly, and
+        # that is the trap: the two implementations would then differ in what
+        # they HOLD, and a case that only one of them gets right is a case the
+        # hermetic suite cannot find. Insertion order is claim order, which is
+        # the order a reconciliation queue is read in.
+        self._refund_claims: dict[str, float] = {}
 
     async def record_settlement(self, record: SettlementRecord) -> None:
         self._settlements[record.job_id_hex] = record
@@ -707,6 +714,9 @@ class InMemoryDisputeStore:
         self._disputes[record.id] = record
         while len(self._disputes) > _MAX_IN_MEMORY:
             dropped, _ = self._disputes.popitem(last=False)
+            # Its mutex goes with it: a claim over a dispute that no longer
+            # exists would sit in the queue as a payout nobody can look up.
+            self._refund_claims.pop(dropped, None)
             logger.warning(
                 "in-memory dispute store full (%d): dropped dispute %s — set DATABASE_URL to persist disputes",
                 _MAX_IN_MEMORY,
@@ -746,6 +756,11 @@ class InMemoryDisputeStore:
             resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or time.time()),
         )
         self._disputes[dispute_id] = updated
+        if status in ("credited", "rejected"):
+            # A dispute that has finished is not mid-payout. Postgres drops the
+            # mutex inside the statement that writes this row; here there is no
+            # statement to be inside, but the rule is the same one.
+            self._refund_claims.pop(dispute_id, None)
         return updated
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
@@ -753,11 +768,14 @@ class InMemoryDisputeStore:
 
         The claim is the whole of story 4.03's idempotency, so it is a
         CONDITIONAL transition and never a read followed by a write: only a
-        dispute sitting in `upheld` can be claimed, and claiming moves it to
-        `crediting` in the same step. A second caller — a retry, a double
-        click, a duplicate webhook — finds it no longer `upheld` and gets None,
-        which is the signal to return the existing record rather than pay
-        again.
+        dispute sitting in `upheld` and held by nobody can be claimed, and
+        claiming moves it to `crediting` in the same step. A second caller — a
+        retry, a double click, a duplicate webhook — gets None, which is the
+        signal to return the existing record rather than pay again.
+
+        Atomic for free, where Postgres buys the same guarantee with a PRIMARY
+        KEY: there is no await between reading the status and writing it, so
+        no second caller can be running in between.
 
         None is deliberately not an error and does not say why: already
         claimed, already credited, still open and never adjudicated, or
@@ -765,8 +783,9 @@ class InMemoryDisputeStore:
         anything*. The caller reads the record back if it needs to explain.
         """
         current = self._disputes.get(dispute_id)
-        if current is None or current.status != "upheld":
+        if current is None or current.status != "upheld" or dispute_id in self._refund_claims:
             return None
+        self._refund_claims[dispute_id] = time.time()
         claimed = replace(current, status="crediting")
         self._disputes[dispute_id] = claimed
         return claimed
@@ -788,6 +807,10 @@ class InMemoryDisputeStore:
         current = self._disputes.get(dispute_id)
         if current is None or current.status != "crediting":
             return None
+        # Gated on the STATUS and never on the claim, so a dispute somehow left
+        # in `crediting` without one is repaired rather than stranded — the
+        # rule _RELEASE_REFUND_CLAIM_SQL follows, and for the same reason.
+        self._refund_claims.pop(dispute_id, None)
         released = replace(current, status="upheld")
         self._disputes[dispute_id] = released
         return released
