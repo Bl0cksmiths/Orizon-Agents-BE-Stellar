@@ -105,13 +105,26 @@ dispute is opened and frozen on its record, so a later change to the policy
 cannot rewrite what the buyer was shown, and it is clamped so a credit can
 never exceed what was actually charged for the step.
 
+What is actually transferred is the **smallest** of three numbers: the amount
+frozen on the dispute when it was opened, the disputed step's price on the
+settlement record, and what the workflow's charge actually moved on-chain.
+With the shipped policy those are normally the same number. They can differ,
+because the per-step figure starts life as the plan's *quoted* price while the
+charge's total is what was really submitted, and when they differ the credit
+follows the smallest — the platform never refunds money it did not collect.
+A credit is also refused outright above `MAX_REFUND_USDC` (shipped at `1.0`),
+checked before anything is signed; a step on this deployment settles for
+hundredths of a USDC, so that ceiling only ever catches something that has gone
+wrong.
+
 Crediting one step is what makes this a *partial* refund: the rest of the
 workflow — the steps that did deliver — stays paid, and their agents keep their
 earnings.
 
-**The platform pays it.** The credit is a transfer from the settler's own
-wallet to the buyer over the asset contract. It is **not** a reversal of the
-original charge and **not** a clawback from the agent:
+**The credit is funded by the platform, and never clawed back from the agent.**
+It is a transfer from the settler's own wallet to the buyer over the asset
+contract — **not** a reversal of the original charge, and **not** a seizure of
+anything the agent was paid:
 
 - The deployed `PaymentEscrow` has no refund entrypoint and never takes
   custody — `charge` sends USDC from the payer straight to the agent's owner,
