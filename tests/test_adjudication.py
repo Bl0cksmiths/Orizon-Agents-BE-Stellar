@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import functools
+import inspect
 import logging
 import time
 from typing import Any, cast
@@ -857,15 +858,54 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
     assert len(long_note.note) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
 
 
-def test_a_rejection_without_a_usable_note_records_none_rather_than_nothing(monkeypatch) -> None:
-    """None, never "". `append_status` carries a null forward and stores an
-    empty string, so a note of pure whitespace has to arrive as no note at all
-    — otherwise a later transition could blank a rationale with a stray space
-    bar rather than leave the record as it was."""
-    no_signing(monkeypatch)
+def test_a_rejection_reason_has_no_default() -> None:
+    """MISSING is refused by the signature itself (story 4.06). A default of
+    any kind — None, "" — would let a caller reject a dispute without telling
+    the buyer why by simply saying nothing, which is the outcome the rule
+    exists to make impossible."""
+    note = inspect.signature(dispute_svc.reject).parameters["note"]
 
-    assert asyncio.run(dispute_svc.reject(a_dispute().id)).note is None
-    assert asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="  \t \n ")).note is None
+    assert note.kind is inspect.Parameter.KEYWORD_ONLY
+    assert note.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize(
+    "note",
+    [None, "", "  \t \n ", "\x00\x1b\x07"],
+    ids=["none", "empty", "whitespace", "control-characters-only"],
+)
+def test_a_rejection_without_a_usable_reason_is_refused_before_anything_is_written(
+    monkeypatch, note: str | None
+) -> None:
+    """A rejection with no explanation is worse than no dispute system, so a
+    reason that is empty AFTER cleaning — whitespace, or nothing but control
+    characters — is no reason, and neither is a None from a caller that
+    ignored the annotation. Each is refused with the one code the console can
+    map to "say why", as the 422 the buyer's own missing `reason` carries.
+
+    Refused FIRST, before the dispute is even read: the check is pure text
+    handling and the one refusal an adjudicator can fix and resend, so the
+    store is booby-trapped for the call — and the dispute is left exactly as
+    the buyer opened it, still open and still rejectable."""
+    no_signing(monkeypatch)
+    dispute = a_dispute()
+    store = dispute_store.get_dispute_store()
+    as_opened = store._disputes[dispute.id]
+
+    async def _must_not_be_read(dispute_id: str) -> None:
+        raise AssertionError("the reason is checked before the dispute is read")
+
+    monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.reject(dispute.id, note=cast(str, note)))
+
+    assert refused.value.code == "rejection_reason_required"
+    assert refused.value.status_code == 422
+    assert refused.value.existing is None
+    # Nothing written: the record is the very one the buyer opened.
+    assert store._disputes[dispute.id] is as_opened
+    assert as_opened.status == "open" and as_opened.note is None
 
 
 # ── the dispute rating: after the credit, never instead of it ───
