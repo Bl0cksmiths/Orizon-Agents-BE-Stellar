@@ -780,8 +780,10 @@ def watch_rating() -> Iterator[list[dispute_rating.RatingOutcome]]:
 #   unconfirmed  — submitted and timed out: it may still land;
 #   failed       — the ledger refused it, and nothing was written;
 #   collision    — a replay with no attempt of this dispute's on record (D4);
-#   unattempted  — no answer from the ledger at all: the submit raised, or was
-#                  never reached, and the service's log lines say which.
+#   unattempted  — no answer from the ledger at all: the rating was never
+#                  submitted (not configured, or not formable from the
+#                  records) or the submit raised, and the service's log lines
+#                  say which.
 RatingVerdict = Literal["rated", "confirmed", "unrecorded", "unconfirmed", "failed", "collision", "unattempted"]
 
 
@@ -833,7 +835,8 @@ def rating_not_landed(
     elif verdict == "failed":
         say("  rating:    FAILED — the ledger refused it; nothing was written.")
     else:
-        say("  rating:    NO ANSWER — the submit never completed; the log lines above name why.")
+        say("  rating:    NO ANSWER — nothing reached the ledger, or the submit never completed.")
+        say("             The log lines above name why, and whether a re-run alone can mend it.")
     if outcome is not None and outcome.tx_hash:
         say(f"  its tx:    {outcome.tx_hash}")
         say(f"  check it:  {expert_url('tx', outcome.tx_hash)}")
