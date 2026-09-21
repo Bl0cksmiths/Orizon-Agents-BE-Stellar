@@ -21,6 +21,7 @@ patched out at the seam, so nothing here reaches the network.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 
@@ -30,7 +31,12 @@ from stellar_sdk import Keypair
 from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import dispute_store, execution_svc
-from app.services.dispute_store import OUTPUT_SUMMARY_MAX_CHARS, InMemoryDisputeStore, SettlementRecord
+from app.services.dispute_store import (
+    OUTPUT_SUMMARY_MAX_CHARS,
+    InMemoryDisputeStore,
+    SettlementRecord,
+    SettlementStep,
+)
 from app.state import state
 
 AUTH_ID_HEX = "ab" * 16
@@ -588,3 +594,39 @@ def test_a_summary_that_cleans_to_nothing_is_kept_as_none(monkeypatch, store):
     (step,) = store.recorded[0].steps
     assert step.delivered is True
     assert step.output_summary is None
+
+
+def test_the_summary_changes_nothing_else_the_settlement_records(monkeypatch, store):
+    """4.05 adds one field and moves nothing 4.02 wrote: with the summaries set
+    aside, the record is exactly the one a settled run left before — the same
+    steps, prices and delivery flags, the same amount, job and window — and the
+    trace line the summary was taken from reads exactly as it always did."""
+    workers = {"agt_0": _OkWorker("w.gen"), "agt_1": _BoomWorker("w.critic")}
+    _resolves_to(monkeypatch, workers.get)
+    rating_calls = _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_unchanged"
+
+    _run_paid(_plan((0.05, 0.02)), task_id)
+
+    assert len(store.recorded) == 1
+    record = store.recorded[0]
+    without_summaries = dataclasses.replace(
+        record, steps=tuple(dataclasses.replace(s, output_summary=None) for s in record.steps)
+    )
+    assert without_summaries == SettlementRecord(
+        task_id=task_id,
+        payer=PAYER,
+        auth_id_hex=AUTH_ID_HEX,
+        job_id_hex=JOB_ID.hex(),
+        charge_tx=CHARGE_TX,
+        proof_tx=PROOF_TX,
+        settled_usdc=0.05,
+        steps=(
+            SettlementStep(step_index=0, agent_id="agt_0", agent_name="w.agt_0", price_usdc=0.05, delivered=True),
+            SettlementStep(step_index=1, agent_id="agt_1", agent_name="w.agt_1", price_usdc=0.02, delivered=False),
+        ),
+        settled_at=record.settled_at,
+        window_closes_at=record.settled_at + settings.dispute_window_seconds,
+    )
+    assert _traced(task_id, "w.gen") == ["did the thing"]
+    assert rating_calls == [JOB_ID]
