@@ -976,9 +976,9 @@ async def _rate_credited(
 async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingOutcome) -> DisputeRecord:
     """What one rating outcome means for this dispute — `_rate_credited`'s five.
 
-    Keyed off `credited`'s own `rating_tx` — the record as `uphold` read it —
-    never re-read from the store, so a REPLAY is judged against what this
-    dispute had recorded before the attempt that drew it.
+    Keyed off `credited`'s own `rating_tx` and `rating_confirmed` — the record
+    as `uphold` read it — never re-read from the store, so a REPLAY is judged
+    against what this dispute had recorded before the attempt that drew it.
     """
     store = get_dispute_store()
     derived = outcome.job_id_hex
