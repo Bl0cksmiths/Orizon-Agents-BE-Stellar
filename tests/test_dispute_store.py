@@ -604,7 +604,8 @@ class FakePool:
         if latest is None or latest["status"] != "crediting":
             return None
         self.claims.pop(dispute_id, None)
-        row = latest | {"status": "upheld", "updated_at": now, "opening": False}
+        # Released only when nothing landed, so no refund hash goes with it.
+        row = latest | {"status": "upheld", "updated_at": now, "refund_tx": None, "opening": False}
         self.disputes.append(row)
         return row
 
