@@ -16,6 +16,14 @@ The shape follows `binding_store.py` deliberately, down to the lazy driver
 import and the append-only tables: same seam, same failure modes, one pattern to
 learn. Timestamps are epoch seconds from our own clock, never the database's, so
 no timezone conversion sits between what was promised and what is later read.
+
+Durably, that is two tables. `workflow_settlements` holds one row per settled
+workflow, the step breakdown in a single JSON column; `dispute_events` holds one
+row per status transition, so a dispute's current state is its newest row and
+its history is the audit trail a chargeback is answered with. One dispute per
+(job_id_hex, step_index) is enforced by a partial UNIQUE INDEX rather than by a
+read in Python, because two requests for the same step arrive at once and only
+the database can settle which of them opened it.
 """
 
 from __future__ import annotations
