@@ -562,7 +562,8 @@ async def _run(
                 # waiting up to ~30s on a status poll — and a process that dies
                 # partway through them (a Render redeploy, an idle spin-down)
                 # would otherwise take the buyer's only evidence of what they
-                # paid for with it. This touches no chain and cannot raise.
+                # paid for with it. It touches no chain, and a store that is
+                # down cannot fail the run — see `_record_settlement`.
                 await _record_settlement(
                     task_id,
                     start,
