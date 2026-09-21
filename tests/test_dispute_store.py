@@ -485,8 +485,6 @@ class FakePool:
             return await self._claim_refund(args)
         if sql == dispute_store._RELEASE_REFUND_CLAIM_SQL:
             return await self._release_refund_claim(args[0])
-        if sql == dispute_store._DELETE_REFUND_CLAIM_SQL:
-            return self._delete_refund_claim(args[0])
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
         return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
 
@@ -551,13 +549,6 @@ class FakePool:
         self.disputes.append(row)
         return row
 
-    def _delete_refund_claim(self, dispute_id: str) -> dict[str, Any] | None:
-        """DELETE ... RETURNING dispute_id — empty when no claim was held."""
-        if dispute_id not in self.claims:
-            return None
-        self.claims.pop(dispute_id, None)
-        return {"dispute_id": dispute_id}
-
     def _open_dispute(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
         row = dict(zip(_DISPUTE_COLUMNS, args, strict=True)) | {"opening": True}
         # dispute_events_one_per_step_idx: UNIQUE (job_id_hex, step_index) WHERE
@@ -573,6 +564,12 @@ class FakePool:
     def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
         dispute_id, status, refund_tx, rating_tx, resolved_at, now = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
+        # `finished`: the mutex is dropped by the same statement that ends the
+        # dispute. Being a data-modifying CTE it runs whether or not the INSERT
+        # beside it finds any history to write from, so it is modelled before
+        # the early return rather than after it.
+        if status in ("credited", "rejected"):
+            self.claims.pop(dispute_id, None)
         # `INSERT ... SELECT FROM latest`: with no history there is nothing to
         # select, so nothing is written and nothing comes back.
         if latest is None:
