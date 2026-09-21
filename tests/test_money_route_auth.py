@@ -6,11 +6,29 @@ silently: a future refactor that moves one route back onto the public router
 would pass every other test. This pins the invariant directly — with an API key
 configured, each of these routes must answer 401 to an unauthenticated call —
 so such a regression fails loudly here (finding B1).
+
+The dispute routes (story 4.02) are deliberately NOT on that list, and
+`UNSECURED_BY_DESIGN` below says so in code rather than by omission. A file
+that enumerates only the secured routes cannot tell "public on purpose" from
+"forgotten to add" — which is the very confusion it exists to prevent — so the
+public ones are listed too, with the reason, and asserted to stay public.
+
+Two things make them public. They move no money: 4.02 records a claim, and
+4.03 is what pays a credit. And the credential that guards the write is the
+*payer's wallet signature*, which is the one thing a shared operator key
+cannot express — worse, the operator holds that key, and the operator is the
+party a dispute is raised against. The last test in this file pins that: with
+an API key configured and none supplied, the write reaches the verifier and is
+stopped by the signature, not by the key.
 """
 
 from __future__ import annotations
 
+import base64
+
 import pytest
+
+from app.services import dispute_svc
 
 # (method, path) for the routes that must never answer anonymously once an
 # API key is set: PDAX money/account routes + the Stellar server-signed routes.
@@ -50,3 +68,74 @@ def test_secured_route_passes_the_guard_with_the_key(client, hermetic_settings) 
     hermetic_settings.api_key = "secret-key"
     resp = client.get("/api/pdax/balances", headers={"X-API-Key": "secret-key"})
     assert resp.status_code != 401
+
+
+# (method, path) for the routes that must KEEP answering anonymously with an
+# API key configured: the 4.02 dispute surface. Listed rather than omitted, so
+# a future refactor that quietly moves one behind the operator key — which
+# would lock every buyer out of the window they were promised — fails here too.
+UNSECURED_BY_DESIGN: list[tuple[str, str]] = [
+    ("post", "/api/disputes/challenge"),
+    ("post", "/api/disputes"),
+    ("get", "/api/disputes/dsp_0000000000000000"),
+    ("get", "/api/tasks/task-unknown/disputes"),
+]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    UNSECURED_BY_DESIGN,
+    ids=[f"{m.upper()} {p}" for m, p in UNSECURED_BY_DESIGN],
+)
+def test_dispute_route_stays_public_with_a_key_configured(client, hermetic_settings, method: str, path: str) -> None:
+    hermetic_settings.api_key = "secret-key"
+    kwargs = {"json": {}} if method == "post" else {}
+    resp = getattr(client, method)(path, **kwargs)
+    # Whatever else it answers — 422 for the empty bodies, 404 for the unknown
+    # ids — it must never be the 401 the operator-key guard raises.
+    assert resp.status_code != 401, f"{method.upper()} {path} is behind the API key; disputes are signature-authorized"
+
+
+def test_the_dispute_write_is_guarded_by_the_signature(client, hermetic_settings, monkeypatch) -> None:
+    """The write is not unguarded — it is guarded by something else.
+
+    With an API key configured and none supplied, the request must reach the
+    signature verifier (proving the operator key is not what admits it) and be
+    refused by that verifier's verdict (proving something still does). Both
+    halves matter: the first alone would describe an open door, the second
+    alone could be any error on the way.
+    """
+    hermetic_settings.api_key = "secret-key"
+    signature = base64.b64encode(b"s" * 64).decode("ascii")
+    verified: list[str] = []
+
+    async def _open(**kwargs: object) -> None:
+        verified.append(str(kwargs["signature_b64"]))
+        # The rules lane's refusal for "you are not the wallet that paid",
+        # built by attribute: the frozen contract fixes DisputeError's
+        # attributes, not its constructor.
+        exc = dispute_svc.DisputeError.__new__(dispute_svc.DisputeError)
+        Exception.__init__(exc, "not_the_payer")
+        exc.code = "not_the_payer"
+        exc.message = "not the payer"
+        exc.status_code = 403
+        exc.existing = None
+        raise exc
+
+    monkeypatch.setattr(dispute_svc, "open_dispute", _open)
+
+    resp = client.post(
+        "/api/disputes",
+        json={
+            "job_id_hex": "1234567890abcdef1234567890abcdef",
+            "step_index": 0,
+            "reason": "the step delivered nothing",
+            "payer": "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
+            "nonce": "0123456789abcdef0123456789abcdef",
+            "signature_b64": signature,
+        },
+    )
+
+    assert verified == [signature], "the API key stopped the request before the signature was ever checked"
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "not_the_payer"
