@@ -102,3 +102,27 @@ class RatingOutcome:
     job_id_hex: str
     rating: int
     weight_stroops: int
+
+
+# The score an upheld dispute writes, on the 0..100 scale of the settler's own
+# `reputation_svc.synthetic_rating`, whose anchors are 20 for a step that
+# delivered nothing (a timeout, a raise, an empty reply, or an external reply
+# with nothing checkable in it), 95 for a baked kit artifact, and 40 to 95 for
+# the work in between — base 70, moved by the artifact and the critic's pass.
+#
+# Below 20 on purpose. ADR 0005 D3 fixed the settler's scale so that a reply
+# which delivers nothing never outscores an honest failure; an upheld dispute
+# sits one step beneath both. The step was billed — a refund is only ever paid
+# against a delivered step — and the credit comes out of the platform's wallet,
+# not the agent's, so the agent keeps what it was paid for work that failed the
+# buyer. A failure somebody paid for is worse evidence than one nobody did.
+# Not 0: the verdict is the platform's alone, with no on-chain arbitration and
+# no appeal, and a unilateral judgement should not carry the harshest score the
+# scale has.
+#
+# It does not replace what the settler wrote for the step, which stays on the
+# ledger under the job's own key — nothing on-chain can amend a rating — so the
+# two stand side by side at the same weight and average between 15 and 52.5. A
+# dispute costs an agent the clean record it had, and `dispute_rate_bps` counts
+# it; it does not erase the evidence of what was delivered.
+DISPUTE_RATING = 10
