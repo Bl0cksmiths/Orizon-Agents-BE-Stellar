@@ -180,8 +180,9 @@ It won for three reasons.
 
 1. **The two ratings on one step are read on one scale.** The ledger's mean is
    `sum_w / weight` over every rating the agent has, and a disputed step
-   contributes two to it: the automatic rating that says the step was paid
-   for, and the dispute rating that says the buyer's claim against it stood.
+   contributes two to it: the automatic rating that says what the step
+   delivered, and the dispute rating that says the buyer's claim against it
+   stood.
    Weigh them by different measures of the same step and the relative force of
    those two facts depends on how far the quote and the charge happened to
    drift — which says nothing about the dispute. Weigh them by the same number
@@ -466,8 +467,9 @@ ADRs keep their bodies as the record of what was decided at the time, and each
 carries a dated amendment wherever it names a retired helper as the thing 4.04
 would call.
 
-Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (why ratings are
-weighted by the quoted price), ADR 0007 (the dispute record the rating is
+Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (a failed step
+is never billed — the reason every rating is weighted by the quoted price
+rather than the settled value), ADR 0007 (the dispute record the rating is
 derived from), ADR 0008 (the credit the rating follows), `docs/disputes.md`
 (reading the two on-chain artifacts, and the collision procedure),
 `docs/reputation.md` (what a dispute rating does to a score), and the code
