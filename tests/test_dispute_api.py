@@ -568,16 +568,19 @@ def test_a_settlement_recorded_before_summaries_existed_reads_them_as_null(clien
     assert step["creditable_usdc"] == 0.25
 
 
-def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
+@pytest.mark.parametrize("task_id", ["task-unsettled", "task-never-ran"], ids=["unsettled", "unknown"])
+def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch, task_id):
     # A running or unpaid task: nothing to dispute, no deadline, and NOT a 404
-    # — the console polls this route while the workflow is still going.
+    # — the console polls this route while the workflow is still going. The
+    # store has no settlement for a task it never heard of either, and the
+    # route does not try to tell the two apart: both read as the same nothing.
     lists(monkeypatch, found=None, disputes=())
 
-    r = client.get("/api/tasks/task-unsettled/disputes")
+    r = client.get(f"/api/tasks/{task_id}/disputes")
 
     assert r.status_code == 200
     body = r.json()
     # The clock is present even with nothing to count down to, so the console
     # can take its skew from any read rather than only a settled one.
     assert isinstance(body.pop("now"), float)
-    assert body == {"task_id": "task-unsettled", "window_closes_at": None, "settlement": None, "disputes": []}
+    assert body == {"task_id": task_id, "window_closes_at": None, "settlement": None, "disputes": []}
