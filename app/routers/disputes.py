@@ -29,13 +29,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..security import request_id_var
 from ..services import dispute_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus
+from ..task_auth import require_task_read
 
 logger = logging.getLogger(__name__)
 
@@ -320,3 +321,39 @@ async def get_dispute(
     if record is None:
         raise HTTPException(404, "unknown_dispute")
     return DisputeResponse.of(record)
+
+
+@router.get(
+    "/tasks/{task_id}/disputes",
+    response_model=TaskDisputesResponse,
+    summary="A task's dispute window and the disputes raised on it",
+    dependencies=[Depends(require_task_read)],
+)
+async def list_task_disputes(
+    task_id: str = Path(..., min_length=1, max_length=128),
+) -> TaskDisputesResponse:
+    """The window and what has been raised, in one read.
+
+    Lives here rather than in `routers/tasks.py` so the dispute surface is one
+    module: `tasks.py` owns the in-memory task state and knows nothing about
+    settlements, and a route split across the two would have to be found twice.
+
+    An unsettled or unknown task is **not** a 404 — it is a null window and an
+    empty list. The console polls this while a workflow runs, and the honest
+    answer to "can this be disputed yet?" before settlement is "no, and here is
+    nothing", not an error the UI has to special-case into the same view.
+
+    Gated by `require_task_read` like every other `/tasks/{task_id}/...` read:
+    a dispute names its payer and carries the buyer's own words about the work,
+    which is exactly the material that capability token exists to scope. The
+    dependency is a no-op while TASK_AUTH_REQUIRED is off, which is the public
+    demo's default, so this changes nothing for the frontend today and fails
+    closed the moment enforcement is turned on.
+    """
+    settlement = await dispute_svc.settlement_for_task(task_id)
+    disputes = await dispute_svc.list_for_task(task_id)
+    return TaskDisputesResponse(
+        task_id=task_id,
+        window_closes_at=settlement.window_closes_at if settlement is not None else None,
+        disputes=[DisputeResponse.of(d) for d in disputes],
+    )
