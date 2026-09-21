@@ -685,7 +685,7 @@ async def run(dispute_id: str, dry_run: bool) -> int:
     if dry_run:
         say()
         say("  DRY RUN — nothing was signed and nothing moved.")
-        say("  Re-run WITHOUT --dry-run to pay exactly the credit above.")
+        say("  Re-run WITHOUT --dry-run to pay exactly the credit above, then write exactly the rating above.")
         say()
         return EXIT_OK
 
