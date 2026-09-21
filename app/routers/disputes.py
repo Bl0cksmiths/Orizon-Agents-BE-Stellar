@@ -36,13 +36,14 @@ a 409 here carries a body the generic error envelope has no room for.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..security import request_id_var, require_adjudicator
-from ..services import dispute_svc
+from ..services import dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus
 from ..task_auth import require_task_read
 
@@ -182,6 +183,43 @@ class DuplicateDisputeResponse(BaseModel):
     detail: str
     error: dict[str, str]
     dispute: DisputeResponse
+
+
+class CreditPolicy(BaseModel):
+    """The terms an upheld dispute is paid under, as the buyer is shown them.
+
+    Exists so the receipt can state the policy BEFORE the buyer signs anything,
+    from the same setting the payout reads: ADR 0002 promises buyer and
+    operator the terms in advance, and a dispute button that only reveals what
+    it pays once it has been pressed does not keep that promise.
+
+    `funded_by` and `adjudicated_by` are the trust model `refund_svc` discloses
+    — the platform's own wallet pays the credit, and the platform decides the
+    claim, with no on-chain arbitration behind it. Single-value literals, so
+    the schema itself says there is no other answer today: the day there is
+    one, widening the literal is a deliberate contract change rather than a
+    string that quietly started meaning something else.
+    """
+
+    credited_fraction: float
+    funded_by: Literal["platform"]
+    adjudicated_by: Literal["platform"]
+
+    @classmethod
+    def in_force(cls, fraction: float) -> CreditPolicy:
+        """The policy under `fraction`, clamped by the refund's own rule.
+
+        `credited_amount_usdc` clamps the fraction inline, so the fraction it
+        really applies is read back as what it credits on one whole USDC rather
+        than re-clamped here. The clamp keeps one home, and a misconfigured 1.5
+        is shown as the 1.0 that would actually be paid instead of a promise
+        the payout would never keep.
+        """
+        return cls(
+            credited_fraction=refund_svc.credited_amount_usdc(1.0, fraction),
+            funded_by="platform",
+            adjudicated_by="platform",
+        )
 
 
 class TaskDisputesResponse(BaseModel):
