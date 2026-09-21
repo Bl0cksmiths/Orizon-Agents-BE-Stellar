@@ -587,6 +587,21 @@ _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.
 )
 
 
+# Ceiling on `SettlementStep.output_summary`. The summary is untrusted — an
+# external agent's own words — and the summarizer bounds only one of its two
+# branches, so the store states the limit a writer must clean to rather than
+# trusting whatever arrives. Long enough for the one line a buyer reads to
+# recognise the step; short enough that a hostile endpoint cannot turn a
+# settlement row into a dumping ground.
+#
+# It bounds the CONTENT, not the stored length: `sanitize_untrusted` cuts at
+# this many characters and then appends its ` …[truncated]` marker, so a cut
+# summary is stored a few characters longer — the same trade the dispute
+# reason makes, and deliberately so, because a reader must be able to tell a
+# summary that was cut from one that simply ended.
+OUTPUT_SUMMARY_MAX_CHARS = 280
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
@@ -602,6 +617,13 @@ class SettlementStep:
     agent_name: str | None
     price_usdc: float
     delivered: bool
+    # What the step produced, in the one line the trace already showed for it
+    # (story 4.05). Kept HERE because the trace is not: it lives in memory, is
+    # evicted and is lost on restart, while a buyer has the whole window to
+    # dispute — and "what did this step give me" is the evidence a dispute is
+    # about. None for a step that delivered nothing, and for every settlement
+    # recorded before this field existed.
+    output_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -927,6 +949,7 @@ def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
                 "agent_name": s.agent_name,
                 "price_usdc": s.price_usdc,
                 "delivered": s.delivered,
+                "output_summary": s.output_summary,
             }
             for s in steps
         ],
@@ -943,6 +966,9 @@ def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
             agent_name=s.get("agent_name"),
             price_usdc=float(s["price_usdc"]),
             delivered=bool(s["delivered"]),
+            # `.get`, not `[...]`: every row written before story 4.05 lacks the
+            # key, and those settlements are still inside their windows.
+            output_summary=s.get("output_summary"),
         )
         for s in json.loads(raw)
     )
