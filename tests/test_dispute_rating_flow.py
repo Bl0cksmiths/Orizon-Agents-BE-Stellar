@@ -531,11 +531,14 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
     After the first uphold every door back into the refund is booby-trapped,
     so a single stray call on any rating path fails here. And at each step the
     cache is dropped exactly when a rating is KNOWN to have landed — never for
-    a failure, never for a timeout, every time a replay confirms one."""
+    a failure, never for a timeout, every time a replay confirms one — and the
+    record's `rating_confirmed` (4.06) says so at the same steps: nothing
+    after the failure, False while in flight, True from the first replay."""
     dispute = open_dispute()
     ledger.script = ["fail"]
     first = uphold(dispute.id)
     assert (first.status, first.refund_tx, first.rating_tx) == ("credited", "tx_credit", None)
+    assert first.rating_confirmed is None
 
     async def _refund_touched(*args: Any, **kwargs: Any) -> None:
         raise RefundTouched("a rating path reached the refund")
@@ -548,15 +551,16 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
 
     ledger.script = ["lost", "late"]
     walk = [
-        # (rating_tx on the record afterwards, cache drops so far)
-        ("tx_rating_2", 0),  # lost in flight: recorded, not known to have landed
-        ("tx_rating_3", 0),  # the retry passed simulation and landed late: still unknown
-        ("tx_rating_3", 1),  # a replay with a hash on record: it landed
-        ("tx_rating_3", 2),  # and again, confirmed and unchanged
+        # (rating_tx on the record afterwards, rating_confirmed, cache drops so far)
+        ("tx_rating_2", False, 0),  # lost in flight: recorded, not known to have landed
+        ("tx_rating_3", False, 0),  # the retry passed simulation and landed late: still unknown
+        ("tx_rating_3", True, 1),  # a replay with a hash on record: it landed
+        ("tx_rating_3", True, 2),  # and again, confirmed and unchanged
     ]
-    for rating_tx, drops in walk:
+    for rating_tx, confirmed, drops in walk:
         answered = uphold(dispute.id)
         assert (answered.status, answered.refund_tx, answered.rating_tx) == ("credited", "tx_credit", rating_tx)
+        assert answered.rating_confirmed is confirmed
         assert invalidated == [AGENT] * drops
 
     assert len(settler.transfers) == 1
