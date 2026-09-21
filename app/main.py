@@ -24,7 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import SERVICE_VERSION, settings
 from .pdax.client import aclose_pdax_client
-from .routers import agents, binding, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
+from .routers import agents, binding, disputes, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
 
 # Imported by symbol, not as a module: the root `/health` handler defined
 # below rebinds the name `health` at module scope, which would shadow a
@@ -456,6 +456,11 @@ app.include_router(agents.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(binding.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(orchestrator.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(tasks.router, prefix="/api", responses=_ERROR_RESPONSES)
+# After tasks.router, which owns the other `/tasks/{task_id}/...` reads. Order
+# is not load-bearing here — `GET /tasks/{task_id}/disputes` is a literal third
+# segment and `tasks.py` declares no catch-all that could swallow it — but
+# keeping the two adjacent is what makes that checkable at a glance.
+app.include_router(disputes.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(trace.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(metrics.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(flow.router, prefix="/api", responses=_ERROR_RESPONSES)
