@@ -908,7 +908,7 @@ def rating_unrecorded(dispute: DisputeRecord, tx_hash: str, rating_id: str) -> i
     say()
     say("  The ledger confirmed the rating; the store write that records it on the dispute")
     say("  failed, and the log lines above name why. Close it by recording what landed:")
-    say(f"    append_status({dispute.id!r}, 'credited', rating_tx={tx_hash!r})")
+    say(f"    append_status({dispute.id!r}, 'credited', rating_tx={tx_hash!r}, rating_confirmed=True)")
     say()
     return EXIT_UNEXPECTED
 
