@@ -32,6 +32,29 @@ DEFAULT_CREDITED_FRACTION = 1.0
 DISPUTE_RATING = 10
 
 
+class RefundRefused(Exception):
+    """A refund that must NOT be signed, with a stable `code` the caller branches on.
+
+    Every instance of this is money that did not move, raised before anything
+    reaches the settler's key. Two codes today:
+
+      - `nothing_to_credit` — the settlement says there is nothing to give back
+        for this step (no such step, a step that never delivered, or an amount
+        that computes to zero once D4's bounds are applied);
+      - `refund_above_cap` — the amount is over `MAX_REFUND_USDC`. A refusal,
+        never a clamp: quietly paying the ceiling would hide the mistaken uphold
+        (or the bad settlement record) that the ceiling exists to catch.
+
+    The code is what a caller maps to a response; `message` carries the numbers,
+    for the operator who has to reconcile it afterwards.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 def dispute_job_id(job_id: bytes) -> bytes:
     """Derive the dispute's job id from the settled job's id (R12).
 
