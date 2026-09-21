@@ -828,40 +828,53 @@ def report_rating(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome 
 
 
 async def execute(dispute_id: str, amount: float) -> int:
-    """Uphold the dispute, pay the credit, and report the verdict from the store.
+    """Uphold the dispute, pay the credit, rate the agent, and report both from the store.
 
     Every path — clean return, refusal, unexpected exception — falls through to
     the same read, because the dispute's own record is the only thing that knows
     whether money moved. A caller that trusted the return value would call a
     timed-out transfer a failure and re-run it.
+
+    The rating is reported only when the refund's report comes back clean —
+    credited, with its hash on record — because that is the only state in
+    which `uphold` rates at all (D3). Any other refund verdict is the whole
+    story of the run, and its exit code stands.
     """
     store = get_dispute_store()
     fallback = EXIT_OK
-    try:
-        await dispute_svc.uphold(dispute_id)
-    except dispute_svc.DisputeError as exc:
-        # Every refusal on this path arrives as a `DisputeError`, including the
-        # two the refund service raises: `uphold` catches `RefundRefused`,
-        # releases the claim and re-raises it in this vocabulary. So there is
-        # one except clause here and not two, and the code carries through.
-        fallback = _REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE)
-        if exc.code in _POST_SIGNING_CODES:
+    with watch_rating() as ratings:
+        try:
+            await dispute_svc.uphold(dispute_id)
+        except dispute_svc.DisputeError as exc:
+            # Every refusal on this path arrives as a `DisputeError`, including
+            # the two the refund service raises: `uphold` catches
+            # `RefundRefused`, releases the claim and re-raises it in this
+            # vocabulary. So there is one except clause here and not two, and
+            # the code carries through. A rating never arrives here: once the
+            # buyer is paid, `uphold` answers with the record, never a raise.
+            fallback = _REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE)
+            if exc.code in _POST_SIGNING_CODES:
+                say()
+                say(f"  {exc.code}: {exc.message}")
+            else:
+                fallback = refuse(fallback, exc.code, exc.message)
+        except Exception as exc:
+            # Deliberately broad on a money path: an exception nobody
+            # anticipated says nothing about whether the transfer was
+            # submitted, and letting it reach the terminal as a traceback
+            # invites exactly the retry that D3 forbids. It is reported, then
+            # the store is asked.
+            fallback = EXIT_UNEXPECTED
             say()
-            say(f"  {exc.code}: {exc.message}")
-        else:
-            fallback = refuse(fallback, exc.code, exc.message)
-    except Exception as exc:
-        # Deliberately broad on a money path: an exception nobody anticipated
-        # says nothing about whether the transfer was submitted, and letting it
-        # reach the terminal as a traceback invites exactly the retry that D3
-        # forbids. It is reported, then the store is asked.
-        fallback = EXIT_UNEXPECTED
-        say()
-        say(f"  the uphold call raised {type(exc).__name__}: {exc}")
-        say("  Do NOT re-run yet. The dispute's state below is the only thing that knows")
-        say("  whether anything was signed.")
+            say(f"  the uphold call raised {type(exc).__name__}: {exc}")
+            say("  Do NOT re-run yet. The dispute's state below is the only thing that knows")
+            say("  whether anything was signed.")
 
-    return report(await store.get_dispute(dispute_id), dispute_id, amount, fallback)
+    dispute = await store.get_dispute(dispute_id)
+    code = report(dispute, dispute_id, amount, fallback)
+    if code != EXIT_OK or dispute is None:
+        return code
+    return report_rating(dispute, ratings[-1] if ratings else None)
 
 
 def build_parser() -> argparse.ArgumentParser:
