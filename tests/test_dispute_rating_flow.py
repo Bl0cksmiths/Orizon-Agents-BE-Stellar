@@ -480,6 +480,25 @@ def test_a_failed_retry_leaves_an_unconfirmed_rating_as_it_was(ledger, settler, 
     assert invalidated == []
 
 
+def test_a_rating_recorded_before_the_confirmation_existed_is_confirmed_by_a_replay(
+    ledger, settler, invalidated
+) -> None:
+    """A dispute rated before 4.06 has a `rating_tx` and no word on whether it
+    landed — None, "not known". The next uphold is refused as a replay, which
+    is the ledger vouching for that hash, so the record is brought up to date
+    rather than left saying "not known" about a rating the chain holds."""
+    dispute = open_dispute()
+    rated = uphold(dispute.id)
+    store = dispute_store.get_dispute_store()
+    store._disputes[dispute.id] = replace(rated, rating_confirmed=None)
+
+    confirmed = uphold(dispute.id)
+
+    assert confirmed.rating_confirmed is True
+    assert confirmed.rating_tx == rated.rating_tx
+    assert ledger.replays == 1 and len(settler.transfers) == 1
+
+
 # ── across disputes, and across every outcome ───────────────────
 
 
