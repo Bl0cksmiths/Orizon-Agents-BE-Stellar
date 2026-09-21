@@ -1059,6 +1059,28 @@ def test_a_rating_that_failed_after_the_credit_landed_says_the_buyer_is_paid_and
     assert record.status == "credited" and record.refund_tx == REFUND_TX and record.rating_tx is None
 
 
+def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on_record(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """The case the record alone cannot settle: the service records a timed-out
+    rating's in-flight hash as `rating_tx`, exactly as it records a landed one.
+    The script does not call it landed on the strength of that — the ledger
+    never confirmed it — so it exits on 12 with the hash to check, and says a
+    re-run is safe: if it lands late, the re-run is answered with Replay."""
+    in_flight = "ab" * 32
+    ledger.answers("TIMEOUT", in_flight)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert stored().rating_tx == in_flight
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+    assert "TIMED OUT — submitted and unconfirmed; it may still land." in out
+    assert f"check it:  https://stellar.expert/explorer/testnet/tx/{in_flight}" in out
+    assert "RE-RUNNING THIS SCRIPT IS SAFE HERE" in out
+    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
