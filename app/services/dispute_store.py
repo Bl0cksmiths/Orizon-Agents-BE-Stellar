@@ -690,6 +690,14 @@ class DisputeRecord:
     refund_tx: str | None = None
     rating_tx: str | None = None
     note: str | None = None
+    # What the refund ACTUALLY transferred, recorded when the dispute is
+    # credited (story 4.06). Not `creditable_usdc`: that is the promise frozen
+    # at opening, and the transfer is the minimum of it, the step price at the
+    # fraction now in force, and what the charge moved (ADR 0008 D4) — so the
+    # two can differ, and a receipt that printed the promise beside a Stellar
+    # Expert link showing another amount would contradict its own evidence.
+    # None until credited, and for every dispute credited before 4.06.
+    credited_usdc: float | None = None
 
 
 @dataclass(frozen=True)
