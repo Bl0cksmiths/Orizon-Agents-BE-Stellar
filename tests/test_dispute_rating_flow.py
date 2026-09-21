@@ -529,3 +529,26 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     assert invalidated == [AGENT]  # it landed, whatever the store says
     (logged,) = svc_errors(caplog)
     assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
+
+
+# ── the observer the operator tool reads the ledger's answer through ──
+
+
+def test_the_rating_observer_is_told_the_ledgers_own_answer(ledger, settler, invalidated) -> None:
+    """A rating that timed out and one that landed both leave a `rating_tx` on
+    the record, so the record cannot tell an operator which they are looking
+    at. `on_rating` is how the tool asks the ledger instead: told once per
+    uphold, exactly as the ledger answered, and the hash it hears is the one
+    the record keeps."""
+    dispute = open_dispute()
+    heard: list[dispute_rating.RatingOutcome] = []
+    ledger.script.append("lost")
+
+    first = asyncio.run(dispute_svc.uphold(dispute.id, on_rating=heard.append))
+    retried = asyncio.run(dispute_svc.uphold(dispute.id, on_rating=heard.append))
+
+    assert [outcome.status for outcome in heard] == ["TIMEOUT", "SUCCESS"]
+    assert first.rating_tx == heard[0].tx_hash  # both calls leave a hash on record...
+    assert retried.rating_tx == heard[1].tx_hash  # ...and only the observer says which one landed
+    assert heard[0].job_id_hex == derived(0).hex()
+    assert settler.transfers == [(dispute.payer, 0.05)]  # told twice, paid once
