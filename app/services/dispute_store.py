@@ -390,6 +390,16 @@ RETURNING dispute_id
 # transition row that claimed to be an opening would collide with its own
 # dispute's opening row in the partial unique index, and every resolution in
 # the system would fail.
+#
+# `finished` drops the refund mutex when this transition ends the dispute, in
+# the same statement rather than in a second call after it. A dispute that has
+# been credited or rejected is not mid-payout, and a claim row that outlived
+# the credit it was taken for would leave `refund_claims` holding a lock over a
+# dispute that is already paid — which costs nobody money but makes the
+# reconciliation queue lie, and a queue that lists finished work is a queue
+# operators learn to ignore. The rule lives in the SQL and not in an `if` above
+# the call, so a future transition cannot forget it. It runs even when `latest`
+# is empty, which is harmless: a dispute that does not exist holds no mutex.
 _APPEND_STATUS_SQL = """
 WITH latest AS (
     SELECT *
@@ -397,6 +407,11 @@ WITH latest AS (
     WHERE dispute_id = $1
     ORDER BY id DESC
     LIMIT 1
+),
+finished AS (
+    DELETE FROM refund_claims
+    WHERE dispute_id = $1 AND $2 IN ('credited', 'rejected')
+    RETURNING dispute_id
 )
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
@@ -519,12 +534,6 @@ _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.
     status="upheld",
     gate="WHERE latest.status = 'crediting'",
 )
-
-# The last statement standing that touches the mutex on its own: `append_status`
-# drops the claim when a dispute finishes.
-_DELETE_REFUND_CLAIM_SQL = """
-DELETE FROM refund_claims WHERE dispute_id = $1 RETURNING dispute_id
-"""
 
 
 @dataclass(frozen=True)
@@ -1036,16 +1045,12 @@ class PostgresDisputeStore:
         # It is only used when neither the caller nor the record already has a
         # resolution time — see COALESCE in _APPEND_STATUS_SQL.
         now = time.time()
+        # The statement also drops the refund mutex when `status` finishes the
+        # dispute, so what remains in `refund_claims` is exactly the set of
+        # payouts still in flight rather than a pile of spent locks.
         row = await pool.fetchrow(_APPEND_STATUS_SQL, dispute_id, status, refund_tx, rating_tx, resolved_at, now)
         if row is None:
             raise KeyError(dispute_id)
-        if status in ("credited", "rejected"):
-            # A dispute that has finished is not mid-payout, so its mutex is
-            # dropped here rather than left for the caller to remember. What
-            # remains in `refund_claims` is then exactly the set of disputes
-            # still in flight — which is what makes the table readable as a
-            # reconciliation queue instead of a pile of spent locks.
-            await pool.fetchrow(_DELETE_REFUND_CLAIM_SQL, dispute_id)
         return self._to_dispute(row)
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
