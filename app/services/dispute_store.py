@@ -943,6 +943,7 @@ def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
                 "agent_name": s.agent_name,
                 "price_usdc": s.price_usdc,
                 "delivered": s.delivered,
+                "output_summary": s.output_summary,
             }
             for s in steps
         ],
