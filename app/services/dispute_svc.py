@@ -644,3 +644,168 @@ async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, t
         # the one retry this whole path exists to make safe, so it is logged
         # and swallowed instead.
         logger.warning("could not trace the credit for dispute %s on task %s", dispute.id, dispute.task_id)
+
+
+async def uphold(dispute_id: str) -> DisputeRecord:
+    """Adjudicate a dispute in the BUYER's favour and pay the settler-funded credit.
+
+    THE ORDER BELOW IS THE STORY. Each step exists to close one way of paying a
+    buyer twice, or of leaving one who is owed unable ever to be paid, so none
+    of them may be reordered for tidiness:
+
+      1. **Load it** — an id nobody issued is `unknown_dispute` (404).
+      2. **Already `credited`** — return the record UNCHANGED, with the
+         `refund_tx` it already carries, and sign nothing. This is the retry
+         acceptance criterion, and it sits ABOVE the claim on purpose: an
+         adjudicator who double-clicks, a proxy that retries a 502, a queue
+         that redelivers — all of them arrive here and none of them may depend
+         on `claim_refund` to be told no. (The claim would also say no, because
+         a credited dispute is not `upheld`. Two independent answers to "has
+         this already been paid" is the point, not redundancy to trim.)
+      3. **`crediting`** — a transfer for this dispute is ON THE NETWORK and
+         nobody knows whether it landed (D3). Refuse with `refund_in_flight`
+         and never pay: the only two ways out are the network confirming it or
+         a human reconciling it, and a second transfer is neither.
+      4. **`rejected`** — adjudicated against the claim, and terminal
+         (`dispute_rejected`). A rejected dispute is never payable.
+      5. **`open` → `upheld`** — the adjudication itself, recorded BEFORE the
+         claim because `claim_refund` only ever claims an `upheld` dispute.
+         An `upheld` one skips straight to the claim, which is what makes a
+         dispute left upheld by a FAILED transfer payable again.
+      6. **Claim it** (D2) — the lock, taken before anything is signed and
+         never a read-then-write. `None` means somebody else holds it, so the
+         current record is returned rather than a second transfer signed.
+      7. **Compute and cap the amount** (D4, D5) — `refund_svc` bounds it by
+         what actually settled and refuses above the ceiling. Every
+         `RefundRefused` is raised BEFORE the settler's key is touched, from
+         either call, so the claim is RELEASED — nothing was signed and the
+         buyer may still be owed — and the refusal is re-raised as a
+         `DisputeError` in this module's vocabulary.
+      8. **Transfer**, and treat its three answers as three different facts:
+         SUCCESS records `credited` with the hash; FAILED definitively moved
+         nothing, so the claim is released and the dispute is left `upheld` and
+         payable; TIMEOUT **keeps the claim**, leaves the dispute `crediting`
+         with the in-flight hash recorded, logs ERROR and refuses. Never a
+         retry, never a release (D3).
+
+    The one window that remains is between a SUCCESS and the `append_status`
+    that records it: if the store is unreachable at that instant the money has
+    moved and the dispute stays `crediting` with its claim held. That is the
+    safe side of the trade — the claim blocks a second payment, and
+    `refund_svc` has already logged the hash for reconciliation.
+    """
+    store = get_dispute_store()
+    dispute = await _load_for_adjudication(dispute_id)
+
+    if dispute.status == "credited":
+        # Not a refusal: the adjudicator asked for this dispute to be credited
+        # and it is, so they are answered with the credit — same record, same
+        # transaction hash, no second transfer.
+        logger.info("dispute %s is already credited — tx %s, nothing signed", dispute.id, dispute.refund_tx)
+        return dispute
+
+    if dispute.status == "crediting":
+        raise _refuse_credit(
+            dispute,
+            "refund_in_flight",
+            409,
+            "a credit for this dispute is already on the network and its outcome is unknown —"
+            " it must be reconciled by hand, never retried",
+            amount_usdc=dispute.creditable_usdc,
+            tx_hash=dispute.refund_tx,
+            level=logging.ERROR,
+        )
+
+    if dispute.status == "rejected":
+        raise _refuse_credit(
+            dispute,
+            "dispute_rejected",
+            409,
+            "this dispute was rejected, so it can never be credited",
+            amount_usdc=dispute.creditable_usdc,
+        )
+
+    if dispute.status == "open":
+        dispute = await store.append_status(dispute_id, "upheld")
+
+    claimed = await store.claim_refund(dispute_id)
+    if claimed is None:
+        # Another caller took the claim between the transition above and this
+        # line. They are paying, or have just paid, so this one returns what
+        # the dispute now says instead of signing a second transfer. Re-read
+        # rather than return `dispute`: the winner has already moved it on.
+        current = await store.get_dispute(dispute_id) or dispute
+        logger.info("dispute %s is already claimed (%s) — nothing signed here", current.id, current.status)
+        return current
+
+    settlement = await store.get_settlement(claimed.job_id_hex)
+    if settlement is None:
+        # The amount is bounded by what the settlement says actually moved
+        # (D4), so without the settlement there is no number that is safe to
+        # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
+        # settlement to price it from can only be paid by a human, and the
+        # claim is handed back so that a human still can.
+        await store.release_refund_claim(dispute_id)
+        raise _refuse_credit(
+            claimed,
+            "settlement_missing",
+            409,
+            "the settlement this dispute was judged against is no longer on record,"
+            " so the credit cannot be bounded by what was actually charged",
+            amount_usdc=claimed.creditable_usdc,
+            level=logging.ERROR,
+        )
+
+    try:
+        amount_usdc = refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
+        outcome = await refund_svc.credit_refund(claimed, amount_usdc)
+    except refund_svc.RefundRefused as refused:
+        # Both refusals — the cap and "nothing to credit" — are raised before
+        # `execute_refund` is called, from `creditable_for` and again from the
+        # transfer wrapper's own re-check, so NOTHING WAS SIGNED on either
+        # path. That is what makes releasing the claim correct here and wrong
+        # after a timeout. `refund_svc` has already logged the numbers, so
+        # this only re-raises in the vocabulary the API answers with.
+        await store.release_refund_claim(dispute_id)
+        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
+
+    if outcome.status == "SUCCESS":
+        credited = await store.append_status(dispute_id, "credited", refund_tx=outcome.tx_hash)
+        await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
+        return credited
+
+    if outcome.status == "FAILED":
+        # The ledger rejected it, which is the ONE answer that says no funds
+        # moved. The buyer is still owed, so the claim goes back and the
+        # dispute is left `upheld` — a second uphold will claim it and try
+        # again, which is the whole reason this release exists.
+        await store.release_refund_claim(dispute_id)
+        raise _refuse_credit(
+            claimed,
+            "refund_failed",
+            502,
+            "the credit transfer did not settle, so nothing was paid — the dispute is still upheld"
+            " and can be credited again",
+            amount_usdc=outcome.amount_usdc,
+            tx_hash=outcome.tx_hash,
+            level=logging.ERROR,
+        )
+
+    # TIMEOUT, and anything the wrapper could not classify, which it maps here
+    # for the same reason: a submission whose fate is unknown MAY STILL LAND.
+    # The claim is NOT released and the dispute stays `crediting` — releasing
+    # it would unlock a retry that credits the buyer a second time the moment
+    # the first submission settles. The in-flight hash is recorded on the
+    # dispute so the reconciliation starts from the record rather than from a
+    # log search.
+    await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash)
+    raise _refuse_credit(
+        claimed,
+        "refund_unconfirmed",
+        504,
+        "the credit was submitted and its outcome is unknown — it may still land, so it must be"
+        " reconciled by hand and never retried",
+        amount_usdc=outcome.amount_usdc,
+        tx_hash=outcome.tx_hash,
+        level=logging.ERROR,
+    )
