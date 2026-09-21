@@ -666,6 +666,27 @@ def test_no_sql_in_the_module_mutates_a_dispute_event() -> None:
             assert after_delete.startswith("FROM REFUND_CLAIMS"), name
 
 
+def test_every_statement_that_writes_an_event_names_the_same_columns() -> None:
+    """Four statements INSERT into dispute_events — opening a dispute, a status
+    transition, and the two refund-mutex transitions — and each spells the
+    column list out in full.
+
+    The fake pool below maps this module's INSERT parameters onto those names
+    POSITIONALLY, exactly as Postgres does. A column added to one statement and
+    forgotten in another would store every value after it under the wrong name,
+    which is the kind of drift that reads correctly and pays the wrong amount."""
+    inserts = [
+        sql
+        for name, sql in vars(dispute_store).items()
+        if name.endswith("_SQL") and "INSERT INTO dispute_events" in sql
+    ]
+
+    assert len(inserts) == 4  # opening, transition, claim, release
+    for sql in inserts:
+        named = sql.split("INSERT INTO dispute_events (", 1)[1].split(")", 1)[0]
+        assert tuple(column.strip() for column in named.split(",")) == _DISPUTE_COLUMNS + ("opening",)
+
+
 def test_nothing_is_dated_by_the_database() -> None:
     """Every timestamp is epoch seconds from this process's clock. A now() in
     the SQL would date a record in whatever timezone the database runs in, and
