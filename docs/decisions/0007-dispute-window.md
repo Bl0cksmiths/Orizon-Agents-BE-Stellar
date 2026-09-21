@@ -290,3 +290,37 @@ far as the buyer is concerned — `_submit_ratings` treats a failed rating as
 best-effort and moves on. That is the failure this ADR exists to prevent, so it
 is stated here as a requirement on the next story rather than a note in a
 docstring.
+
+### Why not turn `TASK_AUTH_REQUIRED` on and keep the token
+
+It would close the third objection in D2 and neither of the first two. The
+token would still be a process-local dict entry, still evicted ahead of live
+tasks once 200 have run, and still gone on the next restart — so a buyer with a
+perfectly valid 24-hour window would find their credential had expired in
+minutes. It would also change the public demo: every task read route would
+start demanding a header, for a guard that does not solve the problem it was
+turned on for. The setting stays as it is, doing the read-scoping job it was
+written for.
+
+### Why not sign the nonce alone
+
+The 1.06 binding prototype did exactly that, and ADR 0003 D3 rejected it for
+binding: a signature captured inside its window could be replayed against a
+different URL. The same hole is worse here, because a dispute names two things
+that both matter. A nonce-only signature could be replayed against **any step
+of any settled job** the holder knows the ids of — including a step of a
+workflow the signer never paid for. Naming the job and the step inside the
+signed message makes the signature authorize precisely one dispute and nothing
+else, and costs a string concatenation.
+
+### Why not keep the settlement facts on the `Task` model
+
+It is the obvious place and it fails on all three of the store's properties.
+`Task` lives in `state.tasks`, which is capped, evicts finished tasks first and
+empties on restart — the record would be gone before the window closed, which
+is the failure D3 exists to prevent. It is also a **response shape**: `Task` is
+serialized straight back to any caller that can read the task, so putting the
+payer and the authorization id on it would publish them, the same leak
+`app/state.py` already avoids by keeping the read token off the model. A
+settlement record is evidence with a different lifetime and a different
+audience from a task, and it belongs in a different store.
