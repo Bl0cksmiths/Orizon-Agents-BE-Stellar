@@ -28,7 +28,7 @@ import pytest
 
 from app.config import settings
 from app.services import dispute_svc, refund_svc
-from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
+from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep, steps_from_json
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -545,6 +545,27 @@ def test_the_task_listing_reports_the_servers_clock(client, monkeypatch):
     after = time.time()
 
     assert before <= body["now"] <= after
+
+
+def test_a_settlement_recorded_before_summaries_existed_reads_them_as_null(client, monkeypatch):
+    # A row written before 4.05 has no `output_summary` key at all, and those
+    # settlements are still inside their windows. Read back through the store's
+    # own tolerant reader, so this is the row as the route would really get it.
+    legacy = steps_from_json(
+        '[{"step_index":1,"agent_id":"code-agent","agent_name":"Coder","price_usdc":0.25,"delivered":true}]'
+    )
+    lists(monkeypatch, found=settlement(steps=legacy), disputes=())
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200, r.text
+    (step,) = r.json()["settlement"]["steps"]
+    # Present and null rather than omitted, so the frontend's frozen type
+    # holds for every row — and nothing else about the step is lost with it.
+    assert "output_summary" in step
+    assert step["output_summary"] is None
+    assert step["delivered"] is True
+    assert step["creditable_usdc"] == 0.25
 
 
 def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypatch):
