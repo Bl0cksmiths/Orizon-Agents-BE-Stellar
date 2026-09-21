@@ -348,12 +348,15 @@ def test_the_key_admits_the_caller_to_uphold(client, adjudicating, monkeypatch):
 
 
 def test_the_key_admits_the_caller_to_reject(client, adjudicating, monkeypatch):
+    # With a note, because a rejection without one is refused at the edge: the
+    # only thing this may pin is the door, so the body has to be one the door
+    # would otherwise admit.
     calls = rejects_with(monkeypatch, record(status="rejected", resolved_at=1_700_000_500.0))
 
-    r = client.post(REJECT, json={}, headers=AUTH)
+    r = client.post(REJECT, json={"note": NOTE}, headers=AUTH)
 
     assert r.status_code == 200, r.text
-    assert calls == [(DISPUTE_ID, None)]
+    assert calls == [(DISPUTE_ID, NOTE)]
 
 
 # ── upholding ───────────────────────────────────────────────────
