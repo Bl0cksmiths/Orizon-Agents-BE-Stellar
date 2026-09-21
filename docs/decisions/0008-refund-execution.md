@@ -409,5 +409,8 @@ for ADR 0007 D5's reason, and nothing here writes a rating. A dispute may reach
 Related: ADR 0002 (the credit mechanism and the trust model), ADR 0007 (the
 window, the proof of payer and the settlement record), `docs/disputes.md` (the
 buyer- and operator-facing version, including the reconciliation procedure),
-`app/config.py`, `app/services/dispute_store.py` and
-`app/services/refund_svc.py`.
+and the code these decisions live in — `app/config.py` (D1's boot refusal, D5's
+cap), `app/security.py` (`require_adjudicator`), `app/routers/disputes.py` (the
+two routes), `app/services/dispute_svc.py` (the adjudication order),
+`app/services/dispute_store.py` (the claim) and `app/services/refund_svc.py`
+(the amount and the three-way outcome).
