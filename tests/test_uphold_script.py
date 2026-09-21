@@ -409,3 +409,82 @@ def test_every_refusal_code_is_non_zero_and_distinct() -> None:
     # 1 and 2 stay clear of the table: 2 is argparse's usage error and 1 is what
     # an unhandled traceback exits with.
     assert not {1, 2} & set(codes.values())
+
+
+# ── the dry run: the default-safe path, and it must sign nothing ───────────
+
+
+def _binding_lines(out: str) -> list[str]:
+    """The bound lines the preview marked as the one that decides the credit."""
+    return [line for line in out.splitlines() if "BINDS" in line]
+
+
+def test_a_dry_run_signs_nothing_and_needs_no_signing_configuration(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The run an operator is told to do first, so it has to work on a machine
+    that holds no key at all — and it must not reach the chain or the uphold on
+    the way. Both are enforced: `forbid_uphold` here, and the stellar client
+    booby-trap that every test in this file runs under."""
+    forbid_uphold(monkeypatch)
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+    monkeypatch.setattr(settings, "stellar_signing_key", "")
+    monkeypatch.setattr(settings, "stellar_asset_sac", "")
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert "DRY RUN — nothing was signed and nothing moved." in out
+
+
+def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """Everything an operator has to approve before real money moves, on one
+    screen: which dispute, which settled step, each of D4's three bounds, D5's
+    ceiling, the amount and the account it lands in."""
+    forbid_uphold(monkeypatch)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert DISPUTE_ID in out and JOB in out and TASK in out
+    assert "promised to the buyer when the dispute was opened" in out
+    assert "DISPUTE_CREDITED_FRACTION" in out
+    assert "ever settled on-chain for the whole workflow" in out
+    assert "MAX_REFUND_USDC" in out
+    assert PAYER in out
+    assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
+    assert f"{CREDITABLE_USDC:.7f} USDC  ->  {PAYER}" in out
+    assert f"not clawed back from {AGENT}" in out
+
+
+def test_the_preview_marks_the_bound_that_actually_binds(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """A clamped credit means two records disagree about money, and WHICH record
+    held the number down is the thing an operator has to see. Here the workflow
+    settled for less than the buyer was promised, so the settled total binds."""
+    forbid_uphold(monkeypatch)
+    credit.pays(0.02)
+    seed(creditable_usdc=0.07, settled_usdc=0.02)
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert _binding_lines(out) == ["    0.0200000 USDC  ever settled on-chain for the whole workflow   <- BINDS"]
+
+
+def test_the_promise_binds_when_it_is_the_smallest_bound(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The other direction: what the buyer was shown at opening time is a
+    ceiling too, frozen then so a later policy change cannot raise it."""
+    forbid_uphold(monkeypatch)
+    credit.pays(0.01)
+    seed(creditable_usdc=0.01)
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert _binding_lines(out) == ["    0.0100000 USDC  promised to the buyer when the dispute was opened   <- BINDS"]
