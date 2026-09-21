@@ -324,6 +324,56 @@ RETURNING dispute_id
 """
 
 
+# Move a dispute to a new status by APPENDING its next event row — the whole of
+# what stories 4.03 (credited) and 4.04 (rated) do to a dispute.
+#
+# One statement, for binding_store's reason: the `latest` CTE and the INSERT
+# share a snapshot, so there is no window between reading the current row and
+# writing the one that supersedes it, and a credit and a rating landing
+# together cannot each write a row that forgets the other's.
+#
+# The immutable half of the record is copied forward from `latest` rather than
+# re-supplied by the caller. A caller that had to restate the payer, the reason
+# and the charged amount on every transition is a caller that can restate them
+# WRONGLY, and this table is evidence.
+#
+# COALESCE is what makes a partial update mean "leave the rest alone": a
+# transition that names only a refund_tx keeps the rating_tx already recorded.
+# `resolved_at` falls through three values in order — the one the caller gave,
+# the one already on the record, then $6, this process's clock — so the moment a
+# dispute was first resolved is stamped once and never moved by a later event.
+# The casts are explicit because an untyped NULL parameter inside COALESCE is
+# ambiguous to the planner.
+#
+# `opening` is FALSE, and that is load-bearing rather than cosmetic: a
+# transition row that claimed to be an opening would collide with its own
+# dispute's opening row in the partial unique index, and every resolution in
+# the system would fail.
+_APPEND_STATUS_SQL = """
+WITH latest AS (
+    SELECT *
+    FROM dispute_events
+    WHERE dispute_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+)
+INSERT INTO dispute_events (
+    dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+    charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, opening
+)
+SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
+       latest.agent_id, latest.payer, latest.reason, $2,
+       latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
+       COALESCE($5::double precision, latest.resolved_at, $6::double precision),
+       COALESCE($3::text, latest.refund_tx),
+       COALESCE($4::text, latest.rating_tx),
+       FALSE
+FROM latest
+RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+          charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
