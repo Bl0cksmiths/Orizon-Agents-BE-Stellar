@@ -877,3 +877,63 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None
         asyncio.run(store.append_status("dsp_never", "upheld"))
 
     assert pool.disputes == []
+
+
+# ── the pool ──────────────────────────────────────────────────────────────
+
+
+def test_close_closes_the_pool_once_and_is_safe_twice() -> None:
+    """Lifespan shutdown calls close unconditionally, and a close racing a
+    request must not hand out the pool it is tearing down."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> None:
+        await store.record_settlement(a_settlement())
+        await store.close()
+        await store.close()
+
+    asyncio.run(go())
+
+    assert pool.closed == 1
+    assert store._pool is None
+
+
+def test_the_pool_is_opened_with_min_size_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A free Render instance idles and its sockets die with it — a pool that
+    insists on a live connection wakes up holding a dead one and hands it to the
+    first buyer opening a dispute."""
+    captured: dict[str, Any] = {}
+
+    async def fake_create_pool(**kwargs: Any) -> FakePool:
+        captured.update(kwargs)
+        return FakePool()
+
+    class FakeAsyncpg:
+        create_pool = staticmethod(fake_create_pool)
+
+    monkeypatch.setattr(dispute_store, "_import_asyncpg", lambda: FakeAsyncpg)
+    store = dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db")
+
+    asyncio.run(store.get_dispute("dsp_never"))
+
+    assert captured["min_size"] == 0
+    assert captured["max_size"] == dispute_store._POOL_MAX_SIZE
+    assert captured["dsn"] == "postgres://user:pw@example.invalid/db"
+
+
+def test_a_missing_driver_names_the_fix() -> None:
+    """asyncpg is imported at first use, not at module scope, so this suite —
+    and any checkout without the driver — imports and collects cleanly."""
+    try:
+        import asyncpg  # noqa: F401
+    except ModuleNotFoundError:
+        pass
+    else:
+        pytest.skip("asyncpg is installed, so the missing-driver path cannot be reached")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        dispute_store._import_asyncpg()
+
+    message = str(excinfo.value)
+    assert "asyncpg" in message and "DATABASE_URL" in message
