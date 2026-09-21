@@ -501,3 +501,74 @@ def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> Non
     assert refused.value.status_code == 409
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
     assert unpaid is not None and unpaid.status == "upheld"
+
+
+# ── rejection, and what a rejected dispute may never become ─────
+
+
+def test_a_rejection_closes_an_open_dispute_without_paying_anything(monkeypatch) -> None:
+    no_signing(monkeypatch)
+
+    dispute = a_dispute()
+    rejected = asyncio.run(dispute_svc.reject(dispute.id, note="the output matched the brief"))
+
+    assert rejected.status == "rejected"
+    assert rejected.refund_tx is None
+    assert rejected.resolved_at is not None
+    # The buyer's own evidence is untouched by the decision against it.
+    assert rejected.reason == dispute.reason
+    assert rejected.creditable_usdc == dispute.creditable_usdc
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == rejected
+
+
+def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
+    """The one outcome that must never become payable again. `uphold` refuses
+    it outright, and it would also fail to be claimed — a rejected dispute is
+    not `upheld` — so no single check carries this on its own."""
+    dispute = a_dispute()
+    asyncio.run(dispute_svc.reject(dispute.id))
+    no_signing(monkeypatch)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "dispute_rejected"
+    assert refused.value.status_code == 409
+    still_rejected = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert still_rejected is not None and still_rejected.status == "rejected"
+
+
+@pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
+def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str) -> None:
+    """Every other status is refused rather than absorbed, including `rejected`
+    itself: a second rejection answered with the existing record would quietly
+    accept one adjudicator overruling another, and would accept a rejection of
+    a dispute that is mid-payout or already paid — which is the one thing an
+    adjudicator most needs to be told they cannot do."""
+    no_signing(monkeypatch)
+    dispute = a_dispute()
+    asyncio.run(dispute_store.get_dispute_store().append_status(dispute.id, status))
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.reject(dispute.id, note="changed my mind"))
+
+    assert refused.value.code == "dispute_not_open"
+    assert refused.value.status_code == 409
+    assert status in refused.value.message  # the adjudicator is told what it IS
+    unchanged = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert unchanged is not None and unchanged.status == status
+
+
+@pytest.mark.parametrize("adjudicate", [dispute_svc.uphold, dispute_svc.reject])
+def test_an_id_nobody_issued_is_refused_by_both_decisions(monkeypatch, adjudicate) -> None:
+    """One answer from both routes. A 404 from one and a 409 from the other
+    would make them disagree about the same fact, and the API maps whatever
+    this module says."""
+    no_signing(monkeypatch)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(adjudicate("dsp_nosuchdispute"))
+
+    assert refused.value.code == "unknown_dispute"
+    assert refused.value.status_code == 404
+    assert refused.value.existing is None
