@@ -16,6 +16,7 @@ Honest trust model, disclosed in every artifact (SOW §3.8 standard):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
@@ -261,6 +262,120 @@ async def execute_refund(buyer: str, amount_usdc: float) -> dict[str, Any]:
         "transfer",
         [sc.addr(settler), sc.addr(buyer), sc.i128(sc.usdc_to_i128(amount_usdc))],
     )
+
+
+async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOutcome:
+    """Sign and submit the credit for `dispute`, as a typed three-way outcome.
+
+    A wrapper over `execute_refund`, which keeps the signature the 4.01 spike
+    script and its tests call it with. What this adds is the one distinction a
+    caller must not get wrong, because `sc.invoke_with_server_key_async` NEVER
+    RAISES on failure — it returns a dict, and a caller that only looks for a
+    hash cannot tell a transfer that failed from one still in flight.
+
+    The mapping, in the order it is decided:
+
+      - `status == "SUCCESS"` with a hash → SUCCESS. The credit landed.
+      - `status == "FAILED"` → FAILED. The ledger rejected it, so no funds
+        moved; this is the ONLY answer that says that.
+      - anything else → TIMEOUT. `"timeout"` is the client's own word for
+        "submitted, then lost track of it", and the leftovers land here on
+        purpose: an unrecognised status, or a SUCCESS with no hash, is a
+        transfer whose fate is unknown, which is the same hazard by another
+        name. An exception is mapped here too — it can be raised before the
+        submission or after it, and nothing in the dict distinguishes those.
+
+    **TIMEOUT MEANS THE TRANSFER MAY STILL LAND, so it must NEVER be retried
+    automatically and the refund claim must NEVER be released** (D3). Releasing
+    a claim says "nothing was signed"; after a timeout something was, and the
+    retry it unlocks credits the buyer twice the moment the first submission
+    settles. The dispute stays in `crediting` and a human reconciles it from the
+    ERROR line this logs.
+
+    `amount_usdc` must have come from `creditable_for`; the two guards below
+    re-check it rather than trust the caller, so a hand-computed or stale amount
+    cannot reach the settler's key either.
+    """
+    if amount_usdc <= 0:
+        raise _refuse(dispute, "nothing_to_credit", f"{amount_usdc:.7f} USDC is not payable", amount_usdc)
+    if amount_usdc > settings.max_refund_usdc:
+        raise _refuse(
+            dispute,
+            "refund_above_cap",
+            f"{amount_usdc:.7f} USDC exceeds MAX_REFUND_USDC={settings.max_refund_usdc:.7f}",
+            amount_usdc,
+        )
+
+    try:
+        raw = await execute_refund(dispute.payer, amount_usdc)
+    except asyncio.CancelledError:
+        # A shutdown cancel (main.py's drain window) can land between the submit
+        # and its confirmation, exactly like `_settle_onchain`'s — and
+        # CancelledError is a BaseException the handler below never sees. Log
+        # for reconstruction first, then let the cancellation propagate: the
+        # claim is still held, which is the correct state for a transfer nobody
+        # can account for.
+        logger.error(
+            "dispute %s: refund transfer cancelled mid-flight and MAY HAVE LANDED — do not retry "
+            "(job %s, payer %s, %.7f USDC)",
+            dispute.id,
+            dispute.job_id_hex,
+            dispute.payer,
+            amount_usdc,
+        )
+        raise
+    except Exception as e:
+        logger.error(
+            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s "
+            "(job %s, payer %s, %.7f USDC)",
+            dispute.id,
+            e,
+            dispute.job_id_hex,
+            dispute.payer,
+            amount_usdc,
+            exc_info=True,
+        )
+        return RefundOutcome("TIMEOUT", None, amount_usdc)
+
+    raw_hash = raw.get("hash")
+    tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
+    status = str(raw.get("status") or "")
+
+    if status == "SUCCESS" and tx_hash:
+        logger.info(
+            "dispute %s credited %.7f USDC to %s — tx %s (job %s)",
+            dispute.id,
+            amount_usdc,
+            dispute.payer,
+            tx_hash,
+            dispute.job_id_hex,
+        )
+        return RefundOutcome("SUCCESS", tx_hash, amount_usdc)
+
+    if status.upper() == "FAILED":
+        logger.error(
+            "dispute %s: refund transfer did not settle — status=%s hash=%s, no funds moved "
+            "(job %s, payer %s, %.7f USDC)",
+            dispute.id,
+            status,
+            tx_hash,
+            dispute.job_id_hex,
+            dispute.payer,
+            amount_usdc,
+        )
+        return RefundOutcome("FAILED", tx_hash, amount_usdc)
+
+    logger.error(
+        "dispute %s: refund transfer unconfirmed and MAY STILL LAND — do not retry, reconcile by hand: "
+        "status=%s hash=%s (job %s, payer %s, %.7f USDC)",
+        dispute.id,
+        status or "missing",
+        tx_hash,
+        dispute.job_id_hex,
+        dispute.payer,
+        amount_usdc,
+    )
+    return RefundOutcome("TIMEOUT", tx_hash, amount_usdc)
 
 
 async def record_dispute_rating(agent_id: str, job_id: bytes, buyer: str, weight_stroops: int) -> dict[str, Any]:
