@@ -491,6 +491,13 @@ class FakePool:
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         self.statements.append(sql)
         await asyncio.sleep(0)
+        if sql == dispute_store._SELECT_REFUND_CLAIMS_SQL:
+            # ORDER BY claimed_at, dispute_id: oldest claim first, and a stable
+            # tiebreak for two taken in the same clock tick.
+            return [
+                {"dispute_id": dispute_id, "claimed_at": at}
+                for dispute_id, at in sorted(self.claims.items(), key=lambda claim: (claim[1], claim[0]))
+            ]
         assert sql == dispute_store._SELECT_DISPUTES_FOR_TASK_SQL, f"unexpected statement: {sql}"
         # DISTINCT ON (dispute_id) ... ORDER BY dispute_id, id DESC keeps the
         # newest row per dispute; the outer ORDER BY re-sorts them for the
