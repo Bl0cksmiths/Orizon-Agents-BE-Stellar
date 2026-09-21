@@ -732,9 +732,10 @@ async def _note_rating_on_workflow(dispute: DisputeRecord, outcome: dispute_rati
 def _derived_id_hex(dispute: DisputeRecord) -> str:
     """The derived job id this dispute is rated under, for a log line only.
 
-    Recomputed for the one line that has no `RatingOutcome` to read it from —
-    an attempt that raised — and never allowed to raise itself, because the
-    derivation's own refusal may be the very failure that line reports.
+    Recomputed for the lines that have no `RatingOutcome` to read it from — an
+    attempt that raised, and one never made — and never allowed to raise
+    itself, because the derivation's own refusal may be the very failure the
+    line reports.
     """
     try:
         return dispute_rating.dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index).hex()
