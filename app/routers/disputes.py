@@ -68,11 +68,6 @@ _PAYER_PATTERN = r"^G[A-Z2-7]{55}$"
 # the service can make.
 _MAX_STEP_INDEX = 63
 
-# The buyer's own words: room for a paragraph of what went wrong, bounded so a
-# dispute record stays a record. The body limiter caps the request as a whole;
-# this caps the one field that is free text.
-_MAX_REASON_CHARS = 2000
-
 
 class DisputeChallengeReq(BaseModel):
     """What the wallet is about to sign is derived from these two, so both are
@@ -119,7 +114,10 @@ class RejectDisputeReq(BaseModel):
     Bounded identically to `OpenDisputeReq.reason` — one paragraph, no empty
     string — because it is the same kind of thing from the other side of the
     table, and a rejection note that outgrew the complaint it answers would be
-    the one free-text field in this surface nobody had sized.
+    the one free-text field in this surface nobody had sized. Identically down
+    to the number: `dispute_svc.reject` cleans and trims the note to the same
+    MAX_REASON_CHARS, so a longer bound here would record an adjudicator's
+    rationale cut short with nothing to say it was.
 
     Optional, and optional all the way down: the body itself may be absent, so
     a console that has nothing to add posts no body rather than an empty one.
@@ -128,7 +126,7 @@ class RejectDisputeReq(BaseModel):
     representation in the record instead of two.
     """
 
-    note: str | None = Field(default=None, min_length=1, max_length=_MAX_REASON_CHARS)
+    note: str | None = Field(default=None, min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
 
 
 class DisputeResponse(BaseModel):
