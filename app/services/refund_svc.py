@@ -3,9 +3,12 @@
 The deployed `PaymentEscrow` has no refund entrypoint and never takes custody:
 `charge` sends USDC payer → agent-owner directly, so there is nothing to reverse.
 A dispute refund is therefore a **new transfer from the platform**, not a
-clawback — the settler credits the buyer over the asset SAC, and the dispute is
-recorded on-chain under a *derived* job id so it clears the ReputationLedger
-replay guard (R12).
+clawback — the settler credits the buyer over the asset SAC.
+
+Money only. The dispute's reputation consequence is `dispute_rating`'s (story
+4.04), written under a *derived* job id once the credit has landed, and kept
+apart on purpose: an unconfirmed refund must never be retried, an unconfirmed
+rating always safely can be, and a failed rating must never touch the credit.
 
 Honest trust model, disclosed in every artifact (SOW §3.8 standard):
   - the **platform funds** the credit — the disputed agent's only consequence is
