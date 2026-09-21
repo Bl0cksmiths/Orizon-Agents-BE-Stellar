@@ -383,6 +383,71 @@ last of those is the reconciliation case below.
 stories that pay the credit and write the rating, which is why a freshly opened
 dispute shows no transactions: there are none to show yet.
 
+## Reading the two on-chain artifacts
+
+An upheld dispute leaves two transactions on-chain, and both hashes are on the
+dispute record: `GET /api/disputes/{dispute_id}` returns them as `refund_tx`
+and `rating_tx`, beside the `job_id_hex`, `step_index`, `agent_id` and `payer`
+they belong to. They are different kinds of evidence, and they tie back to the
+disputed job in different ways.
+
+**The refund transfer** (`refund_tx`) is a `transfer` on the asset contract,
+signed by the settler: from the settler, to the payer, for the credited
+amount. It is what shows the buyer was paid, and it carries **no job id** — a
+token transfer names a sender, a recipient and an amount, and nothing else. Its
+link to the job runs through the dispute record. On-chain it is corroborated
+rather than proved: the recipient is the payer recorded at settlement — the
+address that authorized the escrow, and the one the attestation seal names —
+and the amount is no more than that step's charge.
+
+**The dispute rating** (`rating_tx`) is a call to `ReputationLedger.submit`,
+signed by the settler as the ledger's Scorer:
+
+| argument | value |
+| --- | --- |
+| `agent_id` | the disputed agent |
+| `job_id` | the **derived** id for the disputed step — see below |
+| `rating_0_to_100` | `10` |
+| `weight` | the step's quoted price, in stroops |
+| `payer` | the dispute's payer |
+| `kind` | `dispute` — every rating the settler writes at settlement is `auto` |
+
+and the ledger emits a `rated` event for the agent carrying the same rating,
+weight, job id and kind.
+
+**Tying the rating to its job, without reading any code.** The derived job
+id's **first sixteen hex characters are the disputed job's own**. The job's
+full id is an argument of the workflow's charge (`PaymentEscrow.charge`), of its
+attestation seal (`AttestationRegistry.seal`, the settlement's `proof_tx`) and
+of each automatic rating the settler wrote for it. So:
+
+1. Open the dispute rating on Stellar Expert and read its `job_id` argument.
+2. Open the workflow's seal — or its charge, for the rare job whose seal did not
+   land — and read the job id there.
+3. The first sixteen hex characters are the same. That is the link: an
+   unrelated random job id shares its first eight bytes with probability 2⁻⁶⁴.
+
+The attestation itself reads back by the job's **full** id at
+`GET /api/stellar/attestation/{job_id_hex}` — never by the derived one, which
+names no attestation.
+
+To confirm the other half as well — that the rating is for **this step** of the
+job, not merely for the job — recompute it from the job id and the step index:
+
+```bash
+python3 -c 'import hashlib,sys; j=bytes.fromhex(sys.argv[1]); s=int(sys.argv[2]); print((j[:8]+hashlib.sha256(j+b"orizon-dispute:v1"+s.to_bytes(2,"big")).digest()[:8]).hex())' <job_id_hex> <step_index>
+```
+
+For job `000102030405060708090a0b0c0d0e0f`, step `0`, that prints
+`00010203040506071e6388cbecdde018` — the first golden vector in
+`tests/test_dispute_job_id.py`, which pins the derivation so that it can never
+drift from what is already on the ledger.
+
+An operator can see both ids before anything is paid:
+`python scripts/uphold_dispute.py --dispute-id <id> --dry-run` prints the rating
+the live run will write — agent, score, weight, and the job id and derived id
+stacked, with their shared prefix underlined.
+
 ## The API
 
 | Route | Who may call it | Purpose |
