@@ -20,12 +20,17 @@ No chain, no network, no database.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
+import pytest
 from stellar_sdk import Keypair
 
+import app.stellar.client as sc
+from app.config import settings
 from app.services import refund_svc
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
+from app.services.refund_svc import RefundRefused
 
 JOB = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # 16 bytes of job id, as hex
 TASK = "tsk_disputed"
@@ -128,3 +133,86 @@ def test_the_amount_comes_from_the_settlement_not_the_plan_estimate() -> None:
     generous = (SettlementStep(step_index=0, agent_id="agt_writer", agent_name="C", price_usdc=0.9, delivered=True),)
     amount = refund_svc.creditable_for(_settlement(settled_usdc=0.02, steps=generous), _dispute(creditable_usdc=0.9))
     assert amount == 0.02
+
+
+def _no_signing(monkeypatch) -> None:
+    """Make the settler's key explode if anything reaches it. A refusal that is
+    logged but still signs is not a refusal, and only this catches that."""
+
+    async def _exploding_invoke(contract_id: str, function_name: str, args: list) -> dict:
+        raise AssertionError("a refused refund must never reach the stellar client")
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", _exploding_invoke)
+
+
+def test_a_step_the_settlement_does_not_have_refuses(monkeypatch, caplog) -> None:
+    _no_signing(monkeypatch)
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        with pytest.raises(RefundRefused) as exc:
+            refund_svc.creditable_for(_settlement(), _dispute(step_index=7))
+
+    assert exc.value.code == "nothing_to_credit"
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any("dsp_deadbeefdeadbeef" in m and JOB in m and PAYER in m and "nothing_to_credit" in m for m in msgs), (
+        f"the refusal was not logged with its context: {msgs}"
+    )
+
+
+def test_a_step_that_never_delivered_refuses(monkeypatch) -> None:
+    """An undelivered step was never part of what the buyer paid for, so there
+    is nothing to give back — whatever the dispute was opened promising."""
+    _no_signing(monkeypatch)
+    with pytest.raises(RefundRefused) as exc:
+        refund_svc.creditable_for(_settlement(), _dispute(step_index=2, creditable_usdc=0.09))
+    assert exc.value.code == "nothing_to_credit"
+
+
+def test_a_credit_that_computes_to_zero_refuses(monkeypatch) -> None:
+    _no_signing(monkeypatch)
+    with pytest.raises(RefundRefused) as exc:
+        refund_svc.creditable_for(_settlement(), _dispute(creditable_usdc=0.0))
+    assert exc.value.code == "nothing_to_credit"
+
+    # Zero from the other direction: a workflow that settled for nothing.
+    with pytest.raises(RefundRefused) as exc:
+        refund_svc.creditable_for(_settlement(settled_usdc=0.0), _dispute())
+    assert exc.value.code == "nothing_to_credit"
+
+
+def test_an_amount_over_the_cap_refuses_before_anything_is_signed(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
+    _no_signing(monkeypatch)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        with pytest.raises(RefundRefused) as exc:
+            refund_svc.creditable_for(_settlement(), _dispute())
+
+    assert exc.value.code == "refund_above_cap"
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "exceeds MAX_REFUND_USDC" in m
+        and "0.0500000" in m
+        and "0.0100000" in m
+        and "dsp_deadbeefdeadbeef" in m
+        and JOB in m
+        and PAYER in m
+        for m in msgs
+    ), f"the refused over-cap credit was not logged with its context: {msgs}"
+
+
+def test_a_hand_rolled_over_cap_amount_never_reaches_the_signer(monkeypatch) -> None:
+    """The ceiling lives in `creditable_for`, but a caller that computed its own
+    number must not be able to walk around it either."""
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
+    _no_signing(monkeypatch)
+
+    with pytest.raises(RefundRefused) as exc:
+        asyncio.run(refund_svc.credit_refund(_dispute(), 5.0))
+    assert exc.value.code == "refund_above_cap"
+
+
+def test_a_zero_amount_never_reaches_the_signer(monkeypatch) -> None:
+    _no_signing(monkeypatch)
+    with pytest.raises(RefundRefused) as exc:
+        asyncio.run(refund_svc.credit_refund(_dispute(), 0.0))
+    assert exc.value.code == "nothing_to_credit"
