@@ -199,7 +199,7 @@ dispute shows no transactions: there are none to show yet.
 | `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign, with the step, its charge, the creditable amount and the window's closing time |
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
 | `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
-| `GET /api/disputes?task_id=…` | anyone holding the task id | every dispute raised against one workflow |
+| `GET /api/tasks/{task_id}/disputes` | the task's own token, or an operator API key | one workflow's dispute window and every dispute raised against it; an unknown or unsettled task is a null window and an empty list, not a 404 |
 
 The read routes take no credential because both ids are unguessable — a dispute
 id is `dsp_` plus 16 random hex characters — which is the same trade the task
