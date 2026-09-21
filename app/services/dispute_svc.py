@@ -49,8 +49,8 @@ from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
+from . import dispute_rating, refund_svc
 from . import external_binding as eb
-from . import refund_svc
 from .dispute_store import (
     DisputeRecord,
     DuplicateDisputeError,
@@ -692,6 +692,26 @@ async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, t
         f"dispute {dispute.id} upheld — step {dispute.step_index} credited {amount_usdc:.7f} USDC "
         f"to the buyer, funded by the platform, not clawed back from agent {dispute.agent_id}"
         + (f" · tx {tx_hash}" if tx_hash else ""),
+    )
+
+
+async def _note_rating_on_workflow(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome) -> None:
+    """Show a landed dispute rating on the workflow it disputes (`_trace_on_workflow`).
+
+    `proof`, the level the settler's own ratings trace at, because this is the
+    same kind of evidence: a transaction on the ReputationLedger. It states the
+    consequence in plain words — the score, and that an upheld dispute earned
+    it — because the credit line before it has just told the buyer the agent
+    kept its money, and this is the line that says what the agent lost instead.
+    The derived job id is named beside the hash so a reviewer can find the
+    rating on Stellar Expert by either.
+    """
+    await _trace_on_workflow(
+        dispute,
+        "proof",
+        "rating",
+        f"reputation → agent {dispute.agent_id} rated {outcome.rating}/100 for upheld dispute {dispute.id}"
+        f" on step {dispute.step_index} · dispute job {outcome.job_id_hex} · tx {outcome.tx_hash}",
     )
 
 
