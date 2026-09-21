@@ -118,6 +118,14 @@ Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /ap
 
 `REPUTATION_PRIOR_BPS`, `REPUTATION_PRIOR_WEIGHT_USDC` and `REPUTATION_FLOOR_BPS` between them decide whether a brand-new agent is routable at all, and the margin is 177 bps. **[docs/reputation.md](docs/reputation.md)** has the arithmetic, the exact value at which each one starts excluding newcomers, and why the floor is applied to the lower bound rather than to the raw on-chain mean — read it before changing any of them.
 
+## Dispute window
+
+A settled workflow can be argued with. When a paid workflow settles, the settlement is recorded — the job id, the payer, what each step was actually charged — and stamped with a closing time `DISPUTE_WINDOW_SECONDS` (24 h) ahead of it. Until that moment the buyer may dispute any step that was charged: `POST /api/disputes/challenge` returns the exact string to sign, the wallet that paid signs it, and `POST /api/disputes` records the claim. There is no account and no API key anywhere in that flow — **the wallet signature is the credential**, exactly as it is for endpoint binding, because the only thing that needs proving is "I am the address that paid this job", and a shared operator key cannot say that. It would be the wrong key besides: the operator is the party being disputed.
+
+The deadline is stamped on the settlement record rather than recomputed on read, so retuning `DISPUTE_WINDOW_SECONDS` can never move a closing time a buyer was already given; it only applies to workflows that settle afterwards. One dispute per `(job, step)`: a repeat is answered with the original dispute unchanged, not a second record. `GET /api/tasks/{id}/disputes` returns the window and everything raised on a task, which is what the console shows while the clock runs.
+
+Story 4.02 records the claim and nothing more — no money moves and no rating is written. Paying the credit is 4.03 (`DISPUTE_CREDITED_FRACTION`, default the whole step) and the on-chain `kind="dispute"` rating is 4.04.
+
 ## Testing
 
 ```bash
