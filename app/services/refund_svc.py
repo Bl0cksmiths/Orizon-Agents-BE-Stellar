@@ -375,12 +375,3 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         amount_usdc,
     )
     return RefundOutcome("TIMEOUT", tx_hash, amount_usdc)
-
-
-async def record_dispute_rating(agent_id: str, job_id: bytes, buyer: str, weight_stroops: int) -> dict[str, Any]:
-    """Record an upheld dispute on-chain as a low rating under the DERIVED job
-    id (R12), so it lands despite the settled job's auto-rating already
-    occupying `Rated(agent_id, job_id)`. Kept linkable to the disputed job."""
-    return await sc.submit_rating_async(
-        agent_id, dispute_job_id(job_id), DISPUTE_RATING, weight_stroops, buyer, "dispute"
-    )
