@@ -216,7 +216,10 @@ duration of the outage.
 
 **Only wallet-authorized runs produce ratings.** When a buyer's wallet
 authorizes a run, the backend settles it and then writes one rating per
-dispatched step to ReputationLedger, signed with `STELLAR_SIGNING_KEY`. A
+dispatched step to ReputationLedger, signed with `STELLAR_SIGNING_KEY`. The only
+other rating this backend ever writes is the one an upheld, credited dispute
+adds against a step of such a run — see "What an upheld dispute does to an
+agent". A
 simulated run — no wallet, no authorization — never rates, by design: a rating
 is weighted by the USDC at stake on the step that earned it, and a simulated
 run has none. A deployment that has only ever served simulated runs will show
