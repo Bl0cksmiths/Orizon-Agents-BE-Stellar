@@ -286,6 +286,12 @@ app = FastAPI(
             "name": "binding",
             "description": "Bind an operator HTTPS endpoint to an on-chain agent id, proved by a wallet signature.",
         },
+        {
+            "name": "disputes",
+            "description": (
+                "Dispute a settled step inside its 24-hour window, proved by the payer's wallet signature."
+            ),
+        },
         {"name": "pdax", "description": "PDAX PHP-to-crypto on/off-ramp: trade, funding, withdrawals, webhooks."},
     ],
 )
