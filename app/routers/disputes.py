@@ -171,6 +171,13 @@ class DisputeResponse(BaseModel):
     # buyer the time of a step they are no longer looking at. Null only for a
     # record written before 4.06.
     updated_at: float | None = None
+    # Whether `rating_tx` is known to have LANDED, which the hash alone cannot
+    # say: it is recorded on a timeout as well as on a success, so a receipt
+    # that read "hash present" as "the agent was rated" could claim a
+    # consequence that never happened. True once the ledger has vouched for
+    # it, false while it is only in flight, null when no rating was submitted
+    # or the record predates 4.06 — so null means "not known", never "no".
+    rating_confirmed: bool | None = None
 
     @classmethod
     def of(cls, record: DisputeRecord) -> DisputeResponse:
@@ -192,6 +199,7 @@ class DisputeResponse(BaseModel):
             rating_tx=record.rating_tx,
             credited_usdc=record.credited_usdc,
             updated_at=record.updated_at,
+            rating_confirmed=record.rating_confirmed,
         )
 
 
