@@ -324,3 +324,48 @@ payer and the authorization id on it would publish them, the same leak
 `app/state.py` already avoids by keeping the read token off the model. A
 settlement record is evidence with a different lifetime and a different
 audience from a task, and it belongs in a different store.
+
+## Consequences
+
+**The settlement path now has a durable write on it.** It runs after the charge
+and the seal, so it can never be allowed to fail the workflow — the money has
+already moved and the attestation is already on-chain. A settlement that cannot
+be recorded is a paid workflow with **no dispute window**, and the buyer has no
+way to discover that, so it has to be logged with the same weight as a seal
+that did not settle: it is the other state that has to be reconstructable from
+the logs.
+
+**Production must set `DATABASE_URL`.** Without it the process falls back to the
+in-memory store and every promise in this ADR lasts until the next restart —
+which a free-tier instance performs whenever it idles. The store logs that
+verdict once at startup and again whenever it drops a record, but nothing
+refuses to boot: a local run and the hermetic test suite legitimately have no
+database, and that is the same position ADR 0003 D1 took for bindings.
+
+**The platform carries a bounded, 24-hour liability.** For a day after each
+settlement, every delivered step of that workflow can become a credit paid out
+of the settler's own wallet — never a clawback from the agent. The exposure per
+workflow is capped by `settled_usdc` and the credited fraction, and the settler
+must actually hold the asset, or an upheld dispute cannot be paid.
+
+**The disputed step ends up rated twice.** The settler's automatic rating stays
+where it is, and an upheld dispute adds a second, low rating (10/100) under the
+derived job id. That is the price of resolving R12 without a contract change,
+and it is the honest reading of the ledger: the first rating says the work was
+paid for, the second says the buyer's claim was upheld, and the ledger's
+`disputed` counter and `dispute_rate_bps` — which have existed and been
+unreachable since they were written — finally move.
+
+**The frontend gains a signing step.** 4.05 must request a challenge, have the
+wallet sign the returned message and post the signature; 4.06 reads the dispute
+back by its id. Neither can be built against the capability token that the card
+originally suggested and that the frontend already holds.
+
+**Later stories inherit two frozen numbers.** A dispute carries the charge and
+the creditable amount as they stood when it was opened, so 4.03 pays from the
+record rather than recomputing from config, and a tuning change between opening
+and adjudication cannot alter what the buyer was shown.
+
+Related: ADR 0002 (the refund mechanism and the trust model), `docs/disputes.md`
+(the operator- and buyer-facing guide), `app/services/dispute_store.py` and
+`app/services/refund_svc.py`.
