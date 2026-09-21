@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import time
 from typing import Any
 
@@ -37,7 +38,7 @@ import app.stellar.client as sc
 from app.services import dispute_store, dispute_svc, refund_svc
 from app.services import external_binding as eb
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
-from app.services.dispute_svc import dispute_message
+from app.services.dispute_svc import DisputeError, dispute_message
 from app.state import state
 from app.trace_bus import bus
 
@@ -287,3 +288,93 @@ def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(mon
     # winner of the claim is the one paying it.
     assert answered.status == "upheld"
     assert answered.refund_tx is None
+
+
+# ── the three answers a submitted transfer can have ─────────────
+
+
+def test_a_failed_transfer_leaves_the_dispute_upheld_and_still_payable(monkeypatch) -> None:
+    """FAILED is the one answer that says NO FUNDS MOVED, so it is the one
+    answer that may release the claim. The buyer is still owed, the dispute
+    goes back to `upheld`, and the next uphold claims it and pays."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, REJECTED, LANDED)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refund_failed"
+    assert refused.value.status_code == 502
+    assert refused.value.existing is None
+    stranded = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert stranded is not None and stranded.status == "upheld"
+    assert stranded.refund_tx is None  # nothing landed, so nothing is claimed to have
+
+    # Payable again, which is the entire point of releasing the claim.
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+    assert credited.status == "credited"
+    assert credited.refund_tx == "tx_credit"
+    assert len(chain.calls) == 2
+
+
+def test_a_timed_out_transfer_keeps_the_claim_and_the_next_uphold_refuses(monkeypatch) -> None:
+    """D3, and the reason this story exists at all. A timeout means the
+    transfer is ON THE NETWORK and may still settle, so the claim is NOT
+    released: the dispute stays `crediting`, carrying the in-flight hash a
+    human reconciles from, and every later uphold refuses rather than paying a
+    buyer who may already have been paid."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LOST)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refund_unconfirmed"
+    assert refused.value.status_code == 504
+    assert "never retried" in refused.value.message
+    in_flight = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert in_flight is not None and in_flight.status == "crediting"
+    assert in_flight.refund_tx == "tx_inflight"  # the reconciliation starts from the record
+
+    with pytest.raises(DisputeError) as again:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert again.value.code == "refund_in_flight"
+    assert again.value.status_code == 409
+    assert len(chain.calls) == 1  # the second uphold signed nothing
+
+
+def test_a_timeout_logs_what_a_human_needs_to_reconcile_it(monkeypatch, caplog) -> None:
+    """The dispute, the job, the buyer and the amount, in one ERROR line. A
+    transfer whose fate is unknown is resolved by a person with a block
+    explorer, and this line is where they start."""
+    dispute = a_dispute()
+    settler(monkeypatch, LOST)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER), pytest.raises(DisputeError):
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER]
+    assert len(logged) == 1
+    assert dispute.id in logged[0]
+    assert JOB in logged[0]
+    assert dispute.payer in logged[0]
+    assert "0.0500000" in logged[0]
+    assert "tx_inflight" in logged[0]
+
+
+def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) -> None:
+    """A status nobody planned for is a transfer whose fate is unknown, which
+    is the timeout hazard under another name. It must land on the conservative
+    side — claim held, dispute `crediting` — and never on the one that releases
+    a claim over a transfer that might have moved money."""
+    dispute = a_dispute()
+    settler(monkeypatch, {"status": "PENDING", "hash": "tx_who_knows"})
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refund_unconfirmed"
+    stuck = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert stuck is not None and stuck.status == "crediting"
+    assert stuck.refund_tx == "tx_who_knows"
