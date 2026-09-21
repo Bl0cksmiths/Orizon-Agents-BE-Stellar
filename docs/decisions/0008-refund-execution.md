@@ -159,28 +159,38 @@ CREATE TABLE IF NOT EXISTS refund_claims (
 );
 ```
 
-and the primary key is the whole mechanism. `claim_refund` runs
-`INSERT INTO refund_claims (dispute_id, claimed_at) VALUES ($1, $2)
-ON CONFLICT (dispute_id) DO NOTHING RETURNING dispute_id` — **atomic in a
-single statement**, so of any number of concurrent claimants exactly one
-inserts and the rest come back empty. `DO NOTHING` rather than `DO UPDATE`
-keeps the losers on the ordinary empty-result path instead of an exception
-class every caller would have to name, and leaves the winner's row untouched.
+and the primary key is the whole mechanism. `INSERT ... ON CONFLICT
+(dispute_id) DO NOTHING` is atomic, so of any number of concurrent claimants
+exactly one inserts and the rest come back empty. `DO NOTHING` rather than
+`DO UPDATE` keeps the losers on the ordinary empty-result path instead of an
+exception class every caller would have to name, and leaves the winner's row
+untouched.
 
-The order is the part worth recording, because it is not the intuitive one.
-**The claim is taken first and the dispute's status is checked second.** With
-the claim held, no other payer can be looking at the same dispute, so what the
-status check reads stays true until this call releases it. Checking first and
-claiming second leaves a window between the two that is precisely the race the
-claim exists to close. A claim taken over a dispute that turns out not to be
-`upheld` is handed straight back, so a mistimed retry cannot wedge a dispute
-somebody else is legitimately about to pay.
+**Taking the claim and moving the dispute to `crediting` are one statement**,
+not two, and that is the part worth recording. The version that tried two is
+worth naming because it is the obvious one: insert the claim, read the status
+back, append `crediting`. The gap between the insert and the append is a window
+the process can die in — Render spins a free instance down whenever it idles —
+and what it leaves behind is a claim row over a dispute still reading `upheld`.
+Nothing can pay that buyer afterwards: the claim refuses every later claimant,
+and a release refuses because the dispute is not `crediting`. They would be
+owed money that no code path could send them. A single statement is its own
+transaction, so either both rows are there or neither is, whatever happens to
+the process in between.
 
-A won claim moves the dispute to `crediting`, and **`None` from `claim_refund`
-means sign nothing** — already claimed, already credited, still open, or
-rejected are all the same instruction to the caller. The claim outlives the
-process that took it, which is the property a lock in memory does not have and
-the reason it is a table.
+**Concurrency is settled by the primary key, not by the status the statement
+reads.** Both CTEs share one snapshot, taken before either ran, so two
+claimants racing each other *both* see `upheld` — a status can rule a claim out
+and can never arbitrate between two. The unique index is not snapshot-based:
+exactly one insert lands, the loser's `DO NOTHING` returns nothing, and the
+outer insert selects through the claim, so the loser writes no event row
+either. The status gate is still there, on the claim's own `SELECT`, and its
+job is the other one: a dispute that is not `upheld` inserts nothing at all.
+
+So **`None` from `claim_refund` means sign nothing** — already claimed, already
+credited, still open, or rejected are all the same instruction to the caller.
+The claim outlives the process that took it, which is the property a lock in
+memory does not have and the reason it is a table.
 
 **Why not a partial unique index over `dispute_events`.** ADR 0007 already
 enforces one dispute per `(job_id_hex, step_index)` with exactly that
