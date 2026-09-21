@@ -374,3 +374,36 @@ def test_a_job_id_that_will_not_derive_raises_instead_of_rating(monkeypatch, cap
     assert any(DISPUTE_ID in m and job_id_hex in m and PAYER in m for m in msgs), (
         f"the underivable dispute was not logged with its context: {msgs}"
     )
+
+
+def test_no_dispute_rating_line_carries_the_signing_key(monkeypatch, caplog) -> None:
+    """The scorer's key signs every rating, so every branch that logs is walked
+    with a key configured — message and rendered traceback alike."""
+    monkeypatch.setattr(settings, "stellar_signing_key", SIGNING_SECRET)
+    formatter = logging.Formatter("%(message)s")
+    answers: list[dict | BaseException] = [
+        {"status": "SUCCESS", "hash": "rating_tx"},
+        {"status": "FAILED", "hash": "failed_tx"},
+        {"status": "timeout", "hash": "inflight_tx"},
+        _refused(7),
+        _refused(1),
+        _refused(100),
+        RuntimeError("soroban rpc unreachable"),
+    ]
+
+    with caplog.at_level(logging.DEBUG, logger="app.services.dispute_rating"):
+        for answer in answers:
+            _fake_submit(monkeypatch, answer)
+            _rate()
+        _fake_submit(monkeypatch, asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            _rate()
+        with pytest.raises(LookupError):
+            _rate(_dispute(step_index=7))
+        with pytest.raises(ValueError):
+            _rate(_dispute(job_id_hex="9f8e7d6c"))
+
+    records = [r for r in caplog.records if r.name == "app.services.dispute_rating"]
+    assert len(records) == len(answers) + 3
+    for rec in records:
+        assert SIGNING_SECRET not in formatter.format(rec)
