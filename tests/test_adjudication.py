@@ -1015,18 +1015,26 @@ def trap_the_refund(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("unlanded", "rating_tx"),
-    [("FAILED", None), ("TIMEOUT", "tx_rating_inflight"), ("REPLAY", None), ("raised", None)],
+    ("unlanded", "rating_tx", "rating_confirmed"),
+    [
+        ("FAILED", None, None),
+        ("TIMEOUT", "tx_rating_inflight", False),
+        ("REPLAY", None, None),
+        ("raised", None, None),
+    ],
 )
 def test_a_rating_that_does_not_land_never_touches_the_refund(
-    monkeypatch, rater, unlanded: str, rating_tx: str | None
+    monkeypatch, rater, unlanded: str, rating_tx: str | None, rating_confirmed: bool | None
 ) -> None:
     """D3. The buyer has been paid by the time the rating is asked for, and
     no answer the rating gets — a failure, a timeout, a collision, or an
     exception out of the attempt itself — may reverse, release or re-sign
     that. Nor may it be RAISED: a paid refund answered with an error is a
     refund the caller will think failed. The dispute stays `credited` with its
-    refund hash, and only `rating_tx` says the consequence has not landed."""
+    refund hash, and only `rating_tx` says the consequence has not landed.
+
+    Nor may any of them read as a landing (4.06): the timeout's hash is on
+    record as UNCONFIRMED, and the rest leave nothing to confirm."""
     dispute = a_dispute()
     chain = settler(monkeypatch, LANDED)
 
@@ -1044,6 +1052,7 @@ def test_a_rating_that_does_not_land_never_touches_the_refund(
     assert answered.status == "credited"
     assert answered.refund_tx == "tx_credit"
     assert answered.rating_tx == rating_tx
+    assert answered.rating_confirmed is rating_confirmed
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == answered
     assert len(chain.calls) == 1
 
