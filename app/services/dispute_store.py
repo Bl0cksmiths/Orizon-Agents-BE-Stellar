@@ -26,7 +26,7 @@ import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,46 @@ DisputeStatus = Literal["open", "upheld", "credited", "rejected"]
 # bound, and it is logged when it bites so nobody mistakes a dropped record for
 # a bug in the window arithmetic.
 _MAX_IN_MEMORY = 500
+
+
+# Pool sizing for the Postgres store, taken from binding_store for the reasons
+# it gives there rather than by habit.
+#
+# min_size=0 is the load-bearing one. A free Render instance idles, is spun
+# down, and its TCP sockets die with it; a pool that insists on keeping a live
+# connection wakes up holding a dead one and hands it to the first request. At
+# zero the pool holds nothing while nothing is happening and dials on demand,
+# which is also what a serverless Postgres (Neon) wants.
+#
+# max_size is small because uvicorn runs --workers 1 (render.yaml): this is the
+# whole service's connection budget rather than one worker's share of it, and it
+# is spent alongside the binding store's own pool, so five here is five more
+# connections than that one already holds.
+_POOL_MIN_SIZE = 0
+_POOL_MAX_SIZE = 5
+
+
+def _import_asyncpg() -> Any:
+    """Import the driver at first Postgres use, never at module import.
+
+    This module is imported on every boot — by the settlement path, and so by
+    the hermetic suite and by any checkout that installed only the dev
+    requirements. asyncpg is needed solely when DATABASE_URL is set, so
+    importing it at module scope would turn an optional dependency into a
+    mandatory one and break test collection wherever it is absent. Deferring it
+    means a missing driver surfaces here, at the moment something actually
+    wanted a database, with the fix in the message instead of as an ImportError
+    from an unrelated module three imports away.
+    """
+    try:
+        import asyncpg
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "DATABASE_URL is set but asyncpg is not installed, so settlements and disputes cannot be "
+            "stored durably. Install it (`pip install -r requirements.txt`, asyncpg>=0.30,<1) or clear "
+            "DATABASE_URL to fall back to the in-memory store."
+        ) from exc
+    return asyncpg
 
 
 @dataclass(frozen=True)
