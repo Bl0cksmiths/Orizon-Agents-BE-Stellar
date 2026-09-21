@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import base64
 import time
+from typing import get_args
 
 import pytest
 
 from app.config import settings
 from app.services import dispute_svc, refund_svc
-from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep, steps_from_json
+from app.services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep, steps_from_json
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -473,6 +474,42 @@ def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch):
         "rating_confirmed": True,
         "rejection_reason": None,
     }
+
+
+# An adjudicator's note, as the record keeps it. Distinctive on purpose: the
+# assertions below look for it anywhere in the body, not just under one key.
+ADJUDICATOR_NOTE = "the delivered file matched the brief line for line"
+
+
+def test_a_rejected_dispute_carries_its_reason(client, monkeypatch):
+    reads(monkeypatch, dispute=record(status="rejected", resolved_at=1_700_000_500.0, note=ADJUDICATOR_NOTE))
+
+    body = client.get("/api/disputes/dsp_00112233445566778").json()
+
+    assert body["status"] == "rejected"
+    assert body["rejection_reason"] == ADJUDICATOR_NOTE
+    # Under that one name: the record's own field name never reaches the wire.
+    assert "note" not in body
+
+
+# Every status but `rejected`, read off the type itself, so a status added
+# later is covered here without anyone remembering to add it.
+NOT_REJECTED = [s for s in get_args(DisputeStatus) if s != "rejected"]
+
+
+@pytest.mark.parametrize("status", NOT_REJECTED)
+def test_a_note_on_any_other_status_is_never_published(client, monkeypatch, status):
+    # The note is buyer-facing only as the answer to a rejection. A note on
+    # the record under any other status — carried forward, or written by a
+    # path that has not been thought about yet — must not surface, under
+    # `rejection_reason` or anywhere else in the body.
+    reads(monkeypatch, dispute=record(status=status, note=ADJUDICATOR_NOTE))
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["rejection_reason"] is None
+    assert ADJUDICATOR_NOTE not in r.text
 
 
 def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeypatch):
