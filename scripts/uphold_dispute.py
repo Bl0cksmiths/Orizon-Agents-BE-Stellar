@@ -465,6 +465,11 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallba
         return fallback
 
     say()
+    if fallback != EXIT_OK and dispute.status == "open":
+        say(f"  dispute {dispute.id} is untouched at `open` — the refusal above landed before")
+        say("  anything was written or signed.")
+        say()
+        return fallback
     say(f"  dispute {dispute.id} is {dispute.status!r} with refund tx {dispute.refund_tx or 'none'}.")
     say("  That is not a state this run can account for — reconcile the payer's account on-chain")
     say("  before re-running anything.")
