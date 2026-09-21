@@ -76,7 +76,9 @@ permissionless payment makes everywhere else in this marketplace.
 
 **A reason is mandatory and is kept.** It is the evidence trail — the thing a
 review of the dispute actually reads — and it stays on the record whether the
-dispute is upheld or rejected.
+dispute is upheld or rejected. It may be up to 500 characters, a paragraph; a
+longer one is refused before anything is recorded, rather than accepted and
+kept only in part.
 
 ## What can be disputed
 
