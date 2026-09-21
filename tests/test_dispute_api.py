@@ -126,11 +126,13 @@ def test_challenge_returns_the_message_the_wallet_must_sign(client, challenge_st
     assert challenge_stub == [(JOB_ID, 1)]
 
 
-def test_challenge_does_not_ask_whether_the_job_was_ever_settled(client, challenge_stub, monkeypatch):
-    # The mint is blind on purpose: a challenge that refused unknown or
-    # unsettled jobs would tell an anonymous caller, with no signature, which
-    # publicly-issued job ids were paid for.
+def test_challenge_delegates_the_whole_mint_to_the_service(client, challenge_stub, monkeypatch):
+    # Whether a mint is allowed is the service's call — it reads the settlement
+    # itself, so its bounded challenge table can only hold pairs that could
+    # really be disputed. The route must not form a second opinion by reaching
+    # for the settlement or the dispute list on its own.
     monkeypatch.setattr(dispute_svc, "settlement_for_task", never_called("settlement_for_task"))
+    monkeypatch.setattr(dispute_svc, "list_for_task", never_called("list_for_task"))
     monkeypatch.setattr(dispute_svc, "open_dispute", never_called("open_dispute"))
 
     r = client.post("/api/disputes/challenge", json={"job_id_hex": JOB_ID, "step_index": 0})
