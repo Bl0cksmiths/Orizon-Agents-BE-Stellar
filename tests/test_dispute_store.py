@@ -581,10 +581,11 @@ class FakePool:
         if dispute_id in self.claims:  # ON CONFLICT (dispute_id) DO NOTHING
             return None
         self.claims[dispute_id] = claimed_at
-        # Only the status changes, and the row is dated by the claim's own
-        # clock reading: resolved_at, both transaction hashes and the receipt's
-        # facts are copied forward, because `crediting` is not a resolution.
-        row = latest | {"status": "crediting", "updated_at": claimed_at, "opening": False}
+        # The status changes and the row is dated by the claim's own clock
+        # reading; resolved_at, the rating hash and the receipt's facts are
+        # copied forward, because `crediting` is not a resolution. The refund
+        # hash is cleared: this payout has no transaction yet.
+        row = latest | {"status": "crediting", "updated_at": claimed_at, "refund_tx": None, "opening": False}
         self.disputes.append(row)
         return row
 
