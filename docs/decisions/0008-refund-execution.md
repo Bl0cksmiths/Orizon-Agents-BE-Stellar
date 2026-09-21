@@ -110,6 +110,20 @@ The switch defaults **off**, which means the shipped configuration cannot pay
 anything at all. That is the correct default for a route whose failure mode is
 an emptied wallet, and it costs an operator one environment variable.
 
+**The boot validator is not a sufficient backstop on its own**, which is why
+the check is made again per request at the door of the routes. The validator
+fires only when `dispute_refunds_enabled` is set *together with* a signing key
+and an asset SAC — the configuration that can actually sign. A deployment that
+turns the switch on before wiring the signer boots happily with `API_KEY`
+empty, and would then serve these routes to anyone. So `require_adjudicator`
+answers the three cases in the order a caller meets them: switch off is 503
+`dispute_refunds_disabled`, switch on with no key is 503
+`adjudication_not_configured` and is logged at ERROR because it is a live
+refund switch with no credential behind it, and a missing or wrong key is 401
+`invalid_api_key` — the same code `require_api_key` uses, so a client needs one
+mapping rather than two. No refusal distinguishes "no key" from "wrong key",
+because an adjudication endpoint that did would be an oracle.
+
 **Why not adjudicate from an ops script only.** It is the obvious way to avoid
 inventing an authenticated route: no endpoint, no guard, no new surface, and
 the settler key is already needed to sign. It was rejected on three grounds.
