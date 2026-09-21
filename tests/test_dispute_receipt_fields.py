@@ -75,3 +75,53 @@ def test_each_receipt_column_is_added_to_a_table_that_already_exists(column: str
     # And in the CREATE as well, so a fresh database gets it without the ALTER.
     (declared,) = [line.strip() for line in ddl.splitlines() if line.strip().startswith(f"{column} ")]
     assert declared.rstrip(",").split() == [column, *sql_type.split()]
+
+
+# ── the statements, column by column ──────────────────────────────────────
+
+
+def _written(sql: str) -> dict[str, str]:
+    """What an `INSERT INTO dispute_events (...) SELECT ... FROM latest` writes
+    into each column, as the SQL spells it.
+
+    Paired POSITIONALLY, which is how Postgres pairs them, and split on the
+    commas at parenthesis depth zero so a COALESCE stays one expression. The
+    fake pool cannot stand in for this: it implements its own COALESCE, so a
+    statement whose arguments were swapped would pass every behavioural test
+    against it and still write the wrong value in production.
+    """
+    named, rest = sql.split("INSERT INTO dispute_events (", 1)[1].split(")", 1)
+    selected = rest.split("SELECT", 1)[1].split("\nFROM latest", 1)[0]
+    expressions: list[str] = []
+    depth, current = 0, ""
+    for char in selected:
+        if char == "," and depth == 0:
+            expressions.append(current)
+            current = ""
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        current += char
+    expressions.append(current)
+    columns = [column.strip() for column in named.split(",")]
+    return dict(zip(columns, (" ".join(e.split()) for e in expressions), strict=True))
+
+
+def test_a_transition_carries_the_receipt_forward_and_dates_its_own_row() -> None:
+    """`credited_usdc` and `rating_confirmed` are COALESCEd with the caller's
+    value FIRST. COALESCE returns its first non-NULL argument and FALSE is not
+    NULL, so a caller naming TRUE replaces a recorded FALSE — the confirmation
+    a timed-out rating is owed once it lands — while a caller naming nothing
+    passes NULL and keeps what is there. The other order would make the first
+    answer permanent.
+
+    `updated_at` is the clock outright, never COALESCEd, and the same reading
+    ($7) the resolution time falls back to."""
+    written = _written(dispute_store._APPEND_STATUS_SQL)
+
+    assert written["credited_usdc"] == "COALESCE($8::double precision, latest.credited_usdc)"
+    assert written["rating_confirmed"] == "COALESCE($9::boolean, latest.rating_confirmed)"
+    assert written["updated_at"] == "$7::double precision"
+    assert written["resolved_at"] == "COALESCE($6::double precision, latest.resolved_at, $7::double precision)"
