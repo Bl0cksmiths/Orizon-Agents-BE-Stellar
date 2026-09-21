@@ -17,12 +17,12 @@ uphold. Nothing here touches the chain, a database or the network — and the
 stellar client is deliberately booby-trapped, so "it never signs" is checked
 rather than asserted in a docstring.
 
-`refund_svc.creditable_for` (with `RefundRefused`) and `dispute_svc.uphold_dispute`
-land on sibling lanes of this same story. What is pinned here is what THIS
-script does with each answer those two calls can give, which is what the script
-owns and what a merge cannot change silently. The seams bind to the real types
-when the modules already carry them and to stand-ins with the same surface when
-they do not, so the file holds either side of that merge.
+`refund_svc.creditable_for` (with `RefundRefused`) and `dispute_svc.uphold` land
+on sibling lanes of this same story. What is pinned here is what THIS script
+does with each answer those two calls can give, which is what the script owns
+and what a merge cannot change silently. The seams bind to the real types when
+the modules already carry them and to stand-ins with the same surface when they
+do not, so the file holds either side of that merge.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def credit(monkeypatch: pytest.MonkeyPatch) -> CreditSeam:
 
 
 def forbid_uphold(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail the test if anything calls `dispute_svc.uphold_dispute`.
+    """Fail the test if anything calls `dispute_svc.uphold`.
 
     Used on every path that must stop before signing. Asserting the refusal's
     exit code alone would pass just as happily on a script that refused loudly
@@ -109,9 +109,9 @@ def forbid_uphold(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     async def _never(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("uphold_dispute was called on a path that must never sign")
+        raise AssertionError("uphold was called on a path that must never sign")
 
-    monkeypatch.setattr(dispute_svc, "uphold_dispute", _never, raising=False)
+    monkeypatch.setattr(dispute_svc, "uphold", _never, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -494,7 +494,7 @@ def test_the_promise_binds_when_it_is_the_smallest_bound(
 
 
 class UpholdSeam:
-    """What `dispute_svc.uphold_dispute` does to the store, for one test.
+    """What `dispute_svc.uphold` does to the store, for one test.
 
     Each method writes the state the real service leaves behind for one of the
     three answers a submission can give (D3's taxonomy), so what is exercised is
@@ -507,11 +507,12 @@ class UpholdSeam:
         self.calls: list[str] = []
 
     def _bind(self, effect: Any) -> None:
-        async def _uphold(dispute_id: str) -> None:
+        async def _uphold(dispute_id: str) -> Any:
             self.calls.append(dispute_id)
             await effect(dispute_id)
+            return await dispute_store.get_dispute_store().get_dispute(dispute_id)
 
-        self._monkeypatch.setattr(dispute_svc, "uphold_dispute", _uphold, raising=False)
+        self._monkeypatch.setattr(dispute_svc, "uphold", _uphold, raising=False)
 
     def _writes(self, status: DisputeStatus, refund_tx: str | None) -> Any:
         async def _effect(dispute_id: str) -> None:
@@ -529,14 +530,30 @@ class UpholdSeam:
         self._bind(self._writes("credited", None))
 
     def times_out(self, tx: str | None = REFUND_TX) -> None:
-        """TIMEOUT — the claim stays held, the dispute stays `crediting`, and the
-        in-flight hash is recorded for the human who reconciles it (D3)."""
-        self._bind(self._writes("crediting", tx))
+        """TIMEOUT — the claim stays held, the dispute stays `crediting` with the
+        in-flight hash recorded, and `uphold` refuses with `refund_unconfirmed`
+        rather than returning (D3). The write happens before the refusal, which
+        is exactly why the verdict is read off the record."""
+        self.raises(
+            dispute_svc.DisputeError(
+                "refund_unconfirmed",
+                "the credit was submitted and its outcome is unknown",
+                504,
+            ),
+            leaves=("crediting", tx),
+        )
 
     def fails(self) -> None:
-        """FAILED — nothing moved, so the claim was released and the dispute is
-        back at `upheld`, payable again once the cause is fixed."""
-        self._bind(self._writes("upheld", None))
+        """FAILED — nothing moved, so the claim was released, the dispute is back
+        at `upheld`, and `uphold` refuses with `refund_failed`."""
+        self.raises(
+            dispute_svc.DisputeError(
+                "refund_failed",
+                "the credit transfer did not settle, so nothing was paid",
+                502,
+            ),
+            leaves=("upheld", None),
+        )
 
     def raises(self, exc: BaseException, leaves: tuple[DisputeStatus, str | None] | None = None) -> None:
         """Blow up, optionally after leaving the store in `leaves`."""
@@ -621,6 +638,10 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
     assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
     assert "release_refund_claim" in out
     assert "FAILED" not in out.split("TIMED OUT")[0]
+    assert "refund_unconfirmed" in out
+    # The one sentence that must never appear here: a submission that timed out
+    # WAS signed, and telling an operator otherwise is how it gets retried.
+    assert "nothing was signed" not in out
 
 
 def test_a_timeout_with_no_hash_still_refuses_to_call_it_a_failure(
@@ -780,3 +801,40 @@ def test_nothing_reaches_stdout_except_through_say(
 
     assert printed
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("refunds_disabled", uphold_dispute.EXIT_NOT_CONFIGURED),
+        ("unknown_dispute", uphold_dispute.EXIT_UNKNOWN_DISPUTE),
+        ("dispute_rejected", uphold_dispute.EXIT_NOT_ADJUDICABLE),
+        ("settlement_missing", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
+        ("refund_above_cap", uphold_dispute.EXIT_ABOVE_CAP),
+        ("nothing_to_credit", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
+    ],
+)
+def test_each_adjudication_refusal_carries_through_to_its_own_exit_code(
+    code: str,
+    expected: int,
+    capsys: pytest.CaptureFixture[str],
+    credit: CreditSeam,
+    uphold: UpholdSeam,
+    configured: dict[str, str],
+) -> None:
+    """`uphold` answers every refusal — its own and the two it re-raises out of
+    the refund service — as a `DisputeError` carrying a stable code. Each one
+    reaches a distinct exit, so a wrapper script can tell "the cap stopped it"
+    from "there was nothing to credit" without reading prose.
+
+    All six are raised before anything is signed, so all six keep the
+    `nothing was signed` wording.
+    """
+    uphold.raises(dispute_svc.DisputeError(code, f"refused: {code}", 409))
+    seed()
+
+    exit_code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert exit_code == expected
+    assert code in out
+    assert "nothing was signed" in out
