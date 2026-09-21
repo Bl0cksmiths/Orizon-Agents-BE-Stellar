@@ -53,6 +53,7 @@ SETTLED_USDC = 0.12
 CREDITABLE_USDC = 0.07
 REFUND_TX = "b7c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f809"
 LEDGER = "C" + "LEDGER7Q" * 6 + "ABCDEFG"
+RATING_TX = "d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3"
 
 
 class _Refused(Exception):
@@ -226,6 +227,7 @@ def seed(
     *,
     status: DisputeStatus = "open",
     refund_tx: str | None = None,
+    rating_tx: str | None = None,
     creditable_usdc: float = CREDITABLE_USDC,
     settled_usdc: float = SETTLED_USDC,
     steps: tuple[SettlementStep, ...] = STEPS,
@@ -248,6 +250,7 @@ def seed(
         creditable_usdc=creditable_usdc,
         opened_at=now,
         refund_tx=refund_tx,
+        rating_tx=rating_tx,
     )
 
     async def _write() -> None:
@@ -755,6 +758,75 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     for name, value in secrets.items():
         monkeypatch.setattr(settings, name, value)
     return secrets
+
+
+class RatingSeam:
+    """What the ReputationLedger answers the dispute rating with, for one test.
+
+    Bound at `dispute_rating.submit_dispute_rating` — the rating lane's own
+    boundary, whose answer is the frozen `RatingOutcome` — so everything above
+    it is the real adjudication code deciding what to record, and the script
+    reading that record back. `calls` names each dispute rated: a rating-only
+    re-run must reach this and nothing that pays.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._monkeypatch = monkeypatch
+        self.calls: list[str] = []
+        self.answers("SUCCESS", RATING_TX)
+
+    def answers(self, status: dispute_rating.RatingStatus, tx_hash: str | None = None) -> None:
+        async def _submit(dispute: DisputeRecord, settlement: SettlementRecord) -> dispute_rating.RatingOutcome:
+            self.calls.append(dispute.id)
+            step = settlement.step(dispute.step_index)
+            assert step is not None
+            return dispute_rating.RatingOutcome(
+                status,
+                tx_hash,
+                rating_id_hex(dispute.step_index),
+                dispute_rating.DISPUTE_RATING,
+                reputation_svc.rating_weight_stroops(step.price_usdc),
+            )
+
+        self.submit = _submit
+        self._monkeypatch.setattr(dispute_rating, "submit_dispute_rating", _submit)
+
+
+@pytest.fixture
+def ledger(monkeypatch: pytest.MonkeyPatch) -> RatingSeam:
+    """The dispute rating's ledger, landing the rating by default."""
+    return RatingSeam(monkeypatch)
+
+
+@pytest.fixture
+def paying(
+    monkeypatch: pytest.MonkeyPatch, credit: CreditSeam, configured: dict[str, str], ledger: RatingSeam
+) -> list[str]:
+    """The REAL `dispute_svc.uphold`, with only the chain replaced.
+
+    The transfer lands (`refund_svc.credit_refund`) and the ledger answers as
+    `ledger` says; every rule between them — the claim, what `credited`
+    records, when the rating fires, what a REPLAY means for this dispute — is
+    the adjudication lane's shipped code. That is the point: the script's
+    verdict is read off a record that service wrote, so the test has to let
+    the service write it. The list names each dispute a transfer was signed
+    for, so a rating-only re-run can be held to signing none.
+    """
+    transfers: list[str] = []
+
+    async def _credit(dispute: DisputeRecord, amount_usdc: float) -> refund_svc.RefundOutcome:
+        transfers.append(dispute.id)
+        return refund_svc.RefundOutcome("SUCCESS", REFUND_TX, amount_usdc)
+
+    monkeypatch.setattr(refund_svc, "credit_refund", _credit)
+    return transfers
+
+
+def stored() -> DisputeRecord:
+    """The dispute as the store holds it after a run."""
+    record = asyncio.run(dispute_store.get_dispute_store().get_dispute(DISPUTE_ID))
+    assert record is not None
+    return record
 
 
 def test_a_landed_credit_prints_the_hash_the_explorer_url_and_the_new_status(
