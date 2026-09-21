@@ -151,7 +151,15 @@ class Rater:
 @pytest.fixture(autouse=True)
 def rater(monkeypatch) -> Rater:
     """Every uphold that credits now rates, so every test here has a rater —
-    one that lands by default, which is what an ordinary credit meets."""
+    one that lands by default, which is what an ordinary credit meets.
+
+    On a deployment configured to rate at all: the conftest blanks the ledger
+    and the signing key to keep the suite offline, and `uphold` checks the
+    same presence-only gate the settler does before it submits. Nothing here
+    reaches either value — the settler and the rater are both stubbed."""
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(settings, "stellar_signing_key", Keypair.random().secret)
     stub = Rater()
     monkeypatch.setattr(dispute_rating, "submit_dispute_rating", stub)
     return stub
