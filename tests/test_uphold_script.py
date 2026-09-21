@@ -1,21 +1,29 @@
-"""The operator tool that upholds a dispute and pays it (`scripts/uphold_dispute.py`).
+"""The operator tool that upholds a dispute, pays it and rates the agent (`scripts/uphold_dispute.py`).
 
-Story 4.03's first acceptance criterion — a credit a grant reviewer can open on
-Stellar Expert — is the one thing CI cannot produce, because it needs the funded
-settler key and that key never reaches a CI runner. What CI *can* do is make the
-tool safe to point at real money at 2am, and that is the whole of this file.
-Four properties, in the order they matter:
+Stories 4.03 and 4.04 end in two transactions a grant reviewer can open on
+Stellar Expert — the credit and the dispute rating — and CI can produce
+neither, because both need the funded settler key and that key never reaches a
+CI runner. What CI *can* do is make the tool safe to point at real money at
+2am, and that is the whole of this file. The properties, in the order they
+matter:
 
-  - the preview signs NOTHING — the stellar client is not reached at all;
+  - the preview signs NOTHING — the stellar client is not reached at all, not
+    even for a read;
   - every refusal exits non-zero, with its own code and a sentence saying why;
   - a timed-out transfer is reported as "may still land, do not re-run", never
     as a failure, because the opposite reading credits the buyer twice;
+  - a rating is reported as landed only when the ledger vouched for it during
+    the run, and a paid dispute whose rating did not land says the OPPOSITE of
+    the line above — re-running is safe — on a code of its own;
   - no line of output can carry a secret.
 
-Hermetic: the in-memory dispute store, a stubbed refund service and a stubbed
-uphold. Nothing here touches the chain, a database or the network — and the
-stellar client is deliberately booby-trapped, so "it never signs" is checked
-rather than asserted in a docstring.
+Hermetic: the in-memory dispute store, a stubbed refund service, and either a
+stubbed uphold or — wherever the rating is under test — the REAL one with only
+the transfer and the ledger's answer replaced, because the rating's verdict is
+read off a record the adjudication service writes. Nothing here touches the
+chain, a database or the network — and the stellar client is deliberately
+booby-trapped, so "it never signs" is checked rather than asserted in a
+docstring.
 
 `refund_svc.creditable_for` (with `RefundRefused`) and `dispute_svc.uphold` land
 on sibling lanes of this same story. What is pinned here is what THIS script
