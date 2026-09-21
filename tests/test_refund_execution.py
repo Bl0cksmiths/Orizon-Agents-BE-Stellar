@@ -219,7 +219,7 @@ def test_a_zero_amount_never_reaches_the_signer(monkeypatch) -> None:
     assert exc.value.code == "nothing_to_credit"
 
 
-def _fake_transfer(monkeypatch, outcome: dict | Exception) -> list[dict]:
+def _fake_transfer(monkeypatch, outcome: dict | BaseException) -> list[dict]:
     """Stand in for the SAC transfer, recording what was submitted.
 
     Patched at the stellar client, not at `execute_refund`, so the wrapper is
@@ -230,7 +230,8 @@ def _fake_transfer(monkeypatch, outcome: dict | Exception) -> list[dict]:
 
     async def _invoke(contract_id: str, function_name: str, args: list) -> dict:
         calls.append({"contract": contract_id, "fn": function_name, "args": args})
-        if isinstance(outcome, Exception):
+        # BaseException, not Exception: a cancel is one of the cases under test.
+        if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
@@ -335,3 +336,26 @@ def test_refund_logs_never_carry_the_signing_key(monkeypatch, caplog) -> None:
     assert records
     for rec in records:
         assert SIGNING_SECRET not in formatter.format(rec)
+
+
+def test_cancellation_mid_transfer_is_logged_and_reraised(monkeypatch, caplog) -> None:
+    """A deploy-triggered cancel can land between the submit and its
+    confirmation, and CancelledError is a BaseException the generic handler
+    never sees. The reconstruction line must fire anyway; cancellation
+    semantics are preserved by re-raising, which keeps the refund claim held."""
+    _fake_transfer(monkeypatch, asyncio.CancelledError())
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "cancelled mid-flight" in m
+        and "do not retry" in m
+        and "dsp_deadbeefdeadbeef" in m
+        and JOB in m
+        and PAYER in m
+        and "0.0500000" in m
+        for m in msgs
+    ), f"a cancelled credit was never logged with its context: {msgs}"
