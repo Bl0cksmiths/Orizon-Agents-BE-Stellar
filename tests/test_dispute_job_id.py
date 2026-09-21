@@ -1,0 +1,37 @@
+"""The derived id a dispute's rating is written under (story 4.04, R12).
+
+Pinned hard, because it is permanent in a way ordinary code is not: the
+ReputationLedger's replay guard remembers every `(agent_id, job_id)` it has
+seen, forever. Change this derivation after one rating has landed and a retry
+of that dispute derives a NEW id, the guard no longer recognises it, and the
+agent is rated twice for one dispute.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from app.services.dispute_rating import DISPUTE_ID_TAG, JOB_ID_BYTES, dispute_job_id
+
+_JOB = bytes(range(16))
+
+
+def test_the_derivation_matches_its_golden_vectors() -> None:
+    # Recomputed independently of the function (sha256 over job ‖ tag ‖ step,
+    # first eight bytes, behind the job's own first eight). A failure here is
+    # not a test to update: it means already-written ratings no longer match.
+    assert dispute_job_id(_JOB, 0).hex() == "00010203040506071e6388cbecdde018"
+    assert dispute_job_id(_JOB, 3).hex() == "000102030405060791ded15f2cf43f7e"
+    assert DISPUTE_ID_TAG == b"orizon-dispute:v1"
+
+
+def test_the_derived_id_is_the_ledgers_width_and_deterministic() -> None:
+    derived = dispute_job_id(_JOB, 2)
+    assert len(derived) == JOB_ID_BYTES
+    assert derived == dispute_job_id(_JOB, 2)
+
+
+def test_the_first_half_is_the_sealed_job_so_a_reviewer_can_see_the_link() -> None:
+    # SOW §6.1: whoever opens the rating on Stellar Expert must be able to tie
+    # it to the attested job without reading this code.
+    assert dispute_job_id(_JOB, 5)[:8] == _JOB[:8]
