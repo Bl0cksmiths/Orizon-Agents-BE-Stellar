@@ -71,10 +71,10 @@ logger = logging.getLogger(__name__)
 # but not what THIS attempt drew: a FAILED rating and a collision both leave
 # the record exactly as it was, and a timeout that replaced an earlier dead
 # hash reads just like the one before it, so a tool reporting evidence to a
-# human cannot tell them apart from the record alone. `uphold` keeps its single return type on purpose — an API response
-# must never disagree with a later GET of the same dispute — so the answer is
-# handed out through this declared seam instead, and only to a caller that
-# asks for it.
+# human cannot tell them apart from the record alone. `uphold` keeps its
+# single return type on purpose — an API response must never disagree with a
+# later GET of the same dispute — so the answer is handed out through this
+# declared seam instead, and only to a caller that asks for it.
 RatingObserver = Callable[[dispute_rating.RatingOutcome], None]
 
 # Re-exported so the router depends on ONE module for the whole dispute flow and
@@ -1136,8 +1136,9 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     a `rating_tx` and `rating_confirmed` True has been rated; with
     `rating_confirmed` False the rating timed out and may yet land, and the
     next uphold settles which; and `credited` WITHOUT a `rating_tx` is paid but
-    NOT fully resolved — uphold it again to retry the rating alone. A rating failure is never raised: by then the buyer
-    has been paid, and an exception would say otherwise.
+    NOT fully resolved — uphold it again to retry the rating alone. A rating
+    failure is never raised: by then the buyer has been paid, and an exception
+    would say otherwise.
 
     The one window that remains is between a SUCCESS and the `append_status`
     that records it: if the store is unreachable at that instant the money has
