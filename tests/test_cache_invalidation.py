@@ -268,3 +268,23 @@ def test_the_generation_map_is_bounded_by_the_flights_in_progress():
     generations, running = asyncio.run(run())
     assert generations == {}
     assert running == {}
+
+
+def test_clear_fences_a_flight_that_is_still_running():
+    """clear() empties the cache, so a read in flight across it must not
+    repopulate it — it is every key invalidated at once."""
+
+    async def run():
+        stale, started, release, _ = _parked("pre-clear")
+        caller = asyncio.create_task(cache.get_or_set("k", 60.0, stale))
+        await started.wait()
+        cache.clear()
+        release.set()
+        assert await caller == "pre-clear"
+        return dict(cache._store), dict(cache._generations), dict(cache._running)
+
+    store, generations, running = asyncio.run(run())
+    assert store == {}
+    # And the bookkeeping drained with the flight, as for any invalidation.
+    assert generations == {}
+    assert running == {}
