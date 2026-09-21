@@ -534,3 +534,48 @@ async def _load_for_adjudication(dispute_id: str) -> DisputeRecord:
         logger.warning("adjudication refused: dispute=%s reason=unknown_dispute", dispute_id)
         raise DisputeError("unknown_dispute", "no dispute with that id", 404)
     return record
+
+
+async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
+    """Adjudicate a dispute AGAINST the claim, from `open` and from nowhere else.
+
+    A rejection is terminal and it is the one outcome that must never become
+    payable again: `store.claim_refund` only ever claims an `upheld` dispute,
+    `uphold` refuses a `rejected` one outright, and `append_status("rejected")`
+    drops the refund claim row — three independent places, because "the
+    platform does not pay this one" is the kind of decision that must not
+    depend on a single check holding.
+
+    Every other status is refused rather than absorbed, including `rejected`
+    itself. The alternative — answering a second rejection with the existing
+    record, the way a duplicate `open_dispute` is answered — would quietly
+    accept a second adjudicator overruling the first, and would also accept a
+    rejection of a dispute that is mid-payout or already paid, which is the one
+    thing an adjudicator most needs to be told they cannot do.
+
+    `note` is the adjudicator's reason. `DisputeRecord` has no field for it —
+    the record carries the BUYER's evidence, and inventing a place for the
+    platform's own commentary inside it is not this story's to do — so it is
+    logged with the decision and cleaned exactly the way a buyer's reason is,
+    because free text that reaches a log is free text either way.
+    """
+    dispute = await _load_for_adjudication(dispute_id)
+    if dispute.status != "open":
+        raise _refuse_credit(
+            dispute,
+            "dispute_not_open",
+            409,
+            f"this dispute is {dispute.status}, and only an open dispute can be rejected",
+            amount_usdc=dispute.creditable_usdc,
+            tx_hash=dispute.refund_tx,
+        )
+    rejected = await get_dispute_store().append_status(dispute_id, "rejected")
+    logger.info(
+        "dispute rejected: id=%s job=%s step=%s payer=%s note=%s",
+        rejected.id,
+        rejected.job_id_hex,
+        rejected.step_index,
+        rejected.payer,
+        sanitize_untrusted(note, max_chars=MAX_REASON_CHARS) if note else "-",
+    )
+    return rejected
