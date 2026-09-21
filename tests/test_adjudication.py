@@ -547,9 +547,9 @@ def test_a_rejection_note_never_reaches_the_log(monkeypatch, caplog) -> None:
     rationale was given and who the decision concerns — reproducing the text
     would put unbounded per-complaint prose into a stream read for incidents.
 
-    It is not retained anywhere else either: `DisputeRecord` has no field for
-    the platform's own commentary, so a rejection keeps its status and its
-    resolution time and nothing more until the store gains a column."""
+    The rationale is not lost by this: it is on the record, where whoever
+    adjudicates reads it. Out of the log and onto the record is one decision
+    with two halves, and this test pins the half the log makes."""
     dispute = a_dispute()
 
     with caplog.at_level(logging.INFO, logger=SVC_LOGGER):
@@ -560,9 +560,8 @@ def test_a_rejection_note_never_reaches_the_log(monkeypatch, caplog) -> None:
     assert "the SEO brief was delivered in full" not in logged[0]
     assert "noted=yes" in logged[0]
     assert dispute.id in logged[0] and JOB in logged[0] and dispute.payer in logged[0]
-    # And nothing of the note survives on the record either — the docstring
-    # says so, and this is what stops a caller relying on it.
-    assert "SEO brief was delivered" not in repr(rejected)
+    # ...and it is on the record, which is the other half of the same decision.
+    assert rejected.note == "the SEO brief was delivered in full"
 
 
 @pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
