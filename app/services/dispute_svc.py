@@ -564,8 +564,9 @@ async def _load_for_adjudication(dispute_id: str) -> DisputeRecord:
     return record
 
 
-async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
-    """Adjudicate a dispute AGAINST the claim, from `open` and from nowhere else.
+async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
+    """Adjudicate a dispute AGAINST the claim, from `open` and from nowhere else,
+    and tell the buyer why.
 
     A rejection is terminal and it is the one outcome that must never become
     payable again: `store.claim_refund` only ever claims an `upheld` dispute,
@@ -589,34 +590,60 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
     (D1) — the switch is a money control here and an authorisation control
     there, and only one of those is this module's to make.
 
-    `note` is the adjudicator's reason, and BOTH halves of what happens to it
-    are deliberate.
+    `note` is REQUIRED, and it is written FOR THE BUYER. It is the explanation
+    their receipt shows beside the word "rejected" (story 4.06), so it is
+    written in words the buyer can read — never internal adjudication
+    shorthand, and never anything about another dispute. It is mandatory
+    because a rejection with no explanation is worse than no dispute system:
+    the buyer's side of the argument is durable from the moment they raise it
+    (`reason`, frozen there), an upheld dispute leaves an amount and a
+    transaction hash behind, and a refusal that said nothing would hand the
+    buyer the outcome they are most likely to contest with nothing in it to
+    contest. A buyer told "no" without a reason learns only that complaining
+    here is pointless.
 
-    It IS RETAINED, on the dispute record. A rejection that recorded only a
-    status and a timestamp was backwards: the buyer's side of the argument is
-    durable from the moment they raise it (`reason`, frozen there), and an
-    upheld dispute leaves an amount and a transaction hash behind as well — so
-    the one outcome most likely to be contested was the one with nothing
-    written down. It is cleaned HERE and nowhere else, because the store keeps
-    what it is given byte for byte on purpose: bounding this and stripping the
-    control characters out of it is this module's job, exactly as it is for the
-    buyer's `reason`. Empty after cleaning is stored as nothing rather than as
-    an empty string — `append_status` carries a null forward, so a note of pure
-    whitespace must leave an existing one alone rather than blank it.
+    It is checked FIRST, before the dispute is even read: pure text handling
+    is the cheapest check there is, and it is the only refusal here an
+    adjudicator can fix and send again. A note that is empty AFTER cleaning —
+    missing, blank, or nothing but control characters — is refused as
+    `rejection_reason_required` (422, the status the buyer's own missing
+    `reason` carries) before anything is written, because storing it would
+    print an empty explanation on the receipt.
 
-    It is stored for AUDIT and is not on the API's dispute shape. Surfacing
-    internal adjudication prose — which may reference other disputes or the
-    platform's own reasoning — to the buyer it was written about is a separate
-    decision, and this story does not make it.
+    It is cleaned HERE and nowhere else, because the store keeps what it is
+    given byte for byte on purpose: bounding this and stripping the control
+    characters out of it is this module's job, exactly as it is for the
+    buyer's `reason` and for the same reason — it is read back into an API
+    response and rendered in front of a person, where an escape sequence or a
+    NUL forges structure nobody wrote.
 
-    It is DELIBERATELY NOT LOGGED. `open_dispute` sets that convention and this
-    follows it: free text about one complaint belongs on the record, never in
-    the operator's log viewer, where it is unbounded, useless for
+    Redefining it from the audit-only note story 4.03 introduced is safe
+    because nothing has ever been rejected: rejecting requires the refund path
+    — the adjudication route refuses both decisions while
+    DISPUTE_REFUNDS_ENABLED is off — and that path has never been enabled in
+    production. No note exists that was written for an auditor and would now
+    be shown to a buyer.
+
+    It is still DELIBERATELY NOT LOGGED. `open_dispute` sets that convention
+    and this follows it: free text about one complaint belongs on the record,
+    never in the operator's log viewer, where it is unbounded, useless for
     reconstructing an incident, and — for the buyer's `reason`, which arrives
-    over a public route — written by somebody else. The line below says that a
-    rationale exists and whom the decision concerns; the rationale itself is
-    read from the record by whoever needs it.
+    over a public route — written by somebody else. The line below says that
+    an explanation was recorded and whom the decision concerns; the
+    explanation itself is read from the record by whoever needs it.
     """
+    # `sanitize_untrusted` reads a None as "", so a caller that ignores the
+    # annotation is refused below with the right code rather than with a
+    # TypeError the API would answer as a 500.
+    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS)
+    if not cleaned:
+        logger.warning("adjudication refused: dispute=%s reason=rejection_reason_required", dispute_id)
+        raise DisputeError(
+            "rejection_reason_required",
+            "a rejection must tell the buyer why their dispute was not upheld",
+            422,
+        )
+
     dispute = await _load_for_adjudication(dispute_id)
     if dispute.status != "open":
         raise _refuse_credit(
@@ -627,15 +654,17 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
             amount_usdc=dispute.creditable_usdc,
             tx_hash=dispute.refund_tx,
         )
-    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS) if note else ""
-    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned or None)
+    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned)
+    # `noted=` is the presence of the explanation and never its text. It reads
+    # `yes` on every rejection now that none can be recorded without one, and
+    # stays in the line so it reads the same as every rejection logged before.
     logger.info(
         "dispute rejected: id=%s job=%s step=%s payer=%s noted=%s",
         rejected.id,
         rejected.job_id_hex,
         rejected.step_index,
         rejected.payer,
-        "yes" if note else "no",
+        "yes" if rejected.note else "no",
     )
     return rejected
 
