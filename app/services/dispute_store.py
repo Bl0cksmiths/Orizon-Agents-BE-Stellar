@@ -704,6 +704,14 @@ class DisputeRecord:
     # of when it was credited — and the buyer is owed the time of the step they
     # are actually looking at. None only for records read from before 4.06.
     updated_at: float | None = None
+    # Whether `rating_tx` is known to have LANDED (story 4.06). The hash alone
+    # cannot say: story 4.04 records it on a SUCCESS and also on a TIMEOUT, so
+    # the evidence exists the moment it does — which means a receipt reading
+    # the hash as "the agent was rated" could claim a consequence that never
+    # happened. True once the ledger has vouched for it (a SUCCESS, or a
+    # replay confirming an earlier attempt); False while it is only in flight;
+    # None when no rating was ever submitted, or for records from before 4.06.
+    rating_confirmed: bool | None = None
 
 
 @dataclass(frozen=True)
