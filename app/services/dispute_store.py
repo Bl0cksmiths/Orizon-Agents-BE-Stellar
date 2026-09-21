@@ -41,10 +41,17 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
-# A dispute's lifecycle. `open` is all story 4.02 ever writes; 4.03 pays the
-# credit (`credited`) and 4.04 records the on-chain rating, while an
-# adjudication that goes the other way ends at `rejected`.
-DisputeStatus = Literal["open", "upheld", "credited", "rejected"]
+# A dispute's lifecycle. `open` is all story 4.02 ever writes; 4.03 adjudicates
+# (`upheld` or `rejected`) and pays the credit (`credited`), and 4.04 records
+# the on-chain rating.
+#
+# `crediting` is not a state anybody adjudicates INTO — it is the refund claim
+# itself, made durable. A payout has a window between "we decided to pay" and
+# "we know whether the transfer landed", and on the far side of that window a
+# timed-out submission may still settle. Parking the dispute in `crediting`
+# for the duration is what stops a retry paying twice: the claim is the lock,
+# and it outlives the process that took it.
+DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
 
 # Retention for the in-memory fallback ONLY — the store that runs when
 # DATABASE_URL is unset (local dev and the hermetic test suite). Postgres keeps
