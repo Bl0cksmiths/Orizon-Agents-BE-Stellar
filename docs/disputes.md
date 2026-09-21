@@ -456,7 +456,7 @@ stacked, with their shared prefix underlined.
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
 | `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
 | `GET /api/tasks/{task_id}/disputes` | the task's own token, or an operator API key | one workflow's dispute window and every dispute raised against it; an unknown or unsettled task is a null window and an empty list, not a 404 |
-| `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, and transfers the amount to the payer |
+| `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, transfers the amount to the payer, then writes the dispute rating. On a `credited` dispute it signs no transfer and re-attempts the rating only |
 | `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — records `rejected` with its resolution time; nothing is signed and nothing is spent |
 
 The read routes take no credential because both ids are unguessable — a dispute
@@ -502,6 +502,11 @@ What an adjudicator can be told, and what each answer means:
 dispute stays payable once whatever caused them is fixed. Only `refund_failed`
 and `refund_unconfirmed` describe a transaction that was actually submitted,
 and only the second of those leaves the claim held.
+
+None of these is ever about the **rating**. A rating that does not land is not
+a refusal: the credit has already moved, so the uphold answers with the dispute
+as it stands — `credited`, with `rating_tx` empty — and the reason is in the
+log, as "After `credited`" describes.
 
 A dispute is refused, with the reason said plainly, when: the window has closed
 (the response says when it closed); the signature does not verify against the
