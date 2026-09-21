@@ -477,6 +477,10 @@ class FakePool:
             return self._append_status(args)
         if sql == dispute_store._SELECT_DISPUTE_SQL:
             return _newest(self.disputes, dispute_id=args[0])
+        if sql == dispute_store._CLAIM_REFUND_SQL:
+            return self._claim_refund(args[0])
+        if sql == dispute_store._DELETE_REFUND_CLAIM_SQL:
+            return self._delete_refund_claim(args[0])
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
         return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
 
