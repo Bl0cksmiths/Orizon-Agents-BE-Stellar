@@ -390,14 +390,25 @@ one key is the change of state the cache already needed a word for.
 
 **Every disputed step carries two ratings, under two keys, and neither amends
 the other.** The settler's automatic rating stays where it was written, under
-the job's own id; the dispute adds `DISPUTE_RATING` (10/100) under the derived
-id, at the same weight (D2). The ledger has no entrypoint that amends a
-rating, so this is the only honest reading available: the first rating says
-what was delivered, the second says the buyer's claim against it stood. At
-equal weight the two average between 15 (against a 20, the non-delivery score)
-and 52.5 (against a 95, the baked-artifact score). Both `count` and `disputed`
-go up by one, so `dispute_rate_bps = disputed × 10 000 / count` includes the
-dispute rating in its own denominator.
+the job's own id; the dispute adds `dispute_rating.DISPUTE_RATING` under the
+derived id, at the same weight (D2). The ledger has no entrypoint that amends
+a rating, so this is the only honest reading available: the first rating says
+what was delivered, the second says the buyer's claim against it stood.
+
+The score is **10 out of 100**, and its reasons are recorded beside the
+constant. It sits below the 20 the settler gives a step that delivered
+nothing, because a disputed step was billed and the credit comes out of the
+platform's wallet rather than the agent's — the agent keeps what it was paid
+for work that failed the buyer, and a failure somebody paid for is worse
+evidence than one nobody did. It is not 0, because the verdict is the
+platform's alone, with no on-chain arbitration and no appeal, and a unilateral
+judgement should not carry the harshest score the scale has. The settler's own
+scale runs from that 20 through 40–95 for delivered work (base 70, moved by the
+artifact and the critic's pass, with a baked kit artifact fixed at 95), so at
+equal weight the two ratings on a disputed step average between **15 and
+52.5**. Both `count` and `disputed` go up by one, so
+`dispute_rate_bps = disputed × 10 000 / count` includes the dispute rating in
+its own denominator.
 
 **One case in which the dispute rating is the step's only rating — and it is
 not new.** The settler keys every automatic rating on the job's own id, so when
