@@ -20,6 +20,7 @@ import hashlib
 import logging
 from typing import Any
 
+from ..config import settings
 from ..stellar import client as sc
 from .dispute_store import DisputeRecord, SettlementRecord
 
@@ -195,6 +196,22 @@ def creditable_for(
             dispute,
             "nothing_to_credit",
             f"the bounds compute to {amount:.7f} USDC for step {dispute.step_index}",
+            amount,
+        )
+
+    # D5, and it is enforced HERE, in the function that produces the number,
+    # rather than in the transfer wrapper. `creditable_for` is the only place in
+    # the service that computes a refund amount, so checking at the point of
+    # production means no amount exists that has not been through the ceiling —
+    # whereas a check at the call site guards that one call site, and a call
+    # site is the thing a later caller most easily writes a second copy of.
+    # `credit_refund` re-checks what it is handed as a cheap second gate, but
+    # this is the one that has to hold.
+    if amount > settings.max_refund_usdc:
+        raise _refuse(
+            dispute,
+            "refund_above_cap",
+            f"{amount:.7f} USDC exceeds MAX_REFUND_USDC={settings.max_refund_usdc:.7f}",
             amount,
         )
     return amount
