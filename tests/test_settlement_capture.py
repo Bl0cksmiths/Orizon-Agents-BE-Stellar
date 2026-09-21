@@ -514,3 +514,17 @@ def test_one_agent_on_two_steps_keeps_two_summaries(monkeypatch, store):
     steps = store.recorded[0].steps
     assert [s.output_summary for s in steps] == ["outline drafted", "outline polished"]
     assert _traced(task_id, "w.twopass") == [s.output_summary for s in steps]
+
+
+def test_a_failed_step_never_borrows_a_later_steps_summary(monkeypatch, store):
+    """The same agent fails and then delivers. Keyed by agent, the failed step
+    would show the later step's output as its own — evidence for work that
+    was never done, on the one step the buyer cannot dispute anyway."""
+    worker = _FlakyWorker()
+    _resolves_to(monkeypatch, lambda agent_id: worker)
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_flakysummary"
+
+    _run_paid(_plan((0.05, 0.05), agent_ids=("agt_dup", "agt_dup")), task_id)
+
+    assert [s.output_summary for s in store.recorded[0].steps] == [None, "second time lucky"]
