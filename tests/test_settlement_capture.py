@@ -630,3 +630,34 @@ def test_the_summary_changes_nothing_else_the_settlement_records(monkeypatch, st
     )
     assert _traced(task_id, "w.gen") == ["did the thing"]
     assert rating_calls == [JOB_ID]
+
+
+def test_a_summary_that_cannot_be_kept_never_fails_the_run(monkeypatch, store, caplog):
+    """Capture runs inside the run loop, where anything that escapes reaches
+    the run-level handler: the workflow would finalize as "failed" and the
+    charge that pays every agent would never run — all for one line of
+    evidence. So a cleaner that raises costs the settlement its summaries and
+    nothing else: the run completes, every step still settles as delivered
+    and disputable, the ratings still run, and the loss is logged."""
+
+    def _broken_sanitizer(text, *, max_chars=None):
+        raise RuntimeError("sanitizer regression")
+
+    monkeypatch.setattr(execution_svc, "sanitize_untrusted", _broken_sanitizer)
+    _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
+    rating_calls = _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_brokensummary"
+
+    with caplog.at_level(logging.WARNING, logger="app.services.execution_svc"):
+        _run_paid(_plan((0.05, 0.05)), task_id)
+
+    task = state.tasks[task_id]
+    assert task.status == "complete"
+    assert (task.charge_tx, task.proof_tx) == (CHARGE_TX, PROOF_TX)
+    assert rating_calls == [JOB_ID]
+    steps = store.recorded[0].steps
+    assert [(s.delivered, s.output_summary) for s in steps] == [(True, None), (True, None)]
+    assert _traced(task_id, "w.ok") == ["did the thing", "did the thing"]
+    assert any("dispute window" in ln.msg for ln in state.traces[task_id])
+    warnings = [r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc"]
+    assert sum(task_id in m and "summary could not be cleaned" in m for m in warnings) == 2, warnings
