@@ -15,10 +15,17 @@ credit a buyer twice, or strand one who is owed, is an ordering mistake:
      transfer may still land, so there is no safe retry (D3);
   4. a refusal before the signer — the cap, nothing to credit, a settlement
      that is gone — hands the claim back, because nothing was signed;
-  5. a rejected dispute is never payable.
+  5. a rejected dispute is never payable;
+  6. the dispute rating (4.04) is written only once the credit is recorded,
+     and no answer it gets — failure, timeout, collision, exception — reaches
+     back into the refund or turns a paid credit into an error;
+  7. a repeat uphold of a credited dispute retries the RATING and only the
+     rating (D3), and an open, rejected or unpaid dispute is never rated.
 
 Hermetic: the in-memory dispute store, an in-process challenge table and real
-ed25519 keys, with the settler's SAC transfer stubbed at `execute_refund`. No
+ed25519 keys, with the settler's SAC transfer stubbed at `execute_refund` and
+the dispute rating at `dispute_rating.submit_dispute_rating` (its mapping from
+the chain's answers is `tests/test_dispute_rating_flow.py`'s to prove). No
 chain, no network, no database. Every process singleton these paths touch — the
 store, the challenge table, app state and the trace bus — is reset per test.
 """
