@@ -95,7 +95,7 @@ import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 # Exit codes, so an operator — or the wrapper script somebody inevitably writes
 # around this — can tell the refusals apart without parsing prose. 1 and 2 are
@@ -215,10 +215,23 @@ def install_logging() -> None:
     tears out every root handler, and doing that to a test session would take
     pytest's log capture with it.
     """
-    handler = logging.StreamHandler(sys.stderr)
+    logging.basicConfig(level=logging.INFO, handlers=[redacted_handler(sys.stderr)], force=True)
+
+
+def redacted_handler(stream: TextIO) -> logging.Handler:
+    """The handler `install_logging` puts on stderr: formatted, and masked first.
+
+    Its own function so a test can attach the very handler an operator's
+    terminal gets — to a buffer, beside pytest's capture rather than in place
+    of it — and check what reaches stderr instead of trusting it. That matters
+    most once a rating fails after the buyer is paid: the service logs the
+    failure with its traceback rather than raising, so stderr is where a key
+    quoted back in a signer's error would surface.
+    """
+    handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("  [%(levelname)s] %(name)s: %(message)s"))
     handler.addFilter(SecretRedactionLogFilter())
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    return handler
 
 
 def say(line: str = "") -> None:
