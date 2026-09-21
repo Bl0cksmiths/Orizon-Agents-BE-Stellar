@@ -194,8 +194,11 @@ clicking at the same moment, a retried request, a redeployed process mid-flight
 **A repeat uphold is therefore never a second payout.** An adjudicator who
 double-clicks, or a console retrying a dropped response, is answered with the
 dispute as it now stands: an already-credited dispute comes back with the same
-record and the same transaction hash, and one that another caller is part-way
-through paying comes back as whatever that caller has made of it. The one
+refund transaction hash and no transfer signed, and one that another caller is
+part-way through paying comes back as whatever that caller has made of it. The
+one thing a repeat uphold of a `credited` dispute does attempt again is its
+**rating** — never the transfer — and that is safe for the reason given in the
+next section. The one
 repeat that is refused outright is an uphold aimed at a dispute stuck in
 `crediting` — that is the reconciliation case at the end of this document, and
 it is refused precisely so it cannot be retried into a double credit.
