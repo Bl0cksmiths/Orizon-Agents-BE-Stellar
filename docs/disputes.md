@@ -254,6 +254,11 @@ answer:
   again; the log line for the attempt says when it is not, and the table below
   says what to do instead.
 
+A set hash does not say on its own which of those two it is; the dispute's
+`rating_confirmed` does — `true` once the ledger has vouched for the rating,
+`false` while it is only in flight — so a receipt tells the buyer the agent was
+rated only when that is known.
+
 **Retrying is always safe, and it retries the rating alone.** Upholding a
 `credited` dispute again signs no transfer — that branch returns before the
 refund claim is ever looked at — and submits the rating once more. The ledger
