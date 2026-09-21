@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
-from ..schemas import TraceLine
+from ..schemas import TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
 from . import external_binding as eb
@@ -624,16 +624,17 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
     return rejected
 
 
-async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, tx_hash: str | None) -> None:
-    """Best effort: show a landed credit on the workflow it came out of.
+async def _trace_on_workflow(dispute: DisputeRecord, level: TraceLevel, what: str, msg: str) -> None:
+    """Best effort: show one line about a resolved dispute on the workflow it disputes.
 
-    THE DURABLE RECORD OF A REFUND IS THE DISPUTE, NOT THIS LINE. `app/state.py`
-    keeps the newest 200 tasks and drops each one's traces with it, while a
-    dispute window is 24 hours wide — so by the time one is adjudicated the
-    workflow it disputes has usually been evicted, and this is decoration on
-    the ones a console still has on screen. Nothing reads it back, nothing
-    reconciles against it, and it is emitted after the store already holds the
-    credit so it can never be the reason a paid dispute looks unpaid.
+    THE DURABLE RECORD OF A DISPUTE'S OUTCOME IS THE DISPUTE, NOT THIS LINE.
+    `app/state.py` keeps the newest 200 tasks and drops each one's traces with
+    it, while a dispute window is 24 hours wide — so by the time one is
+    adjudicated the workflow it disputes has usually been evicted, and this is
+    decoration on the ones a console still has on screen. Nothing reads it
+    back, nothing reconciles against it, and every caller emits it after the
+    store already holds what it reports, so it can never be the reason a paid
+    dispute looks unpaid.
 
     Which is exactly why it is GUARDED on `state.tasks` rather than simply
     appended. `state.append_trace` is `traces.setdefault(task_id, []).append(line)`,
@@ -641,7 +642,7 @@ async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, t
     RECREATES a `traces` entry whose task is gone, and eviction only ever
     removes traces alongside a task still in `task_order`, so nothing will
     remove it again. A dispute resolved hours later would leak one list per
-    refund for the life of the process, invisibly. Present task only, and never
+    line for the life of the process, invisibly. Present task only, and never
     `setdefault` on an absent one.
 
     `state` and `bus` directly, not `execution_svc._emit`: that helper is keyed
@@ -652,6 +653,9 @@ async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, t
     keeps clear, for the sake of four lines. `TraceLine` and the bus are the
     whole of what the two actually share, so those are the whole of what this
     imports.
+
+    `what` names the line in the warning a failed trace leaves, and nowhere
+    else.
     """
     task = state.tasks.get(dispute.task_id)
     if task is None:
@@ -660,30 +664,35 @@ async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, t
     # task carries, so a credit sorts where it happened rather than at 00.000.
     elapsed = max(time.time() - task.started_at, 0.0)
     seconds, millis = divmod(int(elapsed * 1000), 1000)
-    # `cost` because a refund is money, and the wording is the SOW §3.8
-    # standard rather than a turn of phrase: the platform FUNDS this credit out
-    # of its own wallet, and the disputed agent keeps what it was paid. This is
-    # the only message about a refund the buyer ever sees, so it is the one
-    # that has to say so.
-    line = TraceLine(
-        t=f"{seconds:02d}.{millis:03d}",
-        level="cost",
-        msg=(
-            f"dispute {dispute.id} upheld — step {dispute.step_index} credited {amount_usdc:.7f} USDC "
-            f"to the buyer, funded by the platform, not clawed back from agent {dispute.agent_id}"
-            + (f" · tx {tx_hash}" if tx_hash else "")
-        ),
-    )
+    line = TraceLine(t=f"{seconds:02d}.{millis:03d}", level=level, msg=msg)
     try:
         state.append_trace(dispute.task_id, line)
         await bus.publish(dispute.task_id, line)
     except Exception:
-        # The transfer has already settled and the dispute already reads
-        # `credited` by the time this runs. Letting a cosmetic line raise out
-        # of `uphold` would answer a successful payout with a 500 and invite
-        # the one retry this whole path exists to make safe, so it is logged
-        # and swallowed instead.
-        logger.warning("could not trace the credit for dispute %s on task %s", dispute.id, dispute.task_id)
+        # What this line reports is already on the dispute record by the time
+        # it runs. Letting a cosmetic line raise out of `uphold` would answer a
+        # successful payout with a 500 and invite the one retry this whole
+        # path exists to make safe, so it is logged and swallowed instead.
+        logger.warning("could not trace the %s for dispute %s on task %s", what, dispute.id, dispute.task_id)
+
+
+async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, tx_hash: str | None) -> None:
+    """Show a landed credit on the workflow it came out of (`_trace_on_workflow`).
+
+    `cost` because a refund is money, and the wording is the SOW §3.8 standard
+    rather than a turn of phrase: the platform FUNDS this credit out of its own
+    wallet, and the disputed agent keeps what it was paid. This is the only
+    message about a refund the buyer ever sees, so it is the one that has to
+    say so.
+    """
+    await _trace_on_workflow(
+        dispute,
+        "cost",
+        "credit",
+        f"dispute {dispute.id} upheld — step {dispute.step_index} credited {amount_usdc:.7f} USDC "
+        f"to the buyer, funded by the platform, not clawed back from agent {dispute.agent_id}"
+        + (f" · tx {tx_hash}" if tx_hash else ""),
+    )
 
 
 async def uphold(dispute_id: str) -> DisputeRecord:
