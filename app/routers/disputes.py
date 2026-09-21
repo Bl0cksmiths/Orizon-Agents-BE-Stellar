@@ -193,18 +193,17 @@ def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
 async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeResponse:
     """Issue the nonce and the exact string the payer's wallet must sign.
 
-    Deliberately **checks nothing**. `bind/challenge` reads the chain first so
-    its bounded challenge table can only hold real agent ids; the opposite
-    trade is right here. A challenge mint that refused unknown or unsettled
-    jobs would answer, to an anonymous caller with no signature, whether any
-    given job id was paid for — and job ids are the one identifier this API
-    hands out publicly (`GET /api/stellar/new-id`, every attestation read). So
-    the mint is blind and free, and every rule is applied at `POST /disputes`,
-    where a signature has been produced and the caller has proved they are the
-    payer.
+    The handler itself decides nothing: it validates the two fields, calls the
+    service once, and renders the message the service defines. In particular it
+    does NOT look up the settlement to decide whether a mint is allowed — the
+    service does that, for `bind_challenge`'s reason (a bounded challenge table
+    keyed on caller-supplied values may only ever hold pairs that could really
+    be disputed, or anyone can evict the challenges honest buyers are mid-way
+    through signing). A second opinion here would be a rule with two homes.
 
-    A refusal is still mapped rather than swallowed: if the rules lane ever
-    does decide a mint must fail, it answers with its own code instead of a 500.
+    So an unknown or unsettled job is refused at the mint, with the service's
+    own code and status rather than a 500 — which is what `_refuse` is for, and
+    why this cheap public route still has a `try`.
     """
     try:
         nonce, expires_at = await dispute_svc.issue_dispute_challenge(body.job_id_hex, body.step_index)
