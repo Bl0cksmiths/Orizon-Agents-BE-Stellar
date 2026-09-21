@@ -317,6 +317,19 @@ def test_a_malformed_body_never_reaches_the_service(client, monkeypatch, label, 
     assert calls == []
 
 
+def test_a_reason_at_the_service_ceiling_reaches_it_whole(client, monkeypatch):
+    # The edge bound IS the service's MAX_REASON_CHARS, inclusive — so the
+    # longest reason the route accepts is one the service keeps whole, and the
+    # buyer is never told "filed" about words that were quietly dropped.
+    reason = "x" * dispute_svc.MAX_REASON_CHARS
+    calls = opens_with(monkeypatch, record(reason=reason))
+
+    r = client.post("/api/disputes", json=open_body(reason=reason))
+
+    assert r.status_code == 200, r.text
+    assert calls[0]["reason"] == reason
+
+
 def test_a_missing_field_never_reaches_the_service(client, monkeypatch):
     calls = opens_with(monkeypatch, record())
     body = open_body()
