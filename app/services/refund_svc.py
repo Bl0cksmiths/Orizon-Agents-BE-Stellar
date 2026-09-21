@@ -326,8 +326,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         raise
     except Exception as e:
         logger.error(
-            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s "
-            "(job %s, payer %s, %.7f USDC)",
+            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s (job %s, payer %s, %.7f USDC)",
             dispute.id,
             e,
             dispute.job_id_hex,
