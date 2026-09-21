@@ -27,20 +27,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import logging
-import re
+import time
 from typing import Any
 
 import pytest
 from stellar_sdk import Keypair
 
 import app.stellar.client as sc
-from app.config import settings
-from app.schemas import Task
 from app.services import dispute_store, dispute_svc, refund_svc
 from app.services import external_binding as eb
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
-from app.services.dispute_svc import DisputeError, dispute_message
+from app.services.dispute_svc import dispute_message
 from app.state import state
 from app.trace_bus import bus
 
@@ -99,7 +96,7 @@ def _sign(keypair: Keypair, message: str) -> str:
 
 def _seed(payer: str, *, settled_usdc: float = 0.12) -> SettlementRecord:
     """Record a settlement the way `execution_svc` will when a workflow seals."""
-    now = dispute_svc.time.time()
+    now = time.time()
     record = SettlementRecord(
         task_id=TASK,
         payer=payer,
