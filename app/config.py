@@ -399,7 +399,14 @@ class Settings(BaseSettings):
         # prior authorisation to bound it. Anonymous, that is a drain of the
         # settler wallet on any network, so the refund routes demand a key
         # wherever they can actually sign.
-        if self.dispute_refunds_enabled and self.stellar_signing_key and self.stellar_asset_sac:
+        # The switch ALONE, deliberately: conjoining it with the signer and the
+        # SAC would let a deployment that flips refunds on before wiring either
+        # of them boot with an empty key, leaving `require_adjudicator` as the
+        # only thing between an anonymous caller and the payout route. It fails
+        # closed, so the door is shut either way — but a validator that
+        # promises "refunds on implies a key" must not have a hole in it, and
+        # the operator who turns the switch on is the one who should be told.
+        if self.dispute_refunds_enabled:
             exposures.append(
                 "a signing key and an asset SAC are set, so /api/disputes/{id}/uphold can "
                 "transfer the platform's own funds"
