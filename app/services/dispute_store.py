@@ -134,6 +134,76 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 """
 
 
+# `dispute_events` is APPEND-ONLY in the strong sense: a dispute is never
+# updated, every status transition INSERTs another row, and the NEWEST row for
+# a dispute_id IS that dispute's current state. Story 4.03 pays an upheld
+# dispute its credit and 4.04 records the on-chain rating; both go through
+# append_status, and neither can overwrite what the buyer was told when the
+# dispute was opened. The history is the audit trail — who disputed what, when
+# it was upheld, which transaction paid it — and that trail is the evidence the
+# marketplace answers a chargeback with, so trading it for an UPDATE would be
+# trading away the point of the feature.
+#
+# Every row carries the WHOLE record rather than a delta, for binding_store's
+# tombstone reason: a history row that has to be read alongside its neighbours
+# to mean anything is a worse audit record than one that states what happened
+# on its own line. It also makes the current state one indexed row rather than
+# a fold over a history.
+#
+# `opening` marks the row that CREATED the dispute (append_status writes FALSE)
+# and exists for one purpose: it is the predicate of the partial unique index
+# that makes the duplicate rule a database constraint.
+#
+#   One dispute per (job_id_hex, step_index) is a product rule, and two clicks
+#   on "dispute this step" — or a retried request — arrive concurrently. A read
+#   in Python cannot enforce it: both requests find nothing and both insert.
+#   Neither can a read-then-insert inside one transaction, which is the tempting
+#   fix and is NOT a fix at READ COMMITTED (the default, and asyncpg's): both
+#   transactions take their snapshot before either has committed, both see no
+#   dispute, and both insert. Only SERIALIZABLE or an explicit lock would save
+#   it, and both cost every unrelated write in the table.
+#
+#   A UNIQUE INDEX costs nothing, needs no isolation level and cannot be
+#   bypassed by a future caller who forgets the rule. It is PARTIAL — `WHERE
+#   opening` — because the table is append-only: the second, third and fourth
+#   rows of a dispute repeat its (job_id_hex, step_index) and a total unique
+#   index would reject every status transition. Scoping it to the one row that
+#   opened the dispute says exactly the rule and nothing more, and it keeps
+#   holding after a dispute is resolved, so a rejected dispute cannot be
+#   re-opened as a second dispute of the same step.
+#
+# The three read indexes carry (key..., id DESC) so "the newest row for this
+# dispute / this step / this task" is served from the index without a sort.
+_CREATE_DISPUTES_SQL = """
+CREATE TABLE IF NOT EXISTS dispute_events (
+    id              BIGSERIAL PRIMARY KEY,
+    dispute_id      TEXT NOT NULL,
+    job_id_hex      TEXT NOT NULL,
+    task_id         TEXT NOT NULL,
+    step_index      INTEGER NOT NULL,
+    agent_id        TEXT NOT NULL,
+    payer           TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    charged_usdc    DOUBLE PRECISION NOT NULL,
+    creditable_usdc DOUBLE PRECISION NOT NULL,
+    opened_at       DOUBLE PRECISION NOT NULL,
+    resolved_at     DOUBLE PRECISION,
+    refund_tx       TEXT,
+    rating_tx       TEXT,
+    opening         BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
+    ON dispute_events (job_id_hex, step_index) WHERE opening;
+CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
+    ON dispute_events (dispute_id, id DESC);
+CREATE INDEX IF NOT EXISTS dispute_events_step_idx
+    ON dispute_events (job_id_hex, step_index, id DESC);
+CREATE INDEX IF NOT EXISTS dispute_events_task_idx
+    ON dispute_events (task_id, dispute_id, id DESC);
+"""
+
+
 @dataclass(frozen=True)
 class SettlementStep:
     """One step of a settled workflow, as it was charged.
