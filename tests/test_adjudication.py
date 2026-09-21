@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import logging
 import time
 from typing import Any, cast
@@ -668,11 +669,16 @@ def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str)
     assert unchanged is not None and unchanged.status == status
 
 
-@pytest.mark.parametrize("adjudicate", [dispute_svc.uphold, dispute_svc.reject])
+@pytest.mark.parametrize(
+    "adjudicate",
+    [dispute_svc.uphold, functools.partial(dispute_svc.reject, note="the output matched the brief")],
+    ids=["uphold", "reject"],
+)
 def test_an_id_nobody_issued_is_refused_by_both_decisions(monkeypatch, adjudicate) -> None:
     """One answer from both routes. A 404 from one and a 409 from the other
     would make them disagree about the same fact, and the API maps whatever
-    this module says."""
+    this module says. The rejection carries a real reason, so the id is the
+    only thing left for it to refuse."""
     no_signing(monkeypatch)
 
     with pytest.raises(DisputeError) as refused:
