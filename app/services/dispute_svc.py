@@ -661,6 +661,13 @@ async def uphold(dispute_id: str) -> DisputeRecord:
     buyer twice, or of leaving one who is owed unable ever to be paid, so none
     of them may be reordered for tidiness:
 
+      0. **The master switch** — `DISPUTE_REFUNDS_ENABLED` is checked before
+         the store is even read, so the answer cannot depend on anything a
+         dispute happens to say (`refunds_disabled`, 503). It is enforced HERE
+         as well as in the route's `require_adjudicator` (D1) because the route
+         is one of two doors: an operator script that imports this service
+         credits a buyer without passing through FastAPI at all, and a switch
+         that only one door honours is not a switch.
       1. **Load it** — an id nobody issued is `unknown_dispute` (404).
       2. **Already `credited`** — return the record UNCHANGED, with the
          `refund_tx` it already carries, and sign nothing. This is the retry
@@ -702,6 +709,17 @@ async def uphold(dispute_id: str) -> DisputeRecord:
     safe side of the trade — the claim blocks a second payment, and
     `refund_svc` has already logged the hash for reconciliation.
     """
+    if not settings.dispute_refunds_enabled:
+        # Fails closed, and first: nothing below this line may run on a
+        # deployment whose operator has not switched the refund path on, and
+        # that must hold however the service was reached.
+        logger.warning("adjudication refused: dispute=%s reason=refunds_disabled", dispute_id)
+        raise DisputeError(
+            "refunds_disabled",
+            "dispute refunds are switched off on this deployment",
+            503,
+        )
+
     store = get_dispute_store()
     dispute = await _load_for_adjudication(dispute_id)
 
