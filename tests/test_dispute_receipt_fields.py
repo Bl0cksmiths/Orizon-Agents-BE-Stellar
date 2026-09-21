@@ -166,17 +166,25 @@ def test_a_transition_carries_the_receipt_forward_and_dates_its_own_row() -> Non
     ids=["claim", "release"],
 )
 def test_a_claim_and_a_release_change_only_the_status_and_when_it_changed(name: str, status: str) -> None:
-    """4.03's rule for the two mutex transitions, now with the one exception
+    """4.03's rule for the two mutex transitions, now with the two exceptions
     4.06 makes: every column is copied from `latest` verbatim — the credited
     amount and the rating confirmation included — except the status, the
-    moment the status changed, and the opening flag no transition may claim.
+    moment the status changed, the opening flag no transition may claim, and
+    the refund hash, which is cleared because neither row is written when a
+    refund has landed. Carrying it forward put a FAILED transaction on the
+    buyer's receipt as the refund in flight for the whole next attempt.
 
     Asserted as the complement, so a column added later that either statement
     forgot to carry forward fails here rather than quietly writing NULL."""
     written = _written(getattr(dispute_store, name))
 
     moved = {column: expression for column, expression in written.items() if expression != f"latest.{column}"}
-    assert moved == {"status": status, "updated_at": "$2::double precision", "opening": "FALSE"}
+    assert moved == {
+        "status": status,
+        "updated_at": "$2::double precision",
+        "refund_tx": "NULL::text",
+        "opening": "FALSE",
+    }
 
 
 def test_no_statement_dates_a_row_by_the_database_clock() -> None:
