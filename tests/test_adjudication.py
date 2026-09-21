@@ -732,6 +732,21 @@ def test_a_landed_rating_is_traced_after_the_credit_in_plain_words(monkeypatch) 
     assert credited.rating_tx == "tx_rating"
 
 
+@pytest.mark.parametrize("unlanded", ["FAILED", "TIMEOUT", "REPLAY"])
+def test_a_rating_that_did_not_land_is_never_traced_as_one(monkeypatch, rater, unlanded: RatingStatus) -> None:
+    """A "rated 10/100" line for evidence that never landed is the lie the
+    settler's own trace was once fixed for. Only a SUCCESS earns the line; a
+    failure, a timeout and a collision leave the credit line on its own."""
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    rater.script = [unlanded]
+    state.add_task(Task(id=TASK, intent="write the launch post", agents=2, spent=0.12, status="complete"))
+
+    asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert [line.level for line in state.traces[TASK]] == ["cost"]
+
+
 def test_a_credit_on_an_evicted_task_creates_no_trace_entry(monkeypatch) -> None:
     """The trap this guard exists for. `state.append_trace` is
     `traces.setdefault(task_id, []).append(line)`, and eviction only ever drops
