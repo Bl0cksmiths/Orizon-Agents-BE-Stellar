@@ -250,3 +250,43 @@ platform adjudicates and that there is no on-chain arbitration this sprint;
 is make adjudication *possible* — a mandatory written reason, the settled
 amounts, the per-step delivery flags and the timestamps are all captured, so
 whoever reviews the dispute is reading evidence rather than reconstructing it.
+
+### D5 — R12 is resolved, and this is where it is named
+
+**R12** (ADR 0002): `ReputationLedger.submit` checks its replay guard on
+`Rated(agent_id, job_id)` *before* it reads the `kind` argument, and the settler
+has already auto-rated every step of the settled workflow under that job id. A
+`"dispute"`-kind rating on the same pair is therefore rejected with
+`Error::Replay` — the dispute is unwritable on-chain, however correct the
+off-chain record is.
+
+The resolution is in the code, in one function:
+
+```python
+# app/services/refund_svc.py
+def dispute_job_id(job_id: bytes) -> bytes:
+    return hashlib.sha256(job_id + b"dispute").digest()[:16]
+```
+
+Derived rather than random, so it is reproducible from the settled job id alone
+and the dispute stays linkable to the job it disputes; distinct, so it clears
+the guard. `record_dispute_rating` already writes through it, and
+`tests/test_refund_svc.py` pins the derivation.
+
+**What 4.02 does about it, concretely.** The window opens at settlement — after
+`_submit_ratings` has run — so the collision is real for every dispute this
+system will ever see; there is no timing that avoids it, which is exactly why
+the card forbade discovering it in 4.04. What 4.02 guarantees instead is that
+the dispute is born with everything the derived id needs: `job_id_hex` and the
+disputed `step_index` are on the record, and the step's `agent_id` with them, so
+the rating pair `(agent_id, dispute_job_id(job_id))` is computable from the
+stored dispute without re-reading anything that no longer exists.
+
+**Story 4.04 must write the dispute rating under the derived id**
+(`refund_svc.record_dispute_rating`, which calls `dispute_job_id` for it) and
+must not call `submit_rating` with the settled job id. A rating written under
+the raw job id will be rejected on-chain, and it will be rejected *silently* as
+far as the buyer is concerned — `_submit_ratings` treats a failed rating as
+best-effort and moves on. That is the failure this ADR exists to prevent, so it
+is stated here as a requirement on the next story rather than a note in a
+docstring.
