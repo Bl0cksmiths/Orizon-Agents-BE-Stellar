@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from ..agents.registry import get_worker
-from ..agents.workers.prompt_safety import fence_untrusted
+from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
@@ -17,7 +17,7 @@ from ..state import state
 from ..trace_bus import bus
 from . import failure_tracker, rating_writer
 from .binding_registry import resolve_worker
-from .dispute_store import SettlementRecord, SettlementStep, get_dispute_store
+from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,45 @@ def _summarize(output: dict) -> str:
     if isinstance(counts, dict):
         return ", ".join(f"{k}={v}" for k, v in counts.items())
     return "done"
+
+
+def _stored_summary(task_id: str, step_index: int, summary: str) -> str | None:
+    """A delivered step's trace summary as its settlement keeps it (story 4.05).
+
+    `summary` is the text of the step's `out` trace line — the line the buyer
+    watched — so the dispute form shows what the trace showed rather than a
+    second rendering of the output that could disagree with it. It is still
+    untrusted, an external agent's own words, and it outlives the trace: it is
+    read back into an API response and shown in the console for the whole
+    dispute window. So it is cleaned with `sanitize_untrusted`, the primitive
+    `dispute_svc` already uses for the buyer's reason, which blanks the control
+    characters that would forge structure nobody wrote there.
+
+    Bounded at the store's OUTPUT_SUMMARY_MAX_CHARS, not trusted to
+    `_summarize`'s 180. That cap is a trace-formatting choice covering only the
+    `summary` branch — the `counts` branch joins every entry with no limit —
+    and it can change for trace reasons without anyone thinking of the
+    settlement row. The store's constant is the one that states what a row may
+    hold, so it is the one a writer cleans to.
+
+    Never raises. This runs inside the run loop, where an exception reaches the
+    run-level handler: the workflow would finalize as "failed" and the charge
+    that pays every agent in the plan would never run, all for one line of
+    evidence. A summary that cannot be kept is logged and left None; the step
+    is still delivered, and still disputable. An empty result is None too, so
+    a reader has one "nothing to show" value to test for, not two.
+    """
+    try:
+        cleaned = sanitize_untrusted(summary, max_chars=OUTPUT_SUMMARY_MAX_CHARS)
+    except Exception:
+        logger.warning(
+            "task %s step %d: output summary could not be cleaned — settled without it",
+            task_id,
+            step_index,
+            exc_info=True,
+        )
+        return None
+    return cleaned or None
 
 
 async def execute_plan(
