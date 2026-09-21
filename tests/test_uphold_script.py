@@ -1165,6 +1165,33 @@ def test_a_rerun_after_a_rating_that_did_not_land_writes_the_rating_and_signs_no
     assert stored().rating_tx == RATING_TX
 
 
+def test_a_rating_that_landed_but_was_never_recorded_asks_for_the_record_before_any_rerun(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, paying: list[str], ledger: RatingSeam
+) -> None:
+    """The ledger confirmed the rating and the store write recording it failed.
+    Both transactions exist, but a re-run would now meet a Replay with no
+    attempt on record and call this dispute's own rating a collision — so it
+    exits on the catch-all with the one write that closes it."""
+    seed()
+    store = dispute_store.get_dispute_store()
+    append = store.append_status
+
+    async def _append(dispute_id: str, status: DisputeStatus, **kwargs: Any) -> DisputeRecord:
+        if kwargs.get("rating_tx"):
+            raise ConnectionError("the store went away")
+        return await append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _append)
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_UNEXPECTED
+    assert "THE RATING LANDED — BUT THE DISPUTE DOES NOT RECORD IT." in out
+    assert f"append_status({DISPUTE_ID!r}, 'credited', rating_tx={RATING_TX!r})" in out
+    assert f"https://stellar.expert/explorer/testnet/tx/{RATING_TX}" in out
+    assert "ON-CHAIN EVIDENCE" not in out
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
