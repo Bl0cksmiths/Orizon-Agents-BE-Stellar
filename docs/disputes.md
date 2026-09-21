@@ -275,9 +275,11 @@ and the outcome is one of these:
 | `already on-chain — kept` | INFO | unchanged: an earlier attempt of this dispute landed | nothing |
 | `unconfirmed — it may still land` | ERROR | `rating_tx` is the in-flight hash, when the submission returned one | uphold again |
 | `failed (FAILED) — nothing landed` | ERROR | unchanged | uphold again — after fixing the cause, if the line before it names one |
-| `did not complete` | ERROR | unchanged | if a `landed` line for the same dispute comes just before it, the rating is on-chain and only the write recording it failed: record that hash first, as the collision procedure does, or the retry will read as a collision. Otherwise uphold again |
+| `was SUCCESS but could not be recorded on the dispute` (or `was TIMEOUT …`) | ERROR | unchanged — the store write failed, and the line carries the hash | record that hash by hand, **before** any retry: a retry first is refused as a replay with nothing on record, and reads as a collision |
 | `COLLISION` | ERROR | unchanged, and no `rating_tx` | the collision procedure at the end of this document |
-| `not re-attempted` | ERROR, or WARNING when a `rating_tx` is already on record | unchanged | the settlement that weights the rating is gone; see below |
+| `not submitted — <setting> …` | ERROR | unchanged; nothing was sent | set the setting the line names — `REPUTATION_ENABLED` or `STELLAR_REPUTATION_LEDGER` — then uphold again |
+| `could not be formed` | ERROR | unchanged; nothing was sent | a retry will not mend it: the settlement no longer has the disputed step, or the job id does not derive. The dispute's records changed under it, and a person has to look |
+| `not re-attempted` | ERROR, or WARNING when a `rating_tx` is already on record | unchanged; nothing was sent | the settlement that weights the rating is gone; see below |
 
 A `failed` rating whose preceding line says `Unauthorized` is not about the
 dispute at all: the deployment's signer is not the ledger's Scorer, so no
