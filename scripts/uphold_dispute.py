@@ -125,14 +125,29 @@ except ValidationError:
     raise SystemExit(EXIT_NOT_CONFIGURED) from None
 
 
-# `refund_svc.RefundRefused.code` is the service's stable vocabulary for a
-# credit that must not be signed; this maps it onto the exit table above. An
-# unmapped code falls to EXIT_UNEXPECTED rather than to any of the specific
-# ones, so a refusal the service grows later cannot be mistaken for a refusal
-# this script already understands.
+# The services' stable refusal vocabulary, mapped onto the exit table above.
+# Both halves of it: the two codes `refund_svc.RefundRefused` raises straight
+# out of `creditable_for` during the preview, and the ones `dispute_svc.uphold`
+# answers a live run with — which include those same two, because `uphold`
+# catches them and re-raises them as `DisputeError` with the code intact.
+#
+# `refund_unconfirmed` is the timeout, and `report` overrides it from the record
+# anyway; it is mapped here so that a run whose store read then fails still
+# exits on the timeout code rather than on a generic one.
+#
+# An unmapped code deliberately does NOT fall to the nearest neighbour: a
+# refusal either service grows later must not be mistaken for one this script
+# already understands.
 _REFUSAL_EXITS = {
     "nothing_to_credit": EXIT_NOTHING_TO_CREDIT,
+    "settlement_missing": EXIT_NOTHING_TO_CREDIT,
     "refund_above_cap": EXIT_ABOVE_CAP,
+    "refunds_disabled": EXIT_NOT_CONFIGURED,
+    "unknown_dispute": EXIT_UNKNOWN_DISPUTE,
+    "dispute_rejected": EXIT_NOT_ADJUDICABLE,
+    "refund_in_flight": EXIT_IN_FLIGHT,
+    "refund_failed": EXIT_TRANSFER_FAILED,
+    "refund_unconfirmed": EXIT_TIMEOUT,
 }
 
 
