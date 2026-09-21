@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -297,4 +297,26 @@ async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
         record.agent_id,
         record.charged_usdc,
     )
+    return DisputeResponse.of(record)
+
+
+@router.get("/disputes/{dispute_id}", response_model=DisputeResponse, summary="Read one dispute")
+async def get_dispute(
+    dispute_id: str = Path(..., min_length=1, max_length=64),
+) -> DisputeResponse:
+    """The dispute, by the id `POST /disputes` returned.
+
+    Unauthenticated by design: `dispute_store.new_dispute_id` mints an
+    unguessable id, so the id IS the capability — the same trade the per-task
+    read token makes, without a token to lose. A buyer with no account can
+    still come back to their dispute from a link.
+
+    The id's exact format is deliberately not pinned in the path pattern. The
+    store mints it and 4.03 may lengthen it; a pattern here would make that a
+    two-module change, and would answer a mistyped id with a 422 that says
+    "wrong shape" where 404 says all a caller is entitled to know.
+    """
+    record = await dispute_svc.get_dispute(dispute_id)
+    if record is None:
+        raise HTTPException(404, "unknown_dispute")
     return DisputeResponse.of(record)
