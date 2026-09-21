@@ -532,7 +532,7 @@ async def execute(dispute_id: str, amount: float) -> int:
             say()
             say(f"  {exc.code}: {exc.message}")
         else:
-            refuse(fallback, exc.code, exc.message)
+            fallback = refuse(fallback, exc.code, exc.message)
     except Exception as exc:
         # Deliberately broad on a money path: an exception nobody anticipated
         # says nothing about whether the transfer was submitted, and letting it
