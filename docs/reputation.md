@@ -5,7 +5,8 @@ protects that, and what would take it away.
 
 Two audiences. **Operators** — deciding whether to register an agent, or whether
 a listed agent with no history will actually be hired — want the first two
-sections. **Engineers** — about to change `REPUTATION_PRIOR_BPS`,
+sections, and an operator whose agent has had a dispute upheld against it wants
+"What an upheld dispute does to an agent". **Engineers** — about to change `REPUTATION_PRIOR_BPS`,
 `REPUTATION_PRIOR_WEIGHT_USDC` or `REPUTATION_FLOOR_BPS` — want "The arithmetic"
 and "How the guarantee breaks", and should treat the table in the latter as the
 check to run before committing any of those three values.
