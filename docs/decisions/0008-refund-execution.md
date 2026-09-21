@@ -26,10 +26,12 @@ card's text did.
 `require_api_key` (`app/security.py`) is a no-op while `settings.api_key` is
 empty — it returns without checking anything — and the public demo runs that
 way on purpose. `Settings._money_capable_config_requires_api_key` is the guard
-that stops that being reckless, and it is scoped narrowly: it refuses to boot
-without `API_KEY` only when `STELLAR_SIGNING_KEY` is set **on mainnet**, or
-when production PDAX credentials are present. A testnet signer keeps the demo
-open, and that is a considered position rather than an oversight.
+that stops that being reckless, and before this story it was scoped narrowly:
+it refused to boot without `API_KEY` only when `STELLAR_SIGNING_KEY` is set
+**on mainnet**, or when production PDAX credentials are present. A testnet
+signer keeps the demo open, and that is a considered position rather than an
+oversight. (The validator now has a third branch, which is D1's; those two are
+the posture D1 diverges from.)
 
 The reason it holds for `/api/stellar/server/charge` is specific, and it is
 worth naming precisely because it is about to stop holding. That route calls
