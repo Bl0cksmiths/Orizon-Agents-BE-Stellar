@@ -596,6 +596,10 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
     `amount` is None on a rating-only run — a dispute credited by an earlier
     one — and the credit is then reported as that earlier run's, so a re-run
     for the rating can never be read as a second payment.
+
+    EXIT_OK here is the REFUND half only. Since 4.04 a `credited` dispute with
+    its refund on record is where the run's verdict begins, not where it ends:
+    `execute` hands it straight to `report_rating`, whose code is the run's.
     """
     if dispute is None:
         say()
