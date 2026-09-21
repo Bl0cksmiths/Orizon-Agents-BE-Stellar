@@ -467,3 +467,54 @@ async def settlement_for_task(task_id: str) -> SettlementRecord | None:
     `window_closes_at` that says whether there is still time.
     """
     return await get_dispute_store().get_settlement_by_task(task_id)
+
+
+# ── adjudication: the money path (story 4.03, ADR 0002) ─────────
+#
+# Everything below decides whether the platform SIGNS A TRANSFER, so the order
+# of the steps in `uphold` is the deliverable and not an implementation detail.
+# Two facts shape all of it. `store.claim_refund` is the lock, taken before
+# anything is signed and never a read-then-write (D2). And the Stellar client
+# does not raise on failure — it returns a status, one of whose values means
+# "submitted, may still land" (D3), which is the only way this service can pay
+# a buyer twice.
+
+
+def _refuse_credit(
+    dispute: DisputeRecord,
+    code: str,
+    status_code: int,
+    message: str,
+    *,
+    amount_usdc: float | None = None,
+    tx_hash: str | None = None,
+    level: int = logging.WARNING,
+) -> DisputeError:
+    """Build an adjudication refusal and log it with what a reconciler needs.
+
+    Separate from `_refuse` because the two refuse different things and so must
+    log different facts: that one refuses to OPEN a dispute and is keyed by
+    (job, step), while this one refuses to PAY one and names the dispute, the
+    job, the buyer and the amount — the four values somebody holding the ledger
+    and a block explorer needs in order to decide whether money moved. The
+    transaction hash joins them whenever there is one, because on this path the
+    hash IS the evidence. Returned rather than raised for `_refuse`'s reason:
+    the refusals are the substance of this module, and the call site should
+    still read `raise`.
+
+    `level` is WARNING for a refusal an adjudicator caused and asked for, and
+    ERROR for one that leaves money in a state a human has to resolve. Nothing
+    secret is logged and nothing secret is reachable from here: the payer is a
+    public address, and the settler's signing key never enters this module.
+    """
+    logger.log(
+        level,
+        "refund refused: dispute=%s job=%s payer=%s amount=%s tx=%s reason=%s",
+        dispute.id,
+        dispute.job_id_hex,
+        dispute.payer,
+        "-" if amount_usdc is None else f"{amount_usdc:.7f}",
+        tx_hash or "-",
+        code,
+    )
+    return DisputeError(code, message, status_code)
