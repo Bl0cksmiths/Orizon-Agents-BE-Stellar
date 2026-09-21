@@ -425,3 +425,41 @@ def test_one_agent_disputed_on_two_steps_is_rated_twice_without_a_collision(ledg
     assert ledger.replays == 0
     assert invalidated == [AGENT, AGENT]
     assert len(settler.transfers) == 2  # one credit per dispute, and no more
+
+
+def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, ledger, settler, invalidated) -> None:
+    """One dispute walked through every answer the ledger can give, one
+    uphold each: failed, lost in flight, landed late, then confirmed twice.
+    After the first uphold every door back into the refund is booby-trapped,
+    so a single stray call on any rating path fails here. And at each step the
+    cache is dropped exactly when a rating is KNOWN to have landed — never for
+    a failure, never for a timeout, every time a replay confirms one."""
+    dispute = open_dispute()
+    ledger.script = ["fail"]
+    first = uphold(dispute.id)
+    assert (first.status, first.refund_tx, first.rating_tx) == ("credited", "tx_credit", None)
+
+    async def _refund_touched(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a rating path reached the refund")
+
+    store = dispute_store.get_dispute_store()
+    monkeypatch.setattr(store, "claim_refund", _refund_touched)
+    monkeypatch.setattr(store, "release_refund_claim", _refund_touched)
+    monkeypatch.setattr(refund_svc, "credit_refund", _refund_touched)
+    monkeypatch.setattr(refund_svc, "execute_refund", _refund_touched)
+
+    ledger.script = ["lost", "late"]
+    walk = [
+        # (rating_tx on the record afterwards, cache drops so far)
+        ("tx_rating_2", 0),  # lost in flight: recorded, not known to have landed
+        ("tx_rating_3", 0),  # the retry passed simulation and landed late: still unknown
+        ("tx_rating_3", 1),  # a replay with a hash on record: it landed
+        ("tx_rating_3", 2),  # and again, confirmed and unchanged
+    ]
+    for rating_tx, drops in walk:
+        answered = uphold(dispute.id)
+        assert (answered.status, answered.refund_tx, answered.rating_tx) == ("credited", "tx_credit", rating_tx)
+        assert invalidated == [AGENT] * drops
+
+    assert len(settler.transfers) == 1
+    assert len(ledger.submits) == 3 and ledger.replays == 2
