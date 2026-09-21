@@ -490,27 +490,38 @@ def test_the_note_reaches_the_service_by_keyword(client, adjudicating, monkeypat
     assert calls == [(DISPUTE_ID, "the delivered file matched the brief")]
 
 
-@pytest.mark.parametrize(
-    ("label", "payload"),
-    [("no-body-at-all", None), ("empty-object", {}), ("explicit-null", {"note": None})],
-    ids=["no-body-at-all", "empty-object", "explicit-null"],
-)
-def test_an_absent_note_is_none_however_it_is_absent(client, adjudicating, monkeypatch, label, payload):
-    # Three ways a client can say "no note", and one representation in the
-    # record. A console with nothing to add must not have to send a body.
+# Every way a client can say "no note", and one answer to all of them. 4.03
+# pinned that however a note is absent it is absent the same way, and that
+# still holds — but the answer is now a refusal, because the note is what the
+# buyer is shown and a rejection with nothing to show them is not one. The
+# empty string moved here from the malformed notes below: it is not a note
+# of the wrong shape, it is no note at all.
+NO_NOTE = [
+    ("no-body-at-all", None),
+    ("empty-object", {}),
+    ("explicit-null", {"note": None}),
+    ("empty-string", {"note": ""}),
+]
+
+
+@pytest.mark.parametrize(("label", "payload"), NO_NOTE, ids=[label for label, _ in NO_NOTE])
+def test_a_rejection_without_a_note_never_reaches_the_service(client, adjudicating, monkeypatch, label, payload):
     calls = rejects_with(monkeypatch, record(status="rejected"))
 
     r = client.post(REJECT, headers=AUTH) if payload is None else client.post(REJECT, json=payload, headers=AUTH)
 
-    assert r.status_code == 200, r.text
-    assert calls == [(DISPUTE_ID, None)]
+    assert r.status_code == 422, f"a rejection with {label} was admitted"
+    # The field-level code, not the service's `rejection_reason_required`:
+    # that one answers a note the edge admitted and cleaning emptied, and
+    # seeing it here would mean the service had been asked.
+    assert r.json()["error"]["code"] == "validation_error"
+    assert calls == []
 
 
 # Notes the service must never be asked about, refused at the edge with the
 # field-level `validation_error` the frontend can render inline — bounded
 # exactly as `OpenDisputeReq.reason` is, because it is the same kind of text.
 MALFORMED_NOTES = [
-    ("note-empty", {"note": ""}),
     ("note-too-long", {"note": "x" * 2001}),
     ("note-not-a-string", {"note": 7}),
 ]
