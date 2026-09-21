@@ -1144,6 +1144,27 @@ def test_a_replay_of_a_recorded_rating_confirms_it_landed(
     assert f"refund: https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
 
 
+def test_a_rerun_after_a_rating_that_did_not_land_writes_the_rating_and_signs_no_transfer(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam
+) -> None:
+    """What exit 12 promises, kept: the dispute is `credited` with no rating,
+    the operator re-runs, and the run goes past the refund to the rating
+    alone — no transfer is signed — and ends with both transactions printed as
+    the dispute's evidence. The credit is reported as the earlier run's, so
+    the re-run can never be read as a second payment."""
+    seed(status="credited", refund_tx=REFUND_TX)
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert paying == []
+    assert ledger.calls == [DISPUTE_ID]
+    assert "CREDITED EARLIER" in out and "this one signed no transfer" in out
+    assert f"refund: https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+    assert f"rating: https://stellar.expert/explorer/testnet/tx/{RATING_TX}" in out
+    assert stored().rating_tx == RATING_TX
+
+
 # ── no line of output can carry a secret ───────────────────────────────────
 
 
