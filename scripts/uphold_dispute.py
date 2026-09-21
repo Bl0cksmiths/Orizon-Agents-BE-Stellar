@@ -93,10 +93,9 @@ import argparse
 import asyncio
 import logging
 import sys
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, TextIO
+from typing import Literal, TextIO
 
 # Exit codes, so an operator — or the wrapper script somebody inevitably writes
 # around this — can tell the refusals apart without parsing prose. 1 and 2 are
