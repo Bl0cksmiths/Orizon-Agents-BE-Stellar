@@ -612,7 +612,7 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     it outright, and it would also fail to be claimed — a rejected dispute is
     not `upheld` — so no single check carries this on its own."""
     dispute = a_dispute()
-    asyncio.run(dispute_svc.reject(dispute.id))
+    asyncio.run(dispute_svc.reject(dispute.id, note="the output matched the brief"))
     no_signing(monkeypatch)
 
     with pytest.raises(DisputeError) as refused:
