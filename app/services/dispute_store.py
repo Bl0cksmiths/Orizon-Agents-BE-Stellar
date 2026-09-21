@@ -970,6 +970,23 @@ class PostgresDisputeStore:
             return None
         return await self.append_status(dispute_id, "crediting")
 
+    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+        """Put a still-unpaid dispute back where another attempt can find it.
+
+        The status moves back BEFORE the mutex is dropped. A caller that saw
+        the claim gone would otherwise be free to take it while the dispute
+        still read `crediting`, and would refuse to pay a buyer who is owed.
+        In the reverse order the worst case is a claim row that outlives its
+        dispute's status, which blocks a payout rather than losing one.
+        """
+        pool = await self._ready_pool()
+        current = await self.get_dispute(dispute_id)
+        if current is None or current.status != "crediting":
+            return None
+        released = await self.append_status(dispute_id, "upheld")
+        await pool.fetchrow(_DELETE_REFUND_CLAIM_SQL, dispute_id)
+        return released
+
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
         # the pool that is being torn down, and so a second close is a no-op.
