@@ -565,6 +565,22 @@ does not have, is null.
 | `rating_confirmed` | whether the dispute rating is known to have **landed**. `rating_tx` cannot say on its own, because it is recorded for a submission that timed out as well as for one that succeeded. `true` once the ledger has vouched for it, `false` while it is only in flight, null when no rating was submitted or the dispute predates the field. Null means "not known", never "no" |
 | `rejection_reason` | on a `rejected` dispute, the adjudicator's reason — **shown to the buyer**. Null under every other status, whatever the record holds, and for a rejection recorded before a reason was required |
 
+**Who can read what a dispute says.** Two fields on this shape are somebody's
+words rather than facts the chain already publishes: the buyer's `reason` and a
+rejection's `rejection_reason`. The API does not hide either.
+`GET /api/disputes/{dispute_id}` answers anyone holding the id, and the
+per-task read answers anyone who may read the task — which, while
+`TASK_AUTH_REQUIRED` is off (the shipped default, and how the public deployment
+runs), is anyone with the task id; that read hands out every dispute id on the
+task as well. The console shows both fields only to the payer, but that is a
+choice about display, not about access, and it narrows nothing the API
+returns. So a rejection reason is written as something anyone holding the task
+id could read: about this step and this claim, with nothing about another
+buyer, another dispute or the platform's internals that would not be said to
+the buyer in the open. Turning `TASK_AUTH_REQUIRED` on scopes the per-task read
+to the task's own token or an operator key; the single-dispute read stays a
+link whose unguessable id is the credential either way.
+
 ### What the per-task read returns
 
 `GET /api/tasks/{task_id}/disputes` is the one read a dispute receipt is built
