@@ -168,7 +168,7 @@ def test_opening_a_dispute_writes_nothing_on_chain(monkeypatch) -> None:
     ):
         monkeypatch.setattr(sc, name, _boom)
     monkeypatch.setattr(refund_svc, "execute_refund", _boom)
-    monkeypatch.setattr(refund_svc, "record_dispute_rating", _boom)
+    monkeypatch.setattr("app.services.dispute_rating.submit_dispute_rating", _boom)
 
     payer = Keypair.random()
     _seed(payer.public_key)

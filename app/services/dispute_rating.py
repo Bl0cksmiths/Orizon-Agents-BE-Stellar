@@ -20,9 +20,18 @@ with `Replay` is a retry whose earlier attempt already landed.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Literal
+
+from ..config import settings
+from ..stellar import client as sc
+from . import rating_writer, reputation_svc
+from .dispute_store import DisputeRecord, SettlementRecord
+
+logger = logging.getLogger(__name__)
 
 # Domain separation for the derived id. Versioned, so a future change to the
 # derivation can never produce an id that collides with one already written
@@ -102,3 +111,190 @@ class RatingOutcome:
     job_id_hex: str
     rating: int
     weight_stroops: int
+
+
+# The score an upheld dispute writes, on the 0..100 scale of the settler's own
+# `reputation_svc.synthetic_rating`, whose anchors are 20 for a step that
+# delivered nothing (a timeout, a raise, an empty reply, or an external reply
+# with nothing checkable in it), 95 for a baked kit artifact, and 40 to 95 for
+# the work in between — base 70, moved by the artifact and the critic's pass.
+#
+# Below 20 on purpose. ADR 0005 D3 fixed the settler's scale so that a reply
+# which delivers nothing never outscores an honest failure; an upheld dispute
+# sits one step beneath both. The step was billed — a refund is only ever paid
+# against a delivered step — and the credit comes out of the platform's wallet,
+# not the agent's, so the agent keeps what it was paid for work that failed the
+# buyer. A failure somebody paid for is worse evidence than one nobody did.
+# Not 0: the verdict is the platform's alone, with no on-chain arbitration and
+# no appeal, and a unilateral judgement should not carry the harshest score the
+# scale has.
+#
+# It does not replace what the settler wrote for the step, which stays on the
+# ledger under the job's own key — nothing on-chain can amend a rating — so the
+# two stand side by side at the same weight and average between 15 and 52.5. A
+# dispute costs an agent the clean record it had, and `dispute_rate_bps` counts
+# it; it does not erase the evidence of what was delivered.
+DISPUTE_RATING = 10
+
+# The ReputationLedger `Error` discriminants this module branches on, numbered
+# as `rating_writer.LEDGER_ERRORS` names them. Both surface at simulation, so a
+# submit refused with either never became a transaction.
+_LEDGER_UNAUTHORIZED = 1
+_LEDGER_REPLAY = 7
+
+
+async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
+    """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
+
+    `DISPUTE_RATING`, kind `dispute`, from the settler to `dispute.agent_id`,
+    under the DERIVED id for the disputed step and on behalf of the payer. The
+    weight is `reputation_svc.rating_weight_stroops` of the settled step's price
+    (D2) — the helper and the quoted price the settler weighted its own rating of
+    that step with, so the two carry exactly the same evidence.
+
+    What this decides is what the chain said, never what that means for the
+    dispute: whether a REPLAY is a retry that already landed or a collision
+    turns on the dispute's own history, which is the caller's. The mapping:
+
+      - `status == "SUCCESS"` with a hash → SUCCESS.
+      - `status == "FAILED"` → FAILED: the ledger rejected the transaction after
+        simulation passed, so nothing was written.
+      - `ContractError` #7 (`Replay`) → REPLAY, with no hash: the ledger already
+        holds a rating under this agent and derived id, so it refused this one
+        at simulation.
+      - any other `ContractError` → FAILED, with no hash, logged by the
+        contract's own name for it. `Unauthorized` is not about the dispute at
+        all: it means this deployment's signer is not the ledger's Scorer.
+      - anything else → TIMEOUT, with the in-flight hash when there is one.
+        `"timeout"` is the client's word for submitted-then-lost-track, and an
+        unrecognised status or a SUCCESS with no hash is the same unknown, and
+        so is any other exception: it can be raised either side of the
+        submission and nothing in it says which. Unlike a refund's, this unknown
+        is harmless to retry: if the first submit landed, the replay guard
+        refuses the second.
+      - cancellation is logged and re-raised, never turned into an outcome.
+
+    Raises instead of returning when the rating cannot even be formed: a
+    settlement with no such step (`LookupError`) or a job id that will not
+    derive (`ValueError`). The refund this rating follows was computed against
+    that same step of that same settlement, and `creditable_for` refuses a step
+    the settlement lacks — so either is a record that changed under a paid
+    dispute, and an outcome would let the caller file it as a rating to retry.
+    """
+    step = settlement.step(dispute.step_index)
+    if step is None:
+        logger.error(
+            "dispute %s: cannot rate — settlement %s has no step %d, yet a refund was paid against it "
+            "(agent %s, payer %s)",
+            dispute.id,
+            settlement.job_id_hex,
+            dispute.step_index,
+            dispute.agent_id,
+            dispute.payer,
+        )
+        raise LookupError(f"settlement {settlement.job_id_hex} has no step {dispute.step_index} to rate")
+
+    weight = reputation_svc.rating_weight_stroops(step.price_usdc)
+    try:
+        derived = dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index)
+    except ValueError:
+        logger.error(
+            "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s)",
+            dispute.id,
+            dispute.job_id_hex,
+            dispute.step_index,
+            dispute.agent_id,
+            dispute.payer,
+            exc_info=True,
+        )
+        raise
+    derived_hex = derived.hex()
+    # Every line below carries the same facts in the same order: the operator
+    # reconciling a dispute rating starts from whichever of them they hold, and
+    # the derived id is the one Stellar Expert shows. Identifiers only — no key.
+    facts = (
+        f"agent {dispute.agent_id}, job {dispute.job_id_hex}, derived {derived_hex}, "
+        f"rating {DISPUTE_RATING}, weight {weight}, payer {dispute.payer}"
+    )
+
+    try:
+        raw = await sc.submit_rating_async(dispute.agent_id, derived, DISPUTE_RATING, weight, dispute.payer, "dispute")
+    except asyncio.CancelledError:
+        # A shutdown cancel can land between the submit and its confirmation,
+        # as it can for the refund before it, and CancelledError is a
+        # BaseException none of the handlers below see. Leave the line an
+        # operator reconciles from, then let the cancellation through.
+        logger.error("dispute %s: rating submit cancelled mid-flight and MAY HAVE LANDED (%s)", dispute.id, facts)
+        raise
+    except sc.ContractError as e:
+        if e.code == _LEDGER_REPLAY:
+            # WARNING, not ERROR: on a retry this is the expected answer from an
+            # attempt that already landed. Only the caller, holding the
+            # dispute's history, can tell that apart from a collision.
+            logger.warning(
+                "dispute %s: rating refused as a Replay — the ledger already holds a rating under this "
+                "agent and derived id (%s)",
+                dispute.id,
+                facts,
+            )
+            return RatingOutcome("REPLAY", None, derived_hex, DISPUTE_RATING, weight)
+        reason = rating_writer.failure_reason(e)
+        if e.code == _LEDGER_UNAUTHORIZED:
+            # Spelled out because this exact misconfiguration once left a
+            # deployment's ledger at zero ratings with nobody able to say why:
+            # a signer that is not the Scorer is refused on every rating it signs.
+            logger.error(
+                "dispute %s: rating refused with %s — this deployment's signer is NOT the Scorer of "
+                "ReputationLedger %s, so no rating it submits can land. A misconfiguration, not a verdict on "
+                "the dispute: the ledger admin must call set_scorer with the signer's address (the boot line "
+                "and ratings on /readiness name both). Nothing was written (%s)",
+                dispute.id,
+                reason,
+                settings.stellar_reputation_ledger,
+                facts,
+            )
+        else:
+            logger.error(
+                "dispute %s: rating refused by the ledger with %s, nothing was written (%s)",
+                dispute.id,
+                reason,
+                facts,
+                exc_info=True,
+            )
+        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight)
+    except Exception as e:
+        logger.error(
+            "dispute %s: rating submit raised and MAY HAVE LANDED: %s (%s)",
+            dispute.id,
+            e,
+            facts,
+            exc_info=True,
+        )
+        return RatingOutcome("TIMEOUT", None, derived_hex, DISPUTE_RATING, weight)
+
+    raw_hash = raw.get("hash")
+    tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
+    status = str(raw.get("status") or "")
+
+    if status == "SUCCESS" and tx_hash:
+        logger.info("dispute %s: rating written — tx %s (%s)", dispute.id, tx_hash, facts)
+        return RatingOutcome("SUCCESS", tx_hash, derived_hex, DISPUTE_RATING, weight)
+
+    if status == "FAILED":
+        logger.error(
+            "dispute %s: rating transaction failed on the ledger, nothing was written — hash=%s (%s)",
+            dispute.id,
+            tx_hash,
+            facts,
+        )
+        return RatingOutcome("FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight)
+
+    logger.error(
+        "dispute %s: rating unconfirmed and MAY STILL LAND — a retry cannot double it, the replay guard "
+        "refuses a second: status=%s hash=%s (%s)",
+        dispute.id,
+        status or "missing",
+        tx_hash,
+        facts,
+    )
+    return RatingOutcome("TIMEOUT", tx_hash, derived_hex, DISPUTE_RATING, weight)

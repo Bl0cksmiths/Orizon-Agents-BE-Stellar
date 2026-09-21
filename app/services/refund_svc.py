@@ -3,9 +3,12 @@
 The deployed `PaymentEscrow` has no refund entrypoint and never takes custody:
 `charge` sends USDC payer → agent-owner directly, so there is nothing to reverse.
 A dispute refund is therefore a **new transfer from the platform**, not a
-clawback — the settler credits the buyer over the asset SAC, and the dispute is
-recorded on-chain under a *derived* job id so it clears the ReputationLedger
-replay guard (R12).
+clawback — the settler credits the buyer over the asset SAC.
+
+Money only. The dispute's reputation consequence is `dispute_rating`'s (story
+4.04), written under a *derived* job id once the credit has landed, and kept
+apart on purpose: an unconfirmed refund must never be retried, an unconfirmed
+rating always safely can be, and a failed rating must never touch the credit.
 
 Honest trust model, disclosed in every artifact (SOW §3.8 standard):
   - the **platform funds** the credit — the disputed agent's only consequence is
@@ -17,7 +20,6 @@ Honest trust model, disclosed in every artifact (SOW §3.8 standard):
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -33,10 +35,6 @@ logger = logging.getLogger(__name__)
 # price. Stated up front so buyer and operator both know the terms in advance,
 # rather than a case-by-case judgement (product rule).
 DEFAULT_CREDITED_FRACTION = 1.0
-
-# Rating written for an upheld dispute, on the same 0..100 scale the settler's
-# synthetic rating uses — low, so a disputed agent's reputation reflects it.
-DISPUTE_RATING = 10
 
 
 class RefundRefused(Exception):
@@ -111,18 +109,6 @@ def _refuse(dispute: DisputeRecord, code: str, detail: str, amount_usdc: float) 
         amount_usdc,
     )
     return RefundRefused(code, message)
-
-
-def dispute_job_id(job_id: bytes) -> bytes:
-    """Derive the dispute's job id from the settled job's id (R12).
-
-    `ReputationLedger.submit` checks its replay guard on `Rated(agent_id,
-    job_id)` before it reads `kind`, and the settler has already auto-rated the
-    settled job under `job_id` — so a dispute rating on the same pair returns
-    `Error::Replay`. A distinct but deterministic derived id lets the dispute be
-    recorded on-chain, still linkable to the job it disputes.
-    """
-    return hashlib.sha256(job_id + b"dispute").digest()[:16]
 
 
 def credited_amount_usdc(step_charged_usdc: float, fraction: float = DEFAULT_CREDITED_FRACTION) -> float:
@@ -375,12 +361,3 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         amount_usdc,
     )
     return RefundOutcome("TIMEOUT", tx_hash, amount_usdc)
-
-
-async def record_dispute_rating(agent_id: str, job_id: bytes, buyer: str, weight_stroops: int) -> dict[str, Any]:
-    """Record an upheld dispute on-chain as a low rating under the DERIVED job
-    id (R12), so it lands despite the settled job's auto-rating already
-    occupying `Rated(agent_id, job_id)`. Kept linkable to the disputed job."""
-    return await sc.submit_rating_async(
-        agent_id, dispute_job_id(job_id), DISPUTE_RATING, weight_stroops, buyer, "dispute"
-    )
