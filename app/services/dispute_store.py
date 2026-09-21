@@ -698,6 +698,12 @@ class DisputeRecord:
     # Expert link showing another amount would contradict its own evidence.
     # None until credited, and for every dispute credited before 4.06.
     credited_usdc: float | None = None
+    # When this dispute last changed state, in epoch seconds on our own clock
+    # (story 4.06). `resolved_at` is stamped once, at the first decision, so a
+    # refund that timed out and was reconciled hours later has no other record
+    # of when it was credited — and the buyer is owed the time of the step they
+    # are actually looking at. None only for records read from before 4.06.
+    updated_at: float | None = None
 
 
 @dataclass(frozen=True)
