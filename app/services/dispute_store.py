@@ -627,6 +627,27 @@ class InMemoryDisputeStore:
         self._disputes[dispute_id] = claimed
         return claimed
 
+    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+        """Hand the claim back, so an unpaid dispute can be paid later.
+
+        Released ONLY when the caller knows with certainty that nothing was
+        signed, or that what was signed definitively failed on-chain — a cap
+        refusal, a rejected submission, a transfer that came back FAILED. In
+        those cases the buyer is still owed, and leaving the dispute stuck in
+        `crediting` would make a retry impossible.
+
+        A submission that TIMED OUT is the case this must not be used for: the
+        transaction may still settle, so the claim stays held and the dispute
+        stays in `crediting` until a human reconciles it. Paying that buyer
+        twice is a worse failure than paying them late.
+        """
+        current = self._disputes.get(dispute_id)
+        if current is None or current.status != "crediting":
+            return None
+        released = replace(current, status="upheld")
+        self._disputes[dispute_id] = released
+        return released
+
     async def close(self) -> None:
         """Nothing to release — kept so the seam is one shape, not two."""
         return None
