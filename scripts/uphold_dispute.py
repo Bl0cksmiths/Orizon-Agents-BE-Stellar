@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Uphold one dispute, pay its credit, and print the on-chain evidence (story 4.03).
 
+    # ALWAYS FIRST — resolves everything, signs nothing, needs no signing key:
+    python scripts/uphold_dispute.py --dispute-id dsp_1a2b3c4d5e6f7a8b --dry-run
+
+    # then, once the dry run reads right:
     python scripts/uphold_dispute.py --dispute-id dsp_1a2b3c4d5e6f7a8b
 
 **This moves real funds on the configured network.** Story 4.03's first
@@ -93,7 +97,7 @@ from pydantic import ValidationError  # noqa: E402  (after the sys.path bootstra
 try:
     from app.config import settings  # noqa: E402
     from app.security import redact_secrets  # noqa: E402
-    from app.services import refund_svc  # noqa: E402
+    from app.services import dispute_svc, refund_svc  # noqa: E402
     from app.services.dispute_store import (  # noqa: E402
         DisputeRecord,
         SettlementRecord,
@@ -354,6 +358,121 @@ def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementS
     return amount, EXIT_OK
 
 
+def check_config() -> int:
+    """EXIT_OK when this process could actually sign a credit; a refusal otherwise.
+
+    Checked before the uphold call rather than left to the service, so an
+    operator who forgot one environment variable learns it from a sentence
+    instead of from a stack trace out of the signing path — and learns it
+    BEFORE a dispute has been moved to `upheld` by a run that then cannot pay.
+
+    Presence only. No value is printed and the signing key is not even read:
+    that a secret is set is the whole of what this needs to know.
+    """
+    missing = [
+        name
+        for name, present in (
+            ("DISPUTE_REFUNDS_ENABLED=true", settings.dispute_refunds_enabled),
+            ("STELLAR_SIGNING_KEY (the funded settler)", bool(settings.stellar_signing_key.strip())),
+            ("STELLAR_ASSET_SAC", bool(settings.stellar_asset_sac.strip())),
+        )
+        if not present
+    ]
+    if not missing:
+        return EXIT_OK
+    return refuse(
+        EXIT_NOT_CONFIGURED,
+        "not_configured",
+        "this process cannot sign a credit. Missing:",
+        *(f"    - {name}" for name in missing),
+        "Set them, re-run with --dry-run, and only then live. Turning the switch on beside a",
+        "signing key and a SAC also makes API_KEY mandatory, on every network including testnet.",
+    )
+
+
+def report(dispute: DisputeRecord | None, dispute_id: str, amount: float, fallback: int) -> int:
+    """What the STORE says happened to the money, and the exit code that follows.
+
+    The record beats the call, always. A submission that timed out after the
+    claim was taken leaves the dispute in `crediting` whatever the caller
+    returned or raised, and that is the case an operator must not misread at
+    2am — so `crediting` wins first, `credited` next, and only a state that says
+    nothing about the money defers to what the call itself reported.
+    """
+    if dispute is None:
+        say()
+        say(f"  dispute {dispute_id} is not in the store after the uphold call.")
+        say("  Check the payer's account on-chain before doing anything else.")
+        say()
+        return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+
+    if dispute.status == "crediting":
+        return unresolved_credit(dispute, EXIT_TIMEOUT, "THE TRANSFER TIMED OUT — IT MAY STILL LAND.", amount)
+
+    if dispute.status == "credited" and dispute.refund_tx:
+        say()
+        say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
+        say(f"  status:    {dispute.status}")
+        say(f"  tx:        {dispute.refund_tx}")
+        say(f"  evidence:  {expert_url('tx', dispute.refund_tx)}")
+        say(f"  payer:     {expert_url('account', dispute.payer)}")
+        say()
+        say("  Funded by the platform's settler wallet. The disputed agent was NOT charged —")
+        say("  label it that way wherever this hash is quoted.")
+        say()
+        return EXIT_OK
+
+    if dispute.status == "upheld":
+        say()
+        if fallback == EXIT_OK:
+            say(f"  the transfer FAILED — dispute {dispute.id} is back at `upheld` and nothing moved.")
+            say("  The claim was released, so running this again once the cause is fixed (settler")
+            say("  balance, asset SAC, RPC) pays the credit. The log lines above name it.")
+            say()
+            return EXIT_TRANSFER_FAILED
+        say(f"  dispute {dispute.id} stands at `upheld`: the decision was recorded, the credit was")
+        say("  not paid, and no claim is held. Fix what the refusal above names, then re-run.")
+        say()
+        return fallback
+
+    say()
+    say(f"  dispute {dispute.id} is {dispute.status!r} with refund tx {dispute.refund_tx or 'none'}.")
+    say("  That is not a state this run can account for — reconcile the payer's account on-chain")
+    say("  before re-running anything.")
+    say()
+    return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+
+
+async def execute(dispute_id: str, amount: float) -> int:
+    """Uphold the dispute, pay the credit, and report the verdict from the store.
+
+    Every path — clean return, refusal, unexpected exception — falls through to
+    the same read, because the dispute's own record is the only thing that knows
+    whether money moved. A caller that trusted the return value would call a
+    timed-out transfer a failure and re-run it.
+    """
+    store = get_dispute_store()
+    fallback = EXIT_OK
+    try:
+        await dispute_svc.uphold_dispute(dispute_id)
+    except refund_svc.RefundRefused as exc:
+        fallback = refuse(_REFUSAL_EXITS.get(exc.code, EXIT_UNEXPECTED), exc.code, exc.message)
+    except dispute_svc.DisputeError as exc:
+        fallback = refuse(EXIT_NOT_ADJUDICABLE, exc.code, exc.message)
+    except Exception as exc:
+        # Deliberately broad on a money path: an exception nobody anticipated
+        # says nothing about whether the transfer was submitted, and letting it
+        # reach the terminal as a traceback invites exactly the retry that D3
+        # forbids. It is reported, then the store is asked.
+        fallback = EXIT_UNEXPECTED
+        say()
+        say(f"  the uphold call raised {type(exc).__name__}: {exc}")
+        say("  Do NOT re-run yet. The dispute's state below is the only thing that knows")
+        say("  whether anything was signed.")
+
+    return report(await store.get_dispute(dispute_id), dispute_id, amount, fallback)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI.
 
@@ -377,21 +496,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    parser.add_argument(
-        "--dispute-id",
-        required=True,
-        help="the dispute to uphold, as GET /api/disputes/{id} reports it",
-    )
-    args = parser.parse_args(argv)
+async def run(dispute_id: str, dry_run: bool) -> int:
+    """Resolve, preview, and — unless this is a dry run — pay. One event loop.
 
-    dispute, settlement = asyncio.run(resolve(args.dispute_id))
+    One loop for the whole run rather than an `asyncio.run` per step, because
+    the Postgres store keeps a connection pool bound to the loop that created
+    it: a second `asyncio.run` would hand the paying path a pool whose loop had
+    already closed, and it would fail there rather than here.
+    """
+    dispute, settlement = await resolve(dispute_id)
     if dispute is None:
         return refuse(
             EXIT_UNKNOWN_DISPUTE,
             "unknown_dispute",
-            f"no dispute {args.dispute_id!r} in this store.",
+            f"no dispute {dispute_id!r} in this store.",
             "Check the id, and check DATABASE_URL points at the store that holds it —",
             "an unset DATABASE_URL is an in-memory store that knows nothing.",
         )
@@ -412,8 +530,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     amount, code = plan(dispute, settlement, step)
     if amount is None:
         return code
-    say()
-    return EXIT_OK
+
+    if dry_run:
+        say()
+        say("  DRY RUN — nothing was signed and nothing moved.")
+        say("  Re-run WITHOUT --dry-run to pay exactly the credit above.")
+        say()
+        return EXIT_OK
+
+    config_code = check_config()
+    if config_code != EXIT_OK:
+        return config_code
+    return await execute(dispute_id, amount)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    parser.add_argument(
+        "--dispute-id",
+        required=True,
+        help="the dispute to uphold, as GET /api/disputes/{id} reports it",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "resolve everything and print exactly what WOULD be paid — the dispute, the settled "
+            "step, D4's three bounds and which one binds, D5's cap and the payer — then stop. "
+            "Signs nothing, submits nothing, and needs no signing key. Always run this first."
+        ),
+    )
+    args = parser.parse_args(argv)
+    return asyncio.run(run(args.dispute_id, args.dry_run))
 
 
 if __name__ == "__main__":
