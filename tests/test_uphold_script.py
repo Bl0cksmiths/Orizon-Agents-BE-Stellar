@@ -550,6 +550,34 @@ def test_a_dry_run_shows_the_rating_it_would_write(
     assert "then write exactly the rating above" in out
 
 
+def test_the_preview_stacks_the_two_ids_and_underlines_the_bytes_they_share(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The shared prefix is the whole reason the derivation was chosen: it is
+    how a grant reviewer ties the rating to the job on Stellar Expert without
+    reading our code. So the layout is pinned, not just the presence of the ids
+    — both printed whole in the same column, the first 8 bytes (16 hex
+    characters) underlined beneath, and a one-line reason beside the underline.
+    """
+    forbid_uphold(monkeypatch)
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    derived = rating_id_hex()
+    lines = out.splitlines()
+    job_line = next(line for line in lines if line.lstrip().startswith("job id:"))
+    rating_line = next(line for line in lines if line.lstrip().startswith("rating id:"))
+    underline = lines[lines.index(rating_line) + 1]
+    column = job_line.index(JOB)
+
+    assert derived[:16] == JOB[:16] and derived != JOB
+    assert rating_line.index(derived) == column
+    assert underline[:column].strip() == ""
+    assert underline[column : column + 17] == "^" * 16 + " "
+    assert "Stellar Expert" in underline[column + 17 :]
+
+
 # ── the live run: the verdict comes off the STORE, never off the call ──────
 
 
