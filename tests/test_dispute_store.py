@@ -234,6 +234,18 @@ def test_every_dispute_of_one_task_is_listed_and_no_other_task_s_is() -> None:
     assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
 
 
+def test_a_dispute_id_is_prefixed_and_unguessable() -> None:
+    """The id is the only credential `GET /api/disputes/{id}` has — it is handed
+    to the buyer and to nobody else — so it is long random hex rather than a
+    counter anyone could walk to read another buyer's complaint."""
+    first, second = dispute_store.new_dispute_id(), dispute_store.new_dispute_id()
+
+    assert first.startswith("dsp_")
+    assert len(first) == len("dsp_") + 16
+    int(first.removeprefix("dsp_"), 16)  # hex, or this raises
+    assert first != second
+
+
 # ── status transitions, in memory ─────────────────────────────────────────
 
 
