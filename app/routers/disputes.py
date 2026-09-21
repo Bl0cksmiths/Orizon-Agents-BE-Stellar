@@ -30,8 +30,10 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..security import request_id_var
 from ..services import dispute_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus
 
@@ -215,3 +217,84 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
         nonce=nonce,
         expires_at=expires_at,
     )
+
+
+def _duplicate_envelope(exc: dispute_svc.DisputeError, existing: DisputeRecord) -> JSONResponse:
+    """A 409 that still carries the dispute the caller already has.
+
+    `app/main.py`'s exception handler builds every error body, and it has no
+    room for a payload — an HTTPException carries a detail, not a record. So
+    this one response is assembled here, in the handler's exact shape: the same
+    `detail`, the same `error` object, the same request id, plus `dispute`.
+    Anything a client reads off a normal error it can still read off this one.
+
+    The duplication is deliberate and bounded to this function rather than
+    imported from `main`, which imports this module — the cycle is the reason,
+    and `tests/test_dispute_api.py` pins the two shapes together so they cannot
+    drift apart unnoticed.
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=DuplicateDisputeResponse(
+            detail=exc.code,
+            error={"code": exc.code, "message": exc.message, "request_id": request_id_var.get()},
+            dispute=DisputeResponse.of(existing),
+        ).model_dump(),
+    )
+
+
+@router.post(
+    "/disputes",
+    response_model=DisputeResponse,
+    summary="Open a dispute on a settled step",
+    responses={
+        409: {
+            "model": DuplicateDisputeResponse,
+            "description": "This step is already disputed — the body carries the original dispute unchanged.",
+        }
+    },
+)
+async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
+    """Verify the payer's signature and record the dispute.
+
+    Every check — the challenge is live, the signature is the payer's, the
+    payer is the wallet that actually paid this job, the step settled and was
+    charged, the window is still open — belongs to `dispute_svc.open_dispute`
+    and is made there in one place, against one settlement record. Splitting
+    any of it out to here would mean a rule with two homes and one of them
+    unguarded: 4.03's resolution path calls the service, not this route.
+
+    200, never 201, and never a second record: a repeat of a dispute already
+    raised is answered with the first one (see `_duplicate_envelope`), so a
+    buyer who double-submits or refreshes sees what they filed rather than an
+    error they cannot act on.
+    """
+    try:
+        record = await dispute_svc.open_dispute(
+            job_id_hex=body.job_id_hex,
+            step_index=body.step_index,
+            reason=body.reason,
+            payer=body.payer,
+            nonce=body.nonce,
+            signature_b64=body.signature_b64,
+        )
+    except dispute_svc.DisputeError as e:
+        # The refusal is logged with the job, the step and the code — never the
+        # claimed payer or the buyer's reason text. The payer is attacker-chosen
+        # until the signature verifies (`bind`'s rule for the claimed signer),
+        # and the reason is the buyer's own words, which do not belong in an
+        # operator's log viewer.
+        logger.warning("dispute refused: job_id=%s step=%d reason=%s", body.job_id_hex, body.step_index, e.code)
+        if e.existing is not None:
+            return _duplicate_envelope(e, e.existing)
+        raise _refuse(e) from None
+    logger.info(
+        "dispute opened: id=%s task_id=%s job_id=%s step=%d agent_id=%s charged_usdc=%s",
+        record.id,
+        record.task_id,
+        record.job_id_hex,
+        record.step_index,
+        record.agent_id,
+        record.charged_usdc,
+    )
+    return DisputeResponse.of(record)
