@@ -681,16 +681,17 @@ def test_a_credit_is_traced_on_the_workflow_while_it_is_still_on_screen(monkeypa
         )
     )
 
-    async def go() -> tuple[DisputeRecord, Any]:
+    async def go() -> tuple[DisputeRecord, Any, Any]:
         stream = bus.subscribe(TASK)
         credited = await dispute_svc.uphold(dispute.id)
-        return credited, stream.get_nowait()
+        return credited, stream.get_nowait(), stream.get_nowait()
 
-    credited, streamed = asyncio.run(go())
+    credited, streamed, rated = asyncio.run(go())
 
     assert credited.status == "credited"
-    # Stored on the task AND pushed to anyone watching it — the same line.
-    assert state.traces[TASK] == [streamed]
+    # Stored on the task AND pushed to anyone watching it — the same lines, and
+    # the credit FIRST: the rating is only written once the credit has landed.
+    assert state.traces[TASK] == [streamed, rated]
     assert streamed.level == "cost"
     assert streamed.t.startswith("7200.")  # elapsed since the run began, not 00.000
     assert dispute.id in streamed.msg
