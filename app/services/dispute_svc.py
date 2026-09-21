@@ -1,6 +1,6 @@
 """When a buyer may dispute a settled step, what it records, and how it is paid.
 
-Stories 4.02 and 4.03, ADR 0002. This module is the gate in front of the money:
+Stories 4.02 to 4.04, ADR 0002. This module is the gate in front of the money:
 every credit the platform pays starts as a `DisputeRecord` written here and
 leaves through `uphold` here, so every rule that decides whether a dispute may
 exist and whether it may be paid lives in this one file, stated once, in an
@@ -24,10 +24,13 @@ cost no RPC, submit no transaction and touch no reputation —
 
 ADJUDICATING one is where that changes, and only there. `uphold` signs a
 settler-funded transfer through `refund_svc`, under an adjudication this sprint
-performs off-chain (ADR 0002's disclosed trust model); 4.04 writes the dispute
-rating. The credit is FUNDED BY THE PLATFORM and is never clawed back from the
-agent — the deployed escrow takes no custody, so there is nothing to reverse —
-and every artifact a buyer can see has to say so (SOW §3.8).
+performs off-chain (ADR 0002's disclosed trust model), and once that credit has
+landed it writes the dispute rating through `dispute_rating` (4.04). The credit
+is FUNDED BY THE PLATFORM and is never clawed back from the agent — the
+deployed escrow takes no custody, so there is nothing to reverse — and every
+artifact a buyer can see has to say so (SOW §3.8). The rating is the agent's
+consequence instead: a low score on the ReputationLedger that costs it future
+routing.
 
 The authority model in one line: THE PAYER PROVES THEMSELVES WITH A WALLET
 SIGNATURE, checked against the payer recorded on the settlement at the moment it
