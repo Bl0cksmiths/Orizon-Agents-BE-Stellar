@@ -330,20 +330,41 @@ _ADJUDICABLE = ("open", "upheld")
 
 
 def check_status(dispute: DisputeRecord) -> int:
-    """EXIT_OK while this dispute may still be paid; a refusal code otherwise.
+    """EXIT_OK while this dispute may still be paid or rated; a refusal code otherwise.
 
     `claim_refund` is the real lock and refuses every one of these on its own
     (D2). This gate exists so the operator gets a sentence rather than a silent
     no-op — and so a preview says the same thing a live run would, which is the
     only reason to trust a preview at all.
+
+    A `credited` dispute is let through since 4.04, to its RATING ONLY. That is
+    `uphold`'s own rule (D3): on a credited dispute it signs no transfer and
+    re-attempts the rating, which the ledger's replay guard makes safe however
+    often it runs. So this is how a rating that did not land is retried, and
+    how one that did is re-confirmed — and the operator is told, before
+    anything runs, that the credit will not be paid again. Without a refund
+    hash on record it is still refused: that dispute needs reconciling before
+    anything is written against it, its rating included.
     """
     if dispute.status == "credited":
-        lines = [f"dispute {dispute.id} has already been credited — paying it again pays the buyer twice."]
-        if dispute.refund_tx:
-            lines += [f"refund tx:  {dispute.refund_tx}", f"evidence:   {expert_url('tx', dispute.refund_tx)}"]
+        if not dispute.refund_tx:
+            return refuse(
+                EXIT_NOT_ADJUDICABLE,
+                "already_credited",
+                f"dispute {dispute.id} is credited, but no refund tx is recorded against it.",
+                "Reconcile the payer's account on-chain before anything else — its rating included.",
+            )
+        say()
+        say("  note: ALREADY CREDITED — the credit will NOT be paid again. Its evidence:")
+        say(f"        refund tx:  {dispute.refund_tx}")
+        say(f"        evidence:   {expert_url('tx', dispute.refund_tx)}")
+        if dispute.rating_tx:
+            say(f"        rating tx:  {dispute.rating_tx}   (on record — a live run re-confirms it)")
         else:
-            lines.append("No refund tx is recorded against it, which is worth reconciling before anything else.")
-        return refuse(EXIT_NOT_ADJUDICABLE, "already_credited", *lines)
+            say("        rating tx:  none on record — its dispute rating has not landed")
+        say("        A live run writes, or re-confirms, the dispute rating ONLY: uphold signs no")
+        say("        second transfer for a credited dispute.")
+        return EXIT_OK
     if dispute.status == "rejected":
         return refuse(
             EXIT_NOT_ADJUDICABLE,
@@ -949,7 +970,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run(dispute_id: str, dry_run: bool) -> int:
-    """Resolve, preview, and — unless this is a dry run — pay. One event loop.
+    """Resolve, preview, and — unless this is a dry run — pay and rate. One event loop.
 
     One loop for the whole run rather than an `asyncio.run` per step, because
     the Postgres store keeps a connection pool bound to the loop that created
@@ -979,21 +1000,30 @@ async def run(dispute_id: str, dry_run: bool) -> int:
     if status_code != EXIT_OK:
         return status_code
 
-    amount, code = plan(dispute, settlement, step)
-    if amount is None:
-        return code
+    # A credited dispute has nothing left to pay, so there is no credit to plan:
+    # its run is the rating alone, and the preview says so rather than showing
+    # a payout that will not happen.
+    rating_only = dispute.status == "credited"
+    amount: float | None = None
+    if not rating_only:
+        amount, code = plan(dispute, settlement, step)
+        if amount is None:
+            return code
     if not preview_rating(dispute, step):
         return refuse(
             EXIT_UNEXPECTED,
             "rating_not_derivable",
-            f"dispute {dispute.id} could be credited but never rated, so it could never be fully resolved.",
-            "Nothing is paid until that is understood — the line above names what is missing.",
+            f"dispute {dispute.id} can never be rated, so it could never be fully resolved.",
+            "Nothing is signed until that is understood — the line above names what is missing.",
         )
 
     if dry_run:
         say()
         say("  DRY RUN — nothing was signed and nothing moved.")
-        say("  Re-run WITHOUT --dry-run to pay exactly the credit above, then write exactly the rating above.")
+        if rating_only:
+            say("  Re-run WITHOUT --dry-run to write, or re-confirm, exactly the rating above. No transfer.")
+        else:
+            say("  Re-run WITHOUT --dry-run to pay exactly the credit above, then write exactly the rating above.")
         say()
         return EXIT_OK
 
