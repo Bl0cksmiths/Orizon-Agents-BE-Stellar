@@ -488,3 +488,216 @@ def test_the_promise_binds_when_it_is_the_smallest_bound(
     _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
 
     assert _binding_lines(out) == ["    0.0100000 USDC  promised to the buyer when the dispute was opened   <- BINDS"]
+
+
+# ── the live run: the verdict comes off the STORE, never off the call ──────
+
+
+class UpholdSeam:
+    """What `dispute_svc.uphold_dispute` does to the store, for one test.
+
+    Each method writes the state the real service leaves behind for one of the
+    three answers a submission can give (D3's taxonomy), so what is exercised is
+    the script reading that state back — which is the whole of how it decides
+    whether money moved.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._monkeypatch = monkeypatch
+        self.calls: list[str] = []
+
+    def _bind(self, effect: Any) -> None:
+        async def _uphold(dispute_id: str) -> None:
+            self.calls.append(dispute_id)
+            await effect(dispute_id)
+
+        self._monkeypatch.setattr(dispute_svc, "uphold_dispute", _uphold, raising=False)
+
+    def _writes(self, status: DisputeStatus, refund_tx: str | None) -> Any:
+        async def _effect(dispute_id: str) -> None:
+            await dispute_store.get_dispute_store().append_status(dispute_id, status, refund_tx=refund_tx)
+
+        return _effect
+
+    def lands(self, tx: str = REFUND_TX) -> None:
+        """SUCCESS — the dispute ends `credited`, carrying the hash that paid it."""
+        self._bind(self._writes("credited", tx))
+
+    def lands_without_a_hash(self) -> None:
+        """`credited` with nothing a reviewer could open — a state the store
+        permits and the script must not report as evidence."""
+        self._bind(self._writes("credited", None))
+
+    def times_out(self, tx: str | None = REFUND_TX) -> None:
+        """TIMEOUT — the claim stays held, the dispute stays `crediting`, and the
+        in-flight hash is recorded for the human who reconciles it (D3)."""
+        self._bind(self._writes("crediting", tx))
+
+    def fails(self) -> None:
+        """FAILED — nothing moved, so the claim was released and the dispute is
+        back at `upheld`, payable again once the cause is fixed."""
+        self._bind(self._writes("upheld", None))
+
+    def raises(self, exc: BaseException, leaves: tuple[DisputeStatus, str | None] | None = None) -> None:
+        """Blow up, optionally after leaving the store in `leaves`."""
+
+        async def _effect(dispute_id: str) -> None:
+            if leaves is not None:
+                await self._writes(*leaves)(dispute_id)
+            raise exc
+
+        self._bind(_effect)
+
+
+@pytest.fixture
+def uphold(monkeypatch: pytest.MonkeyPatch) -> UpholdSeam:
+    return UpholdSeam(monkeypatch)
+
+
+@pytest.fixture
+def configured(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """A process that could sign: the switch on, a settler key and a SAC set.
+
+    The values are fictional and never reach the chain — the stellar client is
+    booby-trapped for every test in this file. They exist so the live path gets
+    past `check_config`, and so the redaction tests have concrete secrets that
+    must not appear anywhere in the output.
+
+    `DATABASE_URL` is deliberately NOT among them: setting it would make
+    `get_dispute_store()` resolve a Postgres store and dial a database from a
+    hermetic suite.
+    """
+    secrets = {
+        "stellar_signing_key": "SB" + "K7QX4M2" * 7,
+        "api_key": "adjudicator-key-" + "9f3c" * 6,
+    }
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
+    monkeypatch.setattr(settings, "stellar_asset_sac", "CSAC" + "7Z2Q" * 12)
+    for name, value in secrets.items():
+        monkeypatch.setattr(settings, name, value)
+    return secrets
+
+
+def test_a_landed_credit_prints_the_hash_the_explorer_url_and_the_new_status(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The acceptance criterion, in the one form a grant reviewer can check:
+    a hash, a full Stellar Expert URL, and the dispute's new status — plus the
+    funding disclosure beside them, so the hash is never quoted bare."""
+    uphold.lands()
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert uphold.calls == [DISPUTE_ID]
+    assert f"CREDITED — {CREDITABLE_USDC:.7f} USDC paid to {PAYER}" in out
+    assert "status:    credited" in out
+    assert f"tx:        {REFUND_TX}" in out
+    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+    assert "The disputed agent was NOT charged" in out
+
+
+def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The case most likely to be mishandled at 2am, and the only one where
+    getting it wrong pays the buyer twice.
+
+    So the output has to carry all four things: that it may still land, that the
+    script must not be re-run, that the claim is still held on purpose, and what
+    to check on-chain before touching anything.
+    """
+    uphold.times_out()
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TIMEOUT
+    assert "TIMED OUT" in out and "MAY STILL LAND" in out
+    assert "DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE." in out
+    assert "STILL HELD" in out
+    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+    assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
+    assert "release_refund_claim" in out
+    assert "FAILED" not in out.split("TIMED OUT")[0]
+
+
+def test_a_timeout_with_no_hash_still_refuses_to_call_it_a_failure(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """A submission can time out before the client has a hash to report. The
+    transfer may still have landed, so the answer is the payer's account rather
+    than a shrug — and certainly not a retry."""
+    uphold.times_out(tx=None)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TIMEOUT
+    assert "none recorded — the submission returned no hash at all." in out
+    assert f"look for a credit of about {CREDITABLE_USDC:.7f} USDC" in out
+
+
+def test_a_definitively_failed_transfer_is_payable_again(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """`upheld` after a live run means the claim was released because nothing
+    moved — the one outcome where running this again is the right move, so it
+    says so and exits on its own code."""
+    uphold.fails()
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TRANSFER_FAILED
+    assert "the transfer FAILED" in out
+    assert "running this again once the cause is fixed" in out
+
+
+def test_an_unexpected_exception_does_not_override_what_the_store_says(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The reason the verdict is read back off the record rather than taken from
+    the call: an exception says nothing about whether the transfer was
+    submitted. Here one is raised after the claim was taken, and the dispute is
+    still `crediting` — which is a timeout, not a crash, however it surfaced."""
+    uphold.raises(RuntimeError("connection reset while polling"), leaves=("crediting", REFUND_TX))
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TIMEOUT
+    assert "RuntimeError: connection reset while polling" in out
+    assert "DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE." in out
+
+
+def test_a_service_refusal_leaves_the_dispute_untouched_and_says_so(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """A rule refusal out of the dispute service is raised before anything is
+    written, and the report says that in as many words rather than listing a
+    status the operator then has to interpret."""
+    uphold.raises(dispute_svc.DisputeError("dispute_window_closed", "the dispute window closed", 409))
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_NOT_ADJUDICABLE
+    assert "dispute_window_closed" in out
+    assert "untouched at `open`" in out
+
+
+def test_a_credited_dispute_with_no_hash_is_not_treated_as_evidence(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """`credited` without a transaction is not something to print a PASS for:
+    there is nothing a reviewer could open. It exits on the catch-all and asks
+    for an on-chain reconciliation."""
+    uphold.lands_without_a_hash()
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_UNEXPECTED
+    assert "reconcile the payer's account on-chain" in out
