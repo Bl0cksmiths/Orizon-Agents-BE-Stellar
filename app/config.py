@@ -236,6 +236,15 @@ class Settings(BaseSettings):
     # it to [0, 1]). 1.0 = the whole step, which is what ADR 0002 states as the
     # policy buyer and operator are both told in advance.
     dispute_credited_fraction: float = 1.0
+    # Hard ceiling on a SINGLE partial-credit refund, checked before anything
+    # is signed (story 4.03). Deliberately NOT `max_charge_usdc`: that one
+    # bounds what a buyer authorised themselves to spend, while this bounds
+    # what the PLATFORM pays out of its own wallet on an adjudicator's say-so,
+    # so sharing a number between them would be a coincidence rather than a
+    # control. A step settles for hundredths of a USDC on this deployment, so
+    # 1.0 is far above anything legitimate and still keeps the blast radius of
+    # a leaked settler key, or a mistaken uphold, small.
+    max_refund_usdc: float = 1.0
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
