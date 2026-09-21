@@ -170,6 +170,10 @@ _REFUSAL_EXITS = {
 # retried. The report block reads the record and says what actually happened.
 _POST_SIGNING_CODES = frozenset({"refund_failed", "refund_unconfirmed", "refund_in_flight"})
 
+# The script's own log lines — only the ones no service writes, like a failed
+# reputation read — go through the same redacted stderr handler as theirs.
+logger = logging.getLogger("uphold_dispute")
+
 
 def install_logging() -> None:
     """Send the service's own log lines to stderr, redacted.
@@ -604,6 +608,69 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
     say("  before re-running anything.")
     say()
     return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+
+
+async def read_standing(agent_id: str) -> reputation_svc.RepInfo | None:
+    """The agent's reputation as the ledger holds it NOW, or None when it cannot be read.
+
+    Read once before the uphold and once after, so the card's "the agent's
+    dispute rate moves" is on the same screen as the transaction that moves
+    it. A simulated read — no signature, no fee, nothing written — and never a
+    reason for the run to fail: the transactions are the evidence, and this is
+    a view of their effect. So it catches everything and answers None.
+
+    The agent's cached score is dropped first. `fetch_rep` serves a read TTL,
+    and the second read lands well inside the first one's window — without
+    this it would print the pre-rating number beside a rating that landed.
+
+    None rather than the prior when the read fails: `fetch_rep` answers an
+    unreadable ledger with the cold-start prior marked `degraded`, and that
+    prior printed as a dispute rate would give the agent a clean record the
+    ledger may well contradict. With reads switched off it answers the prior
+    too, undegraded, for the same non-reason, so that is None as well.
+    """
+    if not settings.reputation_enabled:
+        return None
+    try:
+        reputation_svc.invalidate_rep(agent_id)
+        info = await reputation_svc.fetch_rep(agent_id)
+    except Exception as exc:
+        logger.warning("could not read agent %s's reputation: %s: %s", agent_id, type(exc).__name__, exc)
+        return None
+    return None if info.degraded else info
+
+
+def report_standing(agent_id: str, before: reputation_svc.RepInfo | None, after: reputation_svc.RepInfo | None) -> None:
+    """The agent's dispute rate before this run and after it, and the movement.
+
+    Printed whatever became of the rating: a rate that did not move beside a
+    rating that did not land is the same story told by the ledger's counters,
+    and one that moved beside a rating reported unconfirmed says it has most
+    likely landed since. `disputed` and `count` are shown beside the rate
+    because they are lifetime counters rather than decayed evidence — each
+    landed dispute rating adds exactly one to both — so they are what an
+    operator checks the movement against.
+    """
+
+    def _line(info: reputation_svc.RepInfo | None) -> str:
+        if info is None:
+            return "could not be read"
+        return f"{info.dispute_rate_bps} bps   ({info.disputed} of {info.count} ratings disputed)"
+
+    say(f"  dispute rate of {agent_id} on the ReputationLedger:")
+    say(f"    before this run:  {_line(before)}")
+    say(f"    after this run:   {_line(after)}")
+    if before is not None and after is not None:
+        moved = after.dispute_rate_bps - before.dispute_rate_bps
+        say(f"    moved:            {moved:+d} bps" if moved else "    moved:            unchanged")
+    else:
+        if settings.reputation_enabled:
+            say("    the ledger read failed — the WARNING above names why.")
+        else:
+            say("    reputation reads are switched off here (REPUTATION_ENABLED=false).")
+        say("    A read never fails this run: the transactions are the evidence, and")
+        say(f"    GET /api/stellar/reputation/{agent_id} re-reads the rate once the ledger is readable.")
+    say()
 
 
 def print_evidence(dispute: DisputeRecord) -> None:
