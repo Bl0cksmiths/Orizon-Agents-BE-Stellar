@@ -28,6 +28,8 @@ do not, so the file holds either side of that merge.
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 import time
 from typing import Any
 
@@ -817,6 +819,16 @@ class RatingSeam:
 
         self._monkeypatch.setattr(dispute_rating, "submit_dispute_rating", _submit)
 
+    def raises(self, exc: BaseException) -> None:
+        """The submit raises instead of answering — which the service, holding a
+        paid dispute, absorbs and logs rather than letting out."""
+
+        async def _submit(dispute: DisputeRecord, settlement: SettlementRecord) -> dispute_rating.RatingOutcome:
+            self.calls.append(dispute.id)
+            raise exc
+
+        self._monkeypatch.setattr(dispute_rating, "submit_dispute_rating", _submit)
+
 
 @pytest.fixture
 def ledger(monkeypatch: pytest.MonkeyPatch) -> RatingSeam:
@@ -1031,6 +1043,34 @@ def test_no_line_of_a_live_run_contains_the_signing_key_or_the_api_key(
     for value in configured.values():
         assert value not in captured.out
         assert value not in captured.err
+
+
+def test_a_rating_submit_that_quotes_the_key_back_leaks_it_nowhere(
+    capsys: pytest.CaptureFixture[str], paying: list[str], ledger: RatingSeam, configured: dict[str, str]
+) -> None:
+    """The rating's realistic leak: a signer failure whose message quotes the
+    key. Once the buyer is paid the service swallows it — it must, or a paid
+    refund would read as a failed one — and logs it with its traceback, so
+    stderr is where the key would surface. That stream is watched through the
+    very handler an operator's terminal gets (`redacted_handler`), and it has to
+    carry the failure, so the check is not passing on an empty buffer."""
+    key = configured["stellar_signing_key"]
+    ledger.raises(RuntimeError(f"could not sign with {key}"))
+    seed()
+    stderr = io.StringIO()
+    handler = uphold_dispute.redacted_handler(stderr)
+    logging.getLogger().addHandler(handler)
+    try:
+        code = uphold_dispute.main(["--dispute-id", DISPUTE_ID])
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    out = capsys.readouterr().out
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+    assert "NO ANSWER" in out
+    assert DISPUTE_ID in stderr.getvalue() and "[redacted]" in stderr.getvalue()
+    assert key not in out
+    assert key not in stderr.getvalue()
 
 
 def test_a_secret_quoted_back_inside_an_error_is_masked(
