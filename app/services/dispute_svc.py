@@ -45,6 +45,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from ..agents.workers.prompt_safety import sanitize_untrusted
@@ -63,6 +64,16 @@ from .dispute_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Told the ledger's own answer to a dispute rating, for an in-process caller
+# that needs more than the record can say. The record answers "is a rating on
+# file", and a TIMEOUT that may yet land and a SUCCESS both leave one there, so
+# a tool reporting evidence to a human cannot tell them apart from the record
+# alone. `uphold` keeps its single return type on purpose — an API response
+# must never disagree with a later GET of the same dispute — so the answer is
+# handed out through this declared seam instead, and only to a caller that
+# asks for it.
+RatingObserver = Callable[[dispute_rating.RatingOutcome], None]
 
 # Re-exported so the router depends on ONE module for the whole dispute flow and
 # the message the frontend shows is the message the verifier checks. Aliases
