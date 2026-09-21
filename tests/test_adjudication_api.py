@@ -541,6 +541,31 @@ def test_a_malformed_note_never_reaches_the_service(client, adjudicating, monkey
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("label", "note"),
+    [("whitespace", "   \n\t "), ("control-characters", "\x00\x07\x1b")],
+    ids=["whitespace", "control-characters"],
+)
+def test_a_note_that_cleans_to_nothing_is_the_services_422(client, adjudicating, monkeypatch, label, note):
+    """The half of the rule the edge cannot enforce, and must not try to.
+
+    `min_length` counts characters before cleaning, so a note of blanks is a
+    note to the edge and reaches the service byte for byte — the router trims
+    nothing, or the service's cleaning would stop being the one definition of
+    "empty". The service's refusal then arrives as its own code at 422,
+    distinct from `validation_error`, so the console can say "that reason is
+    blank" rather than "the request was malformed".
+    """
+    calls = rejects_with(monkeypatch, dispute_error("rejection_reason_required", 422))
+
+    r = client.post(REJECT, json={"note": note}, headers=AUTH)
+
+    assert calls == [(DISPUTE_ID, note)], f"a {label} note did not reach the service unchanged"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "rejection_reason_required"
+    assert r.json()["detail"] == "rejection_reason_required"
+
+
 def test_a_note_at_the_bound_is_accepted(client, adjudicating, monkeypatch):
     # The bound is inclusive, as `OpenDisputeReq.reason`'s is — pinned so a
     # future tightening is a deliberate change rather than an off-by-one. It is
