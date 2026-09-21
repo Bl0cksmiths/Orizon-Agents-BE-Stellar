@@ -415,3 +415,24 @@ def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) ->
     # Not adjudicated, not claimed, not paid — the dispute is exactly as the
     # buyer left it.
     assert store._disputes[dispute.id].status == "open"
+
+
+def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
+    """A shutdown cancel can land between the submit and its confirmation, and
+    `CancelledError` is a BaseException that no `except Exception` sees. It
+    must therefore reach no release: the transfer may have settled, so this has
+    to behave exactly like a timeout — the claim stays held and the dispute
+    stays `crediting` for a human to reconcile, rather than being handed back
+    to a retry that would credit the buyer twice."""
+    dispute = a_dispute()
+
+    async def _cancelled_mid_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(refund_svc, "execute_refund", _cancelled_mid_flight)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    unaccounted = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert unaccounted is not None and unaccounted.status == "crediting"
