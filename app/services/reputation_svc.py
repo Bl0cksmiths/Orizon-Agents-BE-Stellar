@@ -497,3 +497,26 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None)
         # single RPC outage produces the same error for every agent.
         _log_degraded([a for a, _ in failures], len(agent_ids), failures[0][1])
     return {info.agent_id: info for info, _ in results}
+
+
+def invalidate_rep(agent_id: str) -> None:
+    """Forget the cached rep_state for one agent, so the next read goes back
+    to the ledger.
+
+    Call it once a rating for the agent has LANDED — a dispute rating above
+    all. Without it every reader keeps the pre-rating score for up to
+    `reputation_read_ttl_seconds`, and a plan decomposed inside that window is
+    routed and stamped on the very number the dispute was meant to change. A
+    read already in flight when this runs is detached rather than cancelled,
+    and cannot write its pre-rating result back (`app.stellar.cache.invalidate`).
+
+    This one key is enough because it is the only cache in front of
+    reputation: `fetch_rep`, `fetch_reps`, both /api/stellar/reputation routes,
+    the decompose snapshot and the dashboard's trust average all read through
+    `_read_rep`. Nothing downstream memoises a RepInfo — every decompose takes
+    a fresh `fetch_reps` snapshot, and the stamps on a plan already stored
+    record what THAT plan was judged on, not a score anything reuses.
+    """
+    from ..stellar import cache as rcache
+
+    rcache.invalidate(_rep_cache_key(agent_id))
