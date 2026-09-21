@@ -358,21 +358,48 @@ def test_a_dispute_whose_settlement_is_missing_is_refused(
     assert "no settlement record" in out
 
 
-def test_an_already_credited_dispute_is_refused_and_reprints_its_evidence(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+def test_a_credited_dispute_is_previewed_as_a_rating_only_run(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    credit: CreditSeam,
+    chain_calls: list[str],
 ) -> None:
-    """The refusal that matters most, because the operator asking for it is
-    usually asking "did this one go through?" — so it answers with the hash and
-    the explorer link instead of only saying no."""
+    """Since 4.04 a credited dispute is not a dead end: `uphold` re-attempts its
+    rating and nothing else (D3), so this is how a rating that did not land is
+    retried. The operator asking is still usually asking "did this one go
+    through?", so the preview answers with the refund's hash and link, says in
+    so many words that it will not be paid again, and says where the rating
+    stands — and, being a dry run, touches neither the uphold nor the chain."""
     forbid_uphold(monkeypatch)
     seed(status="credited", refund_tx=REFUND_TX)
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert "ALREADY CREDITED — the credit will NOT be paid again" in out
+    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+    assert "rating tx:  none on record" in out
+    assert rating_id_hex() in out
+    assert "exactly the rating above. No transfer." in out
+    # No credit is planned for a dispute that has already been paid.
+    assert "credit:    " not in out
+    assert chain_calls == []
+
+
+def test_a_credited_dispute_with_no_refund_hash_is_still_refused(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """`credited` with nothing a reviewer could open is a record to reconcile,
+    not one to write a rating against — the rating is the consequence of a
+    credit, and this one's credit is not evidenced."""
+    forbid_uphold(monkeypatch)
+    seed(status="credited")
 
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
 
     assert code == uphold_dispute.EXIT_NOT_ADJUDICABLE
     assert "already_credited" in out
-    assert REFUND_TX in out
-    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+    assert "nothing was signed" in out
 
 
 def test_a_rejected_dispute_is_refused(
