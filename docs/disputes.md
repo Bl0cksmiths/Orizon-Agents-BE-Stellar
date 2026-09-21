@@ -145,9 +145,15 @@ A person decides, through an authenticated route, and the payout that follows
 is ordered by that decision alone. There is no automatic rule that upholds a
 dispute, and nothing on-chain weighs the claim.
 
-**Rejecting** is one write: the dispute moves to `rejected` with its resolution
-time, the reason it was opened with stays on the record, and nothing is signed
-or spent.
+**Rejecting** is one write, and it is only ever made on a dispute that is still
+`open`: the dispute moves to `rejected` with its resolution time, the reason it
+was opened with stays on the record, and nothing is signed or spent. Any other
+status is refused rather than absorbed — a dispute that is already paid, that
+is mid-payout, or that has already been rejected cannot be rejected again,
+because that would be a second adjudicator quietly overruling the first. The
+adjudicator may attach a note; it is logged with the decision rather than
+written onto the dispute, which carries the buyer's evidence and not the
+platform's commentary on it.
 
 **Upholding** is where money moves, and it happens in a fixed order:
 
@@ -168,6 +174,15 @@ or spent.
 The claim is what makes a credit payable exactly once. Two adjudicators
 clicking at the same moment, a retried request, a redeployed process mid-flight
 — all of them meet the same row, and only one gets past it.
+
+**A repeat uphold is therefore never a second payout.** An adjudicator who
+double-clicks, or a console retrying a dropped response, is answered with the
+dispute as it now stands: an already-credited dispute comes back with the same
+record and the same transaction hash, and one that another caller is part-way
+through paying comes back as whatever that caller has made of it. The one
+repeat that is refused outright is an uphold aimed at a dispute stuck in
+`crediting` — that is the reconciliation case at the end of this document, and
+it is refused precisely so it cannot be retried into a double credit.
 
 **When the transfer definitively fails** — the network rejected it, so no money
 moved — the claim is released and the dispute goes back to `upheld`, payable
