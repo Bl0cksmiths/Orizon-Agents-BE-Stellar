@@ -572,11 +572,20 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
     (D1) — the switch is a money control here and an authorisation control
     there, and only one of those is this module's to make.
 
-    `note` is the adjudicator's reason. `DisputeRecord` has no field for it —
-    the record carries the BUYER's evidence, and inventing a place for the
-    platform's own commentary inside it is not this story's to do — so it is
-    logged with the decision and cleaned exactly the way a buyer's reason is,
-    because free text that reaches a log is free text either way.
+    `note` is the adjudicator's reason, and it is DELIBERATELY NOT LOGGED.
+    `open_dispute` sets that convention and this follows it: free text about
+    one complaint belongs on the record, never in the operator's log viewer,
+    where it is unbounded, useless for reconstructing an incident, and — for
+    the buyer's `reason`, which arrives over a public route — written by
+    somebody else. Only the FACT that a note was given is recorded here.
+
+    It is also NOT PERSISTED, and no caller may treat it as though it were.
+    `DisputeRecord` carries the BUYER's evidence and has no field for the
+    platform's own commentary; adding one is the store's change to make, not
+    this module's. The parameter exists so the adjudication API can accept a
+    note today without the shape of `reject` changing when a column for it
+    arrives — until then the durable record of a rejection is the status and
+    the moment it resolved.
     """
     dispute = await _load_for_adjudication(dispute_id)
     if dispute.status != "open":
@@ -590,12 +599,12 @@ async def reject(dispute_id: str, *, note: str | None = None) -> DisputeRecord:
         )
     rejected = await get_dispute_store().append_status(dispute_id, "rejected")
     logger.info(
-        "dispute rejected: id=%s job=%s step=%s payer=%s note=%s",
+        "dispute rejected: id=%s job=%s step=%s payer=%s noted=%s",
         rejected.id,
         rejected.job_id_hex,
         rejected.step_index,
         rejected.payer,
-        sanitize_untrusted(note, max_chars=MAX_REASON_CHARS) if note else "-",
+        "yes" if note else "no",
     )
     return rejected
 
