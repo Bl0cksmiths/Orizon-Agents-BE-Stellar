@@ -244,6 +244,20 @@ CREATE TABLE IF NOT EXISTS refund_claims (
 );
 """
 
+# The reconciliation queue, oldest claim first — every payout that started and
+# has not finished, which on this path means every buyer who may be waiting on
+# a transfer nobody is going to retry for them.
+#
+# `dispute_id` breaks a tie between two claims taken in the same clock tick, so
+# two reads of an unchanged table cannot come back in different orders. No
+# LIMIT: a queue with enough rows to need paging is an incident, and truncating
+# it would hide exactly the row that made it one.
+_SELECT_REFUND_CLAIMS_SQL = """
+SELECT dispute_id, claimed_at
+FROM refund_claims
+ORDER BY claimed_at, dispute_id
+"""
+
 
 # The newest settlement for one job, and for one task.
 #
@@ -609,6 +623,23 @@ class DisputeRecord:
     rating_tx: str | None = None
 
 
+@dataclass(frozen=True)
+class RefundClaim:
+    """One payout that started and has not finished.
+
+    A claim is taken before anything is signed and dropped when the dispute is
+    credited or rejected, so a claim that is still held is a refund that began
+    and did not end: a transfer that timed out and by D3 is never retried
+    automatically, a process that died mid-payout, a buyer still waiting.
+
+    `claimed_at` is how long they have been waiting, which is the number that
+    decides whether this one needs a human now.
+    """
+
+    dispute_id: str
+    claimed_at: float
+
+
 def new_dispute_id() -> str:
     """A dispute id: unguessable, so `GET /api/disputes/{id}` needs no account."""
     return f"dsp_{secrets.token_hex(8)}"
@@ -662,6 +693,8 @@ class DisputeStore(Protocol):
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
 
     async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None: ...
+
+    async def list_refund_claims(self) -> tuple[RefundClaim, ...]: ...
 
     async def close(self) -> None: ...
 
@@ -814,6 +847,16 @@ class InMemoryDisputeStore:
         released = replace(current, status="upheld")
         self._disputes[dispute_id] = released
         return released
+
+    async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
+        """Every payout still in flight, oldest first.
+
+        Insertion order is claim order, so the dict needs no sorting to read
+        the way the Postgres queue does.
+        """
+        return tuple(
+            RefundClaim(dispute_id=dispute_id, claimed_at=at) for dispute_id, at in self._refund_claims.items()
+        )
 
     async def close(self) -> None:
         """Nothing to release — kept so the seam is one shape, not two."""
@@ -1115,6 +1158,19 @@ class PostgresDisputeStore:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id)
         return None if row is None else self._to_dispute(row)
+
+    async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
+        """Every payout still in flight, oldest first.
+
+        The mutex doubles as the reconciliation queue, and this is the read
+        that makes that true rather than aspirational. D3 forbids retrying a
+        timed-out transfer, so the ONLY way a buyer whose refund hung gets
+        paid is a human finding them — and a lock nobody can list is a buyer
+        nobody can find.
+        """
+        pool = await self._ready_pool()
+        rows = await pool.fetch(_SELECT_REFUND_CLAIMS_SQL)
+        return tuple(RefundClaim(dispute_id=row["dispute_id"], claimed_at=float(row["claimed_at"])) for row in rows)
 
     async def close(self) -> None:
         # Cleared before the await so a close racing a request cannot hand out
