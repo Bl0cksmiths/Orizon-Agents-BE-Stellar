@@ -37,8 +37,9 @@ from stellar_sdk import Keypair
 import app.stellar.client as sc
 from app.config import settings
 from app.schemas import Task
-from app.services import dispute_store, dispute_svc, refund_svc
+from app.services import dispute_rating, dispute_store, dispute_svc, refund_svc, reputation_svc
 from app.services import external_binding as eb
+from app.services.dispute_rating import RatingOutcome, RatingStatus
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
 from app.services.dispute_svc import DisputeError, dispute_message
 from app.state import state
@@ -99,6 +100,62 @@ def _fresh_state(monkeypatch):
     state.task_order.clear()
     bus._subs.clear()
     bus._closed.clear()
+
+
+class Rater:
+    """The dispute rating, as `uphold` sees it: `dispute_rating.submit_dispute_rating`.
+
+    Stubbed at the service seam rather than at the chain, because what this
+    file asserts is WHEN the rating is written relative to the refund —
+    `tests/test_dispute_rating_flow.py` fakes the chain beneath it and drives
+    the real mapping. It models the one ledger rule the ordering leans on, the
+    replay guard: once a dispute's rating has landed, every later attempt is
+    answered REPLAY. `script` queues the answers to give before that.
+
+    Each call records the dispute's status AS THE STORE HELD IT at that
+    instant, because "had the credit already been recorded" is the question.
+    """
+
+    def __init__(self) -> None:
+        self.script: list[RatingStatus] = []
+        self.stored_status: list[str] = []
+        self._landed: set[str] = set()
+
+    @property
+    def calls(self) -> int:
+        return len(self.stored_status)
+
+    async def __call__(self, dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
+        stored = await dispute_store.get_dispute_store().get_dispute(dispute.id)
+        self.stored_status.append(stored.status if stored else "missing")
+        step = settlement.step(dispute.step_index)
+        assert step is not None
+        derived = dispute_rating.dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index).hex()
+        weight = reputation_svc.rating_weight_stroops(step.price_usdc)
+        status: RatingStatus = "REPLAY"
+        if dispute.id not in self._landed:
+            status = self.script.pop(0) if self.script else "SUCCESS"
+        if status == "SUCCESS":
+            self._landed.add(dispute.id)
+        tx = {"SUCCESS": "tx_rating", "TIMEOUT": "tx_rating_inflight", "FAILED": "tx_rating_rejected"}.get(status)
+        return RatingOutcome(status, tx, derived, dispute_rating.DISPUTE_RATING, weight)
+
+
+@pytest.fixture(autouse=True)
+def rater(monkeypatch) -> Rater:
+    """Every uphold that credits now rates, so every test here has a rater —
+    one that lands by default, which is what an ordinary credit meets."""
+    stub = Rater()
+    monkeypatch.setattr(dispute_rating, "submit_dispute_rating", stub)
+    return stub
+
+
+@pytest.fixture(autouse=True)
+def invalidated(monkeypatch) -> list[str]:
+    """The agents whose cached score was dropped, in order."""
+    dropped: list[str] = []
+    monkeypatch.setattr(reputation_svc, "invalidate_rep", dropped.append)
+    return dropped
 
 
 def _sign(keypair: Keypair, message: str) -> str:
