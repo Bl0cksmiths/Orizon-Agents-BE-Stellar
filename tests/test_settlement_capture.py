@@ -426,3 +426,45 @@ def test_a_store_that_raises_does_not_fail_the_workflow(monkeypatch, caplog):
     lines = state.traces[task_id]
     assert any(ln.level == "error" and "cannot be disputed" in ln.msg for ln in lines)
     assert not any("dispute window" in ln.msg for ln in lines)
+
+
+# ── what each step produced outlives the trace (story 4.05) ────────────
+class _SaysWorker:
+    """Delivers exactly `output` — the step whose words a settlement keeps."""
+
+    def __init__(self, output: dict, name: str = "w.says") -> None:
+        self.name = name
+        self._output = output
+
+    async def run(self, intent, rationale, context=None):
+        return self._output
+
+
+def _traced(task_id: str, worker_name: str) -> list[str]:
+    """What each of `worker_name`'s `out` lines said, without its name prefix.
+
+    The text a buyer watched for that worker's steps, in step order — the
+    thing a settled summary must agree with.
+    """
+    prefix = f"{worker_name}: "
+    return [
+        ln.msg.removeprefix(prefix)
+        for ln in state.traces[task_id]
+        if ln.level == "out" and ln.msg.startswith(prefix) and "preview →" not in ln.msg
+    ]
+
+
+def test_a_delivered_step_keeps_the_summary_its_trace_line_showed(monkeypatch, store):
+    """The buyer disputes from the settlement, not the trace, so the settlement
+    carries the line — and carries the very text the trace showed, since two
+    renderings of one output are two chances to disagree about it."""
+    _resolves_to(monkeypatch, lambda agent_id: _SaysWorker({"summary": "12 sources, 3 conflicting"}, "w.research"))
+    _patch_settlement(monkeypatch)
+    task_id = "tsk_capture_summary"
+
+    _run_paid(_plan(), task_id)
+
+    (step,) = store.recorded[0].steps
+    assert step.output_summary == "12 sources, 3 conflicting"
+    assert _traced(task_id, "w.research") == [step.output_summary]
+    assert asyncio.run(store.get_settlement_by_task(task_id)).steps[0].output_summary == step.output_summary
