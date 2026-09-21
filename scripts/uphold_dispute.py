@@ -93,6 +93,14 @@ EXIT_ABOVE_CAP = 8
 EXIT_TRANSFER_FAILED = 9
 EXIT_TIMEOUT = 10
 EXIT_UNEXPECTED = 11
+# Story 4.04's two, and both mean THE BUYER HAS BEEN PAID: the credit landed and
+# is recorded, and only the agent's dispute rating is wrong. They are new codes
+# rather than 9 or 10 because they ask for the opposite of what those ask for.
+# 12 is the one outcome after a signature where re-running is RIGHT — a re-run
+# retries the rating alone, and the ledger's replay guard means it cannot land
+# twice. 13 is a collision, which no re-run can fix and a human must look up.
+EXIT_RATING_NOT_LANDED = 12
+EXIT_RATING_COLLISION = 13
 
 # Make `python scripts/uphold_dispute.py` work from the repo root: put the repo
 # root on sys.path so the `app` package resolves without PYTHONPATH.
