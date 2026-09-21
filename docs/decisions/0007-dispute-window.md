@@ -219,3 +219,34 @@ rewrite what a buyer was already shown. Its id is
 `dsp_` + `secrets.token_hex(8)` — unguessable, so a buyer can read their own
 dispute back without an account, which is the same trade the task read token
 makes and the reason `GET /api/disputes/{id}` needs no credential.
+
+### D4 — What 4.02 deliberately does not do
+
+**Opening a dispute writes `open` and nothing else.** No transaction is
+submitted, no rating is written, no reputation moves, and nobody adjudicates.
+The full status vocabulary is defined now — `open → upheld → credited`, or
+`open → rejected` — so the later stories append to a lifecycle rather than
+redesign one, but 4.02 is the only story that never leaves `open`. Story 4.03
+pays the credit and records `credited` with its refund tx; story 4.04 writes
+the on-chain rating and records `upheld` with its rating tx.
+
+That an open dispute costs the agent nothing is a product rule, not an
+implementation gap. A dispute anyone can raise, that immediately dents a
+competitor's on-chain score, is a free weapon — and because the ledger is
+append-only there would be no way to take the dent back when the dispute was
+rejected. So the only thing that ever reaches the chain is an **upheld**
+dispute, and until then the disputed agent's reputation reads exactly as it did
+before. The buyer is told this plainly in `docs/disputes.md` rather than left
+to infer it.
+
+The dispute is emitted into the workflow's trace, so it appears in the run's
+own record where a buyer is already looking. That is a convenience, not the
+record: traces are in-memory and die with the process, which is the whole
+reason D3 exists.
+
+Adjudication itself stays out of scope. ADR 0002 already disclosed that the
+platform adjudicates and that there is no on-chain arbitration this sprint;
+4.02 does not narrow that further by inventing an automatic rule. What it does
+is make adjudication *possible* — a mandatory written reason, the settled
+amounts, the per-step delivery flags and the timestamps are all captured, so
+whoever reviews the dispute is reading evidence rather than reconstructing it.
