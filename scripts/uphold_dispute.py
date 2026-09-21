@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Uphold one dispute, pay its credit, and print the on-chain evidence (story 4.03).
+"""Uphold one dispute, pay its credit, rate the agent, and print the on-chain evidence (4.03, 4.04).
 
     # ALWAYS FIRST — resolves everything, signs nothing, needs no signing key:
     python scripts/uphold_dispute.py --dispute-id dsp_1a2b3c4d5e6f7a8b --dry-run
@@ -20,6 +20,23 @@ is a NEW transfer out of the settler's own wallet to the buyer. The disputed
 agent's only consequence is reputational (story 4.04's rating), never a seizure
 of its funds. Every artifact built from this output has to say so; that is ADR
 0002's disclosed trust model, not a footnote.
+
+**One live run produces both halves of the dispute's evidence.** The credit,
+and — once it has landed and is recorded — the agent's `dispute`-kind rating on
+the ReputationLedger (4.04): two transactions, printed side by side with their
+Stellar Expert links, beside the agent's dispute rate as it stood before the
+run and after it. The dry run previews both. For the rating that means its
+value, its weight and the DERIVED id it is filed under, stacked over the sealed
+job id so the 8 bytes the two share — the link a reviewer follows from the
+rating back to the job — are plain to see.
+
+**Whether to re-run is in the exit code, and it is not always "never".** A
+timed-out CREDIT must not be retried (10): it may still land, and a second
+transfer pays the buyer twice. A rating that did not land after a credit that
+did (12) is the opposite case: `uphold` never pays a credited dispute again,
+and the ledger refuses a second rating under the same id, so a re-run retries
+the rating and nothing else. A rating collision (13) is neither, and is looked
+up by hand before anything else.
 
 Why this drives the service layer in-process, and not `POST /api/disputes/{id}/uphold`
 -------------------------------------------------------------------------------------
@@ -47,16 +64,17 @@ Three reasons, in the order they matter:
    operator's own machine.
 
 The evidence is not weaker for it. Point `DATABASE_URL` at the same Postgres the
-deployment uses and the dispute's move to `credited`, carrying its `refund_tx`,
-is served by that deployment's own `GET /api/disputes/{id}` the moment this
-exits — so a reviewer still gets the API-visible half without the route ever
-being armed.
+deployment uses and the dispute's move to `credited`, carrying its `refund_tx`
+and its `rating_tx`, is served by that deployment's own `GET /api/disputes/{id}`
+the moment this exits — so a reviewer still gets the API-visible half without
+the route ever being armed.
 
 What it needs in the environment
 --------------------------------
 `STELLAR_SIGNING_KEY` (the settler, funded via friendbot on testnet),
-`STELLAR_ASSET_SAC`, `DISPUTE_REFUNDS_ENABLED=true`, and a `DATABASE_URL`
-pointing at the store that actually holds the dispute. Turning that switch on
+`STELLAR_ASSET_SAC`, `STELLAR_REPUTATION_LEDGER` (the settler must be its
+Scorer), `DISPUTE_REFUNDS_ENABLED=true`, and a `DATABASE_URL` pointing at the
+store that actually holds the dispute. Turning that switch on
 with a signing key and a SAC set makes `API_KEY` mandatory — the config refuses
 to boot without it, on every network including testnet
 (`config._money_capable_config_requires_api_key`).
