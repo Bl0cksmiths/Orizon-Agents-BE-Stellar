@@ -675,12 +675,12 @@ async def uphold_dispute(
 @router.post(
     "/disputes/{dispute_id}/reject",
     response_model=DisputeResponse,
-    summary="Reject a dispute, optionally with a note",
+    summary="Reject a dispute, with a reason the buyer is shown",
     dependencies=[Depends(require_adjudicator)],
 )
 async def reject_dispute(
+    body: RejectDisputeReq,
     dispute_id: str = Path(..., min_length=1, max_length=64),
-    body: RejectDisputeReq | None = None,
 ) -> DisputeResponse:
     """Find for the platform: close the dispute without crediting anything.
 
@@ -692,28 +692,32 @@ async def reject_dispute(
     one. The refund switch gates it too, for the same reason — a deployment
     that cannot pay a dispute out must not be able to dispose of one either.
 
-    The note is the adjudicator's, and it is passed through rather than
-    interpreted: this handler does not decide that a rejection needs a reason,
-    because whether one is required is a policy the service owns and would
-    otherwise hold an opinion about in two places.
+    The note is REQUIRED and it is the buyer's to read — it comes back as the
+    dispute's `rejection_reason`. The body is required with it, so no body, no
+    note, a null note and an empty one are all the same field-level 422, and
+    the service is never called. The note is then passed through rather than
+    interpreted: whether what is left of it after cleaning still says anything
+    is the service's call, because only the service cleans it, and its
+    `rejection_reason_required` reaches the adjudicator through `_refuse`
+    like every other code — 422, verbatim, with no mapping to add here.
     """
-    note = body.note if body is not None else None
     try:
-        record = await dispute_svc.reject(dispute_id, note=note)
+        record = await dispute_svc.reject(dispute_id, note=body.note)
     except dispute_svc.DisputeError as e:
         # `uphold_dispute`'s rule, and the note is left out for
         # `open_dispute`'s: free text written by a human about a specific
         # complaint does not belong in an operator's log viewer.
         logger.warning("reject refused: dispute_id=%s reason=%s", dispute_id, e.code)
         raise _refuse(e) from None
+    # Nothing about the note, not even whether there was one: every rejection
+    # that gets this far carries one, so a flag could only ever say yes.
     logger.info(
-        "dispute rejected: id=%s job_id=%s task_id=%s step=%d payer=%s status=%s noted=%s",
+        "dispute rejected: id=%s job_id=%s task_id=%s step=%d payer=%s status=%s",
         record.id,
         record.job_id_hex,
         record.task_id,
         record.step_index,
         record.payer,
         record.status,
-        note is not None,
     )
     return DisputeResponse.of(record)
