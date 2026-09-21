@@ -331,7 +331,58 @@ attested but has **no dispute window**, and the only trace of that is the error
 log — which is why that failure is logged with the same weight as an
 attestation that did not settle.
 
-Related: `docs/decisions/0007-dispute-window.md` (why the window, the
+## For operators: reconciling a dispute stuck in `crediting`
+
+A dispute sitting in `crediting` has a refund claim held on it and a transfer
+this service could not confirm. In practice that means one thing: the
+submission **timed out**. It was sent, and whether it settled is knowable only
+from the chain.
+
+**Do not simply retry the payout.** A timed-out transaction may still land,
+and a second transfer would credit the buyer twice out of the platform's own
+wallet, with nothing that can reverse it. The claim is deliberately left in
+place to stop that happening, and releasing it or re-running the uphold before
+the chain has been read is the one action that turns a recoverable delay into
+an unrecoverable loss.
+
+**Find them.** The claim table holds exactly the disputes that are mid-payout
+— it is emptied on success, on release and on rejection — so anything in it
+whose claim is more than a few seconds old is stuck:
+
+```sql
+SELECT dispute_id, to_timestamp(claimed_at) AS claimed_at
+FROM refund_claims
+ORDER BY claimed_at;
+```
+
+The error log is the other half of the picture, and it carries the four facts
+worth having at the moment it happened: the dispute id, the job id, the payer
+and the amount. Search it for the dispute id before touching anything.
+
+**Check the chain, in this order.**
+
+1. **The in-flight hash.** The dispute record carries it —
+   `GET /api/disputes/{dispute_id}` returns it as the refund transaction. Look
+   it up on Horizon or Stellar Expert. A transaction found and successful
+   means **the buyer has been paid**: the credit landed, and only this
+   service's record of it is missing.
+2. **The settler's own history**, if the hash turns up nothing. Read the
+   settler account's transfers over the asset contract around the claim time,
+   looking for one to that payer for that amount. A timeout is exactly the case
+   where this service's view and the chain's disagree, so confirm from the
+   account rather than concluding from a single absent hash.
+3. **Only after both** is it safe to say the transfer never landed.
+
+**Then settle the record to match the chain.** A dispute whose transfer landed
+belongs in `credited`, carrying that hash. One whose transfer provably never
+landed can have its claim released, returning it to `upheld`, where the payout
+can be ordered again. Both are deliberate manual writes against the dispute
+store: no script ships for this, and that is on purpose — the decision is the
+part that matters, and it is one a person has to make by reading the chain.
+
+Related: `docs/decisions/0008-refund-execution.md` (why adjudication is an
+authenticated route, why the claim is taken before signing and why a timeout is
+never retried), `docs/decisions/0007-dispute-window.md` (why the window, the
 signature and the settlement record are shaped this way),
 `docs/decisions/0002-partial-credit-refund.md` (where the credit comes from and
 what was rejected) and `docs/reputation.md` (what a rating is worth and how the
