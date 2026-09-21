@@ -912,3 +912,45 @@ def test_a_rating_that_does_not_land_never_touches_the_refund(
     assert answered.rating_tx == rating_tx
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == answered
     assert len(chain.calls) == 1
+
+
+def test_an_open_or_rejected_dispute_is_never_rated(monkeypatch, rater, invalidated) -> None:
+    """A dispute is a CLAIM until it is upheld AND paid, and a claim costs the
+    agent nothing. Opening one never rates; rejecting one never rates; and an
+    uphold of a rejected one is refused before anything could."""
+    no_signing(monkeypatch)
+    opened = a_dispute()
+    rejected = asyncio.run(dispute_svc.reject(a_dispute(step=1).id))
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(rejected.id))
+
+    assert refused.value.code == "dispute_rejected"
+    assert rater.calls == 0
+    assert invalidated == []
+    for dispute_id in (opened.id, rejected.id):
+        stored = asyncio.run(dispute_svc.get_dispute(dispute_id))
+        assert stored is not None and stored.rating_tx is None
+
+
+@pytest.mark.parametrize(("answer", "code"), [(REJECTED, "refund_failed"), (LOST, "refund_unconfirmed")])
+def test_an_upheld_dispute_whose_credit_did_not_land_is_never_rated(
+    monkeypatch, rater, answer: dict[str, Any], code: str
+) -> None:
+    """The rating follows the MONEY, not the decision. An uphold whose
+    transfer failed leaves a dispute that is upheld and unpaid, and one whose
+    transfer timed out leaves one that may or may not be paid — neither is
+    `credited`, so neither is rated, and the repeat uphold a timeout refuses
+    does not rate either."""
+    dispute = a_dispute()
+    settler(monkeypatch, answer)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+    assert refused.value.code == code
+
+    if answer is LOST:
+        with pytest.raises(DisputeError):
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert rater.calls == 0
