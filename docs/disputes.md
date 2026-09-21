@@ -391,13 +391,15 @@ returning the dispute to `upheld`, before the chain has been read. That is the
 one action that turns a recoverable delay into an unrecoverable loss.
 
 **Find them.** The claim table holds exactly the disputes that are mid-payout
-— it is emptied on success, on release and on rejection — so anything in it
-whose claim is more than a few seconds old is stuck:
+— it is emptied inside the same statement that credits, releases or rejects —
+so anything in it whose claim is more than a few seconds old is stuck. The
+store reads it back oldest-first as `list_refund_claims()`, which is the
+reconciliation queue; the same thing straight from the database is:
 
 ```sql
 SELECT dispute_id, to_timestamp(claimed_at) AS claimed_at
 FROM refund_claims
-ORDER BY claimed_at;
+ORDER BY claimed_at, dispute_id;
 ```
 
 The error log is the other half of the picture, and it carries the four facts
@@ -420,12 +422,21 @@ and the amount. Search it for the dispute id before touching anything.
    account rather than concluding from a single absent hash.
 3. **Only after both** is it safe to say the transfer never landed.
 
-**Then settle the record to match the chain.** A dispute whose transfer landed
-belongs in `credited`, carrying that hash. One whose transfer provably never
-landed can have its claim released, returning it to `upheld`, where the payout
-can be ordered again. Both are deliberate manual writes against the dispute
-store: no script ships for this, and that is on purpose — the decision is the
-part that matters, and it is one a person has to make by reading the chain.
+**Then settle the record to match the chain**, and only then:
+
+- **It succeeded.** The buyer has been credited. Close the dispute by recording
+  what landed — `append_status(dispute_id, "credited", refund_tx=<hash>)`.
+  Ordering the payout again instead would credit them a second time.
+- **It failed, or the hash is on no explorer and the payer's balance never
+  moved.** Nothing moved, so `release_refund_claim(dispute_id)` returns the
+  dispute to `upheld`, and only then may the payout be ordered again.
+- **You cannot tell.** Leave it. Late is recoverable; twice is not.
+
+Both writes are deliberate and manual, because the decision is the part that
+matters and it is one a person has to make by reading the chain. The tooling
+will not make it for you: `scripts/uphold_dispute.py` refuses a dispute in
+`crediting` and prints this same block with the explorer links filled in, and
+so does the API, with `refund_in_flight`.
 
 Related: `docs/decisions/0008-refund-execution.md` (why adjudication is an
 authenticated route, why the claim is taken before signing and why a timeout is
