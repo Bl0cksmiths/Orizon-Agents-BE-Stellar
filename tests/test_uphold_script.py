@@ -401,6 +401,24 @@ def test_a_credited_dispute_is_previewed_as_a_rating_only_run(
     assert chain_calls == []
 
 
+def test_a_credited_disputes_recorded_rating_is_never_previewed_as_landed(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """A `rating_tx` on the record is written for a rating that landed and for
+    one that timed out in flight alike, and a dry run asks the ledger nothing —
+    so the preview calls it recorded and unconfirmed, and leaves the verdict to
+    the live run that does ask."""
+    forbid_uphold(monkeypatch)
+    seed(status="credited", refund_tx=REFUND_TX, rating_tx=RATING_TX)
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert f"rating tx:  {RATING_TX}" in out
+    assert "on record, NOT confirmed — landed, or timed out in flight;" in out
+    assert "RATED" not in out
+
+
 def test_a_credited_dispute_with_no_refund_hash_is_still_refused(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
 ) -> None:
