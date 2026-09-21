@@ -465,3 +465,130 @@ def test_a_free_step_cannot_be_disputed() -> None:
 
     assert refused.value.code == "nothing_was_charged"
     assert "free" in refused.value.message
+
+
+# ── rule: one dispute per step ──────────────────────────────────
+
+
+def test_a_second_dispute_returns_the_first_one_unchanged() -> None:
+    """A step is credited once, so the second press of the button is answered
+    with the dispute the buyer already has — not an error they cannot act on,
+    and not a second record 4.03 would pay twice."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    original = _open(payer, reason="the draft ignored half the brief")
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason="a different complaint entirely")
+
+    assert refused.value.code == "duplicate_dispute"
+    assert refused.value.status_code == 409
+    assert refused.value.existing == original  # id, reason, timestamps: untouched
+    assert asyncio.run(dispute_svc.list_for_task(TASK)) == (original,)
+
+
+def test_a_race_is_answered_like_any_other_duplicate(monkeypatch) -> None:
+    """Two requests that both pass the pre-check still meet in the store, which
+    is the only check that holds under a race — so the store raising is the
+    path under test here, forced rather than raced. The loser must get the
+    winner's dispute back: a 500 would tell a buyer their dispute failed when
+    one exists, and they would have spent their challenge finding out."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    original = _open(payer)
+
+    async def _lost_the_race(record):
+        raise dispute_store.DuplicateDisputeError(original)
+
+    monkeypatch.setattr(dispute_store.get_dispute_store(), "open_dispute", _lost_the_race)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, step=1)  # a step with no dispute, so the pre-check passes
+
+    assert refused.value.code == "duplicate_dispute"
+    assert refused.value.status_code == 409
+    assert refused.value.existing == original
+
+
+# ── rule: a mandatory, bounded, cleaned reason ──────────────────
+
+
+def test_a_dispute_must_say_what_was_wrong() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason="   \t  ")
+
+    assert refused.value.code == "reason_required"
+    assert refused.value.status_code == 422
+    assert asyncio.run(dispute_svc.list_for_task(TASK)) == ()
+
+
+def test_an_empty_reason_is_refused_before_the_proof_is_spent() -> None:
+    """Why the reason is checked FIRST. It is the only refusal the buyer can
+    fix and retry, and verifying the signature consumes the challenge — so a
+    buyer refused for an empty reason has to be able to send the very same
+    nonce and signature again with the text filled in, rather than making a
+    second trip through their wallet."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+    signature = _sign(payer, dispute_message(JOB, 0, nonce))
+
+    with pytest.raises(DisputeError):
+        _open(payer, reason="", nonce=nonce, signature=signature)
+
+    assert eb.dispute_challenge_is_live(JOB, 0, nonce) is True
+    assert _open(payer, reason="the draft ignored the brief", nonce=nonce, signature=signature).status == "open"
+
+
+def test_a_reason_of_control_characters_alone_is_no_reason() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason="\x00\x1b\x07")
+
+    assert refused.value.code == "reason_required"
+
+
+def test_control_characters_are_stripped_from_a_stored_reason() -> None:
+    """The reason is read back into an API response, shown in the console and
+    quoted in the receipt. Tab and newline survive — a buyer may write a
+    paragraph — but nothing that forges structure does."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    record = _open(payer, reason="step one\nwas \x00wrong\x1b[31m and late")
+
+    assert "\x00" not in record.reason and "\x1b" not in record.reason
+    assert "\n" in record.reason
+    assert record.reason.startswith("step one")
+
+
+def test_a_very_long_reason_is_clamped() -> None:
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    record = _open(payer, reason="x" * 5_000)
+
+    assert len(record.reason) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
+    assert record.reason.endswith("[truncated]")
+
+
+# ── the refusal type itself ─────────────────────────────────────
+
+
+def test_the_refusal_carries_the_code_status_and_record_the_api_answers_with() -> None:
+    """The shape four other lanes code against, including the keyword form the
+    router uses for a duplicate, and the message a code falls back to — the
+    same wording `main._error_envelope` derives from a snake token."""
+    bare = DisputeError(code="duplicate_dispute", status_code=409, existing=None)
+
+    assert (bare.code, bare.status_code, bare.existing) == ("duplicate_dispute", 409, None)
+    assert bare.message == "duplicate dispute"
+    assert str(bare) == "duplicate dispute"
+
+    spoken = DisputeError("unknown_job", "no settled workflow with that job id", 404)
+    assert spoken.message == "no settled workflow with that job id"
