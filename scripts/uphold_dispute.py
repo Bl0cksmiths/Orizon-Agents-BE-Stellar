@@ -1094,7 +1094,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  10  the credit TIMED OUT and may still land — NEVER re-run; reconcile it\n"
             "  12  the buyer IS paid but the rating did not land — re-running is SAFE and\n"
             "      retries the rating only, never the refund\n"
-            "  13  rating collision — the agent's consequence did not land; look it up\n"
+            "  13  the ledger answered the rating with Replay and this dispute records no\n"
+            "      attempt — a collision; the consequence did not land. Look the id up.\n"
             "every other non-zero code is a refusal before anything was signed, except 11,\n"
             "which asks for the state it prints to be reconciled by hand.\n"
         ),
