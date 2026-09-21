@@ -138,3 +138,25 @@ def test_callers_already_awaiting_the_stale_flight_still_get_their_answer():
     assert produced == 1  # they all shared the one flight
     assert not flight.cancelled()
     assert flight.result() == "pre-dispute"
+
+
+def test_the_stale_read_landing_after_the_fresh_one_does_not_overwrite_it():
+    """The ordering a bounded generation map could get wrong. The fresh read
+    lands first while the stale one is still running; if that dropped the
+    key's generation, the counter would restart at the number the stale
+    flight captured and its late write would sail through."""
+    fresh, _ = _returning("post-dispute")
+
+    async def run():
+        stale, started, release, _ = _parked("pre-dispute")
+        early = asyncio.create_task(cache.get_or_set("k", 60.0, stale))
+        await started.wait()
+        cache.invalidate("k")
+        # Bounded: were the fresh caller to join the parked stale flight, this
+        # would otherwise wait forever instead of failing.
+        await asyncio.wait_for(cache.get_or_set("k", 60.0, fresh), timeout=1.0)
+        release.set()
+        await early
+        return cache._store["k"][1]
+
+    assert asyncio.run(run()) == "post-dispute"
