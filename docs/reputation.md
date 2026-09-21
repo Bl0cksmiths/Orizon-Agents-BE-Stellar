@@ -468,5 +468,8 @@ stall every plan.
    and that is a change to the product, not to a number.
 
 Related: `docs/decisions/0006-floor-visibility.md` (what the buyer is told when
-the floor removes an agent) and the Reputation system section of `README.md`
-(the full tunable list and the on-chain / off-chain split).
+the floor removes an agent), `docs/decisions/0009-dispute-rating.md` (the
+dispute rating's id, its weight, and why the next plan cannot be served a stale
+score), `docs/disputes.md` (the dispute lifecycle a rating comes out of) and the
+Reputation system section of `README.md` (the full tunable list and the
+on-chain / off-chain split).
