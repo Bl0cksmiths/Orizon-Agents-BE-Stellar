@@ -892,6 +892,33 @@ async def _rate_credited(credited: DisputeRecord, settlement: SettlementRecord) 
         return credited
 
 
+async def _retry_rating(credited: DisputeRecord) -> DisputeRecord:
+    """Re-attempt the rating of a dispute already `credited` — THE RATING ONLY.
+
+    The repeat-uphold half of D3: it reads the settlement the rating is
+    weighted from and hands over to `_rate_credited`, and it goes nowhere near
+    the claim or the transfer. `tests/test_adjudication.py` booby-traps both
+    to hold it to that.
+
+    A settlement that is no longer on record leaves no step price to weight a
+    rating with, so nothing is submitted. ERROR when that leaves the dispute
+    with no rating on record — the consequence has not landed and cannot be
+    retried from here — and WARNING when one is on record already, because
+    all that is skipped then is the re-check.
+    """
+    settlement = await get_dispute_store().get_settlement(credited.job_id_hex)
+    if settlement is None:
+        _log_rating(
+            logging.WARNING if credited.rating_tx else logging.ERROR,
+            "not re-attempted — the settlement that weights it is no longer on record",
+            credited,
+            _derived_id_hex(credited),
+            credited.rating_tx,
+        )
+        return credited
+    return await _rate_credited(credited, settlement)
+
+
 async def uphold(dispute_id: str) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour and pay the settler-funded credit.
 
@@ -964,9 +991,16 @@ async def uphold(dispute_id: str) -> DisputeRecord:
     if dispute.status == "credited":
         # Not a refusal: the adjudicator asked for this dispute to be credited
         # and it is, so they are answered with the credit — same record, same
-        # transaction hash, no second transfer.
-        logger.info("dispute %s is already credited — tx %s, nothing signed", dispute.id, dispute.refund_tx)
-        return dispute
+        # refund hash, NO second transfer. What is retried is the RATING and
+        # only the rating (D3), on every repeat: one that already landed is
+        # refused as a replay at simulation, costing nothing on-chain, and one
+        # that never did is written now.
+        logger.info(
+            "dispute %s is already credited — tx %s, no transfer signed; re-attempting its rating only",
+            dispute.id,
+            dispute.refund_tx,
+        )
+        return await _retry_rating(dispute)
 
     if dispute.status == "crediting":
         raise _refuse_credit(
