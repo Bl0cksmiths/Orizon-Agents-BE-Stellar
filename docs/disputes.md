@@ -529,6 +529,64 @@ the step never delivered and so was never charged; or there is no settlement
 record for the job at all. A **duplicate** is not refused — the original
 dispute comes back unchanged.
 
+### What the per-task read returns
+
+`GET /api/tasks/{task_id}/disputes` is the one read a dispute receipt is built
+from. A buyer's first dispute needs the job id to ask for a challenge and the
+payer to know which wallet has to sign, and before story 4.05 neither was
+readable anywhere; only the deadline was.
+
+| field | what it is |
+| --- | --- |
+| `task_id` | the task asked about |
+| `window_closes_at` | the stamped closing time, in epoch seconds; null until the task settles. Always equal to `settlement.window_closes_at`, and kept at the top level for clients that read it there |
+| `now` | this server's clock when the response was built, in epoch seconds. The window is enforced by the server, so a countdown run off the browser's clock is wrong by however far that clock has drifted; the console corrects by the difference |
+| `settlement` | null until the task settles; otherwise the object below |
+| `disputes` | every dispute raised on the task, in the order they were opened, each in the shape `GET /api/disputes/{dispute_id}` returns |
+
+`settlement`:
+
+| field | what it is |
+| --- | --- |
+| `job_id_hex` | the job the charge was made under, which is what `POST /api/disputes/challenge` is asked about |
+| `payer` | the address that authorized the escrow and whose USDC moved: the only wallet whose signature can open a dispute on this task |
+| `settled_at`, `window_closes_at` | when the charge landed, and the deadline stamped from it |
+| `settled_usdc` | what the charge actually moved on-chain, the ceiling on every credit |
+| `charge_tx`, `proof_tx` | the charge and attestation transactions. `proof_tx` is null when the charge landed and the seal did not |
+| `steps` | one entry per step of the plan, below |
+| `policy` | the terms a credit is paid under, below |
+
+Each of `steps`:
+
+| field | what it is |
+| --- | --- |
+| `step_index`, `agent_id`, `agent_name` | which agent ran the step. `agent_name` may be null |
+| `price_usdc` | the step's own price, which a credit is computed from |
+| `delivered` | whether the step produced output. Only a delivered step was billed, and only a delivered step can be disputed |
+| `creditable_usdc` | what an upheld dispute on this step would credit, computed by the server with the refund's own rule (the policy's fraction of `price_usdc`, rounded to 7 decimals), so it is the figure a dispute opened now would freeze. Exactly `0` for a step that did not deliver. The transfer is also bounded by `settled_usdc`, so this is a ceiling, never a sum the platform could exceed |
+| `output_summary` | the one line the trace showed for what the step produced: the agent's own words, cleaned and bounded to 280 characters before they were stored. Null for a step that delivered nothing, and for settlements recorded before this field existed |
+
+`policy`:
+
+| field | what it is |
+| --- | --- |
+| `credited_fraction` | the share of a step's price an upheld dispute credits: `DISPUTE_CREDITED_FRACTION`, clamped to [0, 1] exactly as the refund clamps it, so it states what would really be paid |
+| `funded_by` | always `platform`. The credit comes from the settler's own wallet, never from the agent |
+| `adjudicated_by` | always `platform`. A person decides the claim; there is no on-chain arbitration |
+
+**What this read exposes, and why none of it is new.** While
+`TASK_AUTH_REQUIRED` is off, which is the default and how the public
+deployment runs, this route is world-readable, exactly like the task and its
+trace. The job id is an argument of `PaymentEscrow.charge` and a field of the
+`charged` event it emits. The payer is in the `authd` event their own
+authorization emitted, joined to the charge by the authorization id both
+events carry. And `GET /api/tasks/{task_id}` already serves the full
+`charge_tx`, so a task id already led to both on-chain. Neither is a
+credential: asking for a challenge is public by design, and opening a dispute
+takes the payer's signature, which knowing their address does not provide. The
+output summaries are the lines the world-readable trace already showed. The
+authorization id itself is left off, because no client needs it.
+
 ## For operators: where the records live
 
 Settlements and disputes are the first things this backend keeps that are not
