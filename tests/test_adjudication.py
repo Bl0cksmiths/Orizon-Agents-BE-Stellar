@@ -541,6 +541,30 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     assert still_rejected is not None and still_rejected.status == "rejected"
 
 
+def test_a_rejection_note_never_reaches_the_log(monkeypatch, caplog) -> None:
+    """The convention `open_dispute` set in 4.02: free text about one complaint
+    goes on the record, never into the operator's log viewer. The line says a
+    rationale was given and who the decision concerns — reproducing the text
+    would put unbounded per-complaint prose into a stream read for incidents.
+
+    It is not retained anywhere else either: `DisputeRecord` has no field for
+    the platform's own commentary, so a rejection keeps its status and its
+    resolution time and nothing more until the store gains a column."""
+    dispute = a_dispute()
+
+    with caplog.at_level(logging.INFO, logger=SVC_LOGGER):
+        rejected = asyncio.run(dispute_svc.reject(dispute.id, note="the SEO brief was delivered in full"))
+
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "rejected" in r.getMessage()]
+    assert len(logged) == 1
+    assert "the SEO brief was delivered in full" not in logged[0]
+    assert "noted=yes" in logged[0]
+    assert dispute.id in logged[0] and JOB in logged[0] and dispute.payer in logged[0]
+    # And nothing of the note survives on the record either — the docstring
+    # says so, and this is what stops a caller relying on it.
+    assert "SEO brief was delivered" not in repr(rejected)
+
+
 @pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
 def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str) -> None:
     """Every other status is refused rather than absorbed, including `rejected`
