@@ -357,7 +357,14 @@ dispute comes back unchanged.
 
 Settlements and disputes are the first things this backend keeps that are not
 on-chain and not disposable. They live in Postgres when `DATABASE_URL` is set,
-behind the same store seam the endpoint bindings use, in append-only tables.
+behind the same store seam the endpoint bindings use, in append-only tables: a
+dispute's history is written, never rewritten, so its status is the newest row
+rather than a field that was overwritten.
+
+The refund claims are the one table that is not append-only, because it is not
+a record — it is the mutex, one row per payout in flight, taken before anything
+is signed and dropped inside the same statement that credits, releases or
+rejects. It is also the reconciliation queue, which is the section below.
 
 **Without `DATABASE_URL` the service falls back to an in-memory store**, and
 the whole of this document becomes true only until the next restart — which a
