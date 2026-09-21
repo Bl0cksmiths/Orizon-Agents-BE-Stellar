@@ -871,12 +871,18 @@ def rating_not_landed(
 def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     """The block for a rating the ledger refused as a replay of one this dispute never recorded (D4).
 
-    Loud, and never worded as a resolution: the credit stands, but nothing of
-    this dispute's is on the reputation ledger, and a dispute reported as
-    resolved without its consequence is exactly what D4 forbids. It names the
-    agent, the dispute and the rating id because those are what a lookup on
-    the ledger starts from, and it links the ledger itself because that is
-    where the lookup happens.
+    Diagnosed from the LEDGER'S ANSWER, not from the record: `watch_rating`
+    saw this run's submit come back as a Replay, and the record shows no
+    attempt of this dispute's — the two facts the service itself judges a
+    collision by. The record alone could never say it; an empty `rating_tx`
+    looks the same after a failure.
+
+    Loud, and never worded as a resolution: the credit stands, but the dispute
+    records no rating of its own, and a dispute reported as resolved without
+    its consequence is exactly what D4 forbids. It names the agent, the
+    dispute and the rating id because those are what a lookup on the ledger
+    starts from, and it links the ledger itself because that is where the
+    lookup happens.
 
     Two causes, and the block gives both their remedies. The benign one is
     this dispute's own attempt that landed without its hash ever reaching the
@@ -890,8 +896,8 @@ def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     say(f"  #  agent {dispute.agent_id} · dispute {dispute.id}")
     say("  " + "#" * 74)
     say()
-    say("  The ledger refused the rating as a Replay: it already holds a rating for this agent")
-    say("  under this rating id, and this dispute has no rating of its own on record.")
+    say("  The ledger answered this run's rating with Replay: it already holds a rating for this")
+    say("  agent under this rating id — and this dispute has no rating of its own on record.")
     say()
     say(f"  agent:     {dispute.agent_id}")
     say(f"  dispute:   {dispute.id}")
