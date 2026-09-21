@@ -1,9 +1,12 @@
-"""When a buyer may dispute a settled step, and what that dispute records.
+"""When a buyer may dispute a settled step, what it records, and how it is paid.
 
-Story 4.02, ADR 0002. This module is the gate in front of the money: everything
-story 4.03 pays out starts as a `DisputeRecord` written here, so every rule that
-decides whether one may exist lives in this one file, stated once, in an order
-whose reasoning is written down beside it (see `open_dispute`).
+Stories 4.02 and 4.03, ADR 0002. This module is the gate in front of the money:
+every credit the platform pays starts as a `DisputeRecord` written here and
+leaves through `uphold` here, so every rule that decides whether a dispute may
+exist and whether it may be paid lives in this one file, stated once, in an
+order whose reasoning is written down beside it (see `open_dispute` for the
+first and `uphold` for the second — in both, THE ORDER OF THE CHECKS IS THE
+DELIVERABLE).
 
 Three modules, three jobs, and keeping them apart is what makes each reviewable:
 
@@ -14,12 +17,17 @@ Three modules, three jobs, and keeping them apart is what makes each reviewable:
     outlives the process that promised it;
   - this module holds the RULES, and owns the vocabulary the API answers with.
 
-Nothing here touches the chain, and that is a deliberate boundary rather than an
-accident of scope: a dispute is a CLAIM. Story 4.03 pays the settler-funded
-credit if it is upheld and 4.04 writes the rating, both under an adjudication
-this sprint performs off-chain (ADR 0002's disclosed trust model). Opening one
-must therefore cost no RPC, submit no transaction and touch no reputation —
+OPENING a dispute touches no chain, and that is a deliberate boundary rather
+than an accident of scope: a dispute is a CLAIM. `open_dispute` must therefore
+cost no RPC, submit no transaction and touch no reputation —
 `tests/test_dispute_svc.py` asserts that rather than leaving it as a claim.
+
+ADJUDICATING one is where that changes, and only there. `uphold` signs a
+settler-funded transfer through `refund_svc`, under an adjudication this sprint
+performs off-chain (ADR 0002's disclosed trust model); 4.04 writes the dispute
+rating. The credit is FUNDED BY THE PLATFORM and is never clawed back from the
+agent — the deployed escrow takes no custody, so there is nothing to reverse —
+and every artifact a buyer can see has to say so (SOW §3.8).
 
 The authority model in one line: THE PAYER PROVES THEMSELVES WITH A WALLET
 SIGNATURE, checked against the payer recorded on the settlement at the moment it
