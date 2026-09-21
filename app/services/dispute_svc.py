@@ -222,11 +222,11 @@ def _require_reason(reason: str, job_id_hex: str, step_index: int) -> str:
     `sanitize_untrusted` is this repo's existing primitive for text somebody
     else wrote (`app/agents/workers/prompt_safety.py`), used here for
     `registry_sync`'s reason rather than its own: it strips C0/C1 control
-    characters and clamps the length. Control characters are the part that
-    matters for a dispute — this string is written to a log line an operator
-    reads, is read back into an API response a browser renders, and will be
-    quoted in the dispute receipt, and a bare CR or an escape sequence in any
-    of those forges structure that was never written.
+    characters — all but tab and newline, so a buyer may still write a
+    paragraph — and clamps the length. The control characters are the part that
+    matters for a dispute: this string is read back into an API response, shown
+    in the console and quoted in the dispute receipt, and an escape sequence or
+    a NUL in any of those forges structure that nobody wrote.
 
     Deliberately NOT `fence_untrusted`: a reason is a FIELD, not a prompt
     block, and nothing here sends it to a model. The prompt-fence side effects
