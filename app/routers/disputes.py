@@ -109,24 +109,36 @@ class OpenDisputeReq(BaseModel):
 
 
 class RejectDisputeReq(BaseModel):
-    """The adjudicator's optional word on why a dispute was not upheld.
+    """The adjudicator's word on why a dispute was not upheld — which the buyer reads.
 
-    Bounded identically to `OpenDisputeReq.reason` — one paragraph, no empty
-    string — because it is the same kind of thing from the other side of the
-    table, and a rejection note that outgrew the complaint it answers would be
-    the one free-text field in this surface nobody had sized. Identically down
-    to the number: `dispute_svc.reject` cleans and trims the note to the same
-    MAX_REASON_CHARS, so a longer bound here would record an adjudicator's
-    rationale cut short with nothing to say it was.
+    REQUIRED, because it is the buyer's answer: it comes back on the dispute
+    as `rejection_reason`, and a rejection with no explanation is worse than
+    no dispute system at all. So a body with no note, a null note or an empty
+    one is the field-level `validation_error` here, before anything is read.
+    The edge settles only the shape; what cleaning leaves of the text is the
+    service's to judge, since only it cleans — a note of whitespace or control
+    characters passes this bound, cleans to nothing, and is refused there as
+    `rejection_reason_required`.
 
-    Optional, and optional all the way down: the body itself may be absent, so
-    a console that has nothing to add posts no body rather than an empty one.
-    `min_length=1` then means "if you send a note, send a note" — a note of ""
-    is refused rather than stored, so the absence of a reason has exactly one
-    representation in the record instead of two.
+    Bounded identically to `OpenDisputeReq.reason` — one paragraph — because
+    it is the same kind of thing from the other side of the table, and a
+    rejection that outgrew the complaint it answers would be the one free-text
+    field in this surface nobody had sized. Identically down to the number:
+    `dispute_svc.reject` cleans and trims the note to the same
+    MAX_REASON_CHARS, so a longer bound here would show the buyer an
+    adjudicator's reason cut short with nothing to say it was.
     """
 
-    note: str | None = Field(default=None, min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
+    note: str = Field(
+        ...,
+        min_length=1,
+        max_length=dispute_svc.MAX_REASON_CHARS,
+        description=(
+            "Why the dispute was rejected. SHOWN TO THE BUYER as the dispute's "
+            "`rejection_reason`, and readable by anyone who can read the task's "
+            "disputes — write it for the buyer."
+        ),
+    )
 
 
 class DisputeResponse(BaseModel):
@@ -155,6 +167,45 @@ class DisputeResponse(BaseModel):
     resolved_at: float | None = None
     refund_tx: str | None = None
     rating_tx: str | None = None
+    # What the refund ACTUALLY transferred — the figure the receipt prints
+    # beside the `refund_tx` link. Not `creditable_usdc`: that is the ceiling
+    # frozen at opening, and the payout is bounded again when it is made, by
+    # the fraction then in force and by what the charge moved, so the two can
+    # differ. A receipt that showed the promise next to an explorer page
+    # showing another sum would contradict its own evidence. Null until the
+    # dispute is credited, and for every dispute credited before 4.06, where
+    # the honest answer is "not recorded" rather than the promise passed off
+    # as the payout.
+    credited_usdc: float | None = None
+    # When the dispute last changed state, in epoch seconds on this server's
+    # clock. `resolved_at` is stamped once, at the first verdict, so a refund
+    # that timed out and was reconciled hours later would otherwise show the
+    # buyer the time of a step they are no longer looking at. Null only for a
+    # record written before 4.06.
+    updated_at: float | None = None
+    # Whether `rating_tx` is known to have LANDED, which the hash alone cannot
+    # say: it is recorded on a timeout as well as on a success, so a receipt
+    # that read "hash present" as "the agent was rated" could claim a
+    # consequence that never happened. True once the ledger has vouched for
+    # it, false while it is only in flight, null when no rating was submitted
+    # or the record predates 4.06 — so null means "not known", never "no".
+    rating_confirmed: bool | None = None
+    # Why the adjudicator rejected the claim, for the buyer to read: a
+    # rejection with no explanation is worse than no dispute system at all.
+    # It is the record's `note` under exactly one condition — the status is
+    # `rejected` — and null under every other, so a note recorded at any other
+    # point in a dispute's life is never published by accident, and never
+    # under a second name. Null, too, for a rejection with no note, which only
+    # a record from before the note was required can be.
+    #
+    # Readable wherever the buyer's own `reason` is, and guarded no better:
+    # `GET /api/disputes/{id}` answers whoever holds the id, and the per-task
+    # listing answers whoever may read the task — which, while
+    # TASK_AUTH_REQUIRED is off as it is in production, is anyone with the
+    # task id. The console shows both only to the payer, but that is a choice
+    # about display, not about access. The API does not hide either, and an
+    # adjudicator writes this knowing it.
+    rejection_reason: str | None = None
 
     @classmethod
     def of(cls, record: DisputeRecord) -> DisputeResponse:
@@ -174,6 +225,10 @@ class DisputeResponse(BaseModel):
             resolved_at=record.resolved_at,
             refund_tx=record.refund_tx,
             rating_tx=record.rating_tx,
+            credited_usdc=record.credited_usdc,
+            updated_at=record.updated_at,
+            rating_confirmed=record.rating_confirmed,
+            rejection_reason=record.note if record.status == "rejected" else None,
         )
 
 
@@ -535,15 +590,22 @@ async def list_task_disputes(
     special-case into the same view.
 
     Gated by `require_task_read` like every other `/tasks/{task_id}/...` read:
-    a dispute names its payer and carries the buyer's own words about the work,
-    which is exactly the material that capability token exists to scope. But
-    the dependency is a no-op while TASK_AUTH_REQUIRED is off — the shipped
-    default, and how production runs — so there this read is world-readable,
-    and it fails closed only once enforcement is turned on. That is why the
-    settlement it carries is held to what is already public: the job id and the
-    payer are on-chain (see `SettlementView`), and each output summary is the
-    line the world-readable trace already showed. Nothing belongs on that shape
-    that the chain or the trace does not already publish.
+    a dispute names its payer and carries the buyer's own words about the work
+    — and, once rejected, the adjudicator's answer to them — which is exactly
+    the material that capability token exists to scope. But the dependency is
+    a no-op while TASK_AUTH_REQUIRED is off — the shipped default, and how
+    production runs — so there this read is world-readable, and it fails
+    closed only once enforcement is turned on. That is why the settlement it
+    carries is held to what is already public: the job id and the payer are
+    on-chain (see `SettlementView`), and each output summary is the line the
+    world-readable trace already showed. Nothing belongs on that shape that
+    the chain or the trace does not already publish.
+
+    The disputes are not held to that standard, and this says so rather than
+    implying otherwise: each one's `reason` and `rejection_reason` go to
+    whoever this read admits, which in production is anyone with the task id.
+    The console shows them only to the payer; that is a choice about display,
+    and it narrows nothing this route returns.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
     disputes = await dispute_svc.list_for_task(task_id)
@@ -620,12 +682,12 @@ async def uphold_dispute(
 @router.post(
     "/disputes/{dispute_id}/reject",
     response_model=DisputeResponse,
-    summary="Reject a dispute, optionally with a note",
+    summary="Reject a dispute, with a reason the buyer is shown",
     dependencies=[Depends(require_adjudicator)],
 )
 async def reject_dispute(
+    body: RejectDisputeReq,
     dispute_id: str = Path(..., min_length=1, max_length=64),
-    body: RejectDisputeReq | None = None,
 ) -> DisputeResponse:
     """Find for the platform: close the dispute without crediting anything.
 
@@ -637,28 +699,32 @@ async def reject_dispute(
     one. The refund switch gates it too, for the same reason — a deployment
     that cannot pay a dispute out must not be able to dispose of one either.
 
-    The note is the adjudicator's, and it is passed through rather than
-    interpreted: this handler does not decide that a rejection needs a reason,
-    because whether one is required is a policy the service owns and would
-    otherwise hold an opinion about in two places.
+    The note is REQUIRED and it is the buyer's to read — it comes back as the
+    dispute's `rejection_reason`. The body is required with it, so no body, no
+    note, a null note and an empty one are all the same field-level 422, and
+    the service is never called. The note is then passed through rather than
+    interpreted: whether what is left of it after cleaning still says anything
+    is the service's call, because only the service cleans it, and its
+    `rejection_reason_required` reaches the adjudicator through `_refuse`
+    like every other code — 422, verbatim, with no mapping to add here.
     """
-    note = body.note if body is not None else None
     try:
-        record = await dispute_svc.reject(dispute_id, note=note)
+        record = await dispute_svc.reject(dispute_id, note=body.note)
     except dispute_svc.DisputeError as e:
         # `uphold_dispute`'s rule, and the note is left out for
         # `open_dispute`'s: free text written by a human about a specific
         # complaint does not belong in an operator's log viewer.
         logger.warning("reject refused: dispute_id=%s reason=%s", dispute_id, e.code)
         raise _refuse(e) from None
+    # Nothing about the note, not even whether there was one: every rejection
+    # that gets this far carries one, so a flag could only ever say yes.
     logger.info(
-        "dispute rejected: id=%s job_id=%s task_id=%s step=%d payer=%s status=%s noted=%s",
+        "dispute rejected: id=%s job_id=%s task_id=%s step=%d payer=%s status=%s",
         record.id,
         record.job_id_hex,
         record.task_id,
         record.step_index,
         record.payer,
         record.status,
-        note is not None,
     )
     return DisputeResponse.of(record)

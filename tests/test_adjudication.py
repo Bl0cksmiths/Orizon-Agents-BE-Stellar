@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
+import inspect
 import logging
 import time
 from typing import Any, cast
@@ -309,6 +311,66 @@ def test_the_refund_is_claimed_before_anything_is_signed(monkeypatch) -> None:
 
     assert asyncio.run(dispute_svc.uphold(dispute.id)).status == "credited"
     assert status_while_signing == ["crediting"]
+
+
+# ── the receipt: the amount that actually moved (story 4.06) ────
+
+
+def test_a_credit_records_the_amount_its_transfer_moved(monkeypatch) -> None:
+    """The receipt prints this number beside the refund hash, so it is read
+    off the transfer's own outcome and never recomputed beside it: whatever
+    `credit_refund` reports it moved is what the record says was credited.
+
+    And it survives the rating: that lands after the credit on a transition of
+    its own, which names no amount and must not blank this one."""
+    dispute = a_dispute()
+    assert dispute.credited_usdc is None  # nothing is credited by opening
+
+    async def _moved(claimed: DisputeRecord, amount_usdc: float) -> refund_svc.RefundOutcome:
+        return refund_svc.RefundOutcome("SUCCESS", "tx_credit", 0.0421)
+
+    monkeypatch.setattr(refund_svc, "credit_refund", _moved)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert credited.credited_usdc == 0.0421
+    assert credited.rating_tx == "tx_rating"  # rated afterwards, and the amount kept
+    assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == credited
+
+
+def test_the_credited_amount_is_what_moved_when_the_d4_clamp_bites(monkeypatch) -> None:
+    """The case the field exists for. The workflow settled 0.03 USDC in all,
+    so the step promised 0.05 at opening can only be paid 0.03 — the real
+    transfer path, clamped by D4 — and the receipt must say 0.03 beside a
+    Stellar Expert link that shows 0.03. Printing the promise there would
+    contradict the receipt's own evidence."""
+    dispute = a_dispute(settled_usdc=0.03)
+    chain = settler(monkeypatch, LANDED)
+
+    credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert chain.calls == [(dispute.payer, 0.03)]
+    assert credited.creditable_usdc == 0.05  # the promise, frozen at opening
+    assert credited.credited_usdc == 0.03  # what moved
+    assert credited.credited_usdc != credited.creditable_usdc
+
+
+@pytest.mark.parametrize(("answer", "code"), [(REJECTED, "refund_failed"), (LOST, "refund_unconfirmed")])
+def test_a_refund_that_did_not_land_records_no_credited_amount(monkeypatch, answer: dict[str, Any], code: str) -> None:
+    """None until credited. A FAILED transfer moved nothing, and a timed-out
+    one may or may not have — neither is an amount the buyer was paid, so the
+    record carries none rather than one that may be false. The timeout's
+    in-flight hash is recorded; its amount is the reconciler's to establish."""
+    dispute = a_dispute()
+    settler(monkeypatch, answer)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == code
+    stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
+    assert stored is not None and stored.status != "credited"
+    assert stored.credited_usdc is None
 
 
 # ── the acceptance criterion: a retry cannot double-credit ──────
@@ -612,7 +674,7 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     it outright, and it would also fail to be claimed — a rejected dispute is
     not `upheld` — so no single check carries this on its own."""
     dispute = a_dispute()
-    asyncio.run(dispute_svc.reject(dispute.id))
+    asyncio.run(dispute_svc.reject(dispute.id, note="the output matched the brief"))
     no_signing(monkeypatch)
 
     with pytest.raises(DisputeError) as refused:
@@ -624,27 +686,40 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     assert still_rejected is not None and still_rejected.status == "rejected"
 
 
-def test_a_rejection_note_never_reaches_the_log(monkeypatch, caplog) -> None:
-    """The convention `open_dispute` set in 4.02: free text about one complaint
-    goes on the record, never into the operator's log viewer. The line says a
-    rationale was given and who the decision concerns — reproducing the text
-    would put unbounded per-complaint prose into a stream read for incidents.
+def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
+    """The convention `open_dispute` set in 4.02, kept now that the reason is
+    mandatory and written for the buyer: free text about one complaint goes on
+    the record — and from there onto the buyer's receipt — never into the
+    operator's log viewer. The line says an explanation was recorded and whom
+    the decision concerns; reproducing the text would put unbounded
+    per-complaint prose into a stream read for incidents.
 
-    The rationale is not lost by this: it is on the record, where whoever
-    adjudicates reads it. Out of the log and onto the record is one decision
-    with two halves, and this test pins the half the log makes."""
+    The reason is stored exactly as cleaning leaves it — here, the ragged
+    edges an adjudicator's form leaves are trimmed and nothing else is — and
+    a refused rejection logs its code and the dispute, never what was sent."""
     dispute = a_dispute()
+    reason = "the SEO brief was delivered in full"
 
     with caplog.at_level(logging.INFO, logger=SVC_LOGGER):
-        rejected = asyncio.run(dispute_svc.reject(dispute.id, note="the SEO brief was delivered in full"))
+        rejected = asyncio.run(dispute_svc.reject(dispute.id, note=f"  {reason}\n"))
 
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "rejected" in r.getMessage()]
     assert len(logged) == 1
-    assert "the SEO brief was delivered in full" not in logged[0]
+    assert reason not in logged[0]
     assert "noted=yes" in logged[0]
     assert dispute.id in logged[0] and JOB in logged[0] and dispute.payer in logged[0]
-    # ...and it is on the record, which is the other half of the same decision.
-    assert rejected.note == "the SEO brief was delivered in full"
+    # ...and it is on the record, cleaned and otherwise verbatim, which is the
+    # other half of the same decision.
+    assert rejected.note == reason
+
+    caplog.clear()
+    other = a_dispute(step=1)
+    with caplog.at_level(logging.INFO, logger=SVC_LOGGER), pytest.raises(DisputeError):
+        asyncio.run(dispute_svc.reject(other.id, note=" \t\x1b\x07 "))
+
+    (refusal,) = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "refused" in r.getMessage()]
+    assert "rejection_reason_required" in refusal and other.id in refusal
+    assert "\x1b" not in refusal and "\x07" not in refusal
 
 
 @pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
@@ -668,11 +743,16 @@ def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str)
     assert unchanged is not None and unchanged.status == status
 
 
-@pytest.mark.parametrize("adjudicate", [dispute_svc.uphold, dispute_svc.reject])
+@pytest.mark.parametrize(
+    "adjudicate",
+    [dispute_svc.uphold, functools.partial(dispute_svc.reject, note="the output matched the brief")],
+    ids=["uphold", "reject"],
+)
 def test_an_id_nobody_issued_is_refused_by_both_decisions(monkeypatch, adjudicate) -> None:
     """One answer from both routes. A 404 from one and a 409 from the other
     would make them disagree about the same fact, and the API maps whatever
-    this module says."""
+    this module says. The rejection carries a real reason, so the id is the
+    only thing left for it to refuse."""
     no_signing(monkeypatch)
 
     with pytest.raises(DisputeError) as refused:
@@ -851,15 +931,54 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
     assert len(long_note.note) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
 
 
-def test_a_rejection_without_a_usable_note_records_none_rather_than_nothing(monkeypatch) -> None:
-    """None, never "". `append_status` carries a null forward and stores an
-    empty string, so a note of pure whitespace has to arrive as no note at all
-    — otherwise a later transition could blank a rationale with a stray space
-    bar rather than leave the record as it was."""
-    no_signing(monkeypatch)
+def test_a_rejection_reason_has_no_default() -> None:
+    """MISSING is refused by the signature itself (story 4.06). A default of
+    any kind — None, "" — would let a caller reject a dispute without telling
+    the buyer why by simply saying nothing, which is the outcome the rule
+    exists to make impossible."""
+    note = inspect.signature(dispute_svc.reject).parameters["note"]
 
-    assert asyncio.run(dispute_svc.reject(a_dispute().id)).note is None
-    assert asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="  \t \n ")).note is None
+    assert note.kind is inspect.Parameter.KEYWORD_ONLY
+    assert note.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize(
+    "note",
+    [None, "", "  \t \n ", "\x00\x1b\x07"],
+    ids=["none", "empty", "whitespace", "control-characters-only"],
+)
+def test_a_rejection_without_a_usable_reason_is_refused_before_anything_is_written(
+    monkeypatch, note: str | None
+) -> None:
+    """A rejection with no explanation is worse than no dispute system, so a
+    reason that is empty AFTER cleaning — whitespace, or nothing but control
+    characters — is no reason, and neither is a None from a caller that
+    ignored the annotation. Each is refused with the one code the console can
+    map to "say why", as the 422 the buyer's own missing `reason` carries.
+
+    Refused FIRST, before the dispute is even read: the check is pure text
+    handling and the one refusal an adjudicator can fix and resend, so the
+    store is booby-trapped for the call — and the dispute is left exactly as
+    the buyer opened it, still open and still rejectable."""
+    no_signing(monkeypatch)
+    dispute = a_dispute()
+    store = dispute_store.get_dispute_store()
+    as_opened = store._disputes[dispute.id]
+
+    async def _must_not_be_read(dispute_id: str) -> None:
+        raise AssertionError("the reason is checked before the dispute is read")
+
+    monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.reject(dispute.id, note=cast(str, note)))
+
+    assert refused.value.code == "rejection_reason_required"
+    assert refused.value.status_code == 422
+    assert refused.value.existing is None
+    # Nothing written: the record is the very one the buyer opened.
+    assert store._disputes[dispute.id] is as_opened
+    assert as_opened.status == "open" and as_opened.note is None
 
 
 # ── the dispute rating: after the credit, never instead of it ───
@@ -896,18 +1015,26 @@ def trap_the_refund(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("unlanded", "rating_tx"),
-    [("FAILED", None), ("TIMEOUT", "tx_rating_inflight"), ("REPLAY", None), ("raised", None)],
+    ("unlanded", "rating_tx", "rating_confirmed"),
+    [
+        ("FAILED", None, None),
+        ("TIMEOUT", "tx_rating_inflight", False),
+        ("REPLAY", None, None),
+        ("raised", None, None),
+    ],
 )
 def test_a_rating_that_does_not_land_never_touches_the_refund(
-    monkeypatch, rater, unlanded: str, rating_tx: str | None
+    monkeypatch, rater, unlanded: str, rating_tx: str | None, rating_confirmed: bool | None
 ) -> None:
     """D3. The buyer has been paid by the time the rating is asked for, and
     no answer the rating gets — a failure, a timeout, a collision, or an
     exception out of the attempt itself — may reverse, release or re-sign
     that. Nor may it be RAISED: a paid refund answered with an error is a
     refund the caller will think failed. The dispute stays `credited` with its
-    refund hash, and only `rating_tx` says the consequence has not landed."""
+    refund hash, and only `rating_tx` says the consequence has not landed.
+
+    Nor may any of them read as a landing (4.06): the timeout's hash is on
+    record as UNCONFIRMED, and the rest leave nothing to confirm."""
     dispute = a_dispute()
     chain = settler(monkeypatch, LANDED)
 
@@ -925,6 +1052,7 @@ def test_a_rating_that_does_not_land_never_touches_the_refund(
     assert answered.status == "credited"
     assert answered.refund_tx == "tx_credit"
     assert answered.rating_tx == rating_tx
+    assert answered.rating_confirmed is rating_confirmed
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == answered
     assert len(chain.calls) == 1
 
@@ -935,7 +1063,7 @@ def test_an_open_or_rejected_dispute_is_never_rated(monkeypatch, rater, invalida
     uphold of a rejected one is refused before anything could."""
     no_signing(monkeypatch)
     opened = a_dispute()
-    rejected = asyncio.run(dispute_svc.reject(a_dispute(step=1).id))
+    rejected = asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="the SEO brief was delivered in full"))
 
     with pytest.raises(DisputeError) as refused:
         asyncio.run(dispute_svc.uphold(rejected.id))

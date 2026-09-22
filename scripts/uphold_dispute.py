@@ -347,7 +347,10 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     say()
     say("  Reconcile it on-chain first, then:")
     say("    * it SUCCEEDED — the buyer has been credited. Close the dispute by recording")
-    say(f"      what landed: append_status({dispute.id!r}, 'credited', refund_tx=<hash>).")
+    say(f"      what landed: append_status({dispute.id!r}, 'credited', refund_tx=<hash>,")
+    say("      credited_usdc=<the amount the transfer moved>). Read the amount off the")
+    say("      explorer, not off the estimate above: the buyer's receipt shows it as what")
+    say("      they were paid, and without it the receipt can only show what was promised.")
     say("      Re-running this script instead would credit them a second time.")
     say("    * it FAILED, or the hash is on no explorer and the payer's balance never moved —")
     say(f"      nothing moved. release_refund_claim({dispute.id!r}) returns it to `upheld`,")
@@ -873,7 +876,9 @@ def rating_collision(dispute: DisputeRecord, rating_id: str) -> int:
     say("  Find the rating filed under that id on the ledger before anything else:")
     say("    * it is this dispute's own attempt, never recorded (a timeout that returned no hash,")
     say("      or a record write that failed) — record its hash, and the dispute is resolved:")
-    say(f"      append_status({dispute.id!r}, 'credited', rating_tx=<hash>)")
+    # `rating_confirmed=True` because the operator has just found it ON the ledger:
+    # without it the buyer's receipt keeps showing the agent's consequence as pending.
+    say(f"      append_status({dispute.id!r}, 'credited', rating_tx=<hash>, rating_confirmed=True)")
     say("    * it is anything else — a genuine collision. Escalate it. Re-running cannot fix it:")
     say("      the ledger refuses every retry under this id.")
     say()
@@ -903,7 +908,7 @@ def rating_unrecorded(dispute: DisputeRecord, tx_hash: str, rating_id: str) -> i
     say()
     say("  The ledger confirmed the rating; the store write that records it on the dispute")
     say("  failed, and the log lines above name why. Close it by recording what landed:")
-    say(f"    append_status({dispute.id!r}, 'credited', rating_tx={tx_hash!r})")
+    say(f"    append_status({dispute.id!r}, 'credited', rating_tx={tx_hash!r}, rating_confirmed=True)")
     say()
     return EXIT_UNEXPECTED
 

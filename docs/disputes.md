@@ -166,11 +166,17 @@ dispute, and nothing on-chain weighs the claim.
 was opened with stays on the record, and nothing is signed or spent. Any other
 status is refused rather than absorbed — a dispute that is already paid, that
 is mid-payout, or that has already been rejected cannot be rejected again,
-because that would be a second adjudicator quietly overruling the first. The
-adjudicator may attach a note of up to 500 characters (a longer one is refused,
-not cut). It is kept on the dispute record for audit, so the outcome most
-likely to be contested has its reasoning written down; it is not part of the
-dispute the API returns, and it is never written to the log.
+because that would be a second adjudicator quietly overruling the first.
+
+**A rejection must say why, and the buyer is shown it.** The adjudicator's note
+is required, up to 500 characters (a longer one is refused, not cut), and it
+comes back on the dispute as `rejection_reason` — because a rejection with no
+explanation is worse than no dispute system at all. A rejection without one is
+refused before anything is read: no body, no `note`, a null note or an empty
+one. So is a note that is nothing but whitespace or control characters once it
+is cleaned (`rejection_reason_required`). Write it for the buyer: it is the only
+word they get, and it can be read wherever the dispute can — see "Who can read
+what a dispute says" below. It is never written to the log.
 
 **Upholding** is where money moves, and it happens in a fixed order:
 
@@ -247,6 +253,11 @@ answer:
   on-chain. The dispute is not fully resolved. Usually the fix is to uphold it
   again; the log line for the attempt says when it is not, and the table below
   says what to do instead.
+
+A set hash does not say on its own which of those two it is; the dispute's
+`rating_confirmed` does — `true` once the ledger has vouched for the rating,
+`false` while it is only in flight — so a receipt tells the buyer the agent was
+rated only when that is known.
 
 **Retrying is always safe, and it retries the rating alone.** Upholding a
 `credited` dispute again signs no transfer — that branch returns before the
@@ -368,7 +379,7 @@ stay as they were.
 | `upheld` | adjudicated in the buyer's favour | nothing on-chain yet | adjudication (4.03) |
 | `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx, once one has been submitted | the refund path (4.03) |
 | `credited` | the credit has landed in the buyer's wallet | the refund tx, and the dispute rating's tx once it is written | the refund path (4.03); the rating (4.04) adds its tx to the same status |
-| `rejected` | adjudicated against the claim | the resolution time; nothing on-chain | adjudication (4.03) |
+| `rejected` | adjudicated against the claim | the resolution time and the adjudicator's reason, which the buyer is shown; nothing on-chain | adjudication (4.03); the reason is required and buyer-facing since 4.06 |
 
 ```text
 open ──► upheld ──► crediting ──► credited   the claim stood: the buyer is
@@ -473,10 +484,10 @@ stacked, with their shared prefix underlined.
 | --- | --- | --- |
 | `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign and when the challenge expires. The step's charge, the creditable amount and the window's closing time are on the per-task read |
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
-| `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, and the refund and rating transactions once they exist |
+| `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, the refund and rating transactions once they exist, and the receipt: what was actually credited, when it last changed, whether the rating landed and, for a rejection, why. "What a dispute returns" below has every field |
 | `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
 | `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, transfers the amount to the payer, then writes the dispute rating. On a `credited` dispute it signs no transfer and re-attempts the rating only |
-| `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — records `rejected` with its resolution time; nothing is signed and nothing is spent |
+| `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — body `{"note": "..."}`, **required**, 1 to 500 characters, and **shown to the buyer** as the dispute's `rejection_reason`. Records `rejected` with its resolution time and that reason; nothing is signed and nothing is spent |
 
 The read routes take no credential because both ids are unguessable — a dispute
 id is `dsp_` plus 16 random hex characters — which is the same trade the task
@@ -513,6 +524,8 @@ What an adjudicator can be told, and what each answer means:
 | 409 `settlement_missing` | the settlement the dispute was judged against is no longer on record, so the credit cannot be bounded by what was actually charged |
 | 409 `nothing_to_credit` | the settlement has no such step, the step never delivered, or the amount prices to zero |
 | 409 `refund_above_cap` | the amount exceeds `MAX_REFUND_USDC`. Nothing was signed |
+| 422 `validation_error` | a rejection with no reason — no body, no `note`, a null or an empty one — or one over 500 characters. Refused before the dispute is even read |
+| 422 `rejection_reason_required` | a rejection whose note is nothing but whitespace or control characters once cleaned: there is nothing left to show the buyer. Nothing is written |
 | 502 `refund_failed` | the transfer definitively did not settle, so no funds moved. The dispute is back to `upheld` and can be credited again |
 | 504 `refund_unconfirmed` | the transfer was submitted and its outcome is unknown. The dispute stays in `crediting` for reconciliation |
 
@@ -534,6 +547,45 @@ the step never delivered and so was never charged; or there is no settlement
 record for the job at all. A **duplicate** is not refused — the original
 dispute comes back unchanged.
 
+### What a dispute returns
+
+`GET /api/disputes/{dispute_id}`, both adjudication routes, the duplicate
+answer to `POST /api/disputes` and every entry in the per-task read's
+`disputes` return a dispute in this one shape. No field is ever omitted: one
+that does not apply yet, or that a dispute recorded before the field existed
+does not have, is null.
+
+| field | what it is |
+| --- | --- |
+| `id` | the dispute's own id: `dsp_` and 16 random hex characters |
+| `job_id_hex`, `step_index`, `task_id`, `agent_id` | the job the step was charged under, which step, the task it ran in and the agent that ran it |
+| `payer` | the wallet that paid, and that signed the dispute |
+| `reason` | the buyer's own words about what was wrong, cleaned and bounded to 500 characters |
+| `status` | where the dispute stands — see "The lifecycle" |
+| `charged_usdc`, `creditable_usdc` | what the step cost, and what an upheld dispute credits under the policy in force when it was opened. Both frozen at opening, so neither moves under the buyer |
+| `opened_at`, `resolved_at` | when it was opened, and when it was first decided — stamped once, at the verdict. Epoch seconds |
+| `refund_tx`, `rating_tx` | the refund transfer and the dispute rating, once each exists — see "Reading the two on-chain artifacts" |
+| `credited_usdc` | what the refund **actually** transferred. Not `creditable_usdc`: that is the ceiling promised at opening, and the payout is bounded again when it is made — by the fraction then in force and by what the charge moved — so the two can differ, and this is the one that matches the transfer on-chain. Null until the dispute is credited, and for a dispute credited before the field existed: "not recorded", never the promise standing in for it |
+| `updated_at` | when the dispute last changed state, in epoch seconds. Unlike `resolved_at` it moves: a credit reconciled hours after the verdict carries the time it was credited. Null only for a dispute last written before the field existed |
+| `rating_confirmed` | whether the dispute rating is known to have **landed**. `rating_tx` cannot say on its own, because it is recorded for a submission that timed out as well as for one that succeeded. `true` once the ledger has vouched for it, `false` while it is only in flight, null when no rating was submitted or the dispute predates the field. Null means "not known", never "no" |
+| `rejection_reason` | on a `rejected` dispute, the adjudicator's reason — **shown to the buyer**. Null under every other status, whatever the record holds, and for a rejection recorded before a reason was required |
+
+**Who can read what a dispute says.** Two fields on this shape are somebody's
+words rather than facts the chain already publishes: the buyer's `reason` and a
+rejection's `rejection_reason`. The API does not hide either.
+`GET /api/disputes/{dispute_id}` answers anyone holding the id, and the
+per-task read answers anyone who may read the task — which, while
+`TASK_AUTH_REQUIRED` is off (the shipped default, and how the public deployment
+runs), is anyone with the task id; that read hands out every dispute id on the
+task as well. The console shows both fields only to the payer, but that is a
+choice about display, not about access, and it narrows nothing the API
+returns. So a rejection reason is written as something anyone holding the task
+id could read: about this step and this claim, with nothing about another
+buyer, another dispute or the platform's internals that would not be said to
+the buyer in the open. Turning `TASK_AUTH_REQUIRED` on scopes the per-task read
+to the task's own token or an operator key; the single-dispute read stays a
+link whose unguessable id is the credential either way.
+
 ### What the per-task read returns
 
 `GET /api/tasks/{task_id}/disputes` is the one read a dispute receipt is built
@@ -547,7 +599,7 @@ readable anywhere; only the deadline was.
 | `window_closes_at` | the stamped closing time, in epoch seconds; null until the task settles. Always equal to `settlement.window_closes_at`, and kept at the top level for clients that read it there |
 | `now` | this server's clock when the response was built, in epoch seconds. The window is enforced by the server, so a countdown run off the browser's clock is wrong by however far that clock has drifted; the console corrects by the difference |
 | `settlement` | null until the task settles; otherwise the object below |
-| `disputes` | every dispute raised on the task, in the order they were opened, each in the shape `GET /api/disputes/{dispute_id}` returns |
+| `disputes` | every dispute raised on the task, in the order they were opened, each in the shape `GET /api/disputes/{dispute_id}` returns — "What a dispute returns" above |
 
 `settlement`:
 
@@ -591,6 +643,12 @@ credential: asking for a challenge is public by design, and opening a dispute
 takes the payer's signature, which knowing their address does not provide. The
 output summaries are the lines the world-readable trace already showed. The
 authorization id itself is left off, because no client needs it.
+
+The disputes this read lists are the exception, stated here rather than left
+implied: each carries the buyer's `reason` and, once rejected, the
+adjudicator's `rejection_reason`, which nothing else publishes, and this read
+serves them to whoever it admits. "Who can read what a dispute says" above has what that means
+for anyone writing a rejection.
 
 ## For operators: where the records live
 

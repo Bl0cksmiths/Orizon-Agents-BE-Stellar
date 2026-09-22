@@ -13,7 +13,11 @@ service. What is tested HERE is the wire, and only the wire:
   * an unsettled task reads as an empty window rather than an error;
   * a settled one carries everything a buyer's FIRST dispute starts from
     (story 4.05) — the job id, the payer, each step's credit priced by the
-    refund's own rule, the stated policy and the server's clock.
+    refund's own rule, the stated policy and the server's clock;
+  * a dispute carries its receipt (story 4.06) — what was actually credited,
+    when it last changed, whether its rating landed, and, for a rejection and
+    nothing else, the reason — with every one of them null on a record from
+    before it existed.
 
 Every test stubs `dispute_svc` at the seam the router imported. That keeps this
 file passing without the rules lane's implementation present, and keeps it
@@ -26,12 +30,13 @@ from __future__ import annotations
 
 import base64
 import time
+from typing import get_args
 
 import pytest
 
 from app.config import settings
 from app.services import dispute_svc, refund_svc
-from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep, steps_from_json
+from app.services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep, steps_from_json
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -429,6 +434,114 @@ def test_reading_an_unknown_dispute_is_404(client, monkeypatch):
     assert r.json()["error"]["code"] == "unknown_dispute"
 
 
+def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch):
+    # Pinned whole, for the settlement test's reason: the frontend's types are
+    # frozen to exactly this shape, so a field renamed, dropped or added here
+    # breaks them. The credited amount deliberately differs from the
+    # creditable one, as it can when the payout is bounded again at payout
+    # time, so a mapping that copied the promise into the payout cannot pass;
+    # and `updated_at` is later than `resolved_at`, as it is for a credit
+    # reconciled after the verdict, so neither can stand in for the other.
+    reads(
+        monkeypatch,
+        dispute=record(
+            status="credited",
+            resolved_at=1_700_000_500.0,
+            refund_tx="3f1b" + "0" * 60,
+            rating_tx="9c2e" + "0" * 60,
+            credited_usdc=0.2,
+            updated_at=1_700_003_600.0,
+            rating_confirmed=True,
+        ),
+    )
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "id": "dsp_00112233445566778",
+        "job_id_hex": JOB_ID,
+        "task_id": "task-1",
+        "step_index": 1,
+        "agent_id": "code-agent",
+        "payer": PAYER,
+        "reason": "the step returned an empty file",
+        "status": "credited",
+        "charged_usdc": 0.25,
+        "creditable_usdc": 0.25,
+        "opened_at": 1_700_000_000.0,
+        "resolved_at": 1_700_000_500.0,
+        "refund_tx": "3f1b" + "0" * 60,
+        "rating_tx": "9c2e" + "0" * 60,
+        "credited_usdc": 0.2,
+        "updated_at": 1_700_003_600.0,
+        "rating_confirmed": True,
+        "rejection_reason": None,
+    }
+
+
+# An adjudicator's note, as the record keeps it. Distinctive on purpose: the
+# assertions below look for it anywhere in the body, not just under one key.
+ADJUDICATOR_NOTE = "the delivered file matched the brief line for line"
+
+
+def test_a_rejected_dispute_carries_its_reason(client, monkeypatch):
+    reads(monkeypatch, dispute=record(status="rejected", resolved_at=1_700_000_500.0, note=ADJUDICATOR_NOTE))
+
+    body = client.get("/api/disputes/dsp_00112233445566778").json()
+
+    assert body["status"] == "rejected"
+    assert body["rejection_reason"] == ADJUDICATOR_NOTE
+    # Under that one name: the record's own field name never reaches the wire.
+    assert "note" not in body
+
+
+# Every status but `rejected`, read off the type itself, so a status added
+# later is covered here without anyone remembering to add it.
+NOT_REJECTED = [s for s in get_args(DisputeStatus) if s != "rejected"]
+
+
+@pytest.mark.parametrize("status", NOT_REJECTED)
+def test_a_note_on_any_other_status_is_never_published(client, monkeypatch, status):
+    # The note is buyer-facing only as the answer to a rejection. A note on
+    # the record under any other status — carried forward, or written by a
+    # path that has not been thought about yet — must not surface, under
+    # `rejection_reason` or anywhere else in the body.
+    reads(monkeypatch, dispute=record(status=status, note=ADJUDICATOR_NOTE))
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["rejection_reason"] is None
+    assert ADJUDICATOR_NOTE not in r.text
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        record(status="credited", resolved_at=1_700_000_500.0, refund_tx="3f1b" + "0" * 60),
+        record(status="rejected", resolved_at=1_700_000_500.0),
+    ],
+    ids=["credited-before-4.06", "rejected-before-the-note-was-required"],
+)
+def test_a_record_from_before_the_receipt_fields_reads_them_as_null(client, monkeypatch, legacy):
+    # Built without the four, exactly as a row written before 4.06 reads
+    # back. Each is present and null rather than omitted, so the frontend's
+    # frozen type holds for every dispute ever recorded, and "not known" is
+    # never dressed up as an answer: no credited amount is invented from
+    # `creditable_usdc`, no time from `resolved_at`, no rating from a hash.
+    reads(monkeypatch, dispute=legacy)
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for field in ("credited_usdc", "updated_at", "rating_confirmed", "rejection_reason"):
+        assert field in body, f"{field} was omitted rather than null"
+        assert body[field] is None, f"{field} read {body[field]!r} off a record that never had it"
+    assert body["status"] == legacy.status
+
+
 def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeypatch):
     lists(monkeypatch, found=settlement(), disputes=(record(id="dsp_a"), record(id="dsp_b", step_index=2)))
 
@@ -442,6 +555,31 @@ def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeyp
     assert body["window_closes_at"] == 1_700_086_400.0
     assert [d["id"] for d in body["disputes"]] == ["dsp_a", "dsp_b"]
     assert [d["step_index"] for d in body["disputes"]] == [1, 2]
+
+
+def test_the_task_listing_answers_with_the_same_rejection_reason(client, monkeypatch):
+    # Same projection, same rule: the rejected dispute carries its reason and
+    # the open one, note or not, does not. Pinned for its other half too —
+    # this read is world-readable while TASK_AUTH_REQUIRED is off, so the
+    # reason reaches anyone with the task id. That is the product decision,
+    # made knowingly: the console shows it only to the payer, and nothing here
+    # does, so a change to who may read it has to start at `require_task_read`.
+    lists(
+        monkeypatch,
+        found=settlement(),
+        disputes=(
+            record(id="dsp_rejected", status="rejected", note=ADJUDICATOR_NOTE),
+            record(id="dsp_open", step_index=2, note=ADJUDICATOR_NOTE),
+        ),
+    )
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200, r.text
+    assert [(d["id"], d["rejection_reason"]) for d in r.json()["disputes"]] == [
+        ("dsp_rejected", ADJUDICATOR_NOTE),
+        ("dsp_open", None),
+    ]
 
 
 def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(client, monkeypatch):
