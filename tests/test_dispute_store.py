@@ -528,7 +528,7 @@ class FakePool:
         if sql == dispute_store._INSERT_DISPUTE_SQL:
             return self._open_dispute(args)
         if sql == dispute_store._APPEND_STATUS_SQL:
-            return self._append_status(args)
+            return await self._append_status(args)
         if sql == dispute_store._SELECT_DISPUTE_SQL:
             return _newest(self.disputes, dispute_id=args[0])
         if sql == dispute_store._CLAIM_REFUND_SQL:
@@ -621,9 +621,22 @@ class FakePool:
         self.disputes.append(row)
         return {"dispute_id": row["dispute_id"]}
 
-    def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+    async def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+        """_APPEND_STATUS_SQL: the `latest` CTE, the mutex DELETE and the event
+        insert, as one statement — and ONE snapshot, modelled the way
+        `_claim_refund` models its own.
+
+        The sleep below IS that snapshot window. `latest` is read before
+        anything is written, and a transition that commits in between is
+        invisible to it, so everything after the sleep runs from a row that may
+        already be stale. Modelling the append as an atomic read-modify-write
+        instead — which this fake did until the window was found — certifies a
+        guarantee no database gives: at READ COMMITTED two concurrent
+        statements take their own snapshots, and this one blocks on nothing.
+        """
         dispute_id, status, refund_tx, rating_tx, note, resolved_at, now, credited_usdc, rating_confirmed = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
+        await asyncio.sleep(0)
         # `finished`: the mutex is dropped by the same statement that ends the
         # dispute. Being a data-modifying CTE it runs whether or not the INSERT
         # beside it finds any history to write from, so it is modelled before
