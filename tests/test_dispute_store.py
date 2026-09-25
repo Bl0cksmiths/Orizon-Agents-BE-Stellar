@@ -33,6 +33,7 @@ import pytest
 from app.services import dispute_store
 from app.services.dispute_store import (
     DisputeRecord,
+    DisputeStore,
     DuplicateDisputeError,
     InMemoryDisputeStore,
     SettlementRecord,
@@ -237,6 +238,29 @@ def test_every_dispute_of_one_task_is_listed_and_no_other_task_s_is() -> None:
 
     assert [d.id for d in listed] == ["dsp_0001", "dsp_0002"]
     assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
+
+
+def test_both_stores_list_a_task_s_disputes_in_the_same_order() -> None:
+    """The two stores must not disagree about order, and only this test can
+    tell: every other test in this suite runs against the in-memory one, which
+    used to answer in INSERTION order while Postgres answers oldest-first.
+
+    Insertion order is the order this process happened to see them — a restart,
+    an eviction or a dispute opened against an older settlement all change it —
+    so a task view read from memory and a task view read from the database
+    listed a buyer's own disputes differently, and nothing hermetic could
+    notice. The disputes below are opened NEWEST first, so an implementation
+    that returns them as they arrived cannot pass."""
+
+    async def listed(store: DisputeStore) -> list[str]:
+        await store.open_dispute(a_dispute(id="dsp_late", step_index=1, opened_at=1_700_000_900.0))
+        await store.open_dispute(a_dispute(id="dsp_early", step_index=0, opened_at=1_700_000_100.0))
+        return [d.id for d in await store.list_disputes_for_task(TASK)]
+
+    in_memory = asyncio.run(listed(InMemoryDisputeStore()))
+    postgres = asyncio.run(listed(_pg(FakePool())))
+
+    assert in_memory == postgres == ["dsp_early", "dsp_late"]
 
 
 def test_a_dispute_id_is_prefixed_and_unguessable() -> None:
