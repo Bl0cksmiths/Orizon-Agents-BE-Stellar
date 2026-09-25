@@ -3,7 +3,7 @@ import binascii
 import logging
 import math
 
-from pydantic import model_validator
+from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .pdax_environments import BASE_URLS as PDAX_BASE_URLS
@@ -789,4 +789,85 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
-settings = Settings()
+class ConfigurationError(RuntimeError):
+    """This process refuses to boot, and why — WITHOUT quoting any value.
+
+    Raised in place of pydantic's own `ValidationError`, which cannot be
+    allowed to reach a deploy log. Its `__str__` appends
+    `input_value={...}` — for a model validator that is the WHOLE settings
+    dict, truncated to a fixed width, so whichever secrets happen to fall in
+    the head or the tail are printed verbatim. Nothing chooses them: it is
+    whatever the env supplied, in whatever order, so the leak is intermittent
+    rather than absent. An observed failure printed
+    `'pdax_password': '…'` in full.
+
+    Where it lands is what makes that serious. `settings = _load_settings()`
+    runs at import, so the ValidationError was an uncaught traceback on
+    stderr — Render's deploy log, readable by anyone with dashboard access,
+    retained, and read by several people at once precisely because the deploy
+    just failed. A `STELLAR_SIGNING_KEY` or a `DATABASE_URL` password that
+    reaches a log has to be rotated, so a validator that fires on a typo
+    turned a five-minute fix into a credential rotation.
+
+    `SecretStr` on the secret fields would also have worked and was not
+    chosen: it changes the type of eight fields read across `app/pdax/*`,
+    `app/stellar/client.py` and `app/services/*`, so the blast radius is the
+    whole service rather than this module. The values are not the problem —
+    printing them is.
+    """
+
+
+def _boot_failure_message(exc: ValidationError) -> str:
+    """Every refusal pydantic collected, as text an operator can act on.
+
+    `errors()[i]["msg"]` and the field's name, and nothing else: no `input`,
+    no `ctx`, no URL. The `msg` of a `value_error` is the text this module's
+    own validators wrote, every one of which names the variable at fault and
+    none of which echoes its value — that is the property this function
+    depends on, so it is the one to re-check before a validator's message
+    grows an f-string.
+
+    The field is reported as the ENV VAR an operator sets (`API_KEY`), not as
+    the attribute name, because the fix happens in the Render dashboard.
+    Model-level validators carry an empty `loc` — they are about a
+    combination rather than one field — and their messages already name what
+    they are about, so they are printed unprefixed.
+    """
+    lines = []
+    for err in exc.errors():
+        # "Value error, " is pydantic's own prefix on a ValueError raised by a
+        # validator. Dropped: the sentence after it is a whole sentence.
+        msg = str(err.get("msg", "")).removeprefix("Value error, ")
+        loc = err.get("loc") or ()
+        field = ".".join(str(part) for part in loc).upper()
+        lines.append(f"  - {field}: {msg}" if field else f"  - {msg}")
+    problems = "\n".join(lines)
+    return (
+        f"Refusing to boot: {len(lines)} configuration problem(s).\n"
+        f"{problems}\n"
+        "No configured values are shown above, deliberately — this text goes to the deploy log. "
+        "Fix the named variables (in the Render dashboard for the deployed service) and redeploy."
+    )
+
+
+def _load_settings(**overrides: object) -> Settings:
+    """Build the settings, turning a refusal into one that is safe to print.
+
+    `overrides` exist for the tests that need to drive a real failure through
+    this exact path; production calls it with none and the values come from
+    the environment.
+    """
+    try:
+        return Settings(**overrides)  # type: ignore[arg-type]
+    except ValidationError as exc:
+        message = _boot_failure_message(exc)
+    # Raised OUTSIDE the `except` block, which is not a style choice. Raising
+    # inside it — even `from None` — leaves the ValidationError hanging off
+    # `__context__`, where the values still are, one attribute away from any
+    # handler or reporting tool that walks the exception chain. `from None`
+    # only stops the default traceback printing it. Out here the block has
+    # ended, so there is no chain to walk.
+    raise ConfigurationError(message)
+
+
+settings = _load_settings()
