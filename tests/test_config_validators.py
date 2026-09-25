@@ -16,7 +16,8 @@ import pytest
 from pydantic import ValidationError
 from stellar_sdk import Keypair
 
-from app.config import MAINNET_PASSPHRASE, PDAX_ENVIRONMENTS, Settings
+from app.config import _MIN_API_KEY_CHARS, MAINNET_PASSPHRASE, PDAX_ENVIRONMENTS, Settings
+from app.security import _MIN_MASKED_SECRET_CHARS
 
 CONFIG_LOGGER = "app.config"
 
@@ -74,6 +75,9 @@ def test_non_production_environments_keep_the_escape_hatch():
 # demo/dev/read-only combination bootable.
 
 _MAINNET = {"stellar_network": "mainnet", "stellar_network_passphrase": MAINNET_PASSPHRASE}
+# An operator key this service will actually boot with — ascii, unpadded and
+# long enough for the log redaction filter to mask it.
+_USABLE_KEY = "operator-secret-key"
 _SIGNER = "S" + "A" * 55
 
 
@@ -83,8 +87,10 @@ def test_mainnet_signer_without_api_key_refuses_to_boot():
 
 
 def test_mainnet_signer_with_api_key_boots():
-    s = _settings(**_MAINNET, stellar_signing_key=_SIGNER, api_key="k")
-    assert s.api_key == "k"
+    # A key long enough to be masked in the logs: `_api_key_is_usable_on_the_wire`
+    # refuses a shorter one outright, so "k" would now fail this for the other rule.
+    s = _settings(**_MAINNET, stellar_signing_key=_SIGNER, api_key=_USABLE_KEY)
+    assert s.api_key == _USABLE_KEY
 
 
 def test_public_network_alias_is_covered():
@@ -127,7 +133,7 @@ def test_production_pdax_credentials_with_api_key_boot():
         pdax_webhook_secret="whsec",
         pdax_username="ops@example.com",
         pdax_password="pw",
-        api_key="k",
+        api_key=_USABLE_KEY,
     )
     assert s.pdax_environment == "production"
 
@@ -154,6 +160,94 @@ def test_error_names_every_exposure():
 
 def test_demo_defaults_still_boot_without_an_api_key():
     assert _settings().api_key == ""
+
+
+# ── DISPUTE_REFUNDS_ENABLED vs API_KEY (story 4.03) ─────────────
+# The one branch of `_money_capable_config_requires_api_key` that bites on
+# TESTNET, and the one that had no test at all. An upheld dispute moves the
+# PLATFORM's own balance on an adjudicator's say-so with no prior on-chain
+# authorisation to bound it, so the switch demands a key by itself — NOT in
+# combination with the signer or the asset SAC, because a deployment that
+# flips the switch before wiring either of those would otherwise boot with an
+# empty key and leave `require_adjudicator` as the only door.
+
+
+def test_the_refund_switch_alone_refuses_to_boot_without_an_api_key():
+    with pytest.raises(ValidationError, match="API_KEY is required") as info:
+        _settings(dispute_refunds_enabled=True)
+    message = str(info.value)
+    # The message must name the SWITCH, which is what the branch reads. It
+    # used to say a signing key and an asset SAC were set — neither of which
+    # this configuration has — and sent the operator hunting for credentials
+    # that were never the cause.
+    assert "DISPUTE_REFUNDS_ENABLED" in message
+    assert "STELLAR_SIGNING_KEY" not in message
+
+
+def test_the_refund_switch_with_an_api_key_boots():
+    s = _settings(dispute_refunds_enabled=True, api_key=_USABLE_KEY)
+    assert s.dispute_refunds_enabled is True
+    assert s.api_key == _USABLE_KEY
+
+
+def test_the_refund_switch_off_needs_no_api_key():
+    # The demo's shipped posture: nothing here can pay a dispute out, so an
+    # empty key is the supported configuration and must stay bootable.
+    s = _settings(dispute_refunds_enabled=False)
+    assert s.dispute_refunds_enabled is False
+    assert s.api_key == ""
+
+
+# ── API_KEY's own shape ─────────────────────────────────────────
+# Each of these boots a service that answers 401 to its OWN operator forever,
+# indistinguishably from an attacker, on a deploy that reported success. A
+# named deploy failure is the only outcome an operator can act on.
+
+
+@pytest.mark.parametrize(
+    ("label", "key", "fault"),
+    [
+        ("non-ascii", "passphrase-naïve", "non-ascii"),
+        ("leading-space", " operator-secret-key", "padded"),
+        ("trailing-tab", "operator-secret-key\t", "padded"),
+        ("too-short", "abc", "shorter than"),
+        # Long enough once stripped, so it fails ONLY on the padding — which
+        # is what proves the three rules are checked independently.
+        ("padded-but-long", "  operator-secret-key  ", "padded"),
+    ],
+    ids=["non-ascii", "leading-space", "trailing-tab", "too-short", "padded-but-long"],
+)
+def test_an_unusable_api_key_refuses_to_boot(label, key, fault):
+    with pytest.raises(ValidationError, match="API_KEY cannot be used as configured") as info:
+        _settings(api_key=key)
+    # The validator's OWN message, not `str(ValidationError)` — pydantic
+    # appends a repr of the whole input dict to that, which quotes every
+    # setting including this one. What is assertable here is the line the
+    # validator wrote.
+    (message,) = [e["msg"] for e in info.value.errors()]
+    assert fault in message
+    # The key is a credential: the refusal names the variable and the fault,
+    # never the value.
+    assert key.strip() not in message
+
+
+def test_a_usable_api_key_boots():
+    assert _settings(api_key=_USABLE_KEY).api_key == _USABLE_KEY
+
+
+def test_the_shortest_bootable_key_is_the_shortest_the_log_filter_masks():
+    """The bound is the redaction filter's, and this is where they are joined.
+
+    `security._MIN_MASKED_SECRET_CHARS` is the length below which a configured
+    value is NOT masked by exact match — so a key under it prints itself into
+    any log line that quotes it. `config._MIN_API_KEY_CHARS` is a literal
+    because security.py imports config, not the other way round; this
+    assertion is what an import would have been for.
+    """
+    assert _MIN_API_KEY_CHARS == _MIN_MASKED_SECRET_CHARS
+    assert _settings(api_key="a" * _MIN_API_KEY_CHARS).api_key == "a" * _MIN_API_KEY_CHARS
+    with pytest.raises(ValidationError, match="API_KEY cannot be used"):
+        _settings(api_key="a" * (_MIN_API_KEY_CHARS - 1))
 
 
 # ── PDAX_ENVIRONMENT typo ───────────────────────────────────────
