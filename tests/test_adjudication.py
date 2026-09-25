@@ -582,6 +582,56 @@ def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch,
     assert asyncio.run(store.claim_refund(dispute.id)) is not None
 
 
+def test_a_rejection_holding_a_stale_open_read_never_drops_a_live_payout(monkeypatch, rater) -> None:
+    """A rejection is terminal AND it drops the refund claim row, so the same
+    stale read costs more here than anywhere else.
+
+    The rejecter reads the dispute while it is `open` and stalls until an
+    uphold has claimed it and put a transfer on the network. Written back
+    unconditionally, `rejected` lands over a live payout: the claim that stops
+    a second transfer is deleted, the reconciliation queue that is the only
+    record of the first is emptied, and the receipt tells the buyer their
+    dispute was refused while the platform's money is in the air.
+
+    Conditional, the rejection is refused, and it names the status the store
+    actually holds — which is what the adjudicator needs to be told.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch)
+    store = dispute_store.get_dispute_store()
+
+    async def race() -> tuple[Any, Any]:
+        rejecter_may_proceed = _stalls_the_first_read(monkeypatch)
+        transfer_may_answer = asyncio.Event()
+
+        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+            chain.calls.append((buyer, amount_usdc))
+            await transfer_may_answer.wait()
+            return LOST  # submitted, unconfirmed: it MAY STILL LAND
+
+        monkeypatch.setattr(refund_svc, "execute_refund", _in_flight)
+        rejecting = asyncio.create_task(_attempt(dispute_svc.reject(dispute.id, note="the delivery matched the brief")))
+        await asyncio.sleep(0)  # the rejecter reads `open`, then stalls
+        upholding = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # the uphold claims and submits
+        rejecter_may_proceed.set()
+        refused = await rejecting
+        transfer_may_answer.set()
+        return refused, await upholding
+
+    rejection, credit = asyncio.run(race())
+
+    assert rejection.code == "dispute_not_open" and rejection.status_code == 409
+    assert "crediting" in rejection.message, f"the adjudicator was not told the real status: {rejection.message}"
+    assert credit.code == "refund_unconfirmed"
+    # The in-flight payout keeps both of the things that make it reconcilable:
+    # its claim row, and a dispute that reads as being paid.
+    final = store._disputes[dispute.id]
+    assert (final.status, final.refund_tx, final.note) == ("crediting", "tx_inflight", None)
+    assert [c.dispute_id for c in asyncio.run(store.list_refund_claims())] == [dispute.id]
+    assert len(chain.calls) == 1
+
+
 # ── the three answers a submitted transfer can have ─────────────
 
 
