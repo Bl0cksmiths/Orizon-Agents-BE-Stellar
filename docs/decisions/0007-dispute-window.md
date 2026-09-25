@@ -222,6 +222,28 @@ makes and the reason `GET /api/disputes/{id}` needs no credential.
 
 ### D4 — What 4.02 deliberately does not do
 
+> **Amended 2026-09-25 (story 4.07 — the Epic 4 hardening pass).** Two details
+> below were overtaken by the very stories this section hands the work to, and
+> both mislead anyone reading it as the status vocabulary it claims to define.
+>
+> **The vocabulary has four statuses on the credited path, not three:**
+> `open → upheld → crediting → credited`, or `open → rejected`. `crediting` is
+> story 4.03's durable refund claim (ADR 0008 D2): a dispute is parked there
+> while a transfer may be on the network, and it is the one state an operator
+> reconciles against the chain by hand. Nobody adjudicates a dispute *into* it,
+> which is why it is missing below — but it is a status a reader of a record
+> will meet, and a vocabulary that omits it is not the full one.
+>
+> **The dispute rating is recorded on `credited`, not on `upheld`.** Story 4.04
+> writes it only once the credit has landed *and* been recorded, so `rating_tx`
+> is appended to the same `credited` status the refund tx was; the status does
+> not move again. Since 4.06 that record carries `rating_confirmed` beside the
+> hash, because a submission that timed out records a hash exactly as one that
+> landed, and only the flag tells them apart.
+>
+> What this section actually decided stands unchanged: 4.02 writes `open` and
+> nothing else, and an open dispute still costs the disputed agent nothing.
+
 **Opening a dispute writes `open` and nothing else.** No transaction is
 submitted, no rating is written, no reputation moves, and nobody adjudicates.
 The full status vocabulary is defined now — `open → upheld → credited`, or
