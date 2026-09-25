@@ -122,13 +122,56 @@ UNBIND_SUBJECT = UNBINDING_MESSAGE_PREFIX
 # enforce rather than a check a later change could forget.
 DISPUTE_MESSAGE_PREFIX = "orizon-dispute:v1"
 
-# Retention cap for outstanding challenges (insertion-ordered eviction, see
-# issue_challenge). Matches ramp_store._MAX_RAMPS, and for the same reason with
-# sharper teeth: the challenge route is a PUBLIC, unauthenticated POST whose key
-# is entirely caller-supplied, and the prototype's plain dict was swept only
-# when a verify happened to hit that exact key — i.e. never, for keys an
-# attacker never verifies. That is unbounded growth on a 512 MB free instance.
-MAX_CHALLENGES = 500
+# Retention budget for outstanding challenges, PER PURPOSE. The three public
+# mint routes share one table but not one allowance, because a shared allowance
+# is a shared weapon: any caller who could fill the table displaced whatever was
+# in it, whoever it belonged to and whatever it was for.
+#
+# The bind budget is the one an attacker can spend at will. A bind key is
+# (agent_id, endpoint_url) and the URL is caller-supplied and unbounded, so one
+# real agent id — every one of them public in the marketplace — plus a few
+# hundred URLs an attacker owns filled the whole table. The unbind and dispute
+# key spaces cannot be inflated that way: an unbind is keyed by agent id alone
+# and a dispute by a (job, step) the settlement store must already hold, and
+# both routes refuse to mint for anything else. So bind gets the smallest share
+# it can work in, and the two that cannot be conjured get the room.
+#
+# They sum to MAX_CHALLENGES, which is unchanged: the memory argument below is
+# about the whole table and is not being relaxed, only divided.
+CHALLENGE_BUDGETS: dict[str, int] = {"bind": 150, "unbind": 150, "dispute": 200}
+
+# Retention cap for outstanding challenges across all three purposes. Matches
+# ramp_store._MAX_RAMPS, and for the same reason with sharper teeth: the
+# challenge route is a PUBLIC, unauthenticated POST whose key is entirely
+# caller-supplied, and the prototype's plain dict was swept only when a verify
+# happened to hit that exact key — i.e. never, for keys an attacker never
+# verifies. That is unbounded growth on a 512 MB free instance.
+MAX_CHALLENGES = sum(CHALLENGE_BUDGETS.values())
+
+
+class ChallengeBudgetExhausted(Exception):
+    """No room to mint a challenge for this purpose, and nothing live to take.
+
+    Raised INSTEAD of displacing somebody's outstanding nonce. The table used
+    to fall back to evicting the oldest entry overall once nothing in it had
+    expired, which meant a caller who filled it took a live challenge out of
+    the hands of whoever held it — an operator mid-signature, or a buyer
+    partway through signing a dispute inside a 24-hour window they cannot get
+    back. Refusing the NEW mint moves that cost onto the caller asking for
+    more, who can retry, and off the party who already has what they need.
+
+    `purpose` is which budget is full, for the log and for the handler. It is
+    one of CHALLENGE_BUDGETS' keys — never caller text.
+
+    Carried up to `app/main.py`, which has the handler that turns it into the
+    error envelope, so all three mint routes answer it identically without any
+    of them importing this module's exceptions.
+    """
+
+    def __init__(self, purpose: str) -> None:
+        self.purpose = purpose
+        super().__init__(f"no challenge capacity for {purpose}")
+
 
 # (agent_id, subject) -> (nonce_hex, expires_at), where `subject` is the endpoint
 # URL for a bind and UNBIND_SUBJECT for an unbind. Keyed by the PAIR, not by the
@@ -137,11 +180,11 @@ MAX_CHALLENGES = 500
 # nonce simply by requesting a challenge for a URL they control.
 _challenges: OrderedDict[tuple[str, str], tuple[str, float]] = OrderedDict()
 
-# True while evictions are displacing LIVE challenges — flips the eviction log
-# from WARNING (first) to DEBUG (consecutive), the registry_sync._failing
-# discipline: a flood that keeps the table full must be visible once without
-# the warning itself becoming the flood.
-_evicting_live = False
+# Purposes currently refusing new mints — flips the exhaustion log from WARNING
+# (first) to DEBUG (consecutive), the registry_sync._failing discipline: a flood
+# that keeps a budget full must be visible once without the warning itself
+# becoming the flood. Cleared per purpose as soon as one admits a mint again.
+_exhausted: set[str] = set()
 
 
 def binding_message(agent_id: str, endpoint_url: str, nonce: str) -> str:
@@ -253,18 +296,19 @@ def issue_challenge(scope: str, subject: str, ttl_seconds: int = CHALLENGE_TTL_S
     invalidated the one the owner was in the middle of signing, so the owner's
     signature always arrived against a nonce that no longer existed. Re-issuing
     also cannot be used to extend a challenge's life past its original expiry.
+    It is also what keeps the budget below from being spent by a flood aimed at
+    a pair somebody already holds: that costs no slot at all.
 
-    Bounded, sweep-on-insert — ramp_store.save's discipline: a new key that
-    would take the table past MAX_CHALLENGES first evicts the oldest EXPIRED
-    challenge, falling back to the oldest overall, so the table cannot exceed
-    its cap however many agent ids an anonymous caller invents.
+    Bounded PER PURPOSE, sweep-on-insert, and NEVER at a live entry's expense
+    — see `_make_room`. Raises `ChallengeBudgetExhausted` when the purpose's
+    budget is full of challenges that are all still live.
     """
     key = (scope, subject)
     live = _challenges.get(key)
     if live is not None and live[1] > time.time():
         return live
-    if key not in _challenges and len(_challenges) >= MAX_CHALLENGES:
-        _evict_one()
+    if key not in _challenges:
+        _make_room(_purpose_of(subject))
     nonce = secrets.token_hex(16)
     expires_at = time.time() + ttl_seconds
     _challenges[key] = (nonce, expires_at)
@@ -304,35 +348,70 @@ def issue_dispute_challenge(
     return issue_challenge(job_id_hex, dispute_subject(step_index), ttl_seconds)
 
 
-def _evict_one() -> None:
-    """Drop one challenge to make room: the oldest EXPIRED one, or — if every
-    outstanding challenge is still live — the oldest overall, so the table can
-    never exceed its cap.
+def _purpose_of(subject: str) -> str:
+    """Which budget a (scope, subject) key spends: bind, unbind or dispute.
 
-    Evicting a live challenge strands an operator who may be mid-signature, so
-    it is worth saying out loud; the nonce is never logged (it is a live
-    single-use credential) and consecutive evictions coalesce to DEBUG.
+    Read off the SUBJECT, because the subject is what the three key spaces are
+    already separated by and `dispute_subject` documents why they cannot
+    overlap: an unbind's subject is exactly UNBIND_SUBJECT, a dispute's is that
+    prefix plus a step, and a bind's is an endpoint URL that has passed
+    `validate_endpoint_url` and therefore has a scheme neither of the others
+    can have. Derived rather than passed in, so no caller can name a budget
+    that is not its own.
     """
-    global _evicting_live
+    if subject == UNBIND_SUBJECT:
+        return "unbind"
+    if subject.startswith(DISPUTE_MESSAGE_PREFIX):
+        return "dispute"
+    return "bind"
+
+
+def _make_room(purpose: str) -> None:
+    """Free a slot in `purpose`'s budget, or refuse the mint.
+
+    Two steps, and there is no third. Sweep every EXPIRED challenge of this
+    purpose — all of them, not one, because they are dead weight and the TTL is
+    five minutes, so a budget under real load drains continuously and this
+    almost always ends here. Then, if the budget is still full, every entry in
+    it is live and belongs to somebody: raise, rather than take one.
+
+    THE FALLBACK THAT USED TO BE HERE WAS THE BUG. It evicted the oldest entry
+    overall once nothing had expired, which made a full table a way to cancel
+    other people's outstanding nonces — across purposes, since the budget was
+    shared. A few hundred anonymous bind-challenge mints, one public agent id
+    and as many URLs as the attacker cared to invent, took a buyer's live
+    dispute challenge out of the table and made their signed dispute come back
+    `challenge_expired`. Inside a 24-hour window, repeatable for all of it.
+
+    The refusal costs the caller who is asking for MORE, which is the right
+    party: they can ask again in five minutes, and nothing they held is gone.
+    """
+    budget = CHALLENGE_BUDGETS[purpose]
+    held = [k for k in _challenges if _purpose_of(k[1]) == purpose]
+    if len(held) < budget:
+        _exhausted.discard(purpose)
+        return
     now = time.time()
-    victim = next(
-        (k for k, (_, expires_at) in _challenges.items() if expires_at <= now),
-        next(iter(_challenges)),
-    )
-    evicted = _challenges.pop(victim, None)
-    if evicted is not None and evicted[1] > now:
-        if _evicting_live:
-            logger.debug("evicted a live challenge: scope=%s", victim[0])
-        else:
-            _evicting_live = True
-            logger.warning(
-                "challenge table full at %d — evicting LIVE challenges (scope=%s); a pending "
-                "bind, unbind or dispute may have to be restarted (coalescing to DEBUG until it clears)",
-                MAX_CHALLENGES,
-                victim[0],
-            )
+    expired = [k for k in held if _challenges[k][1] <= now]
+    for key in expired:
+        del _challenges[key]
+    if len(held) - len(expired) < budget:
+        _exhausted.discard(purpose)
+        return
+    # Every slot is live. The nonces are never logged — each is a single-use
+    # credential for its window — and consecutive refusals coalesce to DEBUG so
+    # a flood is visible once without the warning becoming the flood.
+    if purpose in _exhausted:
+        logger.debug("challenge budget still exhausted: purpose=%s", purpose)
     else:
-        _evicting_live = False
+        _exhausted.add(purpose)
+        logger.warning(
+            "challenge budget for %s is full at %d and every entry is still live — new mints are "
+            "REFUSED rather than displacing an outstanding nonce (coalescing to DEBUG until it clears)",
+            purpose,
+            CHALLENGE_BUDGETS[purpose],
+        )
+    raise ChallengeBudgetExhausted(purpose)
 
 
 # The owner lookup gets its OWN cache namespace, `agentowner:{agent_id}`. It must
