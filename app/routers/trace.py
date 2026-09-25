@@ -22,7 +22,15 @@ router = APIRouter(tags=["trace"])
 )
 async def get_trace(task_id: str) -> list[TraceLine]:
     if task_id not in state.traces and task_id not in state.tasks:
-        raise HTTPException(404, f"unknown task: {task_id}")
+        # A bare snake token, never the id — `task_auth.require_task_read`'s
+        # rule, and this is the route that most needs it: these two are the
+        # world-readable ones while TASK_AUTH_REQUIRED is off, which is the
+        # shipped default. `main.http_exception_handler` promotes a snake
+        # detail to `error.code` and derives the message from it; an
+        # interpolated id is not one, so it fell through to `not_found` and
+        # the handler copied the caller's own text into `error.message`.
+        # `task_id` carries no length bound here either.
+        raise HTTPException(404, "unknown_task")
     return state.traces.get(task_id, [])
 
 
@@ -47,7 +55,7 @@ async def stream_trace(task_id: str) -> EventSourceResponse:
     would race sse-starlette's own listener for the one ASGI receive channel.
     """
     if task_id not in state.traces and task_id not in state.tasks:
-        raise HTTPException(404, f"unknown task: {task_id}")
+        raise HTTPException(404, "unknown_task")  # `get_trace`'s rule
 
     task = state.tasks.get(task_id)
     running = task is not None and task.status in ("pending", "running") and not bus.is_closed(task_id)

@@ -227,15 +227,28 @@ def test_a_bind_and_an_unbind_challenge_coexist_for_one_agent() -> None:
 def test_unbind_challenges_share_the_one_bounded_table() -> None:
     """The reuse, asserted: the cap that protects a 512 MB instance from the
     public bind route has to cover the public unbind route too, and it does
-    because there is one table rather than two."""
+    because there is one table rather than two.
+
+    Since 4.07 the table is one but the ALLOWANCE is three, so this bounds at
+    the unbind budget. A shared allowance was a shared weapon: whoever could
+    fill it displaced whatever was in it, whoever it belonged to. Full, the
+    budget refuses the new mint rather than taking a live challenge from the
+    operator who is in the middle of revoking a compromised host."""
     saved = eb._challenges.copy()
     eb._challenges.clear()
+    eb._exhausted.clear()
     try:
-        for i in range(eb.MAX_CHALLENGES + 20):
+        for i in range(eb.CHALLENGE_BUDGETS["unbind"]):
             issue_unbind_challenge(f"flood_{i}")
-        assert len(eb._challenges) == eb.MAX_CHALLENGES
-        assert ("flood_0", UNBIND_SUBJECT) not in eb._challenges
-        assert (f"flood_{eb.MAX_CHALLENGES + 19}", UNBIND_SUBJECT) in eb._challenges
+        assert len(eb._challenges) == eb.CHALLENGE_BUDGETS["unbind"]
+
+        with pytest.raises(eb.ChallengeBudgetExhausted) as info:
+            issue_unbind_challenge("flood_one_too_many")
+
+        assert info.value.purpose == "unbind"
+        assert ("flood_0", UNBIND_SUBJECT) in eb._challenges
+        assert ("flood_one_too_many", UNBIND_SUBJECT) not in eb._challenges
     finally:
         eb._challenges.clear()
         eb._challenges.update(saved)
+        eb._exhausted.clear()

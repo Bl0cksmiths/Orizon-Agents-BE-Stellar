@@ -392,10 +392,14 @@ open ──► upheld ──► crediting ──► credited   the claim stood: 
 ```
 
 **The rating does not get a status of its own.** It is written after the
-dispute is `credited` and recorded on it as `rating_tx`, so a `credited`
-dispute is paid either way, and fully resolved only once `rating_tx` is set.
-One without it is a buyer who has their credit and an agent whose rating has
-not landed — retryable, as "After `credited`" describes.
+dispute is `credited` and recorded on it as `rating_tx` — so a `credited`
+dispute is paid either way, and fully resolved only once that hash is on the
+record **and** `rating_confirmed` is true. Since 4.06 the hash alone does not
+say it: a submission that timed out records its hash exactly as one that
+landed, and `rating_confirmed` is what tells them apart. A dispute with no
+hash, or with a hash and `rating_confirmed` false, is a buyer who has their
+credit and an agent whose rating has not been shown to land — retryable either
+way, as "After `credited`" describes.
 
 **`crediting` is not a verdict.** Nobody adjudicates a dispute *into* it: it is
 the refund claim itself, made durable, and it exists so that a payout can be
@@ -506,20 +510,27 @@ dispute spends the platform's own balance on an adjudicator's say-so with
 nothing on-chain to bound it. `docs/decisions/0008-refund-execution.md` D1 has
 the argument in full.
 
-Turning the money path on without a key is not a silent weakness: with
-`DISPUTE_REFUNDS_ENABLED=true`, a signing key and an asset SAC configured, the
-process **refuses to start** unless `API_KEY` is set, and says why.
+Turning the money path on without a key is not a silent weakness:
+`DISPUTE_REFUNDS_ENABLED=true` alone makes the process **refuse to start**
+unless `API_KEY` is set, and it says why. The switch by itself, deliberately —
+a deployment that flips refunds on before a signing key or an asset SAC is
+wired up would otherwise boot with an empty key and nothing but
+`require_adjudicator` between an anonymous caller and the payout route. So
+there is no order of setting these in which the rule does not bite.
 
 What an adjudicator can be told, and what each answer means:
 
 | refusal | when |
 | --- | --- |
 | 503 `dispute_refunds_disabled` | the switch is off — nothing on this deployment is adjudicable. A configuration state, not the caller's mistake |
-| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see |
+| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see. **The credential at the door**, not the settler's key — see the row below, which is the one it is confused with |
+| 503 `refunds_not_configured` | the switch is on, the caller is authenticated, and **the settler cannot sign**: no `STELLAR_SIGNING_KEY`, or no `STELLAR_ASSET_SAC`. Asked after the terminal-status checks and *before* the dispute is moved or claimed, so the dispute is left exactly as the buyer left it. Logged at ERROR — an upheld dispute nobody is configured to pay is a buyer waiting on a human |
 | 401 `invalid_api_key` | the key is missing or wrong. The answer is the same either way — an adjudication route that distinguished them would be an oracle |
 | 404 `unknown_dispute` | no dispute with that id |
 | 409 `dispute_not_open` | a rejection aimed at a dispute that is no longer `open` |
 | 409 `dispute_rejected` | an uphold aimed at a rejected dispute: it can never be credited |
+| 409 `adjudication_in_progress` | another adjudication of this dispute is already running. The move from `open` to `upheld` is a compare-and-set, and losing it means the record changed under the read the decision was made on; re-read, the dispute still said `upheld`, so the winner is between its decision and its claim. Refused rather than raced to the mutex. **Nothing was signed here, and whether anything was signed there is not knowable from the refusal** — read the dispute back before deciding again |
+| 409 `refund_amount_invalid` | the credit computes to something that is not a finite number, so no bound can judge it. Refused ahead of both caps, because every other guard on that path is a comparison and a comparison cannot refuse a NaN. It means a figure on the settlement record — or `DISPUTE_CREDITED_FRACTION` in the environment — is not a quantity of money; the fix is to that, not to the dispute |
 | 409 `refund_in_flight` | an uphold aimed at a dispute in `crediting`. Reconcile it by hand; never retry it |
 | 409 `settlement_missing` | the settlement the dispute was judged against is no longer on record, so the credit cannot be bounded by what was actually charged |
 | 409 `nothing_to_credit` | the settlement has no such step, the step never delivered, or the amount prices to zero |
@@ -529,11 +540,32 @@ What an adjudicator can be told, and what each answer means:
 | 502 `refund_failed` | the transfer definitively did not settle, so no funds moved. The dispute is back to `upheld` and can be credited again |
 | 504 `refund_unconfirmed` | the transfer was submitted and its outcome is unknown. The dispute stays in `crediting` for reconciliation |
 
-`settlement_missing`, `nothing_to_credit` and `refund_above_cap` are all raised
-**before** anything is signed, and each hands the refund claim back, so the
-dispute stays payable once whatever caused them is fixed. Only `refund_failed`
-and `refund_unconfirmed` describe a transaction that was actually submitted,
-and only the second of those leaves the claim held.
+**`adjudication_not_configured` and `refunds_not_configured` are different
+checks, and telling them apart is the whole of knowing what to fix.** Both are
+503, both say "not configured", and they are about opposite ends of the
+request:
+
+- `adjudication_not_configured` is **the door**. `API_KEY` is empty, so the
+  route cannot tell an adjudicator from a stranger, and it refuses everyone.
+  Nothing about the settler is even looked at. Fix it in the deployment's
+  credentials (ADR 0008 D1).
+- `refunds_not_configured` is **the wallet**. The caller got through the door;
+  this deployment has no settler key or no asset SAC, so it could not sign a
+  transfer if it decided to. Fix it by wiring the signer.
+
+A deployment can be in either state alone, and setting `API_KEY` does nothing
+for the second. The tell is which one comes back: if you have just set
+`API_KEY` and the answer changed from `adjudication_not_configured` to
+`refunds_not_configured`, the door is fixed and the wallet is not.
+
+`settlement_missing`, `nothing_to_credit`, `refund_above_cap` and
+`refund_amount_invalid` are all raised **before** anything is signed, and each
+hands the refund claim back, so the dispute stays payable once whatever caused
+them is fixed. `refunds_not_configured` and `adjudication_in_progress` are
+raised before anything is signed too, and earlier still — before the claim is
+ever taken, so there is none to hand back. Only `refund_failed` and
+`refund_unconfirmed` describe a transaction that was actually submitted, and
+only the second of those leaves the claim held.
 
 None of these is ever about the **rating**. A rating that does not land is not
 a refusal: the credit has already moved, so the uphold answers with the dispute
@@ -741,8 +773,19 @@ and the amount. Search it for the dispute id before touching anything.
 **Then settle the record to match the chain**, and only then:
 
 - **It succeeded.** The buyer has been credited. Close the dispute by recording
-  what landed — `append_status(dispute_id, "credited", refund_tx=<hash>)`.
-  Ordering the payout again instead would credit them a second time.
+  what landed — `append_status(dispute_id, "credited", refund_tx=<hash>,
+  credited_usdc=<the amount the transfer moved>)`. **Both fields.**
+  `append_status` reads a missing keyword as "leave it as recorded", so a write
+  without `credited_usdc` leaves the dispute `credited` with a null amount for
+  good, and the buyer's receipt has nothing to show but the promise frozen at
+  opening time — a figure that need not match the explorer. Read the amount off
+  the transaction, never off an estimate.
+
+  **Then uphold it once more**, and only then. A dispute recorded `credited` by
+  hand carries its refund hash and *no rating*, and nothing in that write can
+  produce one; upholding a `credited` dispute signs no transfer and writes the
+  rating alone, so it cannot pay the buyer twice. Ordering the payout again by
+  releasing the claim first is the thing that would.
 - **It failed, or the hash is on no explorer and the payer's balance never
   moved.** Nothing moved, so `release_refund_claim(dispute_id)` returns the
   dispute to `upheld`, and only then may the payout be ordered again.
@@ -773,8 +816,11 @@ write recording it on the dispute fails, the service logs
 `dispute rating was SUCCESS but could not be recorded on the dispute — record
 rating_tx by hand` with the hash, and the script prints that hash with the exact
 `append_status` line that records it and asks for it to be run before anything
-is re-run. Do it — a re-run first is refused as a replay with nothing on
-record, and reads as a collision.
+is re-run. That line carries `rating_confirmed=True` beside the hash, for the
+reason above: the ledger has already vouched for this rating, and a hash
+written without the flag leaves the receipt showing it as still in flight. Do
+it — a re-run first is refused as a replay with nothing on record, and reads as
+a collision.
 
 **What it means.** The ledger refused the rating as a replay — it already holds
 a rating for this agent under this dispute's derived id — and this dispute has
@@ -814,12 +860,26 @@ argument.
 matches what this dispute would have written: `kind` is `dispute`, the rating
 is `10`, the agent is `agent=`, the payer is `payer=`, and the weight is the
 step's quoted price in stroops — the dispute's `charged_usdc` × 10 000 000,
-rounded, which is the same settled step price the rating was weighted from, and
-which the script's `--dry-run` prints beside the rating id.
+rounded and then **clamped to `[1, REPUTATION_MAX_RATING_WEIGHT_USDC ×
+10 000 000]`**, which is the same settled step price the rating was weighted
+from, and which the script's `--dry-run` prints beside the rating id.
+
+Do the clamp before deciding the weight disagrees. It only shows at the two
+ends, and both are ordinary: a step priced at zero is weighted 1 stroop rather
+than nothing, so that it still carries evidence, and a step priced above the
+cap is weighted at the cap, so one whale job cannot own the score. A rating
+computed without it at either end differs from ours by exactly that clamp, and
+escalating on the difference escalates a benign case.
 
 - **It is ours.** Record it, and the dispute is fully resolved:
-  `append_status(dispute_id, "credited", rating_tx=<hash>)`. The next uphold is
-  then answered `already on-chain — kept`, which is the confirmation.
+  `append_status(dispute_id, "credited", rating_tx=<hash>, rating_confirmed=True)`.
+  The flag is not optional here: you have just read the rating **on the
+  ledger**, which is the very evidence that upgrades it, and `append_status`
+  reads a missing keyword as "leave it as recorded" — so without it the
+  dispute keeps `rating_confirmed` null and the buyer's receipt shows the
+  agent's consequence as pending for good. Until both are written the dispute
+  is *not* resolved, whatever the hash says. The next uphold is then answered
+  `already on-chain — kept`, which is the confirmation.
 - **It is not ours, or nothing can be found.** Leave the dispute as it is —
   `credited`, the buyer paid, no `rating_tx` — and treat it as an incident: find
   out what else is writing ratings as the Scorer, or why the dispute's job id

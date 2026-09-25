@@ -75,10 +75,12 @@ What it needs in the environment
 `STELLAR_ASSET_SAC`, `STELLAR_REPUTATION_LEDGER` with `REPUTATION_ENABLED` left
 on (and the settler registered as the ledger's Scorer, or every rating it signs
 is refused), `DISPUTE_REFUNDS_ENABLED=true`, and a `DATABASE_URL` pointing at
-the store that actually holds the dispute. Turning that switch on with a
-signing key and a SAC set makes `API_KEY` mandatory — the config refuses to
-boot without it, on every network including testnet
-(`config._money_capable_config_requires_api_key`).
+the store that actually holds the dispute. Turning that switch on makes
+`API_KEY` mandatory BY ITSELF — the config refuses to boot without it, on
+every network including testnet, whether or not a signing key or a SAC is
+wired up yet (`config._money_capable_config_requires_api_key`, whose comment
+explains why it is the switch alone: a validator that promised "refunds on
+implies a key" must not have a hole in it).
 
 No secret ever reaches the terminal: every line goes out through
 `security.redact_secrets`, which masks this deployment's configured values and
@@ -119,6 +121,22 @@ EXIT_UNEXPECTED = 11
 # twice. 13 is a collision, which no re-run can fix and a human must look up.
 EXIT_RATING_NOT_LANDED = 12
 EXIT_RATING_COLLISION = 13
+# A SECOND ADJUDICATION of this dispute was running when this one refused: the
+# service's compare-and-set on `open` lost, it read the dispute back, and the
+# dispute still said `upheld` — somebody else is between the decision and the
+# claim right now (`adjudication_in_progress`).
+#
+# Its own code because neither neighbour tells the truth about it. 5 is the
+# terminal family — rejected, already credited — and this dispute is not
+# terminal at all, it is BUSY; a wrapper that read 5 would stop asking about a
+# dispute that is about to be paid, or about to become payable again. 6 is the
+# opposite error: 6's instruction is "never re-run, reconcile against the
+# chain", and here a re-run may well be the fix a minute from now, because the
+# other adjudication can fail and leave the dispute `upheld` and payable.
+#
+# What it asks for is neither of those: READ THE DISPUTE BACK, then decide. So
+# it says that, under a code of its own.
+EXIT_ADJUDICATION_RACE = 14
 
 # Make `python scripts/uphold_dispute.py` work from the repo root: put the repo
 # root on sys.path so the `app` package resolves without PYTHONPATH.
@@ -147,9 +165,9 @@ except ValidationError:
     print(
         "\n  REFUSED (not_configured) — nothing was signed.\n"
         "  The service refused to start with this configuration. The usual cause on the\n"
-        "  refund path: DISPUTE_REFUNDS_ENABLED is true and a signing key and asset SAC\n"
-        "  are set, which makes API_KEY mandatory on every network. Set API_KEY, or clear\n"
-        "  DISPUTE_REFUNDS_ENABLED to run read-only.\n"
+        "  refund path: DISPUTE_REFUNDS_ENABLED is true, which makes API_KEY mandatory on\n"
+        "  every network ON ITS OWN — no signing key or asset SAC need be set for it to\n"
+        "  bite. Set API_KEY, or clear DISPUTE_REFUNDS_ENABLED to run read-only.\n"
         "  (The underlying error is withheld on purpose: pydantic prints a truncated repr\n"
         "  of the settings, which includes the tail of the signing key.)\n"
     )
@@ -173,20 +191,53 @@ _REFUSAL_EXITS = {
     "nothing_to_credit": EXIT_NOTHING_TO_CREDIT,
     "settlement_missing": EXIT_NOTHING_TO_CREDIT,
     "refund_above_cap": EXIT_ABOVE_CAP,
+    # A credit that is not a finite number. Mapped to the catch-all ON PURPOSE,
+    # and not to 7 or 8 beside its two siblings in `RefundRefused`: those two
+    # are answers about this dispute — there is nothing owed, or more is owed
+    # than the ceiling allows — and either sends the operator to the dispute.
+    # This one is not an answer about the dispute at all. A NaN or an infinity
+    # arriving here means a figure on the settlement record, or
+    # DISPUTE_CREDITED_FRACTION in the environment, is not a quantity of money,
+    # and nothing done to the dispute fixes that. 11's whole instruction —
+    # reconcile the state it prints, by hand — is the right one. Mapped rather
+    # than left to fall there, because unmapped it is 11 out of the preview and
+    # 5 out of the live run, and one fault must not answer with two codes.
+    "refund_amount_invalid": EXIT_UNEXPECTED,
     "refunds_disabled": EXIT_NOT_CONFIGURED,
+    # The settler has no signing key, or no asset SAC — `refund_svc.config_gap`,
+    # asked above the claim so that a deployment which cannot sign claims
+    # nothing. Same exit as `refunds_disabled` and as `check_config`'s own
+    # refusal, deliberately: all three are "this process is not configured to
+    # pay", all three are fixed by setting something and running again, and a
+    # wrapper that had to tell them apart would be branching on which of the
+    # two doors noticed first rather than on anything about the dispute.
+    "refunds_not_configured": EXIT_NOT_CONFIGURED,
     "unknown_dispute": EXIT_UNKNOWN_DISPUTE,
     "dispute_rejected": EXIT_NOT_ADJUDICABLE,
+    "adjudication_in_progress": EXIT_ADJUDICATION_RACE,
     "refund_in_flight": EXIT_IN_FLIGHT,
     "refund_failed": EXIT_TRANSFER_FAILED,
     "refund_unconfirmed": EXIT_TIMEOUT,
 }
 
-# The codes above that are raised on the FAR SIDE of a submission: something was
-# signed, whatever became of it. They must never go out through `refuse`, whose
-# whole message is that nothing was — on a money path that sentence is the one
-# an operator acts on, and being wrong about it is how a timed-out credit gets
-# retried. The report block reads the record and says what actually happened.
-_POST_SIGNING_CODES = frozenset({"refund_failed", "refund_unconfirmed", "refund_in_flight"})
+# The codes above that MUST NOT go out through `refuse`, whose whole message is
+# that nothing was signed. On a money path that sentence is the one an operator
+# acts on, and being wrong about it is how a timed-out credit gets retried, so
+# it is reserved for refusals that can actually promise it.
+#
+# Three of these are raised on the FAR SIDE of a submission — something was
+# signed, whatever became of it. `adjudication_in_progress` is the fourth and
+# is not: nothing was signed HERE. It is in the set anyway, because "nothing
+# was signed" would be read as a fact about the DISPUTE, and about the dispute
+# it may be false the instant it is printed — the adjudication this one lost
+# the race to is between its decision and its claim, and may sign next. The
+# set is "cannot honestly say nothing was signed", which is the property
+# `refuse` needs, rather than "was signed", which is merely how three of them
+# come to have it. Each one's report block reads the record and says what
+# actually happened instead.
+_CANNOT_SAY_NOTHING_WAS_SIGNED = frozenset(
+    {"refund_failed", "refund_unconfirmed", "refund_in_flight", "adjudication_in_progress"}
+)
 
 # The script's own log lines — only the ones no service writes, like a failed
 # reputation read — go through the same redacted stderr handler as theirs.
@@ -315,10 +366,17 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     the same words rather than two half-written versions of them.
 
     Nothing here tidies up, and that is D3 rather than an unfinished path. A
-    timed-out submission may still settle, so releasing the claim or retrying
-    would credit the buyer twice the moment it does. A buyer credited late is
-    recoverable; a buyer credited twice is not, and the settler's wallet is the
-    platform's own money.
+    timed-out submission may still settle, so releasing the claim and paying it
+    again would credit the buyer twice the moment it does. A buyer credited
+    late is recoverable; a buyer credited twice is not, and the settler's
+    wallet is the platform's own money.
+
+    The "do not re-run" is therefore conditional, and says so. A bare re-run
+    cannot double-pay anything — `check_status` answers a `crediting` dispute
+    with this very block and `uphold` refuses it with `refund_in_flight` — and
+    once the operator has read the chain and recorded `credited` by hand, one
+    re-run is the CORRECT next step: it writes the rating that hand-written
+    record has no way to produce, and signs nothing.
     """
     # The promise frozen at opening time is the best figure available when this
     # is reached before the credit has been computed; a caller that knows the
@@ -327,7 +385,9 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     say()
     say("  " + "#" * 74)
     say(f"  #  {headline}")
-    say("  #  DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE.")
+    say("  #  DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE, AND A SECOND")
+    say("  #  ONE CANNOT BE TAKEN BACK. A re-run is right only after the chain has")
+    say("  #  been read and the record written — the first case below says when.")
     say("  " + "#" * 74)
     say()
     say(f"  Dispute {dispute.id} is parked in `crediting`, which means the refund claim is")
@@ -351,7 +411,11 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     say("      credited_usdc=<the amount the transfer moved>). Read the amount off the")
     say("      explorer, not off the estimate above: the buyer's receipt shows it as what")
     say("      they were paid, and without it the receipt can only show what was promised.")
-    say("      Re-running this script instead would credit them a second time.")
+    say("      THEN re-run this script once. A dispute recorded `credited` by hand carries")
+    say("      its refund hash and NO rating, and a re-run writes that rating alone: uphold")
+    say("      signs no second transfer for a `credited` dispute, so it cannot pay the buyer")
+    say("      twice. Before that write a re-run is refused (exit 6) rather than dangerous —")
+    say("      it simply cannot tell you anything the chain has not already told you.")
     say("    * it FAILED, or the hash is on no explorer and the payer's balance never moved —")
     say(f"      nothing moved. release_refund_claim({dispute.id!r}) returns it to `upheld`,")
     say("      and only then may this script be run again.")
@@ -474,8 +538,23 @@ def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementS
         say("  D4 — the credit is the SMALLEST of three bounds:")
         bounded = bounds(dispute, settlement, step)
         smallest = min(value for value, _ in bounded)
+        # ONE marker, however many bounds sit at the smallest figure — which is
+        # the ordinary case, since a full-fraction credit on a workflow whose
+        # only settled step is the disputed one makes all three the same
+        # number. Three "<- BINDS" beside a promise of "which one binds" reads
+        # as the arithmetic disagreeing with itself. The others are counted
+        # instead, because an agreement is a fact worth seeing and a silent
+        # one looks like a bound that was skipped.
+        agreeing = sum(1 for value, _ in bounded if value == smallest) - 1
+        marked = False
         for value, why in bounded:
-            say(f"    {value:.7f} USDC  {why}{'   <- BINDS' if value <= smallest else ''}")
+            mark = ""
+            if not marked and value == smallest:
+                marked = True
+                mark = "   <- BINDS"
+                if agreeing:
+                    mark += f" ({agreeing} other bound{'s' if agreeing > 1 else ''} at the same figure)"
+            say(f"    {value:.7f} USDC  {why}{mark}")
         say(f"  D5 — cap on ONE credit: MAX_REFUND_USDC = {settings.max_refund_usdc:.7f} USDC")
 
     try:
@@ -556,9 +635,21 @@ def check_config() -> int:
     (4.04): a deployment that cannot write one would land the credit, skip the
     rating, and end with the buyer paid and the dispute unresolved until
     somebody noticed. The check is `rating_writer.config_gap` — the very gate
-    `uphold` applies before it submits a rating — so this refuses exactly the
-    runs the service would pay and then decline to rate, and names the same
-    setting the service's own log line would.
+    `uphold` applies before it submits a rating — so a run this passes will at
+    least ATTEMPT the rating, and a refusal names the same setting the
+    service's own log line would.
+
+    It does not promise the rating will be accepted, and must not be read as
+    one. `config_gap` is presence-only by design, and the commonest reason a
+    correctly configured deployment still cannot rate is not a missing setting
+    at all: the settler is not the address the ReputationLedger stores as its
+    Scorer, and every submit reverts. Only the chain can answer that, so it is
+    answered where a chain read belongs — `GET /readiness`, whose
+    `ratings.writer` reads `not_scorer` on exactly that deployment (`scorer`
+    when the key is the registered one, `unchecked` when the RPC could not be
+    asked). Check it before a live run; this function will not, because a
+    pre-flight that dialled the RPC would let a blip block a credit an
+    operator is trying to pay, and `unchecked` could never refuse anyway.
     """
     missing = [
         name
@@ -575,14 +666,22 @@ def check_config() -> int:
         # this script uses for it.
         missing.append(f"{gap.problem} — so the dispute rating could not be written")
     if not missing:
+        # Said out loud, because the docstring above is not what an operator
+        # reads at 2am and "configured" is the word they will hear otherwise.
+        say()
+        say("  config:    set — this process can sign the credit and will attempt the rating.")
+        say("             Presence only. A settler that is not the ledger's registered Scorer")
+        say("             lands the credit and has EVERY rating refused: GET /readiness reports")
+        say("             that one, as ratings.writer = not_scorer.")
         return EXIT_OK
     return refuse(
         EXIT_NOT_CONFIGURED,
         "not_configured",
         "this process cannot sign a credit and write its rating. Missing:",
         *(f"    - {name}" for name in missing),
-        "Set them, re-run with --dry-run, and only then live. Turning the switch on beside a",
-        "signing key and a SAC also makes API_KEY mandatory, on every network including testnet.",
+        "Set them, re-run with --dry-run, and only then live. Note that DISPUTE_REFUNDS_ENABLED",
+        "makes API_KEY mandatory on its own — the process refuses to boot without one, on every",
+        "network including testnet, however little else on the refund path is wired up yet.",
     )
 
 
@@ -594,6 +693,21 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
     returned or raised, and that is the case an operator must not misread at
     2am — so `crediting` wins first, `credited` next, and only a state that says
     nothing about the money defers to what the call itself reported.
+
+    `crediting` is not always a timeout, though. `refund_in_flight` out of
+    `uphold` means the claim was already held when it looked, so the live
+    transfer belongs to another caller and the block says so under its own
+    code. Same instruction either way — read the chain, never re-run blind.
+
+    `adjudication_in_progress` is the same fact caught a moment earlier, and it
+    is the reason every branch here reads `fallback` as well as the status.
+    That refusal means another caller won the transition and has not claimed
+    YET, so the record can read `upheld`, `crediting` or `credited` by the time
+    this function sees it, depending only on how far they got. All three are
+    somebody else's run, and none of them is this one's to describe: `upheld`
+    must not say "no claim is held", `crediting` is their transfer rather than
+    this run's timeout, and `credited` must not put this run's previewed amount
+    beside their hash.
 
     `amount` is None on a rating-only run — a dispute credited by an earlier
     one — and the credit is then reported as that earlier run's, so a re-run
@@ -611,11 +725,29 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
 
     if dispute.status == "crediting":
+        if fallback in (EXIT_IN_FLIGHT, EXIT_ADJUDICATION_RACE):
+            # Not this run's submission. `uphold` answered `refund_in_flight`,
+            # which it only says when the claim was ALREADY held — another
+            # caller took it between this run's status check and its uphold.
+            # The instruction is the same as a timeout's, but the headline and
+            # the code are not: 10 says "this run signed and lost the answer",
+            # and reporting somebody else's live transfer that way sends the
+            # operator looking for a submission this process never made. The
+            # adjudication race lands here too once the caller that won it has
+            # got as far as claiming: same transfer, same owner, same words.
+            return unresolved_credit(dispute, EXIT_IN_FLIGHT, "A CREDIT FOR THIS DISPUTE IS ALREADY IN FLIGHT.", amount)
         return unresolved_credit(dispute, EXIT_TIMEOUT, "THE TRANSFER TIMED OUT — IT MAY STILL LAND.", amount)
 
     if dispute.status == "credited" and dispute.refund_tx:
         say()
-        if amount is None:
+        if fallback == EXIT_ADJUDICATION_RACE:
+            # This run planned an amount and never signed it: the adjudication
+            # it lost the race to has since paid. Crediting it to this run's
+            # own preview would put a figure this process computed beside a
+            # hash it had no part in.
+            say(f"  CREDITED — {dispute.payer} was paid by the adjudication running alongside this one;")
+            say("             this run signed no transfer, and the hash below is not its doing.")
+        elif amount is None:
             say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
         else:
             say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
@@ -631,6 +763,27 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
 
     if dispute.status == "upheld":
         say()
+        if fallback == EXIT_ADJUDICATION_RACE:
+            # The ONE case where "no claim is held" must not be said. The
+            # caller that won the compare-and-set is between the decision and
+            # the claim, so the claim may be taken and a transfer signed while
+            # this block is on the screen — and the generic `upheld` sentence
+            # below ends "then re-run", which is how this run races the other
+            # one a second time.
+            say(f"  ANOTHER ADJUDICATION OF {dispute.id} IS RUNNING — this one refused rather than race it.")
+            say("  Nothing was signed HERE. Whether anything has been signed THERE is not knowable")
+            say("  from this process: the dispute reads `upheld`, which is the state the other caller")
+            say("  claims from, so it may be signing a transfer as you read this.")
+            say()
+            say("  Read the dispute back before deciding anything — this signs nothing:")
+            say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id} --dry-run")
+            say()
+            say("  and go by what it says:")
+            say("    * `credited`  — they paid it. A live re-run writes the RATING only, never a transfer.")
+            say("    * `crediting` — their transfer is on the network. Do NOT re-run; reconcile it (10).")
+            say("    * `upheld`    — they failed or gave up and nothing moved, so a re-run pays it.")
+            say()
+            return fallback
         # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
         # outcome reached two ways: `uphold` refusing with `refund_failed`, and
         # a call that returned while leaving the claim released. Both mean the
@@ -998,7 +1151,7 @@ async def execute(dispute_id: str, agent_id: str, amount: float | None) -> int:
         # the code carries through. A rating never arrives here: once the
         # buyer is paid, `uphold` answers with the record, never a raise.
         fallback = _REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE)
-        if exc.code in _POST_SIGNING_CODES:
+        if exc.code in _CANNOT_SAY_NOTHING_WAS_SIGNED:
             say()
             say(f"  {exc.code}: {exc.message}")
         else:
@@ -1033,8 +1186,10 @@ def build_parser() -> argparse.ArgumentParser:
     module finds the two facts that change what they are about to do: that this
     spends real funds, and that the platform — not the disputed agent — is the
     one spending them. The epilog is where they find what to do AFTER it, and
-    it lists the post-signature codes because those are the ones where the
-    right next move differs — two of them in opposite directions.
+    it lists every code a transfer may be behind — 6 included, because 6 is a
+    transfer on the network with an unknown outcome and the sweeping sentence
+    that used to catch it said nothing had been signed. Those are the codes
+    where the right next move differs, and they point in opposite directions.
 
     Whole, rather than a parser `main` then adds arguments to, so that what a
     test reads out of `format_help()` is the text an operator sees.
@@ -1054,16 +1209,22 @@ def build_parser() -> argparse.ArgumentParser:
             "a dispute rating on the ReputationLedger, written once the credit has landed.\n"
         ),
         epilog=(
-            "exit codes after a live run's signature:\n"
+            "exit codes once money may have moved — on this run's signature or an earlier one's:\n"
             "   0  credit and rating both landed — the two links printed are the evidence\n"
+            "   6  a credit for this dispute is IN FLIGHT and its outcome is unknown — this\n"
+            "      run's submission, or one an earlier run or the API left unresolved. NEVER\n"
+            "      re-run; reconcile it against the chain, exactly as 10 asks\n"
             "   9  the credit FAILED, nothing moved — re-run once the cause is fixed\n"
             "  10  the credit TIMED OUT and may still land — NEVER re-run; reconcile it\n"
             "  12  the buyer IS paid but the rating did not land — re-running is SAFE and\n"
             "      retries the rating only, never the refund\n"
             "  13  the ledger answered the rating with Replay and this dispute records no\n"
             "      attempt — a collision; the consequence did not land. Look the id up.\n"
-            "every other non-zero code is a refusal before anything was signed, except 11,\n"
-            "which asks for the state it prints to be reconciled by hand.\n"
+            "3, 4, 5, 7 and 8 are refusals raised before anything was signed. 11 is the\n"
+            "catch-all, and it asks for the state it prints to be reconciled by hand.\n"
+            "14 is pre-signature HERE only: another adjudication of this dispute was running\n"
+            "and may be signing right now. Read the dispute back before deciding again, and\n"
+            "never re-run it on the assumption that nothing moved.\n"
         ),
     )
     parser.add_argument(

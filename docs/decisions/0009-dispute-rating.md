@@ -260,6 +260,34 @@ do is be told the rating already landed.
 
 ### D4 — The replay guard is the idempotency
 
+> **Amended 2026-09-25 (story 4.07 — the Epic 4 hardening pass).** The outcome
+> table below describes only what each answer writes to `rating_tx`, which was
+> the whole record when this was written. Story 4.06 added a second column to
+> all three of the writing rows — `rating_confirmed` — and that flag, not the
+> hash, is what the buyer's receipt reads.
+>
+> It exists because `rating_tx` cannot answer the question a receipt asks. A
+> submission that timed out records its in-flight hash exactly as a successful
+> one records its landed hash, so a set `rating_tx` alone cannot distinguish
+> "the agent was rated" from "a rating is in flight and may never land". Three
+> values, and only three:
+>
+> - **`SUCCESS` → `rating_confirmed` True.** The ledger answered, with a hash.
+> - **`TIMEOUT` → `rating_confirmed` False.** The hash is recorded and the
+>   outcome is not known; the next uphold settles it.
+> - **`REPLAY` against a `rating_tx` already on record → `rating_confirmed`
+>   True.** The refusal is the confirmation (that is this section's argument),
+>   so it upgrades the flag on a hash already held, writing no new one. This is
+>   the one move from False to True, and it is why re-upholding a dispute whose
+>   rating timed out is worth doing even when the hash is already there.
+>
+> `FAILED` and a collision write neither field, as below. `null` is "no rating
+> was submitted, or the dispute predates the field" — never "no". Anything
+> written by hand during a reconciliation has to set the flag too, or the
+> receipt shows the agent's consequence as pending for good;
+> `docs/disputes.md`'s operator procedures carry it on every `append_status`
+> line for that reason.
+
 The refund path needed a durable mutex — `refund_claims`, taken before anything
 is signed (ADR 0008 D2) — because the chain cannot stop a second transfer. The
 asset SAC will move the same amount to the same buyer as many times as it is

@@ -70,12 +70,22 @@ payment path that breaks the existing x402 flow. Roadmap, not sprint. Rejected.
 A real refund landed on testnet on 2026-09-12: tx
 `9b8ffaa44b2b966e4c3f1ab581f4203a30d282901ba3b231a578e46d8f919a68` (ledger
 4635132, `successful: true` on Horizon), the settler crediting the 1.05
-registrant `GBI2I3WL…` over the asset SAC. Full record + Stellar Expert link:
-[`docs/evidence/4.01-refund-testnet.md`](../evidence/4.01-refund-testnet.md).
+registrant `GBI2I3WL…` over the asset SAC. Open it at
+`https://stellar.expert/explorer/testnet/tx/9b8ffaa44b2b966e4c3f1ab581f4203a30d282901ba3b231a578e46d8f919a68`.
 
-The mechanism and the R12 derivation are unit-tested (`tests/test_refund_svc.py`,
-5 tests). The live tx was produced by a signed settler transaction from the
-**funded testnet key** — run:
+The hash and that URL are the whole of what a reviewer needs, so they are
+inlined here rather than linked to. The longer write-up lives in
+`docs/evidence/4.01-refund-testnet.md`, which is **deliberately not in this
+repo**: `/docs/evidence/*.md` is gitignored, because evidence write-ups travel
+with the bundle rather than with the code. Anyone who cloned this will find
+nothing at that path, which is why it is named and not linked.
+
+The mechanism is unit-tested in `tests/test_refund_svc.py` (2 tests). The R12
+derivation is no longer among them: ADR 0007 D5's amendment supersedes the
+`refund_svc` helpers that held it, and the derivation now lives in
+`app/services/dispute_rating.py`, pinned by golden vectors in
+`tests/test_dispute_job_id.py` (13 tests). The live tx was produced by a signed
+settler transaction from the **funded testnet key** — run:
 
 ```
 python scripts/prototype_refund.py --buyer <G...> --amount 0.054

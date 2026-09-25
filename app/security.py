@@ -37,9 +37,11 @@ import secrets
 import time
 import uuid
 from collections import deque
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Security
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
 
 from .config import settings
 
@@ -56,6 +58,55 @@ EXEMPT_PATHS = frozenset({"/", "/health", "/readiness", "/api/health"})
 # Current request's id — set by RequestContextMiddleware, readable from any
 # code running in the request's task context (error handlers, log records).
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class ErrorBody(BaseModel):
+    """Structured half of the unified error envelope."""
+
+    code: str
+    message: str
+    request_id: str
+
+
+class ErrorEnvelope(BaseModel):
+    """Every error response body: the legacy FastAPI "detail" (string or
+    validation-error list) plus the structured "error" object.
+
+    Declared here rather than in `app/main.py`, which assembles it: a router
+    that wants to document a status of its own has to NAME this model in its
+    `responses=`, and `main` imports the routers, so it cannot be the one to
+    hold it. The schema name is what reaches the spec, so moving it changed
+    nothing a client can see.
+    """
+
+    detail: Any
+    error: ErrorBody
+
+
+class CodedHTTPException(HTTPException):
+    """An HTTPException that carries its own human message beside its code.
+
+    `app/main.py`'s handler derives `error.message` from the detail: a snake
+    token becomes the code and the message is that token with its underscores
+    swapped for spaces. That is right for almost everything, and wrong for a
+    handful of refusals whose message says something the code cannot — the
+    time a dispute window closed, what to do next. Raising one of these keeps
+    the stable code AND the written sentence, instead of forcing a choice.
+
+    It is raised only where the message has been read and found safe to
+    disclose to whoever is being refused. A message that quotes configured
+    limits, or facts about state the caller has not proved they may know, goes
+    out as a bare code like everything else — see `routers/disputes._refuse`,
+    which is the only place in this service that makes that judgement.
+
+    Lives here, in a module of hardening primitives, for `request_id_var`'s
+    reason: both are halves of the error envelope that `main` assembles, and
+    `main` imports the routers, so the routers cannot import it back.
+    """
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(status_code=status_code, detail=code)
+        self.message = message
 
 
 # Credential-bearing query values (the SSE routes take `?token=`) must not
@@ -333,6 +384,42 @@ class ForwardedChainSampler:
 forwarded_chain_sampler = ForwardedChainSampler()
 
 
+def header_secret_matches(supplied: str | None, expected: str) -> bool:
+    """Constant-time comparison of a HEADER value against a configured secret.
+
+    The comparison is on the bytes that crossed the wire, which is the only
+    comparison that can succeed. Starlette decodes header bytes as LATIN-1, so
+    the str a dependency receives is the wire bytes one-to-one; re-encoding it
+    latin-1 recovers them exactly. The previous `encode("utf-8", "ignore")`
+    re-encoded that decoding as UTF-8 instead, which is the identity only while
+    every byte is ASCII: a key holding one non-ASCII character was mangled into
+    something the configured value could never equal, so a deployment whose
+    API_KEY contained an accent answered 401 to its own operator forever —
+    indistinguishable, in the log and in the body, from an attacker. `replace`
+    rather than `strict` because nothing may raise here: a str outside latin-1
+    cannot have come off a header, and a caller who contrives one gets a
+    mismatch rather than a 500.
+
+    Both sides are stripped of ASCII whitespace — the OWS an HTTP parser is
+    allowed to leave on a header value, which h11 and httptools do not treat
+    identically, and the padding an operator's copy-paste leaves on an env var.
+    `bytes.strip()` touches only ASCII whitespace, so it cannot eat a
+    continuation byte of a multi-byte character the way `str.strip()` can (it
+    considers U+00A0 whitespace, and that is a valid UTF-8 continuation byte).
+    `config` refuses to boot on a padded key; this is the wire half, and it
+    also holds for the tests that set `settings.api_key` past the validators.
+
+    False for an absent header and for an unset secret, so no caller can match
+    "no key configured" by sending nothing.
+    """
+    if supplied is None or not expected:
+        return False
+    return secrets.compare_digest(
+        supplied.encode("latin-1", "replace").strip(),
+        expected.encode("utf-8").strip(),
+    )
+
+
 async def require_api_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
@@ -340,15 +427,35 @@ async def require_api_key(
     expected = settings.api_key
     if not expected:
         return
-    # Compare utf-8 bytes, not str: compare_digest raises TypeError on
-    # non-ASCII str input (Starlette decodes headers latin-1), which would
-    # turn a bad key into a 500 instead of a 401.
-    if x_api_key is None or not secrets.compare_digest(x_api_key.encode("utf-8", "ignore"), expected.encode("utf-8")):
+    if not header_secret_matches(x_api_key, expected):
         raise HTTPException(status_code=401, detail="invalid_api_key")
 
 
+# The operator key, declared as a SECURITY SCHEME rather than as an ordinary
+# optional header. The spec advertises the production server, so what it says
+# about the two routes that spend the platform's balance is read as an
+# instruction: as a bare header they looked optional, and a generated client
+# would have omitted it and got a 401 it had no way to anticipate. With a
+# scheme the operations carry a security requirement, /docs grows an
+# Authorize box, and a generator emits the credential.
+#
+# `auto_error=False` so this returns None for an absent header instead of
+# raising FastAPI's own 403 — the refusals below are this module's to give,
+# in this service's error vocabulary, and a 403 is not in it.
+_operator_key_scheme = APIKeyHeader(
+    name="X-API-Key",
+    scheme_name="OperatorApiKey",
+    auto_error=False,
+    description=(
+        "The operator's API_KEY. Required by the adjudication routes, which spend the platform's "
+        "own settler balance — they fail CLOSED, so a deployment with no key configured refuses "
+        "them outright rather than serving them openly."
+    ),
+)
+
+
 async def require_adjudicator(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
 ) -> None:
     """The operator key, enforced — the adjudication routes FAIL CLOSED.
 
@@ -369,13 +476,18 @@ async def require_adjudicator(
     surely as on mainnet. `settings.max_refund_usdc` caps ONE payout; it does
     not cap how many an open route can be asked for.
 
-    Nor is the boot validator a sufficient backstop here. It only fires when
-    `dispute_refunds_enabled` is set *together with* a signing key and an
-    asset SAC — the configuration that can actually sign. A deployment that
-    turns the switch on before wiring the signer boots happily with API_KEY
-    empty, and would then serve these routes to anyone. So the check is made
-    again, per request, at the door of the routes themselves, and an unset key
-    is answered rather than waved through.
+    Nor is the boot validator a sufficient backstop here, though it is a
+    better one than this paragraph used to claim: since story 4.03
+    `_money_capable_config_requires_api_key` fires on `dispute_refunds_enabled`
+    ALONE, so a deployment cannot boot with the switch on and API_KEY empty.
+    What it cannot do is answer the question this dependency asks. It proves a
+    key EXISTS at boot; only a per-request check can say whether the caller
+    holds it — and the value it checked is mutable afterwards (tests set it,
+    and a reload would reread it), so a route that signs must not authorise
+    anyone on the strength of something that was true at import. The second
+    refusal below is therefore unreachable on a correctly booted process, and
+    it stays: an unset key on a payout route is answered, never waved through,
+    whatever is supposed to have stopped it getting here.
 
     The three refusals, in the order a caller meets them:
 
@@ -401,10 +513,7 @@ async def require_adjudicator(
             "so the refund routes have no credential to check and stay closed"
         )
         raise HTTPException(status_code=503, detail="adjudication_not_configured")
-    # Compare utf-8 bytes, not str, for `require_api_key`'s reason: Starlette
-    # decodes headers latin-1, and compare_digest raises TypeError on a
-    # non-ASCII str, which would answer a bad key with a 500 instead of a 401.
-    if x_api_key is None or not secrets.compare_digest(x_api_key.encode("utf-8", "ignore"), expected.encode("utf-8")):
+    if not header_secret_matches(x_api_key, expected):
         raise HTTPException(status_code=401, detail="invalid_api_key")
 
 

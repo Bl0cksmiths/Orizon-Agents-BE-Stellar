@@ -78,7 +78,11 @@ class Ledger:
       - `fail`: the ledger FAILED the transaction, nothing taken;
       - `lost`: the poll ran out and the transaction never landed;
       - `late`: the poll ran out but the transaction landed after all;
-      - `raise`: the submit raised, with no hash — and it landed.
+      - `raise`: the submit raised, with no hash — and it landed;
+      - `unreachable`: the RPC never answered at all, so the replay guard —
+        which the CONTRACT checks at simulation — never got to speak. This is
+        the one way a rating that has ALREADY landed comes back TIMEOUT, and
+        it is scripted ahead of the guard for exactly that reason.
 
     Anything unscripted lands.
     """
@@ -93,6 +97,12 @@ class Ledger:
     async def __call__(
         self, agent_id: str, job_id: bytes, rating: int, weight: int, payer: str, kind: str
     ) -> dict[str, Any]:
+        if self.script and self.script[0] == "unreachable":
+            # Answered before the guard is consulted, because nothing reached
+            # the ledger: a transport that never came back cannot report a
+            # replay it never asked about.
+            self.script.pop(0)
+            return {"status": "timeout", "hash": next(self._hashes)}
         if (agent_id, job_id) in self.rated:
             self.replays += 1
             raise sc.ContractError("HostError: Error(Contract, #7)", 7)
@@ -132,11 +142,19 @@ class Settler:
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch):
     """Every singleton these paths reach, reset around each test, on a
-    deployment that has switched refunds on and is configured to rate."""
+    deployment that has switched refunds on and is configured to rate AND pay.
+
+    The settler's pair — a signing key and the asset SAC — is set explicitly
+    because `uphold` now asks `refund_svc.config_gap` for it before it claims
+    anything, and neither is set in a hermetic run: the conftest blanks the key
+    and CI has no `.env` to supply the SAC. Both are fictional and neither is
+    read; the transfer is stubbed above the client.
+    """
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
     monkeypatch.setattr(settings, "reputation_enabled", True)
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
     monkeypatch.setattr(settings, "stellar_signing_key", Keypair.random().secret)
+    monkeypatch.setattr(settings, "stellar_asset_sac", "CSAC" + "7Z2Q" * 12)
     dispute_store._store = None
     eb._challenges.clear()
     state.tasks.clear()
@@ -398,6 +416,80 @@ def test_a_replay_with_nothing_on_record_is_a_loud_collision_and_the_buyer_keeps
         assert fact in logged[0]
 
 
+def test_the_collision_line_spells_out_the_write_that_closes_it(ledger, settler, caplog) -> None:
+    """The recovery instruction IS the line's payload, so it is pinned literally.
+
+    An operator follows it exactly, and `append_status` reads a missing keyword
+    as "leave it as recorded". A line that said only "record that hash as
+    rating_tx" therefore leaves `rating_confirmed` null — and the buyer's
+    receipt goes on showing the agent's consequence as still in flight for
+    good, because the frontend will not call a rating done without that flag.
+    The operator has by then read the rating ON THE LEDGER, which is the very
+    evidence that confirms it, so withholding the flag is not caution.
+
+    `docs/disputes.md` and `scripts/uphold_dispute.py` print the same write.
+    This is the third copy of it, and the three have to say the same thing.
+    """
+    dispute = open_dispute()
+    ledger.rated.add((AGENT, derived(0)))
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        uphold(dispute.id)
+
+    (logged,) = svc_errors(caplog)
+    assert "append_status(dispute_id, 'credited', rating_tx=<hash>, rating_confirmed=True)" in logged, (
+        f"the collision line does not name the write that closes it: {logged}"
+    )
+
+
+def test_a_timed_out_re_run_never_replaces_a_rating_the_ledger_confirmed(ledger, settler, caplog) -> None:
+    """The two halves of the TIMEOUT write have to move together, and here they
+    move by not moving at all.
+
+    A confirmation is MONOTONIC in the store — once the ledger has vouched for
+    a rating, no later transition may take that back, which is right: a
+    submission that timed out says nothing about one that landed. But the
+    TIMEOUT branch wrote `rating_tx=<new hash>` beside `rating_confirmed=False`
+    as one pair, and only half of that pair now lands. The record would read
+    CONFIRMED beside a transaction nobody has seen land, and the receipt would
+    render a tick against a rating that never happened — the premature success
+    story 4.06 exists to make impossible.
+
+    So a hash that has not landed is not recorded over one that has. Nothing is
+    lost: the replay guard makes a second landing under this derived id
+    impossible, so this submission could only ever have been refused, and the
+    rating it would have replaced is settled. The hash goes to the log for
+    whoever is reconciling a submission they can see.
+    """
+    dispute = open_dispute()
+
+    landed = uphold(dispute.id)
+    assert landed.rating_tx == "tx_rating_1" and landed.rating_confirmed is True
+
+    # The RPC never answers the re-run, so the rating comes back TIMEOUT with a
+    # hash of its own — the one way a landed rating can still time out.
+    ledger.script = ["unreachable"]
+    with caplog.at_level(logging.WARNING, logger=SVC_LOGGER):
+        again = uphold(dispute.id)
+
+    assert (again.rating_tx, again.rating_confirmed) == ("tx_rating_1", True)
+    stored = asyncio.run(dispute_store.get_dispute_store().get_dispute(dispute.id))
+    assert stored is not None
+    assert (stored.rating_tx, stored.rating_confirmed) == ("tx_rating_1", True), (
+        "an unconfirmed hash replaced the one the ledger vouched for"
+    )
+    assert len(settler.transfers) == 1  # and no rating answer ever re-signs the credit
+
+    declined = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == SVC_LOGGER and r.levelno == logging.WARNING and "NOT recorded" in r.getMessage()
+    ]
+    assert len(declined) == 1
+    for fact in ("already confirmed on-chain", "tx_rating_2", dispute.id, AGENT, derived(0).hex()):
+        assert fact in declined[0], f"the declined hash was not logged with {fact!r}: {declined[0]}"
+
+
 def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_resolved(
     ledger, settler, invalidated, caplog
 ) -> None:
@@ -604,7 +696,13 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     rating is still on-chain — so the score is still dropped, the paid record
     is still the answer, and the hash is in an ERROR line telling the operator
     to record it, because a later replay will otherwise find nothing on record
-    and report this dispute's own rating as a collision."""
+    and report this dispute's own rating as a collision.
+
+    The line names the whole write, `rating_confirmed` included, for the
+    collision line's reason: an operator writes exactly what it says, and an
+    omitted keyword leaves the flag as it was. `True` here, and only here,
+    because the LEDGER confirmed this one — a timeout that could not be
+    recorded is the sibling case below, and it says `False`."""
     dispute = open_dispute()
     store = dispute_store.get_dispute_store()
     real_append = store.append_status
@@ -624,6 +722,43 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     assert invalidated == [AGENT]  # it landed, whatever the store says
     (logged,) = svc_errors(caplog)
     assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "append_status(dispute_id, 'credited', rating_tx=<the tx above>, rating_confirmed=True)" in logged, (
+        f"the operator was not told the whole write: {logged}"
+    )
+
+
+def test_an_unconfirmed_rating_the_store_would_not_record_is_not_reported_as_confirmed(
+    monkeypatch, ledger, settler, caplog
+) -> None:
+    """The same line after a TIMEOUT, where the flag must read the other way.
+
+    The hash still belongs on the record — it is the evidence the moment the
+    rating lands — but nothing has vouched for it yet, so an operator copying
+    this line must not write `rating_confirmed=True` and tell the buyer a
+    consequence landed that no one has seen land. The next uphold settles it.
+    """
+    dispute = open_dispute()
+    ledger.script = ["timeout"]
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _refuses_the_rating(dispute_id: str, status: Any, **kwargs: Any) -> DisputeRecord | None:
+        if kwargs.get("rating_tx"):
+            raise ConnectionError("the database went away")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _refuses_the_rating)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        paid = uphold(dispute.id)
+
+    assert paid.status == "credited" and paid.rating_tx is None
+    unrecorded = [m for m in svc_errors(caplog) if "could not be recorded" in m]
+    assert len(unrecorded) == 1
+    assert "was TIMEOUT but could not be recorded" in unrecorded[0]
+    assert "rating_confirmed=False)" in unrecorded[0], (
+        f"an unconfirmed rating was written up as confirmed: {unrecorded[0]}"
+    )
 
 
 def test_a_confirmation_the_store_would_not_record_is_left_for_the_next_uphold(

@@ -394,7 +394,11 @@ def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
     """The same argument one step later. A DELETE issued after the transition
     is a statement that can fail to run, and `refund_claims` would then hold a
     lock over a dispute that has already been paid — no money lost, but a
-    reconciliation queue listing finished work is one nobody reads."""
+    reconciliation queue listing finished work is one nobody reads.
+
+    The row lock is the statement before it, inside the same transaction: it
+    changes nothing and writes nothing, and the DELETE and the event row are
+    still the one statement they have to be."""
     pool = FakePool()
     store = _pg(pool)
 
@@ -405,7 +409,7 @@ def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
         await store.append_status(upheld.id, "credited", refund_tx="tx_refund")
         return pool.statements[mark:]
 
-    assert asyncio.run(go()) == [dispute_store._APPEND_STATUS_SQL]
+    assert asyncio.run(go()) == [dispute_store._LOCK_DISPUTE_SQL, dispute_store._APPEND_STATUS_SQL]
     assert pool.claims == {}
 
 
@@ -446,6 +450,86 @@ def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice() ->
 
     assert resolved.status == "credited"
     assert asyncio.run(_queued(store)) == []
+
+
+def test_a_refused_verdict_leaves_the_mutex_over_a_live_payout(store: DisputeStore) -> None:
+    """The reject that ran over a transfer already on the network.
+
+    An adjudicator reads a dispute while it is `open`, and by the time their
+    `rejected` reaches the store it has been upheld, claimed and paid for. The
+    precondition refuses the verdict — but the mutex is dropped by a CTE beside
+    that INSERT, and a CTE runs whether or not the INSERT writes anything. So
+    the refusal used to cost the claim anyway: the buyer disappeared from the
+    reconciliation queue while their transfer was still in flight, and the
+    dispute was left claimable by the next payer along."""
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, list[str]]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        refused = await store.append_status(upheld.id, "rejected", note="not upheld", expected_status="open")
+        return refused, await store.get_dispute(upheld.id), await _queued(store)
+
+    refused, current, queue = asyncio.run(go())
+
+    assert refused is None
+    # The payout is untouched: still mid-flight, still held, still findable.
+    assert current is not None and current.status == "crediting"
+    assert queue == ["dsp_0001"]
+
+
+def test_a_verdict_on_a_dispute_with_no_history_drops_no_claim_row() -> None:
+    """A claim row whose dispute this store has never heard of is the one row
+    an operator most needs to see — it is money that may have left the wallet
+    with nothing to account for it. Writing a verdict against the id used to
+    delete it silently, because the DELETE only ever looked at the status being
+    written."""
+    pool = FakePool()
+    pool.claims["dsp_ghost"] = 1_700_000_500.0
+    store = _pg(pool)
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_ghost", "credited", refund_tx="tx_guess"))
+
+    assert list(pool.claims) == ["dsp_ghost"]
+
+
+def test_the_mutex_delete_is_gated_on_the_transition_being_written() -> None:
+    """Asserted on the SQL, because the two halves of the statement can only
+    disagree here: the INSERT selects through the precondition and the DELETE
+    is a separate CTE that has to repeat it, or the mutex moves for a
+    transition the trail never recorded."""
+    sql = dispute_store._APPEND_STATUS_SQL
+    delete = sql.split("finished AS (")[1].split("\n)\n")[0]
+
+    assert "DELETE FROM refund_claims" in delete
+    assert "$10::text IS NULL OR latest.status = $10::text" in delete
+
+
+def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to() -> None:
+    """The two halves of finding the wedge, in one interleaving.
+
+    A payer claims the dispute and starts signing; an adjudicator's `rejected`,
+    computed from a read taken while it was still `open`, arrives in the middle
+    of that. The verdict is refused — the dispute has moved — and the claim
+    protecting the transfer has to survive the refusal, or the buyer drops off
+    the reconciliation queue while their money is still in flight."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[Any, Any, DisputeRecord | None, list[str]]:
+        upheld = await _upheld(store)
+        claimed, refused = await asyncio.gather(
+            store.claim_refund(upheld.id),
+            store.append_status(upheld.id, "rejected", note="not upheld", expected_status="open"),
+        )
+        return claimed, refused, await store.get_dispute(upheld.id), await _queued(store)
+
+    claimed, refused, current, queue = asyncio.run(go())
+
+    assert claimed is not None and claimed.status == "crediting"
+    assert refused is None
+    assert current is not None and current.status == "crediting"
+    assert queue == ["dsp_0001"]
 
 
 # ── across a restart ──────────────────────────────────────────────────────

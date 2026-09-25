@@ -303,29 +303,37 @@ async def _run(
         "kit": kit.model_dump() if kit is not None else None,
         "intent": plan.intent,
     }
-    # What each step actually delivered, keyed by the PLAN STEP's agent_id.
+    # What each step actually delivered, by PLAN-STEP INDEX.
     # Separate from `context` because the two are keyed for different readers:
     # `context` is worker-facing and keyed by worker name (a worker asks for
-    # context["code.gen"]), while the settler needs the output for a step it
-    # holds only an agent_id and a catalog agent_name for. Those coincide for a
-    # local worker and do NOT for a bound external one, whose worker name is
-    # "external.<agent_id>" — see _submit_ratings.
-    delivered: dict[str, Any] = {}
+    # context["code.gen"]), while the settler grades a plan STEP.
+    # By index for the same reason its two siblings below are, and it was the
+    # one of the three that did not get it: keyed by agent_id, one agent hired
+    # for two steps overwrote its own first output with its second, and BOTH
+    # steps were then rated on whichever one happened to land last. Indexing
+    # also retires the agent_name fallback `_submit_ratings` carried, which
+    # existed only because worker name and agent_id coincide for a local worker
+    # and do NOT for a bound external one ("external.<agent_id>").
+    delivered: dict[int, Any] = {}
     # Plan-step INDEXES that produced output — the same steps that incremented
-    # `succeeded` and `spent`. Kept by index rather than by agent_id like
-    # `delivered` above because a plan may use the same agent twice: keyed by
-    # agent, a step that failed would be settled as delivered on the strength
-    # of a LATER step that succeeded, and story 4.02 would then accept a
-    # dispute over work nobody was ever paid for.
+    # `succeeded` and `spent`. Kept by index rather than by agent_id because a
+    # plan may use the same agent twice: keyed by agent, a step that failed
+    # would be settled as delivered on the strength of a LATER step that
+    # succeeded, and story 4.02 would then accept a dispute over work nobody
+    # was ever paid for.
     delivered_steps: set[int] = set()
     # What each delivered step produced, as its settlement keeps it (story
     # 4.05) — by plan-step index for the same reason as `delivered_steps`: one
     # agent on two steps produced two different things, and keyed by agent the
     # second would overwrite the first on the step the buyer disputes.
     output_summaries: dict[int, str | None] = {}
-    # Agent ids whose step never reached a worker at all — see the resolve
+    # Plan-step INDEXES that never reached a worker at all — see the resolve
     # branch below. Distinct from "delivered nothing": these are not rated.
-    undispatched: set[str] = set()
+    # By index, like the three maps above and for the last of the same reason:
+    # resolution fails OPEN and is negative-cached, so one blip can leave an
+    # agent unresolved at step 0 and resolvable at step 3 — and keyed by agent
+    # that dropped the rating for step 3, which DID deliver and WAS charged for.
+    undispatched: set[int] = set()
     # Agent ids that ran on one of OUR workers. The rating scale trusts a
     # first-party response to have delivered something real; an untrusted one
     # has to prove it (ADR 0005 D3). Carried separately because `delivered`
@@ -379,7 +387,10 @@ async def _run(
                 # on-chain 20/100 against an operator who was never asked to
                 # deliver. "Did not deliver" and "was never asked" are
                 # different facts and only the first is theirs (ADR 0005 D5).
-                undispatched.add(step.agent_id)
+                # THIS step, not this agent: the same agent may be resolvable
+                # at another step of the plan, and that step's delivery is its
+                # own evidence.
+                undispatched.add(step_index)
                 logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
                 await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
                 continue
@@ -561,8 +572,10 @@ async def _run(
                 # needs one (2.02 AC-5 / Product Rule 5).
                 context[worker.name] = output if first_party else _fenced_for_context(output)
                 # The settler reads a rating-facing view of the same output —
-                # an untrusted worker does not get to grade itself.
-                delivered[step.agent_id] = _rating_view(output, first_party=first_party)
+                # an untrusted worker does not get to grade itself. Under THIS
+                # step's index: the agent may serve another step of this plan,
+                # and that step's output is its own evidence, not this one's.
+                delivered[step_index] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
@@ -777,7 +790,12 @@ async def _settle_onchain(
     """Perform the real PaymentEscrow.charge + AttestationRegistry.seal calls.
 
     Returns (charge_tx, proof_tx, job_id); either tx may be None if that step
-    failed, and job_id is None when the charge failed or was skipped.
+    failed, and job_id is None whenever the charge did not CONFIRM — skipped,
+    raised, rejected, or submitted and never confirmed. The last of those is
+    not a failure: a charge that timed out may still settle on-chain, so a None
+    job id means "we do not know that the money moved", never "it did not".
+    The unconfirmed case is logged loudly, because nothing downstream can tell
+    it apart from the others — see the branch that raises it.
 
     Every failure here is money-affecting (a charge that never landed, or a
     charge that landed with no attestation sealed against it), so each one is
@@ -851,7 +869,8 @@ async def _settle_onchain(
             ],
         )
         charge_tx = charge.get("hash")
-        if charge.get("status") == "SUCCESS" and charge_tx:
+        charge_status = str(charge.get("status") or "")
+        if charge_status == "SUCCESS" and charge_tx:
             settled_job_id = job_id
             await _emit(
                 task_id,
@@ -859,12 +878,13 @@ async def _settle_onchain(
                 "cost",
                 f"x402 charge → {total_usdc:.3f} USDC settled · tx {charge_tx[:10]}…",
             )
-        else:
+        elif charge_status == "FAILED":
+            # The ledger rejected it after simulation passed: nothing moved.
             logger.error(
                 "task %s: PaymentEscrow.charge did not settle — status=%s hash=%s "
                 "(auth %s, payer %s, %.6f USDC, job %s)",
                 task_id,
-                charge.get("status"),
+                charge_status,
                 charge_tx,
                 auth_id_hex,
                 payer,
@@ -875,7 +895,47 @@ async def _settle_onchain(
                 task_id,
                 start,
                 "error",
-                f"charge status={charge.get('status')} hash={charge_tx}",
+                f"charge status={charge_status} hash={charge_tx}",
+            )
+            return (charge_tx, None, None)
+        else:
+            # NOT a failure: `"timeout"` is the client's word for submitted and
+            # then lost track of, and a SUCCESS with no hash is the same
+            # unknown. The charge may settle two ledgers from now, and the
+            # epic says so everywhere else — `RefundStatus.TIMEOUT` and the
+            # CancelledError handler below both spell out that the transfer may
+            # still land. It is called out separately here because the
+            # consequence is one-sided: we return no job id, `_record_settlement`
+            # writes nothing, and if the charge DOES land the buyer is charged
+            # for a run `issue_dispute_challenge` answers `unknown_job` for,
+            # until the 24-hour window closes on a door that never opened.
+            # Recording the settlement anyway would open a dispute window over
+            # money that may never have moved, which is a different wrong — so
+            # this lane leaves the operator a line they can reconcile from and
+            # refund by hand, and the choice between the two is a story of its
+            # own.
+            logger.error(
+                "task %s: PaymentEscrow.charge is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+                "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=%s hash=%s "
+                "(auth %s, payer %s, %.6f USDC, job %s)",
+                task_id,
+                charge_status or "missing",
+                charge_tx,
+                auth_id_hex,
+                payer,
+                total_usdc,
+                job_id.hex(),
+            )
+            # The buyer is told too, in the terms that matter to them: their
+            # money may be gone and this run has no dispute window. The job id
+            # stays out — trace lines are world-readable when TASK_AUTH_REQUIRED
+            # is off, and a dispute is filed against that id.
+            await _emit(
+                task_id,
+                start,
+                "error",
+                f"charge unconfirmed status={charge_status or 'missing'} hash={charge_tx} — it may still "
+                "settle, and this run cannot be disputed",
             )
             return (charge_tx, None, None)
 
@@ -1044,12 +1104,18 @@ async def _record_settlement(
     settlement time — it evicts finished tasks first and is lost on restart,
     which is exactly the set and exactly the moment a buyer disputes.
 
-    Written only when the charge actually landed: `job_id` comes back None when
-    the charge was skipped (no signing key, over the cap), raised, or returned
-    non-SUCCESS, and none of those took the buyer's money — there is nothing to
-    dispute and nothing to credit. A charge that landed and a seal that then
-    failed DOES record, with `proof_tx` None: the buyer paid, so the buyer has
-    recourse, attested or not.
+    Written only when the charge CONFIRMED. `job_id` comes back None when the
+    charge was skipped (no signing key, over the cap), raised, was rejected, or
+    was submitted and never confirmed — and the last of those is NOT a charge
+    that took nothing. A timed-out charge may still settle, exactly as
+    `refund_svc.RefundStatus` says of a timed-out transfer, and this function
+    cannot tell the two apart from a None. So a run with no record here is a
+    run we cannot prove was paid for, not a run we know was free: when an
+    unconfirmed charge does land, the buyer is charged and has no window, which
+    `_settle_onchain` logs as the unreconciled charge it is.
+
+    A charge that landed and a seal that then failed DOES record, with
+    `proof_tx` None: the buyer paid, so the buyer has recourse, attested or not.
 
     Best-effort in the same sense as `_submit_ratings`, and for a stronger
     reason: the money has already moved by the time this runs, so a store that
@@ -1170,18 +1236,88 @@ def unsettled_job_id(task_id: str) -> bytes:
     return hashlib.sha256(task_id.encode("utf-8") + b"unsettled").digest()[:16]
 
 
+# Domain separation for the settler's per-step rating ids, versioned for the
+# reason every other `orizon-*:v1` string in this service is, and for one more:
+# the ledger's replay guard remembers every key it has ever seen, so a later
+# scheme ships under a NEW tag rather than re-deriving ids already spent.
+SETTLEMENT_ID_TAG = b"orizon-settlement:v1"
+
+# The shape ADR 0009 D1 fixed for the dispute rating — half the sealed job id
+# verbatim so a reviewer SEES the link, half a hash that carries the step.
+# Restated rather than imported from `dispute_rating`, which pulls the stellar
+# client into its module scope; this module imports that per function instead.
+# The ledger's job id is a `BytesN<16>`; the step is packed into two of them,
+# which bounds a plan at 65,536 steps — far past anything an orchestrator emits.
+_JOB_ID_BYTES = 16
+_LINKED_PREFIX_BYTES = 8
+_STEP_INDEX_BYTES = 2
+
+
+def settlement_job_id(job_id: bytes, step_index: int) -> bytes:
+    """The id the settler's automatic rating for one plan step is written under.
+
+    Step 0 keeps the sealed job id itself. Every later step takes
+    `job_id[:8] ‖ sha256(job_id ‖ SETTLEMENT_ID_TAG ‖ step)[:8]`.
+
+    **Why derive at all.** `ReputationLedger.submit` guards on
+    `Rated(agent_id, job_id)` and answers `Error::Replay` *before* it reads
+    `kind`, so a plan that hires one agent for two steps submitted both its
+    ratings under one pair: the first landed, the second was refused, and half
+    that run's evidence was lost behind a "reputation submit failed" line. It is
+    the same R12 collision story 4.04 removed from the *dispute* path (ADR 0009
+    D1); the settlement path never got the fix.
+
+    **Why step 0 is not derived.** The sealed job id appears verbatim on the
+    charge, on the attestation and on every automatic rating this settler has
+    ever written. Leaving step 0 on it means no id already on the ledger changes
+    meaning — only the later steps, which is exactly the set that could never be
+    rated before, move.
+
+    **Why this shape rather than a second scheme.** ADR 0009 D1 chose it so that
+    a reviewer who opens a rating on Stellar Expert can tie it to the sealed job
+    without insider knowledge, which is what SOW §6.1 asks for: the first
+    sixteen hex characters of a derived id ARE the job's own, read by eye off
+    the charge or the seal. The hash half is the confirmation anyone can
+    recompute — the step index is the position in the plan, whose ordered agent
+    list the attestation itself seals. The tag differs from
+    `dispute_rating.DISPUTE_ID_TAG`, so a step's automatic rating and its
+    dispute rating can never derive onto one key.
+
+    Raises `ValueError` rather than returning an unusable id — a job id that is
+    not the ledger's sixteen bytes, a step that will not fit two, or the one
+    derivation in 2**64 that reproduces the job id itself and would be refused
+    as a replay of step 0's rating for ever. The caller rates the other steps.
+    """
+    if len(job_id) != _JOB_ID_BYTES:
+        raise ValueError(f"a sealed job id is {_JOB_ID_BYTES} bytes, got {len(job_id)}")
+    if not 0 <= step_index < 2 ** (8 * _STEP_INDEX_BYTES):
+        raise ValueError(f"step index {step_index} does not fit the derived id")
+    if step_index == 0:
+        return job_id
+    digest = hashlib.sha256(job_id + SETTLEMENT_ID_TAG + step_index.to_bytes(_STEP_INDEX_BYTES, "big")).digest()
+    derived = job_id[:_LINKED_PREFIX_BYTES] + digest[:_LINKED_PREFIX_BYTES]
+    if derived == job_id:
+        raise ValueError(f"the rating id for job {job_id.hex()} step {step_index} equals the job id itself")
+    return derived
+
+
 async def _submit_ratings(
     task_id: str,
     start: float,
     plan: StoredPlan,
-    delivered: dict[str, Any],
+    delivered: Mapping[int, Any],
     *,
     payer: str,
     job_id: bytes,
-    undispatched: frozenset[str] = frozenset(),
+    undispatched: frozenset[int] = frozenset(),
     first_party_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Submit the settler's synthetic per-step ratings to ReputationLedger.
+
+    `delivered` and `undispatched` are both by PLAN-STEP INDEX, not by agent:
+    one step's rating is graded on that step's own output and withheld on that
+    step's own dispatch, and a plan is free to hire one agent twice. A step
+    with no `delivered` entry delivered nothing and is rated as such.
 
     Best-effort by design: a failed rating never fails the workflow — each step
     traces and logs its own failure and the loop moves on. It is logged as well
@@ -1204,20 +1340,20 @@ async def _submit_ratings(
 
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
-    for step in plan.plan.steps:
-        # Keyed by agent_id — the one identity both worker kinds share. Worker
-        # names do not: a bound external agent runs as "external.<agent_id>",
-        # never as the operator's catalog agent_name, so a name lookup missed
-        # every delivered external step and wrote a permanent on-chain 20/100
-        # ("settled money for no delivered work") for an operator who shipped.
-        # The agent_name fallback is for a caller that still hands in a
-        # worker-name-keyed map, which is correct for a local step.
-        if step.agent_id in undispatched:
-            # We never sent them the step, so there is nothing to judge.
+    for step_index, step in enumerate(plan.plan.steps):
+        if step_index in undispatched:
+            # We never sent them this step, so there is nothing to judge. By
+            # index: the agent may have served another step of this plan, and
+            # a delivery of ours they never got asked for does not cancel one
+            # they did.
             continue
-        step_output = delivered.get(step.agent_id)
-        if step_output is None:
-            step_output = delivered.get(step.agent_name or "")
+        # By index, so the step is graded on ITS output. The lookup used to be
+        # by agent_id — the one identity both worker kinds share, worker names
+        # being no use because a bound external agent runs as
+        # "external.<agent_id>" rather than as the operator's catalog name —
+        # but an agent hired for two steps of one plan wrote both its outputs
+        # to that one key, so both steps were graded on whichever landed last.
+        step_output = delivered.get(step_index)
         # Untrusted output must carry something checkable to earn the base
         # score. Without this an operator answering "{\"ok\": true}" forever
         # scored 70 — the prior exactly — and their lower bound ROSE with every
@@ -1225,12 +1361,40 @@ async def _submit_ratings(
         rating, weight = reputation_svc.synthetic_rating(
             step_output, step.est_price_usdc, first_party=step.agent_id in first_party_ids
         )
+        # One id per STEP, because the ledger's replay guard is per
+        # (agent, job): under the job's own id an agent hired twice landed one
+        # rating and lost the other. Derived outside the submit's `try` so a
+        # refusal to derive is never traced to the buyer as an RPC failure,
+        # which is the only thing `failure_reason` could call it.
+        try:
+            step_job_id = settlement_job_id(job_id, step_index)
+        except ValueError:
+            logger.error(
+                "task %s: no rating id for %s (%s) at step %d of job %s — that step is NOT rated "
+                "(rating %d, weight %d, payer %s)",
+                task_id,
+                step.agent_name,
+                step.agent_id,
+                step_index,
+                job_id.hex(),
+                rating,
+                weight,
+                payer,
+                exc_info=True,
+            )
+            await _emit(
+                task_id,
+                start,
+                "error",
+                f"reputation submit skipped for {step.agent_name}: no rating id for this step",
+            )
+            continue
         try:
             # Async path: the submit RPC runs in a worker thread but the ~30s
             # status poll waits on the event loop — no executor thread pinned.
             result = await sc.submit_rating_async(
                 step.agent_id,
-                job_id,
+                step_job_id,
                 rating,
                 weight,
                 payer,
@@ -1245,13 +1409,15 @@ async def _submit_ratings(
                 # "rated N/100" — a success line for evidence that never landed.
                 logger.error(
                     "task %s: reputation submit for %s (%s) did not land: status=%s tx=%s "
-                    "(job %s, rating %d, weight %d, payer %s)",
+                    "(job %s, step %d under %s, rating %d, weight %d, payer %s)",
                     task_id,
                     step.agent_name,
                     step.agent_id,
                     status,
                     tx,
                     job_id.hex(),
+                    step_index,
+                    step_job_id.hex(),
                     rating,
                     weight,
                     payer,
@@ -1271,13 +1437,19 @@ async def _submit_ratings(
                 f"reputation → {step.agent_name} rated {rating}/100 · tx {tx[:10]}…",
             )
         except Exception as e:
+            # Both ids: the sealed one ties the line to the run, and the one
+            # the rating was submitted under is what an operator searches the
+            # ledger with. They are the same id only for step 0.
             logger.error(
-                "task %s: reputation submit failed for %s (%s): %s (job %s, rating %d, weight %d, payer %s)",
+                "task %s: reputation submit failed for %s (%s): %s "
+                "(job %s, step %d under %s, rating %d, weight %d, payer %s)",
                 task_id,
                 step.agent_name,
                 step.agent_id,
                 e,
                 job_id.hex(),
+                step_index,
+                step_job_id.hex(),
                 rating,
                 weight,
                 payer,

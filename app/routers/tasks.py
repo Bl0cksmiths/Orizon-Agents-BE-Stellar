@@ -45,7 +45,13 @@ async def list_tasks(limit: int = Query(20, ge=1, le=200)) -> list[Task]:
 async def get_task(task_id: str) -> Task:
     task = state.tasks.get(task_id)
     if task is None:
-        raise HTTPException(404, f"unknown task: {task_id}")
+        # A bare snake token, never the id — `task_auth.require_task_read`'s
+        # rule. `main.http_exception_handler` promotes a snake detail to
+        # `error.code` and derives the message from it; an interpolated id is
+        # not one, so it fell through to `not_found` and the handler copied
+        # the caller's own text into `error.message`. `task_id` carries no
+        # length bound here, so that text was unbounded as well as reflected.
+        raise HTTPException(404, "unknown_task")
     return task
 
 
@@ -59,5 +65,5 @@ async def get_artifact(task_id: str) -> ArtifactResponse:
     """Returns the code artifact produced by the workflow, if any."""
     task = state.tasks.get(task_id)
     if task is None:
-        raise HTTPException(404, f"unknown task: {task_id}")
+        raise HTTPException(404, "unknown_task")  # `get_task`'s rule
     return ArtifactResponse(artifact=task.artifact, charge_tx=task.charge_tx, proof_tx=task.proof_tx)

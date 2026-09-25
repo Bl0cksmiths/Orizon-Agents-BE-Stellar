@@ -337,6 +337,22 @@ def test_help_tells_the_two_post_signature_rules_apart() -> None:
     assert "12  the buyer IS paid but the rating did not land — re-running is SAFE" in help_text
     assert "retries the rating only, never the refund" in help_text
     assert "13  the ledger answered the rating with Replay" in help_text
+    assert "14 is pre-signature HERE only" in help_text
+    assert "never re-run it on the assumption that nothing moved" in help_text
+
+
+def test_help_lists_the_in_flight_code_beside_the_timeout_it_behaves_like() -> None:
+    """6 is a transfer on the network whose outcome nobody knows — the same
+    situation as 10, and the block it prints opens with DO NOT RE-RUN. It used
+    to fall under "every other non-zero code is a refusal before anything was
+    signed", which is the one sentence that would make a wrapper author retry
+    it. So it is in the table, with 10's instruction, and the sweeping sentence
+    now names the codes it actually covers."""
+    help_text = uphold_dispute.build_parser().format_help()
+    assert "6  a credit for this dispute is IN FLIGHT and its outcome is unknown" in help_text
+    assert "NEVER\n      re-run; reconcile it against the chain, exactly as 10 asks" in help_text
+    assert "3, 4, 5, 7 and 8 are refusals raised before anything was signed." in help_text
+    assert "every other non-zero code" not in help_text
 
 
 def test_the_module_docstring_says_it_too() -> None:
@@ -540,6 +556,50 @@ def test_a_live_run_without_a_signing_configuration_is_refused_before_it_upholds
     assert "STELLAR_ASSET_SAC" in out
     # Without the ledger the credit would land and its rating could not.
     assert "STELLAR_REPUTATION_LEDGER" in out
+    # The boot rule as `config._money_capable_config_requires_api_key` actually
+    # applies it: the switch ALONE. Stating a signing key and a SAC as further
+    # preconditions tells a deployer that a switch-on/signer-unwired deployment
+    # will boot, and it hard-fails instead.
+    assert "makes API_KEY mandatory on its own" in out
+    assert "however little else on the refund path is wired up yet" in out
+
+
+def test_nothing_this_script_prints_conjoins_the_boot_rule_with_a_signer(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The validator fires on `dispute_refunds_enabled` alone, deliberately —
+    conjoining it would leave a deployment that flips refunds on before wiring
+    a signer booting with an empty API_KEY. So neither the module docstring nor
+    any refusal may describe it as the switch plus a key plus a SAC."""
+    forbid_uphold(monkeypatch)
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    doc = uphold_dispute.__doc__ or ""
+    assert "makes\n`API_KEY` mandatory BY ITSELF" in doc
+    for text in (doc, out):
+        assert "a signing key and a SAC" not in text
+        assert "signing key and asset SAC" not in text
+
+
+def test_a_passed_config_check_says_what_it_did_not_check(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """`config_gap` is presence-only, and the gap it cannot see is the one that
+    actually bites: a settler that is not the ledger's registered Scorer signs
+    the credit perfectly well and has every rating reverted. Passing the check
+    therefore says so, and names the probe that CAN answer it, rather than
+    letting "configured" be heard as "the rating will be accepted"."""
+    uphold.fails()
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert "Presence only." in out
+    assert "not the ledger's registered Scorer" in out
+    assert "ratings.writer = not_scorer" in out
 
 
 def test_a_deployment_that_could_not_rate_is_refused_before_it_pays(
@@ -561,6 +621,120 @@ def test_a_deployment_that_could_not_rate_is_refused_before_it_pays(
     assert code == uphold_dispute.EXIT_NOT_CONFIGURED
     assert "REPUTATION_ENABLED is false — so the dispute rating could not be written" in out
     assert "nothing was signed" in out
+
+
+def test_a_lost_adjudication_race_never_claims_that_nothing_was_signed(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The service's compare-and-set on `open` lost and the dispute read back
+    `upheld`: another adjudication is between its decision and its claim, and
+    may sign a transfer in the next instant.
+
+    Nothing was signed HERE, but `refuse`'s "nothing was signed" is heard as a
+    fact about the DISPUTE, and about the dispute it may be false before the
+    line finishes printing. So this code never goes out through `refuse`, and
+    the two sentences the generic `upheld` report would have printed — that no
+    claim is held, and to re-run — are both absent, because the first may be
+    untrue and the second is how this run races the other one again.
+    """
+    uphold.raises(
+        dispute_svc.DisputeError(
+            "adjudication_in_progress",
+            "another adjudication of this dispute is already running and may be paying it",
+            409,
+        ),
+        leaves=("upheld", None),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_ADJUDICATION_RACE
+    assert "adjudication_in_progress" in out
+    assert f"ANOTHER ADJUDICATION OF {DISPUTE_ID} IS RUNNING" in out
+    assert "Read the dispute back before deciding anything" in out
+    assert "--dry-run" in out
+    # The refusal that must not be made, and the instruction that must not be
+    # given, at the one moment another caller may be signing.
+    assert "nothing was signed" not in out
+    assert "no claim is held" not in out
+
+
+def test_the_winner_of_an_adjudication_race_is_not_reported_as_this_run_paying(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The same refusal, read back a moment later: the caller that won has got
+    all the way to `credited`. This run previewed an amount and signed nothing,
+    so its own figure must not be printed beside somebody else's hash — that is
+    a number this process computed presented as a transfer it made."""
+    uphold.raises(
+        dispute_svc.DisputeError("adjudication_in_progress", "another adjudication is already running", 409),
+        leaves=("credited", REFUND_TX),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert "was paid by the adjudication running alongside this one" in out
+    assert "this run signed no transfer" in out
+    assert f"{CREDITABLE_USDC:.7f} USDC paid to {PAYER}" not in out
+    assert f"tx:        {REFUND_TX}" in out
+    # The credit half is settled, so the run's verdict is the rating's: nothing
+    # of this run's reached the ledger, so it is the not-landed code.
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+
+
+def test_a_race_lost_after_the_winner_claimed_is_their_transfer_not_our_timeout(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """And a moment earlier again: the winner has claimed and submitted. The
+    record says `crediting`, which is the timeout block's own state — but this
+    run signed nothing, so it gets the in-flight headline and code 6, never the
+    10 that means "this process submitted and lost the answer"."""
+    uphold.raises(
+        dispute_svc.DisputeError("adjudication_in_progress", "another adjudication is already running", 409),
+        leaves=("crediting", REFUND_TX),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_IN_FLIGHT
+    assert "ALREADY IN FLIGHT" in out
+    assert "TIMED OUT" not in out
+
+
+def test_a_non_finite_credit_exits_the_same_way_through_either_door(
+    capsys: pytest.CaptureFixture[str],
+    credit: CreditSeam,
+    uphold: UpholdSeam,
+    configured: dict[str, str],
+) -> None:
+    """`refund_amount_invalid` reaches this script twice over: raised straight
+    out of `creditable_for` while the preview is computing the credit, and
+    re-raised as a `DisputeError` when the live run asks `uphold` for it. One
+    fault, so one code — an unmapped one takes the preview's default and the
+    live run's, which are different, and a wrapper would then see the same
+    broken settlement record as two unrelated failures depending on how far the
+    run got."""
+    uphold.raises(dispute_svc.DisputeError("refund_amount_invalid", "nan USDC is not an amount of money", 409))
+
+    credit.refuses("refund_amount_invalid", "the bounds compute to nan USDC for step 1")
+    seed()
+    from_preview, preview_out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+    assert uphold.calls == []
+
+    # No re-seed: the preview refused before anything was written, so the same
+    # dispute is still sitting at `open` — which is the point.
+    credit.pays(CREDITABLE_USDC)
+    from_live, live_out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+    assert uphold.calls == [DISPUTE_ID]
+
+    assert from_preview == from_live == uphold_dispute.EXIT_UNEXPECTED
+    assert "refund_amount_invalid" in preview_out and "refund_amount_invalid" in live_out
+    # Neither door signed anything: the finiteness test is made before the
+    # amount can reach the settler's key, on both of them.
+    assert "nothing was signed" in preview_out and "nothing was signed" in live_out
 
 
 def test_every_refusal_code_is_non_zero_and_distinct() -> None:
@@ -663,6 +837,26 @@ def test_the_promise_binds_when_it_is_the_smallest_bound(
     _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
 
     assert _binding_lines(out) == ["    0.0100000 USDC  promised to the buyer when the dispute was opened   <- BINDS"]
+
+
+def test_equal_bounds_are_marked_once_and_the_agreement_is_counted(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The ordinary case: a full-fraction credit on a workflow whose settled
+    total is the disputed step's own price makes all three bounds the same
+    number. Nothing is clamping the credit, so exactly one line carries the
+    marker — the preview promises "which one binds", singular — and the two
+    that agree with it are counted rather than left looking skipped."""
+    forbid_uphold(monkeypatch)
+    credit.pays(0.07)
+    seed(creditable_usdc=0.07, settled_usdc=0.07)
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert _binding_lines(out) == [
+        "    0.0700000 USDC  promised to the buyer when the dispute was opened   <- BINDS"
+        " (2 other bounds at the same figure)"
+    ]
 
 
 # ── the dry run shows the rating too: 4.04's half of the evidence ──────────
@@ -980,7 +1174,7 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
 
     assert code == uphold_dispute.EXIT_TIMEOUT
     assert "TIMED OUT" in out and "MAY STILL LAND" in out
-    assert "DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE." in out
+    assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
     assert "STILL HELD" in out
     assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
     assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
@@ -989,6 +1183,58 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
     assert "refund_unconfirmed" in out
     # The one sentence that must never appear here: a submission that timed out
     # WAS signed, and telling an operator otherwise is how it gets retried.
+    assert "nothing was signed" not in out
+
+
+def test_the_timeout_block_asks_for_the_one_re_run_that_finishes_the_dispute(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The reconciled dispute is not finished when its credit is recorded.
+
+    An operator who reads the chain and writes `credited` by hand leaves a
+    dispute with a refund hash and NO rating — nothing in that write can
+    produce one. Exactly one re-run does, and it signs nothing: `uphold`
+    refuses to transfer for a `credited` dispute. The block used to forbid it
+    on the false premise that it would pay the buyer twice, so the premise is
+    pinned out as well as the instruction pinned in.
+    """
+    uphold.times_out()
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TIMEOUT
+    assert "credited_usdc=<the amount the transfer moved>" in out
+    assert "THEN re-run this script once." in out
+    assert "signs no second transfer for a `credited` dispute" in out
+    # The false sentence this block used to carry, and the rule it wrongly
+    # blocked: a bare re-run is refused, never a second payment.
+    assert "would credit them a second time" not in out
+    assert "refused (exit 6) rather than dangerous" in out
+
+
+def test_a_credit_claimed_by_another_caller_mid_run_is_not_called_a_timeout(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The narrow race: the dispute was payable when this run read it, and
+    another caller claimed it before the uphold landed. `uphold` refuses with
+    `refund_in_flight` and the dispute reads `crediting` — the same record a
+    timeout leaves, and the same instruction follows. But it is not this run's
+    transfer, so the headline says whose it is and the code is 6, not the 10
+    that means "this process signed and lost the answer"."""
+    uphold.raises(
+        dispute_svc.DisputeError("refund_in_flight", "a credit for this dispute is already in flight", 409),
+        leaves=("crediting", REFUND_TX),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_IN_FLIGHT
+    assert "ALREADY IN FLIGHT" in out
+    assert "TIMED OUT" not in out
+    assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
+    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
     assert "nothing was signed" not in out
 
 
@@ -1038,7 +1284,7 @@ def test_an_unexpected_exception_does_not_override_what_the_store_says(
 
     assert code == uphold_dispute.EXIT_TIMEOUT
     assert "RuntimeError: connection reset while polling" in out
-    assert "DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE." in out
+    assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
 
 
 def test_a_service_refusal_leaves_the_dispute_untouched_and_says_so(
@@ -1445,11 +1691,13 @@ def test_nothing_reaches_stdout_except_through_say(
     ("code", "expected"),
     [
         ("refunds_disabled", uphold_dispute.EXIT_NOT_CONFIGURED),
+        ("refunds_not_configured", uphold_dispute.EXIT_NOT_CONFIGURED),
         ("unknown_dispute", uphold_dispute.EXIT_UNKNOWN_DISPUTE),
         ("dispute_rejected", uphold_dispute.EXIT_NOT_ADJUDICABLE),
         ("settlement_missing", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
         ("refund_above_cap", uphold_dispute.EXIT_ABOVE_CAP),
         ("nothing_to_credit", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
+        ("refund_amount_invalid", uphold_dispute.EXIT_UNEXPECTED),
     ],
 )
 def test_each_adjudication_refusal_carries_through_to_its_own_exit_code(
@@ -1465,7 +1713,7 @@ def test_each_adjudication_refusal_carries_through_to_its_own_exit_code(
     reaches a distinct exit, so a wrapper script can tell "the cap stopped it"
     from "there was nothing to credit" without reading prose.
 
-    All six are raised before anything is signed, so all six keep the
+    All of them are raised before anything is signed, so all of them keep the
     `nothing was signed` wording.
     """
     uphold.raises(dispute_svc.DisputeError(code, f"refused: {code}", 409))

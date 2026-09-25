@@ -304,37 +304,61 @@ def test_a_non_ascii_key_is_a_401_and_never_a_500(client, adjudicating, monkeypa
     [("latin1-accents", "passphrase-naïve"), ("outside-latin1", "passphrase-Ω")],
     ids=["latin1-accents", "outside-latin1"],
 )
-def test_a_non_ascii_configured_key_locks_the_door_rather_than_crashing(
+def test_a_non_ascii_configured_key_still_admits_the_operator_who_holds_it(
     client, adjudicating, monkeypatch, label, configured
 ):
     """The other side of the same hazard: a non-ascii value pasted into API_KEY.
 
-    `expected.encode("utf-8")` cannot raise, so the guard does not crash on
-    this side — but the header round-trip is lossy either way (Starlette
-    decodes latin-1; httpx's ASGI transport, which `client` rides on, encodes
-    every header utf-8 before that), so such a key does not in practice match
-    anything a client can send. That makes the configuration unusable, and
-    what matters on a payout route is HOW it is unusable: every attempt must
-    be an ordinary 401, so the operator sees a locked door in their access log
-    and goes looking at API_KEY, rather than a stream of 500s from an
-    unhandled TypeError that reads like the service itself is broken.
+    This used to be a PERMANENT LOCKOUT, and the lockout was invisible. The
+    guard compared `supplied.encode("utf-8", "ignore")` against the configured
+    value's utf-8 bytes — but Starlette hands a dependency the header decoded
+    as LATIN-1, so re-encoding it utf-8 is the identity only while every byte
+    is ascii. One accent in API_KEY and the operator's own key arrived as
+    different bytes from the ones configured: every uphold answered 401, in
+    the access log and in the body exactly like an attacker's, forever, on a
+    deploy that reported success.
 
-    Fail-closed is the correct end state here, so this pins the refusal rather
-    than chasing an encoding that would admit the caller. What proves the
-    comparison is a real comparison and not a blanket refusal is the ascii
-    pair above: `test_the_key_admits_the_caller_to_uphold` admits the right
-    key, `test_a_prefix_of_the_key_is_401` refuses one byte short of it.
+    `security.header_secret_matches` compares the WIRE BYTES — latin-1 back
+    out, which is what latin-1 in must round-trip to — so the operator who
+    holds the key is admitted whatever alphabet it is written in. `config`
+    refuses such a key at boot as well (`API_KEY must be ascii`), because a
+    named deploy failure beats even a working accent; this is what keeps the
+    door honest for the tests and hot reloads that set the value past the
+    validators, and for a header a proxy re-encodes on the way through.
+
+    What proves this is a comparison and not a blanket admission is the pair
+    around it: the wrong key one byte short is still refused here, and
+    `test_a_prefix_of_the_key_is_401` refuses it for the ascii key.
     """
     adjudicating.api_key = configured
-    reached = sealed(monkeypatch)
+    reached = upholds_with(monkeypatch, record(status="credited", refund_tx=REFUND_TX))
 
+    # Exactly what a normal client puts on the wire for this key.
     same_bytes = client.post(UPHOLD, json={}, headers={"X-API-Key": configured.encode()})
     ascii_fold = client.post(UPHOLD, json={}, headers={"X-API-Key": b"passphrase-"})
 
-    assert same_bytes.status_code == 401, f"a {label} configured key answered {same_bytes.status_code}, not 401"
-    assert same_bytes.json()["error"]["code"] == "invalid_api_key"
+    assert same_bytes.status_code == 200, f"a {label} configured key answered {same_bytes.status_code}, not 200"
     assert ascii_fold.status_code == 401
-    assert reached == []
+    assert ascii_fold.json()["error"]["code"] == "invalid_api_key"
+    assert reached == [DISPUTE_ID]
+
+
+def test_a_padded_configured_key_admits_the_key_without_the_padding(client, adjudicating, monkeypatch):
+    """An API_KEY with whitespace around it is the operator's paste, not their key.
+
+    Nothing on the wire can carry it: the two HTTP parsers uvicorn may pick do
+    not agree about trailing OWS on a header value, and an operator typing the
+    key into a client types the key. `header_secret_matches` strips ascii
+    whitespace from both sides so the padding cannot decide who gets in, and
+    `config` refuses to boot on it so nobody has to find that out in a log.
+    """
+    adjudicating.api_key = f"  {API_KEY}\t"
+    reached = upholds_with(monkeypatch, record(status="credited", refund_tx=REFUND_TX))
+
+    r = client.post(UPHOLD, json={}, headers=AUTH)
+
+    assert r.status_code == 200, r.text
+    assert reached == [DISPUTE_ID]
 
 
 # ── the door: it admits ─────────────────────────────────────────
@@ -609,3 +633,84 @@ def test_an_oversized_dispute_id_never_reaches_the_service(client, adjudicating,
     assert [e["loc"] for e in r.json()["detail"]] == [["path", "dispute_id"]]
     assert calls_uphold == []
     assert calls_reject == []
+
+
+def test_an_adjudication_refusal_never_publishes_the_message_it_was_written_with(client, adjudicating, monkeypatch):
+    """The other half of the message decision, and the reason it has two halves.
+
+    The buyer's routes pass `DisputeError.message` through, because everything
+    `dispute_svc` refuses a buyer with is written for the buyer and two of
+    those messages say what the code cannot. These do not: they are written
+    for an operator holding the ledger, and they quote the deployment's own
+    numbers — `refund_svc.RefundRefused` names MAX_REFUND_USDC in as many
+    words. A cap is a fact about this platform's balance sheet, and a 409 on a
+    public-shaped route is not where it is published.
+
+    So the message stays derived from the code here, and `_refuse` is the
+    function that drops it. What the adjudicator loses is nothing they cannot
+    read in the log line that was already written for them.
+    """
+    exc = dispute_error("refund_above_cap", 409)
+    exc.message = "this credit would exceed MAX_REFUND_USDC=12.5"  # type: ignore[attr-defined]
+    upholds_with(monkeypatch, exc)
+
+    r = client.post(UPHOLD, json={}, headers=AUTH)
+
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "refund_above_cap"
+    assert r.json()["error"]["message"] == "refund above cap"
+    assert "12.5" not in r.text
+    assert "MAX_REFUND_USDC" not in r.text
+
+
+# ── what the published spec says about this pair ────────────────
+
+
+UPHOLD_PATH = "/api/disputes/{dispute_id}/uphold"
+REJECT_PATH = "/api/disputes/{dispute_id}/reject"
+
+
+def test_the_operator_key_is_a_declared_security_scheme(client):
+    """The spec advertises the production server, so it is read as instruction.
+
+    X-API-Key used to appear on these two as an ordinary OPTIONAL header, with
+    no security scheme behind it — so a generated client omitted it and met a
+    401 it had no way to anticipate, and /docs offered no way to send one.
+    """
+    spec = client.get("/openapi.json").json()
+
+    scheme = spec["components"]["securitySchemes"]["OperatorApiKey"]
+    assert (scheme["type"], scheme["in"], scheme["name"]) == ("apiKey", "header", "X-API-Key")
+    for path in (UPHOLD_PATH, REJECT_PATH):
+        assert spec["paths"][path]["post"]["security"] == [{"OperatorApiKey": []}], path
+
+
+def test_the_spec_documents_every_status_the_pair_answers_with(client):
+    spec = client.get("/openapi.json").json()
+
+    uphold = set(spec["paths"][UPHOLD_PATH]["post"]["responses"])
+    reject = set(spec["paths"][REJECT_PATH]["post"]["responses"])
+
+    # The guard's own answers, and the service's.
+    assert {"401", "404", "409", "503"} <= uphold & reject
+    # Only uphold reaches the ledger, so only uphold can report on one — and a
+    # 504 that means "may still land, reconcile by hand, never retry" is the
+    # last status to leave undeclared.
+    assert {"502", "504"} <= uphold
+    assert {"502", "504"} & reject == set()
+    # 403 is not among them: a missing key and a wrong key are both 401 on
+    # purpose, so a spec promising a 403 would describe an oracle this pair
+    # deliberately is not.
+    assert "403" not in uphold | reject
+
+
+def test_every_documented_error_status_carries_the_envelope(client):
+    spec = client.get("/openapi.json").json()
+
+    for path in (UPHOLD_PATH, REJECT_PATH):
+        responses = spec["paths"][path]["post"]["responses"]
+        for status, row in responses.items():
+            if status == "200":
+                continue
+            ref = row["content"]["application/json"]["schema"]["$ref"]
+            assert ref.endswith("ErrorEnvelope"), (path, status)

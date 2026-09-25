@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 
+import pytest
 from stellar_sdk import Keypair
 
 from app.services.external_binding import (
@@ -168,47 +169,64 @@ def test_an_expired_challenge_is_replaced_rather_than_returned() -> None:
     assert fresh_expiry > stale_expiry
 
 
-def test_challenge_table_is_bounded_at_max_challenges() -> None:
+def test_challenge_table_is_bounded_at_the_bind_budget() -> None:
     """An unauthenticated POST whose key is caller-supplied must not be able to
     grow the table without limit — that is memory exhaustion on a free instance.
+
+    Bounded by the BIND budget rather than the whole table since 4.07: the
+    endpoint URL in a bind key is caller-supplied and unbounded, which made
+    this the one flood an attacker could mount at will, and a shared bound
+    meant mounting it displaced the unbind and dispute challenges too. Full,
+    the budget REFUSES a new mint instead of taking a live one.
     """
     from app.services import external_binding as eb
 
     saved = eb._challenges.copy()
     eb._challenges.clear()
+    eb._exhausted.clear()
     try:
-        for i in range(eb.MAX_CHALLENGES + 50):
+        for i in range(eb.CHALLENGE_BUDGETS["bind"]):
             issue_challenge(f"flood_{i}", ENDPOINT)
-        assert len(eb._challenges) == eb.MAX_CHALLENGES
-        # every challenge here is live, so eviction fell back to oldest-first
-        assert ("flood_0", ENDPOINT) not in eb._challenges
-        assert (f"flood_{eb.MAX_CHALLENGES + 49}", ENDPOINT) in eb._challenges
+        assert len(eb._challenges) == eb.CHALLENGE_BUDGETS["bind"]
+
+        with pytest.raises(eb.ChallengeBudgetExhausted) as info:
+            issue_challenge("flood_one_too_many", ENDPOINT)
+
+        assert info.value.purpose == "bind"
+        assert len(eb._challenges) == eb.CHALLENGE_BUDGETS["bind"]
+        # The operator who got in first still holds a signable challenge.
+        assert ("flood_0", ENDPOINT) in eb._challenges
     finally:
         eb._challenges.clear()
         eb._challenges.update(saved)
+        eb._exhausted.clear()
 
 
-def test_eviction_drops_expired_challenges_before_live_ones() -> None:
+def test_a_full_budget_sweeps_expired_challenges_and_never_live_ones() -> None:
     """The live challenge is the OLDEST entry, so a naive oldest-first eviction
     would take it and strand the one operator actually mid-bind."""
     from app.services import external_binding as eb
 
     saved = eb._challenges.copy()
     eb._challenges.clear()
+    eb._exhausted.clear()
     try:
         issue_challenge("still_binding", ENDPOINT)
-        for i in range(eb.MAX_CHALLENGES - 1):
+        for i in range(eb.CHALLENGE_BUDGETS["bind"] - 1):
             issue_challenge(f"stale_{i}", ENDPOINT, ttl_seconds=-1)
-        assert len(eb._challenges) == eb.MAX_CHALLENGES
+        assert len(eb._challenges) == eb.CHALLENGE_BUDGETS["bind"]
 
         issue_challenge("newcomer", ENDPOINT)
-        assert len(eb._challenges) == eb.MAX_CHALLENGES
+
+        # The lapsed entries were reclaimed, so the newcomer got in without
+        # anything live being touched.
         assert ("still_binding", ENDPOINT) in eb._challenges
         assert ("newcomer", ENDPOINT) in eb._challenges
         assert ("stale_0", ENDPOINT) not in eb._challenges
     finally:
         eb._challenges.clear()
         eb._challenges.update(saved)
+        eb._exhausted.clear()
 
 
 # ── SEP-53: what a real wallet actually signs ────────────────────────────

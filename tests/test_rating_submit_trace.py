@@ -71,7 +71,7 @@ def _rate() -> list[TraceLine]:
             task_id,
             time.monotonic(),
             _plan(),
-            {"w.x": {"artifact": {"title": "x"}, "critic_violations": []}},
+            {0: {"artifact": {"title": "x"}, "critic_violations": []}},
             payer=PAYER,
             job_id=JOB_ID,
         )
