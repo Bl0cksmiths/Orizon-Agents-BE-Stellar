@@ -44,6 +44,7 @@ from .services import execution_svc, rating_writer, registry_sync, reputation_sv
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import close_dispute_store
+from .services.external_binding import ChallengeBudgetExhausted
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -421,6 +422,34 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         status_code=exc.status_code,
         content=_error_envelope(jsonable_encoder(detail), code, message),
         headers=headers,
+    )
+
+
+@app.exception_handler(ChallengeBudgetExhausted)
+async def challenge_budget_handler(request: Request, exc: ChallengeBudgetExhausted) -> JSONResponse:
+    """A challenge mint refused for want of room, in the unified envelope.
+
+    Handled here rather than in each of the three mint routes, because it is
+    one answer and `routers/binding.py` and `routers/disputes.py` would
+    otherwise both need to learn a service exception in order to give it. This
+    module already owns every error body; this is one more.
+
+    503, not 429: the caller being refused is usually not the caller who
+    filled the budget, and nothing about their own rate is the problem. It is
+    a capacity state of the service, it clears on its own as challenges expire
+    (five minutes at the outside), and the honest thing to say is "not now".
+
+    The purpose is in the code so an operator reading a log can tell which
+    budget is under pressure. It is one of `CHALLENGE_BUDGETS`' own keys and
+    never caller text, so no request can shape the token a client branches on.
+    """
+    return JSONResponse(
+        status_code=503,
+        content=_error_envelope(
+            f"challenge_capacity_{exc.purpose}",
+            f"challenge_capacity_{exc.purpose}",
+            f"no {exc.purpose} challenge capacity right now — ask again shortly",
+        ),
     )
 
 
