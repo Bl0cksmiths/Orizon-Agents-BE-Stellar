@@ -150,7 +150,7 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 | `TRUSTED_PROXY_HOPS` | `0` | how many **trailing** `X-Forwarded-For` entries are this deployment's own infrastructure and are skipped when resolving the client |
 | `FORWARDED_CHAIN_SAMPLES` | `5` | log the raw forwarded chain + resolved key for the first N non-exempt requests after each restart (`0` disables) |
 | `MAX_CHARGE_USDC` | `100` | server-side ceiling for a single `PaymentEscrow.charge`, in USDC |
-| `DISPUTE_REFUNDS_ENABLED` | `false` | master switch on the refund path — while it is false, `/api/disputes/{id}/uphold` and `/reject` refuse. **Turning it on with a signing key and an asset SAC configured makes `API_KEY` mandatory: the process refuses to boot without one, on every network including testnet.** |
+| `DISPUTE_REFUNDS_ENABLED` | `false` | master switch on the refund path — while it is false, `/api/disputes/{id}/uphold` and `/reject` refuse. **Turning it on makes `API_KEY` mandatory on its own: the process refuses to boot without one, on every network including testnet, whether or not a signing key or an asset SAC is wired up yet.** |
 | `MAX_REFUND_USDC` | `1.0` | ceiling on a single dispute credit, checked before anything is signed — deliberately not `MAX_CHARGE_USDC`, because that bounds what a buyer authorised themselves to spend and this bounds what the platform pays out of its own wallet |
 | `DOCS_ENABLED` | `true` | serve `/docs`, `/redoc`, and `/openapi.json` |
 
