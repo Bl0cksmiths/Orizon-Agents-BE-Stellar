@@ -725,3 +725,31 @@ def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypat
     # can take its skew from any read rather than only a settled one.
     assert isinstance(body.pop("now"), float)
     assert body == {"task_id": task_id, "window_closes_at": None, "settlement": None, "disputes": []}
+
+
+def test_the_task_read_refusal_never_echoes_the_id_it_refused(client, monkeypatch):
+    """The one dispute route that takes caller text and answers about it.
+
+    `require_task_read` refuses with a 404 so task ids stay unenumerable, and
+    it used to interpolate the id into the detail. That is not a snake token,
+    so `main.http_exception_handler` fell through to its `not_found` fallback
+    and copied the caller's own text into `error.message` — on a dependency
+    that runs BEFORE the route's `max_length`, so the text was unbounded too.
+    """
+    monkeypatch.setattr(settings, "task_auth_required", True)
+    lists(monkeypatch, found=None, disputes=())
+    # No slash anywhere in it: a slash would add a path segment and the router
+    # would answer its own 404 before this dependency ever ran.
+    hostile = "A" * 4096 + "<script>alert(1)"
+
+    r = client.get(f"/api/tasks/{hostile}/disputes")
+
+    assert r.status_code == 404
+    assert r.json()["error"] == {
+        "code": "unknown_task",
+        "message": "unknown task",
+        "request_id": r.headers["x-request-id"],
+    }
+    # Nowhere in the body, not under `detail` either — the id is already in the
+    # path the caller sent and in the access log, joined by that request id.
+    assert hostile not in r.text
