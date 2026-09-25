@@ -327,9 +327,13 @@ async def _run(
     # agent on two steps produced two different things, and keyed by agent the
     # second would overwrite the first on the step the buyer disputes.
     output_summaries: dict[int, str | None] = {}
-    # Agent ids whose step never reached a worker at all — see the resolve
+    # Plan-step INDEXES that never reached a worker at all — see the resolve
     # branch below. Distinct from "delivered nothing": these are not rated.
-    undispatched: set[str] = set()
+    # By index, like the three maps above and for the last of the same reason:
+    # resolution fails OPEN and is negative-cached, so one blip can leave an
+    # agent unresolved at step 0 and resolvable at step 3 — and keyed by agent
+    # that dropped the rating for step 3, which DID deliver and WAS charged for.
+    undispatched: set[int] = set()
     # Agent ids that ran on one of OUR workers. The rating scale trusts a
     # first-party response to have delivered something real; an untrusted one
     # has to prove it (ADR 0005 D3). Carried separately because `delivered`
@@ -383,7 +387,10 @@ async def _run(
                 # on-chain 20/100 against an operator who was never asked to
                 # deliver. "Did not deliver" and "was never asked" are
                 # different facts and only the first is theirs (ADR 0005 D5).
-                undispatched.add(step.agent_id)
+                # THIS step, not this agent: the same agent may be resolvable
+                # at another step of the plan, and that step's delivery is its
+                # own evidence.
+                undispatched.add(step_index)
                 logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
                 await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
                 continue
@@ -1302,14 +1309,15 @@ async def _submit_ratings(
     *,
     payer: str,
     job_id: bytes,
-    undispatched: frozenset[str] = frozenset(),
+    undispatched: frozenset[int] = frozenset(),
     first_party_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Submit the settler's synthetic per-step ratings to ReputationLedger.
 
-    `delivered` is by PLAN-STEP INDEX, not by agent: one step's rating is
-    graded on that step's own output, and a plan is free to hire one agent
-    twice. A step with no entry delivered nothing and is rated as such.
+    `delivered` and `undispatched` are both by PLAN-STEP INDEX, not by agent:
+    one step's rating is graded on that step's own output and withheld on that
+    step's own dispatch, and a plan is free to hire one agent twice. A step
+    with no `delivered` entry delivered nothing and is rated as such.
 
     Best-effort by design: a failed rating never fails the workflow — each step
     traces and logs its own failure and the loop moves on. It is logged as well
@@ -1333,8 +1341,11 @@ async def _submit_ratings(
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
     for step_index, step in enumerate(plan.plan.steps):
-        if step.agent_id in undispatched:
-            # We never sent them the step, so there is nothing to judge.
+        if step_index in undispatched:
+            # We never sent them this step, so there is nothing to judge. By
+            # index: the agent may have served another step of this plan, and
+            # a delivery of ours they never got asked for does not cancel one
+            # they did.
             continue
         # By index, so the step is graded on ITS output. The lookup used to be
         # by agent_id — the one identity both worker kinds share, worker names
