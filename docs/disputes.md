@@ -832,8 +832,16 @@ argument.
 matches what this dispute would have written: `kind` is `dispute`, the rating
 is `10`, the agent is `agent=`, the payer is `payer=`, and the weight is the
 step's quoted price in stroops — the dispute's `charged_usdc` × 10 000 000,
-rounded, which is the same settled step price the rating was weighted from, and
-which the script's `--dry-run` prints beside the rating id.
+rounded and then **clamped to `[1, REPUTATION_MAX_RATING_WEIGHT_USDC ×
+10 000 000]`**, which is the same settled step price the rating was weighted
+from, and which the script's `--dry-run` prints beside the rating id.
+
+Do the clamp before deciding the weight disagrees. It only shows at the two
+ends, and both are ordinary: a step priced at zero is weighted 1 stroop rather
+than nothing, so that it still carries evidence, and a step priced above the
+cap is weighted at the cap, so one whale job cannot own the score. A rating
+computed without it at either end differs from ours by exactly that clamp, and
+escalating on the difference escalates a benign case.
 
 - **It is ours.** Record it, and the dispute is fully resolved:
   `append_status(dispute_id, "credited", rating_tx=<hash>, rating_confirmed=True)`.
