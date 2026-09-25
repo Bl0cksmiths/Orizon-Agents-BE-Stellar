@@ -11,12 +11,20 @@ assertions."""
 from __future__ import annotations
 
 import logging
+import traceback
 
 import pytest
 from pydantic import ValidationError
 from stellar_sdk import Keypair
 
-from app.config import _MIN_API_KEY_CHARS, MAINNET_PASSPHRASE, PDAX_ENVIRONMENTS, Settings
+from app.config import (
+    _MIN_API_KEY_CHARS,
+    MAINNET_PASSPHRASE,
+    PDAX_ENVIRONMENTS,
+    ConfigurationError,
+    Settings,
+    _load_settings,
+)
 from app.security import _MIN_MASKED_SECRET_CHARS
 
 CONFIG_LOGGER = "app.config"
@@ -501,3 +509,112 @@ def test_production_pdax_shaped_config_boots_clean_and_silent(caplog):
         s = _production_shaped(pdax_environment="production")
     assert s.pdax_environment == "production"
     assert _errors(caplog) == []
+
+
+# ── a refusal to boot must not print what it refused ────────────
+# `settings = _load_settings()` runs at import, so a refusal is an uncaught
+# traceback on stderr — Render's deploy log, which is readable by anyone with
+# dashboard access, is retained, and is read by several people at once exactly
+# because the deploy just failed. pydantic's own ValidationError prints
+# `input_value={...}`, and for a model validator that is the whole settings
+# dict truncated to a fixed width: whichever secrets fall in the head or the
+# tail go out verbatim, chosen by nothing but env ordering. A signing key or a
+# database password that reaches a log has to be rotated.
+
+# Recognisable, and shaped like the real things: a Stellar secret seed, a
+# password, a DSN with a password in it, an OpenAI key.
+LEAKY_SECRETS = {
+    "stellar_signing_key": "SFAKESEEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "pdax_password": "fake-pdax-password-9f3b",
+    "pdax_webhook_secret": "fake-webhook-secret-7c1d",
+    "pdax_otp_secret": "JBSWY3DPEHPK3PXPFAKEOTP",
+    "database_url": "postgresql://user:fake-db-password-4e2a@db.example.com/orizon",
+    "openai_api_key": "sk-fake-openai-key-8b6e",
+    "orizon_dispatch_signing_key": "fake-dispatch-signing-key-1a5c",
+}
+
+
+def _formatted(exc: BaseException) -> str:
+    """Every way this exception could reach a log, concatenated.
+
+    `str` and `repr` because a handler may use either, and the full formatted
+    traceback because that is what an uncaught one prints — `format_exception`
+    walks `__cause__` and `__context__` exactly as the interpreter does, so a
+    chained ValidationError still holding the values would show up here.
+    """
+    return "\n".join((str(exc), repr(exc), "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))))
+
+
+def test_a_refused_boot_prints_no_configured_value_anywhere():
+    # A key short enough to fail `_api_key_is_usable_on_the_wire`, with every
+    # secret this service holds set alongside it — the real shape of a
+    # production deploy that got one variable wrong.
+    with pytest.raises(ConfigurationError) as info:
+        _load_settings(_env_file=None, api_key="sh", **LEAKY_SECRETS)
+
+    printed = _formatted(info.value)
+    for field, secret in LEAKY_SECRETS.items():
+        assert secret not in printed, f"{field} reached the log"
+    # The password inside the DSN, in case a future change prints the DSN in
+    # pieces rather than whole.
+    assert "fake-db-password-4e2a" not in printed
+    # And the bad value itself is not echoed back either.
+    assert "'sh'" not in printed
+
+
+def test_a_refused_boot_still_names_the_variable_to_fix():
+    # The whole point of the message: an operator reading the deploy log has
+    # to be able to tell WHICH setting is wrong without being shown any.
+    with pytest.raises(ConfigurationError) as info:
+        _load_settings(_env_file=None, api_key="sh", **LEAKY_SECRETS)
+
+    message = str(info.value)
+    assert "API_KEY" in message
+    assert "Refusing to boot" in message
+    assert "shorter than 8 characters" in message
+
+
+def test_the_validation_error_is_not_left_hanging_off_the_chain():
+    """`raise ... from None` would not have been enough.
+
+    An exception raised inside the `except` block keeps the ValidationError as
+    `__context__` whatever the `from` clause says — `from None` only stops the
+    default traceback printing it. The values would still sit one attribute
+    away from any reporting tool that walks the chain, so the refusal is
+    raised after the block has ended instead.
+    """
+    with pytest.raises(ConfigurationError) as info:
+        _load_settings(_env_file=None, api_key="sh", **LEAKY_SECRETS)
+
+    assert info.value.__cause__ is None
+    assert info.value.__context__ is None
+
+
+def test_a_field_level_refusal_names_its_variable_and_shows_no_value():
+    # Not every refusal comes from a model validator: a field that will not
+    # coerce fails with a `loc`, and that path must be just as quiet.
+    #
+    # Passed in a dict rather than as a literal kwarg so the bad value does
+    # not appear in this file's own source — a traceback renders the source
+    # line of every frame, and in production that line is `_load_settings()`
+    # with no values in it. A literal here would fail the assertion on the
+    # test's text instead of on the exception's.
+    bad = {"port": "not-a-port", **LEAKY_SECRETS}
+
+    with pytest.raises(ConfigurationError) as info:
+        _load_settings(_env_file=None, **bad)
+
+    printed = _formatted(info.value)
+    assert "PORT" in str(info.value)
+    assert "not-a-port" not in printed
+    for secret in LEAKY_SECRETS.values():
+        assert secret not in printed
+
+
+def test_a_good_configuration_still_loads_through_the_same_door():
+    # The wrapper must not be a second opinion about what is valid: a config
+    # that `Settings` accepts has to come back from `_load_settings` unchanged.
+    loaded = _load_settings(_env_file=None, api_key=_USABLE_KEY)
+
+    assert isinstance(loaded, Settings)
+    assert loaded.api_key == _USABLE_KEY
