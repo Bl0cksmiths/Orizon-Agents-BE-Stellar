@@ -1375,6 +1375,72 @@ def test_a_refused_transition_is_told_apart_from_an_unknown_dispute() -> None:
         asyncio.run(store.append_status("dsp_never", "credited", expected_status="open"))
 
 
+# ── two transitions at once ───────────────────────────────────────────────
+
+
+def test_two_concurrent_transitions_do_not_lose_each_other_s_facts() -> None:
+    """The lost update, on the module's own example: a credit and a rating
+    landing together.
+
+    Both statements read the dispute's newest row, and each writes a row
+    COALESCEd against what it read. Running at once — at READ COMMITTED,
+    without a lock — they read the SAME row, and the one that commits second
+    carries forward a record that never knew about the first. The buyer's
+    receipt then shows a rating and no refund hash, for a refund that was paid.
+
+    The fake models that window (see `_append_status`); what closes it is the
+    row lock, which makes the second append read `latest` only after the first
+    has written it."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await asyncio.gather(
+            store.append_status(opened.id, "credited", refund_tx="tx_paid", credited_usdc=1.5),
+            store.append_status(opened.id, "credited", rating_tx="tx_rating", rating_confirmed=True),
+        )
+        return await store.get_dispute(opened.id)
+
+    final = asyncio.run(go())
+
+    assert final is not None
+    # Every fact either transition recorded is still on the record.
+    assert final.refund_tx == "tx_paid"
+    assert final.credited_usdc == 1.5
+    assert final.rating_tx == "tx_rating"
+    assert final.rating_confirmed is True
+
+
+def test_two_concurrent_adjudications_produce_exactly_one_verdict() -> None:
+    """Two adjudicators, one dispute, both deciding from the same `open` read.
+
+    The precondition can only refuse the second if the second READS what the
+    first wrote, and at READ COMMITTED a statement that started first never
+    will. The lock is what orders them: the loser wakes, reads the verdict
+    already recorded, and declines to write over it."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> list[DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        return list(
+            await asyncio.gather(
+                store.append_status(opened.id, "upheld", expected_status="open"),
+                store.append_status(opened.id, "rejected", note=NOTE, expected_status="open"),
+            )
+        )
+
+    results = asyncio.run(go())
+    written = [record for record in results if record is not None]
+
+    assert len(written) == 1
+    # One verdict on the trail, beside the opening row — not two.
+    assert [row["status"] for row in pool.disputes] == ["open", written[0].status]
+
+
 # ── the pool ──────────────────────────────────────────────────────────────
 
 

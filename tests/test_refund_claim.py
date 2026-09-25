@@ -505,6 +505,33 @@ def test_the_mutex_delete_is_gated_on_the_transition_being_written() -> None:
     assert "$10::text IS NULL OR latest.status = $10::text" in delete
 
 
+def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to() -> None:
+    """The two halves of finding the wedge, in one interleaving.
+
+    A payer claims the dispute and starts signing; an adjudicator's `rejected`,
+    computed from a read taken while it was still `open`, arrives in the middle
+    of that. The verdict is refused — the dispute has moved — and the claim
+    protecting the transfer has to survive the refusal, or the buyer drops off
+    the reconciliation queue while their money is still in flight."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> tuple[Any, Any, DisputeRecord | None, list[str]]:
+        upheld = await _upheld(store)
+        claimed, refused = await asyncio.gather(
+            store.claim_refund(upheld.id),
+            store.append_status(upheld.id, "rejected", note="not upheld", expected_status="open"),
+        )
+        return claimed, refused, await store.get_dispute(upheld.id), await _queued(store)
+
+    claimed, refused, current, queue = asyncio.run(go())
+
+    assert claimed is not None and claimed.status == "crediting"
+    assert refused is None
+    assert current is not None and current.status == "crediting"
+    assert queue == ["dsp_0001"]
+
+
 # ── across a restart ──────────────────────────────────────────────────────
 
 
