@@ -582,6 +582,16 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
     rejection of a dispute that is mid-payout or already paid, which is the one
     thing an adjudicator most needs to be told they cannot do.
 
+    That check is a READ, so the write it guards is made CONDITIONAL on it
+    (`expected_status="open"`) rather than trusting it across the await that
+    separates them. What lands in that gap is not hypothetical: an uphold
+    claiming the dispute moves it to `crediting` and signs a transfer, and an
+    unconditional append would then write `rejected` over a payment that is on
+    the network AND drop the refund claim row — which is at once the mutex
+    stopping a second transfer and the whole of the reconciliation queue for
+    the first. Losing the compare-and-set means precisely that happened, so
+    the rejection is refused, naming the status the store really holds.
+
     Deliberately NOT gated on `DISPUTE_REFUNDS_ENABLED` the way `uphold` is.
     That switch guards the platform's WALLET, and a rejection signs nothing and
     pays nothing; gating it would mean a deployment with the refund path off
@@ -654,7 +664,20 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
             amount_usdc=dispute.creditable_usdc,
             tx_hash=dispute.refund_tx,
         )
-    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned)
+    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned, expected_status="open")
+    if rejected is None:
+        # The dispute moved under the read above. Refused rather than retried:
+        # a rejection is an adjudicator's decision about a dispute in a
+        # particular state, and the state it was decided about is gone.
+        current = await _load_for_adjudication(dispute_id)
+        raise _refuse_credit(
+            current,
+            "dispute_not_open",
+            409,
+            f"this dispute is {current.status}, and only an open dispute can be rejected",
+            amount_usdc=current.creditable_usdc,
+            tx_hash=current.refund_tx,
+        )
     # `noted=` is the presence of the explanation and never its text. It reads
     # `yes` on every rejection now that none can be recorded without one, and
     # stays in the line so it reads the same as every rejection logged before.
