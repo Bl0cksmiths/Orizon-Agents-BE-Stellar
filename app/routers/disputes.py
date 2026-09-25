@@ -44,7 +44,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..security import request_id_var, require_adjudicator
+from ..security import CodedHTTPException, request_id_var, require_adjudicator
 from ..services import dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..task_auth import TaskReadProof, require_task_read, task_read_proof
@@ -473,7 +473,7 @@ class TaskDisputesResponse(BaseModel):
 
 
 def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
-    """The rules lane's refusal, as this API's error.
+    """The rules lane's refusal, as this API's error — code only.
 
     The code is passed through as the HTTPException *detail* because
     `app/main.py`'s handler promotes a snake_case detail to `error.code`
@@ -481,8 +481,42 @@ def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
     mapping table here to forget to update. The status comes from the exception
     for the same reason: this module must not hold a second opinion about
     whether a closed window is a 409.
+
+    The MESSAGE is dropped here, and `_refuse_buyer` is where it is not. The
+    adjudication refusals this builds quote things the buyer's side of the
+    table should not read back — what a refund was capped at
+    (`refund_svc.RefundRefused`'s message names `MAX_REFUND_USDC`), what state
+    a credit is stuck in, which settlement is missing — and those messages are
+    written for an operator holding the ledger. The stable code is what a
+    client branches on, and it is unchanged.
     """
     return HTTPException(exc.status_code, exc.code)
+
+
+def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
+    """A refusal on one of the BUYER's routes, message and all.
+
+    Everything `dispute_svc` refuses a buyer with is written for the buyer,
+    and two of them say something the code alone cannot: a closed window names
+    the time it closed, and a lapsed challenge says to ask for a new one.
+    Dropping those made liars of the docstrings that promise them — and left
+    the frontend to re-derive an English sentence the service had already
+    written, which is how two spellings of one refusal start.
+
+    Safe to disclose, which is the only reason this exists as a second
+    function rather than as a change to `_refuse`. Every message reachable
+    from `issue_dispute_challenge` and `open_dispute` either states a rule
+    ("only the payer of a workflow may dispute it"), states a format ("an
+    ed25519 signature is 64 bytes"), or echoes back a value the caller sent —
+    a step index the edge has already bounded to an int. The ones that name
+    private state all sit AFTER `_authenticate_payer` in the service's own
+    order, so nobody reaches them without having signed as the payer first.
+
+    That ordering is the whole of the argument, so it is the thing to re-read
+    before routing a new code through here: a refusal moved to before the
+    signature check is a refusal whose message this function would publish.
+    """
+    return CodedHTTPException(exc.status_code, exc.code, exc.message)
 
 
 @router.post(
@@ -514,7 +548,7 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
     try:
         nonce, expires_at = await dispute_svc.issue_dispute_challenge(body.job_id_hex, body.step_index)
     except dispute_svc.DisputeError as e:
-        raise _refuse(e) from None
+        raise _refuse_buyer(e) from None
     # The nonce is a live single-use credential for its whole window: returned
     # to the caller, never written to a log — `bind_challenge`'s rule.
     logger.info("dispute challenge issued: job_id=%s step=%d", body.job_id_hex, body.step_index)
@@ -596,7 +630,7 @@ async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
         logger.warning("dispute refused: job_id=%s step=%d reason=%s", body.job_id_hex, body.step_index, e.code)
         if e.existing is not None:
             return _duplicate_envelope(e, e.existing)
-        raise _refuse(e) from None
+        raise _refuse_buyer(e) from None
     logger.info(
         "dispute opened: id=%s task_id=%s job_id=%s step=%d agent_id=%s charged_usdc=%s",
         record.id,
