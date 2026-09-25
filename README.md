@@ -185,12 +185,18 @@ The repo ships a `render.yaml` blueprint + a `runtime.txt` pinning Python 3.12. 
    git push origin main
    ```
 2. Go to [render.com](https://render.com) → **New → Blueprint** → connect `Orizon-Agents-BE-Stellar`.
-3. Render detects `render.yaml` and lists two secrets you must fill (`sync: false`):
+3. Render detects `render.yaml` and lists **eight** secrets to fill (`sync: false`). The blueprint fills none of them, and an unset one is simply empty — so read the whole table before skipping any:
 
    | name | value |
    | --- | --- |
-   | `OPENAI_API_KEY` | your OpenAI key (secret) |
-   | `STELLAR_SIGNING_KEY` | your admin `S…` secret — optional, needed only for real on-chain charge/seal |
+   | `OPENAI_API_KEY` | your OpenAI key. Required — no worker runs without it |
+   | `DATABASE_URL` | a Postgres DSN (e.g. a Neon connection string). **The one that makes disputes durable.** Left unset, the settlement, dispute and operator-binding stores are all in-memory: every settlement and every dispute is lost on the next deploy or idle spin-down, silently, and a dispute nobody can find is a buyer who cannot be paid. Not a free Render Postgres — that tier expires after 30 days |
+   | `STELLAR_SIGNING_KEY` | the settler's `S…` secret. Needed for real on-chain charge/seal, for paying dispute credits, and for writing ratings (the same key must be the ReputationLedger's registered Scorer, or every rating reverts) |
+   | `API_KEY` | the ops/adjudicator credential, sent as `X-API-Key`. Mandatory the moment this deployment is money-capable — `DISPUTE_REFUNDS_ENABLED=true`, a mainnet signing key, or production PDAX credentials — and the process refuses to boot without it |
+   | `PDAX_USERNAME` | PDAX account name — only for the PHP↔crypto ramps |
+   | `PDAX_PASSWORD` | PDAX account password — only for the PHP↔crypto ramps |
+   | `PDAX_OTP_SECRET` | base32 TOTP seed, only if the PDAX account has `SOFTWARE_TOKEN_MFA` |
+   | `PDAX_WEBHOOK_SECRET` | shared secret for verifying inbound PDAX webhooks. Required when `PDAX_ENVIRONMENT=production`, which also refuses to boot without it |
 
    All other env vars (model IDs, contract addresses, RPC) are preset in `render.yaml`.
 
