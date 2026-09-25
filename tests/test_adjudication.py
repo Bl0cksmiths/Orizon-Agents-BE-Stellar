@@ -92,8 +92,15 @@ def _fresh_state(monkeypatch):
     refund path, which is the only deployment where any of this runs. The test
     that covers the switch itself turns it back off, so the default is asserted
     rather than assumed.
+
+    The asset SAC is set for the same reason, and because nothing else would:
+    `uphold` asks `refund_svc.config_gap` for the settler's pair before it
+    claims, and a hermetic run has no `.env` to name a SAC. Its partner, the
+    signing key, is set by `rater` below. Both are fictional and neither is
+    read — the settler's transfer is stubbed above the stellar client.
     """
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
+    monkeypatch.setattr(settings, "stellar_asset_sac", "CSAC" + "7Z2Q" * 12)
     dispute_store._store = None
     eb._challenges.clear()
     state.tasks.clear()
@@ -445,6 +452,258 @@ def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(mon
     assert answered.refund_tx is None
 
 
+def _stalls_the_first_read(monkeypatch) -> asyncio.Event:
+    """Hold the FIRST `get_dispute` of a test open until the returned event is set.
+
+    This is the whole of what a race is, and the only thing these tests force:
+    one caller reads the dispute while it is still `open` and its round trip
+    then takes a while to come back — a slow query, a wait for a pool
+    connection, a second uvicorn worker, a GC pause. Everything after it is
+    the shipped service running against the real store.
+
+    Called from inside a coroutine, because the event belongs to the loop the
+    race runs in.
+    """
+    store = dispute_store.get_dispute_store()
+    real_get = store.get_dispute
+    may_proceed = asyncio.Event()
+    reads = 0
+
+    async def _slow_first_read(dispute_id: str) -> DisputeRecord | None:
+        nonlocal reads
+        reads += 1
+        record = await real_get(dispute_id)
+        if reads == 1:
+            await may_proceed.wait()
+        return record
+
+    monkeypatch.setattr(store, "get_dispute", _slow_first_read)
+    return may_proceed
+
+
+async def _attempt(call: Any) -> Any:
+    """Run one adjudication and answer with its record or its refusal, so a
+    racing pair can be compared side by side rather than one of them blowing
+    up the gather."""
+    try:
+        return await call
+    except DisputeError as refused:
+        return refused
+
+
+def test_a_second_uphold_holding_a_stale_open_read_never_signs_a_second_transfer(monkeypatch, rater) -> None:
+    """The real interleave, where the test above fakes it by stubbing the claim.
+
+    B reads the dispute while it is still `open`; its round trip stalls until A
+    has claimed, credited and closed it. B's record is now a fact about a state
+    that no longer exists, and an UNCONDITIONAL `open → upheld` append would
+    write it back — resurrecting a paid dispute into the one status
+    `claim_refund` accepts. The claim would then be granted, correctly, and B
+    would sign a SECOND transfer for a buyer who had already been paid: two
+    hashes, 0.10 USDC out of the platform wallet, and a record saying 0.05.
+
+    With the transition conditional, B's append simply loses, and B is
+    answered the way any repeat uphold of a credited dispute is — with the
+    credit that already exists.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED, LANDED)  # a second answer is available; it must go unused
+    store = dispute_store.get_dispute_store()
+
+    async def race() -> tuple[Any, Any]:
+        b_may_proceed = _stalls_the_first_read(monkeypatch)
+        loser = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # B reads `open`, then stalls
+        winner = await _attempt(dispute_svc.uphold(dispute.id))  # A runs to completion meanwhile
+        b_may_proceed.set()  # B's stale `open` record arrives now
+        return winner, await loser
+
+    won, lost = asyncio.run(race())
+
+    assert len(chain.calls) == 1, f"the settler signed {len(chain.calls)} transfers for one dispute"
+    assert won.status == "credited" and won.refund_tx == "tx_credit"
+    assert lost == won, "the loser was answered with something other than the credit that exists"
+    final = store._disputes[dispute.id]
+    assert (final.status, final.refund_tx, final.credited_usdc) == ("credited", "tx_credit", 0.05)
+    assert asyncio.run(store.list_refund_claims()) == ()
+
+
+def test_a_stale_uphold_is_refused_rather_than_racing_a_live_adjudication(monkeypatch, rater) -> None:
+    """The other side of the same lost compare-and-set.
+
+    A's transfer came back FAILED, so the dispute is back to `upheld` and
+    payable by the time B's stale `open` record arrives. Claiming from there
+    would in fact be safe — `claim_refund` is itself a compare-and-set — but
+    B would be claiming on a record it already knows is stale, one step before
+    the settler's key. It is refused instead, which costs B a re-read and
+    costs the buyer nothing: the dispute is upheld, and the next uphold pays
+    it, which this test then does.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch, REJECTED, LANDED)
+    store = dispute_store.get_dispute_store()
+
+    async def race() -> tuple[Any, Any]:
+        b_may_proceed = _stalls_the_first_read(monkeypatch)
+        loser = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # B reads `open`, then stalls
+        winner = await _attempt(dispute_svc.uphold(dispute.id))  # A claims, fails, releases
+        b_may_proceed.set()
+        return winner, await loser
+
+    won, lost = asyncio.run(race())
+
+    assert won.code == "refund_failed"
+    assert lost.code == "adjudication_in_progress" and lost.status_code == 409
+    assert len(chain.calls) == 1
+    # Refused, never stranded: the dispute is upheld and still owed.
+    assert store._disputes[dispute.id].status == "upheld"
+    assert asyncio.run(store.list_refund_claims()) == ()
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    assert paid.status == "credited" and len(chain.calls) == 2
+
+
+def test_an_in_flight_hash_the_store_would_not_record_still_refuses_with_the_hash(monkeypatch, caplog) -> None:
+    """A timed-out credit whose `crediting` row cannot be written.
+
+    Nothing that stops a second transfer depends on that write: `claim_refund`
+    moved the dispute to `crediting` already and the claim is still held. What
+    is lost is the in-flight HASH on the record, which is where a
+    reconciliation starts — so it goes in the log, and the caller still gets
+    the 504 that tells it never to retry, which says strictly more than the
+    500 that raising here would.
+    """
+    dispute = a_dispute()
+    settler(monkeypatch, LOST)
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _refuses_the_hash(dispute_id: str, status: str, **kwargs: Any) -> DisputeRecord | None:
+        if status == "crediting":
+            raise ConnectionError("the database went away")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _refuses_the_hash)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        with pytest.raises(DisputeError) as refused:
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refund_unconfirmed" and refused.value.status_code == 504
+    stuck = store._disputes[dispute.id]
+    assert stuck.status == "crediting"
+    assert stuck.refund_tx is None, "the hash was not recorded, so the log is the only place it exists"
+    assert [c.dispute_id for c in asyncio.run(store.list_refund_claims())] == [dispute.id]
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert any(
+        "tx_inflight" in m and dispute.id in m and JOB in m and dispute.payer in m and "0.0500000" in m for m in logged
+    ), f"the unrecorded in-flight hash was not logged with its context: {logged}"
+
+
+def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch, rater) -> None:
+    """The same stale append, arriving while A's transfer is ON THE NETWORK.
+
+    Written back unconditionally it moves a `crediting` dispute to `upheld`
+    while A's claim row stays — and that pair is unpayable forever: `claim_refund`
+    refuses because the claim is held, `release_refund_claim` refuses because
+    the status is not `crediting`, and the reconciliation queue holds a row for
+    a dispute that does not read as being paid. Nothing but a database edit
+    gets that buyer their money.
+
+    Conditional, B's append loses and B is told the credit is in flight. A's
+    transfer then comes back FAILED — the one answer that says no funds moved —
+    so A releases, and the buyer is payable again.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch)
+    store = dispute_store.get_dispute_store()
+    mid_flight: list[tuple[str, str]] = []
+
+    async def race() -> tuple[Any, Any]:
+        b_may_proceed = _stalls_the_first_read(monkeypatch)
+        transfer_may_answer = asyncio.Event()
+
+        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+            chain.calls.append((buyer, amount_usdc))
+            await transfer_may_answer.wait()  # A's transfer is on the network
+            return REJECTED
+
+        monkeypatch.setattr(refund_svc, "execute_refund", _in_flight)
+        loser = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # B reads `open`, then stalls
+        winner = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # A claims, signs, and waits on the network
+        b_may_proceed.set()  # B's stale `open` record arrives mid-flight
+        refused = await loser
+        # The claim protecting A's in-flight transfer is still there.
+        mid_flight.append((store._disputes[dispute.id].status, refused.code))
+        assert [c.dispute_id for c in await store.list_refund_claims()] == [dispute.id]
+        transfer_may_answer.set()  # and it comes back FAILED: nothing moved
+        return refused, await winner
+
+    lost, won = asyncio.run(race())
+
+    assert mid_flight == [("crediting", "refund_in_flight")]
+    assert lost.code == "refund_in_flight" and lost.status_code == 409
+    assert won.code == "refund_failed"
+    assert len(chain.calls) == 1
+    # FAILED means nothing moved, so the claim went back and the buyer can
+    # still be paid — which is the wedge, stated as the thing it prevents.
+    assert store._disputes[dispute.id].status == "upheld"
+    assert asyncio.run(store.list_refund_claims()) == ()
+    assert asyncio.run(store.claim_refund(dispute.id)) is not None
+
+
+def test_a_rejection_holding_a_stale_open_read_never_drops_a_live_payout(monkeypatch, rater) -> None:
+    """A rejection is terminal AND it drops the refund claim row, so the same
+    stale read costs more here than anywhere else.
+
+    The rejecter reads the dispute while it is `open` and stalls until an
+    uphold has claimed it and put a transfer on the network. Written back
+    unconditionally, `rejected` lands over a live payout: the claim that stops
+    a second transfer is deleted, the reconciliation queue that is the only
+    record of the first is emptied, and the receipt tells the buyer their
+    dispute was refused while the platform's money is in the air.
+
+    Conditional, the rejection is refused, and it names the status the store
+    actually holds — which is what the adjudicator needs to be told.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch)
+    store = dispute_store.get_dispute_store()
+
+    async def race() -> tuple[Any, Any]:
+        rejecter_may_proceed = _stalls_the_first_read(monkeypatch)
+        transfer_may_answer = asyncio.Event()
+
+        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+            chain.calls.append((buyer, amount_usdc))
+            await transfer_may_answer.wait()
+            return LOST  # submitted, unconfirmed: it MAY STILL LAND
+
+        monkeypatch.setattr(refund_svc, "execute_refund", _in_flight)
+        rejecting = asyncio.create_task(_attempt(dispute_svc.reject(dispute.id, note="the delivery matched the brief")))
+        await asyncio.sleep(0)  # the rejecter reads `open`, then stalls
+        upholding = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # the uphold claims and submits
+        rejecter_may_proceed.set()
+        refused = await rejecting
+        transfer_may_answer.set()
+        return refused, await upholding
+
+    rejection, credit = asyncio.run(race())
+
+    assert rejection.code == "dispute_not_open" and rejection.status_code == 409
+    assert "crediting" in rejection.message, f"the adjudicator was not told the real status: {rejection.message}"
+    assert credit.code == "refund_unconfirmed"
+    # The in-flight payout keeps both of the things that make it reconcilable:
+    # its claim row, and a dispute that reads as being paid.
+    final = store._disputes[dispute.id]
+    assert (final.status, final.refund_tx, final.note) == ("crediting", "tx_inflight", None)
+    assert [c.dispute_id for c in asyncio.run(store.list_refund_claims())] == [dispute.id]
+    assert len(chain.calls) == 1
+
+
 # ── the three answers a submitted transfer can have ─────────────
 
 
@@ -537,6 +796,60 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
     assert stuck.refund_tx == "tx_who_knows"
 
 
+@pytest.mark.parametrize(
+    ("refusal", "raised"),
+    [
+        ("raises", "the dispute store is unreachable"),
+        # An append given no `expected_status` has no precondition to lose, so
+        # None from one is the store saying something its contract forbids. It
+        # has to reach the operator as the same emergency the outage does, and
+        # never as a `credited` record that was never written.
+        ("answers none", "refused an unconditional"),
+    ],
+)
+def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(
+    monkeypatch, caplog, refusal: str, raised: str
+) -> None:
+    """The one window `uphold` cannot close, and the only one it can log.
+
+    The transfer has LANDED and the store is unreachable at the instant the
+    credit is written. Leaving the claim held and the dispute in `crediting`
+    is right — both say a payment may have happened — and letting the
+    exception out is right too. What was missing is the line: `refund_svc`
+    logs the landed credit at INFO, and a bare 500 carries no dispute, no job,
+    no payer, no amount and no hash, so the highest-stakes moment on the money
+    path was the one place with nothing an operator could reconcile from.
+    """
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _unreachable(dispute_id: str, status: str, **kwargs: Any) -> DisputeRecord | None:
+        if status == "credited":
+            if refusal == "raises":
+                raise RuntimeError("the dispute store is unreachable")
+            return None
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _unreachable)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        with pytest.raises(RuntimeError, match=raised):
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    # The claim is what stops a second payment, so it must outlive the failure.
+    assert store._disputes[dispute.id].status == "crediting"
+    assert [c.dispute_id for c in asyncio.run(store.list_refund_claims())] == [dispute.id]
+
+    logged = [r for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 1
+    message = logged[0].getMessage()
+    for fact in (dispute.id, JOB, dispute.payer, "0.0500000", "tx_credit"):
+        assert fact in message, f"a landed credit was not logged with {fact!r}: {message}"
+    assert logged[0].exc_info is not None, "the store failure was logged without its traceback"
+
+
 # ── the master switch ───────────────────────────────────────────
 
 
@@ -563,6 +876,49 @@ def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) ->
     # Not adjudicated, not claimed, not paid — the dispute is exactly as the
     # buyer left it.
     assert store._disputes[dispute.id].status == "open"
+
+
+@pytest.mark.parametrize(
+    ("setting", "named"),
+    [
+        ("stellar_signing_key", "STELLAR_SIGNING_KEY is unset"),
+        ("stellar_asset_sac", "STELLAR_ASSET_SAC is unset"),
+    ],
+)
+def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(monkeypatch, caplog, setting: str, named: str) -> None:
+    """The refund was the one money path with no presence check on its config,
+    and the absence was not cosmetic. `execute_refund` reads the settler
+    through `sc.signer_public_key`, which raises on an empty key BEFORE it
+    submits anything; `credit_refund` can only read a raise as "may still have
+    landed", so the claim was kept and the dispute parked in `crediting` with
+    an ERROR line that refuted itself — "MAY HAVE LANDED — do not retry:
+    STELLAR_SIGNING_KEY is empty". Nothing but a database edit ever got it out.
+
+    Asked above the claim, the same deployment refuses with a code that says
+    what is actually wrong, leaves the dispute exactly as the buyer left it,
+    and — the point — takes NO claim, so the buyer is payable the moment the
+    setting is.
+    """
+    dispute = a_dispute()
+    monkeypatch.setattr(settings, setting, "")
+    no_signing(monkeypatch)
+    store = dispute_store.get_dispute_store()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        with pytest.raises(DisputeError) as refused:
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refunds_not_configured"
+    assert refused.value.status_code == 503
+    assert store._disputes[dispute.id].status == "open"
+    assert asyncio.run(store.list_refund_claims()) == ()
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert any(named in m and dispute.id in m and JOB in m and dispute.payer in m for m in logged), (
+        f"the missing setting was not named beside the dispute: {logged}"
+    )
+    # The refusal an adjudicator reads names no setting: it is the operator's
+    # line above that does, and only the operator can act on it.
+    assert named not in refused.value.message
 
 
 def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
@@ -1151,7 +1507,6 @@ def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, 
     [
         ("reputation_enabled", False, "REPUTATION_ENABLED is false"),
         ("stellar_reputation_ledger", "", "STELLAR_REPUTATION_LEDGER is unset"),
-        ("stellar_signing_key", "", "STELLAR_SIGNING_KEY is unset"),
     ],
 )
 def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
@@ -1178,4 +1533,37 @@ def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 2  # one per uphold: each is a paid dispute left unrated
     for fact in (named, dispute.id, JOB, "agt_writer", dispute.payer):
+        assert fact in logged[0]
+
+
+def test_a_signing_key_that_goes_missing_after_the_credit_stops_the_rating_and_says_why(
+    monkeypatch, rater, invalidated, caplog
+) -> None:
+    """The signing key is the third setting the rating gate names, and it no
+    longer reaches that gate through a first uphold: `refund_svc.config_gap`
+    refuses the CREDIT without one, above the claim, so there is never a paid
+    dispute for the rating to be judged on. The gate a keyless deployment does
+    meet is the rating-only retry — a dispute paid while the key was there,
+    upheld again after it went — and that is where it is pinned, because the
+    consequence is the same one: the agent is not rated and each attempt says
+    which setting is missing."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    assert paid.status == "credited" and paid.rating_tx == "tx_rating" and rater.calls == 1
+
+    monkeypatch.setattr(settings, "stellar_signing_key", "")
+    trap_the_refund(monkeypatch)  # a rating-only retry must sign nothing either
+    invalidated.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert again == paid  # paid, and not re-rated
+    assert rater.calls == 1 and invalidated == [] and len(chain.calls) == 1
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 1
+    for fact in ("STELLAR_SIGNING_KEY is unset", dispute.id, JOB, "agt_writer", dispute.payer):
         assert fact in logged[0]

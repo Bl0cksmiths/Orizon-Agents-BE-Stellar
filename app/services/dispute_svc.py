@@ -57,6 +57,7 @@ from . import dispute_rating, rating_writer, refund_svc, reputation_svc
 from . import external_binding as eb
 from .dispute_store import (
     DisputeRecord,
+    DisputeStatus,
     DuplicateDisputeError,
     SettlementRecord,
     get_dispute_store,
@@ -502,7 +503,9 @@ async def settlement_for_task(task_id: str) -> SettlementRecord | None:
 # Everything below decides whether the platform SIGNS A TRANSFER, so the order
 # of the steps in `uphold` is the deliverable and not an implementation detail.
 # Two facts shape all of it. `store.claim_refund` is the lock, taken before
-# anything is signed and never a read-then-write (D2). And the Stellar client
+# anything is signed and never a read-then-write (D2) — and neither is the
+# adjudication that makes a dispute claimable in the first place, because a
+# lock a stale read can re-open is not a lock. And the Stellar client
 # does not raise on failure — it returns a status, one of whose values means
 # "submitted, may still land" (D3), which is the only way this service can pay
 # a buyer twice.
@@ -548,6 +551,29 @@ def _refuse_credit(
     return DisputeError(code, message, status_code)
 
 
+def _recorded(written: DisputeRecord | None, dispute_id: str, status: DisputeStatus) -> DisputeRecord:
+    """The record an UNCONDITIONAL `append_status` wrote.
+
+    `append_status` answers with an optional because a CONDITIONAL append — one
+    given an `expected_status` — can lose its compare-and-set. An append made
+    without one cannot: it has no precondition to fail, so None from one means
+    the store broke its own contract, not that this module lost a race it
+    ought to have reasoned about. The two are kept apart deliberately, because
+    treating a contract breach as a lost race is how a real one gets absorbed.
+
+    Raised rather than narrowed away with an `assert`, on both counts that
+    matter here. Every one of these calls is on the money path, where carrying
+    on with the record the caller already held would answer somebody with a
+    dispute the store does not hold. And `python -O` deletes an assert, which
+    would leave the one form of this check that costs nothing in production as
+    the one that is not there. Each call site already sits inside a handler
+    that knows what its own failed write means, and this is what reaches it.
+    """
+    if written is None:
+        raise RuntimeError(f"the dispute store refused an unconditional {status!r} append for dispute {dispute_id}")
+    return written
+
+
 async def _load_for_adjudication(dispute_id: str) -> DisputeRecord:
     """The dispute an adjudicator named, or `unknown_dispute` (404).
 
@@ -581,6 +607,16 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
     accept a second adjudicator overruling the first, and would also accept a
     rejection of a dispute that is mid-payout or already paid, which is the one
     thing an adjudicator most needs to be told they cannot do.
+
+    That check is a READ, so the write it guards is made CONDITIONAL on it
+    (`expected_status="open"`) rather than trusting it across the await that
+    separates them. What lands in that gap is not hypothetical: an uphold
+    claiming the dispute moves it to `crediting` and signs a transfer, and an
+    unconditional append would then write `rejected` over a payment that is on
+    the network AND drop the refund claim row — which is at once the mutex
+    stopping a second transfer and the whole of the reconciliation queue for
+    the first. Losing the compare-and-set means precisely that happened, so
+    the rejection is refused, naming the status the store really holds.
 
     Deliberately NOT gated on `DISPUTE_REFUNDS_ENABLED` the way `uphold` is.
     That switch guards the platform's WALLET, and a rejection signs nothing and
@@ -654,7 +690,20 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
             amount_usdc=dispute.creditable_usdc,
             tx_hash=dispute.refund_tx,
         )
-    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned)
+    rejected = await get_dispute_store().append_status(dispute_id, "rejected", note=cleaned, expected_status="open")
+    if rejected is None:
+        # The dispute moved under the read above. Refused rather than retried:
+        # a rejection is an adjudicator's decision about a dispute in a
+        # particular state, and the state it was decided about is gone.
+        current = await _load_for_adjudication(dispute_id)
+        raise _refuse_credit(
+            current,
+            "dispute_not_open",
+            409,
+            f"this dispute is {current.status}, and only an open dispute can be rejected",
+            amount_usdc=current.creditable_usdc,
+            tx_hash=current.refund_tx,
+        )
     # `noted=` is the presence of the explanation and never its text. It reads
     # `yes` on every rejection now that none can be recorded without one, and
     # stays in the line so it reads the same as every rejection logged before.
@@ -866,7 +915,9 @@ async def _rate_credited(
         the rating does, with `rating_confirmed` False, so a receipt holding
         that hash does not claim a consequence nobody has seen land. The next
         `uphold` settles it — REPLAY if it landed, a fresh SUCCESS that
-        replaces the hash if it never did.
+        replaces the hash if it never did. UNLESS this dispute's rating is
+        already confirmed, in which case nothing is recorded at all and the
+        hash is logged: see `_apply_rating`.
       - **FAILED** — nothing landed and nothing is recorded; retryable.
 
     A rating that cannot even be FORMED — `submit_dispute_rating` raises for a
@@ -962,9 +1013,17 @@ async def _rate_credited(
         # the log. The dispute is answered as the store last held it: paid,
         # and not shown as rated — which a later REPLAY will then report as a
         # collision, so this line is where that one is explained.
+        # The write is spelled out for the collision line's reason — an operator
+        # writes what the line says, and an omitted keyword means "leave it as
+        # recorded" — and its flag follows the outcome rather than being fixed:
+        # a SUCCESS has been vouched for by the ledger and a TIMEOUT has not,
+        # so the hash goes on record either way but only one of them may be
+        # shown to the buyer as a consequence that landed.
         _log_rating(
             logging.ERROR,
-            f"was {outcome.status} but could not be recorded on the dispute — record rating_tx by hand",
+            f"was {outcome.status} but could not be recorded on the dispute — record it by hand with"
+            " append_status(dispute_id, 'credited', rating_tx=<the tx above>,"
+            f" rating_confirmed={outcome.status == 'SUCCESS'})",
             credited,
             outcome.job_id_hex,
             outcome.tx_hash,
@@ -989,7 +1048,11 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # must be in the log and the score fresh even if the write fails.
         _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
         reputation_svc.invalidate_rep(credited.agent_id)
-        rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True)
+        rated = _recorded(
+            await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True),
+            credited.id,
+            "credited",
+        )
         await _note_rating_on_workflow(rated, outcome)
         return rated
 
@@ -1005,13 +1068,25 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             # before 4.06 kept whether it landed: either way the ledger has now
             # vouched for the hash on record, and only now may the receipt say
             # the agent was rated.
-            return await store.append_status(credited.id, "credited", rating_confirmed=True)
+            return _recorded(
+                await store.append_status(credited.id, "credited", rating_confirmed=True), credited.id, "credited"
+            )
+        # `rating_confirmed=True` is spelled out and not left implied, because
+        # an operator following this line writes exactly what it says and
+        # `append_status` reads a missing keyword as "leave it as recorded".
+        # Without the flag the hash lands on a dispute whose `rating_confirmed`
+        # stays null, and the buyer's receipt shows the agent's consequence as
+        # still in flight for good — while the operator has just read the
+        # rating ON THE LEDGER, which is the very evidence that confirms it.
+        # `docs/disputes.md` and `scripts/uphold_dispute.py` print the same
+        # write, word for word, so all three agree on what closes this.
         _log_rating(
             logging.ERROR,
             "COLLISION — the ledger already holds a rating under this dispute's derived id and this"
             " dispute records none, so its reputation consequence did NOT land; the credit stands."
             " Look the derived id up on-chain: if it is this dispute's own unrecorded attempt (a"
-            " timeout with no hash, or a record write that failed), record that hash as rating_tx",
+            " timeout with no hash, or a record write that failed), record it with"
+            " append_status(dispute_id, 'credited', rating_tx=<hash>, rating_confirmed=True)",
             credited,
             derived,
             None,
@@ -1019,6 +1094,32 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         return credited
 
     if outcome.status == "TIMEOUT":
+        if credited.rating_confirmed:
+            # The ledger has ALREADY vouched for this dispute's rating, and a
+            # confirmation is monotonic in the store — once TRUE it stays TRUE,
+            # whatever a later transition says. So recording this hash would
+            # leave `rating_confirmed` True beside a transaction nobody has
+            # seen land, and the receipt would render a tick against a rating
+            # that never happened: the premature success 4.06 exists to make
+            # impossible, produced by the two halves of one write moving
+            # apart. They move together here by not moving at all.
+            #
+            # Nothing is lost by declining. The ledger's replay guard makes a
+            # second landing under this derived id impossible, so a submission
+            # made after a confirmed one could only ever have been refused —
+            # it is evidence of nothing, and the rating it would replace is
+            # settled. WARNING rather than ERROR for that reason: the hash is
+            # in the log for anyone reconciling a submission they can see, and
+            # the dispute itself needs no one.
+            _log_rating(
+                logging.WARNING,
+                "unconfirmed and NOT recorded — this dispute's rating is already confirmed on-chain, and a"
+                " hash that has not landed must never replace the one that did",
+                credited,
+                derived,
+                outcome.tx_hash,
+            )
+            return credited
         # Logged before it is recorded, for the reason SUCCESS is.
         _log_rating(
             logging.ERROR,
@@ -1031,7 +1132,11 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             # Evidence, and explicitly NOT confirmation: the hash is the
             # rating's the moment it lands, but until the ledger vouches for it
             # the receipt must not say the agent was rated.
-            return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=False)
+            return _recorded(
+                await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=False),
+                credited.id,
+                "credited",
+            )
         return credited
 
     # FAILED — and, deliberately, anything else: for a rating the safe
@@ -1075,105 +1180,31 @@ async def _retry_rating(credited: DisputeRecord, *, on_rating: RatingObserver | 
     return await _rate_credited(credited, settlement, on_rating=on_rating)
 
 
-async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
-    """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
+async def _already_adjudicated(dispute: DisputeRecord, *, on_rating: RatingObserver | None) -> DisputeRecord | None:
+    """`uphold`'s steps 2–4: the answer a dispute already has, or None when it
+    is still waiting for one.
 
-    THE ORDER BELOW IS THE STORY. Each step exists to close one way of paying a
-    buyer twice, or of leaving one who is owed unable ever to be paid, so none
-    of them may be reordered for tidiness:
+    Lifted out of `uphold` because `uphold` has to ask this TWICE — once off
+    its first read, and again when the `open → upheld` compare-and-set loses,
+    because losing it means some other caller has already given this dispute
+    one of these three answers. Asked from one place, so the two askings can
+    never answer the same record differently.
 
-      0. **The master switch** — `DISPUTE_REFUNDS_ENABLED` is checked before
-         the store is even read, so the answer cannot depend on anything a
-         dispute happens to say (`refunds_disabled`, 503). It is enforced HERE
-         as well as in the route's `require_adjudicator` (D1) because the route
-         is one of two doors: an operator script that imports this service
-         credits a buyer without passing through FastAPI at all, and a switch
-         that only one door honours is not a switch.
-      1. **Load it** — an id nobody issued is `unknown_dispute` (404).
-      2. **Already `credited`** — sign NO transfer: the refund is answered
-         with the `refund_tx` it already carries. This is the retry acceptance
-         criterion, and it sits ABOVE the claim on purpose: an adjudicator who
-         double-clicks, a proxy that retries a 502, a queue that redelivers —
-         all of them arrive here and none of them may depend on `claim_refund`
-         to be told no. (The claim would also say no, because a credited
-         dispute is not `upheld`. Two independent answers to "has this already
-         been paid" is the point, not redundancy to trim.) What IS retried,
-         every time, is the RATING and only the rating (step 9, D3) — safe
-         because the ledger's replay guard makes a second landing impossible.
-      3. **`crediting`** — a transfer for this dispute is ON THE NETWORK and
-         nobody knows whether it landed (D3). Refuse with `refund_in_flight`
-         and never pay: the only two ways out are the network confirming it or
-         a human reconciling it, and a second transfer is neither.
-      4. **`rejected`** — adjudicated against the claim, and terminal
-         (`dispute_rejected`). A rejected dispute is never payable.
-      5. **`open` → `upheld`** — the adjudication itself, recorded BEFORE the
-         claim because `claim_refund` only ever claims an `upheld` dispute.
-         An `upheld` one skips straight to the claim, which is what makes a
-         dispute left upheld by a FAILED transfer payable again.
-      6. **Claim it** (D2) — the lock, taken before anything is signed and
-         never a read-then-write. `None` means somebody else holds it, so the
-         current record is returned rather than a second transfer signed.
-      7. **Compute and cap the amount** (D4, D5) — `refund_svc` bounds it by
-         what actually settled and refuses above the ceiling. Every
-         `RefundRefused` is raised BEFORE the settler's key is touched, from
-         either call, so the claim is RELEASED — nothing was signed and the
-         buyer may still be owed — and the refusal is re-raised as a
-         `DisputeError` in this module's vocabulary.
-      8. **Transfer**, and treat its three answers as three different facts:
-         SUCCESS records `credited` with the hash; FAILED definitively moved
-         nothing, so the claim is released and the dispute is left `upheld` and
-         payable; TIMEOUT **keeps the claim**, leaves the dispute `crediting`
-         with the in-flight hash recorded, logs ERROR and refuses. Never a
-         retry, never a release (D3).
-      9. **Rate the agent** (story 4.04) — only after the credit has landed
-         AND been recorded, so no rating ever exists for a dispute the buyer
-         was not paid for. See `_rate_credited` for its five outcomes. A
-         rating that does not land NEVER reverses or re-touches the refund:
-         the dispute stays `credited` and its `rating_tx` stays empty.
+      - `credited` — not a refusal: the adjudicator asked for this dispute to
+        be credited and it is, so they are answered with the credit — same
+        record, same refund hash, NO second transfer. What is retried is the
+        RATING and only the rating (D3), on every repeat: one that already
+        landed is refused as a replay at simulation, costing nothing on-chain,
+        and one that never did is written now.
+      - `crediting` — a transfer is on the network and nobody knows whether it
+        landed. Never pay: the only ways out are the network confirming it or
+        a human reconciling it, and a second transfer is neither.
+      - `rejected` — adjudicated against the claim, and terminal.
 
-    The return value is the dispute as the store holds it, and it is also how
-    a caller learns whether the reputation consequence landed: `credited` with
-    a `rating_tx` and `rating_confirmed` True has been rated; with
-    `rating_confirmed` False the rating timed out and may yet land, and the
-    next uphold settles which; and `credited` WITHOUT a `rating_tx` is paid but
-    NOT fully resolved — uphold it again to retry the rating alone. A rating
-    failure is never raised: by then the buyer has been paid, and an exception
-    would say otherwise.
-
-    The one window that remains is between a SUCCESS and the `append_status`
-    that records it: if the store is unreachable at that instant the money has
-    moved and the dispute stays `crediting` with its claim held. That is the
-    safe side of the trade — the claim blocks a second payment, and
-    `refund_svc` has already logged the hash for reconciliation.
-
-    `on_rating`, when given, is handed the ledger's answer to the rating the
-    moment there is one — at most once per call, and never when no rating was
-    submitted. It exists for the operator tool, which must tell a human whether
-    the reputation consequence actually landed, and the record cannot say that
-    on its own. The HTTP route passes nothing, so what it answers stays exactly
-    what a later `GET` of the dispute will answer.
+    `open` and `upheld` answer None, because both still have a payment ahead
+    of them and neither is this function's to make.
     """
-    if not settings.dispute_refunds_enabled:
-        # Fails closed, and first: nothing below this line may run on a
-        # deployment whose operator has not switched the refund path on, and
-        # that must hold however the service was reached.
-        logger.warning("adjudication refused: dispute=%s reason=refunds_disabled", dispute_id)
-        raise DisputeError(
-            "refunds_disabled",
-            "dispute refunds are switched off on this deployment",
-            503,
-        )
-
-    store = get_dispute_store()
-    dispute = await _load_for_adjudication(dispute_id)
-
     if dispute.status == "credited":
-        # Not a refusal: the adjudicator asked for this dispute to be credited
-        # and it is, so they are answered with the credit — same record, same
-        # refund hash, NO second transfer. What is retried is the RATING and
-        # only the rating (D3), on every repeat: one that already landed is
-        # refused as a replay at simulation, costing nothing on-chain, and one
-        # that never did is written now.
         logger.info(
             "dispute %s is already credited — tx %s, no transfer signed; re-attempting its rating only",
             dispute.id,
@@ -1202,8 +1233,175 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
             amount_usdc=dispute.creditable_usdc,
         )
 
+    return None
+
+
+async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
+    """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
+
+    THE ORDER BELOW IS THE STORY. Each step exists to close one way of paying a
+    buyer twice, or of leaving one who is owed unable ever to be paid, so none
+    of them may be reordered for tidiness:
+
+      0. **The master switch** — `DISPUTE_REFUNDS_ENABLED` is checked before
+         the store is even read, so the answer cannot depend on anything a
+         dispute happens to say (`refunds_disabled`, 503). It is enforced HERE
+         as well as in the route's `require_adjudicator` (D1) because the route
+         is one of two doors: an operator script that imports this service
+         credits a buyer without passing through FastAPI at all, and a switch
+         that only one door honours is not a switch.
+      1. **Load it** — an id nobody issued is `unknown_dispute` (404).
+      2. **Already `credited`** — sign NO transfer: the refund is answered
+         with the `refund_tx` it already carries. This is the retry acceptance
+         criterion, and it sits ABOVE the claim on purpose: an adjudicator who
+         double-clicks, a proxy that retries a 502, a queue that redelivers —
+         all of them arrive here and none of them may depend on `claim_refund`
+         to be told no. (The claim would also say no, because a credited
+         dispute is not `upheld`. Two independent answers to "has this already
+         been paid" is the point, not redundancy to trim.) What IS retried,
+         every time, is the RATING and only the rating (step 10, D3) — safe
+         because the ledger's replay guard makes a second landing impossible.
+      3. **`crediting`** — a transfer for this dispute is ON THE NETWORK and
+         nobody knows whether it landed (D3). Refuse with `refund_in_flight`
+         and never pay: the only two ways out are the network confirming it or
+         a human reconciling it, and a second transfer is neither.
+      4. **`rejected`** — adjudicated against the claim, and terminal
+         (`dispute_rejected`). A rejected dispute is never payable.
+      5. **Configured to pay** — the presence-only gate on the settler's key
+         and the asset SAC (`refund_svc.config_gap`), the twin of the one
+         `_rate_credited` applies to the rating. It sits ABOVE the claim
+         because a deployment that cannot sign must claim nothing: the key is
+         read inside the transfer, where it raises before any submission, and
+         a raise out of a transfer cannot be told from one that may have
+         landed — so without this the claim is taken, the dispute parks in
+         `crediting`, and only a database edit ever frees it
+         (`refunds_not_configured`, 503).
+      6. **`open` → `upheld`** — the adjudication itself, recorded BEFORE the
+         claim because `claim_refund` only ever claims an `upheld` dispute.
+         An `upheld` one skips straight to the claim, which is what makes a
+         dispute left upheld by a FAILED transfer payable again. The write is
+         a COMPARE-AND-SET on `open`, never a plain append, because steps 2–4
+         read the dispute an await earlier: a caller holding a stale `open`
+         read would otherwise RESURRECT a dispute that had since been claimed,
+         credited and closed, and step 7 would then legitimately hand it the
+         mutex and sign a second transfer for the same claim. Losing the set
+         means the record moved, so it is read again and asked steps 2–4
+         again; a dispute merely `upheld` by then has another adjudication
+         running on it right now, and this one refuses
+         (`adjudication_in_progress`, 409) rather than racing it to the claim.
+      7. **Claim it** (D2) — the lock, taken before anything is signed and
+         never a read-then-write. `None` means somebody else holds it, so the
+         current record is returned rather than a second transfer signed.
+      8. **Compute and cap the amount** (D4, D5) — `refund_svc` bounds it by
+         what actually settled and refuses above the ceiling. Every
+         `RefundRefused` is raised BEFORE the settler's key is touched, from
+         either call, so the claim is RELEASED — nothing was signed and the
+         buyer may still be owed — and the refusal is re-raised as a
+         `DisputeError` in this module's vocabulary.
+      9. **Transfer**, and treat its three answers as three different facts:
+         SUCCESS records `credited` with the hash; FAILED definitively moved
+         nothing, so the claim is released and the dispute is left `upheld` and
+         payable; TIMEOUT **keeps the claim**, leaves the dispute `crediting`
+         with the in-flight hash recorded, logs ERROR and refuses. Never a
+         retry, never a release (D3).
+     10. **Rate the agent** (story 4.04) — only after the credit has landed
+         AND been recorded, so no rating ever exists for a dispute the buyer
+         was not paid for. See `_rate_credited` for its five outcomes. A
+         rating that does not land NEVER reverses or re-touches the refund:
+         the dispute stays `credited` and its `rating_tx` stays empty.
+
+    The return value is the dispute as the store holds it, and it is also how
+    a caller learns whether the reputation consequence landed: `credited` with
+    a `rating_tx` and `rating_confirmed` True has been rated; with
+    `rating_confirmed` False the rating timed out and may yet land, and the
+    next uphold settles which; and `credited` WITHOUT a `rating_tx` is paid but
+    NOT fully resolved — uphold it again to retry the rating alone. A rating
+    failure is never raised: by then the buyer has been paid, and an exception
+    would say otherwise.
+
+    The one window that remains is between a SUCCESS and the `append_status`
+    that records it: if the store is unreachable at that instant the money has
+    moved and the dispute stays `crediting` with its claim held. That is the
+    safe side of the trade — the claim blocks a second payment — and the
+    failure is logged HERE at ERROR with the dispute, the job, the payer, the
+    amount and the hash, which is everything a reconciliation starts from.
+    `refund_svc` logs the landed credit too, but at INFO, which is not a level
+    anyone is watching: a credit that landed and could not be recorded is the
+    highest-stakes line this service writes, so it writes its own.
+
+    `on_rating`, when given, is handed the ledger's answer to the rating the
+    moment there is one — at most once per call, and never when no rating was
+    submitted. It exists for the operator tool, which must tell a human whether
+    the reputation consequence actually landed, and the record cannot say that
+    on its own. The HTTP route passes nothing, so what it answers stays exactly
+    what a later `GET` of the dispute will answer.
+    """
+    if not settings.dispute_refunds_enabled:
+        # Fails closed, and first: nothing below this line may run on a
+        # deployment whose operator has not switched the refund path on, and
+        # that must hold however the service was reached.
+        logger.warning("adjudication refused: dispute=%s reason=refunds_disabled", dispute_id)
+        raise DisputeError(
+            "refunds_disabled",
+            "dispute refunds are switched off on this deployment",
+            503,
+        )
+
+    store = get_dispute_store()
+    dispute = await _load_for_adjudication(dispute_id)
+
+    settled = await _already_adjudicated(dispute, on_rating=on_rating)
+    if settled is not None:
+        return settled
+
+    gap = refund_svc.config_gap()
+    if gap is not None:
+        # Two lines, because they answer two people. This one names the
+        # setting, for the operator who has to set it; `_refuse_credit`'s
+        # names the dispute, job, payer and amount, which is the money-path
+        # record every refusal here leaves. ERROR on both: nothing moved and
+        # nothing is stuck, but an upheld dispute nobody is configured to pay
+        # is a buyer waiting on a human.
+        logger.error(
+            "dispute %s cannot be credited — %s; nothing was claimed and nothing was signed (job %s, payer %s)",
+            dispute.id,
+            gap.problem,
+            dispute.job_id_hex,
+            dispute.payer,
+        )
+        raise _refuse_credit(
+            dispute,
+            "refunds_not_configured",
+            503,
+            f"this deployment cannot sign a credit: {gap.reason}",
+            amount_usdc=dispute.creditable_usdc,
+            level=logging.ERROR,
+        )
+
     if dispute.status == "open":
-        dispute = await store.append_status(dispute_id, "upheld")
+        upheld = await store.append_status(dispute_id, "upheld", expected_status="open")
+        if upheld is None:
+            # The record moved under the read this decision was made on, so
+            # nothing may be decided from it: it is read again and asked the
+            # same three questions. A dispute that is merely `upheld` by now
+            # has another adjudication running on it this instant — one that
+            # is about to claim — and this caller refuses rather than racing
+            # it, because the claim is the last gate and nothing should arrive
+            # at it holding a record it already knows is stale.
+            current = await _load_for_adjudication(dispute_id)
+            settled = await _already_adjudicated(current, on_rating=on_rating)
+            if settled is not None:
+                return settled
+            raise _refuse_credit(
+                current,
+                "adjudication_in_progress",
+                409,
+                "another adjudication of this dispute is already running and may be paying it —"
+                " nothing was signed here; read the dispute back before deciding again",
+                amount_usdc=current.creditable_usdc,
+                tx_hash=current.refund_tx,
+            )
+        dispute = upheld
 
     claimed = await store.claim_refund(dispute_id)
     if claimed is None:
@@ -1237,12 +1435,13 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         amount_usdc = refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
         outcome = await refund_svc.credit_refund(claimed, amount_usdc)
     except refund_svc.RefundRefused as refused:
-        # Both refusals — the cap and "nothing to credit" — are raised before
-        # `execute_refund` is called, from `creditable_for` and again from the
-        # transfer wrapper's own re-check, so NOTHING WAS SIGNED on either
-        # path. That is what makes releasing the claim correct here and wrong
-        # after a timeout. `refund_svc` has already logged the numbers, so
-        # this only re-raises in the vocabulary the API answers with.
+        # Every refusal — the cap, "nothing to credit", and an amount that is
+        # not a finite number — is raised before `execute_refund` is called,
+        # from `creditable_for` and again from the transfer wrapper's own
+        # re-check, so NOTHING WAS SIGNED on any of those paths. That is what
+        # makes releasing the claim correct here and wrong after a timeout.
+        # `refund_svc` has already logged the numbers, so this only re-raises
+        # in the vocabulary the API answers with.
         await store.release_refund_claim(dispute_id)
         raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
 
@@ -1252,9 +1451,33 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # step price at today's fraction and by what the charge settled. The
         # receipt prints this beside the refund hash, so it must be the number
         # the hash proves.
-        credited = await store.append_status(
-            dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
-        )
+        try:
+            credited = _recorded(
+                await store.append_status(
+                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+                ),
+                dispute_id,
+                "credited",
+            )
+        except Exception:
+            # The money has MOVED and nothing else would say so where anyone
+            # would see it: `credit_refund`'s SUCCESS line is INFO, and an
+            # exception let out from here reaches the caller as a bare 500
+            # carrying no dispute, job, payer, amount or hash at all. Logged
+            # before it is re-raised, because re-raising is still right: the
+            # claim stays held and the dispute stays `crediting`, which is
+            # exactly what a credit that landed and could not be recorded is.
+            logger.error(
+                "dispute %s: %.7f USDC LANDED as tx %s and the credit could NOT be recorded — the dispute"
+                " stays crediting with its claim held; record it by hand (job %s, payer %s)",
+                dispute_id,
+                outcome.amount_usdc,
+                outcome.tx_hash,
+                claimed.job_id_hex,
+                claimed.payer,
+                exc_info=True,
+            )
+            raise
         await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
         # Only now, with the credit landed AND recorded, is the agent rated —
         # and against the settlement the credit was just bounded by, so the
@@ -1285,7 +1508,28 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # the first submission settles. The in-flight hash is recorded on the
     # dispute so the reconciliation starts from the record rather than from a
     # log search.
-    await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash)
+    try:
+        _recorded(
+            await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash), dispute_id, "crediting"
+        )
+    except Exception:
+        # Only the HASH was lost. `claim_refund` already moved this dispute to
+        # `crediting` and the claim is still held, so both of the things that
+        # stop a second transfer are in place whatever happened here. The
+        # refusal below is therefore still the right answer and still carries
+        # the hash, and raising instead would answer a 500 that says strictly
+        # less than the 504 does. So this logs what the record will not say,
+        # and the caller is answered properly.
+        logger.error(
+            "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
+            " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
+            dispute_id,
+            outcome.tx_hash,
+            claimed.job_id_hex,
+            claimed.payer,
+            outcome.amount_usdc,
+            exc_info=True,
+        )
     raise _refuse_credit(
         claimed,
         "refund_unconfirmed",

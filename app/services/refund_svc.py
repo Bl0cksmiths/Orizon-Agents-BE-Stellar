@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -41,14 +42,19 @@ class RefundRefused(Exception):
     """A refund that must NOT be signed, with a stable `code` the caller branches on.
 
     Every instance of this is money that did not move, raised before anything
-    reaches the settler's key. Two codes today:
+    reaches the settler's key. Three codes today:
 
       - `nothing_to_credit` — the settlement says there is nothing to give back
         for this step (no such step, a step that never delivered, or an amount
         that computes to zero once D4's bounds are applied);
       - `refund_above_cap` — the amount is over `MAX_REFUND_USDC`. A refusal,
         never a clamp: quietly paying the ceiling would hide the mistaken uphold
-        (or the bad settlement record) that the ceiling exists to catch.
+        (or the bad settlement record) that the ceiling exists to catch;
+      - `refund_amount_invalid` — the amount is not a finite number, so no bound
+        in this module can say anything about it. Kept apart from the two above
+        because it is neither a judgement about this dispute nor a ceiling an
+        operator raised: it means a figure on the records or in the environment
+        is not a quantity of money, and the fix is to that, not to the dispute.
 
     The code is what a caller maps to a response; `message` carries the numbers,
     for the operator who has to reconcile it afterwards.
@@ -58,6 +64,52 @@ class RefundRefused(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+@dataclass(frozen=True)
+class ConfigGap:
+    """A setting whose absence stops this deployment paying any credit."""
+
+    # For operators: names the setting and what is wrong with it.
+    problem: str
+    # For the adjudicator's refusal, which a person reads: names no setting.
+    reason: str
+
+
+_NO_KEY = ConfigGap("STELLAR_SIGNING_KEY is unset", "there is no settler to pay a credit from")
+_NO_SAC = ConfigGap("STELLAR_ASSET_SAC is unset", "there is no asset contract to pay a credit over")
+
+
+def config_gap() -> ConfigGap | None:
+    """The first missing setting that stops credits, or None when both are set.
+
+    `rating_writer.config_gap`'s twin, for the other half of an uphold, and
+    deliberately the same shape: presence only, in the order an operator would
+    fix them, asked before anything is claimed or signed.
+
+    It exists because the credit was the one money path with no such check, and
+    the absence was not merely untidy. `execute_refund` reads the settler
+    through `sc.signer_public_key`, which RAISES on an empty key BEFORE it
+    submits anything; `credit_refund` can only read a raise as "may still have
+    landed", because a raise out of a transfer genuinely can come from either
+    side of the submission. So an unconfigured deployment looked exactly like a
+    transfer lost on the network: the dispute kept its refund claim, parked in
+    `crediting`, and nothing could free it but an edit to the database. That
+    difference is knowable here, and without touching the key at all.
+
+    DISPUTE_REFUNDS_ENABLED is deliberately NOT among these. It is the
+    operator's switch over the platform's wallet, `dispute_svc.uphold` refuses
+    on it first and with its own code, and a second opinion about it here could
+    only ever disagree with that one.
+
+    Presence, never the value — and `.strip()`, because a setting whose whole
+    value is whitespace is one somebody meant to set and did not.
+    """
+    if not settings.stellar_signing_key.strip():
+        return _NO_KEY
+    if not settings.stellar_asset_sac.strip():
+        return _NO_SAC
+    return None
 
 
 # What a submitted refund transfer is known to have done. Three values because
@@ -208,6 +260,26 @@ def creditable_for(
         amount = settlement.settled_usdc
 
     amount = round(amount, 7)
+
+    # Asked BEFORE either bound below, because NaN defeats both by
+    # construction: every guard on this path is a `<` or a `>`, and every
+    # comparison against NaN is false, so a NaN clears the floor, clears the
+    # ceiling, and arrives at `usdc_to_i128` — which raises AFTER the claim has
+    # been taken, and `credit_refund` can only read a raise as "may still have
+    # landed". A wedged dispute holding a claim for a transfer that never
+    # existed is the cost, so the one test a non-number cannot pass is made
+    # here. Infinities go the same way: an unbounded credit is precisely what
+    # the ceiling exists to stop, and it cannot stop one it cannot compare.
+    # The open door is `DISPUTE_CREDITED_FRACTION`, whose NaN survives
+    # `credited_amount_usdc`'s min(max(…)) untouched and is frozen onto the
+    # dispute as the promise it was opened with.
+    if not math.isfinite(amount):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"the bounds compute to {amount} USDC for step {dispute.step_index}, which is not an amount of money",
+            amount,
+        )
     if amount <= 0:
         raise _refuse(
             dispute,
@@ -263,7 +335,13 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
 
       - `status == "SUCCESS"` with a hash → SUCCESS. The credit landed.
       - `status == "FAILED"` → FAILED. The ledger rejected it, so no funds
-        moved; this is the ONLY answer that says that.
+        moved; this is the ONLY answer that says that. Matched EXACTLY, the way
+        SUCCESS is above and the way `dispute_rating` matches both of its own:
+        this is the branch that RELEASES the refund claim, and case-folding it
+        would widen the one door in this module that says "nothing was signed"
+        on the strength of a word the client wrote and this module did not. A
+        client that ever answered `failed` falls through to TIMEOUT instead,
+        which holds the claim — the buyer is paid late rather than twice.
       - anything else → TIMEOUT. `"timeout"` is the client's own word for
         "submitted, then lost track of it", and the leftovers land here on
         purpose: an unrecognised status, or a SUCCESS with no hash, is a
@@ -278,10 +356,19 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
     settles. The dispute stays in `crediting` and a human reconciles it from the
     ERROR line this logs.
 
-    `amount_usdc` must have come from `creditable_for`; the two guards below
+    `amount_usdc` must have come from `creditable_for`; the three guards below
     re-check it rather than trust the caller, so a hand-computed or stale amount
-    cannot reach the settler's key either.
+    cannot reach the settler's key either — and the finiteness one leads, for
+    the reason `creditable_for`'s does: the other two are comparisons, and a
+    comparison cannot refuse a NaN.
     """
+    if not math.isfinite(amount_usdc):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"{amount_usdc} USDC is not an amount of money",
+            amount_usdc,
+        )
     if amount_usdc <= 0:
         raise _refuse(dispute, "nothing_to_credit", f"{amount_usdc:.7f} USDC is not payable", amount_usdc)
     if amount_usdc > settings.max_refund_usdc:
@@ -337,7 +424,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         )
         return RefundOutcome("SUCCESS", tx_hash, amount_usdc)
 
-    if status.upper() == "FAILED":
+    if status == "FAILED":
         logger.error(
             "dispute %s: refund transfer did not settle — status=%s hash=%s, no funds moved "
             "(job %s, payer %s, %.7f USDC)",
