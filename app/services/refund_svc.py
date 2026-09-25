@@ -66,6 +66,52 @@ class RefundRefused(Exception):
         self.message = message
 
 
+@dataclass(frozen=True)
+class ConfigGap:
+    """A setting whose absence stops this deployment paying any credit."""
+
+    # For operators: names the setting and what is wrong with it.
+    problem: str
+    # For the adjudicator's refusal, which a person reads: names no setting.
+    reason: str
+
+
+_NO_KEY = ConfigGap("STELLAR_SIGNING_KEY is unset", "there is no settler to pay a credit from")
+_NO_SAC = ConfigGap("STELLAR_ASSET_SAC is unset", "there is no asset contract to pay a credit over")
+
+
+def config_gap() -> ConfigGap | None:
+    """The first missing setting that stops credits, or None when both are set.
+
+    `rating_writer.config_gap`'s twin, for the other half of an uphold, and
+    deliberately the same shape: presence only, in the order an operator would
+    fix them, asked before anything is claimed or signed.
+
+    It exists because the credit was the one money path with no such check, and
+    the absence was not merely untidy. `execute_refund` reads the settler
+    through `sc.signer_public_key`, which RAISES on an empty key BEFORE it
+    submits anything; `credit_refund` can only read a raise as "may still have
+    landed", because a raise out of a transfer genuinely can come from either
+    side of the submission. So an unconfigured deployment looked exactly like a
+    transfer lost on the network: the dispute kept its refund claim, parked in
+    `crediting`, and nothing could free it but an edit to the database. That
+    difference is knowable here, and without touching the key at all.
+
+    DISPUTE_REFUNDS_ENABLED is deliberately NOT among these. It is the
+    operator's switch over the platform's wallet, `dispute_svc.uphold` refuses
+    on it first and with its own code, and a second opinion about it here could
+    only ever disagree with that one.
+
+    Presence, never the value — and `.strip()`, because a setting whose whole
+    value is whitespace is one somebody meant to set and did not.
+    """
+    if not settings.stellar_signing_key.strip():
+        return _NO_KEY
+    if not settings.stellar_asset_sac.strip():
+        return _NO_SAC
+    return None
+
+
 # What a submitted refund transfer is known to have done. Three values because
 # the money question has exactly three answers, and collapsing any two of them
 # costs a buyer their credit or pays it twice.

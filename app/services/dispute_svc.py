@@ -1098,7 +1098,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
          to be told no. (The claim would also say no, because a credited
          dispute is not `upheld`. Two independent answers to "has this already
          been paid" is the point, not redundancy to trim.) What IS retried,
-         every time, is the RATING and only the rating (step 9, D3) — safe
+         every time, is the RATING and only the rating (step 10, D3) — safe
          because the ledger's replay guard makes a second landing impossible.
       3. **`crediting`** — a transfer for this dispute is ON THE NETWORK and
          nobody knows whether it landed (D3). Refuse with `refund_in_flight`
@@ -1106,26 +1106,35 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
          a human reconciling it, and a second transfer is neither.
       4. **`rejected`** — adjudicated against the claim, and terminal
          (`dispute_rejected`). A rejected dispute is never payable.
-      5. **`open` → `upheld`** — the adjudication itself, recorded BEFORE the
+      5. **Configured to pay** — the presence-only gate on the settler's key
+         and the asset SAC (`refund_svc.config_gap`), the twin of the one
+         `_rate_credited` applies to the rating. It sits ABOVE the claim
+         because a deployment that cannot sign must claim nothing: the key is
+         read inside the transfer, where it raises before any submission, and
+         a raise out of a transfer cannot be told from one that may have
+         landed — so without this the claim is taken, the dispute parks in
+         `crediting`, and only a database edit ever frees it
+         (`refunds_not_configured`, 503).
+      6. **`open` → `upheld`** — the adjudication itself, recorded BEFORE the
          claim because `claim_refund` only ever claims an `upheld` dispute.
          An `upheld` one skips straight to the claim, which is what makes a
          dispute left upheld by a FAILED transfer payable again.
-      6. **Claim it** (D2) — the lock, taken before anything is signed and
+      7. **Claim it** (D2) — the lock, taken before anything is signed and
          never a read-then-write. `None` means somebody else holds it, so the
          current record is returned rather than a second transfer signed.
-      7. **Compute and cap the amount** (D4, D5) — `refund_svc` bounds it by
+      8. **Compute and cap the amount** (D4, D5) — `refund_svc` bounds it by
          what actually settled and refuses above the ceiling. Every
          `RefundRefused` is raised BEFORE the settler's key is touched, from
          either call, so the claim is RELEASED — nothing was signed and the
          buyer may still be owed — and the refusal is re-raised as a
          `DisputeError` in this module's vocabulary.
-      8. **Transfer**, and treat its three answers as three different facts:
+      9. **Transfer**, and treat its three answers as three different facts:
          SUCCESS records `credited` with the hash; FAILED definitively moved
          nothing, so the claim is released and the dispute is left `upheld` and
          payable; TIMEOUT **keeps the claim**, leaves the dispute `crediting`
          with the in-flight hash recorded, logs ERROR and refuses. Never a
          retry, never a release (D3).
-      9. **Rate the agent** (story 4.04) — only after the credit has landed
+     10. **Rate the agent** (story 4.04) — only after the credit has landed
          AND been recorded, so no rating ever exists for a dispute the buyer
          was not paid for. See `_rate_credited` for its five outcomes. A
          rating that does not land NEVER reverses or re-touches the refund:
@@ -1200,6 +1209,30 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
             409,
             "this dispute was rejected, so it can never be credited",
             amount_usdc=dispute.creditable_usdc,
+        )
+
+    gap = refund_svc.config_gap()
+    if gap is not None:
+        # Two lines, because they answer two people. This one names the
+        # setting, for the operator who has to set it; `_refuse_credit`'s
+        # names the dispute, job, payer and amount, which is the money-path
+        # record every refusal here leaves. ERROR on both: nothing moved and
+        # nothing is stuck, but an upheld dispute nobody is configured to pay
+        # is a buyer waiting on a human.
+        logger.error(
+            "dispute %s cannot be credited — %s; nothing was claimed and nothing was signed (job %s, payer %s)",
+            dispute.id,
+            gap.problem,
+            dispute.job_id_hex,
+            dispute.payer,
+        )
+        raise _refuse_credit(
+            dispute,
+            "refunds_not_configured",
+            503,
+            f"this deployment cannot sign a credit: {gap.reason}",
+            amount_usdc=dispute.creditable_usdc,
+            level=logging.ERROR,
         )
 
     if dispute.status == "open":

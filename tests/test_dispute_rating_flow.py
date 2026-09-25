@@ -132,11 +132,19 @@ class Settler:
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch):
     """Every singleton these paths reach, reset around each test, on a
-    deployment that has switched refunds on and is configured to rate."""
+    deployment that has switched refunds on and is configured to rate AND pay.
+
+    The settler's pair — a signing key and the asset SAC — is set explicitly
+    because `uphold` now asks `refund_svc.config_gap` for it before it claims
+    anything, and neither is set in a hermetic run: the conftest blanks the key
+    and CI has no `.env` to supply the SAC. Both are fictional and neither is
+    read; the transfer is stubbed above the client.
+    """
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
     monkeypatch.setattr(settings, "reputation_enabled", True)
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
     monkeypatch.setattr(settings, "stellar_signing_key", Keypair.random().secret)
+    monkeypatch.setattr(settings, "stellar_asset_sac", "CSAC" + "7Z2Q" * 12)
     dispute_store._store = None
     eb._challenges.clear()
     state.tasks.clear()

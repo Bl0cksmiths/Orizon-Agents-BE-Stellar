@@ -92,8 +92,15 @@ def _fresh_state(monkeypatch):
     refund path, which is the only deployment where any of this runs. The test
     that covers the switch itself turns it back off, so the default is asserted
     rather than assumed.
+
+    The asset SAC is set for the same reason, and because nothing else would:
+    `uphold` asks `refund_svc.config_gap` for the settler's pair before it
+    claims, and a hermetic run has no `.env` to name a SAC. Its partner, the
+    signing key, is set by `rater` below. Both are fictional and neither is
+    read — the settler's transfer is stubbed above the stellar client.
     """
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
+    monkeypatch.setattr(settings, "stellar_asset_sac", "CSAC" + "7Z2Q" * 12)
     dispute_store._store = None
     eb._challenges.clear()
     state.tasks.clear()
@@ -1151,7 +1158,6 @@ def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, 
     [
         ("reputation_enabled", False, "REPUTATION_ENABLED is false"),
         ("stellar_reputation_ledger", "", "STELLAR_REPUTATION_LEDGER is unset"),
-        ("stellar_signing_key", "", "STELLAR_SIGNING_KEY is unset"),
     ],
 )
 def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
@@ -1178,4 +1184,37 @@ def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 2  # one per uphold: each is a paid dispute left unrated
     for fact in (named, dispute.id, JOB, "agt_writer", dispute.payer):
+        assert fact in logged[0]
+
+
+def test_a_signing_key_that_goes_missing_after_the_credit_stops_the_rating_and_says_why(
+    monkeypatch, rater, invalidated, caplog
+) -> None:
+    """The signing key is the third setting the rating gate names, and it no
+    longer reaches that gate through a first uphold: `refund_svc.config_gap`
+    refuses the CREDIT without one, above the claim, so there is never a paid
+    dispute for the rating to be judged on. The gate a keyless deployment does
+    meet is the rating-only retry — a dispute paid while the key was there,
+    upheld again after it went — and that is where it is pinned, because the
+    consequence is the same one: the agent is not rated and each attempt says
+    which setting is missing."""
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED)
+
+    paid = asyncio.run(dispute_svc.uphold(dispute.id))
+    assert paid.status == "credited" and paid.rating_tx == "tx_rating" and rater.calls == 1
+
+    monkeypatch.setattr(settings, "stellar_signing_key", "")
+    trap_the_refund(monkeypatch)  # a rating-only retry must sign nothing either
+    invalidated.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        again = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert again == paid  # paid, and not re-rated
+    assert rater.calls == 1 and invalidated == [] and len(chain.calls) == 1
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 1
+    for fact in ("STELLAR_SIGNING_KEY is unset", dispute.id, JOB, "agt_writer", dispute.payer):
         assert fact in logged[0]
