@@ -608,6 +608,11 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
     2am — so `crediting` wins first, `credited` next, and only a state that says
     nothing about the money defers to what the call itself reported.
 
+    `crediting` is not always a timeout, though. `refund_in_flight` out of
+    `uphold` means the claim was already held when it looked, so the live
+    transfer belongs to another caller and the block says so under its own
+    code. Same instruction either way — read the chain, never re-run blind.
+
     `amount` is None on a rating-only run — a dispute credited by an earlier
     one — and the credit is then reported as that earlier run's, so a re-run
     for the rating can never be read as a second payment.
@@ -624,6 +629,15 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
 
     if dispute.status == "crediting":
+        if fallback == EXIT_IN_FLIGHT:
+            # Not this run's submission. `uphold` answered `refund_in_flight`,
+            # which it only says when the claim was ALREADY held — another
+            # caller took it between this run's status check and its uphold.
+            # The instruction is the same as a timeout's, but the headline and
+            # the code are not: 10 says "this run signed and lost the answer",
+            # and reporting somebody else's live transfer that way sends the
+            # operator looking for a submission this process never made.
+            return unresolved_credit(dispute, EXIT_IN_FLIGHT, "A CREDIT FOR THIS DISPUTE IS ALREADY IN FLIGHT.", amount)
         return unresolved_credit(dispute, EXIT_TIMEOUT, "THE TRANSFER TIMED OUT — IT MAY STILL LAND.", amount)
 
     if dispute.status == "credited" and dispute.refund_tx:

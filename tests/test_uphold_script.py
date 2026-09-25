@@ -1033,6 +1033,31 @@ def test_the_timeout_block_asks_for_the_one_re_run_that_finishes_the_dispute(
     assert "refused (exit 6) rather than dangerous" in out
 
 
+def test_a_credit_claimed_by_another_caller_mid_run_is_not_called_a_timeout(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The narrow race: the dispute was payable when this run read it, and
+    another caller claimed it before the uphold landed. `uphold` refuses with
+    `refund_in_flight` and the dispute reads `crediting` — the same record a
+    timeout leaves, and the same instruction follows. But it is not this run's
+    transfer, so the headline says whose it is and the code is 6, not the 10
+    that means "this process signed and lost the answer"."""
+    uphold.raises(
+        dispute_svc.DisputeError("refund_in_flight", "a credit for this dispute is already in flight", 409),
+        leaves=("crediting", REFUND_TX),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_IN_FLIGHT
+    assert "ALREADY IN FLIGHT" in out
+    assert "TIMED OUT" not in out
+    assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
+    assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
+    assert "nothing was signed" not in out
+
+
 def test_a_timeout_with_no_hash_still_refuses_to_call_it_a_failure(
     capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
 ) -> None:
