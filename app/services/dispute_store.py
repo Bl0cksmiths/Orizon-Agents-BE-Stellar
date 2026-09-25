@@ -1058,7 +1058,22 @@ class InMemoryDisputeStore:
         )
 
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
-        return tuple(d for d in self._disputes.values() if d.task_id == task_id)
+        # Ordered the way _SELECT_DISPUTES_FOR_TASK_SQL orders: oldest dispute
+        # first, tiebroken by step so two opened in the same clock tick still
+        # have a defined order.
+        #
+        # Insertion order is not that. It is the order THIS PROCESS happened to
+        # see them, which a restart, an eviction or a dispute opened against an
+        # older settlement all change — and it is the order every test in this
+        # suite sees, because they all run against this store. A receipt that
+        # listed a task's disputes one way here and another way in production
+        # would have nothing in the hermetic suite to catch it.
+        return tuple(
+            sorted(
+                (d for d in self._disputes.values() if d.task_id == task_id),
+                key=lambda d: (d.opened_at, d.step_index),
+            )
+        )
 
     async def append_status(
         self,
