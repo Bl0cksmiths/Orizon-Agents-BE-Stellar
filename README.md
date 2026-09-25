@@ -144,6 +144,7 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 | name | default | purpose |
 | --- | --- | --- |
 | `API_KEY` | *(unset)* | when set, `/api/stellar/server/*` and all non-public `/api/pdax/*` routes require a matching `X-API-Key` header. The dispute adjudication routes are the exception that **fails closed** — they refuse while it is unset rather than running open |
+| `DATABASE_URL` | *(unset)* | Postgres DSN. With it, settlements, disputes and operator-endpoint bindings are durable; without it all three fall back to an in-memory store that is lost on every restart. The store implementation is chosen from this value alone — no code change, no migration flag |
 | `TASK_AUTH_REQUIRED` | `false` | when true, task/trace/artifact reads require the per-task `read_token` returned by execute |
 | `ORCHESTRATOR_MAX_CONCURRENT` | `8` | in-flight workflow ceiling — excess execute calls get a 503 `capacity_exhausted` |
 | `RATE_LIMIT_PER_MINUTE` | `1200` | request budget per resolved client key (sliding 60 s window) — see below |
@@ -235,7 +236,7 @@ The contracts are live on Stellar **mainnet** — `render.yaml` ships these as t
 - Every response carries hardening headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`.
 - Every response echoes an `X-Request-ID` (yours, or a generated one). Logs leave as single-line JSON — every record (access line and service logs alike) carries the request id, so a 500 and its traceback correlate.
 - Error responses share one envelope: the legacy `detail` plus `error: {code, message, request_id}` — the same shape for 4xx, validation errors, 429s, and 500s.
-- **Durability**: storage is in-memory by design — task history, traces, and PDAX ramp records reset on every restart (Render's free tier idles out routinely). Durable facts live on-chain. Do not run real-money PDAX ramps on this deployment; move ramp state to a persistent store first (that project pairs naturally with going multi-worker).
+- **Durability**: three stores are Postgres-backed when `DATABASE_URL` is set — settlements, disputes and operator-endpoint bindings — and fall back to memory when it is not, which is the failure mode to watch: nothing announces it, and a settlement that never persisted is a dispute that can never be opened. Everything else is in-memory by design: task history, traces, and PDAX ramp records reset on every restart (Render's free tier idles out routinely). Durable facts otherwise live on-chain. Do not run real-money PDAX ramps on this deployment; move ramp state to a persistent store first (that project pairs naturally with going multi-worker).
 - Public-demo scope: task history (`/api/tasks`, traces, artifacts) is world-readable **by default** so visitors can watch runs. Capability-token auth is fully wired — every execute response returns a `read_token`, and setting `TASK_AUTH_REQUIRED=true` enforces it on task/trace/artifact reads (the token rides an `X-Task-Token` header, or `?token=` for SSE; a valid `X-API-Key` bypasses for ops). Flip the env var when real users bring real intents.
 - `/docs`, `/redoc`, and `/openapi.json` are public on purpose — this is a showcase API. Set `DOCS_ENABLED=false` to turn them off.
 - 4 real Agno workers (`copywrite.v3`, `seo.brief`, `research.pro`, `sol-audit`) + `code.gen`; the remaining workers are mocks.
