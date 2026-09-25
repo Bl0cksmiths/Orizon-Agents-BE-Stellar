@@ -37,9 +37,10 @@ import secrets
 import time
 import uuid
 from collections import deque
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 from .config import settings
@@ -430,8 +431,31 @@ async def require_api_key(
         raise HTTPException(status_code=401, detail="invalid_api_key")
 
 
+# The operator key, declared as a SECURITY SCHEME rather than as an ordinary
+# optional header. The spec advertises the production server, so what it says
+# about the two routes that spend the platform's balance is read as an
+# instruction: as a bare header they looked optional, and a generated client
+# would have omitted it and got a 401 it had no way to anticipate. With a
+# scheme the operations carry a security requirement, /docs grows an
+# Authorize box, and a generator emits the credential.
+#
+# `auto_error=False` so this returns None for an absent header instead of
+# raising FastAPI's own 403 — the refusals below are this module's to give,
+# in this service's error vocabulary, and a 403 is not in it.
+_operator_key_scheme = APIKeyHeader(
+    name="X-API-Key",
+    scheme_name="OperatorApiKey",
+    auto_error=False,
+    description=(
+        "The operator's API_KEY. Required by the adjudication routes, which spend the platform's "
+        "own settler balance — they fail CLOSED, so a deployment with no key configured refuses "
+        "them outright rather than serving them openly."
+    ),
+)
+
+
 async def require_adjudicator(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
 ) -> None:
     """The operator key, enforced — the adjudication routes FAIL CLOSED.
 
