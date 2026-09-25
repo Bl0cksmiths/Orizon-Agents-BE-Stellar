@@ -402,13 +402,18 @@ async def require_adjudicator(
     surely as on mainnet. `settings.max_refund_usdc` caps ONE payout; it does
     not cap how many an open route can be asked for.
 
-    Nor is the boot validator a sufficient backstop here. It only fires when
-    `dispute_refunds_enabled` is set *together with* a signing key and an
-    asset SAC — the configuration that can actually sign. A deployment that
-    turns the switch on before wiring the signer boots happily with API_KEY
-    empty, and would then serve these routes to anyone. So the check is made
-    again, per request, at the door of the routes themselves, and an unset key
-    is answered rather than waved through.
+    Nor is the boot validator a sufficient backstop here, though it is a
+    better one than this paragraph used to claim: since story 4.03
+    `_money_capable_config_requires_api_key` fires on `dispute_refunds_enabled`
+    ALONE, so a deployment cannot boot with the switch on and API_KEY empty.
+    What it cannot do is answer the question this dependency asks. It proves a
+    key EXISTS at boot; only a per-request check can say whether the caller
+    holds it — and the value it checked is mutable afterwards (tests set it,
+    and a reload would reread it), so a route that signs must not authorise
+    anyone on the strength of something that was true at import. The second
+    refusal below is therefore unreachable on a correctly booted process, and
+    it stays: an unset key on a payout route is answered, never waved through,
+    whatever is supposed to have stopped it getting here.
 
     The three refusals, in the order a caller meets them:
 
