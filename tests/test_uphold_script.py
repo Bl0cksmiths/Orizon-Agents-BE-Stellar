@@ -994,7 +994,7 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
 
     assert code == uphold_dispute.EXIT_TIMEOUT
     assert "TIMED OUT" in out and "MAY STILL LAND" in out
-    assert "DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE." in out
+    assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
     assert "STILL HELD" in out
     assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
     assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
@@ -1004,6 +1004,33 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
     # The one sentence that must never appear here: a submission that timed out
     # WAS signed, and telling an operator otherwise is how it gets retried.
     assert "nothing was signed" not in out
+
+
+def test_the_timeout_block_asks_for_the_one_re_run_that_finishes_the_dispute(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The reconciled dispute is not finished when its credit is recorded.
+
+    An operator who reads the chain and writes `credited` by hand leaves a
+    dispute with a refund hash and NO rating — nothing in that write can
+    produce one. Exactly one re-run does, and it signs nothing: `uphold`
+    refuses to transfer for a `credited` dispute. The block used to forbid it
+    on the false premise that it would pay the buyer twice, so the premise is
+    pinned out as well as the instruction pinned in.
+    """
+    uphold.times_out()
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_TIMEOUT
+    assert "credited_usdc=<the amount the transfer moved>" in out
+    assert "THEN re-run this script once." in out
+    assert "signs no second transfer for a `credited` dispute" in out
+    # The false sentence this block used to carry, and the rule it wrongly
+    # blocked: a bare re-run is refused, never a second payment.
+    assert "would credit them a second time" not in out
+    assert "refused (exit 6) rather than dangerous" in out
 
 
 def test_a_timeout_with_no_hash_still_refuses_to_call_it_a_failure(
@@ -1052,7 +1079,7 @@ def test_an_unexpected_exception_does_not_override_what_the_store_says(
 
     assert code == uphold_dispute.EXIT_TIMEOUT
     assert "RuntimeError: connection reset while polling" in out
-    assert "DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE." in out
+    assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
 
 
 def test_a_service_refusal_leaves_the_dispute_untouched_and_says_so(

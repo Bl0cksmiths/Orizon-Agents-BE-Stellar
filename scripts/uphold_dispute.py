@@ -315,10 +315,17 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     the same words rather than two half-written versions of them.
 
     Nothing here tidies up, and that is D3 rather than an unfinished path. A
-    timed-out submission may still settle, so releasing the claim or retrying
-    would credit the buyer twice the moment it does. A buyer credited late is
-    recoverable; a buyer credited twice is not, and the settler's wallet is the
-    platform's own money.
+    timed-out submission may still settle, so releasing the claim and paying it
+    again would credit the buyer twice the moment it does. A buyer credited
+    late is recoverable; a buyer credited twice is not, and the settler's
+    wallet is the platform's own money.
+
+    The "do not re-run" is therefore conditional, and says so. A bare re-run
+    cannot double-pay anything — `check_status` answers a `crediting` dispute
+    with this very block and `uphold` refuses it with `refund_in_flight` — and
+    once the operator has read the chain and recorded `credited` by hand, one
+    re-run is the CORRECT next step: it writes the rating that hand-written
+    record has no way to produce, and signs nothing.
     """
     # The promise frozen at opening time is the best figure available when this
     # is reached before the credit has been computed; a caller that knows the
@@ -327,7 +334,9 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     say()
     say("  " + "#" * 74)
     say(f"  #  {headline}")
-    say("  #  DO NOT RE-RUN THIS SCRIPT FOR THIS DISPUTE.")
+    say("  #  DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE, AND A SECOND")
+    say("  #  ONE CANNOT BE TAKEN BACK. A re-run is right only after the chain has")
+    say("  #  been read and the record written — the first case below says when.")
     say("  " + "#" * 74)
     say()
     say(f"  Dispute {dispute.id} is parked in `crediting`, which means the refund claim is")
@@ -351,7 +360,11 @@ def unresolved_credit(dispute: DisputeRecord, code: int, headline: str, amount: 
     say("      credited_usdc=<the amount the transfer moved>). Read the amount off the")
     say("      explorer, not off the estimate above: the buyer's receipt shows it as what")
     say("      they were paid, and without it the receipt can only show what was promised.")
-    say("      Re-running this script instead would credit them a second time.")
+    say("      THEN re-run this script once. A dispute recorded `credited` by hand carries")
+    say("      its refund hash and NO rating, and a re-run writes that rating alone: uphold")
+    say("      signs no second transfer for a `credited` dispute, so it cannot pay the buyer")
+    say("      twice. Before that write a re-run is refused (exit 6) rather than dangerous —")
+    say("      it simply cannot tell you anything the chain has not already told you.")
     say("    * it FAILED, or the hash is on no explorer and the payer's balance never moved —")
     say(f"      nothing moved. release_refund_claim({dispute.id!r}) returns it to `upheld`,")
     say("      and only then may this script be run again.")
