@@ -143,19 +143,26 @@ def _written(sql: str) -> dict[str, str]:
 
 
 def test_a_transition_carries_the_receipt_forward_and_dates_its_own_row() -> None:
-    """`credited_usdc` and `rating_confirmed` are COALESCEd with the caller's
-    value FIRST. COALESCE returns its first non-NULL argument and FALSE is not
-    NULL, so a caller naming TRUE replaces a recorded FALSE — the confirmation
-    a timed-out rating is owed once it lands — while a caller naming nothing
-    passes NULL and keeps what is there. The other order would make the first
-    answer permanent.
+    """`credited_usdc` is COALESCEd with the caller's value FIRST. COALESCE
+    returns its first non-NULL argument, so a caller naming an amount replaces
+    what is recorded while a caller naming nothing passes NULL and keeps it.
+    The other order would make the first answer permanent.
+
+    `rating_confirmed` cannot be that, and the CASE is why. FALSE is not NULL
+    either, so plain COALESCE let a caller naming FALSE overwrite a recorded
+    TRUE — which is the pair story 4.04 writes when a submission times out, so
+    a rating the ledger had vouched for was downgraded to "in flight". TRUE
+    survives; NULL still means "this transition does not say"; a rating never
+    submitted stays NULL rather than becoming FALSE.
 
     `updated_at` is the clock outright, never COALESCEd, and the same reading
     ($7) the resolution time falls back to."""
     written = _written(dispute_store._APPEND_STATUS_SQL)
 
     assert written["credited_usdc"] == "COALESCE($8::double precision, latest.credited_usdc)"
-    assert written["rating_confirmed"] == "COALESCE($9::boolean, latest.rating_confirmed)"
+    assert written["rating_confirmed"] == (
+        "CASE WHEN latest.rating_confirmed THEN TRUE ELSE COALESCE($9::boolean, latest.rating_confirmed) END"
+    )
     assert written["updated_at"] == "$7::double precision"
     assert written["resolved_at"] == "COALESCE($6::double precision, latest.resolved_at, $7::double precision)"
 

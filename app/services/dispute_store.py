@@ -515,6 +515,17 @@ FOR UPDATE
 # permanent, and a rating that timed out would read "unconfirmed" forever after
 # the ledger vouched for it.
 #
+# What COALESCE alone got WRONG is the other direction, and for the same
+# reason: FALSE is not NULL, so a caller naming FALSE replaced a recorded TRUE.
+# Story 4.04 writes exactly that pair when a submission times out — a fresh
+# hash beside `rating_confirmed=False` — so a rating the ledger had already
+# vouched for was downgraded to "in flight" by a later attempt, and the receipt
+# went on to deny something that had happened. A confirmation is therefore
+# MONOTONIC: once TRUE it stays TRUE, whatever a later transition says. NULL
+# still means "this transition does not say", and a rating that was never
+# submitted stays NULL rather than becoming FALSE — which is the distinction
+# DisputeRecord promises a reader of a receipt.
+#
 # `updated_at` is $7 outright and never COALESCEd, because it is the one column
 # every transition exists to move. It is the same reading of the clock as the
 # `resolved_at` fallback, so the transition that first resolves a dispute
@@ -597,7 +608,10 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        COALESCE($5::text, latest.note),
        COALESCE($8::double precision, latest.credited_usdc),
        $7::double precision,
-       COALESCE($9::boolean, latest.rating_confirmed),
+       CASE
+           WHEN latest.rating_confirmed THEN TRUE
+           ELSE COALESCE($9::boolean, latest.rating_confirmed)
+       END,
        FALSE
 FROM latest
 WHERE $10::text IS NULL OR latest.status = $10::text
@@ -1068,7 +1082,16 @@ class InMemoryDisputeStore:
             resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or now),
             credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
             updated_at=now,
-            rating_confirmed=rating_confirmed if rating_confirmed is not None else current.rating_confirmed,
+            # Monotonic, as the CASE in _APPEND_STATUS_SQL is: a rating the
+            # ledger has vouched for cannot be taken back by a later attempt
+            # that timed out. `is True` rather than truthiness, because NULL
+            # and FALSE are different answers here and only one of them is a
+            # confirmation.
+            rating_confirmed=(
+                True
+                if current.rating_confirmed is True
+                else (rating_confirmed if rating_confirmed is not None else current.rating_confirmed)
+            ),
         )
         self._disputes[dispute_id] = updated
         if status in ("credited", "rejected"):

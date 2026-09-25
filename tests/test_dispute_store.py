@@ -785,7 +785,11 @@ class FakePool:
             "note": _coalesce(note, latest["note"]),
             "credited_usdc": _coalesce(credited_usdc, latest["credited_usdc"]),
             "updated_at": now,
-            "rating_confirmed": _coalesce(rating_confirmed, latest["rating_confirmed"]),
+            # The CASE, not a COALESCE: a confirmation the ledger has already
+            # given cannot be undone by a later FALSE.
+            "rating_confirmed": (
+                True if latest["rating_confirmed"] else _coalesce(rating_confirmed, latest["rating_confirmed"])
+            ),
             "opening": False,
         }
         self.disputes.append(row)
