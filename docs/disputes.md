@@ -506,9 +506,13 @@ dispute spends the platform's own balance on an adjudicator's say-so with
 nothing on-chain to bound it. `docs/decisions/0008-refund-execution.md` D1 has
 the argument in full.
 
-Turning the money path on without a key is not a silent weakness: with
-`DISPUTE_REFUNDS_ENABLED=true`, a signing key and an asset SAC configured, the
-process **refuses to start** unless `API_KEY` is set, and says why.
+Turning the money path on without a key is not a silent weakness:
+`DISPUTE_REFUNDS_ENABLED=true` alone makes the process **refuse to start**
+unless `API_KEY` is set, and it says why. The switch by itself, deliberately —
+a deployment that flips refunds on before a signing key or an asset SAC is
+wired up would otherwise boot with an empty key and nothing but
+`require_adjudicator` between an anonymous caller and the payout route. So
+there is no order of setting these in which the rule does not bite.
 
 What an adjudicator can be told, and what each answer means:
 
