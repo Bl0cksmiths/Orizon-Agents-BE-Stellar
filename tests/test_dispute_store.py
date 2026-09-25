@@ -1472,6 +1472,42 @@ def test_close_closes_the_pool_once_and_is_safe_twice() -> None:
     assert store._pool is None
 
 
+def test_a_shutdown_racing_the_first_call_closes_the_pool_that_call_dialled() -> None:
+    """Shutdown arrives while the first request is still dialling Postgres.
+
+    `close()` used to run straight through: it found `self._pool` still empty,
+    closed nothing, and the dial it did not wait for assigned a live pool
+    afterwards — up to five sockets held open by a store nobody will call
+    again, on a process that is trying to exit. Taking the creation lock is
+    what makes the pool that was dialled the pool that is closed, and the
+    caller still gets a pool rather than the None it would otherwise have to
+    call a statement on."""
+    store = dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db")
+    dialled: list[FakePool] = []
+
+    async def slow_create() -> FakePool:
+        # The dial, mid-flight when the shutdown lands.
+        await asyncio.sleep(0.01)
+        pool = FakePool()
+        dialled.append(pool)
+        return pool
+
+    store._create_pool = slow_create  # type: ignore[method-assign]
+
+    async def go() -> Any:
+        first = asyncio.create_task(store._ready_pool())
+        await asyncio.sleep(0)
+        await store.close()
+        return await first
+
+    got = asyncio.run(go())
+
+    assert len(dialled) == 1
+    assert dialled[0].closed == 1
+    assert got is dialled[0]
+    assert store._pool is None
+
+
 def test_the_pool_is_opened_with_min_size_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """A free Render instance idles and its sockets die with it — a pool that
     insists on a live connection wakes up holding a dead one and hands it to the
