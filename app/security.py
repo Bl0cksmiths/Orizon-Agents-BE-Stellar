@@ -333,6 +333,42 @@ class ForwardedChainSampler:
 forwarded_chain_sampler = ForwardedChainSampler()
 
 
+def header_secret_matches(supplied: str | None, expected: str) -> bool:
+    """Constant-time comparison of a HEADER value against a configured secret.
+
+    The comparison is on the bytes that crossed the wire, which is the only
+    comparison that can succeed. Starlette decodes header bytes as LATIN-1, so
+    the str a dependency receives is the wire bytes one-to-one; re-encoding it
+    latin-1 recovers them exactly. The previous `encode("utf-8", "ignore")`
+    re-encoded that decoding as UTF-8 instead, which is the identity only while
+    every byte is ASCII: a key holding one non-ASCII character was mangled into
+    something the configured value could never equal, so a deployment whose
+    API_KEY contained an accent answered 401 to its own operator forever —
+    indistinguishable, in the log and in the body, from an attacker. `replace`
+    rather than `strict` because nothing may raise here: a str outside latin-1
+    cannot have come off a header, and a caller who contrives one gets a
+    mismatch rather than a 500.
+
+    Both sides are stripped of ASCII whitespace — the OWS an HTTP parser is
+    allowed to leave on a header value, which h11 and httptools do not treat
+    identically, and the padding an operator's copy-paste leaves on an env var.
+    `bytes.strip()` touches only ASCII whitespace, so it cannot eat a
+    continuation byte of a multi-byte character the way `str.strip()` can (it
+    considers U+00A0 whitespace, and that is a valid UTF-8 continuation byte).
+    `config` refuses to boot on a padded key; this is the wire half, and it
+    also holds for the tests that set `settings.api_key` past the validators.
+
+    False for an absent header and for an unset secret, so no caller can match
+    "no key configured" by sending nothing.
+    """
+    if supplied is None or not expected:
+        return False
+    return secrets.compare_digest(
+        supplied.encode("latin-1", "replace").strip(),
+        expected.encode("utf-8").strip(),
+    )
+
+
 async def require_api_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
@@ -340,10 +376,7 @@ async def require_api_key(
     expected = settings.api_key
     if not expected:
         return
-    # Compare utf-8 bytes, not str: compare_digest raises TypeError on
-    # non-ASCII str input (Starlette decodes headers latin-1), which would
-    # turn a bad key into a 500 instead of a 401.
-    if x_api_key is None or not secrets.compare_digest(x_api_key.encode("utf-8", "ignore"), expected.encode("utf-8")):
+    if not header_secret_matches(x_api_key, expected):
         raise HTTPException(status_code=401, detail="invalid_api_key")
 
 
@@ -401,10 +434,7 @@ async def require_adjudicator(
             "so the refund routes have no credential to check and stay closed"
         )
         raise HTTPException(status_code=503, detail="adjudication_not_configured")
-    # Compare utf-8 bytes, not str, for `require_api_key`'s reason: Starlette
-    # decodes headers latin-1, and compare_digest raises TypeError on a
-    # non-ASCII str, which would answer a bad key with a 500 instead of a 401.
-    if x_api_key is None or not secrets.compare_digest(x_api_key.encode("utf-8", "ignore"), expected.encode("utf-8")):
+    if not header_secret_matches(x_api_key, expected):
         raise HTTPException(status_code=401, detail="invalid_api_key")
 
 

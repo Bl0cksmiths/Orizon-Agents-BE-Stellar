@@ -21,12 +21,17 @@ import secrets
 from fastapi import Header, HTTPException, Query
 
 from .config import settings
+from .security import header_secret_matches
 from .state import state
 
 
 def _matches(candidate: str, expected: str) -> bool:
-    # Compare utf-8 bytes, not str — same rationale as security.require_api_key:
-    # compare_digest raises TypeError on non-ASCII str input.
+    # For the TASK TOKEN only, which this module mints itself and which is
+    # hex — so utf-8 and latin-1 agree on every byte of it, and a candidate
+    # that is not ASCII is simply not the token. `security.header_secret_matches`
+    # is the one to use for anything whose bytes came off a header and may not
+    # be ASCII; it cannot be used here because `token` may arrive as a QUERY
+    # parameter instead, which Starlette decodes as utf-8, not latin-1.
     return secrets.compare_digest(candidate.encode("utf-8", "ignore"), expected.encode("utf-8"))
 
 
@@ -39,8 +44,11 @@ async def require_task_read(
     """FastAPI dependency guarding a `{task_id}`-scoped read route."""
     if not settings.task_auth_required:
         return
-    # A valid operator API key sees everything (ops visibility).
-    if settings.api_key and x_api_key is not None and _matches(x_api_key, settings.api_key):
+    # A valid operator API key sees everything (ops visibility). Through
+    # `header_secret_matches`, so an operator whose key holds a non-ASCII
+    # character is admitted here on exactly the terms `require_api_key` admits
+    # them — two answers to "is this the operator?" would be one too many.
+    if header_secret_matches(x_api_key, settings.api_key):
         return
     expected = state.task_tokens.get(task_id)
     supplied = x_task_token if x_task_token is not None else token
