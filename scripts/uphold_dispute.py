@@ -121,6 +121,22 @@ EXIT_UNEXPECTED = 11
 # twice. 13 is a collision, which no re-run can fix and a human must look up.
 EXIT_RATING_NOT_LANDED = 12
 EXIT_RATING_COLLISION = 13
+# A SECOND ADJUDICATION of this dispute was running when this one refused: the
+# service's compare-and-set on `open` lost, it read the dispute back, and the
+# dispute still said `upheld` — somebody else is between the decision and the
+# claim right now (`adjudication_in_progress`).
+#
+# Its own code because neither neighbour tells the truth about it. 5 is the
+# terminal family — rejected, already credited — and this dispute is not
+# terminal at all, it is BUSY; a wrapper that read 5 would stop asking about a
+# dispute that is about to be paid, or about to become payable again. 6 is the
+# opposite error: 6's instruction is "never re-run, reconcile against the
+# chain", and here a re-run may well be the fix a minute from now, because the
+# other adjudication can fail and leave the dispute `upheld` and payable.
+#
+# What it asks for is neither of those: READ THE DISPUTE BACK, then decide. So
+# it says that, under a code of its own.
+EXIT_ADJUDICATION_RACE = 14
 
 # Make `python scripts/uphold_dispute.py` work from the repo root: put the repo
 # root on sys.path so the `app` package resolves without PYTHONPATH.
@@ -198,17 +214,30 @@ _REFUSAL_EXITS = {
     "refunds_not_configured": EXIT_NOT_CONFIGURED,
     "unknown_dispute": EXIT_UNKNOWN_DISPUTE,
     "dispute_rejected": EXIT_NOT_ADJUDICABLE,
+    "adjudication_in_progress": EXIT_ADJUDICATION_RACE,
     "refund_in_flight": EXIT_IN_FLIGHT,
     "refund_failed": EXIT_TRANSFER_FAILED,
     "refund_unconfirmed": EXIT_TIMEOUT,
 }
 
-# The codes above that are raised on the FAR SIDE of a submission: something was
-# signed, whatever became of it. They must never go out through `refuse`, whose
-# whole message is that nothing was — on a money path that sentence is the one
-# an operator acts on, and being wrong about it is how a timed-out credit gets
-# retried. The report block reads the record and says what actually happened.
-_POST_SIGNING_CODES = frozenset({"refund_failed", "refund_unconfirmed", "refund_in_flight"})
+# The codes above that MUST NOT go out through `refuse`, whose whole message is
+# that nothing was signed. On a money path that sentence is the one an operator
+# acts on, and being wrong about it is how a timed-out credit gets retried, so
+# it is reserved for refusals that can actually promise it.
+#
+# Three of these are raised on the FAR SIDE of a submission — something was
+# signed, whatever became of it. `adjudication_in_progress` is the fourth and
+# is not: nothing was signed HERE. It is in the set anyway, because "nothing
+# was signed" would be read as a fact about the DISPUTE, and about the dispute
+# it may be false the instant it is printed — the adjudication this one lost
+# the race to is between its decision and its claim, and may sign next. The
+# set is "cannot honestly say nothing was signed", which is the property
+# `refuse` needs, rather than "was signed", which is merely how three of them
+# come to have it. Each one's report block reads the record and says what
+# actually happened instead.
+_CANNOT_SAY_NOTHING_WAS_SIGNED = frozenset(
+    {"refund_failed", "refund_unconfirmed", "refund_in_flight", "adjudication_in_progress"}
+)
 
 # The script's own log lines — only the ones no service writes, like a failed
 # reputation read — go through the same redacted stderr handler as theirs.
@@ -670,6 +699,16 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
     transfer belongs to another caller and the block says so under its own
     code. Same instruction either way — read the chain, never re-run blind.
 
+    `adjudication_in_progress` is the same fact caught a moment earlier, and it
+    is the reason every branch here reads `fallback` as well as the status.
+    That refusal means another caller won the transition and has not claimed
+    YET, so the record can read `upheld`, `crediting` or `credited` by the time
+    this function sees it, depending only on how far they got. All three are
+    somebody else's run, and none of them is this one's to describe: `upheld`
+    must not say "no claim is held", `crediting` is their transfer rather than
+    this run's timeout, and `credited` must not put this run's previewed amount
+    beside their hash.
+
     `amount` is None on a rating-only run — a dispute credited by an earlier
     one — and the credit is then reported as that earlier run's, so a re-run
     for the rating can never be read as a second payment.
@@ -686,20 +725,29 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
 
     if dispute.status == "crediting":
-        if fallback == EXIT_IN_FLIGHT:
+        if fallback in (EXIT_IN_FLIGHT, EXIT_ADJUDICATION_RACE):
             # Not this run's submission. `uphold` answered `refund_in_flight`,
             # which it only says when the claim was ALREADY held — another
             # caller took it between this run's status check and its uphold.
             # The instruction is the same as a timeout's, but the headline and
             # the code are not: 10 says "this run signed and lost the answer",
             # and reporting somebody else's live transfer that way sends the
-            # operator looking for a submission this process never made.
+            # operator looking for a submission this process never made. The
+            # adjudication race lands here too once the caller that won it has
+            # got as far as claiming: same transfer, same owner, same words.
             return unresolved_credit(dispute, EXIT_IN_FLIGHT, "A CREDIT FOR THIS DISPUTE IS ALREADY IN FLIGHT.", amount)
         return unresolved_credit(dispute, EXIT_TIMEOUT, "THE TRANSFER TIMED OUT — IT MAY STILL LAND.", amount)
 
     if dispute.status == "credited" and dispute.refund_tx:
         say()
-        if amount is None:
+        if fallback == EXIT_ADJUDICATION_RACE:
+            # This run planned an amount and never signed it: the adjudication
+            # it lost the race to has since paid. Crediting it to this run's
+            # own preview would put a figure this process computed beside a
+            # hash it had no part in.
+            say(f"  CREDITED — {dispute.payer} was paid by the adjudication running alongside this one;")
+            say("             this run signed no transfer, and the hash below is not its doing.")
+        elif amount is None:
             say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
         else:
             say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
@@ -715,6 +763,27 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
 
     if dispute.status == "upheld":
         say()
+        if fallback == EXIT_ADJUDICATION_RACE:
+            # The ONE case where "no claim is held" must not be said. The
+            # caller that won the compare-and-set is between the decision and
+            # the claim, so the claim may be taken and a transfer signed while
+            # this block is on the screen — and the generic `upheld` sentence
+            # below ends "then re-run", which is how this run races the other
+            # one a second time.
+            say(f"  ANOTHER ADJUDICATION OF {dispute.id} IS RUNNING — this one refused rather than race it.")
+            say("  Nothing was signed HERE. Whether anything has been signed THERE is not knowable")
+            say("  from this process: the dispute reads `upheld`, which is the state the other caller")
+            say("  claims from, so it may be signing a transfer as you read this.")
+            say()
+            say("  Read the dispute back before deciding anything — this signs nothing:")
+            say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id} --dry-run")
+            say()
+            say("  and go by what it says:")
+            say("    * `credited`  — they paid it. A live re-run writes the RATING only, never a transfer.")
+            say("    * `crediting` — their transfer is on the network. Do NOT re-run; reconcile it (10).")
+            say("    * `upheld`    — they failed or gave up and nothing moved, so a re-run pays it.")
+            say()
+            return fallback
         # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
         # outcome reached two ways: `uphold` refusing with `refund_failed`, and
         # a call that returned while leaving the claim released. Both mean the
@@ -1082,7 +1151,7 @@ async def execute(dispute_id: str, agent_id: str, amount: float | None) -> int:
         # the code carries through. A rating never arrives here: once the
         # buyer is paid, `uphold` answers with the record, never a raise.
         fallback = _REFUSAL_EXITS.get(exc.code, EXIT_NOT_ADJUDICABLE)
-        if exc.code in _POST_SIGNING_CODES:
+        if exc.code in _CANNOT_SAY_NOTHING_WAS_SIGNED:
             say()
             say(f"  {exc.code}: {exc.message}")
         else:
@@ -1153,6 +1222,9 @@ def build_parser() -> argparse.ArgumentParser:
             "      attempt — a collision; the consequence did not land. Look the id up.\n"
             "3, 4, 5, 7 and 8 are refusals raised before anything was signed. 11 is the\n"
             "catch-all, and it asks for the state it prints to be reconciled by hand.\n"
+            "14 is pre-signature HERE only: another adjudication of this dispute was running\n"
+            "and may be signing right now. Read the dispute back before deciding again, and\n"
+            "never re-run it on the assumption that nothing moved.\n"
         ),
     )
     parser.add_argument(

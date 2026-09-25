@@ -337,6 +337,8 @@ def test_help_tells_the_two_post_signature_rules_apart() -> None:
     assert "12  the buyer IS paid but the rating did not land — re-running is SAFE" in help_text
     assert "retries the rating only, never the refund" in help_text
     assert "13  the ledger answered the rating with Replay" in help_text
+    assert "14 is pre-signature HERE only" in help_text
+    assert "never re-run it on the assumption that nothing moved" in help_text
 
 
 def test_help_lists_the_in_flight_code_beside_the_timeout_it_behaves_like() -> None:
@@ -619,6 +621,87 @@ def test_a_deployment_that_could_not_rate_is_refused_before_it_pays(
     assert code == uphold_dispute.EXIT_NOT_CONFIGURED
     assert "REPUTATION_ENABLED is false — so the dispute rating could not be written" in out
     assert "nothing was signed" in out
+
+
+def test_a_lost_adjudication_race_never_claims_that_nothing_was_signed(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The service's compare-and-set on `open` lost and the dispute read back
+    `upheld`: another adjudication is between its decision and its claim, and
+    may sign a transfer in the next instant.
+
+    Nothing was signed HERE, but `refuse`'s "nothing was signed" is heard as a
+    fact about the DISPUTE, and about the dispute it may be false before the
+    line finishes printing. So this code never goes out through `refuse`, and
+    the two sentences the generic `upheld` report would have printed — that no
+    claim is held, and to re-run — are both absent, because the first may be
+    untrue and the second is how this run races the other one again.
+    """
+    uphold.raises(
+        dispute_svc.DisputeError(
+            "adjudication_in_progress",
+            "another adjudication of this dispute is already running and may be paying it",
+            409,
+        ),
+        leaves=("upheld", None),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_ADJUDICATION_RACE
+    assert "adjudication_in_progress" in out
+    assert f"ANOTHER ADJUDICATION OF {DISPUTE_ID} IS RUNNING" in out
+    assert "Read the dispute back before deciding anything" in out
+    assert "--dry-run" in out
+    # The refusal that must not be made, and the instruction that must not be
+    # given, at the one moment another caller may be signing.
+    assert "nothing was signed" not in out
+    assert "no claim is held" not in out
+
+
+def test_the_winner_of_an_adjudication_race_is_not_reported_as_this_run_paying(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """The same refusal, read back a moment later: the caller that won has got
+    all the way to `credited`. This run previewed an amount and signed nothing,
+    so its own figure must not be printed beside somebody else's hash — that is
+    a number this process computed presented as a transfer it made."""
+    uphold.raises(
+        dispute_svc.DisputeError("adjudication_in_progress", "another adjudication is already running", 409),
+        leaves=("credited", REFUND_TX),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert "was paid by the adjudication running alongside this one" in out
+    assert "this run signed no transfer" in out
+    assert f"{CREDITABLE_USDC:.7f} USDC paid to {PAYER}" not in out
+    assert f"tx:        {REFUND_TX}" in out
+    # The credit half is settled, so the run's verdict is the rating's: nothing
+    # of this run's reached the ledger, so it is the not-landed code.
+    assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
+
+
+def test_a_race_lost_after_the_winner_claimed_is_their_transfer_not_our_timeout(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """And a moment earlier again: the winner has claimed and submitted. The
+    record says `crediting`, which is the timeout block's own state — but this
+    run signed nothing, so it gets the in-flight headline and code 6, never the
+    10 that means "this process submitted and lost the answer"."""
+    uphold.raises(
+        dispute_svc.DisputeError("adjudication_in_progress", "another adjudication is already running", 409),
+        leaves=("crediting", REFUND_TX),
+    )
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_IN_FLIGHT
+    assert "ALREADY IN FLIGHT" in out
+    assert "TIMED OUT" not in out
 
 
 def test_a_non_finite_credit_exits_the_same_way_through_either_door(
