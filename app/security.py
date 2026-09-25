@@ -58,6 +58,32 @@ EXEMPT_PATHS = frozenset({"/", "/health", "/readiness", "/api/health"})
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 
+class CodedHTTPException(HTTPException):
+    """An HTTPException that carries its own human message beside its code.
+
+    `app/main.py`'s handler derives `error.message` from the detail: a snake
+    token becomes the code and the message is that token with its underscores
+    swapped for spaces. That is right for almost everything, and wrong for a
+    handful of refusals whose message says something the code cannot — the
+    time a dispute window closed, what to do next. Raising one of these keeps
+    the stable code AND the written sentence, instead of forcing a choice.
+
+    It is raised only where the message has been read and found safe to
+    disclose to whoever is being refused. A message that quotes configured
+    limits, or facts about state the caller has not proved they may know, goes
+    out as a bare code like everything else — see `routers/disputes._refuse`,
+    which is the only place in this service that makes that judgement.
+
+    Lives here, in a module of hardening primitives, for `request_id_var`'s
+    reason: both are halves of the error envelope that `main` assembles, and
+    `main` imports the routers, so the routers cannot import it back.
+    """
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(status_code=status_code, detail=code)
+        self.message = message
+
+
 # Credential-bearing query values (the SSE routes take `?token=`) must not
 # reach the access log; only the parameter name survives.
 _TOKEN_QUERY_RE = re.compile(r"(^|&)([^&=]*token)=[^&]*")
