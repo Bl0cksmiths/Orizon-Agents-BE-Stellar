@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -41,14 +42,19 @@ class RefundRefused(Exception):
     """A refund that must NOT be signed, with a stable `code` the caller branches on.
 
     Every instance of this is money that did not move, raised before anything
-    reaches the settler's key. Two codes today:
+    reaches the settler's key. Three codes today:
 
       - `nothing_to_credit` — the settlement says there is nothing to give back
         for this step (no such step, a step that never delivered, or an amount
         that computes to zero once D4's bounds are applied);
       - `refund_above_cap` — the amount is over `MAX_REFUND_USDC`. A refusal,
         never a clamp: quietly paying the ceiling would hide the mistaken uphold
-        (or the bad settlement record) that the ceiling exists to catch.
+        (or the bad settlement record) that the ceiling exists to catch;
+      - `refund_amount_invalid` — the amount is not a finite number, so no bound
+        in this module can say anything about it. Kept apart from the two above
+        because it is neither a judgement about this dispute nor a ceiling an
+        operator raised: it means a figure on the records or in the environment
+        is not a quantity of money, and the fix is to that, not to the dispute.
 
     The code is what a caller maps to a response; `message` carries the numbers,
     for the operator who has to reconcile it afterwards.
@@ -208,6 +214,26 @@ def creditable_for(
         amount = settlement.settled_usdc
 
     amount = round(amount, 7)
+
+    # Asked BEFORE either bound below, because NaN defeats both by
+    # construction: every guard on this path is a `<` or a `>`, and every
+    # comparison against NaN is false, so a NaN clears the floor, clears the
+    # ceiling, and arrives at `usdc_to_i128` — which raises AFTER the claim has
+    # been taken, and `credit_refund` can only read a raise as "may still have
+    # landed". A wedged dispute holding a claim for a transfer that never
+    # existed is the cost, so the one test a non-number cannot pass is made
+    # here. Infinities go the same way: an unbounded credit is precisely what
+    # the ceiling exists to stop, and it cannot stop one it cannot compare.
+    # The open door is `DISPUTE_CREDITED_FRACTION`, whose NaN survives
+    # `credited_amount_usdc`'s min(max(…)) untouched and is frozen onto the
+    # dispute as the promise it was opened with.
+    if not math.isfinite(amount):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"the bounds compute to {amount} USDC for step {dispute.step_index}, which is not an amount of money",
+            amount,
+        )
     if amount <= 0:
         raise _refuse(
             dispute,
@@ -284,10 +310,19 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
     settles. The dispute stays in `crediting` and a human reconciles it from the
     ERROR line this logs.
 
-    `amount_usdc` must have come from `creditable_for`; the two guards below
+    `amount_usdc` must have come from `creditable_for`; the three guards below
     re-check it rather than trust the caller, so a hand-computed or stale amount
-    cannot reach the settler's key either.
+    cannot reach the settler's key either — and the finiteness one leads, for
+    the reason `creditable_for`'s does: the other two are comparisons, and a
+    comparison cannot refuse a NaN.
     """
+    if not math.isfinite(amount_usdc):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"{amount_usdc} USDC is not an amount of money",
+            amount_usdc,
+        )
     if amount_usdc <= 0:
         raise _refuse(dispute, "nothing_to_credit", f"{amount_usdc:.7f} USDC is not payable", amount_usdc)
     if amount_usdc > settings.max_refund_usdc:
