@@ -638,7 +638,13 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     rating is still on-chain — so the score is still dropped, the paid record
     is still the answer, and the hash is in an ERROR line telling the operator
     to record it, because a later replay will otherwise find nothing on record
-    and report this dispute's own rating as a collision."""
+    and report this dispute's own rating as a collision.
+
+    The line names the whole write, `rating_confirmed` included, for the
+    collision line's reason: an operator writes exactly what it says, and an
+    omitted keyword leaves the flag as it was. `True` here, and only here,
+    because the LEDGER confirmed this one — a timeout that could not be
+    recorded is the sibling case below, and it says `False`."""
     dispute = open_dispute()
     store = dispute_store.get_dispute_store()
     real_append = store.append_status
@@ -658,6 +664,43 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     assert invalidated == [AGENT]  # it landed, whatever the store says
     (logged,) = svc_errors(caplog)
     assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "append_status(dispute_id, 'credited', rating_tx=<the tx above>, rating_confirmed=True)" in logged, (
+        f"the operator was not told the whole write: {logged}"
+    )
+
+
+def test_an_unconfirmed_rating_the_store_would_not_record_is_not_reported_as_confirmed(
+    monkeypatch, ledger, settler, caplog
+) -> None:
+    """The same line after a TIMEOUT, where the flag must read the other way.
+
+    The hash still belongs on the record — it is the evidence the moment the
+    rating lands — but nothing has vouched for it yet, so an operator copying
+    this line must not write `rating_confirmed=True` and tell the buyer a
+    consequence landed that no one has seen land. The next uphold settles it.
+    """
+    dispute = open_dispute()
+    ledger.script = ["timeout"]
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _refuses_the_rating(dispute_id: str, status: Any, **kwargs: Any) -> DisputeRecord | None:
+        if kwargs.get("rating_tx"):
+            raise ConnectionError("the database went away")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _refuses_the_rating)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        paid = uphold(dispute.id)
+
+    assert paid.status == "credited" and paid.rating_tx is None
+    unrecorded = [m for m in svc_errors(caplog) if "could not be recorded" in m]
+    assert len(unrecorded) == 1
+    assert "was TIMEOUT but could not be recorded" in unrecorded[0]
+    assert "rating_confirmed=False)" in unrecorded[0], (
+        f"an unconfirmed rating was written up as confirmed: {unrecorded[0]}"
+    )
 
 
 def test_a_confirmation_the_store_would_not_record_is_left_for_the_next_uphold(
