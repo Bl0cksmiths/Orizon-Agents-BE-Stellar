@@ -125,6 +125,68 @@ def test_charge_that_does_not_settle_is_logged(monkeypatch, caplog):
     ), f"a failed charge was not logged with its context: {msgs}"
 
 
+@pytest.mark.parametrize("status", ["timeout", "", "PENDING"], ids=["timed-out", "missing", "unrecognised"])
+def test_an_unconfirmed_charge_is_logged_as_undisputable_not_as_a_failure(monkeypatch, caplog, status):
+    """`"timeout"` is the client's word for submitted and then lost track of —
+    the same unknown `refund_svc.RefundStatus` names for a transfer, and the
+    charge may settle two ledgers later.
+
+    It used to be logged as a charge that "did not settle", which is precisely
+    the thing nobody knows. The consequence is one-sided: no settlement row is
+    written, so if the charge DOES land the buyer is charged and
+    `issue_dispute_challenge` answers `unknown_job` until the 24-hour window
+    expires. The operator's only route in is this line, so it has to name the
+    job, the payer and the amount, and say the buyer cannot dispute it."""
+    _use_fake_signer(monkeypatch)
+
+    async def fake_invoke(contract_id, function_name, args):
+        assert function_name == "charge"
+        return {"status": status, "hash": "chargehash123"}
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", fake_invoke)
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        assert _settle("tsk_settle_unconfirmed") == ("chargehash123", None, None)
+
+    msgs = [r.getMessage() for r in _errors(caplog)]
+    assert any(
+        "UNCONFIRMED" in m
+        and "MAY STILL SETTLE" in m
+        and "NO WAY TO DISPUTE" in m
+        and "chargehash123" in m
+        and AUTH_ID_HEX in m
+        and PAYER in m
+        and "0.050000" in m
+        for m in msgs
+    ), f"an unconfirmed charge was not logged as one: {msgs}"
+    # Never as a charge that did not settle: that is the claim the code cannot
+    # make, and an operator who reads it stops reconciling.
+    assert not any("did not settle" in m for m in msgs)
+
+    # The buyer is told in their own terms, and the job id — what a dispute is
+    # filed against — stays out of a world-readable trace.
+    lines = [ln.msg for ln in state.traces["tsk_settle_unconfirmed"] if ln.level == "error"]
+    assert any("unconfirmed" in m and "cannot be disputed" in m for m in lines), lines
+
+
+def test_a_rejected_charge_is_still_logged_as_one_that_moved_nothing(monkeypatch, caplog):
+    """The other half of the split. A FAILED charge was rejected by the ledger
+    after simulation passed — nothing moved, there is nothing to reconcile, and
+    calling it unconfirmed would send an operator hunting a payment that does
+    not exist."""
+    _use_fake_signer(monkeypatch)
+
+    async def fake_invoke(contract_id, function_name, args):
+        return {"status": "FAILED", "hash": "chargehash123"}
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", fake_invoke)
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        assert _settle("tsk_settle_rejected") == ("chargehash123", None, None)
+
+    msgs = [r.getMessage() for r in _errors(caplog)]
+    assert any("did not settle" in m for m in msgs)
+    assert not any("UNCONFIRMED" in m for m in msgs)
+
+
 def test_seal_that_does_not_settle_after_a_charge_is_logged(monkeypatch, caplog):
     _use_fake_signer(monkeypatch)
 
