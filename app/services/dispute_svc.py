@@ -1152,8 +1152,12 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     The one window that remains is between a SUCCESS and the `append_status`
     that records it: if the store is unreachable at that instant the money has
     moved and the dispute stays `crediting` with its claim held. That is the
-    safe side of the trade — the claim blocks a second payment, and
-    `refund_svc` has already logged the hash for reconciliation.
+    safe side of the trade — the claim blocks a second payment — and the
+    failure is logged HERE at ERROR with the dispute, the job, the payer, the
+    amount and the hash, which is everything a reconciliation starts from.
+    `refund_svc` logs the landed credit too, but at INFO, which is not a level
+    anyone is watching: a credit that landed and could not be recorded is the
+    highest-stakes line this service writes, so it writes its own.
 
     `on_rating`, when given, is handed the ledger's answer to the rating the
     moment there is one — at most once per call, and never when no rating was
@@ -1285,9 +1289,29 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # step price at today's fraction and by what the charge settled. The
         # receipt prints this beside the refund hash, so it must be the number
         # the hash proves.
-        credited = await store.append_status(
-            dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
-        )
+        try:
+            credited = await store.append_status(
+                dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+            )
+        except Exception:
+            # The money has MOVED and nothing else would say so where anyone
+            # would see it: `credit_refund`'s SUCCESS line is INFO, and an
+            # exception let out from here reaches the caller as a bare 500
+            # carrying no dispute, job, payer, amount or hash at all. Logged
+            # before it is re-raised, because re-raising is still right: the
+            # claim stays held and the dispute stays `crediting`, which is
+            # exactly what a credit that landed and could not be recorded is.
+            logger.error(
+                "dispute %s: %.7f USDC LANDED as tx %s and the credit could NOT be recorded — the dispute"
+                " stays crediting with its claim held; record it by hand (job %s, payer %s)",
+                dispute_id,
+                outcome.amount_usdc,
+                outcome.tx_hash,
+                claimed.job_id_hex,
+                claimed.payer,
+                exc_info=True,
+            )
+            raise
         await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
         # Only now, with the credit landed AND recorded, is the agent rated —
         # and against the settlement the credit was just bounded by, so the
