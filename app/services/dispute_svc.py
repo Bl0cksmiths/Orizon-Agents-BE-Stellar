@@ -915,7 +915,9 @@ async def _rate_credited(
         the rating does, with `rating_confirmed` False, so a receipt holding
         that hash does not claim a consequence nobody has seen land. The next
         `uphold` settles it — REPLAY if it landed, a fresh SUCCESS that
-        replaces the hash if it never did.
+        replaces the hash if it never did. UNLESS this dispute's rating is
+        already confirmed, in which case nothing is recorded at all and the
+        hash is logged: see `_apply_rating`.
       - **FAILED** — nothing landed and nothing is recorded; retryable.
 
     A rating that cannot even be FORMED — `submit_dispute_rating` raises for a
@@ -1092,6 +1094,32 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         return credited
 
     if outcome.status == "TIMEOUT":
+        if credited.rating_confirmed:
+            # The ledger has ALREADY vouched for this dispute's rating, and a
+            # confirmation is monotonic in the store — once TRUE it stays TRUE,
+            # whatever a later transition says. So recording this hash would
+            # leave `rating_confirmed` True beside a transaction nobody has
+            # seen land, and the receipt would render a tick against a rating
+            # that never happened: the premature success 4.06 exists to make
+            # impossible, produced by the two halves of one write moving
+            # apart. They move together here by not moving at all.
+            #
+            # Nothing is lost by declining. The ledger's replay guard makes a
+            # second landing under this derived id impossible, so a submission
+            # made after a confirmed one could only ever have been refused —
+            # it is evidence of nothing, and the rating it would replace is
+            # settled. WARNING rather than ERROR for that reason: the hash is
+            # in the log for anyone reconciling a submission they can see, and
+            # the dispute itself needs no one.
+            _log_rating(
+                logging.WARNING,
+                "unconfirmed and NOT recorded — this dispute's rating is already confirmed on-chain, and a"
+                " hash that has not landed must never replace the one that did",
+                credited,
+                derived,
+                outcome.tx_hash,
+            )
+            return credited
         # Logged before it is recorded, for the reason SUCCESS is.
         _log_rating(
             logging.ERROR,
