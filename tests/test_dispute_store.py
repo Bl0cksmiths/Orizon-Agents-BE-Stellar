@@ -1495,6 +1495,64 @@ def test_the_pool_is_opened_with_min_size_zero(monkeypatch: pytest.MonkeyPatch) 
     assert captured["dsn"] == "postgres://user:pw@example.invalid/db"
 
 
+def test_the_pool_is_opened_with_a_connect_and_a_command_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without these two, an unreachable database stops the service rather
+    than failing its requests. asyncpg bounds a connect at 60 seconds, which
+    is a hang as far as an HTTP request goes, and a COMMAND at nothing at
+    all — a statement that never returns holds its connection for as long as
+    the socket lives, and five of those is the whole pool."""
+    captured: dict[str, Any] = {}
+
+    async def fake_create_pool(**kwargs: Any) -> FakePool:
+        captured.update(kwargs)
+        return FakePool()
+
+    class FakeAsyncpg:
+        create_pool = staticmethod(fake_create_pool)
+
+    monkeypatch.setattr(dispute_store, "_import_asyncpg", lambda: FakeAsyncpg)
+    store = dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db")
+
+    asyncio.run(store.get_dispute("dsp_never"))
+
+    assert captured["timeout"] == dispute_store._POOL_CONNECT_TIMEOUT
+    assert captured["command_timeout"] == dispute_store._POOL_COMMAND_TIMEOUT
+
+
+def test_every_statement_and_every_acquire_names_its_own_bound() -> None:
+    """The pool default is not enough on its own, because `acquire()` does not
+    take one: a call that waits for a free connection waits forever unless it
+    says otherwise. Every path here is walked, and the one that asks for a
+    connection of its own is checked separately — a bound added to the pool
+    and forgotten at a call site is the call that hangs."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> None:
+        await store.record_settlement(a_settlement())
+        await store.get_settlement(JOB)
+        await store.get_settlement_by_task(TASK)
+        opened = await store.open_dispute(a_dispute())
+        await store.get_dispute(opened.id)
+        await store.find_dispute(JOB, 0)
+        await store.list_disputes_for_task(TASK)
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.list_refund_claims()
+        await store.release_refund_claim(opened.id)
+
+    asyncio.run(go())
+
+    # Every statement the store sent, the DDL included, named a bound.
+    assert pool.statements and None not in pool.timeouts
+    assert len(pool.timeouts) == len(pool.statements)
+    # And the one call that takes a connection of its own bounded the wait for
+    # it — longer than a command, so a waiter is never cut off before the
+    # holder it is waiting for has been.
+    assert pool.acquired == [dispute_store._POOL_ACQUIRE_TIMEOUT]
+    assert dispute_store._POOL_ACQUIRE_TIMEOUT > dispute_store._POOL_COMMAND_TIMEOUT
+
+
 def test_a_missing_driver_names_the_fix() -> None:
     """asyncpg is imported at first use, not at module scope, so this suite —
     and any checkout without the driver — imports and collects cleanly."""
