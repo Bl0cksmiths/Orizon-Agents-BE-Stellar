@@ -784,8 +784,11 @@ write recording it on the dispute fails, the service logs
 `dispute rating was SUCCESS but could not be recorded on the dispute — record
 rating_tx by hand` with the hash, and the script prints that hash with the exact
 `append_status` line that records it and asks for it to be run before anything
-is re-run. Do it — a re-run first is refused as a replay with nothing on
-record, and reads as a collision.
+is re-run. That line carries `rating_confirmed=True` beside the hash, for the
+reason above: the ledger has already vouched for this rating, and a hash
+written without the flag leaves the receipt showing it as still in flight. Do
+it — a re-run first is refused as a replay with nothing on record, and reads as
+a collision.
 
 **What it means.** The ledger refused the rating as a replay — it already holds
 a rating for this agent under this dispute's derived id — and this dispute has
@@ -829,8 +832,14 @@ rounded, which is the same settled step price the rating was weighted from, and
 which the script's `--dry-run` prints beside the rating id.
 
 - **It is ours.** Record it, and the dispute is fully resolved:
-  `append_status(dispute_id, "credited", rating_tx=<hash>)`. The next uphold is
-  then answered `already on-chain — kept`, which is the confirmation.
+  `append_status(dispute_id, "credited", rating_tx=<hash>, rating_confirmed=True)`.
+  The flag is not optional here: you have just read the rating **on the
+  ledger**, which is the very evidence that upgrades it, and `append_status`
+  reads a missing keyword as "leave it as recorded" — so without it the
+  dispute keeps `rating_confirmed` null and the buyer's receipt shows the
+  agent's consequence as pending for good. Until both are written the dispute
+  is *not* resolved, whatever the hash says. The next uphold is then answered
+  `already on-chain — kept`, which is the confirmation.
 - **It is not ours, or nothing can be found.** Leave the dispute as it is —
   `credited`, the buyer paid, no `rating_tx` — and treat it as an incident: find
   out what else is writing ratings as the Scorer, or why the dispute's job id
