@@ -751,10 +751,16 @@ class FakePool:
         latest = _newest(self.disputes, dispute_id=dispute_id)
         await asyncio.sleep(0)
         # `finished`: the mutex is dropped by the same statement that ends the
-        # dispute. Being a data-modifying CTE it runs whether or not the INSERT
-        # beside it finds any history to write from, so it is modelled before
-        # the early return rather than after it.
-        if status in ("credited", "rejected"):
+        # dispute. Being a data-modifying CTE it is evaluated whether or not
+        # the INSERT beside it writes a row, so it is modelled before the early
+        # return rather than after it — and it repeats the precondition, from
+        # the same snapshot, because a transition that is refused must leave
+        # the mutex where it is.
+        if (
+            status in ("credited", "rejected")
+            and latest is not None
+            and (expected_status is None or latest["status"] == expected_status)
+        ):
             self.claims.pop(dispute_id, None)
         # `INSERT ... SELECT FROM latest`: with no history there is nothing to
         # select, so nothing is written and nothing comes back.

@@ -504,8 +504,22 @@ RETURNING dispute_id
 # dispute that is already paid — which costs nobody money but makes the
 # reconciliation queue lie, and a queue that lists finished work is a queue
 # operators learn to ignore. The rule lives in the SQL and not in an `if` above
-# the call, so a future transition cannot forget it. It runs even when `latest`
-# is empty, which is harmless: a dispute that does not exist holds no mutex.
+# the call, so a future transition cannot forget it.
+#
+# It is gated on the transition this statement is actually WRITING, and that is
+# load-bearing rather than tidy: a data-modifying CTE is executed whether or
+# not the INSERT beside it produces a row, so conditioned on the new status
+# alone — which is all it was — the DELETE fired for a transition the
+# precondition had just refused. A `reject` computed from a stale read of an
+# `open` dispute is refused by the precondition and yet still dropped the claim
+# row protecting a transfer that was already on the network; the buyer waiting
+# on it then vanished from `list_refund_claims()`, which is the only queue a
+# human reconciles from, and another payer could take the claim and sign a
+# second transfer. The EXISTS repeats the precondition so the mutex moves only
+# when the trail does. It also stops firing for a dispute that has no history
+# at all, which used to drop a stray claim silently — this table blocks rather
+# than forgets, and a row nobody can account for is exactly the row an operator
+# has to see.
 _APPEND_STATUS_SQL = """
 WITH latest AS (
     SELECT *
@@ -516,7 +530,13 @@ WITH latest AS (
 ),
 finished AS (
     DELETE FROM refund_claims
-    WHERE dispute_id = $1 AND $2 IN ('credited', 'rejected')
+    WHERE dispute_id = $1
+      AND $2 IN ('credited', 'rejected')
+      AND EXISTS (
+          SELECT 1
+          FROM latest
+          WHERE $10::text IS NULL OR latest.status = $10::text
+      )
     RETURNING dispute_id
 )
 INSERT INTO dispute_events (
@@ -1010,7 +1030,11 @@ class InMemoryDisputeStore:
         if status in ("credited", "rejected"):
             # A dispute that has finished is not mid-payout. Postgres drops the
             # mutex inside the statement that writes this row; here there is no
-            # statement to be inside, but the rule is the same one.
+            # statement to be inside, but the rule is the same one — including
+            # that a REFUSED transition must not touch the mutex, which this
+            # side gets from the early return above rather than from a repeated
+            # condition, where the SQL has to spell it out because its DELETE
+            # is a CTE that runs whatever the INSERT beside it does.
             self._refund_claims.pop(dispute_id, None)
         return updated
 
