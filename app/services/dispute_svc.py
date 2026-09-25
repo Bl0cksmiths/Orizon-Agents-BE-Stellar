@@ -57,6 +57,7 @@ from . import dispute_rating, rating_writer, refund_svc, reputation_svc
 from . import external_binding as eb
 from .dispute_store import (
     DisputeRecord,
+    DisputeStatus,
     DuplicateDisputeError,
     SettlementRecord,
     get_dispute_store,
@@ -550,6 +551,29 @@ def _refuse_credit(
     return DisputeError(code, message, status_code)
 
 
+def _recorded(written: DisputeRecord | None, dispute_id: str, status: DisputeStatus) -> DisputeRecord:
+    """The record an UNCONDITIONAL `append_status` wrote.
+
+    `append_status` answers with an optional because a CONDITIONAL append — one
+    given an `expected_status` — can lose its compare-and-set. An append made
+    without one cannot: it has no precondition to fail, so None from one means
+    the store broke its own contract, not that this module lost a race it
+    ought to have reasoned about. The two are kept apart deliberately, because
+    treating a contract breach as a lost race is how a real one gets absorbed.
+
+    Raised rather than narrowed away with an `assert`, on both counts that
+    matter here. Every one of these calls is on the money path, where carrying
+    on with the record the caller already held would answer somebody with a
+    dispute the store does not hold. And `python -O` deletes an assert, which
+    would leave the one form of this check that costs nothing in production as
+    the one that is not there. Each call site already sits inside a handler
+    that knows what its own failed write means, and this is what reaches it.
+    """
+    if written is None:
+        raise RuntimeError(f"the dispute store refused an unconditional {status!r} append for dispute {dispute_id}")
+    return written
+
+
 async def _load_for_adjudication(dispute_id: str) -> DisputeRecord:
     """The dispute an adjudicator named, or `unknown_dispute` (404).
 
@@ -1014,7 +1038,11 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # must be in the log and the score fresh even if the write fails.
         _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
         reputation_svc.invalidate_rep(credited.agent_id)
-        rated = await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True)
+        rated = _recorded(
+            await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True),
+            credited.id,
+            "credited",
+        )
         await _note_rating_on_workflow(rated, outcome)
         return rated
 
@@ -1030,7 +1058,9 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             # before 4.06 kept whether it landed: either way the ledger has now
             # vouched for the hash on record, and only now may the receipt say
             # the agent was rated.
-            return await store.append_status(credited.id, "credited", rating_confirmed=True)
+            return _recorded(
+                await store.append_status(credited.id, "credited", rating_confirmed=True), credited.id, "credited"
+            )
         _log_rating(
             logging.ERROR,
             "COLLISION — the ledger already holds a rating under this dispute's derived id and this"
@@ -1056,7 +1086,11 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             # Evidence, and explicitly NOT confirmation: the hash is the
             # rating's the moment it lands, but until the ledger vouches for it
             # the receipt must not say the agent was rated.
-            return await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=False)
+            return _recorded(
+                await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=False),
+                credited.id,
+                "credited",
+            )
         return credited
 
     # FAILED — and, deliberately, anything else: for a rating the safe
@@ -1371,8 +1405,12 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # receipt prints this beside the refund hash, so it must be the number
         # the hash proves.
         try:
-            credited = await store.append_status(
-                dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+            credited = _recorded(
+                await store.append_status(
+                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+                ),
+                dispute_id,
+                "credited",
             )
         except Exception:
             # The money has MOVED and nothing else would say so where anyone
@@ -1423,7 +1461,28 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # the first submission settles. The in-flight hash is recorded on the
     # dispute so the reconciliation starts from the record rather than from a
     # log search.
-    await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash)
+    try:
+        _recorded(
+            await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash), dispute_id, "crediting"
+        )
+    except Exception:
+        # Only the HASH was lost. `claim_refund` already moved this dispute to
+        # `crediting` and the claim is still held, so both of the things that
+        # stop a second transfer are in place whatever happened here. The
+        # refusal below is therefore still the right answer and still carries
+        # the hash, and raising instead would answer a 500 that says strictly
+        # less than the 504 does. So this logs what the record will not say,
+        # and the caller is answered properly.
+        logger.error(
+            "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
+            " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
+            dispute_id,
+            outcome.tx_hash,
+            claimed.job_id_hex,
+            claimed.payer,
+            outcome.amount_usdc,
+            exc_info=True,
+        )
     raise _refuse_credit(
         claimed,
         "refund_unconfirmed",
