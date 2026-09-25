@@ -47,4 +47,13 @@ async def require_task_read(
     if expected is None or supplied is None or not _matches(supplied, expected):
         # 404, not 403: a wrong token must be indistinguishable from a
         # nonexistent task, or ids become enumerable.
-        raise HTTPException(404, f"unknown task: {task_id}")
+        #
+        # A bare snake token, never the id. `main.http_exception_handler`
+        # promotes a snake_case detail to `error.code` and derives the message
+        # from it; an interpolated id is not a snake token, so it fell through
+        # to the `not_found` fallback and the handler copied the CALLER'S OWN
+        # TEXT into `error.message`. This dependency runs before the route's
+        # own `max_length`, so that text was unbounded as well as reflected.
+        # Nothing is lost: the id is in the path the caller sent, in the access
+        # log line, and joinable to both through the request id.
+        raise HTTPException(404, "unknown_task")
