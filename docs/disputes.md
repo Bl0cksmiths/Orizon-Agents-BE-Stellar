@@ -741,8 +741,19 @@ and the amount. Search it for the dispute id before touching anything.
 **Then settle the record to match the chain**, and only then:
 
 - **It succeeded.** The buyer has been credited. Close the dispute by recording
-  what landed — `append_status(dispute_id, "credited", refund_tx=<hash>)`.
-  Ordering the payout again instead would credit them a second time.
+  what landed — `append_status(dispute_id, "credited", refund_tx=<hash>,
+  credited_usdc=<the amount the transfer moved>)`. **Both fields.**
+  `append_status` reads a missing keyword as "leave it as recorded", so a write
+  without `credited_usdc` leaves the dispute `credited` with a null amount for
+  good, and the buyer's receipt has nothing to show but the promise frozen at
+  opening time — a figure that need not match the explorer. Read the amount off
+  the transaction, never off an estimate.
+
+  **Then uphold it once more**, and only then. A dispute recorded `credited` by
+  hand carries its refund hash and *no rating*, and nothing in that write can
+  produce one; upholding a `credited` dispute signs no transfer and writes the
+  rating alone, so it cannot pay the buyer twice. Ordering the payout again by
+  releasing the claim first is the thing that would.
 - **It failed, or the hash is on no explorer and the payer's balance never
   moved.** Nothing moved, so `release_refund_claim(dispute_id)` returns the
   dispute to `upheld`, and only then may the payout be ordered again.
