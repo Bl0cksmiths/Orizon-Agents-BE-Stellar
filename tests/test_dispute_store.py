@@ -634,7 +634,18 @@ class FakePool:
         guarantee no database gives: at READ COMMITTED two concurrent
         statements take their own snapshots, and this one blocks on nothing.
         """
-        dispute_id, status, refund_tx, rating_tx, note, resolved_at, now, credited_usdc, rating_confirmed = args
+        (
+            dispute_id,
+            status,
+            refund_tx,
+            rating_tx,
+            note,
+            resolved_at,
+            now,
+            credited_usdc,
+            rating_confirmed,
+            expected_status,
+        ) = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
         await asyncio.sleep(0)
         # `finished`: the mutex is dropped by the same statement that ends the
@@ -646,6 +657,11 @@ class FakePool:
         # `INSERT ... SELECT FROM latest`: with no history there is nothing to
         # select, so nothing is written and nothing comes back.
         if latest is None:
+            return None
+        # `WHERE $10::text IS NULL OR latest.status = $10::text` — the
+        # precondition, read from the SAME snapshot the row would be copied
+        # from, which is why it is checked on this side of the sleep.
+        if expected_status is not None and latest["status"] != expected_status:
             return None
         row = latest | {
             "status": status,

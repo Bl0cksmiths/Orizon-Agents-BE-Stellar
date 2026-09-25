@@ -481,6 +481,22 @@ RETURNING dispute_id
 # dispute's opening row in the partial unique index, and every resolution in
 # the system would fail.
 #
+# `expected_status` ($10) is the PRECONDITION, and it is what makes a
+# transition safe to compute from a read taken a round trip earlier. A caller
+# reads the dispute, decides, and appends; between those two the dispute can be
+# claimed, credited or adjudicated by somebody else, and an unconditional
+# append writes the stale decision anyway — dragging `credited` back to
+# `upheld`, where it is claimed and paid a SECOND time out of the platform
+# wallet, or `rejected` to `upheld`, paying a dispute that was adjudicated
+# against the buyer's claim. Naming the status the decision was made from
+# refuses the write instead: the INSERT selects from `latest` only while its
+# status still matches, so nothing is written and RETURNING comes back empty.
+#
+# NULL means unconditional, and that is a decision rather than a default nobody
+# made. The reconciliation writes in docs/disputes.md are made by a person who
+# has read the chain and is correcting the record ON PURPOSE — the one caller
+# whose write has to land whatever the dispute currently says.
+#
 # `finished` drops the refund mutex when this transition ends the dispute, in
 # the same statement rather than in a second call after it. A dispute that has
 # been credited or rejected is not mid-payout, and a claim row that outlived
@@ -520,6 +536,7 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        COALESCE($9::boolean, latest.rating_confirmed),
        FALSE
 FROM latest
+WHERE $10::text IS NULL OR latest.status = $10::text
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
           credited_usdc, updated_at, rating_confirmed
@@ -853,7 +870,8 @@ class DisputeStore(Protocol):
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
-    ) -> DisputeRecord: ...
+        expected_status: DisputeStatus | None = None,
+    ) -> DisputeRecord | None: ...
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
 
@@ -948,10 +966,28 @@ class InMemoryDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
-    ) -> DisputeRecord:
+        expected_status: DisputeStatus | None = None,
+    ) -> DisputeRecord | None:
+        """Append the transition and return the dispute, or None if refused.
+
+        `expected_status` is the precondition _APPEND_STATUS_SQL states as a
+        WHERE clause, and it means the same here: name the status the decision
+        was computed from and a dispute that has moved since refuses the write
+        rather than taking it. None at both ends — no precondition asked for,
+        and no transition written — never overlap, because an unconditional
+        append over a dispute that exists always lands.
+
+        KeyError stays what it always was: an id this store has never held is a
+        bug in the caller, not a dispute that moved underneath one.
+        """
         current = self._disputes.get(dispute_id)
         if current is None:
             raise KeyError(dispute_id)
+        if expected_status is not None and current.status != expected_status:
+            # The decision was made against a dispute that no longer reads that
+            # way. Refusing is the whole point: what the caller was about to
+            # record is a verdict on a state somebody else has already left.
+            return None
         # One reading of the clock for both timestamps, as _APPEND_STATUS_SQL
         # reads $7 once: the transition that first resolves a dispute must
         # record the same moment as its resolution and as its last change.
@@ -1300,7 +1336,8 @@ class PostgresDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
-    ) -> DisputeRecord:
+        expected_status: DisputeStatus | None = None,
+    ) -> DisputeRecord | None:
         """Append the transition and return the dispute as it now stands.
 
         Returning the updated record is what lets 4.03 and 4.04 credit or rate a
@@ -1314,10 +1351,19 @@ class PostgresDisputeStore:
         the answer it is. `updated_at` is not a keyword at all — every row this
         appends is stamped with the moment it was appended.
 
-        KeyError for an unknown id, matching InMemoryDisputeStore: the INSERT
-        selects from the dispute's own history, so no history means no row
-        written and nothing returned. A dispute id that does not exist is a bug
-        in the caller, not a state this store can be in.
+        `expected_status` is the precondition, checked inside the statement
+        that writes: the transition lands only while the dispute still reads
+        the status the decision was computed from, and None comes back when it
+        does not. Callers that adjudicate pass the status they read; the
+        reconciliation writes of docs/disputes.md pass nothing and land
+        unconditionally, which is what they are for.
+
+        KeyError for an unknown id, matching InMemoryDisputeStore, and it is
+        kept apart from the refusal on purpose: RETURNING is empty for both a
+        dispute with no history and a dispute that has moved, so the id is read
+        back to tell those two apart. A dispute id that does not exist is a bug
+        in the caller; one that moved is the concurrency this precondition
+        exists to answer, and a caller cannot handle them the same way.
         """
         pool = await self._ready_pool()
         # Our own clock, in epoch seconds, for the reason every other timestamp
@@ -1341,8 +1387,15 @@ class PostgresDisputeStore:
             now,
             credited_usdc,
             rating_confirmed,
+            expected_status,
         )
         if row is None:
+            # Empty RETURNING: either the precondition refused the write or
+            # this dispute has no history at all. Only the second is a caller
+            # bug, so the two are separated by a read rather than collapsed —
+            # and the read is paid for only on the path that already failed.
+            if expected_status is not None and await self.get_dispute(dispute_id) is not None:
+                return None
             raise KeyError(dispute_id)
         return self._to_dispute(row)
 
