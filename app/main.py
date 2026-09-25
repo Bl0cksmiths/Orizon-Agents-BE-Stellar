@@ -411,7 +411,15 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         return Response(status_code=exc.status_code, headers=headers)
     detail = exc.detail
     if isinstance(detail, str) and _SNAKE_TOKEN.fullmatch(detail):
-        code, message = detail, detail.replace("_", " ")
+        # The derived message — the token with its underscores swapped for
+        # spaces — unless the raiser attached one of its own. A
+        # `CodedHTTPException` carries a sentence that says what the code
+        # cannot (the time a window closed, what to do next), and is raised
+        # only where that sentence has been judged safe to disclose to
+        # whoever is being refused. The code is unaffected either way, so no
+        # client's mapping changes.
+        code = detail
+        message = getattr(exc, "message", None) or detail.replace("_", " ")
     else:
         try:
             code = HTTPStatus(exc.status_code).phrase.lower().replace(" ", "_")
