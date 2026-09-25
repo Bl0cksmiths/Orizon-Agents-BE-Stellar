@@ -91,3 +91,33 @@ def test_bus_unsubscribe_removes_empty_key():
     assert task_id in bus._subs
     bus.unsubscribe(task_id, q)
     assert task_id not in bus._subs
+
+
+# `tests/test_tasks_api.py` carries the full reasoning. These two matter most
+# of the four: with TASK_AUTH_REQUIRED off — the shipped default, and how
+# production runs — they are world-readable, so the caller whose text was
+# being reflected needed no credential at all. No slash in it, or the router
+# answers its own 404 before the handler runs.
+HOSTILE_TASK_ID = "A" * 4096 + "<script>alert(1)"
+
+
+def test_an_unknown_trace_is_refused_without_echoing_the_id(client):
+    r = client.get(f"/api/trace/{HOSTILE_TASK_ID}")
+
+    assert r.status_code == 404
+    assert r.json()["error"] == {
+        "code": "unknown_task",
+        "message": "unknown task",
+        "request_id": r.headers["x-request-id"],
+    }
+    assert HOSTILE_TASK_ID not in r.text
+
+
+def test_an_unknown_trace_stream_is_refused_without_echoing_the_id(client):
+    # The SSE route refuses before any stream is opened, so the 404 is an
+    # ordinary JSON envelope and the same rule applies to it.
+    r = client.get(f"/api/trace/{HOSTILE_TASK_ID}/stream")
+
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "unknown_task"
+    assert HOSTILE_TASK_ID not in r.text

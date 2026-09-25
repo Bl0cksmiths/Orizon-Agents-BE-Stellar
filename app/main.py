@@ -31,8 +31,14 @@ from .routers import agents, binding, disputes, flow, metrics, orchestrator, pay
 # `from .routers import health` module import at call time.
 from .routers.health import HealthResponse, health_payload
 from .routers.health import router as health_router
+
+# ErrorEnvelope (and the ErrorBody it nests) live in security.py, not here, so
+# a router can name them in its own `responses=` without importing this module
+# — which imports the routers. Re-exported by this import, so
+# `main.ErrorEnvelope` still resolves for anything that reads it from here.
 from .security import (
     BodyLimitMiddleware,
+    ErrorEnvelope,
     RateLimitMiddleware,
     RequestContextMiddleware,
     RequestIdLogFilter,
@@ -44,6 +50,7 @@ from .services import execution_svc, rating_writer, registry_sync, reputation_sv
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import close_dispute_store
+from .services.external_binding import ChallengeBudgetExhausted
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -365,22 +372,6 @@ app.add_middleware(RequestContextMiddleware)
 _SNAKE_TOKEN = re.compile(r"[a-z][a-z0-9]*(_[a-z0-9]+)*")
 
 
-class ErrorBody(BaseModel):
-    """Structured half of the unified error envelope."""
-
-    code: str
-    message: str
-    request_id: str
-
-
-class ErrorEnvelope(BaseModel):
-    """Every error response body: the legacy FastAPI "detail" (string or
-    validation-error list) plus the structured "error" object."""
-
-    detail: Any
-    error: ErrorBody
-
-
 # Merged into every routed operation via include_router below, so the docs
 # show the envelope on the error statuses any endpoint can produce.
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -410,7 +401,15 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         return Response(status_code=exc.status_code, headers=headers)
     detail = exc.detail
     if isinstance(detail, str) and _SNAKE_TOKEN.fullmatch(detail):
-        code, message = detail, detail.replace("_", " ")
+        # The derived message — the token with its underscores swapped for
+        # spaces — unless the raiser attached one of its own. A
+        # `CodedHTTPException` carries a sentence that says what the code
+        # cannot (the time a window closed, what to do next), and is raised
+        # only where that sentence has been judged safe to disclose to
+        # whoever is being refused. The code is unaffected either way, so no
+        # client's mapping changes.
+        code = detail
+        message = getattr(exc, "message", None) or detail.replace("_", " ")
     else:
         try:
             code = HTTPStatus(exc.status_code).phrase.lower().replace(" ", "_")
@@ -421,6 +420,34 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         status_code=exc.status_code,
         content=_error_envelope(jsonable_encoder(detail), code, message),
         headers=headers,
+    )
+
+
+@app.exception_handler(ChallengeBudgetExhausted)
+async def challenge_budget_handler(request: Request, exc: ChallengeBudgetExhausted) -> JSONResponse:
+    """A challenge mint refused for want of room, in the unified envelope.
+
+    Handled here rather than in each of the three mint routes, because it is
+    one answer and `routers/binding.py` and `routers/disputes.py` would
+    otherwise both need to learn a service exception in order to give it. This
+    module already owns every error body; this is one more.
+
+    503, not 429: the caller being refused is usually not the caller who
+    filled the budget, and nothing about their own rate is the problem. It is
+    a capacity state of the service, it clears on its own as challenges expire
+    (five minutes at the outside), and the honest thing to say is "not now".
+
+    The purpose is in the code so an operator reading a log can tell which
+    budget is under pressure. It is one of `CHALLENGE_BUDGETS`' own keys and
+    never caller text, so no request can shape the token a client branches on.
+    """
+    return JSONResponse(
+        status_code=503,
+        content=_error_envelope(
+            f"challenge_capacity_{exc.purpose}",
+            f"challenge_capacity_{exc.purpose}",
+            f"no {exc.purpose} challenge capacity right now — ask again shortly",
+        ),
     )
 
 

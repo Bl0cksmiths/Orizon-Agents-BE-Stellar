@@ -212,3 +212,66 @@ def test_adjudication_route_is_refused_while_the_refund_switch_is_off(
 
     assert resp.status_code == 503, f"{method.upper()} {path} answered {resp.status_code} with DISPUTE_REFUNDS off"
     assert resp.json()["error"]["code"] == "dispute_refunds_disabled"
+
+
+# ── the one answer that precedes the guard ──────────────────────
+
+
+def test_an_undecodable_body_is_answered_before_the_guard_and_tells_nobody_anything(
+    client, hermetic_settings, monkeypatch
+) -> None:
+    """Pinned as a DECISION, not discovered as a bug.
+
+    FastAPI decodes a request body before it solves dependencies, so a body
+    that is not JSON at all reaches a 422 ahead of `require_adjudicator` and
+    an anonymous caller sees 422 where they would otherwise see 503. Left as
+    it is, because the 422 discloses strictly less than the guarded answer
+    beside it — asserted here rather than argued:
+
+      * a well-formed anonymous POST already answers 503, and a path that does
+        not exist answers 404, so the route's existence is public either way;
+      * a well-formed body with no `note` is 503 as well, so the model is
+        validated after the guard like everything else and the 422 says only
+        "this endpoint parses JSON";
+      * nothing runs on any of these paths — no store read, no signature, no
+        money.
+
+    Closing it would mean taking the body as a raw `Request` and parsing it by
+    hand, losing the declared model that makes the second bullet true and the
+    request schema in the published spec. `routers/disputes.reject_dispute`
+    carries the whole argument. If this test starts failing because the route
+    now answers 401/503, that is an improvement and this test should go — it
+    exists to stop the behaviour being *mistaken for an oversight*, not to
+    keep it.
+    """
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+    hermetic_settings.api_key = "operator-secret-key"
+    # `/reject` alone: it is the only one of the pair that declares a body, so
+    # it is the only one with a decode to happen before the dependency.
+    reject = "/api/disputes/dsp_0000000000000000/reject"
+
+    undecodable = client.post(reject, content="{not json", headers={"content-type": "application/json"})
+    well_formed = client.post(reject, json={"note": "a note"})
+    no_note = client.post(reject, json={})
+    absent_route = client.post("/api/disputes/dsp_0000000000000000/revoke", json={"note": "a note"})
+    # `/uphold` takes no body at all, so the same request never reaches a
+    # decode and is refused by the guard — the contrast that shows this is
+    # about the declared model and not about the pair.
+    uphold_undecodable = client.post(
+        "/api/disputes/dsp_0000000000000000/uphold",
+        content="{not json",
+        headers={"content-type": "application/json"},
+    )
+
+    assert undecodable.status_code == 422
+    assert uphold_undecodable.status_code == 503
+    assert undecodable.json()["error"]["code"] == "validation_error"
+    # What the 422 would supposedly reveal, revealed anyway by the guard.
+    assert well_formed.status_code == 503
+    assert well_formed.json()["error"]["code"] == "dispute_refunds_disabled"
+    # And the schema is NOT revealed: a decodable body with the field missing
+    # is refused by the guard, not by the model.
+    assert no_note.status_code == 503
+    # A route that does not exist still answers 404, so nothing above is the
+    # only way to tell a real path from a made-up one.
+    assert absent_route.status_code == 404

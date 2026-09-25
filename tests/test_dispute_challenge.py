@@ -274,37 +274,136 @@ def test_the_ttl_is_the_time_to_sign_not_the_time_to_dispute() -> None:
     assert eb.CHALLENGE_TTL_SECONDS < 86_400
 
 
-def test_dispute_challenges_share_the_one_bounded_table() -> None:
+@pytest.fixture()
+def empty_table():
+    """An empty challenge table, restored afterwards."""
+    saved = eb._challenges.copy()
+    eb._challenges.clear()
+    eb._exhausted.clear()
+    try:
+        yield eb._challenges
+    finally:
+        eb._challenges.clear()
+        eb._challenges.update(saved)
+        eb._exhausted.clear()
+
+
+def test_dispute_challenges_share_the_one_bounded_table(empty_table) -> None:
     """The reuse, asserted. The cap that protects a 512 MB instance from the
     public bind route has to cover the public dispute route too — and it does
     because there is one table rather than three. A caller who invents job ids
-    (or steps) cannot grow it past the cap."""
-    saved = eb._challenges.copy()
-    eb._challenges.clear()
-    try:
-        for i in range(eb.MAX_CHALLENGES + 20):
-            issue_dispute_challenge(f"flood_{i}", i)
-        assert len(eb._challenges) == eb.MAX_CHALLENGES
-        assert ("flood_0", dispute_subject(0)) not in eb._challenges
-        last = eb.MAX_CHALLENGES + 19
-        assert (f"flood_{last}", dispute_subject(last)) in eb._challenges
-    finally:
-        eb._challenges.clear()
-        eb._challenges.update(saved)
+    (or steps) cannot grow it past the DISPUTE budget, and the budgets sum to
+    the table's own cap."""
+    for i in range(eb.CHALLENGE_BUDGETS["dispute"]):
+        issue_dispute_challenge(f"flood_{i}", i)
+
+    assert len(empty_table) == eb.CHALLENGE_BUDGETS["dispute"]
+    assert eb.CHALLENGE_BUDGETS["dispute"] <= eb.MAX_CHALLENGES == sum(eb.CHALLENGE_BUDGETS.values())
+    # One past the budget is REFUSED, not admitted over somebody's live nonce.
+    with pytest.raises(eb.ChallengeBudgetExhausted) as info:
+        issue_dispute_challenge("flood_one_too_many", 0)
+    assert info.value.purpose == "dispute"
+    assert len(empty_table) == eb.CHALLENGE_BUDGETS["dispute"]
+    # And the first buyer in still has theirs.
+    assert ("flood_0", dispute_subject(0)) in empty_table
 
 
-def test_one_job_cannot_flood_the_table_past_the_cap_by_inventing_steps() -> None:
+def test_one_job_cannot_flood_the_table_past_the_cap_by_inventing_steps(empty_table) -> None:
     """The step is caller-supplied, so the per-step key must not be a way around
-    the cap. It is not: the cap is on the table, not on the scope."""
-    saved = eb._challenges.copy()
-    eb._challenges.clear()
-    try:
-        for step in range(eb.MAX_CHALLENGES + 20):
-            issue_dispute_challenge("job_flood", step)
-        assert len(eb._challenges) == eb.MAX_CHALLENGES
-    finally:
-        eb._challenges.clear()
-        eb._challenges.update(saved)
+    the budget. It is not: the budget is on the purpose, not on the job."""
+    for step in range(eb.CHALLENGE_BUDGETS["dispute"]):
+        issue_dispute_challenge("job_flood", step)
+
+    with pytest.raises(eb.ChallengeBudgetExhausted):
+        issue_dispute_challenge("job_flood", eb.CHALLENGE_BUDGETS["dispute"])
+    assert len(empty_table) == eb.CHALLENGE_BUDGETS["dispute"]
+
+
+# ── nobody can take a live challenge away from anybody ──────────
+# The property that actually matters, and the one whose absence let the old
+# fallback ship. The table used to evict the oldest entry OVERALL once nothing
+# in it had expired, so filling it was a way to cancel other people's
+# outstanding nonces — across purposes, because the budget was shared.
+
+
+def test_a_bind_flood_cannot_evict_a_buyers_live_dispute_challenge(empty_table) -> None:
+    """The attacker's path, at the seam it runs through.
+
+    A bind key is (agent_id, endpoint_url) and the URL is caller-supplied, so
+    one public agent id and as many URLs as an attacker cares to invent used to
+    fill the single shared table and displace whatever was oldest — including a
+    buyer's live dispute challenge, which came back `challenge_expired` when
+    they finally submitted their signed dispute. Inside a 24-hour window, for
+    the whole of it.
+    """
+    victim_nonce, _ = issue_dispute_challenge("victims_job", 0)
+    assert eb.dispute_challenge_is_live("victims_job", 0, victim_nonce) is True
+
+    refused = 0
+    for i in range(eb.MAX_CHALLENGES * 2):
+        try:
+            eb.issue_challenge("public_agent", f"https://attacker{i}.example.com/hook")
+        except eb.ChallengeBudgetExhausted:
+            refused += 1
+
+    # The flood was stopped by its OWN budget, and stopped well short of the
+    # table's cap — so it never had the dispute budget's slots to spend.
+    assert refused > 0
+    assert len(empty_table) <= eb.CHALLENGE_BUDGETS["bind"] + eb.CHALLENGE_BUDGETS["dispute"]
+    # The whole point: the buyer's challenge is untouched and still signable.
+    assert eb.dispute_challenge_is_live("victims_job", 0, victim_nonce) is True
+
+
+def test_a_dispute_flood_cannot_evict_another_buyers_live_challenge(empty_table) -> None:
+    """And within the one purpose, where there is no other budget to hide
+    behind. A third party who fills the dispute budget is refused; the buyer
+    who was already holding a challenge keeps it."""
+    victim_nonce, _ = issue_dispute_challenge("victims_job", 0)
+
+    for i in range(eb.MAX_CHALLENGES * 2):
+        try:
+            issue_dispute_challenge(f"attacker_job_{i}", 0)
+        except eb.ChallengeBudgetExhausted:
+            break
+    else:  # pragma: no cover - only reached if the budget stopped bounding
+        raise AssertionError("the dispute budget never refused a mint")
+
+    assert eb.dispute_challenge_is_live("victims_job", 0, victim_nonce) is True
+
+
+def test_a_flood_of_one_purpose_leaves_the_others_room(empty_table) -> None:
+    """Partitioned, not merely bounded. A full bind budget must not be able to
+    stop an unbind or a dispute being minted at all — one scope starving the
+    others is the same defect as one scope evicting them, a step later."""
+    for i in range(eb.MAX_CHALLENGES * 2):
+        try:
+            eb.issue_challenge("public_agent", f"https://attacker{i}.example.com/hook")
+        except eb.ChallengeBudgetExhausted:
+            break
+
+    # Both still mint, with no exception and a real nonce.
+    unbind_nonce, _ = eb.issue_unbind_challenge("honest_operator")
+    dispute_nonce, _ = issue_dispute_challenge("honest_buyers_job", 0)
+
+    assert len(unbind_nonce) == len(dispute_nonce) == 32
+    assert eb.dispute_challenge_is_live("honest_buyers_job", 0, dispute_nonce) is True
+
+
+def test_an_expired_slot_is_reclaimed_before_anything_is_refused(empty_table) -> None:
+    """The refusal is the last resort, not the first answer. A budget full of
+    lapsed challenges is swept and the new mint goes through — which is why a
+    five-minute TTL makes exhaustion rare rather than routine."""
+    for i in range(eb.CHALLENGE_BUDGETS["dispute"]):
+        issue_dispute_challenge(f"lapsed_{i}", 0, ttl_seconds=-1)
+    live_nonce, _ = issue_dispute_challenge("still_signing", 0)
+
+    fresh_nonce, _ = issue_dispute_challenge("newcomer", 0)
+
+    assert eb.dispute_challenge_is_live("newcomer", 0, fresh_nonce) is True
+    # The one live entry was the OLDEST thing a naive sweep would have reached
+    # for first; it is still here.
+    assert eb.dispute_challenge_is_live("still_signing", 0, live_nonce) is True
+    assert ("lapsed_0", dispute_subject(0)) not in empty_table
 
 
 # ── the liveness predicate the dispute API needs ────────────────

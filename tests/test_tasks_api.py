@@ -188,3 +188,37 @@ def test_humanize_age_bands():
     assert humanize_age(3_599.0) == "59m ago"
     assert humanize_age(86_399.0) == "23h ago"
     assert humanize_age(200_000.0) == "2d ago"
+
+
+# A task id no route should ever echo back: long enough to show the reflection
+# was unbounded, and shaped so it would be obvious in a log or a rendered
+# error. No slash — a slash adds a path segment and the router answers its own
+# 404 before the handler runs.
+HOSTILE_TASK_ID = "A" * 4096 + "<script>alert(1)"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/tasks/{task_id}", "/api/tasks/{task_id}/artifact"],
+    ids=["status", "artifact"],
+)
+def test_an_unknown_task_is_refused_without_echoing_the_id(client, path):
+    """Both task reads used to copy the caller's own text into `error.message`.
+
+    `main.http_exception_handler` promotes a snake_case detail to `error.code`
+    and derives the message from it. An interpolated id is not a snake token,
+    so it fell through to the `not_found` fallback and the handler used the
+    detail — the caller's string — as the message. Neither route bounds
+    `task_id`, so it was unbounded as well as reflected.
+    """
+    r = client.get(path.format(task_id=HOSTILE_TASK_ID))
+
+    assert r.status_code == 404
+    assert r.json()["error"] == {
+        "code": "unknown_task",
+        "message": "unknown task",
+        "request_id": r.headers["x-request-id"],
+    }
+    # Not under `detail` either: the id is already in the path the caller
+    # sent and in the access log, joined to both by that request id.
+    assert HOSTILE_TASK_ID not in r.text

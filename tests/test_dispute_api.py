@@ -37,6 +37,7 @@ import pytest
 from app.config import settings
 from app.services import dispute_svc, refund_svc
 from app.services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep, steps_from_json
+from app.state import state
 
 JOB_ID = "1234567890abcdef1234567890abcdef"
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -128,7 +129,9 @@ def test_challenge_returns_the_message_the_wallet_must_sign(client, challenge_st
     assert r.status_code == 200
     body = r.json()
     assert body["nonce"] == NONCE
-    assert body["expires_at"] == 1_700_000_300.0
+    # Coarsened to the minute, and never past the real expiry — see
+    # `_coarse_expiry`. The nonce itself is exact; only the clock is blurred.
+    assert body["expires_at"] == 1_700_000_280.0
     # Derived from the service, not assembled in the router — so the domain
     # separator and the field order can only ever have one definition.
     assert body["message"] == dispute_svc.dispute_message(JOB_ID, 1, NONCE)
@@ -402,6 +405,25 @@ def reads(monkeypatch, *, dispute: DisputeRecord | None = None) -> None:
     monkeypatch.setattr(dispute_svc, "get_dispute", _get)
 
 
+# The per-task read token `execute` mints and `lib/task-tokens.ts` remembers.
+# Holding it is what buys a caller the buyer's free text on either read route.
+TASK_TOKEN = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+PROVEN = {"X-Task-Token": TASK_TOKEN}
+
+
+@pytest.fixture()
+def proved():
+    """Mint `task-1`'s read token, so a test can present it.
+
+    Straight into the state the dependency reads, rather than through a real
+    execute: these tests pin the wire, and a workflow run would drag the whole
+    orchestrator in to produce one string.
+    """
+    state.task_tokens["task-1"] = TASK_TOKEN
+    yield PROVEN
+    state.task_tokens.pop("task-1", None)
+
+
 def lists(monkeypatch, *, found: SettlementRecord | None, disputes: tuple[DisputeRecord, ...]) -> None:
     """Point `GET /api/tasks/{id}/disputes` at one settlement and its disputes."""
 
@@ -434,7 +456,7 @@ def test_reading_an_unknown_dispute_is_404(client, monkeypatch):
     assert r.json()["error"]["code"] == "unknown_dispute"
 
 
-def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch):
+def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch, proved):
     # Pinned whole, for the settlement test's reason: the frontend's types are
     # frozen to exactly this shape, so a field renamed, dropped or added here
     # breaks them. The credited amount deliberately differs from the
@@ -455,7 +477,7 @@ def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch):
         ),
     )
 
-    r = client.get("/api/disputes/dsp_00112233445566778")
+    r = client.get("/api/disputes/dsp_00112233445566778", headers=proved)
 
     assert r.status_code == 200, r.text
     assert r.json() == {
@@ -485,10 +507,10 @@ def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch):
 ADJUDICATOR_NOTE = "the delivered file matched the brief line for line"
 
 
-def test_a_rejected_dispute_carries_its_reason(client, monkeypatch):
+def test_a_rejected_dispute_carries_its_reason(client, monkeypatch, proved):
     reads(monkeypatch, dispute=record(status="rejected", resolved_at=1_700_000_500.0, note=ADJUDICATOR_NOTE))
 
-    body = client.get("/api/disputes/dsp_00112233445566778").json()
+    body = client.get("/api/disputes/dsp_00112233445566778", headers=proved).json()
 
     assert body["status"] == "rejected"
     assert body["rejection_reason"] == ADJUDICATOR_NOTE
@@ -557,13 +579,11 @@ def test_the_task_listing_returns_the_window_and_what_was_raised(client, monkeyp
     assert [d["step_index"] for d in body["disputes"]] == [1, 2]
 
 
-def test_the_task_listing_answers_with_the_same_rejection_reason(client, monkeypatch):
+def test_the_task_listing_answers_with_the_same_rejection_reason(client, monkeypatch, proved):
     # Same projection, same rule: the rejected dispute carries its reason and
-    # the open one, note or not, does not. Pinned for its other half too —
-    # this read is world-readable while TASK_AUTH_REQUIRED is off, so the
-    # reason reaches anyone with the task id. That is the product decision,
-    # made knowingly: the console shows it only to the payer, and nothing here
-    # does, so a change to who may read it has to start at `require_task_read`.
+    # the open one, note or not, does not. Read with the task token, because
+    # the note is the adjudicator's free text and a caller who cannot prove
+    # they may read this task no longer gets it — see the group below.
     lists(
         monkeypatch,
         found=settlement(),
@@ -573,13 +593,174 @@ def test_the_task_listing_answers_with_the_same_rejection_reason(client, monkeyp
         ),
     )
 
-    r = client.get("/api/tasks/task-1/disputes")
+    r = client.get("/api/tasks/task-1/disputes", headers=proved)
 
     assert r.status_code == 200, r.text
     assert [(d["id"], d["rejection_reason"]) for d in r.json()["disputes"]] == [
         ("dsp_rejected", ADJUDICATOR_NOTE),
         ("dsp_open", None),
     ]
+
+
+# ── who may read the buyer's own words ──────────────────────────
+# The attacker's path, written as the attacker walks it. Every dispute in this
+# service used to be readable, free text and all, by somebody with no
+# credential whatever: `GET /api/tasks?limit=200` hands out task ids while
+# TASK_AUTH_REQUIRED is off (the shipped default, and how production runs),
+# `GET /api/tasks/{id}/disputes` turns one into dispute ids plus the buyer's
+# verbatim reason and the adjudicator's answer, and `GET /api/disputes/{id}`
+# serves the same text again to whoever holds an id it just published.
+
+
+def test_an_anonymous_reader_gets_the_money_facts_and_not_the_buyers_words(client, monkeypatch):
+    """The whole finding, on the route that leaked it: no credential at all."""
+    monkeypatch.setattr(settings, "task_auth_required", False)
+    lists(
+        monkeypatch,
+        found=settlement(),
+        disputes=(record(id="dsp_rejected", status="rejected", refund_tx="3f1b" + "0" * 60, note=ADJUDICATOR_NOTE),),
+    )
+
+    r = client.get("/api/tasks/task-1/disputes")
+
+    assert r.status_code == 200, r.text
+    (dispute,) = r.json()["disputes"]
+    # Withheld, and nowhere else in the body either.
+    assert dispute["reason"] == ""
+    assert dispute["rejection_reason"] is None
+    assert ADJUDICATOR_NOTE not in r.text
+    assert "the step returned an empty file" not in r.text
+    # And the chain-public facts are all still there: the shared trace link
+    # this route exists to serve must keep working, and it is the free text
+    # that is being withheld, not the receipt.
+    assert dispute["status"] == "rejected"
+    assert dispute["refund_tx"] == "3f1b" + "0" * 60
+    assert (dispute["charged_usdc"], dispute["creditable_usdc"]) == (0.25, 0.25)
+    assert dispute["payer"] == PAYER
+    assert r.json()["settlement"]["job_id_hex"] == JOB_ID
+
+
+def test_an_anonymous_reader_of_one_dispute_gets_no_free_text_either(client, monkeypatch):
+    """The second half: the id `list_task_disputes` just published opens this.
+
+    `get_dispute`'s "the unguessable id is the capability" argument is void
+    while the listing hands the ids out, so this route asks for the same proof
+    — against the task the DISPUTE names, since the caller never names one.
+    """
+    monkeypatch.setattr(settings, "task_auth_required", False)
+    reads(monkeypatch, dispute=record(status="rejected", note=ADJUDICATOR_NOTE))
+
+    r = client.get("/api/disputes/dsp_00112233445566778")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["reason"] == ""
+    assert r.json()["rejection_reason"] is None
+    assert ADJUDICATOR_NOTE not in r.text
+    assert r.json()["status"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/tasks/task-1/disputes", "/api/disputes/dsp_00112233445566778"],
+    ids=["per-task", "one-dispute"],
+)
+def test_the_task_token_buys_the_free_text_on_both_reads(client, monkeypatch, proved, path):
+    # The credential the frontend already holds: `lib/task-tokens.ts` remembers
+    # the `read_token` from execute and `lib/api.ts` sends it as X-Task-Token.
+    # The buyer reading back their own run is unaffected by any of this.
+    full = record(status="rejected", note=ADJUDICATOR_NOTE)
+    reads(monkeypatch, dispute=full)
+    lists(monkeypatch, found=settlement(), disputes=(full,))
+
+    r = client.get(path, headers=proved)
+
+    assert r.status_code == 200, r.text
+    dispute = r.json()["disputes"][0] if "disputes" in r.json() else r.json()
+    assert dispute["reason"] == "the step returned an empty file"
+    assert dispute["rejection_reason"] == ADJUDICATOR_NOTE
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/tasks/task-1/disputes", "/api/disputes/dsp_00112233445566778"],
+    ids=["per-task", "one-dispute"],
+)
+def test_the_operator_key_buys_the_free_text_on_both_reads(client, monkeypatch, path):
+    # Ops visibility, on the same terms `require_task_read` grants it: the
+    # operator holds the key and is the party a dispute is raised against, so
+    # they must be able to read the claim in order to answer it.
+    monkeypatch.setattr(settings, "api_key", "operator-secret-key")
+    full = record(status="rejected", note=ADJUDICATOR_NOTE)
+    reads(monkeypatch, dispute=full)
+    lists(monkeypatch, found=settlement(), disputes=(full,))
+
+    r = client.get(path, headers={"X-API-Key": "operator-secret-key"})
+
+    assert r.status_code == 200, r.text
+    dispute = r.json()["disputes"][0] if "disputes" in r.json() else r.json()
+    assert dispute["reason"] == "the step returned an empty file"
+    assert dispute["rejection_reason"] == ADJUDICATOR_NOTE
+
+
+@pytest.mark.parametrize(
+    ("label", "headers"),
+    [
+        ("another-tasks-token", {"X-Task-Token": "ffffffffffffffffffffffffffffffff"}),
+        ("empty-token", {"X-Task-Token": ""}),
+        ("a-guessed-api-key", {"X-API-Key": "operator-secret-key"}),
+    ],
+    ids=["another-tasks-token", "empty-token", "a-guessed-api-key"],
+)
+def test_a_credential_that_is_not_this_tasks_buys_nothing(client, monkeypatch, label, headers):
+    # No key is CONFIGURED here, which is the demo's posture — so an X-API-Key
+    # header must not admit anyone by matching an unset value, and a token
+    # minted for some other task must not travel.
+    monkeypatch.setattr(settings, "api_key", "")
+    state.task_tokens["some-other-task"] = TASK_TOKEN
+    try:
+        lists(monkeypatch, found=settlement(), disputes=(record(status="rejected", note=ADJUDICATOR_NOTE),))
+
+        r = client.get("/api/tasks/task-1/disputes", headers=headers)
+    finally:
+        state.task_tokens.pop("some-other-task", None)
+
+    assert r.status_code == 200, r.text
+    (dispute,) = r.json()["disputes"]
+    assert dispute["reason"] == "", label
+    assert dispute["rejection_reason"] is None, label
+
+
+def test_the_payer_who_just_signed_reads_back_what_they_wrote(client, monkeypatch):
+    # `POST /api/disputes` answers a wallet signature this settlement's payer
+    # made over this job and step — strictly more proof than a task token —
+    # so the reason on the response is the one they just filed.
+    opened = record(reason="the delivered zip was empty")
+
+    async def _open(**kwargs: object) -> DisputeRecord:
+        return opened
+
+    monkeypatch.setattr(dispute_svc, "open_dispute", _open)
+
+    r = client.post("/api/disputes", json=open_body())
+
+    assert r.status_code == 200, r.text
+    assert r.json()["reason"] == "the delivered zip was empty"
+
+
+def test_the_duplicate_answer_still_carries_the_buyers_reason(client, monkeypatch):
+    # `duplicate_dispute` is raised behind the same signature, and answering it
+    # with a blanked reason would show a buyer their own complaint erased.
+    existing = record(id="dsp_first", reason="the delivered zip was empty")
+
+    async def _open(**kwargs: object) -> DisputeRecord:
+        raise dispute_error("duplicate_dispute", 409, existing=existing)
+
+    monkeypatch.setattr(dispute_svc, "open_dispute", _open)
+
+    r = client.post("/api/disputes", json=open_body())
+
+    assert r.status_code == 409
+    assert r.json()["dispute"]["reason"] == "the delivered zip was empty"
 
 
 def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(client, monkeypatch):
@@ -725,3 +906,124 @@ def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypat
     # can take its skew from any read rather than only a settled one.
     assert isinstance(body.pop("now"), float)
     assert body == {"task_id": task_id, "window_closes_at": None, "settlement": None, "disputes": []}
+
+
+def test_the_task_read_refusal_never_echoes_the_id_it_refused(client, monkeypatch):
+    """The one dispute route that takes caller text and answers about it.
+
+    `require_task_read` refuses with a 404 so task ids stay unenumerable, and
+    it used to interpolate the id into the detail. That is not a snake token,
+    so `main.http_exception_handler` fell through to its `not_found` fallback
+    and copied the caller's own text into `error.message` — on a dependency
+    that runs BEFORE the route's `max_length`, so the text was unbounded too.
+    """
+    monkeypatch.setattr(settings, "task_auth_required", True)
+    lists(monkeypatch, found=None, disputes=())
+    # No slash anywhere in it: a slash would add a path segment and the router
+    # would answer its own 404 before this dependency ever ran.
+    hostile = "A" * 4096 + "<script>alert(1)"
+
+    r = client.get(f"/api/tasks/{hostile}/disputes")
+
+    assert r.status_code == 404
+    assert r.json()["error"] == {
+        "code": "unknown_task",
+        "message": "unknown task",
+        "request_id": r.headers["x-request-id"],
+    }
+    # Nowhere in the body, not under `detail` either — the id is already in the
+    # path the caller sent and in the access log, joined by that request id.
+    assert hostile not in r.text
+
+
+# ── the challenge mint's expiry is not an activity oracle ───────
+
+
+def test_the_challenge_expiry_is_coarse_and_never_later_than_the_real_one(client, monkeypatch):
+    """A live challenge is handed back AS IS, so its remaining TTL is readable.
+
+    That idempotency is load-bearing — it is what stops an anonymous flood
+    cancelling the nonce a buyer is mid-way through signing — so the answer is
+    coarsened rather than the behaviour changed. An exact `expires_at` minus a
+    five-minute constant is the moment somebody started disputing that step,
+    to the second, told to anyone who can name a (job, step).
+    """
+    real = 1_700_000_000.0 + 293.0  # a live challenge, partway through its TTL
+
+    async def _issue(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        return NONCE, real
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _issue)
+
+    body = client.post("/api/disputes/challenge", json={"job_id_hex": JOB_ID, "step_index": 1}).json()
+
+    assert body["expires_at"] % 60 == 0
+    # Never later than the truth: the buyer is not told they have longer to
+    # sign than they do.
+    assert body["expires_at"] <= real
+    assert real - body["expires_at"] < 60
+    # And the nonce itself is untouched — only the clock is blurred.
+    assert body["nonce"] == NONCE
+
+
+def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, monkeypatch):
+    # Quantised on the absolute expiry, not on the remaining time, so the
+    # answer cannot be sharpened by asking twice and differencing.
+    async def _issue(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        return NONCE, time.time() + 137.0
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _issue)
+    body = {"job_id_hex": JOB_ID, "step_index": 1}
+
+    first = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
+    second = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
+
+    assert first == second
+
+
+# ── what a refusal SAYS, not just what it is called ─────────────
+
+
+def test_a_buyers_refusal_carries_the_sentence_the_service_wrote(client, monkeypatch):
+    """`dispute_svc` writes a message for the buyer; the envelope used to drop it.
+
+    The handler regenerates `error.message` from the code, which turns
+    `dispute_window_closed` into "dispute window closed" and throws away "your
+    window closed at ...". Good for disclosure, and it silently falsified the
+    docstrings that promise otherwise — `open_dispute`'s "the message says when
+    it closed", and the challenge path's "ask for a new one".
+    """
+    written = "that challenge has expired or was already used — ask for a new one"
+    exc = dispute_error("challenge_expired", 400)
+    exc.message = written  # type: ignore[attr-defined]
+
+    async def _refuse(**kwargs: object) -> DisputeRecord:
+        raise exc
+
+    monkeypatch.setattr(dispute_svc, "open_dispute", _refuse)
+
+    r = client.post("/api/disputes", json=open_body())
+
+    assert r.status_code == 400
+    # The stable code is unchanged — no client's mapping moves.
+    assert r.json()["error"]["code"] == "challenge_expired"
+    assert r.json()["error"]["message"] == written
+
+
+def test_the_challenge_mint_carries_its_message_too(client, monkeypatch):
+    written = "that workflow has no step 9"
+    exc = dispute_error("step_not_settled", 409)
+    exc.message = written  # type: ignore[attr-defined]
+
+    async def _refuse(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        raise exc
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _refuse)
+
+    r = client.post("/api/disputes/challenge", json={"job_id_hex": JOB_ID, "step_index": 9})
+
+    assert r.json()["error"] == {
+        "code": "step_not_settled",
+        "message": written,
+        "request_id": r.headers["x-request-id"],
+    }
