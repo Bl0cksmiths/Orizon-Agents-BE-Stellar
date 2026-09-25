@@ -175,6 +175,18 @@ _REFUSAL_EXITS = {
     "nothing_to_credit": EXIT_NOTHING_TO_CREDIT,
     "settlement_missing": EXIT_NOTHING_TO_CREDIT,
     "refund_above_cap": EXIT_ABOVE_CAP,
+    # A credit that is not a finite number. Mapped to the catch-all ON PURPOSE,
+    # and not to 7 or 8 beside its two siblings in `RefundRefused`: those two
+    # are answers about this dispute — there is nothing owed, or more is owed
+    # than the ceiling allows — and either sends the operator to the dispute.
+    # This one is not an answer about the dispute at all. A NaN or an infinity
+    # arriving here means a figure on the settlement record, or
+    # DISPUTE_CREDITED_FRACTION in the environment, is not a quantity of money,
+    # and nothing done to the dispute fixes that. 11's whole instruction —
+    # reconcile the state it prints, by hand — is the right one. Mapped rather
+    # than left to fall there, because unmapped it is 11 out of the preview and
+    # 5 out of the live run, and one fault must not answer with two codes.
+    "refund_amount_invalid": EXIT_UNEXPECTED,
     "refunds_disabled": EXIT_NOT_CONFIGURED,
     # The settler has no signing key, or no asset SAC — `refund_svc.config_gap`,
     # asked above the claim so that a deployment which cannot sign claims

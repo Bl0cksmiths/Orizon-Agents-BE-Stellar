@@ -621,6 +621,39 @@ def test_a_deployment_that_could_not_rate_is_refused_before_it_pays(
     assert "nothing was signed" in out
 
 
+def test_a_non_finite_credit_exits_the_same_way_through_either_door(
+    capsys: pytest.CaptureFixture[str],
+    credit: CreditSeam,
+    uphold: UpholdSeam,
+    configured: dict[str, str],
+) -> None:
+    """`refund_amount_invalid` reaches this script twice over: raised straight
+    out of `creditable_for` while the preview is computing the credit, and
+    re-raised as a `DisputeError` when the live run asks `uphold` for it. One
+    fault, so one code — an unmapped one takes the preview's default and the
+    live run's, which are different, and a wrapper would then see the same
+    broken settlement record as two unrelated failures depending on how far the
+    run got."""
+    uphold.raises(dispute_svc.DisputeError("refund_amount_invalid", "nan USDC is not an amount of money", 409))
+
+    credit.refuses("refund_amount_invalid", "the bounds compute to nan USDC for step 1")
+    seed()
+    from_preview, preview_out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+    assert uphold.calls == []
+
+    # No re-seed: the preview refused before anything was written, so the same
+    # dispute is still sitting at `open` — which is the point.
+    credit.pays(CREDITABLE_USDC)
+    from_live, live_out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+    assert uphold.calls == [DISPUTE_ID]
+
+    assert from_preview == from_live == uphold_dispute.EXIT_UNEXPECTED
+    assert "refund_amount_invalid" in preview_out and "refund_amount_invalid" in live_out
+    # Neither door signed anything: the finiteness test is made before the
+    # amount can reach the settler's key, on both of them.
+    assert "nothing was signed" in preview_out and "nothing was signed" in live_out
+
+
 def test_every_refusal_code_is_non_zero_and_distinct() -> None:
     """The table an operator greps. Zero would read as success and a duplicate
     would make two different refusals indistinguishable to a wrapper script."""
@@ -1581,6 +1614,7 @@ def test_nothing_reaches_stdout_except_through_say(
         ("settlement_missing", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
         ("refund_above_cap", uphold_dispute.EXIT_ABOVE_CAP),
         ("nothing_to_credit", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
+        ("refund_amount_invalid", uphold_dispute.EXIT_UNEXPECTED),
     ],
 )
 def test_each_adjudication_refusal_carries_through_to_its_own_exit_code(
