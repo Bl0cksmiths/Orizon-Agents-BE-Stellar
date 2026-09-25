@@ -554,6 +554,32 @@ def test_a_live_run_without_a_signing_configuration_is_refused_before_it_upholds
     assert "STELLAR_ASSET_SAC" in out
     # Without the ledger the credit would land and its rating could not.
     assert "STELLAR_REPUTATION_LEDGER" in out
+    # The boot rule as `config._money_capable_config_requires_api_key` actually
+    # applies it: the switch ALONE. Stating a signing key and a SAC as further
+    # preconditions tells a deployer that a switch-on/signer-unwired deployment
+    # will boot, and it hard-fails instead.
+    assert "makes API_KEY mandatory on its own" in out
+    assert "however little else on the refund path is wired up yet" in out
+
+
+def test_nothing_this_script_prints_conjoins_the_boot_rule_with_a_signer(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The validator fires on `dispute_refunds_enabled` alone, deliberately —
+    conjoining it would leave a deployment that flips refunds on before wiring
+    a signer booting with an empty API_KEY. So neither the module docstring nor
+    any refusal may describe it as the switch plus a key plus a SAC."""
+    forbid_uphold(monkeypatch)
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    doc = uphold_dispute.__doc__ or ""
+    assert "makes\n`API_KEY` mandatory BY ITSELF" in doc
+    for text in (doc, out):
+        assert "a signing key and a SAC" not in text
+        assert "signing key and asset SAC" not in text
 
 
 def test_a_passed_config_check_says_what_it_did_not_check(

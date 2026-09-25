@@ -75,10 +75,12 @@ What it needs in the environment
 `STELLAR_ASSET_SAC`, `STELLAR_REPUTATION_LEDGER` with `REPUTATION_ENABLED` left
 on (and the settler registered as the ledger's Scorer, or every rating it signs
 is refused), `DISPUTE_REFUNDS_ENABLED=true`, and a `DATABASE_URL` pointing at
-the store that actually holds the dispute. Turning that switch on with a
-signing key and a SAC set makes `API_KEY` mandatory — the config refuses to
-boot without it, on every network including testnet
-(`config._money_capable_config_requires_api_key`).
+the store that actually holds the dispute. Turning that switch on makes
+`API_KEY` mandatory BY ITSELF — the config refuses to boot without it, on
+every network including testnet, whether or not a signing key or a SAC is
+wired up yet (`config._money_capable_config_requires_api_key`, whose comment
+explains why it is the switch alone: a validator that promised "refunds on
+implies a key" must not have a hole in it).
 
 No secret ever reaches the terminal: every line goes out through
 `security.redact_secrets`, which masks this deployment's configured values and
@@ -147,9 +149,9 @@ except ValidationError:
     print(
         "\n  REFUSED (not_configured) — nothing was signed.\n"
         "  The service refused to start with this configuration. The usual cause on the\n"
-        "  refund path: DISPUTE_REFUNDS_ENABLED is true and a signing key and asset SAC\n"
-        "  are set, which makes API_KEY mandatory on every network. Set API_KEY, or clear\n"
-        "  DISPUTE_REFUNDS_ENABLED to run read-only.\n"
+        "  refund path: DISPUTE_REFUNDS_ENABLED is true, which makes API_KEY mandatory on\n"
+        "  every network ON ITS OWN — no signing key or asset SAC need be set for it to\n"
+        "  bite. Set API_KEY, or clear DISPUTE_REFUNDS_ENABLED to run read-only.\n"
         "  (The underlying error is withheld on purpose: pydantic prints a truncated repr\n"
         "  of the settings, which includes the tail of the signing key.)\n"
     )
@@ -628,8 +630,9 @@ def check_config() -> int:
         "not_configured",
         "this process cannot sign a credit and write its rating. Missing:",
         *(f"    - {name}" for name in missing),
-        "Set them, re-run with --dry-run, and only then live. Turning the switch on beside a",
-        "signing key and a SAC also makes API_KEY mandatory, on every network including testnet.",
+        "Set them, re-run with --dry-run, and only then live. Note that DISPUTE_REFUNDS_ENABLED",
+        "makes API_KEY mandatory on its own — the process refuses to boot without one, on every",
+        "network including testnet, however little else on the refund path is wired up yet.",
     )
 
 
