@@ -1061,12 +1061,22 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             return _recorded(
                 await store.append_status(credited.id, "credited", rating_confirmed=True), credited.id, "credited"
             )
+        # `rating_confirmed=True` is spelled out and not left implied, because
+        # an operator following this line writes exactly what it says and
+        # `append_status` reads a missing keyword as "leave it as recorded".
+        # Without the flag the hash lands on a dispute whose `rating_confirmed`
+        # stays null, and the buyer's receipt shows the agent's consequence as
+        # still in flight for good — while the operator has just read the
+        # rating ON THE LEDGER, which is the very evidence that confirms it.
+        # `docs/disputes.md` and `scripts/uphold_dispute.py` print the same
+        # write, word for word, so all three agree on what closes this.
         _log_rating(
             logging.ERROR,
             "COLLISION — the ledger already holds a rating under this dispute's derived id and this"
             " dispute records none, so its reputation consequence did NOT land; the credit stands."
             " Look the derived id up on-chain: if it is this dispute's own unrecorded attempt (a"
-            " timeout with no hash, or a record write that failed), record that hash as rating_tx",
+            " timeout with no hash, or a record write that failed), record it with"
+            " append_status(dispute_id, 'credited', rating_tx=<hash>, rating_confirmed=True)",
             credited,
             derived,
             None,
