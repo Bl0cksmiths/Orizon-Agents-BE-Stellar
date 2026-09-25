@@ -384,6 +384,24 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
         asyncio.run(store.append_status("dsp_never", "upheld"))
 
 
+def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution() -> None:
+    """`resolved_at` is stamped once and never moved, and 0.0 is a moment like
+    any other. COALESCE keeps it in Postgres; read with truthiness rather than
+    `is not None` — the rule this file states everywhere else — the in-memory
+    store re-stamped it with today's clock, so the two answered differently
+    about when a dispute was resolved and only one of them was right."""
+
+    async def go(store: DisputeStore) -> tuple[float | None, float | None]:
+        opened = await store.open_dispute(a_dispute())
+        upheld = await store.append_status(opened.id, "upheld", resolved_at=0.0)
+        credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+        assert upheld is not None and credited is not None
+        return upheld.resolved_at, credited.resolved_at
+
+    assert asyncio.run(go(InMemoryDisputeStore())) == (0.0, 0.0)
+    assert asyncio.run(go(_pg(FakePool()))) == (0.0, 0.0)
+
+
 # ── the precondition on a transition ──────────────────────────────────────
 
 
