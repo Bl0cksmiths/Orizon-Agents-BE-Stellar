@@ -1407,12 +1407,13 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         amount_usdc = refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
         outcome = await refund_svc.credit_refund(claimed, amount_usdc)
     except refund_svc.RefundRefused as refused:
-        # Both refusals — the cap and "nothing to credit" — are raised before
-        # `execute_refund` is called, from `creditable_for` and again from the
-        # transfer wrapper's own re-check, so NOTHING WAS SIGNED on either
-        # path. That is what makes releasing the claim correct here and wrong
-        # after a timeout. `refund_svc` has already logged the numbers, so
-        # this only re-raises in the vocabulary the API answers with.
+        # Every refusal — the cap, "nothing to credit", and an amount that is
+        # not a finite number — is raised before `execute_refund` is called,
+        # from `creditable_for` and again from the transfer wrapper's own
+        # re-check, so NOTHING WAS SIGNED on any of those paths. That is what
+        # makes releasing the claim correct here and wrong after a timeout.
+        # `refund_svc` has already logged the numbers, so this only re-raises
+        # in the vocabulary the API answers with.
         await store.release_refund_claim(dispute_id)
         raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
 
