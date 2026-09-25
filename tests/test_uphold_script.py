@@ -339,6 +339,20 @@ def test_help_tells_the_two_post_signature_rules_apart() -> None:
     assert "13  the ledger answered the rating with Replay" in help_text
 
 
+def test_help_lists_the_in_flight_code_beside_the_timeout_it_behaves_like() -> None:
+    """6 is a transfer on the network whose outcome nobody knows — the same
+    situation as 10, and the block it prints opens with DO NOT RE-RUN. It used
+    to fall under "every other non-zero code is a refusal before anything was
+    signed", which is the one sentence that would make a wrapper author retry
+    it. So it is in the table, with 10's instruction, and the sweeping sentence
+    now names the codes it actually covers."""
+    help_text = uphold_dispute.build_parser().format_help()
+    assert "6  a credit for this dispute is IN FLIGHT and its outcome is unknown" in help_text
+    assert "NEVER\n      re-run; reconcile it against the chain, exactly as 10 asks" in help_text
+    assert "3, 4, 5, 7 and 8 are refusals raised before anything was signed." in help_text
+    assert "every other non-zero code" not in help_text
+
+
 def test_the_module_docstring_says_it_too() -> None:
     """`--help` is for the operator; the docstring is for whoever reads the tool
     before trusting its output. Both have to carry the funding disclosure —
