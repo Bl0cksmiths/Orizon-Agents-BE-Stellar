@@ -1033,8 +1033,10 @@ def build_parser() -> argparse.ArgumentParser:
     module finds the two facts that change what they are about to do: that this
     spends real funds, and that the platform — not the disputed agent — is the
     one spending them. The epilog is where they find what to do AFTER it, and
-    it lists the post-signature codes because those are the ones where the
-    right next move differs — two of them in opposite directions.
+    it lists every code a transfer may be behind — 6 included, because 6 is a
+    transfer on the network with an unknown outcome and the sweeping sentence
+    that used to catch it said nothing had been signed. Those are the codes
+    where the right next move differs, and they point in opposite directions.
 
     Whole, rather than a parser `main` then adds arguments to, so that what a
     test reads out of `format_help()` is the text an operator sees.
@@ -1054,16 +1056,19 @@ def build_parser() -> argparse.ArgumentParser:
             "a dispute rating on the ReputationLedger, written once the credit has landed.\n"
         ),
         epilog=(
-            "exit codes after a live run's signature:\n"
+            "exit codes once money may have moved — on this run's signature or an earlier one's:\n"
             "   0  credit and rating both landed — the two links printed are the evidence\n"
+            "   6  a credit for this dispute is IN FLIGHT and its outcome is unknown — this\n"
+            "      run's submission, or one an earlier run or the API left unresolved. NEVER\n"
+            "      re-run; reconcile it against the chain, exactly as 10 asks\n"
             "   9  the credit FAILED, nothing moved — re-run once the cause is fixed\n"
             "  10  the credit TIMED OUT and may still land — NEVER re-run; reconcile it\n"
             "  12  the buyer IS paid but the rating did not land — re-running is SAFE and\n"
             "      retries the rating only, never the refund\n"
             "  13  the ledger answered the rating with Replay and this dispute records no\n"
             "      attempt — a collision; the consequence did not land. Look the id up.\n"
-            "every other non-zero code is a refusal before anything was signed, except 11,\n"
-            "which asks for the state it prints to be reconciled by hand.\n"
+            "3, 4, 5, 7 and 8 are refusals raised before anything was signed. 11 is the\n"
+            "catch-all, and it asks for the state it prints to be reconciled by hand.\n"
         ),
     )
     parser.add_argument(
