@@ -303,20 +303,24 @@ async def _run(
         "kit": kit.model_dump() if kit is not None else None,
         "intent": plan.intent,
     }
-    # What each step actually delivered, keyed by the PLAN STEP's agent_id.
+    # What each step actually delivered, by PLAN-STEP INDEX.
     # Separate from `context` because the two are keyed for different readers:
     # `context` is worker-facing and keyed by worker name (a worker asks for
-    # context["code.gen"]), while the settler needs the output for a step it
-    # holds only an agent_id and a catalog agent_name for. Those coincide for a
-    # local worker and do NOT for a bound external one, whose worker name is
-    # "external.<agent_id>" — see _submit_ratings.
-    delivered: dict[str, Any] = {}
+    # context["code.gen"]), while the settler grades a plan STEP.
+    # By index for the same reason its two siblings below are, and it was the
+    # one of the three that did not get it: keyed by agent_id, one agent hired
+    # for two steps overwrote its own first output with its second, and BOTH
+    # steps were then rated on whichever one happened to land last. Indexing
+    # also retires the agent_name fallback `_submit_ratings` carried, which
+    # existed only because worker name and agent_id coincide for a local worker
+    # and do NOT for a bound external one ("external.<agent_id>").
+    delivered: dict[int, Any] = {}
     # Plan-step INDEXES that produced output — the same steps that incremented
-    # `succeeded` and `spent`. Kept by index rather than by agent_id like
-    # `delivered` above because a plan may use the same agent twice: keyed by
-    # agent, a step that failed would be settled as delivered on the strength
-    # of a LATER step that succeeded, and story 4.02 would then accept a
-    # dispute over work nobody was ever paid for.
+    # `succeeded` and `spent`. Kept by index rather than by agent_id because a
+    # plan may use the same agent twice: keyed by agent, a step that failed
+    # would be settled as delivered on the strength of a LATER step that
+    # succeeded, and story 4.02 would then accept a dispute over work nobody
+    # was ever paid for.
     delivered_steps: set[int] = set()
     # What each delivered step produced, as its settlement keeps it (story
     # 4.05) — by plan-step index for the same reason as `delivered_steps`: one
@@ -561,8 +565,10 @@ async def _run(
                 # needs one (2.02 AC-5 / Product Rule 5).
                 context[worker.name] = output if first_party else _fenced_for_context(output)
                 # The settler reads a rating-facing view of the same output —
-                # an untrusted worker does not get to grade itself.
-                delivered[step.agent_id] = _rating_view(output, first_party=first_party)
+                # an untrusted worker does not get to grade itself. Under THIS
+                # step's index: the agent may serve another step of this plan,
+                # and that step's output is its own evidence, not this one's.
+                delivered[step_index] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
@@ -1174,7 +1180,7 @@ async def _submit_ratings(
     task_id: str,
     start: float,
     plan: StoredPlan,
-    delivered: dict[str, Any],
+    delivered: Mapping[int, Any],
     *,
     payer: str,
     job_id: bytes,
@@ -1182,6 +1188,10 @@ async def _submit_ratings(
     first_party_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Submit the settler's synthetic per-step ratings to ReputationLedger.
+
+    `delivered` is by PLAN-STEP INDEX, not by agent: one step's rating is
+    graded on that step's own output, and a plan is free to hire one agent
+    twice. A step with no entry delivered nothing and is rated as such.
 
     Best-effort by design: a failed rating never fails the workflow — each step
     traces and logs its own failure and the loop moves on. It is logged as well
@@ -1204,20 +1214,17 @@ async def _submit_ratings(
 
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
-    for step in plan.plan.steps:
-        # Keyed by agent_id — the one identity both worker kinds share. Worker
-        # names do not: a bound external agent runs as "external.<agent_id>",
-        # never as the operator's catalog agent_name, so a name lookup missed
-        # every delivered external step and wrote a permanent on-chain 20/100
-        # ("settled money for no delivered work") for an operator who shipped.
-        # The agent_name fallback is for a caller that still hands in a
-        # worker-name-keyed map, which is correct for a local step.
+    for step_index, step in enumerate(plan.plan.steps):
         if step.agent_id in undispatched:
             # We never sent them the step, so there is nothing to judge.
             continue
-        step_output = delivered.get(step.agent_id)
-        if step_output is None:
-            step_output = delivered.get(step.agent_name or "")
+        # By index, so the step is graded on ITS output. The lookup used to be
+        # by agent_id — the one identity both worker kinds share, worker names
+        # being no use because a bound external agent runs as
+        # "external.<agent_id>" rather than as the operator's catalog name —
+        # but an agent hired for two steps of one plan wrote both its outputs
+        # to that one key, so both steps were graded on whichever landed last.
+        step_output = delivered.get(step_index)
         # Untrusted output must carry something checkable to earn the base
         # score. Without this an operator answering "{\"ok\": true}" forever
         # scored 70 — the prior exactly — and their lower bound ROSE with every

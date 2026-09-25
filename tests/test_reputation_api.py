@@ -355,9 +355,9 @@ def test_submit_ratings_is_best_effort(monkeypatch):
             started="just now",
         )
     )
-    # Context keys are worker names — w.ok delivered a clean artifact (95),
-    # w.bad has no output (20) and its submit raises.
-    context = {"w.ok": {"artifact": {"title": "x"}, "critic_violations": []}}
+    # Keyed by plan-step index — step 0 delivered a clean artifact (95),
+    # step 1 has no output (20) and its submit raises.
+    delivered = {0: {"artifact": {"title": "x"}, "critic_violations": []}}
 
     # Must never raise, even with a failing submit in the middle.
     asyncio.run(
@@ -365,7 +365,7 @@ def test_submit_ratings_is_best_effort(monkeypatch):
             task_id,
             time.monotonic(),
             plan,
-            context,
+            delivered,
             payer="G" + "A" * 55,
             job_id=b"\x01" * 16,
         )
