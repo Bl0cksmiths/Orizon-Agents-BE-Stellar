@@ -724,7 +724,20 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
     assert stuck.refund_tx == "tx_who_knows"
 
 
-def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(monkeypatch, caplog) -> None:
+@pytest.mark.parametrize(
+    ("refusal", "raised"),
+    [
+        ("raises", "the dispute store is unreachable"),
+        # An append given no `expected_status` has no precondition to lose, so
+        # None from one is the store saying something its contract forbids. It
+        # has to reach the operator as the same emergency the outage does, and
+        # never as a `credited` record that was never written.
+        ("answers none", "refused an unconditional"),
+    ],
+)
+def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(
+    monkeypatch, caplog, refusal: str, raised: str
+) -> None:
     """The one window `uphold` cannot close, and the only one it can log.
 
     The transfer has LANDED and the store is unreachable at the instant the
@@ -740,15 +753,17 @@ def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(monk
     store = dispute_store.get_dispute_store()
     real_append = store.append_status
 
-    async def _unreachable(dispute_id: str, status: str, **kwargs: Any) -> DisputeRecord:
+    async def _unreachable(dispute_id: str, status: str, **kwargs: Any) -> DisputeRecord | None:
         if status == "credited":
-            raise RuntimeError("the dispute store is unreachable")
+            if refusal == "raises":
+                raise RuntimeError("the dispute store is unreachable")
+            return None
         return await real_append(dispute_id, status, **kwargs)
 
     monkeypatch.setattr(store, "append_status", _unreachable)
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
-        with pytest.raises(RuntimeError, match="unreachable"):
+        with pytest.raises(RuntimeError, match=raised):
             asyncio.run(dispute_svc.uphold(dispute.id))
 
     # The claim is what stops a second payment, so it must outlive the failure.
