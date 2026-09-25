@@ -40,6 +40,7 @@ from collections import deque
 from typing import Any
 
 from fastapi import Header, HTTPException
+from pydantic import BaseModel
 
 from .config import settings
 
@@ -56,6 +57,29 @@ EXEMPT_PATHS = frozenset({"/", "/health", "/readiness", "/api/health"})
 # Current request's id — set by RequestContextMiddleware, readable from any
 # code running in the request's task context (error handlers, log records).
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class ErrorBody(BaseModel):
+    """Structured half of the unified error envelope."""
+
+    code: str
+    message: str
+    request_id: str
+
+
+class ErrorEnvelope(BaseModel):
+    """Every error response body: the legacy FastAPI "detail" (string or
+    validation-error list) plus the structured "error" object.
+
+    Declared here rather than in `app/main.py`, which assembles it: a router
+    that wants to document a status of its own has to NAME this model in its
+    `responses=`, and `main` imports the routers, so it cannot be the one to
+    hold it. The schema name is what reaches the spec, so moving it changed
+    nothing a client can see.
+    """
+
+    detail: Any
+    error: ErrorBody
 
 
 class CodedHTTPException(HTTPException):

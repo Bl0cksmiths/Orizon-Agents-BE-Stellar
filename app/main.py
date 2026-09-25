@@ -31,8 +31,14 @@ from .routers import agents, binding, disputes, flow, metrics, orchestrator, pay
 # `from .routers import health` module import at call time.
 from .routers.health import HealthResponse, health_payload
 from .routers.health import router as health_router
+
+# ErrorEnvelope (and the ErrorBody it nests) live in security.py, not here, so
+# a router can name them in its own `responses=` without importing this module
+# — which imports the routers. Re-exported by this import, so
+# `main.ErrorEnvelope` still resolves for anything that reads it from here.
 from .security import (
     BodyLimitMiddleware,
+    ErrorEnvelope,
     RateLimitMiddleware,
     RequestContextMiddleware,
     RequestIdLogFilter,
@@ -364,22 +370,6 @@ app.add_middleware(RequestContextMiddleware)
 # Details that are already machine-readable tokens ("invalid_api_key",
 # "build_failed") are promoted to the envelope's error code as-is.
 _SNAKE_TOKEN = re.compile(r"[a-z][a-z0-9]*(_[a-z0-9]+)*")
-
-
-class ErrorBody(BaseModel):
-    """Structured half of the unified error envelope."""
-
-    code: str
-    message: str
-    request_id: str
-
-
-class ErrorEnvelope(BaseModel):
-    """Every error response body: the legacy FastAPI "detail" (string or
-    validation-error list) plus the structured "error" object."""
-
-    detail: Any
-    error: ErrorBody
 
 
 # Merged into every routed operation via include_router below, so the docs
