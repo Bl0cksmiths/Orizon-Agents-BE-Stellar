@@ -1011,9 +1011,17 @@ async def _rate_credited(
         # the log. The dispute is answered as the store last held it: paid,
         # and not shown as rated — which a later REPLAY will then report as a
         # collision, so this line is where that one is explained.
+        # The write is spelled out for the collision line's reason — an operator
+        # writes what the line says, and an omitted keyword means "leave it as
+        # recorded" — and its flag follows the outcome rather than being fixed:
+        # a SUCCESS has been vouched for by the ledger and a TIMEOUT has not,
+        # so the hash goes on record either way but only one of them may be
+        # shown to the buyer as a consequence that landed.
         _log_rating(
             logging.ERROR,
-            f"was {outcome.status} but could not be recorded on the dispute — record rating_tx by hand",
+            f"was {outcome.status} but could not be recorded on the dispute — record it by hand with"
+            " append_status(dispute_id, 'credited', rating_tx=<the tx above>,"
+            f" rating_confirmed={outcome.status == 'SUCCESS'})",
             credited,
             outcome.job_id_hex,
             outcome.tx_hash,
