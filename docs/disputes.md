@@ -523,11 +523,14 @@ What an adjudicator can be told, and what each answer means:
 | refusal | when |
 | --- | --- |
 | 503 `dispute_refunds_disabled` | the switch is off — nothing on this deployment is adjudicable. A configuration state, not the caller's mistake |
-| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see |
+| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see. **The credential at the door**, not the settler's key — see the row below, which is the one it is confused with |
+| 503 `refunds_not_configured` | the switch is on, the caller is authenticated, and **the settler cannot sign**: no `STELLAR_SIGNING_KEY`, or no `STELLAR_ASSET_SAC`. Asked after the terminal-status checks and *before* the dispute is moved or claimed, so the dispute is left exactly as the buyer left it. Logged at ERROR — an upheld dispute nobody is configured to pay is a buyer waiting on a human |
 | 401 `invalid_api_key` | the key is missing or wrong. The answer is the same either way — an adjudication route that distinguished them would be an oracle |
 | 404 `unknown_dispute` | no dispute with that id |
 | 409 `dispute_not_open` | a rejection aimed at a dispute that is no longer `open` |
 | 409 `dispute_rejected` | an uphold aimed at a rejected dispute: it can never be credited |
+| 409 `adjudication_in_progress` | another adjudication of this dispute is already running. The move from `open` to `upheld` is a compare-and-set, and losing it means the record changed under the read the decision was made on; re-read, the dispute still said `upheld`, so the winner is between its decision and its claim. Refused rather than raced to the mutex. **Nothing was signed here, and whether anything was signed there is not knowable from the refusal** — read the dispute back before deciding again |
+| 409 `refund_amount_invalid` | the credit computes to something that is not a finite number, so no bound can judge it. Refused ahead of both caps, because every other guard on that path is a comparison and a comparison cannot refuse a NaN. It means a figure on the settlement record — or `DISPUTE_CREDITED_FRACTION` in the environment — is not a quantity of money; the fix is to that, not to the dispute |
 | 409 `refund_in_flight` | an uphold aimed at a dispute in `crediting`. Reconcile it by hand; never retry it |
 | 409 `settlement_missing` | the settlement the dispute was judged against is no longer on record, so the credit cannot be bounded by what was actually charged |
 | 409 `nothing_to_credit` | the settlement has no such step, the step never delivered, or the amount prices to zero |
@@ -537,11 +540,32 @@ What an adjudicator can be told, and what each answer means:
 | 502 `refund_failed` | the transfer definitively did not settle, so no funds moved. The dispute is back to `upheld` and can be credited again |
 | 504 `refund_unconfirmed` | the transfer was submitted and its outcome is unknown. The dispute stays in `crediting` for reconciliation |
 
-`settlement_missing`, `nothing_to_credit` and `refund_above_cap` are all raised
-**before** anything is signed, and each hands the refund claim back, so the
-dispute stays payable once whatever caused them is fixed. Only `refund_failed`
-and `refund_unconfirmed` describe a transaction that was actually submitted,
-and only the second of those leaves the claim held.
+**`adjudication_not_configured` and `refunds_not_configured` are different
+checks, and telling them apart is the whole of knowing what to fix.** Both are
+503, both say "not configured", and they are about opposite ends of the
+request:
+
+- `adjudication_not_configured` is **the door**. `API_KEY` is empty, so the
+  route cannot tell an adjudicator from a stranger, and it refuses everyone.
+  Nothing about the settler is even looked at. Fix it in the deployment's
+  credentials (ADR 0008 D1).
+- `refunds_not_configured` is **the wallet**. The caller got through the door;
+  this deployment has no settler key or no asset SAC, so it could not sign a
+  transfer if it decided to. Fix it by wiring the signer.
+
+A deployment can be in either state alone, and setting `API_KEY` does nothing
+for the second. The tell is which one comes back: if you have just set
+`API_KEY` and the answer changed from `adjudication_not_configured` to
+`refunds_not_configured`, the door is fixed and the wallet is not.
+
+`settlement_missing`, `nothing_to_credit`, `refund_above_cap` and
+`refund_amount_invalid` are all raised **before** anything is signed, and each
+hands the refund claim back, so the dispute stays payable once whatever caused
+them is fixed. `refunds_not_configured` and `adjudication_in_progress` are
+raised before anything is signed too, and earlier still — before the claim is
+ever taken, so there is none to hand back. Only `refund_failed` and
+`refund_unconfirmed` describe a transaction that was actually submitted, and
+only the second of those leaves the claim held.
 
 None of these is ever about the **rating**. A rating that does not land is not
 a refusal: the credit has already moved, so the uphold answers with the dispute
