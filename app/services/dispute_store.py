@@ -84,6 +84,31 @@ _MAX_IN_MEMORY = 500
 _POOL_MIN_SIZE = 0
 _POOL_MAX_SIZE = 5
 
+# Timeouts, because a pool without them turns a database that is merely slow
+# into a service that is merely stopped — and this pool is five connections
+# wide for the whole process.
+#
+# asyncpg's defaults are not enough on their own. A connect attempt is bounded
+# at 60 seconds, which is a hang as far as an HTTP request is concerned, and a
+# COMMAND has no bound at all: a statement that never comes back holds its
+# connection for as long as the socket stays open. Five of those and every
+# later call waits on `acquire()`, which is also unbounded by default — so one
+# unreachable database stops answering disputes, settlements and the routes
+# above them, all of which had another answer available.
+#
+# So each of the three is named. `command_timeout` is the one that matters
+# most: it is what guarantees a connection comes back to the pool, which is
+# what makes waiting for one finite. The acquire timeout is longer than it on
+# purpose — a waiter must not be cut off before the holder it is waiting for
+# has been — and the whole worst case is a bounded error instead of a request
+# that never returns. They are seconds, and generous ones: every statement here
+# is a single indexed row or a table that holds the payouts currently in
+# flight, so anything near these numbers is a database in trouble rather than a
+# query that needs longer.
+_POOL_CONNECT_TIMEOUT = 10.0
+_POOL_COMMAND_TIMEOUT = 10.0
+_POOL_ACQUIRE_TIMEOUT = 15.0
+
 
 def _import_asyncpg() -> Any:
     """Import the driver at first Postgres use, never at module import.
@@ -1258,15 +1283,21 @@ class PostgresDisputeStore:
                 # own rationale above it. asyncpg runs argument-less queries
                 # through the simple protocol, which is what lets one execute()
                 # carry a table and its indexes together.
-                await self._pool.execute(_CREATE_SETTLEMENTS_SQL)
-                await self._pool.execute(_CREATE_DISPUTES_SQL)
-                await self._pool.execute(_CREATE_REFUND_CLAIMS_SQL)
+                await self._pool.execute(_CREATE_SETTLEMENTS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await self._pool.execute(_CREATE_DISPUTES_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await self._pool.execute(_CREATE_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
                 self._ready = True
         return self._pool
 
     async def _create_pool(self) -> Any:
         asyncpg = _import_asyncpg()
-        return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+        return await asyncpg.create_pool(
+            dsn=self._dsn,
+            min_size=_POOL_MIN_SIZE,
+            max_size=_POOL_MAX_SIZE,
+            timeout=_POOL_CONNECT_TIMEOUT,
+            command_timeout=_POOL_COMMAND_TIMEOUT,
+        )
 
     async def record_settlement(self, record: SettlementRecord) -> None:
         pool = await self._ready_pool()
@@ -1286,16 +1317,17 @@ class PostgresDisputeStore:
             steps_to_json(record.steps),
             record.settled_at,
             record.window_closes_at,
+            timeout=_POOL_COMMAND_TIMEOUT,
         )
 
     async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_JOB_SQL, job_id_hex)
+        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_JOB_SQL, job_id_hex, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
 
     async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id)
+        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
 
     @staticmethod
@@ -1322,17 +1354,17 @@ class PostgresDisputeStore:
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_DISPUTE_SQL, dispute_id)
+        row = await pool.fetchrow(_SELECT_DISPUTE_SQL, dispute_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_DISPUTE_BY_STEP_SQL, job_id_hex, step_index)
+        row = await pool.fetchrow(_SELECT_DISPUTE_BY_STEP_SQL, job_id_hex, step_index, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
         pool = await self._ready_pool()
-        rows = await pool.fetch(_SELECT_DISPUTES_FOR_TASK_SQL, task_id)
+        rows = await pool.fetch(_SELECT_DISPUTES_FOR_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
         return tuple(self._to_dispute(row) for row in rows)
 
     @staticmethod
@@ -1401,6 +1433,7 @@ class PostgresDisputeStore:
             record.credited_usdc,
             record.updated_at,
             record.rating_confirmed,
+            timeout=_POOL_COMMAND_TIMEOUT,
         )
         if won is not None:
             return record
@@ -1465,11 +1498,11 @@ class PostgresDisputeStore:
         answer, and a caller cannot handle them the same way.
         """
         pool = await self._ready_pool()
-        async with pool.acquire() as conn, conn.transaction():
+        async with pool.acquire(timeout=_POOL_ACQUIRE_TIMEOUT) as conn, conn.transaction():
             # Nothing may be read about this dispute until the appends ahead of
             # this one have finished, so the lock comes before the clock as
             # well as before the read.
-            if await conn.fetchrow(_LOCK_DISPUTE_SQL, dispute_id) is None:
+            if await conn.fetchrow(_LOCK_DISPUTE_SQL, dispute_id, timeout=_POOL_COMMAND_TIMEOUT) is None:
                 raise KeyError(dispute_id)
             # Our own clock, in epoch seconds, for the reason every other
             # timestamp here is: the record handed back must be the row that was
@@ -1495,6 +1528,7 @@ class PostgresDisputeStore:
                 credited_usdc,
                 rating_confirmed,
                 expected_status,
+                timeout=_POOL_COMMAND_TIMEOUT,
             )
         # Empty RETURNING with the dispute known to exist means one thing: the
         # precondition refused the write.
@@ -1514,7 +1548,7 @@ class PostgresDisputeStore:
         anything*. The caller reads the record back if it needs to explain.
         """
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time())
+        row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
@@ -1538,7 +1572,7 @@ class PostgresDisputeStore:
         """
         pool = await self._ready_pool()
         # Our own clock for the row's `updated_at`, never the database's.
-        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time())
+        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
@@ -1551,7 +1585,7 @@ class PostgresDisputeStore:
         nobody can find.
         """
         pool = await self._ready_pool()
-        rows = await pool.fetch(_SELECT_REFUND_CLAIMS_SQL)
+        rows = await pool.fetch(_SELECT_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
         return tuple(RefundClaim(dispute_id=row["dispute_id"], claimed_at=float(row["claimed_at"])) for row in rows)
 
     async def close(self) -> None:

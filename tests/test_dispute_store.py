@@ -610,11 +610,15 @@ class FakePool:
         # there are no rows to lock here, so the dispute id stands in for the
         # opening row every appender for that dispute queues on.
         self.row_locks: dict[str, asyncio.Lock] = {}
-        self.acquired = 0
+        # What each call passed as its bound. A pool call that names none can
+        # wait forever, so the value is recorded rather than discarded.
+        self.timeouts: list[float | None] = []
+        self.acquired: list[float | None] = []
         self.closed = 0
 
-    async def execute(self, sql: str, *args: Any) -> str:
+    async def execute(self, sql: str, *args: Any, timeout: float | None = None) -> str:
         self.statements.append(sql)
+        self.timeouts.append(timeout)
         await asyncio.sleep(0)
         if sql == dispute_store._INSERT_SETTLEMENT_SQL:
             self.settlements.append(dict(zip(_SETTLEMENT_COLUMNS, args, strict=True)))
@@ -626,8 +630,9 @@ class FakePool:
         ), f"unexpected statement: {sql}"
         return "CREATE TABLE"
 
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+    async def fetchrow(self, sql: str, *args: Any, timeout: float | None = None) -> dict[str, Any] | None:
         self.statements.append(sql)
+        self.timeouts.append(timeout)
         await asyncio.sleep(0)
         if sql == dispute_store._SELECT_SETTLEMENT_BY_JOB_SQL:
             return _newest(self.settlements, job_id_hex=args[0])
@@ -646,8 +651,9 @@ class FakePool:
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
         return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
 
-    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+    async def fetch(self, sql: str, *args: Any, timeout: float | None = None) -> list[dict[str, Any]]:
         self.statements.append(sql)
+        self.timeouts.append(timeout)
         await asyncio.sleep(0)
         if sql == dispute_store._SELECT_REFUND_CLAIMS_SQL:
             # ORDER BY claimed_at, dispute_id: oldest claim first, and a stable
@@ -802,7 +808,7 @@ class FakePool:
         have to run on the same connection inside one transaction — the first
         takes a row lock the second is read under.
         """
-        self.acquired += 1
+        self.acquired.append(timeout)
         return FakeAcquire(self)
 
     async def close(self) -> None:
@@ -843,16 +849,17 @@ class FakeConnection:
         self._pool = pool
         self._held: list[asyncio.Lock] = []
 
-    async def execute(self, sql: str, *args: Any) -> str:
-        return await self._pool.execute(sql, *args)
+    async def execute(self, sql: str, *args: Any, timeout: float | None = None) -> str:
+        return await self._pool.execute(sql, *args, timeout=timeout)
 
-    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-        return await self._pool.fetch(sql, *args)
+    async def fetch(self, sql: str, *args: Any, timeout: float | None = None) -> list[dict[str, Any]]:
+        return await self._pool.fetch(sql, *args, timeout=timeout)
 
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+    async def fetchrow(self, sql: str, *args: Any, timeout: float | None = None) -> dict[str, Any] | None:
         if sql != dispute_store._LOCK_DISPUTE_SQL:
-            return await self._pool.fetchrow(sql, *args)
+            return await self._pool.fetchrow(sql, *args, timeout=timeout)
         self._pool.statements.append(sql)
+        self._pool.timeouts.append(timeout)
         await asyncio.sleep(0)
         (dispute_id,) = args
         opening = next(
