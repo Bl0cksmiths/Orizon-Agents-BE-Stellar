@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from typing import Any
 
 import pytest
@@ -303,3 +304,50 @@ def test_an_id_that_cannot_be_derived_is_refused_not_truncated(job_id, step_inde
     caller rates the run's other steps."""
     with pytest.raises(ValueError):
         execution_svc.settlement_job_id(job_id, step_index)
+
+
+def test_a_derived_id_equal_to_the_job_id_is_refused_loudly(monkeypatch):
+    """Unreachable by chance (2**-64), so forced: a digest whose first eight
+    bytes reproduce the job id's own tail. Returning it would put the step's
+    rating on step 0's key, where the ledger refuses it as a replay for ever —
+    and a rating that can never be written names nothing, while a refusal to
+    derive names the job and the step."""
+
+    class _Echo:
+        def __init__(self, data: bytes) -> None:
+            self._tail = data[8:16]
+
+        def digest(self) -> bytes:
+            return self._tail + bytes(24)
+
+    monkeypatch.setattr(hashlib, "sha256", _Echo)
+    with pytest.raises(ValueError, match="equals the job id itself"):
+        execution_svc.settlement_job_id(JOB_ID, 1)
+
+
+def test_a_step_with_no_derivable_id_is_skipped_and_the_rest_are_rated(monkeypatch, caplog):
+    """Best-effort, like every other failure in this loop: the step that cannot
+    be rated is named in the log and in the buyer's trace, and the run's other
+    steps still leave their evidence. The reason is NOT `failure_reason`'s "rpc
+    error" — nothing was submitted, and the buyer's trace should not say one
+    thing happened when another did."""
+    ledger = _rates(monkeypatch, _AnswersInTurn("external.agt_twice", [CLEAN, FLAWED]))
+
+    def _refuses(job_id: bytes, step_index: int) -> bytes:
+        if step_index == 1:
+            raise ValueError("forced")
+        return job_id
+
+    monkeypatch.setattr(execution_svc, "settlement_job_id", _refuses)
+    task_id = "tsk_ratingid_skipped"
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        _run_paid(_plan("pln_ratingid_skipped", "agt_twice", "agt_twice"), task_id)
+
+    assert list(ledger.rated) == [("agt_twice", JOB_ID)]
+    assert state.tasks[task_id].status == "complete"
+    logged = [r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc"]
+    assert any("no rating id" in m and "step 1" in m and JOB_ID.hex() in m and PAYER in m for m in logged), logged
+    traced = [ln.msg for ln in state.traces[task_id] if ln.level == "error"]
+    assert any("reputation submit skipped" in m and "no rating id" in m for m in traced), traced
+    assert not any("rpc error" in m for m in traced)
