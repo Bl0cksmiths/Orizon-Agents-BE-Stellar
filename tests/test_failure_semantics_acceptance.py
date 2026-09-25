@@ -279,16 +279,22 @@ def test_a_partial_run_rates_both_outcomes_when_nothing_settled(monkeypatch, set
 
     rated = {agent: rating for agent, _job, rating in calls}
     assert rated == {"agt_a": 85, "ext_down": FAILED}
-    # Under the task-derived id, which is deterministic — the ledger rejects a
-    # second rating for the same (agent_id, job_id), so re-running this task
-    # cannot double-count the same failure.
-    assert {job for _agent, job, _rating in calls} == {execution_svc.unsettled_job_id(task_id)}
+    # Under ids derived from the task-derived one, which is deterministic — the
+    # ledger rejects a second rating for the same (agent_id, job_id), so
+    # re-running this task cannot double-count the same failure. One id per
+    # step, so a plan that hired one agent twice loses neither of its ratings.
+    unsettled = execution_svc.unsettled_job_id(task_id)
+    assert [job for _agent, job, _rating in calls] == [
+        execution_svc.settlement_job_id(unsettled, 0),
+        execution_svc.settlement_job_id(unsettled, 1),
+    ]
 
 
 def test_a_settled_partial_run_still_rates_under_the_charges_job_id(monkeypatch):
     """The fallback is a fallback. When the charge did mint a job id, the
     ratings stay linked to the payment that funded the run rather than to a
-    second, synthetic id for the same steps."""
+    second, synthetic id for the same steps — step 0 under the sealed id
+    itself, every later step under one carrying its first eight bytes."""
     calls = _rates(monkeypatch, ("chargehash", "sealhash", b"\x02" * 16))
     _resolves_to(
         monkeypatch,
@@ -304,7 +310,12 @@ def test_a_settled_partial_run_still_rates_under_the_charges_job_id(monkeypatch)
         execution_svc._run(_plan("pln_ac_partial_settled", "agt_a", "ext_down"), task_id, auth_id_hex=AUTH, payer=PAYER)
     )
 
-    assert {job for _agent, job, _rating in calls} == {b"\x02" * 16}
+    charged = b"\x02" * 16
+    assert [job for _agent, job, _rating in calls] == [
+        charged,
+        execution_svc.settlement_job_id(charged, 1),
+    ]
+    assert all(job.startswith(charged[:8]) for _agent, job, _rating in calls)
     assert execution_svc.unsettled_job_id(task_id) not in {job for _agent, job, _rating in calls}
 
 

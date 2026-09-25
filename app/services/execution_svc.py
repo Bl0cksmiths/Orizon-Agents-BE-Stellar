@@ -1176,6 +1176,71 @@ def unsettled_job_id(task_id: str) -> bytes:
     return hashlib.sha256(task_id.encode("utf-8") + b"unsettled").digest()[:16]
 
 
+# Domain separation for the settler's per-step rating ids, versioned for the
+# reason every other `orizon-*:v1` string in this service is, and for one more:
+# the ledger's replay guard remembers every key it has ever seen, so a later
+# scheme ships under a NEW tag rather than re-deriving ids already spent.
+SETTLEMENT_ID_TAG = b"orizon-settlement:v1"
+
+# The shape ADR 0009 D1 fixed for the dispute rating — half the sealed job id
+# verbatim so a reviewer SEES the link, half a hash that carries the step.
+# Restated rather than imported from `dispute_rating`, which pulls the stellar
+# client into its module scope; this module imports that per function instead.
+# The ledger's job id is a `BytesN<16>`; the step is packed into two of them,
+# which bounds a plan at 65,536 steps — far past anything an orchestrator emits.
+_JOB_ID_BYTES = 16
+_LINKED_PREFIX_BYTES = 8
+_STEP_INDEX_BYTES = 2
+
+
+def settlement_job_id(job_id: bytes, step_index: int) -> bytes:
+    """The id the settler's automatic rating for one plan step is written under.
+
+    Step 0 keeps the sealed job id itself. Every later step takes
+    `job_id[:8] ‖ sha256(job_id ‖ SETTLEMENT_ID_TAG ‖ step)[:8]`.
+
+    **Why derive at all.** `ReputationLedger.submit` guards on
+    `Rated(agent_id, job_id)` and answers `Error::Replay` *before* it reads
+    `kind`, so a plan that hires one agent for two steps submitted both its
+    ratings under one pair: the first landed, the second was refused, and half
+    that run's evidence was lost behind a "reputation submit failed" line. It is
+    the same R12 collision story 4.04 removed from the *dispute* path (ADR 0009
+    D1); the settlement path never got the fix.
+
+    **Why step 0 is not derived.** The sealed job id appears verbatim on the
+    charge, on the attestation and on every automatic rating this settler has
+    ever written. Leaving step 0 on it means no id already on the ledger changes
+    meaning — only the later steps, which is exactly the set that could never be
+    rated before, move.
+
+    **Why this shape rather than a second scheme.** ADR 0009 D1 chose it so that
+    a reviewer who opens a rating on Stellar Expert can tie it to the sealed job
+    without insider knowledge, which is what SOW §6.1 asks for: the first
+    sixteen hex characters of a derived id ARE the job's own, read by eye off
+    the charge or the seal. The hash half is the confirmation anyone can
+    recompute — the step index is the position in the plan, whose ordered agent
+    list the attestation itself seals. The tag differs from
+    `dispute_rating.DISPUTE_ID_TAG`, so a step's automatic rating and its
+    dispute rating can never derive onto one key.
+
+    Raises `ValueError` rather than returning an unusable id — a job id that is
+    not the ledger's sixteen bytes, a step that will not fit two, or the one
+    derivation in 2**64 that reproduces the job id itself and would be refused
+    as a replay of step 0's rating for ever. The caller rates the other steps.
+    """
+    if len(job_id) != _JOB_ID_BYTES:
+        raise ValueError(f"a sealed job id is {_JOB_ID_BYTES} bytes, got {len(job_id)}")
+    if not 0 <= step_index < 2 ** (8 * _STEP_INDEX_BYTES):
+        raise ValueError(f"step index {step_index} does not fit the derived id")
+    if step_index == 0:
+        return job_id
+    digest = hashlib.sha256(job_id + SETTLEMENT_ID_TAG + step_index.to_bytes(_STEP_INDEX_BYTES, "big")).digest()
+    derived = job_id[:_LINKED_PREFIX_BYTES] + digest[:_LINKED_PREFIX_BYTES]
+    if derived == job_id:
+        raise ValueError(f"the rating id for job {job_id.hex()} step {step_index} equals the job id itself")
+    return derived
+
+
 async def _submit_ratings(
     task_id: str,
     start: float,
@@ -1232,12 +1297,40 @@ async def _submit_ratings(
         rating, weight = reputation_svc.synthetic_rating(
             step_output, step.est_price_usdc, first_party=step.agent_id in first_party_ids
         )
+        # One id per STEP, because the ledger's replay guard is per
+        # (agent, job): under the job's own id an agent hired twice landed one
+        # rating and lost the other. Derived outside the submit's `try` so a
+        # refusal to derive is never traced to the buyer as an RPC failure,
+        # which is the only thing `failure_reason` could call it.
+        try:
+            step_job_id = settlement_job_id(job_id, step_index)
+        except ValueError:
+            logger.error(
+                "task %s: no rating id for %s (%s) at step %d of job %s — that step is NOT rated "
+                "(rating %d, weight %d, payer %s)",
+                task_id,
+                step.agent_name,
+                step.agent_id,
+                step_index,
+                job_id.hex(),
+                rating,
+                weight,
+                payer,
+                exc_info=True,
+            )
+            await _emit(
+                task_id,
+                start,
+                "error",
+                f"reputation submit skipped for {step.agent_name}: no rating id for this step",
+            )
+            continue
         try:
             # Async path: the submit RPC runs in a worker thread but the ~30s
             # status poll waits on the event loop — no executor thread pinned.
             result = await sc.submit_rating_async(
                 step.agent_id,
-                job_id,
+                step_job_id,
                 rating,
                 weight,
                 payer,
@@ -1252,13 +1345,15 @@ async def _submit_ratings(
                 # "rated N/100" — a success line for evidence that never landed.
                 logger.error(
                     "task %s: reputation submit for %s (%s) did not land: status=%s tx=%s "
-                    "(job %s, rating %d, weight %d, payer %s)",
+                    "(job %s, step %d under %s, rating %d, weight %d, payer %s)",
                     task_id,
                     step.agent_name,
                     step.agent_id,
                     status,
                     tx,
                     job_id.hex(),
+                    step_index,
+                    step_job_id.hex(),
                     rating,
                     weight,
                     payer,
@@ -1278,13 +1373,19 @@ async def _submit_ratings(
                 f"reputation → {step.agent_name} rated {rating}/100 · tx {tx[:10]}…",
             )
         except Exception as e:
+            # Both ids: the sealed one ties the line to the run, and the one
+            # the rating was submitted under is what an operator searches the
+            # ledger with. They are the same id only for step 0.
             logger.error(
-                "task %s: reputation submit failed for %s (%s): %s (job %s, rating %d, weight %d, payer %s)",
+                "task %s: reputation submit failed for %s (%s): %s "
+                "(job %s, step %d under %s, rating %d, weight %d, payer %s)",
                 task_id,
                 step.agent_name,
                 step.agent_id,
                 e,
                 job_id.hex(),
+                step_index,
+                step_job_id.hex(),
                 rating,
                 weight,
                 payer,
