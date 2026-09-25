@@ -360,6 +360,108 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
         asyncio.run(store.append_status("dsp_never", "upheld"))
 
 
+# ── the precondition on a transition ──────────────────────────────────────
+
+
+def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld() -> None:
+    """The double payment, in four lines.
+
+    A caller reads a dispute, decides, and appends; the append is a round trip
+    later, and in between the dispute can be adjudicated, claimed and paid by
+    somebody else. An unconditional append writes the stale decision anyway,
+    and `credited` dragged back to `upheld` is a dispute that can be claimed
+    and paid a SECOND time out of the platform wallet, with nothing on-chain
+    to take the second transfer back.
+
+    Naming the status the decision was read from is what refuses it."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        # What the stale caller read, one round trip ago.
+        stale = await store.get_dispute(opened.id)
+        assert stale is not None and stale.status == "open"
+        # Meanwhile the dispute is upheld, claimed and paid.
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.append_status(opened.id, "credited", refund_tx="tx_paid", credited_usdc=1.5)
+        refused = await store.append_status(opened.id, "upheld", expected_status=stale.status)
+        return refused, await store.get_dispute(opened.id), await store.claim_refund(opened.id)
+
+    refused, current, second_claim = asyncio.run(go())
+
+    assert refused is None
+    # Nothing was written: the dispute still reads as paid, with its hash.
+    assert current is not None and current.status == "credited"
+    assert current.refund_tx == "tx_paid"
+    # And so the second payout cannot even be claimed, let alone signed.
+    assert second_claim is None
+
+
+def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected() -> None:
+    """The other half of the same bug, and the one that pays out money the
+    adjudicator refused: `rejected` dragged back to `upheld` is a dispute
+    decided AGAINST the buyer becoming claimable and payable."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "rejected", note=NOTE)
+        refused = await store.append_status(opened.id, "upheld", expected_status="open")
+        return refused, await store.get_dispute(opened.id)
+
+    refused, current = asyncio.run(go())
+
+    assert refused is None
+    assert current is not None and current.status == "rejected"
+    # The buyer's explanation is still the one they were given.
+    assert current.note == NOTE
+
+
+def test_a_transition_that_names_no_expectation_still_lands_unconditionally() -> None:
+    """The operator's reconciliation write (docs/disputes.md): a person who has
+    read the chain is correcting the record ON PURPOSE, and their write has to
+    land whatever the dispute currently says. Passing no expectation is how
+    that is asked for, so the default cannot be a precondition."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        return await store.append_status(opened.id, "credited", refund_tx="tx_reconciled", credited_usdc=1.5)
+
+    recorded = asyncio.run(go())
+
+    assert recorded is not None and recorded.status == "credited"
+    assert recorded.refund_tx == "tx_reconciled"
+
+
+def test_a_transition_that_matches_the_expectation_is_written() -> None:
+    """The precondition refuses a dispute that MOVED, and nothing else. An
+    implementation that refused whenever an expectation was named would break
+    every adjudication while passing the two tests above."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "upheld", expected_status="open")
+
+    upheld = asyncio.run(go())
+
+    assert upheld is not None and upheld.status == "upheld"
+
+
+def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation() -> None:
+    """None means "this dispute has moved"; KeyError means "there is no such
+    dispute". Folding the second into the first would let a caller with a typo
+    in an id read it as a lost race and move on."""
+    store = InMemoryDisputeStore()
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_never", "upheld", expected_status="open"))
+
+
 # ── the bound on the in-memory store ──────────────────────────────────────
 
 
@@ -1109,6 +1211,54 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None
         asyncio.run(store.append_status("dsp_never", "upheld"))
 
     assert pool.disputes == []
+
+
+def test_the_precondition_is_a_clause_of_the_writing_statement() -> None:
+    """Asserted on the SQL itself, because a precondition checked in Python
+    before the INSERT is not a precondition at all: the dispute can move
+    between the read and the write, which is the whole bug. It has to be the
+    same statement that does the writing."""
+    sql = dispute_store._APPEND_STATUS_SQL
+
+    assert "WHERE $10::text IS NULL OR latest.status = $10::text" in sql
+    # And it gates the INSERT's own SELECT — not the `latest` CTE, which every
+    # column of the new row is copied from.
+    assert sql.index("FROM latest\nWHERE $10::text") > sql.index("INSERT INTO dispute_events")
+
+
+def test_a_stale_transition_writes_no_row_in_postgres() -> None:
+    """The append-only trail is the evidence a chargeback is answered with, so
+    a refused transition must leave no trace in it — not a row recording a
+    verdict the store declined to accept."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "rejected", note=NOTE)
+        return await store.append_status(opened.id, "upheld", expected_status="open")
+
+    refused = asyncio.run(go())
+
+    assert refused is None
+    assert [row["status"] for row in pool.disputes] == ["open", "rejected"]
+
+
+def test_a_refused_transition_is_told_apart_from_an_unknown_dispute() -> None:
+    """RETURNING is empty for both, so the store reads the id back to say which
+    — and pays for that read only on the path that has already failed."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        return await store.append_status(opened.id, "credited", expected_status="open")
+
+    assert asyncio.run(go()) is None
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_never", "credited", expected_status="open"))
 
 
 # ── the pool ──────────────────────────────────────────────────────────────
