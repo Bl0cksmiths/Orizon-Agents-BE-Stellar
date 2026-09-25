@@ -176,6 +176,14 @@ _REFUSAL_EXITS = {
     "settlement_missing": EXIT_NOTHING_TO_CREDIT,
     "refund_above_cap": EXIT_ABOVE_CAP,
     "refunds_disabled": EXIT_NOT_CONFIGURED,
+    # The settler has no signing key, or no asset SAC — `refund_svc.config_gap`,
+    # asked above the claim so that a deployment which cannot sign claims
+    # nothing. Same exit as `refunds_disabled` and as `check_config`'s own
+    # refusal, deliberately: all three are "this process is not configured to
+    # pay", all three are fixed by setting something and running again, and a
+    # wrapper that had to tell them apart would be branching on which of the
+    # two doors noticed first rather than on anything about the dispute.
+    "refunds_not_configured": EXIT_NOT_CONFIGURED,
     "unknown_dispute": EXIT_UNKNOWN_DISPUTE,
     "dispute_rejected": EXIT_NOT_ADJUDICABLE,
     "refund_in_flight": EXIT_IN_FLIGHT,

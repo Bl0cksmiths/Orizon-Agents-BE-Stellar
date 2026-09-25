@@ -1575,6 +1575,7 @@ def test_nothing_reaches_stdout_except_through_say(
     ("code", "expected"),
     [
         ("refunds_disabled", uphold_dispute.EXIT_NOT_CONFIGURED),
+        ("refunds_not_configured", uphold_dispute.EXIT_NOT_CONFIGURED),
         ("unknown_dispute", uphold_dispute.EXIT_UNKNOWN_DISPUTE),
         ("dispute_rejected", uphold_dispute.EXIT_NOT_ADJUDICABLE),
         ("settlement_missing", uphold_dispute.EXIT_NOTHING_TO_CREDIT),
@@ -1595,7 +1596,7 @@ def test_each_adjudication_refusal_carries_through_to_its_own_exit_code(
     reaches a distinct exit, so a wrapper script can tell "the cap stopped it"
     from "there was nothing to credit" without reading prose.
 
-    All six are raised before anything is signed, so all six keep the
+    All of them are raised before anything is signed, so all of them keep the
     `nothing was signed` wording.
     """
     uphold.raises(dispute_svc.DisputeError(code, f"refused: {code}", 409))
