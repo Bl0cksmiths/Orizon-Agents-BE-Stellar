@@ -392,10 +392,14 @@ open ──► upheld ──► crediting ──► credited   the claim stood: 
 ```
 
 **The rating does not get a status of its own.** It is written after the
-dispute is `credited` and recorded on it as `rating_tx`, so a `credited`
-dispute is paid either way, and fully resolved only once `rating_tx` is set.
-One without it is a buyer who has their credit and an agent whose rating has
-not landed — retryable, as "After `credited`" describes.
+dispute is `credited` and recorded on it as `rating_tx` — so a `credited`
+dispute is paid either way, and fully resolved only once that hash is on the
+record **and** `rating_confirmed` is true. Since 4.06 the hash alone does not
+say it: a submission that timed out records its hash exactly as one that
+landed, and `rating_confirmed` is what tells them apart. A dispute with no
+hash, or with a hash and `rating_confirmed` false, is a buyer who has their
+credit and an agent whose rating has not been shown to land — retryable either
+way, as "After `credited`" describes.
 
 **`crediting` is not a verdict.** Nobody adjudicates a dispute *into* it: it is
 the refund claim itself, made durable, and it exists so that a payout can be
