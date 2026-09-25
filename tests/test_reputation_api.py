@@ -355,9 +355,9 @@ def test_submit_ratings_is_best_effort(monkeypatch):
             started="just now",
         )
     )
-    # Context keys are worker names — w.ok delivered a clean artifact (95),
-    # w.bad has no output (20) and its submit raises.
-    context = {"w.ok": {"artifact": {"title": "x"}, "critic_violations": []}}
+    # Keyed by plan-step index — step 0 delivered a clean artifact (95),
+    # step 1 has no output (20) and its submit raises.
+    delivered = {0: {"artifact": {"title": "x"}, "critic_violations": []}}
 
     # Must never raise, even with a failing submit in the middle.
     asyncio.run(
@@ -365,14 +365,18 @@ def test_submit_ratings_is_best_effort(monkeypatch):
             task_id,
             time.monotonic(),
             plan,
-            context,
+            delivered,
             payer="G" + "A" * 55,
             job_id=b"\x01" * 16,
         )
     )
 
     assert len(calls) == 2  # one submit per plan step
-    assert all(c[1] == b"\x01" * 16 for c in calls)
+    # One rating id per step: step 0 under the sealed job id, step 1 under the
+    # derived one that keeps its first eight bytes, so an agent hired for both
+    # would not lose the second to the ledger's replay guard.
+    job_id = b"\x01" * 16
+    assert [c[1] for c in calls] == [job_id, execution_svc.settlement_job_id(job_id, 1)]
     assert all(c[5] == "auto" for c in calls)
     assert calls[0][2] == 95 and calls[1][2] == 20
 

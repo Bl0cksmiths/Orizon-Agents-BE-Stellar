@@ -7,8 +7,12 @@ link back to the plan and no settlement time — while evicting finished tasks
 first and losing everything on restart, which is exactly the set and exactly the
 moment a buyer disputes. These tests pin the four facts a dispute needs — WHO
 paid, WHICH job, WHAT each step cost and whether it delivered, and UNTIL WHEN —
-plus the rule about when not to write at all: no charge landed, so no money
-moved, so there is nothing to dispute.
+plus the rule about when not to write at all: no job id came back from the
+charge, so there is nothing to file a dispute against. That rule is narrower
+than it reads. A charge that raised or was rejected moved no money and has
+nothing to dispute; a charge that was submitted and never confirmed MAY still
+settle, and records nothing all the same — a known gap, pinned below as a gap
+and logged by `_settle_onchain` rather than papered over here.
 
 Story 4.05 adds a fifth fact — WHAT each delivered step produced — because the
 dispute form has to show it and the trace line that showed it first is evicted
@@ -344,12 +348,25 @@ def test_a_seal_failure_still_records_the_settlement(monkeypatch, store):
     assert any("dispute window" in ln.msg for ln in state.traces[task_id])
 
 
-@pytest.mark.parametrize("charge_tx", [None, CHARGE_TX], ids=["charge-raised", "charge-not-successful"])
-def test_a_charge_that_never_landed_records_nothing(monkeypatch, store, charge_tx):
-    """No job id means no money moved — `_settle_onchain` mints it inside the
-    charge and returns None when the charge was skipped, raised, or came back
-    non-SUCCESS. There is nothing to dispute and nothing to credit, and a
-    window promised over an empty charge is a lie to the buyer."""
+@pytest.mark.parametrize(
+    "charge_tx",
+    [None, CHARGE_TX, CHARGE_TX],
+    ids=["charge-raised", "charge-rejected", "charge-unconfirmed"],
+)
+def test_a_charge_with_no_job_id_records_nothing(monkeypatch, store, charge_tx):
+    """No job id, no record — `_settle_onchain` mints the id inside the charge
+    and returns None when the charge was skipped, raised, rejected, or
+    submitted and never confirmed.
+
+    For the first three that is also no money: nothing to dispute, nothing to
+    credit, and a window promised over an empty charge would be a lie to the
+    buyer. The fourth is NOT one of those and this pins the gap rather than a
+    guarantee: a timed-out charge MAY still settle (the same doctrine
+    `refund_svc.RefundStatus` states for a timed-out transfer), and if it does
+    the buyer is charged with no settlement row, so `issue_dispute_challenge`
+    answers `unknown_job` until the window expires. `_settle_onchain` logs that
+    charge as unreconciled — see `test_settlement_logging.py` — which is
+    today's whole answer to it."""
     _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
     _patch_settlement(monkeypatch, charge_tx=charge_tx, proof_tx=None, job_id=None)
     task_id = "tsk_capture_nocharge"
