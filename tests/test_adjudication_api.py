@@ -661,3 +661,56 @@ def test_an_adjudication_refusal_never_publishes_the_message_it_was_written_with
     assert r.json()["error"]["message"] == "refund above cap"
     assert "12.5" not in r.text
     assert "MAX_REFUND_USDC" not in r.text
+
+
+# ── what the published spec says about this pair ────────────────
+
+
+UPHOLD_PATH = "/api/disputes/{dispute_id}/uphold"
+REJECT_PATH = "/api/disputes/{dispute_id}/reject"
+
+
+def test_the_operator_key_is_a_declared_security_scheme(client):
+    """The spec advertises the production server, so it is read as instruction.
+
+    X-API-Key used to appear on these two as an ordinary OPTIONAL header, with
+    no security scheme behind it — so a generated client omitted it and met a
+    401 it had no way to anticipate, and /docs offered no way to send one.
+    """
+    spec = client.get("/openapi.json").json()
+
+    scheme = spec["components"]["securitySchemes"]["OperatorApiKey"]
+    assert (scheme["type"], scheme["in"], scheme["name"]) == ("apiKey", "header", "X-API-Key")
+    for path in (UPHOLD_PATH, REJECT_PATH):
+        assert spec["paths"][path]["post"]["security"] == [{"OperatorApiKey": []}], path
+
+
+def test_the_spec_documents_every_status_the_pair_answers_with(client):
+    spec = client.get("/openapi.json").json()
+
+    uphold = set(spec["paths"][UPHOLD_PATH]["post"]["responses"])
+    reject = set(spec["paths"][REJECT_PATH]["post"]["responses"])
+
+    # The guard's own answers, and the service's.
+    assert {"401", "404", "409", "503"} <= uphold & reject
+    # Only uphold reaches the ledger, so only uphold can report on one — and a
+    # 504 that means "may still land, reconcile by hand, never retry" is the
+    # last status to leave undeclared.
+    assert {"502", "504"} <= uphold
+    assert {"502", "504"} & reject == set()
+    # 403 is not among them: a missing key and a wrong key are both 401 on
+    # purpose, so a spec promising a 403 would describe an oracle this pair
+    # deliberately is not.
+    assert "403" not in uphold | reject
+
+
+def test_every_documented_error_status_carries_the_envelope(client):
+    spec = client.get("/openapi.json").json()
+
+    for path in (UPHOLD_PATH, REJECT_PATH):
+        responses = spec["paths"][path]["post"]["responses"]
+        for status, row in responses.items():
+            if status == "200":
+                continue
+            ref = row["content"]["application/json"]["schema"]["$ref"]
+            assert ref.endswith("ErrorEnvelope"), (path, status)
