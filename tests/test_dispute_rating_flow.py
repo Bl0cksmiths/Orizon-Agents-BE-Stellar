@@ -78,7 +78,11 @@ class Ledger:
       - `fail`: the ledger FAILED the transaction, nothing taken;
       - `lost`: the poll ran out and the transaction never landed;
       - `late`: the poll ran out but the transaction landed after all;
-      - `raise`: the submit raised, with no hash — and it landed.
+      - `raise`: the submit raised, with no hash — and it landed;
+      - `unreachable`: the RPC never answered at all, so the replay guard —
+        which the CONTRACT checks at simulation — never got to speak. This is
+        the one way a rating that has ALREADY landed comes back TIMEOUT, and
+        it is scripted ahead of the guard for exactly that reason.
 
     Anything unscripted lands.
     """
@@ -93,6 +97,12 @@ class Ledger:
     async def __call__(
         self, agent_id: str, job_id: bytes, rating: int, weight: int, payer: str, kind: str
     ) -> dict[str, Any]:
+        if self.script and self.script[0] == "unreachable":
+            # Answered before the guard is consulted, because nothing reached
+            # the ledger: a transport that never came back cannot report a
+            # replay it never asked about.
+            self.script.pop(0)
+            return {"status": "timeout", "hash": next(self._hashes)}
         if (agent_id, job_id) in self.rated:
             self.replays += 1
             raise sc.ContractError("HostError: Error(Contract, #7)", 7)
@@ -430,6 +440,54 @@ def test_the_collision_line_spells_out_the_write_that_closes_it(ledger, settler,
     assert "append_status(dispute_id, 'credited', rating_tx=<hash>, rating_confirmed=True)" in logged, (
         f"the collision line does not name the write that closes it: {logged}"
     )
+
+
+def test_a_timed_out_re_run_never_replaces_a_rating_the_ledger_confirmed(ledger, settler, caplog) -> None:
+    """The two halves of the TIMEOUT write have to move together, and here they
+    move by not moving at all.
+
+    A confirmation is MONOTONIC in the store — once the ledger has vouched for
+    a rating, no later transition may take that back, which is right: a
+    submission that timed out says nothing about one that landed. But the
+    TIMEOUT branch wrote `rating_tx=<new hash>` beside `rating_confirmed=False`
+    as one pair, and only half of that pair now lands. The record would read
+    CONFIRMED beside a transaction nobody has seen land, and the receipt would
+    render a tick against a rating that never happened — the premature success
+    story 4.06 exists to make impossible.
+
+    So a hash that has not landed is not recorded over one that has. Nothing is
+    lost: the replay guard makes a second landing under this derived id
+    impossible, so this submission could only ever have been refused, and the
+    rating it would have replaced is settled. The hash goes to the log for
+    whoever is reconciling a submission they can see.
+    """
+    dispute = open_dispute()
+
+    landed = uphold(dispute.id)
+    assert landed.rating_tx == "tx_rating_1" and landed.rating_confirmed is True
+
+    # The RPC never answers the re-run, so the rating comes back TIMEOUT with a
+    # hash of its own — the one way a landed rating can still time out.
+    ledger.script = ["unreachable"]
+    with caplog.at_level(logging.WARNING, logger=SVC_LOGGER):
+        again = uphold(dispute.id)
+
+    assert (again.rating_tx, again.rating_confirmed) == ("tx_rating_1", True)
+    stored = asyncio.run(dispute_store.get_dispute_store().get_dispute(dispute.id))
+    assert stored is not None
+    assert (stored.rating_tx, stored.rating_confirmed) == ("tx_rating_1", True), (
+        "an unconfirmed hash replaced the one the ledger vouched for"
+    )
+    assert len(settler.transfers) == 1  # and no rating answer ever re-signs the credit
+
+    declined = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == SVC_LOGGER and r.levelno == logging.WARNING and "NOT recorded" in r.getMessage()
+    ]
+    assert len(declined) == 1
+    for fact in ("already confirmed on-chain", "tx_rating_2", dispute.id, AGENT, derived(0).hex()):
+        assert fact in declined[0], f"the declined hash was not logged with {fact!r}: {declined[0]}"
 
 
 def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_resolved(
