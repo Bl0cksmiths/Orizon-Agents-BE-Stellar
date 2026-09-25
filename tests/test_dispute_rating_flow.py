@@ -406,6 +406,32 @@ def test_a_replay_with_nothing_on_record_is_a_loud_collision_and_the_buyer_keeps
         assert fact in logged[0]
 
 
+def test_the_collision_line_spells_out_the_write_that_closes_it(ledger, settler, caplog) -> None:
+    """The recovery instruction IS the line's payload, so it is pinned literally.
+
+    An operator follows it exactly, and `append_status` reads a missing keyword
+    as "leave it as recorded". A line that said only "record that hash as
+    rating_tx" therefore leaves `rating_confirmed` null — and the buyer's
+    receipt goes on showing the agent's consequence as still in flight for
+    good, because the frontend will not call a rating done without that flag.
+    The operator has by then read the rating ON THE LEDGER, which is the very
+    evidence that confirms it, so withholding the flag is not caution.
+
+    `docs/disputes.md` and `scripts/uphold_dispute.py` print the same write.
+    This is the third copy of it, and the three have to say the same thing.
+    """
+    dispute = open_dispute()
+    ledger.rated.add((AGENT, derived(0)))
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        uphold(dispute.id)
+
+    (logged,) = svc_errors(caplog)
+    assert "append_status(dispute_id, 'credited', rating_tx=<hash>, rating_confirmed=True)" in logged, (
+        f"the collision line does not name the write that closes it: {logged}"
+    )
+
+
 def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_resolved(
     ledger, settler, invalidated, caplog
 ) -> None:
