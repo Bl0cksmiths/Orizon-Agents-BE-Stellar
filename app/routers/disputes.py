@@ -44,7 +44,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..security import CodedHTTPException, request_id_var, require_adjudicator
+from ..security import CodedHTTPException, ErrorEnvelope, request_id_var, require_adjudicator
 from ..services import dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..task_auth import TaskReadProof, require_task_read, task_read_proof
@@ -741,11 +741,65 @@ async def list_task_disputes(
     )
 
 
+# Every status the adjudication pair actually answers with, so the published
+# spec stops understating them. It advertises the production server, so a
+# generated client reads it as the contract: with only 422/429/500 merged in by
+# `include_router`, the 401 an operator meets on their first call, the 503 a
+# deployment with the switch off answers to everyone, and the 502/504 that say
+# whether a credit moved were all absent — and a 504 that means "this may still
+# land, reconcile by hand, never retry" is the last thing to leave undeclared.
+#
+# 403 is deliberately NOT here: `require_adjudicator` never gives one. A
+# missing key and a wrong key are both 401, on purpose, because a route that
+# distinguishes them is an oracle — see its docstring.
+_ADJUDICATION_RESPONSES: dict[int | str, dict[str, object]] = {
+    401: {
+        "model": ErrorEnvelope,
+        "description": "`invalid_api_key` — no X-API-Key, or not the operator's. The two are one answer.",
+    },
+    404: {"model": ErrorEnvelope, "description": "`unknown_dispute` — no dispute with that id."},
+    409: {
+        "model": ErrorEnvelope,
+        "description": (
+            "The dispute cannot take this verdict: `dispute_not_open`, `dispute_rejected`, "
+            "`refund_in_flight`, `settlement_missing`, `nothing_to_credit` or `refund_above_cap`."
+        ),
+    },
+    503: {
+        "model": ErrorEnvelope,
+        "description": (
+            "`dispute_refunds_disabled` — the deployment cannot adjudicate at all; or "
+            "`adjudication_not_configured` — the switch is on with no API_KEY behind it. "
+            "Both are the operator's, never the caller's."
+        ),
+    },
+}
+
+# Uphold alone can reach the ledger, so only it can answer about one.
+_UPHOLD_RESPONSES: dict[int | str, dict[str, object]] = {
+    **_ADJUDICATION_RESPONSES,
+    502: {
+        "model": ErrorEnvelope,
+        "description": (
+            "`refund_failed` — the ledger rejected the credit, so NOTHING moved and the dispute stays upheld."
+        ),
+    },
+    504: {
+        "model": ErrorEnvelope,
+        "description": (
+            "`refund_unconfirmed` — the credit was submitted and its outcome is unknown. It may still "
+            "land, so it must be reconciled by hand and NEVER retried."
+        ),
+    },
+}
+
+
 @router.post(
     "/disputes/{dispute_id}/uphold",
     response_model=DisputeResponse,
     summary="Uphold a dispute and credit the buyer",
     dependencies=[Depends(require_adjudicator)],
+    responses=_UPHOLD_RESPONSES,
 )
 async def uphold_dispute(
     dispute_id: str = Path(..., min_length=1, max_length=64),
@@ -807,6 +861,10 @@ async def uphold_dispute(
     response_model=DisputeResponse,
     summary="Reject a dispute, with a reason the buyer is shown",
     dependencies=[Depends(require_adjudicator)],
+    # No 502/504: nothing here signs, so there is no ledger for it to report
+    # on. Its own 422 — `rejection_reason_required`, a note that cleaned to
+    # nothing — shares the row `include_router` already merges in.
+    responses=_ADJUDICATION_RESPONSES,
 )
 async def reject_dispute(
     body: RejectDisputeReq,
