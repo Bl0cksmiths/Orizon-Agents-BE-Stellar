@@ -351,3 +351,35 @@ def test_a_step_with_no_derivable_id_is_skipped_and_the_rest_are_rated(monkeypat
     traced = [ln.msg for ln in state.traces[task_id] if ln.level == "error"]
     assert any("reputation submit skipped" in m and "no rating id" in m for m in traced), traced
     assert not any("rpc error" in m for m in traced)
+
+
+def test_a_step_we_never_dispatched_does_not_cost_the_agent_s_other_step(monkeypatch):
+    """`resolve_worker` fails OPEN and its read failures are negative-cached,
+    so one blip can leave an agent unresolved at one step of a plan and
+    resolvable at the next. `undispatched` was keyed by agent_id, so that one
+    blip dropped BOTH of the agent's steps — including the one that delivered
+    and was billed for. "Was never asked" is a fact about a STEP.
+    """
+    worker = _AnswersInTurn("external.agt_twice", [CLEAN])
+    ledger = _rates(monkeypatch, worker)
+
+    seen: list[str] = []
+
+    async def _blips(agent_id: str) -> _AnswersInTurn | None:
+        seen.append(agent_id)
+        return None if len(seen) == 1 else worker
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _blips)
+    task_id = "tsk_ratingid_ghost"
+
+    _run_paid(_plan("pln_ratingid_ghost", "agt_twice", "agt_twice"), task_id)
+
+    # Step 1 delivered, so it is rated on its own output under its own id.
+    step_one = execution_svc.settlement_job_id(JOB_ID, 1)
+    assert list(ledger.rated) == [("agt_twice", step_one)]
+    assert ledger.rated[("agt_twice", step_one)] == (CLEAN_RATING, "auto")
+    # Step 0 was never asked, so nobody rates it — not even the 20/100 a step
+    # that delivered nothing earns. Our outage is not their reputation
+    # (ADR 0005 D5), and the run still says out loud that it happened.
+    assert ("agt_twice", JOB_ID) not in ledger.rated
+    assert any("unknown agent" in ln.msg for ln in state.traces[task_id])
