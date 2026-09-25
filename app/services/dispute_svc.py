@@ -502,7 +502,9 @@ async def settlement_for_task(task_id: str) -> SettlementRecord | None:
 # Everything below decides whether the platform SIGNS A TRANSFER, so the order
 # of the steps in `uphold` is the deliverable and not an implementation detail.
 # Two facts shape all of it. `store.claim_refund` is the lock, taken before
-# anything is signed and never a read-then-write (D2). And the Stellar client
+# anything is signed and never a read-then-write (D2) — and neither is the
+# adjudication that makes a dispute claimable in the first place, because a
+# lock a stale read can re-open is not a lock. And the Stellar client
 # does not raise on failure — it returns a status, one of whose values means
 # "submitted, may still land" (D3), which is the only way this service can pay
 # a buyer twice.
@@ -1098,6 +1100,62 @@ async def _retry_rating(credited: DisputeRecord, *, on_rating: RatingObserver | 
     return await _rate_credited(credited, settlement, on_rating=on_rating)
 
 
+async def _already_adjudicated(dispute: DisputeRecord, *, on_rating: RatingObserver | None) -> DisputeRecord | None:
+    """`uphold`'s steps 2–4: the answer a dispute already has, or None when it
+    is still waiting for one.
+
+    Lifted out of `uphold` because `uphold` has to ask this TWICE — once off
+    its first read, and again when the `open → upheld` compare-and-set loses,
+    because losing it means some other caller has already given this dispute
+    one of these three answers. Asked from one place, so the two askings can
+    never answer the same record differently.
+
+      - `credited` — not a refusal: the adjudicator asked for this dispute to
+        be credited and it is, so they are answered with the credit — same
+        record, same refund hash, NO second transfer. What is retried is the
+        RATING and only the rating (D3), on every repeat: one that already
+        landed is refused as a replay at simulation, costing nothing on-chain,
+        and one that never did is written now.
+      - `crediting` — a transfer is on the network and nobody knows whether it
+        landed. Never pay: the only ways out are the network confirming it or
+        a human reconciling it, and a second transfer is neither.
+      - `rejected` — adjudicated against the claim, and terminal.
+
+    `open` and `upheld` answer None, because both still have a payment ahead
+    of them and neither is this function's to make.
+    """
+    if dispute.status == "credited":
+        logger.info(
+            "dispute %s is already credited — tx %s, no transfer signed; re-attempting its rating only",
+            dispute.id,
+            dispute.refund_tx,
+        )
+        return await _retry_rating(dispute, on_rating=on_rating)
+
+    if dispute.status == "crediting":
+        raise _refuse_credit(
+            dispute,
+            "refund_in_flight",
+            409,
+            "a credit for this dispute is already on the network and its outcome is unknown —"
+            " it must be reconciled by hand, never retried",
+            amount_usdc=dispute.creditable_usdc,
+            tx_hash=dispute.refund_tx,
+            level=logging.ERROR,
+        )
+
+    if dispute.status == "rejected":
+        raise _refuse_credit(
+            dispute,
+            "dispute_rejected",
+            409,
+            "this dispute was rejected, so it can never be credited",
+            amount_usdc=dispute.creditable_usdc,
+        )
+
+    return None
+
+
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
@@ -1141,7 +1199,16 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
       6. **`open` → `upheld`** — the adjudication itself, recorded BEFORE the
          claim because `claim_refund` only ever claims an `upheld` dispute.
          An `upheld` one skips straight to the claim, which is what makes a
-         dispute left upheld by a FAILED transfer payable again.
+         dispute left upheld by a FAILED transfer payable again. The write is
+         a COMPARE-AND-SET on `open`, never a plain append, because steps 2–4
+         read the dispute an await earlier: a caller holding a stale `open`
+         read would otherwise RESURRECT a dispute that had since been claimed,
+         credited and closed, and step 7 would then legitimately hand it the
+         mutex and sign a second transfer for the same claim. Losing the set
+         means the record moved, so it is read again and asked steps 2–4
+         again; a dispute merely `upheld` by then has another adjudication
+         running on it right now, and this one refuses
+         (`adjudication_in_progress`, 409) rather than racing it to the claim.
       7. **Claim it** (D2) — the lock, taken before anything is signed and
          never a read-then-write. `None` means somebody else holds it, so the
          current record is returned rather than a second transfer signed.
@@ -1203,40 +1270,9 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     store = get_dispute_store()
     dispute = await _load_for_adjudication(dispute_id)
 
-    if dispute.status == "credited":
-        # Not a refusal: the adjudicator asked for this dispute to be credited
-        # and it is, so they are answered with the credit — same record, same
-        # refund hash, NO second transfer. What is retried is the RATING and
-        # only the rating (D3), on every repeat: one that already landed is
-        # refused as a replay at simulation, costing nothing on-chain, and one
-        # that never did is written now.
-        logger.info(
-            "dispute %s is already credited — tx %s, no transfer signed; re-attempting its rating only",
-            dispute.id,
-            dispute.refund_tx,
-        )
-        return await _retry_rating(dispute, on_rating=on_rating)
-
-    if dispute.status == "crediting":
-        raise _refuse_credit(
-            dispute,
-            "refund_in_flight",
-            409,
-            "a credit for this dispute is already on the network and its outcome is unknown —"
-            " it must be reconciled by hand, never retried",
-            amount_usdc=dispute.creditable_usdc,
-            tx_hash=dispute.refund_tx,
-            level=logging.ERROR,
-        )
-
-    if dispute.status == "rejected":
-        raise _refuse_credit(
-            dispute,
-            "dispute_rejected",
-            409,
-            "this dispute was rejected, so it can never be credited",
-            amount_usdc=dispute.creditable_usdc,
-        )
+    settled = await _already_adjudicated(dispute, on_rating=on_rating)
+    if settled is not None:
+        return settled
 
     gap = refund_svc.config_gap()
     if gap is not None:
@@ -1263,7 +1299,29 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         )
 
     if dispute.status == "open":
-        dispute = await store.append_status(dispute_id, "upheld")
+        upheld = await store.append_status(dispute_id, "upheld", expected_status="open")
+        if upheld is None:
+            # The record moved under the read this decision was made on, so
+            # nothing may be decided from it: it is read again and asked the
+            # same three questions. A dispute that is merely `upheld` by now
+            # has another adjudication running on it this instant — one that
+            # is about to claim — and this caller refuses rather than racing
+            # it, because the claim is the last gate and nothing should arrive
+            # at it holding a record it already knows is stale.
+            current = await _load_for_adjudication(dispute_id)
+            settled = await _already_adjudicated(current, on_rating=on_rating)
+            if settled is not None:
+                return settled
+            raise _refuse_credit(
+                current,
+                "adjudication_in_progress",
+                409,
+                "another adjudication of this dispute is already running and may be paying it —"
+                " nothing was signed here; read the dispute back before deciding again",
+                amount_usdc=current.creditable_usdc,
+                tx_hash=current.refund_tx,
+            )
+        dispute = upheld
 
     claimed = await store.claim_refund(dispute_id)
     if claimed is None:
