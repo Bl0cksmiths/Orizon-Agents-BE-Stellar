@@ -129,7 +129,9 @@ def test_challenge_returns_the_message_the_wallet_must_sign(client, challenge_st
     assert r.status_code == 200
     body = r.json()
     assert body["nonce"] == NONCE
-    assert body["expires_at"] == 1_700_000_300.0
+    # Coarsened to the minute, and never past the real expiry — see
+    # `_coarse_expiry`. The nonce itself is exact; only the clock is blurred.
+    assert body["expires_at"] == 1_700_000_280.0
     # Derived from the service, not assembled in the router — so the domain
     # separator and the field order can only ever have one definition.
     assert body["message"] == dispute_svc.dispute_message(JOB_ID, 1, NONCE)
@@ -932,3 +934,48 @@ def test_the_task_read_refusal_never_echoes_the_id_it_refused(client, monkeypatc
     # Nowhere in the body, not under `detail` either — the id is already in the
     # path the caller sent and in the access log, joined by that request id.
     assert hostile not in r.text
+
+
+# ── the challenge mint's expiry is not an activity oracle ───────
+
+
+def test_the_challenge_expiry_is_coarse_and_never_later_than_the_real_one(client, monkeypatch):
+    """A live challenge is handed back AS IS, so its remaining TTL is readable.
+
+    That idempotency is load-bearing — it is what stops an anonymous flood
+    cancelling the nonce a buyer is mid-way through signing — so the answer is
+    coarsened rather than the behaviour changed. An exact `expires_at` minus a
+    five-minute constant is the moment somebody started disputing that step,
+    to the second, told to anyone who can name a (job, step).
+    """
+    real = 1_700_000_000.0 + 293.0  # a live challenge, partway through its TTL
+
+    async def _issue(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        return NONCE, real
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _issue)
+
+    body = client.post("/api/disputes/challenge", json={"job_id_hex": JOB_ID, "step_index": 1}).json()
+
+    assert body["expires_at"] % 60 == 0
+    # Never later than the truth: the buyer is not told they have longer to
+    # sign than they do.
+    assert body["expires_at"] <= real
+    assert real - body["expires_at"] < 60
+    # And the nonce itself is untouched — only the clock is blurred.
+    assert body["nonce"] == NONCE
+
+
+def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, monkeypatch):
+    # Quantised on the absolute expiry, not on the remaining time, so the
+    # answer cannot be sharpened by asking twice and differencing.
+    async def _issue(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        return NONCE, time.time() + 137.0
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _issue)
+    body = {"job_id_hex": JOB_ID, "step_index": 1}
+
+    first = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
+    second = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
+
+    assert first == second
