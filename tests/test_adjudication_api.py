@@ -304,37 +304,61 @@ def test_a_non_ascii_key_is_a_401_and_never_a_500(client, adjudicating, monkeypa
     [("latin1-accents", "passphrase-naïve"), ("outside-latin1", "passphrase-Ω")],
     ids=["latin1-accents", "outside-latin1"],
 )
-def test_a_non_ascii_configured_key_locks_the_door_rather_than_crashing(
+def test_a_non_ascii_configured_key_still_admits_the_operator_who_holds_it(
     client, adjudicating, monkeypatch, label, configured
 ):
     """The other side of the same hazard: a non-ascii value pasted into API_KEY.
 
-    `expected.encode("utf-8")` cannot raise, so the guard does not crash on
-    this side — but the header round-trip is lossy either way (Starlette
-    decodes latin-1; httpx's ASGI transport, which `client` rides on, encodes
-    every header utf-8 before that), so such a key does not in practice match
-    anything a client can send. That makes the configuration unusable, and
-    what matters on a payout route is HOW it is unusable: every attempt must
-    be an ordinary 401, so the operator sees a locked door in their access log
-    and goes looking at API_KEY, rather than a stream of 500s from an
-    unhandled TypeError that reads like the service itself is broken.
+    This used to be a PERMANENT LOCKOUT, and the lockout was invisible. The
+    guard compared `supplied.encode("utf-8", "ignore")` against the configured
+    value's utf-8 bytes — but Starlette hands a dependency the header decoded
+    as LATIN-1, so re-encoding it utf-8 is the identity only while every byte
+    is ascii. One accent in API_KEY and the operator's own key arrived as
+    different bytes from the ones configured: every uphold answered 401, in
+    the access log and in the body exactly like an attacker's, forever, on a
+    deploy that reported success.
 
-    Fail-closed is the correct end state here, so this pins the refusal rather
-    than chasing an encoding that would admit the caller. What proves the
-    comparison is a real comparison and not a blanket refusal is the ascii
-    pair above: `test_the_key_admits_the_caller_to_uphold` admits the right
-    key, `test_a_prefix_of_the_key_is_401` refuses one byte short of it.
+    `security.header_secret_matches` compares the WIRE BYTES — latin-1 back
+    out, which is what latin-1 in must round-trip to — so the operator who
+    holds the key is admitted whatever alphabet it is written in. `config`
+    refuses such a key at boot as well (`API_KEY must be ascii`), because a
+    named deploy failure beats even a working accent; this is what keeps the
+    door honest for the tests and hot reloads that set the value past the
+    validators, and for a header a proxy re-encodes on the way through.
+
+    What proves this is a comparison and not a blanket admission is the pair
+    around it: the wrong key one byte short is still refused here, and
+    `test_a_prefix_of_the_key_is_401` refuses it for the ascii key.
     """
     adjudicating.api_key = configured
-    reached = sealed(monkeypatch)
+    reached = upholds_with(monkeypatch, record(status="credited", refund_tx=REFUND_TX))
 
+    # Exactly what a normal client puts on the wire for this key.
     same_bytes = client.post(UPHOLD, json={}, headers={"X-API-Key": configured.encode()})
     ascii_fold = client.post(UPHOLD, json={}, headers={"X-API-Key": b"passphrase-"})
 
-    assert same_bytes.status_code == 401, f"a {label} configured key answered {same_bytes.status_code}, not 401"
-    assert same_bytes.json()["error"]["code"] == "invalid_api_key"
+    assert same_bytes.status_code == 200, f"a {label} configured key answered {same_bytes.status_code}, not 200"
     assert ascii_fold.status_code == 401
-    assert reached == []
+    assert ascii_fold.json()["error"]["code"] == "invalid_api_key"
+    assert reached == [DISPUTE_ID]
+
+
+def test_a_padded_configured_key_admits_the_key_without_the_padding(client, adjudicating, monkeypatch):
+    """An API_KEY with whitespace around it is the operator's paste, not their key.
+
+    Nothing on the wire can carry it: the two HTTP parsers uvicorn may pick do
+    not agree about trailing OWS on a header value, and an operator typing the
+    key into a client types the key. `header_secret_matches` strips ascii
+    whitespace from both sides so the padding cannot decide who gets in, and
+    `config` refuses to boot on it so nobody has to find that out in a log.
+    """
+    adjudicating.api_key = f"  {API_KEY}\t"
+    reached = upholds_with(monkeypatch, record(status="credited", refund_tx=REFUND_TX))
+
+    r = client.post(UPHOLD, json={}, headers=AUTH)
+
+    assert r.status_code == 200, r.text
+    assert reached == [DISPUTE_ID]
 
 
 # ── the door: it admits ─────────────────────────────────────────
