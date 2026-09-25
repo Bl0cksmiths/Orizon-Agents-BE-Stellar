@@ -697,6 +697,26 @@ def test_the_promise_binds_when_it_is_the_smallest_bound(
     assert _binding_lines(out) == ["    0.0100000 USDC  promised to the buyer when the dispute was opened   <- BINDS"]
 
 
+def test_equal_bounds_are_marked_once_and_the_agreement_is_counted(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The ordinary case: a full-fraction credit on a workflow whose settled
+    total is the disputed step's own price makes all three bounds the same
+    number. Nothing is clamping the credit, so exactly one line carries the
+    marker — the preview promises "which one binds", singular — and the two
+    that agree with it are counted rather than left looking skipped."""
+    forbid_uphold(monkeypatch)
+    credit.pays(0.07)
+    seed(creditable_usdc=0.07, settled_usdc=0.07)
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert _binding_lines(out) == [
+        "    0.0700000 USDC  promised to the buyer when the dispute was opened   <- BINDS"
+        " (2 other bounds at the same figure)"
+    ]
+
+
 # ── the dry run shows the rating too: 4.04's half of the evidence ──────────
 
 
