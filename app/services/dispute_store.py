@@ -1112,16 +1112,23 @@ class InMemoryDisputeStore:
         # reads $7 once: the transition that first resolves a dispute must
         # record the same moment as its resolution and as its last change.
         now = time.time()
-        # `is not None` throughout, never truthiness, and for rating_confirmed
-        # it is the rule rather than style: False is an answer to record, and
-        # only None means "this transition does not say".
+        # `is not None` throughout, never truthiness, and it is the rule
+        # rather than style in both directions. For rating_confirmed, False is
+        # an answer to record and only None means "this transition does not
+        # say". For resolved_at, 0.0 is a moment — COALESCE keeps it in
+        # Postgres, and reading it as falsey here re-stamped it with today's
+        # clock, so the two stores disagreed about when a dispute was resolved.
         updated = replace(
             current,
             status=status,
             refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
             rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
             note=note if note is not None else current.note,
-            resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or now),
+            resolved_at=(
+                resolved_at
+                if resolved_at is not None
+                else (current.resolved_at if current.resolved_at is not None else now)
+            ),
             credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
             updated_at=now,
             # Monotonic, as the CASE in _APPEND_STATUS_SQL is: a rating the
