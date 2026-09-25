@@ -263,7 +263,13 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
 
       - `status == "SUCCESS"` with a hash → SUCCESS. The credit landed.
       - `status == "FAILED"` → FAILED. The ledger rejected it, so no funds
-        moved; this is the ONLY answer that says that.
+        moved; this is the ONLY answer that says that. Matched EXACTLY, the way
+        SUCCESS is above and the way `dispute_rating` matches both of its own:
+        this is the branch that RELEASES the refund claim, and case-folding it
+        would widen the one door in this module that says "nothing was signed"
+        on the strength of a word the client wrote and this module did not. A
+        client that ever answered `failed` falls through to TIMEOUT instead,
+        which holds the claim — the buyer is paid late rather than twice.
       - anything else → TIMEOUT. `"timeout"` is the client's own word for
         "submitted, then lost track of it", and the leftovers land here on
         purpose: an unrecognised status, or a SUCCESS with no hash, is a
@@ -337,7 +343,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         )
         return RefundOutcome("SUCCESS", tx_hash, amount_usdc)
 
-    if status.upper() == "FAILED":
+    if status == "FAILED":
         logger.error(
             "dispute %s: refund transfer did not settle — status=%s hash=%s, no funds moved "
             "(job %s, payer %s, %.7f USDC)",
