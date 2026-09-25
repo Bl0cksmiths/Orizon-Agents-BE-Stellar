@@ -633,3 +633,31 @@ def test_an_oversized_dispute_id_never_reaches_the_service(client, adjudicating,
     assert [e["loc"] for e in r.json()["detail"]] == [["path", "dispute_id"]]
     assert calls_uphold == []
     assert calls_reject == []
+
+
+def test_an_adjudication_refusal_never_publishes_the_message_it_was_written_with(client, adjudicating, monkeypatch):
+    """The other half of the message decision, and the reason it has two halves.
+
+    The buyer's routes pass `DisputeError.message` through, because everything
+    `dispute_svc` refuses a buyer with is written for the buyer and two of
+    those messages say what the code cannot. These do not: they are written
+    for an operator holding the ledger, and they quote the deployment's own
+    numbers — `refund_svc.RefundRefused` names MAX_REFUND_USDC in as many
+    words. A cap is a fact about this platform's balance sheet, and a 409 on a
+    public-shaped route is not where it is published.
+
+    So the message stays derived from the code here, and `_refuse` is the
+    function that drops it. What the adjudicator loses is nothing they cannot
+    read in the log line that was already written for them.
+    """
+    exc = dispute_error("refund_above_cap", 409)
+    exc.message = "this credit would exceed MAX_REFUND_USDC=12.5"  # type: ignore[attr-defined]
+    upholds_with(monkeypatch, exc)
+
+    r = client.post(UPHOLD, json={}, headers=AUTH)
+
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "refund_above_cap"
+    assert r.json()["error"]["message"] == "refund above cap"
+    assert "12.5" not in r.text
+    assert "MAX_REFUND_USDC" not in r.text

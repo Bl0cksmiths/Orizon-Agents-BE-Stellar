@@ -979,3 +979,51 @@ def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, mon
     second = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
 
     assert first == second
+
+
+# ── what a refusal SAYS, not just what it is called ─────────────
+
+
+def test_a_buyers_refusal_carries_the_sentence_the_service_wrote(client, monkeypatch):
+    """`dispute_svc` writes a message for the buyer; the envelope used to drop it.
+
+    The handler regenerates `error.message` from the code, which turns
+    `dispute_window_closed` into "dispute window closed" and throws away "your
+    window closed at ...". Good for disclosure, and it silently falsified the
+    docstrings that promise otherwise — `open_dispute`'s "the message says when
+    it closed", and the challenge path's "ask for a new one".
+    """
+    written = "that challenge has expired or was already used — ask for a new one"
+    exc = dispute_error("challenge_expired", 400)
+    exc.message = written  # type: ignore[attr-defined]
+
+    async def _refuse(**kwargs: object) -> DisputeRecord:
+        raise exc
+
+    monkeypatch.setattr(dispute_svc, "open_dispute", _refuse)
+
+    r = client.post("/api/disputes", json=open_body())
+
+    assert r.status_code == 400
+    # The stable code is unchanged — no client's mapping moves.
+    assert r.json()["error"]["code"] == "challenge_expired"
+    assert r.json()["error"]["message"] == written
+
+
+def test_the_challenge_mint_carries_its_message_too(client, monkeypatch):
+    written = "that workflow has no step 9"
+    exc = dispute_error("step_not_settled", 409)
+    exc.message = written  # type: ignore[attr-defined]
+
+    async def _refuse(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        raise exc
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _refuse)
+
+    r = client.post("/api/disputes/challenge", json={"job_id_hex": JOB_ID, "step_index": 9})
+
+    assert r.json()["error"] == {
+        "code": "step_not_settled",
+        "message": written,
+        "request_id": r.headers["x-request-id"],
+    }
