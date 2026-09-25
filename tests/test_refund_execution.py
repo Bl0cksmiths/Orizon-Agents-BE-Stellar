@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 import pytest
 from stellar_sdk import Keypair
@@ -217,6 +218,52 @@ def test_a_zero_amount_never_reaches_the_signer(monkeypatch) -> None:
     with pytest.raises(RefundRefused) as exc:
         asyncio.run(refund_svc.credit_refund(_dispute(), 0.0))
     assert exc.value.code == "nothing_to_credit"
+
+
+def test_a_promise_that_is_not_a_number_refuses_before_any_bound(monkeypatch, caplog) -> None:
+    """NaN is invisible to every bound in this module, so it is refused by identity.
+
+    Each bound here is a `<` or a `>`, and every comparison against NaN is
+    false: a NaN promise clears the zero floor, clears MAX_REFUND_USDC twice —
+    once here and once in the transfer wrapper — and reaches `usdc_to_i128`,
+    which raises only after the refund claim has been taken. A raise there
+    reads as "may still have landed", so the dispute wedges in `crediting`
+    holding a claim for a transfer nobody ever submitted.
+
+    The door is `DISPUTE_CREDITED_FRACTION`, shown here rather than argued:
+    a NaN survives `credited_amount_usdc`'s clamp untouched and is frozen onto
+    the dispute as the promise it was opened with.
+    """
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
+    _no_signing(monkeypatch)
+    nan = float("nan")
+    assert math.isnan(refund_svc.credited_amount_usdc(0.05, nan))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        with pytest.raises(RefundRefused) as exc:
+            refund_svc.creditable_for(_settlement(), _dispute(creditable_usdc=nan))
+
+    assert exc.value.code == "refund_amount_invalid"
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "dsp_deadbeefdeadbeef" in m and JOB in m and PAYER in m and "refund_amount_invalid" in m for m in msgs
+    ), f"an unpayable number was not logged with its context: {msgs}"
+
+
+@pytest.mark.parametrize("amount", [float("nan"), float("inf"), float("-inf")])
+def test_a_hand_rolled_unpayable_number_never_reaches_the_signer(monkeypatch, amount: float) -> None:
+    """The transfer wrapper re-checks it for the reason it re-checks the cap.
+
+    An infinity is refused by the same test: it is the unbounded credit the
+    ceiling exists to stop, and the ceiling cannot stop what it cannot
+    meaningfully compare.
+    """
+    _no_signing(monkeypatch)
+
+    with pytest.raises(RefundRefused) as exc:
+        asyncio.run(refund_svc.credit_refund(_dispute(), amount))
+
+    assert exc.value.code == "refund_amount_invalid"
 
 
 def _fake_transfer(monkeypatch, outcome: dict | BaseException) -> list[dict]:
