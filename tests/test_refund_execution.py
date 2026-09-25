@@ -302,6 +302,24 @@ def test_an_unrecognised_status_is_a_timeout(monkeypatch) -> None:
     assert asyncio.run(refund_svc.credit_refund(_dispute(), 0.05)).status == "TIMEOUT"
 
 
+@pytest.mark.parametrize("status", ["failed", "Failed", "FAILED "])
+def test_only_the_exact_word_failed_releases_a_claim(monkeypatch, status: str) -> None:
+    """FAILED is matched exactly, the way SUCCESS is.
+
+    The two branches disagreed: SUCCESS was compared verbatim while FAILED was
+    case-folded first, which made the door that says "nothing was signed" —
+    the only one a caller may release the refund claim through — wider than
+    the door that says the credit landed. A status this module did not agree
+    on is a transfer whose fate is unknown, so it belongs in TIMEOUT, which
+    holds the claim and pays the buyer late rather than twice.
+    """
+    _fake_transfer(monkeypatch, {"status": status, "hash": "maybe_tx"})
+
+    outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash) == ("TIMEOUT", "maybe_tx")
+
+
 def test_a_raising_transfer_is_a_timeout_and_is_logged(monkeypatch, caplog) -> None:
     """A raise can happen either side of the submission and the exception does
     not say which, so it is treated as in-flight: logged, never retried."""
