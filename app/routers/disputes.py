@@ -77,12 +77,39 @@ class DisputeChallengeReq(BaseModel):
     step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
 
 
+# How coarsely a dispute challenge's expiry is reported, in seconds.
+#
+# `issue_challenge` is idempotent inside the window — a live challenge comes
+# back AS IS, which is what stops a flood cancelling the nonce a buyer is
+# signing — so anyone who knows a (job, step) could mint against it and read
+# the REMAINING TTL off the answer. That is `expires_at` minus a five-minute
+# constant: the moment somebody started disputing that step, to the second,
+# answered to an anonymous caller. Which steps of which workflows are being
+# disputed right now, and when each one began, is not something this route is
+# asked and not something it should tell.
+#
+# Quantised on the ABSOLUTE expiry rather than on the remaining time, so the
+# answer does not move with how long the handler took — two callers a
+# millisecond apart get the same value, which is the whole point of reporting
+# a coarse one. Rounded DOWN, so the buyer is never told they have longer to
+# sign than they do; the cost is up to 59 seconds of a 300-second window, and
+# a challenge that lapses is re-minted for free.
+_EXPIRY_GRAIN_SECONDS = 60
+
+
+def _coarse_expiry(expires_at: float) -> float:
+    """`expires_at` floored to `_EXPIRY_GRAIN_SECONDS`. See that constant."""
+    return float(int(expires_at // _EXPIRY_GRAIN_SECONDS) * _EXPIRY_GRAIN_SECONDS)
+
+
 class DisputeChallengeResponse(BaseModel):
     # The exact string the wallet must sign, returned rather than assembled
     # client-side so the format can version without shipping a new frontend —
     # `BindChallengeResponse`'s reasoning, and the same trade.
     message: str
     nonce: str
+    # COARSE, and never later than the real expiry — see `_coarse_expiry`. The
+    # nonce this accompanies is exact; only the clock is blurred.
     expires_at: float
 
 
@@ -477,6 +504,12 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
     So an unknown or unsettled job is refused at the mint, with the service's
     own code and status rather than a 500 — which is what `_refuse` is for, and
     why this cheap public route still has a `try`.
+
+    The expiry it answers with is deliberately COARSE (`_coarse_expiry`): the
+    mint is idempotent inside the window, so an exact one would tell any
+    anonymous caller how long ago somebody started disputing a step they can
+    name. The idempotency stays — it is what keeps a flood from cancelling the
+    nonce a buyer is mid-way through signing — and only the clock is blurred.
     """
     try:
         nonce, expires_at = await dispute_svc.issue_dispute_challenge(body.job_id_hex, body.step_index)
@@ -488,7 +521,7 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
     return DisputeChallengeResponse(
         message=dispute_svc.dispute_message(body.job_id_hex, body.step_index, nonce),
         nonce=nonce,
-        expires_at=expires_at,
+        expires_at=_coarse_expiry(expires_at),
     )
 
 
