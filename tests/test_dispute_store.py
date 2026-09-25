@@ -266,11 +266,17 @@ def test_both_stores_list_a_task_s_disputes_in_the_same_order() -> None:
 def test_a_dispute_id_is_prefixed_and_unguessable() -> None:
     """The id is the only credential `GET /api/disputes/{id}` has — it is handed
     to the buyer and to nobody else — so it is long random hex rather than a
-    counter anyone could walk to read another buyer's complaint."""
+    counter anyone could walk to read another buyer's complaint.
+
+    128 bits, not 64: an unauthenticated route guarded by a bearer secret is
+    guarded by its width, and 8 bytes makes guessing a budget question. It
+    fits everywhere it has to — both columns are TEXT and every route bounds
+    the path at 64 characters, against the 36 this produces."""
     first, second = dispute_store.new_dispute_id(), dispute_store.new_dispute_id()
 
     assert first.startswith("dsp_")
-    assert len(first) == len("dsp_") + 16
+    assert len(first) == len("dsp_") + 32
+    assert len(first) <= 64
     int(first.removeprefix("dsp_"), 16)  # hex, or this raises
     assert first != second
 

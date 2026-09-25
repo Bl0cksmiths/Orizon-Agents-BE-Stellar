@@ -925,8 +925,21 @@ class RefundClaim:
 
 
 def new_dispute_id() -> str:
-    """A dispute id: unguessable, so `GET /api/disputes/{id}` needs no account."""
-    return f"dsp_{secrets.token_hex(8)}"
+    """A dispute id: 128 random bits, so `GET /api/disputes/{id}` needs no account.
+
+    The id is a BEARER CAPABILITY and the only thing between a stranger and a
+    buyer's dispute — their verbatim reason, what they were charged, and the
+    adjudicator's answer to them — so it is sized like one rather than like an
+    identifier. 16 bytes from `secrets`, written as 32 hex characters.
+
+    Eight bytes was the first version and is a different kind of secret: 64
+    bits is small enough that guessing is a budget question rather than an
+    impossibility, and this route answers unauthenticated. Widening costs
+    nothing anywhere — both columns are TEXT, every route bounds the path at 64
+    characters and `dsp_` + 32 leaves 28 spare — and ids already issued keep
+    working, because the value is stored and never derived from its length.
+    """
+    return f"dsp_{secrets.token_hex(16)}"
 
 
 class DuplicateDisputeError(Exception):
