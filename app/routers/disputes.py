@@ -830,6 +830,30 @@ async def reject_dispute(
     is the service's call, because only the service cleans it, and its
     `rejection_reason_required` reaches the adjudicator through `_refuse`
     like every other code — 422, verbatim, with no mapping to add here.
+
+    ONE ANSWER HERE PRECEDES THE GUARD, deliberately. FastAPI decodes the body
+    before it solves dependencies, so a body that is not JSON at all — `{not
+    json` — is a 422 rather than the 401 or 503 this pair otherwise gives an
+    anonymous caller. It was worth checking what that discloses, and the
+    answer is nothing:
+
+      * the ROUTE'S EXISTENCE is already disclosed by the guarded answer. A
+        well-formed anonymous POST here gets 503 `dispute_refunds_disabled`,
+        where a path that does not exist gets 404. Whoever the 422 would tell
+        has already been told;
+      * the SHAPE is not disclosed at all. A well-formed body with no `note`
+        is 503 too — the model is validated after the dependency like
+        everything else, and only an undecodable body is answered earlier. So
+        the 422 says "this endpoint parses JSON" and no more;
+      * NOTHING RUNS. No store read, no signature, no money — the request dies
+        in the body decode.
+
+    Taking the body as a raw `Request` and parsing it by hand after the guard
+    would close it, at the cost of the declared model that makes every promise
+    in the paragraph above, and of the request schema in the published spec.
+    That is a worse route in exchange for an answer nobody learns anything
+    from. `tests/test_money_route_auth.py` pins the case so the next reader
+    finds a decision here rather than an oversight.
     """
     try:
         record = await dispute_svc.reject(dispute_id, note=body.note)
