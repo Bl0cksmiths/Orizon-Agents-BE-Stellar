@@ -783,7 +783,12 @@ async def _settle_onchain(
     """Perform the real PaymentEscrow.charge + AttestationRegistry.seal calls.
 
     Returns (charge_tx, proof_tx, job_id); either tx may be None if that step
-    failed, and job_id is None when the charge failed or was skipped.
+    failed, and job_id is None whenever the charge did not CONFIRM — skipped,
+    raised, rejected, or submitted and never confirmed. The last of those is
+    not a failure: a charge that timed out may still settle on-chain, so a None
+    job id means "we do not know that the money moved", never "it did not".
+    The unconfirmed case is logged loudly, because nothing downstream can tell
+    it apart from the others — see the branch that raises it.
 
     Every failure here is money-affecting (a charge that never landed, or a
     charge that landed with no attestation sealed against it), so each one is
@@ -1092,12 +1097,18 @@ async def _record_settlement(
     settlement time — it evicts finished tasks first and is lost on restart,
     which is exactly the set and exactly the moment a buyer disputes.
 
-    Written only when the charge actually landed: `job_id` comes back None when
-    the charge was skipped (no signing key, over the cap), raised, or returned
-    non-SUCCESS, and none of those took the buyer's money — there is nothing to
-    dispute and nothing to credit. A charge that landed and a seal that then
-    failed DOES record, with `proof_tx` None: the buyer paid, so the buyer has
-    recourse, attested or not.
+    Written only when the charge CONFIRMED. `job_id` comes back None when the
+    charge was skipped (no signing key, over the cap), raised, was rejected, or
+    was submitted and never confirmed — and the last of those is NOT a charge
+    that took nothing. A timed-out charge may still settle, exactly as
+    `refund_svc.RefundStatus` says of a timed-out transfer, and this function
+    cannot tell the two apart from a None. So a run with no record here is a
+    run we cannot prove was paid for, not a run we know was free: when an
+    unconfirmed charge does land, the buyer is charged and has no window, which
+    `_settle_onchain` logs as the unreconciled charge it is.
+
+    A charge that landed and a seal that then failed DOES record, with
+    `proof_tx` None: the buyer paid, so the buyer has recourse, attested or not.
 
     Best-effort in the same sense as `_submit_ratings`, and for a stronger
     reason: the money has already moved by the time this runs, so a store that
