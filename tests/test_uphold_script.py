@@ -556,6 +556,24 @@ def test_a_live_run_without_a_signing_configuration_is_refused_before_it_upholds
     assert "STELLAR_REPUTATION_LEDGER" in out
 
 
+def test_a_passed_config_check_says_what_it_did_not_check(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, uphold: UpholdSeam, configured: dict[str, str]
+) -> None:
+    """`config_gap` is presence-only, and the gap it cannot see is the one that
+    actually bites: a settler that is not the ledger's registered Scorer signs
+    the credit perfectly well and has every rating reverted. Passing the check
+    therefore says so, and names the probe that CAN answer it, rather than
+    letting "configured" be heard as "the rating will be accepted"."""
+    uphold.fails()
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert "Presence only." in out
+    assert "not the ledger's registered Scorer" in out
+    assert "ratings.writer = not_scorer" in out
+
+
 def test_a_deployment_that_could_not_rate_is_refused_before_it_pays(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

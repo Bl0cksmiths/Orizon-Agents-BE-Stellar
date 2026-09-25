@@ -569,9 +569,21 @@ def check_config() -> int:
     (4.04): a deployment that cannot write one would land the credit, skip the
     rating, and end with the buyer paid and the dispute unresolved until
     somebody noticed. The check is `rating_writer.config_gap` — the very gate
-    `uphold` applies before it submits a rating — so this refuses exactly the
-    runs the service would pay and then decline to rate, and names the same
-    setting the service's own log line would.
+    `uphold` applies before it submits a rating — so a run this passes will at
+    least ATTEMPT the rating, and a refusal names the same setting the
+    service's own log line would.
+
+    It does not promise the rating will be accepted, and must not be read as
+    one. `config_gap` is presence-only by design, and the commonest reason a
+    correctly configured deployment still cannot rate is not a missing setting
+    at all: the settler is not the address the ReputationLedger stores as its
+    Scorer, and every submit reverts. Only the chain can answer that, so it is
+    answered where a chain read belongs — `GET /readiness`, whose
+    `ratings.writer` reads `not_scorer` on exactly that deployment (`scorer`
+    when the key is the registered one, `unchecked` when the RPC could not be
+    asked). Check it before a live run; this function will not, because a
+    pre-flight that dialled the RPC would let a blip block a credit an
+    operator is trying to pay, and `unchecked` could never refuse anyway.
     """
     missing = [
         name
@@ -588,6 +600,13 @@ def check_config() -> int:
         # this script uses for it.
         missing.append(f"{gap.problem} — so the dispute rating could not be written")
     if not missing:
+        # Said out loud, because the docstring above is not what an operator
+        # reads at 2am and "configured" is the word they will hear otherwise.
+        say()
+        say("  config:    set — this process can sign the credit and will attempt the rating.")
+        say("             Presence only. A settler that is not the ledger's registered Scorer")
+        say("             lands the credit and has EVERY rating refused: GET /readiness reports")
+        say("             that one, as ratings.writer = not_scorer.")
         return EXIT_OK
     return refuse(
         EXIT_NOT_CONFIGURED,
