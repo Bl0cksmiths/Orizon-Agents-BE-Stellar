@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
@@ -47,7 +47,7 @@ from ..config import settings
 from ..security import request_id_var, require_adjudicator
 from ..services import dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
-from ..task_auth import require_task_read
+from ..task_auth import TaskReadProof, require_task_read, task_read_proof
 
 logger = logging.getLogger(__name__)
 
@@ -198,18 +198,45 @@ class DisputeResponse(BaseModel):
     # under a second name. Null, too, for a rejection with no note, which only
     # a record from before the note was required can be.
     #
-    # Readable wherever the buyer's own `reason` is, and guarded no better:
-    # `GET /api/disputes/{id}` answers whoever holds the id, and the per-task
-    # listing answers whoever may read the task — which, while
-    # TASK_AUTH_REQUIRED is off as it is in production, is anyone with the
-    # task id. The console shows both only to the payer, but that is a choice
-    # about display, not about access. The API does not hide either, and an
-    # adjudicator writes this knowing it.
+    # WITHHELD from a caller who has not proved they may read this task, along
+    # with `reason` above — see `of`.
     rejection_reason: str | None = None
 
     @classmethod
-    def of(cls, record: DisputeRecord) -> DisputeResponse:
-        """Project a stored record onto the wire shape."""
+    def of(cls, record: DisputeRecord, *, free_text: bool) -> DisputeResponse:
+        """Project a stored record onto the wire shape.
+
+        `free_text` is whether the two HUMAN-WRITTEN fields go out: the
+        buyer's `reason` and, on a rejection, the adjudicator's
+        `rejection_reason`. Everything else on this shape is a fact about
+        money or state — amounts, statuses, transaction hashes, timestamps —
+        and those are on-chain or derivable from what is, so they go to
+        whoever the route admits.
+
+        The free text is not. It is the buyer describing, in their own words,
+        what they believe went wrong with work they paid for, and the
+        platform's written answer to them. `GET /api/disputes/{id}` rests on
+        an unguessable id, and the per-task listing is open whenever
+        TASK_AUTH_REQUIRED is off — which is the shipped default and how
+        production runs — so on both routes an anonymous stranger reached both
+        fields. This is the server declining to send them, rather than the
+        console declining to draw them: the console's choice narrows nothing
+        the API returns, and the API is what was being read.
+
+        Withheld `reason` is the EMPTY STRING, not null, and not absent. The
+        field is required and typed `str` on every client built against this
+        API, so a null would not be read as "withheld" — it would fail the
+        row's type check and cost the reader the whole dispute, statuses and
+        refund hash included, which is more than is being withheld. Empty is
+        unambiguous because `OpenDisputeReq.reason` has `min_length=1`: no
+        stored reason is ever empty, so an empty one on the wire can only mean
+        this. `rejection_reason` is already nullable and is nulled, which is
+        the same answer it gives for every dispute that was not rejected.
+
+        A proof-carrying read is unchanged, as is every route that answers a
+        caller who has already proved more than a token: the payer who just
+        signed `POST /disputes`, and the adjudicator behind the operator key.
+        """
         return cls(
             id=record.id,
             job_id_hex=record.job_id_hex,
@@ -217,7 +244,7 @@ class DisputeResponse(BaseModel):
             step_index=record.step_index,
             agent_id=record.agent_id,
             payer=record.payer,
-            reason=record.reason,
+            reason=record.reason if free_text else "",
             status=record.status,
             charged_usdc=record.charged_usdc,
             creditable_usdc=record.creditable_usdc,
@@ -228,7 +255,7 @@ class DisputeResponse(BaseModel):
             credited_usdc=record.credited_usdc,
             updated_at=record.updated_at,
             rating_confirmed=record.rating_confirmed,
-            rejection_reason=record.note if record.status == "rejected" else None,
+            rejection_reason=record.note if free_text and record.status == "rejected" else None,
         )
 
 
@@ -484,7 +511,10 @@ def _duplicate_envelope(exc: dispute_svc.DisputeError, existing: DisputeRecord) 
         content=DuplicateDisputeResponse(
             detail=exc.code,
             error={"code": exc.code, "message": exc.message, "request_id": request_id_var.get()},
-            dispute=DisputeResponse.of(existing),
+            # With its free text: only a caller whose wallet signature already
+            # verified as this settlement's payer gets this far, and the text
+            # is their own. They are the one party it was never withheld from.
+            dispute=DisputeResponse.of(existing, free_text=True),
         ).model_dump(),
     )
 
@@ -543,12 +573,15 @@ async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
         record.agent_id,
         record.charged_usdc,
     )
-    return DisputeResponse.of(record)
+    # The payer just proved themselves with a signature over this job and
+    # step, so they read back what they wrote.
+    return DisputeResponse.of(record, free_text=True)
 
 
 @router.get("/disputes/{dispute_id}", response_model=DisputeResponse, summary="Read one dispute")
 async def get_dispute(
-    dispute_id: str = Path(..., min_length=1, max_length=64),
+    dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
+    proof: Annotated[TaskReadProof, Depends(task_read_proof)],
 ) -> DisputeResponse:
     """The dispute, by the id `POST /disputes` returned.
 
@@ -556,6 +589,15 @@ async def get_dispute(
     unguessable id, so the id IS the capability — the same trade the per-task
     read token makes, without a token to lose. A buyer with no account can
     still come back to their dispute from a link.
+
+    That trade only ever held while the ids stayed unguessable, and they do
+    not: `GET /api/tasks/{id}/disputes` PUBLISHES them, and it is open while
+    TASK_AUTH_REQUIRED is off, which is how production runs. So the id buys
+    the money facts — status, amounts, the refund hash — and the free text is
+    bought separately, with the same proof that route asks for: a task token
+    for the task this dispute belongs to, or the operator key. The dispute
+    names its own task, so the caller supplies a credential and never a
+    second id.
 
     The id's exact format is deliberately not pinned in the path pattern. The
     store mints it and 4.03 may lengthen it; a pattern here would make that a
@@ -565,7 +607,7 @@ async def get_dispute(
     record = await dispute_svc.get_dispute(dispute_id)
     if record is None:
         raise HTTPException(404, "unknown_dispute")
-    return DisputeResponse.of(record)
+    return DisputeResponse.of(record, free_text=proof.proves(record.task_id))
 
 
 @router.get(
@@ -575,7 +617,8 @@ async def get_dispute(
     dependencies=[Depends(require_task_read)],
 )
 async def list_task_disputes(
-    task_id: str = Path(..., min_length=1, max_length=128),
+    task_id: Annotated[str, Path(min_length=1, max_length=128)],
+    proof: Annotated[TaskReadProof, Depends(task_read_proof)],
 ) -> TaskDisputesResponse:
     """The settlement, the window and what has been raised, in one read.
 
@@ -589,26 +632,37 @@ async def list_task_disputes(
     before settlement is "no, and here is nothing", not an error the UI has to
     special-case into the same view.
 
-    Gated by `require_task_read` like every other `/tasks/{task_id}/...` read:
-    a dispute names its payer and carries the buyer's own words about the work
-    — and, once rejected, the adjudicator's answer to them — which is exactly
-    the material that capability token exists to scope. But the dependency is
-    a no-op while TASK_AUTH_REQUIRED is off — the shipped default, and how
-    production runs — so there this read is world-readable, and it fails
-    closed only once enforcement is turned on. That is why the settlement it
-    carries is held to what is already public: the job id and the payer are
-    on-chain (see `SettlementView`), and each output summary is the line the
-    world-readable trace already showed. Nothing belongs on that shape that
-    the chain or the trace does not already publish.
+    THE TASK ID IS NOT A CAPABILITY, and this route is built on the assumption
+    that it is not. `require_task_read` gates it like every other
+    `/tasks/{task_id}/...` read, but that dependency is a no-op while
+    TASK_AUTH_REQUIRED is off — the shipped default, and how production runs
+    — and `GET /api/tasks?limit=200` hands out two hundred task ids for the
+    asking. So in production this read is open, and what it may carry is
+    decided on that basis rather than on the gate.
 
-    The disputes are not held to that standard, and this says so rather than
-    implying otherwise: each one's `reason` and `rejection_reason` go to
-    whoever this read admits, which in production is anyone with the task id.
-    The console shows them only to the payer; that is a choice about display,
-    and it narrows nothing this route returns.
+    What it carries openly is held to what is already public. The settlement's
+    job id and payer are on-chain (see `SettlementView`), each output summary
+    is the line the world-readable trace already showed, and every dispute's
+    amounts, statuses, timestamps and transaction hashes are facts about money
+    that moved or is owed. Nothing belongs on either shape that the chain or
+    the trace does not already publish.
+
+    The two fields that do not meet that standard are the HUMAN-WRITTEN ones —
+    each dispute's `reason` and, on a rejection, `rejection_reason` — and they
+    are withheld from a caller who has not proved they may read this task,
+    with the proof `require_task_read` would demand if it were switched on: a
+    task token, or the operator key. See `DisputeResponse.of`. This route
+    stays open to a shared trace link, which is the point of not simply
+    turning the switch on; a shared link just does not come with the buyer's
+    words attached.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
     disputes = await dispute_svc.list_for_task(task_id)
+    # Resolved ONCE for the whole listing, not per dispute: every row here
+    # belongs to this one task, so one proof answers for all of them, and a
+    # per-row answer would invite a future row that disagreed with its
+    # neighbours about who was reading.
+    free_text = proof.proves(task_id)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
@@ -616,7 +670,7 @@ async def list_task_disputes(
         # close to the moment the response leaves as this handler can get it.
         now=time.time(),
         settlement=SettlementView.of(settlement) if settlement is not None else None,
-        disputes=[DisputeResponse.of(d) for d in disputes],
+        disputes=[DisputeResponse.of(d, free_text=free_text) for d in disputes],
     )
 
 
@@ -676,7 +730,9 @@ async def uphold_dispute(
         record.creditable_usdc,
         record.refund_tx,
     )
-    return DisputeResponse.of(record)
+    # `require_adjudicator` admitted this caller on the operator key, which is
+    # strictly more than the free text is gated on.
+    return DisputeResponse.of(record, free_text=True)
 
 
 @router.post(
@@ -727,4 +783,6 @@ async def reject_dispute(
         record.payer,
         record.status,
     )
-    return DisputeResponse.of(record)
+    # `uphold_dispute`'s reason: the operator key, and the note is the
+    # adjudicator's own, written moments ago in this request.
+    return DisputeResponse.of(record, free_text=True)
