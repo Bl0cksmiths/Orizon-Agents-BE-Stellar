@@ -38,6 +38,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -1204,25 +1206,76 @@ class InMemoryDisputeStore:
         return None
 
 
+# The characters `jsonb` refuses however well-formed the JSON around them is.
+# Postgres cannot convert a NUL to text at all, and a lone surrogate is not a
+# character — it is half of one. `json.dumps` emits both quite happily, as
+# `\u0000` and `\ud800`, and Python's own json parser reads them back, so a
+# round trip in the test suite proves nothing about what the database will take.
+_UNSTORABLE_TEXT = re.compile("[\x00\ud800-\udfff]")
+
+
+def _storable(text: str | None) -> str | None:
+    """`text` with the characters `jsonb` will not store removed.
+
+    None stays None — an agent with no display name is not an agent with an
+    empty one, and the same holds for a step that produced no summary.
+    """
+    return None if text is None else _UNSTORABLE_TEXT.sub("", text)
+
+
 def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
     """The step breakdown as the one JSON column Postgres stores it in.
 
     A child table would need a join and a transaction for a value that is only
     ever read whole, with the settlement it belongs to.
+
+    It is also the last place a settlement can be stopped from being LOST, and
+    that is why it does more than call `json.dumps`. Anything `jsonb` refuses
+    makes the INSERT raise inside `_record_settlement`'s best-effort `try`,
+    where it is logged at ERROR and swallowed — and by then the buyer has paid.
+    A settlement with no row is a buyer with no dispute window at all: nothing
+    downstream can find what they were charged, or until when they could
+    contest it. The window is the promise this module exists to keep, so a
+    breakdown that cannot be stored must not be allowed to cost it.
+
+    The two kinds of trouble are answered differently, on purpose.
+
+    TEXT is cleaned. `agent_id` and `agent_name` arrive from a plan and are
+    sanitised nowhere on the way here; `output_summary` has been through
+    `sanitize_untrusted`, which strips control characters — including the NUL —
+    but not lone surrogates, so it is cleaned too rather than trusted on a
+    technicality. Dropping those characters costs the record nothing anybody
+    chose and keeps the window open.
+
+    A non-finite PRICE is refused. `PlanStep.est_price_usdc` is validated `ge=0`
+    and `float("inf") >= 0` is True, so an infinite price reaches here from an
+    ordinary plan — and it is the number a credit for the step is computed
+    from. There is no honest value to substitute, so this raises with the step
+    named rather than storing a settlement that promises a refund of infinity.
     """
+    for step in steps:
+        if not math.isfinite(step.price_usdc):
+            raise ValueError(
+                f"settlement step {step.step_index} ({step.agent_id}) has a non-finite price "
+                f"({step.price_usdc!r}), which cannot be stored or credited"
+            )
     return json.dumps(
         [
             {
                 "step_index": s.step_index,
-                "agent_id": s.agent_id,
-                "agent_name": s.agent_name,
+                "agent_id": _storable(s.agent_id),
+                "agent_name": _storable(s.agent_name),
                 "price_usdc": s.price_usdc,
                 "delivered": s.delivered,
-                "output_summary": s.output_summary,
+                "output_summary": _storable(s.output_summary),
             }
             for s in steps
         ],
         separators=(",", ":"),
+        # The backstop for a number the loop above cannot see — a future field,
+        # or one reached through a subclass. NaN and Infinity are not JSON, and
+        # a jsonb column is the wrong place to find that out.
+        allow_nan=False,
     )
 
 
