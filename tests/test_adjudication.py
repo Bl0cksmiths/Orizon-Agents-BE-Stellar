@@ -452,6 +452,136 @@ def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(mon
     assert answered.refund_tx is None
 
 
+def _stalls_the_first_read(monkeypatch) -> asyncio.Event:
+    """Hold the FIRST `get_dispute` of a test open until the returned event is set.
+
+    This is the whole of what a race is, and the only thing these tests force:
+    one caller reads the dispute while it is still `open` and its round trip
+    then takes a while to come back — a slow query, a wait for a pool
+    connection, a second uvicorn worker, a GC pause. Everything after it is
+    the shipped service running against the real store.
+
+    Called from inside a coroutine, because the event belongs to the loop the
+    race runs in.
+    """
+    store = dispute_store.get_dispute_store()
+    real_get = store.get_dispute
+    may_proceed = asyncio.Event()
+    reads = 0
+
+    async def _slow_first_read(dispute_id: str) -> DisputeRecord | None:
+        nonlocal reads
+        reads += 1
+        record = await real_get(dispute_id)
+        if reads == 1:
+            await may_proceed.wait()
+        return record
+
+    monkeypatch.setattr(store, "get_dispute", _slow_first_read)
+    return may_proceed
+
+
+async def _attempt(call: Any) -> Any:
+    """Run one adjudication and answer with its record or its refusal, so a
+    racing pair can be compared side by side rather than one of them blowing
+    up the gather."""
+    try:
+        return await call
+    except DisputeError as refused:
+        return refused
+
+
+def test_a_second_uphold_holding_a_stale_open_read_never_signs_a_second_transfer(monkeypatch, rater) -> None:
+    """The real interleave, where the test above fakes it by stubbing the claim.
+
+    B reads the dispute while it is still `open`; its round trip stalls until A
+    has claimed, credited and closed it. B's record is now a fact about a state
+    that no longer exists, and an UNCONDITIONAL `open → upheld` append would
+    write it back — resurrecting a paid dispute into the one status
+    `claim_refund` accepts. The claim would then be granted, correctly, and B
+    would sign a SECOND transfer for a buyer who had already been paid: two
+    hashes, 0.10 USDC out of the platform wallet, and a record saying 0.05.
+
+    With the transition conditional, B's append simply loses, and B is
+    answered the way any repeat uphold of a credited dispute is — with the
+    credit that already exists.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch, LANDED, LANDED)  # a second answer is available; it must go unused
+    store = dispute_store.get_dispute_store()
+
+    async def race() -> tuple[Any, Any]:
+        b_may_proceed = _stalls_the_first_read(monkeypatch)
+        loser = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # B reads `open`, then stalls
+        winner = await _attempt(dispute_svc.uphold(dispute.id))  # A runs to completion meanwhile
+        b_may_proceed.set()  # B's stale `open` record arrives now
+        return winner, await loser
+
+    won, lost = asyncio.run(race())
+
+    assert len(chain.calls) == 1, f"the settler signed {len(chain.calls)} transfers for one dispute"
+    assert won.status == "credited" and won.refund_tx == "tx_credit"
+    assert lost == won, "the loser was answered with something other than the credit that exists"
+    final = store._disputes[dispute.id]
+    assert (final.status, final.refund_tx, final.credited_usdc) == ("credited", "tx_credit", 0.05)
+    assert asyncio.run(store.list_refund_claims()) == ()
+
+
+def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch, rater) -> None:
+    """The same stale append, arriving while A's transfer is ON THE NETWORK.
+
+    Written back unconditionally it moves a `crediting` dispute to `upheld`
+    while A's claim row stays — and that pair is unpayable forever: `claim_refund`
+    refuses because the claim is held, `release_refund_claim` refuses because
+    the status is not `crediting`, and the reconciliation queue holds a row for
+    a dispute that does not read as being paid. Nothing but a database edit
+    gets that buyer their money.
+
+    Conditional, B's append loses and B is told the credit is in flight. A's
+    transfer then comes back FAILED — the one answer that says no funds moved —
+    so A releases, and the buyer is payable again.
+    """
+    dispute = a_dispute()
+    chain = settler(monkeypatch)
+    store = dispute_store.get_dispute_store()
+    mid_flight: list[tuple[str, str]] = []
+
+    async def race() -> tuple[Any, Any]:
+        b_may_proceed = _stalls_the_first_read(monkeypatch)
+        transfer_may_answer = asyncio.Event()
+
+        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+            chain.calls.append((buyer, amount_usdc))
+            await transfer_may_answer.wait()  # A's transfer is on the network
+            return REJECTED
+
+        monkeypatch.setattr(refund_svc, "execute_refund", _in_flight)
+        loser = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # B reads `open`, then stalls
+        winner = asyncio.create_task(_attempt(dispute_svc.uphold(dispute.id)))
+        await asyncio.sleep(0)  # A claims, signs, and waits on the network
+        b_may_proceed.set()  # B's stale `open` record arrives mid-flight
+        refused = await loser
+        # The claim protecting A's in-flight transfer is still there.
+        mid_flight.append((store._disputes[dispute.id].status, refused.code))
+        assert [c.dispute_id for c in await store.list_refund_claims()] == [dispute.id]
+        transfer_may_answer.set()  # and it comes back FAILED: nothing moved
+        return refused, await winner
+
+    lost, won = asyncio.run(race())
+
+    assert mid_flight == [("crediting", "refund_in_flight")]
+    assert lost.code == "refund_in_flight" and lost.status_code == 409
+    assert won.code == "refund_failed"
+    assert len(chain.calls) == 1
+    # FAILED means nothing moved, so the claim went back and the buyer can
+    # still be paid — which is the wedge, stated as the thing it prevents.
+    assert store._disputes[dispute.id].status == "upheld"
+    assert asyncio.run(store.list_refund_claims()) == ()
+    assert asyncio.run(store.claim_refund(dispute.id)) is not None
+
+
 # ── the three answers a submitted transfer can have ─────────────
 
 
