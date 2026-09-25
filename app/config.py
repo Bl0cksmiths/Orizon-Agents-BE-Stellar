@@ -37,6 +37,15 @@ REPUTATION_READ_BUDGET_SHARE = 0.10
 # and is nanoseconds on any real budget, so it admits no bound anyone would type.
 REPUTATION_READ_BUDGET_TOLERANCE = 1e-9
 
+# Shortest API_KEY this service will boot with. Tied to
+# `security._MIN_MASKED_SECRET_CHARS`, and it must never drop below it: under
+# that length the redaction filter stops masking a configured value by exact
+# match, so a shorter key is one that prints itself into the logs. Kept as a
+# literal rather than imported, because app/security.py imports THIS module —
+# `tests/test_config_validators.py` asserts the two agree, which is the check
+# an import would have been for.
+_MIN_API_KEY_CHARS = 8
+
 
 def _seconds(value: float) -> str:
     """A duration as a boot error prints it: precise enough to copy back in.
@@ -407,9 +416,14 @@ class Settings(BaseSettings):
         # promises "refunds on implies a key" must not have a hole in it, and
         # the operator who turns the switch on is the one who should be told.
         if self.dispute_refunds_enabled:
+            # Says what the branch above ACTUALLY tests. It reads
+            # `dispute_refunds_enabled` alone, deliberately (see the comment
+            # above) — so naming the signer and the SAC as the trigger sent an
+            # operator mid-deploy-failure hunting for credentials that may not
+            # be set, and left the real cause, the switch, unnamed.
             exposures.append(
-                "a signing key and an asset SAC are set, so /api/disputes/{id}/uphold can "
-                "transfer the platform's own funds"
+                "DISPUTE_REFUNDS_ENABLED is on, so /api/disputes/{id}/uphold is a route that "
+                "transfers the platform's own funds — whether or not the signer is wired yet"
             )
         if exposures:
             raise ValueError(
@@ -417,6 +431,65 @@ class Settings(BaseSettings):
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _api_key_is_usable_on_the_wire(self) -> "Settings":
+        """Refuse a key that would lock the operator out, or leak into the log.
+
+        RAISED, not logged, and that is the whole point of it. Each of the
+        three shapes below produces a service that *boots clean* and then
+        answers 401 to its own operator on every uphold — a refusal
+        indistinguishable, in the access log and in the body, from an
+        attacker's. A named deploy failure someone has to read beats a silent
+        permanent lockout nobody can diagnose.
+
+          * NON-ASCII. Starlette decodes header bytes as latin-1, so what the
+            operator's client puts on the wire and what an env var holds are
+            the same string only while every byte is ascii.
+            `security.header_secret_matches` round-trips those bytes so an
+            accent no longer locks the door — but a key that means different
+            things to a client, a proxy and this process is a key to replace,
+            not one to make work.
+          * PADDED. HTTP parsers do not agree about the optional whitespace
+            around a header value (uvicorn may run h11 or httptools), so a key
+            with padding is a key whose acceptance depends on which one the
+            deploy happened to pick. The comparison strips both sides; this
+            makes sure nobody relies on that.
+          * SHORTER THAN 8 CHARACTERS. `security._MIN_MASKED_SECRET_CHARS` is
+            8: below it the redaction filter does not mask a configured value
+            by exact match, because masking every occurrence of a short string
+            would shred unrelated log text. So a 6-character API_KEY is a
+            credential that PRINTS ITSELF into any log line that quotes it —
+            and this is the validator that filter's comment defers to.
+
+        An empty API_KEY is not checked here: that is the public demo's
+        supported configuration, and whether it is allowed at all is
+        `_money_capable_config_requires_api_key`'s question, not this one.
+        """
+        key = self.api_key
+        if not key:
+            return self
+        faults: list[str] = []
+        if not key.isascii():
+            faults.append("it holds a non-ascii character, which no HTTP client can send unambiguously")
+        if key != key.strip():
+            faults.append("it is padded with whitespace, which HTTP parsers disagree about")
+        if len(key.strip()) < _MIN_API_KEY_CHARS:
+            faults.append(
+                f"it is shorter than {_MIN_API_KEY_CHARS} characters, "
+                "below which the log redaction filter will not mask it"
+            )
+        if faults:
+            # The key is a credential: name the variable and the faults, never
+            # echo the value or its length beyond the bound it failed.
+            raise ValueError(
+                "API_KEY cannot be used as configured because " + "; and ".join(faults) + ". Set API_KEY "
+                "(in the Render dashboard for the deployed service) to at least "
+                f"{_MIN_API_KEY_CHARS} printable ascii characters with no surrounding whitespace — "
+                "otherwise the adjudication routes answer 401 to the operator's own key, "
+                "indistinguishably from an attacker, for as long as the deployment lives."
             )
         return self
 
