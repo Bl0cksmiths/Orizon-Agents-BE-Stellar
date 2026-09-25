@@ -394,7 +394,11 @@ def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
     """The same argument one step later. A DELETE issued after the transition
     is a statement that can fail to run, and `refund_claims` would then hold a
     lock over a dispute that has already been paid — no money lost, but a
-    reconciliation queue listing finished work is one nobody reads."""
+    reconciliation queue listing finished work is one nobody reads.
+
+    The row lock is the statement before it, inside the same transaction: it
+    changes nothing and writes nothing, and the DELETE and the event row are
+    still the one statement they have to be."""
     pool = FakePool()
     store = _pg(pool)
 
@@ -405,7 +409,7 @@ def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
         await store.append_status(upheld.id, "credited", refund_tx="tx_refund")
         return pool.statements[mark:]
 
-    assert asyncio.run(go()) == [dispute_store._APPEND_STATUS_SQL]
+    assert asyncio.run(go()) == [dispute_store._LOCK_DISPUTE_SQL, dispute_store._APPEND_STATUS_SQL]
     assert pool.claims == {}
 
 

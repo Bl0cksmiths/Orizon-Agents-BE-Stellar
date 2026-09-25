@@ -433,13 +433,57 @@ RETURNING dispute_id
 """
 
 
+# The per-dispute mutex every append queues on, taken in its own statement
+# immediately before _APPEND_STATUS_SQL and inside the same transaction, so the
+# two run as one.
+#
+# Its own statement, and that is the whole reason it works. `FOR UPDATE` on the
+# `latest` CTE is legal and looks like the fix, but at READ COMMITTED a
+# statement that WAITS on a row lock does not re-take its snapshot when it
+# wakes: the row it was blocked on is re-checked, and a row another transaction
+# INSERTED while it waited stays invisible. The blocked appender would take the
+# lock and then copy forward the very row it read before it waited, which is
+# the lost update again with a lock in front of it. A new command in the same
+# transaction DOES take a new snapshot — that is what READ COMMITTED means —
+# so the statement that reads `latest` has to be the one AFTER the lock.
+#
+# The OPENING row is the thing locked, not the newest one, and the difference
+# is not cosmetic. A dispute's newest row changes with every transition, so two
+# appenders can end up holding locks on two different rows and neither waits
+# for the other. The opening row is written once, exists for every dispute, and
+# is never superseded, so every appender for one dispute queues on the same
+# row. The lock is released when the transaction ends, which is what holds the
+# lock and the append together.
+#
+# It also answers whether the dispute exists at all: no opening row, no
+# dispute, and RETURNING can then be empty for only one reason.
+_LOCK_DISPUTE_SQL = """
+SELECT 1
+FROM dispute_events
+WHERE dispute_id = $1 AND opening
+FOR UPDATE
+"""
+
+
 # Move a dispute to a new status by APPENDING its next event row — the whole of
 # what stories 4.03 (credited) and 4.04 (rated) do to a dispute.
 #
-# One statement, for binding_store's reason: the `latest` CTE and the INSERT
-# share a snapshot, so there is no window between reading the current row and
-# writing the one that supersedes it, and a credit and a rating landing
-# together cannot each write a row that forgets the other's.
+# One statement, so the row this appends and the mutex it drops cannot come
+# apart — but NOT, as this comment claimed until the window was found, because
+# the `latest` CTE and the INSERT share a snapshot. They do share one, and that
+# buys nothing whatever against a concurrent caller: a snapshot is shared
+# WITHIN a statement, and at READ COMMITTED — asyncpg's isolation level and
+# Postgres's default — two statements running at once each take their own at
+# their own start. This one takes no lock and has no unique index to block on
+# (`opening` is FALSE on every row it writes), so both appends read the same
+# `latest`, both COALESCE against it, and the second supersedes the first. That
+# is a textbook lost update, and what it loses is evidence: the note that
+# explains a rejection to the buyer, or the refund_tx and credited_usdc pair
+# that records that they were paid — the module's own example of "a credit and
+# a rating landing together" is exactly the case it gets wrong.
+#
+# What closes that window is _LOCK_DISPUTE_SQL, taken by `append_status` in the
+# same transaction immediately before this statement.
 #
 # The immutable half of the record is copied forward from `latest` rather than
 # re-supplied by the caller. A caller that had to restate the payer, the reason
@@ -1382,46 +1426,56 @@ class PostgresDisputeStore:
         reconciliation writes of docs/disputes.md pass nothing and land
         unconditionally, which is what they are for.
 
+        Two statements on one connection, in one transaction, and that shape
+        is the fix for a lost update rather than a flourish — see
+        _LOCK_DISPUTE_SQL. The lock serializes every append for this dispute;
+        the statement after it reads `latest` under a fresh snapshot, which at
+        READ COMMITTED is the only way to see what the appender ahead just
+        wrote. Nothing else in this store holds a connection across statements,
+        because nothing else has two that have to agree.
+
         KeyError for an unknown id, matching InMemoryDisputeStore, and it is
-        kept apart from the refusal on purpose: RETURNING is empty for both a
-        dispute with no history and a dispute that has moved, so the id is read
-        back to tell those two apart. A dispute id that does not exist is a bug
-        in the caller; one that moved is the concurrency this precondition
-        exists to answer, and a caller cannot handle them the same way.
+        kept apart from the refusal on purpose: the lock statement is what
+        answers it, so an empty RETURNING afterwards can only mean the
+        precondition refused. A dispute id that does not exist is a bug in the
+        caller; one that moved is the concurrency the precondition exists to
+        answer, and a caller cannot handle them the same way.
         """
         pool = await self._ready_pool()
-        # Our own clock, in epoch seconds, for the reason every other timestamp
-        # here is: the record handed back must be the row that was stored, not a
-        # value the database rendered in whatever timezone it happens to run in.
-        # It is always the row's `updated_at`, and its `resolved_at` only when
-        # neither the caller nor the record already has a resolution time — see
-        # COALESCE in _APPEND_STATUS_SQL.
-        now = time.time()
-        # The statement also drops the refund mutex when `status` finishes the
-        # dispute, so what remains in `refund_claims` is exactly the set of
-        # payouts still in flight rather than a pile of spent locks.
-        row = await pool.fetchrow(
-            _APPEND_STATUS_SQL,
-            dispute_id,
-            status,
-            refund_tx,
-            rating_tx,
-            note,
-            resolved_at,
-            now,
-            credited_usdc,
-            rating_confirmed,
-            expected_status,
-        )
-        if row is None:
-            # Empty RETURNING: either the precondition refused the write or
-            # this dispute has no history at all. Only the second is a caller
-            # bug, so the two are separated by a read rather than collapsed —
-            # and the read is paid for only on the path that already failed.
-            if expected_status is not None and await self.get_dispute(dispute_id) is not None:
-                return None
-            raise KeyError(dispute_id)
-        return self._to_dispute(row)
+        async with pool.acquire() as conn, conn.transaction():
+            # Nothing may be read about this dispute until the appends ahead of
+            # this one have finished, so the lock comes before the clock as
+            # well as before the read.
+            if await conn.fetchrow(_LOCK_DISPUTE_SQL, dispute_id) is None:
+                raise KeyError(dispute_id)
+            # Our own clock, in epoch seconds, for the reason every other
+            # timestamp here is: the record handed back must be the row that was
+            # stored, not a value the database rendered in whatever timezone it
+            # happens to run in. Read AFTER the lock, so a transition that
+            # waited is dated when it was written rather than when it queued.
+            # It is always the row's `updated_at`, and its `resolved_at` only
+            # when neither the caller nor the record already has a resolution
+            # time — see COALESCE in _APPEND_STATUS_SQL.
+            now = time.time()
+            # The statement also drops the refund mutex when `status` finishes
+            # the dispute, so what remains in `refund_claims` is exactly the set
+            # of payouts still in flight rather than a pile of spent locks.
+            row = await conn.fetchrow(
+                _APPEND_STATUS_SQL,
+                dispute_id,
+                status,
+                refund_tx,
+                rating_tx,
+                note,
+                resolved_at,
+                now,
+                credited_usdc,
+                rating_confirmed,
+                expected_status,
+            )
+        # Empty RETURNING with the dispute known to exist means one thing: the
+        # precondition refused the write.
+        return None if row is None else self._to_dispute(row)
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
         """Take the exclusive right to pay this dispute, or return None.

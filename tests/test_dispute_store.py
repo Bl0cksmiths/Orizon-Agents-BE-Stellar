@@ -605,6 +605,12 @@ class FakePool:
         # `refund_claims`. A dict rather than a set because the claim time is
         # what makes the table readable as a reconciliation queue.
         self.claims: dict[str, float] = {}
+        # Row locks, one per dispute id, taken by _LOCK_DISPUTE_SQL and held
+        # until the transaction that took them ends. Postgres locks a row;
+        # there are no rows to lock here, so the dispute id stands in for the
+        # opening row every appender for that dispute queues on.
+        self.row_locks: dict[str, asyncio.Lock] = {}
+        self.acquired = 0
         self.closed = 0
 
     async def execute(self, sql: str, *args: Any) -> str:
@@ -785,12 +791,102 @@ class FakePool:
         self.disputes.append(row)
         return row
 
+    def acquire(self, *, timeout: float | None = None) -> FakeAcquire:
+        """`pool.acquire()`: one connection, as an async context manager.
+
+        Only `append_status` asks for one, and only because its two statements
+        have to run on the same connection inside one transaction — the first
+        takes a row lock the second is read under.
+        """
+        self.acquired += 1
+        return FakeAcquire(self)
+
     async def close(self) -> None:
         self.closed += 1
 
     @property
     def writes(self) -> list[str]:
-        return [s for s in self.statements if "INSERT" in s or "UPDATE" in s or "DELETE" in s]
+        # The lock statement reads one row and locks it. `FOR UPDATE` puts the
+        # word in the SQL without making the statement a write, so it is named
+        # out rather than matched on.
+        return [
+            s
+            for s in self.statements
+            if s != dispute_store._LOCK_DISPUTE_SQL and ("INSERT" in s or "UPDATE" in s or "DELETE" in s)
+        ]
+
+
+class FakeAcquire:
+    """What `pool.acquire()` returns: `async with` it for a connection."""
+
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+
+    async def __aenter__(self) -> FakeConnection:
+        await asyncio.sleep(0)
+        return FakeConnection(self._pool)
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class FakeConnection:
+    """One pooled connection: the pool's own statements, plus the two things a
+    pool call cannot give — a transaction, and the row locks it holds until
+    that transaction ends."""
+
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+        self._held: list[asyncio.Lock] = []
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        return await self._pool.execute(sql, *args)
+
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        return await self._pool.fetch(sql, *args)
+
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+        if sql != dispute_store._LOCK_DISPUTE_SQL:
+            return await self._pool.fetchrow(sql, *args)
+        self._pool.statements.append(sql)
+        await asyncio.sleep(0)
+        (dispute_id,) = args
+        opening = next(
+            (row for row in self._pool.disputes if row["opening"] and row["dispute_id"] == dispute_id),
+            None,
+        )
+        # `SELECT ... FOR UPDATE` over no rows locks nothing and returns
+        # nothing, which is how the store tells an unknown dispute apart from
+        # one whose transition was refused.
+        if opening is None:
+            return None
+        lock = self._pool.row_locks.setdefault(dispute_id, asyncio.Lock())
+        # The wait itself. A second appender for this dispute stops here until
+        # the first transaction ends, and reads `latest` only afterwards —
+        # which is the whole of what the lock buys, and the reason it is a
+        # separate statement rather than a FOR UPDATE on the `latest` CTE.
+        await lock.acquire()
+        self._held.append(lock)
+        return {"locked": 1}
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self)
+
+
+class FakeTransaction:
+    """`conn.transaction()`. A row lock lasts until the transaction ends, and
+    that is the half of it that makes the lock a mutex rather than a pause."""
+
+    def __init__(self, conn: FakeConnection) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> FakeTransaction:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        for lock in self._conn._held:
+            lock.release()
+        self._conn._held.clear()
 
 
 def _pg(pool: FakePool) -> dispute_store.PostgresDisputeStore:
@@ -854,7 +950,13 @@ def test_no_sql_in_the_module_mutates_a_dispute_event() -> None:
     assert {"_INSERT_DISPUTE_SQL", "_APPEND_STATUS_SQL", "_CLAIM_REFUND_SQL"} <= statements.keys()
     for name, sql in statements.items():
         upper = sql.upper()
-        assert "UPDATE " not in upper, name
+        # What is refused is the UPDATE *command*. The bare word proves
+        # nothing on its own: `FOR UPDATE` is a row LOCK, which holds a row
+        # against concurrent appends and changes none of it, and `updated_at`
+        # is a column every transition writes.
+        without_lock = upper.replace("FOR UPDATE", "")
+        assert "UPDATE " not in without_lock, name
+        assert "UPDATE\n" not in without_lock, name
         assert "DO UPDATE" not in upper, name
         for after_delete in upper.split("DELETE ")[1:]:
             assert after_delete.startswith("FROM REFUND_CLAIMS"), name
@@ -1105,8 +1207,14 @@ def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone() -> None:
     assert pool.disputes[1]["opening"] is False
     # `dispute_events` stays append-only. The only DELETE this path may issue
     # is against `refund_claims`, which is a mutex rather than a record: it is
-    # meant to be released, and releasing it destroys no history.
-    assert not any(("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s for s in pool.statements)
+    # meant to be released, and releasing it destroys no history. The lock
+    # statement is named out because `FOR UPDATE` carries the word without
+    # changing a row — it reads one and holds it.
+    assert not any(
+        ("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s
+        for s in pool.statements
+        if s != dispute_store._LOCK_DISPUTE_SQL
+    )
 
 
 def test_the_current_state_is_the_newest_row() -> None:
