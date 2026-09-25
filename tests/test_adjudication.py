@@ -544,6 +544,45 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
     assert stuck.refund_tx == "tx_who_knows"
 
 
+def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(monkeypatch, caplog) -> None:
+    """The one window `uphold` cannot close, and the only one it can log.
+
+    The transfer has LANDED and the store is unreachable at the instant the
+    credit is written. Leaving the claim held and the dispute in `crediting`
+    is right — both say a payment may have happened — and letting the
+    exception out is right too. What was missing is the line: `refund_svc`
+    logs the landed credit at INFO, and a bare 500 carries no dispute, no job,
+    no payer, no amount and no hash, so the highest-stakes moment on the money
+    path was the one place with nothing an operator could reconcile from.
+    """
+    dispute = a_dispute()
+    settler(monkeypatch, LANDED)
+    store = dispute_store.get_dispute_store()
+    real_append = store.append_status
+
+    async def _unreachable(dispute_id: str, status: str, **kwargs: Any) -> DisputeRecord:
+        if status == "credited":
+            raise RuntimeError("the dispute store is unreachable")
+        return await real_append(dispute_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "append_status", _unreachable)
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        with pytest.raises(RuntimeError, match="unreachable"):
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    # The claim is what stops a second payment, so it must outlive the failure.
+    assert store._disputes[dispute.id].status == "crediting"
+    assert [c.dispute_id for c in asyncio.run(store.list_refund_claims())] == [dispute.id]
+
+    logged = [r for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert len(logged) == 1
+    message = logged[0].getMessage()
+    for fact in (dispute.id, JOB, dispute.payer, "0.0500000", "tx_credit"):
+        assert fact in message, f"a landed credit was not logged with {fact!r}: {message}"
+    assert logged[0].exc_info is not None, "the store failure was logged without its traceback"
+
+
 # ── the master switch ───────────────────────────────────────────
 
 
