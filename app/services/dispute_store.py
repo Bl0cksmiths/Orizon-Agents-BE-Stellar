@@ -38,6 +38,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -83,6 +85,31 @@ _MAX_IN_MEMORY = 500
 # connections than that one already holds.
 _POOL_MIN_SIZE = 0
 _POOL_MAX_SIZE = 5
+
+# Timeouts, because a pool without them turns a database that is merely slow
+# into a service that is merely stopped — and this pool is five connections
+# wide for the whole process.
+#
+# asyncpg's defaults are not enough on their own. A connect attempt is bounded
+# at 60 seconds, which is a hang as far as an HTTP request is concerned, and a
+# COMMAND has no bound at all: a statement that never comes back holds its
+# connection for as long as the socket stays open. Five of those and every
+# later call waits on `acquire()`, which is also unbounded by default — so one
+# unreachable database stops answering disputes, settlements and the routes
+# above them, all of which had another answer available.
+#
+# So each of the three is named. `command_timeout` is the one that matters
+# most: it is what guarantees a connection comes back to the pool, which is
+# what makes waiting for one finite. The acquire timeout is longer than it on
+# purpose — a waiter must not be cut off before the holder it is waiting for
+# has been — and the whole worst case is a bounded error instead of a request
+# that never returns. They are seconds, and generous ones: every statement here
+# is a single indexed row or a table that holds the payouts currently in
+# flight, so anything near these numbers is a database in trouble rather than a
+# query that needs longer.
+_POOL_CONNECT_TIMEOUT = 10.0
+_POOL_COMMAND_TIMEOUT = 10.0
+_POOL_ACQUIRE_TIMEOUT = 15.0
 
 
 def _import_asyncpg() -> Any:
@@ -433,13 +460,57 @@ RETURNING dispute_id
 """
 
 
+# The per-dispute mutex every append queues on, taken in its own statement
+# immediately before _APPEND_STATUS_SQL and inside the same transaction, so the
+# two run as one.
+#
+# Its own statement, and that is the whole reason it works. `FOR UPDATE` on the
+# `latest` CTE is legal and looks like the fix, but at READ COMMITTED a
+# statement that WAITS on a row lock does not re-take its snapshot when it
+# wakes: the row it was blocked on is re-checked, and a row another transaction
+# INSERTED while it waited stays invisible. The blocked appender would take the
+# lock and then copy forward the very row it read before it waited, which is
+# the lost update again with a lock in front of it. A new command in the same
+# transaction DOES take a new snapshot — that is what READ COMMITTED means —
+# so the statement that reads `latest` has to be the one AFTER the lock.
+#
+# The OPENING row is the thing locked, not the newest one, and the difference
+# is not cosmetic. A dispute's newest row changes with every transition, so two
+# appenders can end up holding locks on two different rows and neither waits
+# for the other. The opening row is written once, exists for every dispute, and
+# is never superseded, so every appender for one dispute queues on the same
+# row. The lock is released when the transaction ends, which is what holds the
+# lock and the append together.
+#
+# It also answers whether the dispute exists at all: no opening row, no
+# dispute, and RETURNING can then be empty for only one reason.
+_LOCK_DISPUTE_SQL = """
+SELECT 1
+FROM dispute_events
+WHERE dispute_id = $1 AND opening
+FOR UPDATE
+"""
+
+
 # Move a dispute to a new status by APPENDING its next event row — the whole of
 # what stories 4.03 (credited) and 4.04 (rated) do to a dispute.
 #
-# One statement, for binding_store's reason: the `latest` CTE and the INSERT
-# share a snapshot, so there is no window between reading the current row and
-# writing the one that supersedes it, and a credit and a rating landing
-# together cannot each write a row that forgets the other's.
+# One statement, so the row this appends and the mutex it drops cannot come
+# apart — but NOT, as this comment claimed until the window was found, because
+# the `latest` CTE and the INSERT share a snapshot. They do share one, and that
+# buys nothing whatever against a concurrent caller: a snapshot is shared
+# WITHIN a statement, and at READ COMMITTED — asyncpg's isolation level and
+# Postgres's default — two statements running at once each take their own at
+# their own start. This one takes no lock and has no unique index to block on
+# (`opening` is FALSE on every row it writes), so both appends read the same
+# `latest`, both COALESCE against it, and the second supersedes the first. That
+# is a textbook lost update, and what it loses is evidence: the note that
+# explains a rejection to the buyer, or the refund_tx and credited_usdc pair
+# that records that they were paid — the module's own example of "a credit and
+# a rating landing together" is exactly the case it gets wrong.
+#
+# What closes that window is _LOCK_DISPUTE_SQL, taken by `append_status` in the
+# same transaction immediately before this statement.
 #
 # The immutable half of the record is copied forward from `latest` rather than
 # re-supplied by the caller. A caller that had to restate the payer, the reason
@@ -471,6 +542,17 @@ RETURNING dispute_id
 # permanent, and a rating that timed out would read "unconfirmed" forever after
 # the ledger vouched for it.
 #
+# What COALESCE alone got WRONG is the other direction, and for the same
+# reason: FALSE is not NULL, so a caller naming FALSE replaced a recorded TRUE.
+# Story 4.04 writes exactly that pair when a submission times out — a fresh
+# hash beside `rating_confirmed=False` — so a rating the ledger had already
+# vouched for was downgraded to "in flight" by a later attempt, and the receipt
+# went on to deny something that had happened. A confirmation is therefore
+# MONOTONIC: once TRUE it stays TRUE, whatever a later transition says. NULL
+# still means "this transition does not say", and a rating that was never
+# submitted stays NULL rather than becoming FALSE — which is the distinction
+# DisputeRecord promises a reader of a receipt.
+#
 # `updated_at` is $7 outright and never COALESCEd, because it is the one column
 # every transition exists to move. It is the same reading of the clock as the
 # `resolved_at` fallback, so the transition that first resolves a dispute
@@ -481,6 +563,22 @@ RETURNING dispute_id
 # dispute's opening row in the partial unique index, and every resolution in
 # the system would fail.
 #
+# `expected_status` ($10) is the PRECONDITION, and it is what makes a
+# transition safe to compute from a read taken a round trip earlier. A caller
+# reads the dispute, decides, and appends; between those two the dispute can be
+# claimed, credited or adjudicated by somebody else, and an unconditional
+# append writes the stale decision anyway — dragging `credited` back to
+# `upheld`, where it is claimed and paid a SECOND time out of the platform
+# wallet, or `rejected` to `upheld`, paying a dispute that was adjudicated
+# against the buyer's claim. Naming the status the decision was made from
+# refuses the write instead: the INSERT selects from `latest` only while its
+# status still matches, so nothing is written and RETURNING comes back empty.
+#
+# NULL means unconditional, and that is a decision rather than a default nobody
+# made. The reconciliation writes in docs/disputes.md are made by a person who
+# has read the chain and is correcting the record ON PURPOSE — the one caller
+# whose write has to land whatever the dispute currently says.
+#
 # `finished` drops the refund mutex when this transition ends the dispute, in
 # the same statement rather than in a second call after it. A dispute that has
 # been credited or rejected is not mid-payout, and a claim row that outlived
@@ -488,8 +586,22 @@ RETURNING dispute_id
 # dispute that is already paid — which costs nobody money but makes the
 # reconciliation queue lie, and a queue that lists finished work is a queue
 # operators learn to ignore. The rule lives in the SQL and not in an `if` above
-# the call, so a future transition cannot forget it. It runs even when `latest`
-# is empty, which is harmless: a dispute that does not exist holds no mutex.
+# the call, so a future transition cannot forget it.
+#
+# It is gated on the transition this statement is actually WRITING, and that is
+# load-bearing rather than tidy: a data-modifying CTE is executed whether or
+# not the INSERT beside it produces a row, so conditioned on the new status
+# alone — which is all it was — the DELETE fired for a transition the
+# precondition had just refused. A `reject` computed from a stale read of an
+# `open` dispute is refused by the precondition and yet still dropped the claim
+# row protecting a transfer that was already on the network; the buyer waiting
+# on it then vanished from `list_refund_claims()`, which is the only queue a
+# human reconciles from, and another payer could take the claim and sign a
+# second transfer. The EXISTS repeats the precondition so the mutex moves only
+# when the trail does. It also stops firing for a dispute that has no history
+# at all, which used to drop a stray claim silently — this table blocks rather
+# than forgets, and a row nobody can account for is exactly the row an operator
+# has to see.
 _APPEND_STATUS_SQL = """
 WITH latest AS (
     SELECT *
@@ -500,7 +612,13 @@ WITH latest AS (
 ),
 finished AS (
     DELETE FROM refund_claims
-    WHERE dispute_id = $1 AND $2 IN ('credited', 'rejected')
+    WHERE dispute_id = $1
+      AND $2 IN ('credited', 'rejected')
+      AND EXISTS (
+          SELECT 1
+          FROM latest
+          WHERE $10::text IS NULL OR latest.status = $10::text
+      )
     RETURNING dispute_id
 )
 INSERT INTO dispute_events (
@@ -517,9 +635,13 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        COALESCE($5::text, latest.note),
        COALESCE($8::double precision, latest.credited_usdc),
        $7::double precision,
-       COALESCE($9::boolean, latest.rating_confirmed),
+       CASE
+           WHEN latest.rating_confirmed THEN TRUE
+           ELSE COALESCE($9::boolean, latest.rating_confirmed)
+       END,
        FALSE
 FROM latest
+WHERE $10::text IS NULL OR latest.status = $10::text
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
           credited_usdc, updated_at, rating_confirmed
@@ -803,8 +925,21 @@ class RefundClaim:
 
 
 def new_dispute_id() -> str:
-    """A dispute id: unguessable, so `GET /api/disputes/{id}` needs no account."""
-    return f"dsp_{secrets.token_hex(8)}"
+    """A dispute id: 128 random bits, so `GET /api/disputes/{id}` needs no account.
+
+    The id is a BEARER CAPABILITY and the only thing between a stranger and a
+    buyer's dispute — their verbatim reason, what they were charged, and the
+    adjudicator's answer to them — so it is sized like one rather than like an
+    identifier. 16 bytes from `secrets`, written as 32 hex characters.
+
+    Eight bytes was the first version and is a different kind of secret: 64
+    bits is small enough that guessing is a budget question rather than an
+    impossibility, and this route answers unauthenticated. Widening costs
+    nothing anywhere — both columns are TEXT, every route bounds the path at 64
+    characters and `dsp_` + 32 leaves 28 spare — and ids already issued keep
+    working, because the value is stored and never derived from its length.
+    """
+    return f"dsp_{secrets.token_hex(16)}"
 
 
 class DuplicateDisputeError(Exception):
@@ -853,7 +988,8 @@ class DisputeStore(Protocol):
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
-    ) -> DisputeRecord: ...
+        expected_status: DisputeStatus | None = None,
+    ) -> DisputeRecord | None: ...
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
 
@@ -935,7 +1071,22 @@ class InMemoryDisputeStore:
         )
 
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
-        return tuple(d for d in self._disputes.values() if d.task_id == task_id)
+        # Ordered the way _SELECT_DISPUTES_FOR_TASK_SQL orders: oldest dispute
+        # first, tiebroken by step so two opened in the same clock tick still
+        # have a defined order.
+        #
+        # Insertion order is not that. It is the order THIS PROCESS happened to
+        # see them, which a restart, an eviction or a dispute opened against an
+        # older settlement all change — and it is the order every test in this
+        # suite sees, because they all run against this store. A receipt that
+        # listed a task's disputes one way here and another way in production
+        # would have nothing in the hermetic suite to catch it.
+        return tuple(
+            sorted(
+                (d for d in self._disputes.values() if d.task_id == task_id),
+                key=lambda d: (d.opened_at, d.step_index),
+            )
+        )
 
     async def append_status(
         self,
@@ -948,33 +1099,71 @@ class InMemoryDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
-    ) -> DisputeRecord:
+        expected_status: DisputeStatus | None = None,
+    ) -> DisputeRecord | None:
+        """Append the transition and return the dispute, or None if refused.
+
+        `expected_status` is the precondition _APPEND_STATUS_SQL states as a
+        WHERE clause, and it means the same here: name the status the decision
+        was computed from and a dispute that has moved since refuses the write
+        rather than taking it. None at both ends — no precondition asked for,
+        and no transition written — never overlap, because an unconditional
+        append over a dispute that exists always lands.
+
+        KeyError stays what it always was: an id this store has never held is a
+        bug in the caller, not a dispute that moved underneath one.
+        """
         current = self._disputes.get(dispute_id)
         if current is None:
             raise KeyError(dispute_id)
+        if expected_status is not None and current.status != expected_status:
+            # The decision was made against a dispute that no longer reads that
+            # way. Refusing is the whole point: what the caller was about to
+            # record is a verdict on a state somebody else has already left.
+            return None
         # One reading of the clock for both timestamps, as _APPEND_STATUS_SQL
         # reads $7 once: the transition that first resolves a dispute must
         # record the same moment as its resolution and as its last change.
         now = time.time()
-        # `is not None` throughout, never truthiness, and for rating_confirmed
-        # it is the rule rather than style: False is an answer to record, and
-        # only None means "this transition does not say".
+        # `is not None` throughout, never truthiness, and it is the rule
+        # rather than style in both directions. For rating_confirmed, False is
+        # an answer to record and only None means "this transition does not
+        # say". For resolved_at, 0.0 is a moment — COALESCE keeps it in
+        # Postgres, and reading it as falsey here re-stamped it with today's
+        # clock, so the two stores disagreed about when a dispute was resolved.
         updated = replace(
             current,
             status=status,
             refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
             rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
             note=note if note is not None else current.note,
-            resolved_at=resolved_at if resolved_at is not None else (current.resolved_at or now),
+            resolved_at=(
+                resolved_at
+                if resolved_at is not None
+                else (current.resolved_at if current.resolved_at is not None else now)
+            ),
             credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
             updated_at=now,
-            rating_confirmed=rating_confirmed if rating_confirmed is not None else current.rating_confirmed,
+            # Monotonic, as the CASE in _APPEND_STATUS_SQL is: a rating the
+            # ledger has vouched for cannot be taken back by a later attempt
+            # that timed out. `is True` rather than truthiness, because NULL
+            # and FALSE are different answers here and only one of them is a
+            # confirmation.
+            rating_confirmed=(
+                True
+                if current.rating_confirmed is True
+                else (rating_confirmed if rating_confirmed is not None else current.rating_confirmed)
+            ),
         )
         self._disputes[dispute_id] = updated
         if status in ("credited", "rejected"):
             # A dispute that has finished is not mid-payout. Postgres drops the
             # mutex inside the statement that writes this row; here there is no
-            # statement to be inside, but the rule is the same one.
+            # statement to be inside, but the rule is the same one — including
+            # that a REFUSED transition must not touch the mutex, which this
+            # side gets from the early return above rather than from a repeated
+            # condition, where the SQL has to spell it out because its DELETE
+            # is a CTE that runs whatever the INSERT beside it does.
             self._refund_claims.pop(dispute_id, None)
         return updated
 
@@ -1052,25 +1241,76 @@ class InMemoryDisputeStore:
         return None
 
 
+# The characters `jsonb` refuses however well-formed the JSON around them is.
+# Postgres cannot convert a NUL to text at all, and a lone surrogate is not a
+# character — it is half of one. `json.dumps` emits both quite happily, as
+# `\u0000` and `\ud800`, and Python's own json parser reads them back, so a
+# round trip in the test suite proves nothing about what the database will take.
+_UNSTORABLE_TEXT = re.compile("[\x00\ud800-\udfff]")
+
+
+def _storable(text: str | None) -> str | None:
+    """`text` with the characters `jsonb` will not store removed.
+
+    None stays None — an agent with no display name is not an agent with an
+    empty one, and the same holds for a step that produced no summary.
+    """
+    return None if text is None else _UNSTORABLE_TEXT.sub("", text)
+
+
 def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
     """The step breakdown as the one JSON column Postgres stores it in.
 
     A child table would need a join and a transaction for a value that is only
     ever read whole, with the settlement it belongs to.
+
+    It is also the last place a settlement can be stopped from being LOST, and
+    that is why it does more than call `json.dumps`. Anything `jsonb` refuses
+    makes the INSERT raise inside `_record_settlement`'s best-effort `try`,
+    where it is logged at ERROR and swallowed — and by then the buyer has paid.
+    A settlement with no row is a buyer with no dispute window at all: nothing
+    downstream can find what they were charged, or until when they could
+    contest it. The window is the promise this module exists to keep, so a
+    breakdown that cannot be stored must not be allowed to cost it.
+
+    The two kinds of trouble are answered differently, on purpose.
+
+    TEXT is cleaned. `agent_id` and `agent_name` arrive from a plan and are
+    sanitised nowhere on the way here; `output_summary` has been through
+    `sanitize_untrusted`, which strips control characters — including the NUL —
+    but not lone surrogates, so it is cleaned too rather than trusted on a
+    technicality. Dropping those characters costs the record nothing anybody
+    chose and keeps the window open.
+
+    A non-finite PRICE is refused. `PlanStep.est_price_usdc` is validated `ge=0`
+    and `float("inf") >= 0` is True, so an infinite price reaches here from an
+    ordinary plan — and it is the number a credit for the step is computed
+    from. There is no honest value to substitute, so this raises with the step
+    named rather than storing a settlement that promises a refund of infinity.
     """
+    for step in steps:
+        if not math.isfinite(step.price_usdc):
+            raise ValueError(
+                f"settlement step {step.step_index} ({step.agent_id}) has a non-finite price "
+                f"({step.price_usdc!r}), which cannot be stored or credited"
+            )
     return json.dumps(
         [
             {
                 "step_index": s.step_index,
-                "agent_id": s.agent_id,
-                "agent_name": s.agent_name,
+                "agent_id": _storable(s.agent_id),
+                "agent_name": _storable(s.agent_name),
                 "price_usdc": s.price_usdc,
                 "delivered": s.delivered,
-                "output_summary": s.output_summary,
+                "output_summary": _storable(s.output_summary),
             }
             for s in steps
         ],
         separators=(",", ":"),
+        # The backstop for a number the loop above cannot see — a future field,
+        # or one reached through a subclass. NaN and Infinity are not JSON, and
+        # a jsonb column is the wrong place to find that out.
+        allow_nan=False,
     )
 
 
@@ -1121,25 +1361,45 @@ class PostgresDisputeStore:
         self._lock = asyncio.Lock()
 
     async def _ready_pool(self) -> Any:
-        if self._ready and self._pool is not None:
-            return self._pool
+        """The pool, dialled and with the DDL run, as a LOCAL.
+
+        Every read of `self._pool` after the first is a chance for a concurrent
+        `close()` to have cleared it, and the DDL below spans three awaits: a
+        shutdown landing between two of them used to turn the next line into
+        `None.execute(...)`, which reaches the caller as a 500 on a request
+        that had a database. Holding the pool in a local means this call works
+        with the pool it actually dialled, whatever happens to the attribute —
+        at worst against a pool that is closing, which raises something that
+        names the problem.
+        """
+        pool = self._pool
+        if self._ready and pool is not None:
+            return pool
         async with self._lock:
-            if self._pool is None:
-                self._pool = await self._create_pool()
+            pool = self._pool
+            if pool is None:
+                pool = await self._create_pool()
+                self._pool = pool
             if not self._ready:
                 # Two statements rather than one string, so each table keeps its
                 # own rationale above it. asyncpg runs argument-less queries
                 # through the simple protocol, which is what lets one execute()
                 # carry a table and its indexes together.
-                await self._pool.execute(_CREATE_SETTLEMENTS_SQL)
-                await self._pool.execute(_CREATE_DISPUTES_SQL)
-                await self._pool.execute(_CREATE_REFUND_CLAIMS_SQL)
+                await pool.execute(_CREATE_SETTLEMENTS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await pool.execute(_CREATE_DISPUTES_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await pool.execute(_CREATE_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
                 self._ready = True
-        return self._pool
+            return pool
 
     async def _create_pool(self) -> Any:
         asyncpg = _import_asyncpg()
-        return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+        return await asyncpg.create_pool(
+            dsn=self._dsn,
+            min_size=_POOL_MIN_SIZE,
+            max_size=_POOL_MAX_SIZE,
+            timeout=_POOL_CONNECT_TIMEOUT,
+            command_timeout=_POOL_COMMAND_TIMEOUT,
+        )
 
     async def record_settlement(self, record: SettlementRecord) -> None:
         pool = await self._ready_pool()
@@ -1159,16 +1419,17 @@ class PostgresDisputeStore:
             steps_to_json(record.steps),
             record.settled_at,
             record.window_closes_at,
+            timeout=_POOL_COMMAND_TIMEOUT,
         )
 
     async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_JOB_SQL, job_id_hex)
+        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_JOB_SQL, job_id_hex, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
 
     async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id)
+        row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
 
     @staticmethod
@@ -1195,17 +1456,17 @@ class PostgresDisputeStore:
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_DISPUTE_SQL, dispute_id)
+        row = await pool.fetchrow(_SELECT_DISPUTE_SQL, dispute_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_SELECT_DISPUTE_BY_STEP_SQL, job_id_hex, step_index)
+        row = await pool.fetchrow(_SELECT_DISPUTE_BY_STEP_SQL, job_id_hex, step_index, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
         pool = await self._ready_pool()
-        rows = await pool.fetch(_SELECT_DISPUTES_FOR_TASK_SQL, task_id)
+        rows = await pool.fetch(_SELECT_DISPUTES_FOR_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
         return tuple(self._to_dispute(row) for row in rows)
 
     @staticmethod
@@ -1274,6 +1535,7 @@ class PostgresDisputeStore:
             record.credited_usdc,
             record.updated_at,
             record.rating_confirmed,
+            timeout=_POOL_COMMAND_TIMEOUT,
         )
         if won is not None:
             return record
@@ -1300,7 +1562,8 @@ class PostgresDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
-    ) -> DisputeRecord:
+        expected_status: DisputeStatus | None = None,
+    ) -> DisputeRecord | None:
         """Append the transition and return the dispute as it now stands.
 
         Returning the updated record is what lets 4.03 and 4.04 credit or rate a
@@ -1314,37 +1577,64 @@ class PostgresDisputeStore:
         the answer it is. `updated_at` is not a keyword at all — every row this
         appends is stamped with the moment it was appended.
 
-        KeyError for an unknown id, matching InMemoryDisputeStore: the INSERT
-        selects from the dispute's own history, so no history means no row
-        written and nothing returned. A dispute id that does not exist is a bug
-        in the caller, not a state this store can be in.
+        `expected_status` is the precondition, checked inside the statement
+        that writes: the transition lands only while the dispute still reads
+        the status the decision was computed from, and None comes back when it
+        does not. Callers that adjudicate pass the status they read; the
+        reconciliation writes of docs/disputes.md pass nothing and land
+        unconditionally, which is what they are for.
+
+        Two statements on one connection, in one transaction, and that shape
+        is the fix for a lost update rather than a flourish — see
+        _LOCK_DISPUTE_SQL. The lock serializes every append for this dispute;
+        the statement after it reads `latest` under a fresh snapshot, which at
+        READ COMMITTED is the only way to see what the appender ahead just
+        wrote. Nothing else in this store holds a connection across statements,
+        because nothing else has two that have to agree.
+
+        KeyError for an unknown id, matching InMemoryDisputeStore, and it is
+        kept apart from the refusal on purpose: the lock statement is what
+        answers it, so an empty RETURNING afterwards can only mean the
+        precondition refused. A dispute id that does not exist is a bug in the
+        caller; one that moved is the concurrency the precondition exists to
+        answer, and a caller cannot handle them the same way.
         """
         pool = await self._ready_pool()
-        # Our own clock, in epoch seconds, for the reason every other timestamp
-        # here is: the record handed back must be the row that was stored, not a
-        # value the database rendered in whatever timezone it happens to run in.
-        # It is always the row's `updated_at`, and its `resolved_at` only when
-        # neither the caller nor the record already has a resolution time — see
-        # COALESCE in _APPEND_STATUS_SQL.
-        now = time.time()
-        # The statement also drops the refund mutex when `status` finishes the
-        # dispute, so what remains in `refund_claims` is exactly the set of
-        # payouts still in flight rather than a pile of spent locks.
-        row = await pool.fetchrow(
-            _APPEND_STATUS_SQL,
-            dispute_id,
-            status,
-            refund_tx,
-            rating_tx,
-            note,
-            resolved_at,
-            now,
-            credited_usdc,
-            rating_confirmed,
-        )
-        if row is None:
-            raise KeyError(dispute_id)
-        return self._to_dispute(row)
+        async with pool.acquire(timeout=_POOL_ACQUIRE_TIMEOUT) as conn, conn.transaction():
+            # Nothing may be read about this dispute until the appends ahead of
+            # this one have finished, so the lock comes before the clock as
+            # well as before the read.
+            if await conn.fetchrow(_LOCK_DISPUTE_SQL, dispute_id, timeout=_POOL_COMMAND_TIMEOUT) is None:
+                raise KeyError(dispute_id)
+            # Our own clock, in epoch seconds, for the reason every other
+            # timestamp here is: the record handed back must be the row that was
+            # stored, not a value the database rendered in whatever timezone it
+            # happens to run in. Read AFTER the lock, so a transition that
+            # waited is dated when it was written rather than when it queued.
+            # It is always the row's `updated_at`, and its `resolved_at` only
+            # when neither the caller nor the record already has a resolution
+            # time — see COALESCE in _APPEND_STATUS_SQL.
+            now = time.time()
+            # The statement also drops the refund mutex when `status` finishes
+            # the dispute, so what remains in `refund_claims` is exactly the set
+            # of payouts still in flight rather than a pile of spent locks.
+            row = await conn.fetchrow(
+                _APPEND_STATUS_SQL,
+                dispute_id,
+                status,
+                refund_tx,
+                rating_tx,
+                note,
+                resolved_at,
+                now,
+                credited_usdc,
+                rating_confirmed,
+                expected_status,
+                timeout=_POOL_COMMAND_TIMEOUT,
+            )
+        # Empty RETURNING with the dispute known to exist means one thing: the
+        # precondition refused the write.
+        return None if row is None else self._to_dispute(row)
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
         """Take the exclusive right to pay this dispute, or return None.
@@ -1360,7 +1650,7 @@ class PostgresDisputeStore:
         anything*. The caller reads the record back if it needs to explain.
         """
         pool = await self._ready_pool()
-        row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time())
+        row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
@@ -1384,7 +1674,7 @@ class PostgresDisputeStore:
         """
         pool = await self._ready_pool()
         # Our own clock for the row's `updated_at`, never the database's.
-        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time())
+        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
@@ -1397,16 +1687,24 @@ class PostgresDisputeStore:
         nobody can find.
         """
         pool = await self._ready_pool()
-        rows = await pool.fetch(_SELECT_REFUND_CLAIMS_SQL)
+        rows = await pool.fetch(_SELECT_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
         return tuple(RefundClaim(dispute_id=row["dispute_id"], claimed_at=float(row["claimed_at"])) for row in rows)
 
     async def close(self) -> None:
-        # Cleared before the await so a close racing a request cannot hand out
-        # the pool that is being torn down, and so a second close is a no-op.
-        pool, self._pool = self._pool, None
-        self._ready = False
-        if pool is not None:
-            await pool.close()
+        # Under the SAME lock that creates the pool, because the two race. A
+        # shutdown landing while the first request is still dialling used to
+        # find `self._pool` empty, close nothing, and leave that dial to assign
+        # a live pool afterwards — five sockets held open by a store nobody
+        # will call again. Waiting for the dial means the pool that was made is
+        # the pool that is closed.
+        async with self._lock:
+            # Cleared before the await so a close racing a request cannot hand
+            # out the pool that is being torn down, and so a second close is a
+            # no-op.
+            pool, self._pool = self._pool, None
+            self._ready = False
+            if pool is not None:
+                await pool.close()
 
 
 _store: DisputeStore | None = None

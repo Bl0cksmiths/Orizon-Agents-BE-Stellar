@@ -143,19 +143,26 @@ def _written(sql: str) -> dict[str, str]:
 
 
 def test_a_transition_carries_the_receipt_forward_and_dates_its_own_row() -> None:
-    """`credited_usdc` and `rating_confirmed` are COALESCEd with the caller's
-    value FIRST. COALESCE returns its first non-NULL argument and FALSE is not
-    NULL, so a caller naming TRUE replaces a recorded FALSE — the confirmation
-    a timed-out rating is owed once it lands — while a caller naming nothing
-    passes NULL and keeps what is there. The other order would make the first
-    answer permanent.
+    """`credited_usdc` is COALESCEd with the caller's value FIRST. COALESCE
+    returns its first non-NULL argument, so a caller naming an amount replaces
+    what is recorded while a caller naming nothing passes NULL and keeps it.
+    The other order would make the first answer permanent.
+
+    `rating_confirmed` cannot be that, and the CASE is why. FALSE is not NULL
+    either, so plain COALESCE let a caller naming FALSE overwrite a recorded
+    TRUE — which is the pair story 4.04 writes when a submission times out, so
+    a rating the ledger had vouched for was downgraded to "in flight". TRUE
+    survives; NULL still means "this transition does not say"; a rating never
+    submitted stays NULL rather than becoming FALSE.
 
     `updated_at` is the clock outright, never COALESCEd, and the same reading
     ($7) the resolution time falls back to."""
     written = _written(dispute_store._APPEND_STATUS_SQL)
 
     assert written["credited_usdc"] == "COALESCE($8::double precision, latest.credited_usdc)"
-    assert written["rating_confirmed"] == "COALESCE($9::boolean, latest.rating_confirmed)"
+    assert written["rating_confirmed"] == (
+        "CASE WHEN latest.rating_confirmed THEN TRUE ELSE COALESCE($9::boolean, latest.rating_confirmed) END"
+    )
     assert written["updated_at"] == "$7::double precision"
     assert written["resolved_at"] == "COALESCE($6::double precision, latest.resolved_at, $7::double precision)"
 
@@ -314,6 +321,52 @@ def test_the_credited_amount_and_the_confirmation_are_carried_forward(store: Dis
     assert confirmed.rating_confirmed is True
     assert later.rating_confirmed is True and later.credited_usdc == 1.25
     assert stored == later
+
+
+def test_a_confirmed_rating_is_not_walked_back_by_a_later_attempt(store: DisputeStore) -> None:
+    """The confirmation is MONOTONIC, over both stores.
+
+    Story 4.04 records a rating hash on a SUCCESS and on a TIMEOUT, and the
+    timeout writes `rating_confirmed=False` beside a hash of its own. Carried
+    by a plain COALESCE — FALSE is not NULL — that pair overwrote a TRUE the
+    ledger had already given, and the buyer's receipt then denied a rating
+    that had happened. Nothing may take a confirmation back."""
+
+    async def go() -> tuple[DisputeRecord, ...]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        confirmed = await store.append_status(opened.id, "credited", rating_tx="tx_r1", rating_confirmed=True)
+        retried = await store.append_status(opened.id, "credited", rating_tx="tx_r2", rating_confirmed=False)
+        stored = await store.get_dispute(opened.id)
+        assert confirmed is not None and retried is not None and stored is not None
+        return confirmed, retried, stored
+
+    confirmed, retried, stored = asyncio.run(go())
+
+    assert confirmed.rating_confirmed is True
+    assert retried.rating_confirmed is True
+    assert stored.rating_confirmed is True
+
+
+def test_a_rating_that_was_never_submitted_is_still_told_from_one_in_flight(store: DisputeStore) -> None:
+    """Monotonic is not "always True". NULL has to survive a transition that
+    says nothing — a dispute nobody ever rated must not read as one whose
+    rating is in flight — and FALSE has to be writable while no confirmation
+    has been given, or a timed-out rating could never be recorded at all."""
+
+    async def go() -> tuple[DisputeRecord, ...]:
+        opened = await store.open_dispute(a_dispute())
+        upheld = await store.append_status(opened.id, "upheld")
+        in_flight = await store.append_status(opened.id, "credited", rating_confirmed=False)
+        silent = await store.append_status(opened.id, "credited")
+        assert upheld is not None and in_flight is not None and silent is not None
+        return upheld, in_flight, silent
+
+    upheld, in_flight, silent = asyncio.run(go())
+
+    assert upheld.rating_confirmed is None
+    assert in_flight.rating_confirmed is False
+    assert silent.rating_confirmed is False
 
 
 def test_a_claim_and_a_release_carry_the_receipt_verbatim(store: DisputeStore) -> None:

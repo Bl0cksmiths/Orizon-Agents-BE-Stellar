@@ -33,6 +33,7 @@ import pytest
 from app.services import dispute_store
 from app.services.dispute_store import (
     DisputeRecord,
+    DisputeStore,
     DuplicateDisputeError,
     InMemoryDisputeStore,
     SettlementRecord,
@@ -239,14 +240,43 @@ def test_every_dispute_of_one_task_is_listed_and_no_other_task_s_is() -> None:
     assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
 
 
+def test_both_stores_list_a_task_s_disputes_in_the_same_order() -> None:
+    """The two stores must not disagree about order, and only this test can
+    tell: every other test in this suite runs against the in-memory one, which
+    used to answer in INSERTION order while Postgres answers oldest-first.
+
+    Insertion order is the order this process happened to see them — a restart,
+    an eviction or a dispute opened against an older settlement all change it —
+    so a task view read from memory and a task view read from the database
+    listed a buyer's own disputes differently, and nothing hermetic could
+    notice. The disputes below are opened NEWEST first, so an implementation
+    that returns them as they arrived cannot pass."""
+
+    async def listed(store: DisputeStore) -> list[str]:
+        await store.open_dispute(a_dispute(id="dsp_late", step_index=1, opened_at=1_700_000_900.0))
+        await store.open_dispute(a_dispute(id="dsp_early", step_index=0, opened_at=1_700_000_100.0))
+        return [d.id for d in await store.list_disputes_for_task(TASK)]
+
+    in_memory = asyncio.run(listed(InMemoryDisputeStore()))
+    postgres = asyncio.run(listed(_pg(FakePool())))
+
+    assert in_memory == postgres == ["dsp_early", "dsp_late"]
+
+
 def test_a_dispute_id_is_prefixed_and_unguessable() -> None:
     """The id is the only credential `GET /api/disputes/{id}` has — it is handed
     to the buyer and to nobody else — so it is long random hex rather than a
-    counter anyone could walk to read another buyer's complaint."""
+    counter anyone could walk to read another buyer's complaint.
+
+    128 bits, not 64: an unauthenticated route guarded by a bearer secret is
+    guarded by its width, and 8 bytes makes guessing a budget question. It
+    fits everywhere it has to — both columns are TEXT and every route bounds
+    the path at 64 characters, against the 36 this produces."""
     first, second = dispute_store.new_dispute_id(), dispute_store.new_dispute_id()
 
     assert first.startswith("dsp_")
-    assert len(first) == len("dsp_") + 16
+    assert len(first) == len("dsp_") + 32
+    assert len(first) <= 64
     int(first.removeprefix("dsp_"), 16)  # hex, or this raises
     assert first != second
 
@@ -358,6 +388,126 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
 
     with pytest.raises(KeyError):
         asyncio.run(store.append_status("dsp_never", "upheld"))
+
+
+def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution() -> None:
+    """`resolved_at` is stamped once and never moved, and 0.0 is a moment like
+    any other. COALESCE keeps it in Postgres; read with truthiness rather than
+    `is not None` — the rule this file states everywhere else — the in-memory
+    store re-stamped it with today's clock, so the two answered differently
+    about when a dispute was resolved and only one of them was right."""
+
+    async def go(store: DisputeStore) -> tuple[float | None, float | None]:
+        opened = await store.open_dispute(a_dispute())
+        upheld = await store.append_status(opened.id, "upheld", resolved_at=0.0)
+        credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+        assert upheld is not None and credited is not None
+        return upheld.resolved_at, credited.resolved_at
+
+    assert asyncio.run(go(InMemoryDisputeStore())) == (0.0, 0.0)
+    assert asyncio.run(go(_pg(FakePool()))) == (0.0, 0.0)
+
+
+# ── the precondition on a transition ──────────────────────────────────────
+
+
+def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld() -> None:
+    """The double payment, in four lines.
+
+    A caller reads a dispute, decides, and appends; the append is a round trip
+    later, and in between the dispute can be adjudicated, claimed and paid by
+    somebody else. An unconditional append writes the stale decision anyway,
+    and `credited` dragged back to `upheld` is a dispute that can be claimed
+    and paid a SECOND time out of the platform wallet, with nothing on-chain
+    to take the second transfer back.
+
+    Naming the status the decision was read from is what refuses it."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        # What the stale caller read, one round trip ago.
+        stale = await store.get_dispute(opened.id)
+        assert stale is not None and stale.status == "open"
+        # Meanwhile the dispute is upheld, claimed and paid.
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.append_status(opened.id, "credited", refund_tx="tx_paid", credited_usdc=1.5)
+        refused = await store.append_status(opened.id, "upheld", expected_status=stale.status)
+        return refused, await store.get_dispute(opened.id), await store.claim_refund(opened.id)
+
+    refused, current, second_claim = asyncio.run(go())
+
+    assert refused is None
+    # Nothing was written: the dispute still reads as paid, with its hash.
+    assert current is not None and current.status == "credited"
+    assert current.refund_tx == "tx_paid"
+    # And so the second payout cannot even be claimed, let alone signed.
+    assert second_claim is None
+
+
+def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected() -> None:
+    """The other half of the same bug, and the one that pays out money the
+    adjudicator refused: `rejected` dragged back to `upheld` is a dispute
+    decided AGAINST the buyer becoming claimable and payable."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "rejected", note=NOTE)
+        refused = await store.append_status(opened.id, "upheld", expected_status="open")
+        return refused, await store.get_dispute(opened.id)
+
+    refused, current = asyncio.run(go())
+
+    assert refused is None
+    assert current is not None and current.status == "rejected"
+    # The buyer's explanation is still the one they were given.
+    assert current.note == NOTE
+
+
+def test_a_transition_that_names_no_expectation_still_lands_unconditionally() -> None:
+    """The operator's reconciliation write (docs/disputes.md): a person who has
+    read the chain is correcting the record ON PURPOSE, and their write has to
+    land whatever the dispute currently says. Passing no expectation is how
+    that is asked for, so the default cannot be a precondition."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        return await store.append_status(opened.id, "credited", refund_tx="tx_reconciled", credited_usdc=1.5)
+
+    recorded = asyncio.run(go())
+
+    assert recorded is not None and recorded.status == "credited"
+    assert recorded.refund_tx == "tx_reconciled"
+
+
+def test_a_transition_that_matches_the_expectation_is_written() -> None:
+    """The precondition refuses a dispute that MOVED, and nothing else. An
+    implementation that refused whenever an expectation was named would break
+    every adjudication while passing the two tests above."""
+    store = InMemoryDisputeStore()
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        return await store.append_status(opened.id, "upheld", expected_status="open")
+
+    upheld = asyncio.run(go())
+
+    assert upheld is not None and upheld.status == "upheld"
+
+
+def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation() -> None:
+    """None means "this dispute has moved"; KeyError means "there is no such
+    dispute". Folding the second into the first would let a caller with a typo
+    in an id read it as a lost race and move on."""
+    store = InMemoryDisputeStore()
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_never", "upheld", expected_status="open"))
 
 
 # ── the bound on the in-memory store ──────────────────────────────────────
@@ -503,10 +653,20 @@ class FakePool:
         # `refund_claims`. A dict rather than a set because the claim time is
         # what makes the table readable as a reconciliation queue.
         self.claims: dict[str, float] = {}
+        # Row locks, one per dispute id, taken by _LOCK_DISPUTE_SQL and held
+        # until the transaction that took them ends. Postgres locks a row;
+        # there are no rows to lock here, so the dispute id stands in for the
+        # opening row every appender for that dispute queues on.
+        self.row_locks: dict[str, asyncio.Lock] = {}
+        # What each call passed as its bound. A pool call that names none can
+        # wait forever, so the value is recorded rather than discarded.
+        self.timeouts: list[float | None] = []
+        self.acquired: list[float | None] = []
         self.closed = 0
 
-    async def execute(self, sql: str, *args: Any) -> str:
+    async def execute(self, sql: str, *args: Any, timeout: float | None = None) -> str:
         self.statements.append(sql)
+        self.timeouts.append(timeout)
         await asyncio.sleep(0)
         if sql == dispute_store._INSERT_SETTLEMENT_SQL:
             self.settlements.append(dict(zip(_SETTLEMENT_COLUMNS, args, strict=True)))
@@ -518,8 +678,9 @@ class FakePool:
         ), f"unexpected statement: {sql}"
         return "CREATE TABLE"
 
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+    async def fetchrow(self, sql: str, *args: Any, timeout: float | None = None) -> dict[str, Any] | None:
         self.statements.append(sql)
+        self.timeouts.append(timeout)
         await asyncio.sleep(0)
         if sql == dispute_store._SELECT_SETTLEMENT_BY_JOB_SQL:
             return _newest(self.settlements, job_id_hex=args[0])
@@ -528,7 +689,7 @@ class FakePool:
         if sql == dispute_store._INSERT_DISPUTE_SQL:
             return self._open_dispute(args)
         if sql == dispute_store._APPEND_STATUS_SQL:
-            return self._append_status(args)
+            return await self._append_status(args)
         if sql == dispute_store._SELECT_DISPUTE_SQL:
             return _newest(self.disputes, dispute_id=args[0])
         if sql == dispute_store._CLAIM_REFUND_SQL:
@@ -538,8 +699,9 @@ class FakePool:
         assert sql == dispute_store._SELECT_DISPUTE_BY_STEP_SQL, f"unexpected statement: {sql}"
         return _newest(self.disputes, job_id_hex=args[0], step_index=args[1])
 
-    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+    async def fetch(self, sql: str, *args: Any, timeout: float | None = None) -> list[dict[str, Any]]:
         self.statements.append(sql)
+        self.timeouts.append(timeout)
         await asyncio.sleep(0)
         if sql == dispute_store._SELECT_REFUND_CLAIMS_SQL:
             # ORDER BY claimed_at, dispute_id: oldest claim first, and a stable
@@ -621,18 +783,53 @@ class FakePool:
         self.disputes.append(row)
         return {"dispute_id": row["dispute_id"]}
 
-    def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
-        dispute_id, status, refund_tx, rating_tx, note, resolved_at, now, credited_usdc, rating_confirmed = args
+    async def _append_status(self, args: tuple[Any, ...]) -> dict[str, Any] | None:
+        """_APPEND_STATUS_SQL: the `latest` CTE, the mutex DELETE and the event
+        insert, as one statement — and ONE snapshot, modelled the way
+        `_claim_refund` models its own.
+
+        The sleep below IS that snapshot window. `latest` is read before
+        anything is written, and a transition that commits in between is
+        invisible to it, so everything after the sleep runs from a row that may
+        already be stale. Modelling the append as an atomic read-modify-write
+        instead — which this fake did until the window was found — certifies a
+        guarantee no database gives: at READ COMMITTED two concurrent
+        statements take their own snapshots, and this one blocks on nothing.
+        """
+        (
+            dispute_id,
+            status,
+            refund_tx,
+            rating_tx,
+            note,
+            resolved_at,
+            now,
+            credited_usdc,
+            rating_confirmed,
+            expected_status,
+        ) = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
+        await asyncio.sleep(0)
         # `finished`: the mutex is dropped by the same statement that ends the
-        # dispute. Being a data-modifying CTE it runs whether or not the INSERT
-        # beside it finds any history to write from, so it is modelled before
-        # the early return rather than after it.
-        if status in ("credited", "rejected"):
+        # dispute. Being a data-modifying CTE it is evaluated whether or not
+        # the INSERT beside it writes a row, so it is modelled before the early
+        # return rather than after it — and it repeats the precondition, from
+        # the same snapshot, because a transition that is refused must leave
+        # the mutex where it is.
+        if (
+            status in ("credited", "rejected")
+            and latest is not None
+            and (expected_status is None or latest["status"] == expected_status)
+        ):
             self.claims.pop(dispute_id, None)
         # `INSERT ... SELECT FROM latest`: with no history there is nothing to
         # select, so nothing is written and nothing comes back.
         if latest is None:
+            return None
+        # `WHERE $10::text IS NULL OR latest.status = $10::text` — the
+        # precondition, read from the SAME snapshot the row would be copied
+        # from, which is why it is checked on this side of the sleep.
+        if expected_status is not None and latest["status"] != expected_status:
             return None
         row = latest | {
             "status": status,
@@ -642,18 +839,113 @@ class FakePool:
             "note": _coalesce(note, latest["note"]),
             "credited_usdc": _coalesce(credited_usdc, latest["credited_usdc"]),
             "updated_at": now,
-            "rating_confirmed": _coalesce(rating_confirmed, latest["rating_confirmed"]),
+            # The CASE, not a COALESCE: a confirmation the ledger has already
+            # given cannot be undone by a later FALSE.
+            "rating_confirmed": (
+                True if latest["rating_confirmed"] else _coalesce(rating_confirmed, latest["rating_confirmed"])
+            ),
             "opening": False,
         }
         self.disputes.append(row)
         return row
+
+    def acquire(self, *, timeout: float | None = None) -> FakeAcquire:
+        """`pool.acquire()`: one connection, as an async context manager.
+
+        Only `append_status` asks for one, and only because its two statements
+        have to run on the same connection inside one transaction — the first
+        takes a row lock the second is read under.
+        """
+        self.acquired.append(timeout)
+        return FakeAcquire(self)
 
     async def close(self) -> None:
         self.closed += 1
 
     @property
     def writes(self) -> list[str]:
-        return [s for s in self.statements if "INSERT" in s or "UPDATE" in s or "DELETE" in s]
+        # The lock statement reads one row and locks it. `FOR UPDATE` puts the
+        # word in the SQL without making the statement a write, so it is named
+        # out rather than matched on.
+        return [
+            s
+            for s in self.statements
+            if s != dispute_store._LOCK_DISPUTE_SQL and ("INSERT" in s or "UPDATE" in s or "DELETE" in s)
+        ]
+
+
+class FakeAcquire:
+    """What `pool.acquire()` returns: `async with` it for a connection."""
+
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+
+    async def __aenter__(self) -> FakeConnection:
+        await asyncio.sleep(0)
+        return FakeConnection(self._pool)
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class FakeConnection:
+    """One pooled connection: the pool's own statements, plus the two things a
+    pool call cannot give — a transaction, and the row locks it holds until
+    that transaction ends."""
+
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+        self._held: list[asyncio.Lock] = []
+
+    async def execute(self, sql: str, *args: Any, timeout: float | None = None) -> str:
+        return await self._pool.execute(sql, *args, timeout=timeout)
+
+    async def fetch(self, sql: str, *args: Any, timeout: float | None = None) -> list[dict[str, Any]]:
+        return await self._pool.fetch(sql, *args, timeout=timeout)
+
+    async def fetchrow(self, sql: str, *args: Any, timeout: float | None = None) -> dict[str, Any] | None:
+        if sql != dispute_store._LOCK_DISPUTE_SQL:
+            return await self._pool.fetchrow(sql, *args, timeout=timeout)
+        self._pool.statements.append(sql)
+        self._pool.timeouts.append(timeout)
+        await asyncio.sleep(0)
+        (dispute_id,) = args
+        opening = next(
+            (row for row in self._pool.disputes if row["opening"] and row["dispute_id"] == dispute_id),
+            None,
+        )
+        # `SELECT ... FOR UPDATE` over no rows locks nothing and returns
+        # nothing, which is how the store tells an unknown dispute apart from
+        # one whose transition was refused.
+        if opening is None:
+            return None
+        lock = self._pool.row_locks.setdefault(dispute_id, asyncio.Lock())
+        # The wait itself. A second appender for this dispute stops here until
+        # the first transaction ends, and reads `latest` only afterwards —
+        # which is the whole of what the lock buys, and the reason it is a
+        # separate statement rather than a FOR UPDATE on the `latest` CTE.
+        await lock.acquire()
+        self._held.append(lock)
+        return {"locked": 1}
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self)
+
+
+class FakeTransaction:
+    """`conn.transaction()`. A row lock lasts until the transaction ends, and
+    that is the half of it that makes the lock a mutex rather than a pause."""
+
+    def __init__(self, conn: FakeConnection) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> FakeTransaction:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        for lock in self._conn._held:
+            lock.release()
+        self._conn._held.clear()
 
 
 def _pg(pool: FakePool) -> dispute_store.PostgresDisputeStore:
@@ -717,7 +1009,13 @@ def test_no_sql_in_the_module_mutates_a_dispute_event() -> None:
     assert {"_INSERT_DISPUTE_SQL", "_APPEND_STATUS_SQL", "_CLAIM_REFUND_SQL"} <= statements.keys()
     for name, sql in statements.items():
         upper = sql.upper()
-        assert "UPDATE " not in upper, name
+        # What is refused is the UPDATE *command*. The bare word proves
+        # nothing on its own: `FOR UPDATE` is a row LOCK, which holds a row
+        # against concurrent appends and changes none of it, and `updated_at`
+        # is a column every transition writes.
+        without_lock = upper.replace("FOR UPDATE", "")
+        assert "UPDATE " not in without_lock, name
+        assert "UPDATE\n" not in without_lock, name
         assert "DO UPDATE" not in upper, name
         for after_delete in upper.split("DELETE ")[1:]:
             assert after_delete.startswith("FROM REFUND_CLAIMS"), name
@@ -968,8 +1266,14 @@ def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone() -> None:
     assert pool.disputes[1]["opening"] is False
     # `dispute_events` stays append-only. The only DELETE this path may issue
     # is against `refund_claims`, which is a mutex rather than a record: it is
-    # meant to be released, and releasing it destroys no history.
-    assert not any(("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s for s in pool.statements)
+    # meant to be released, and releasing it destroys no history. The lock
+    # statement is named out because `FOR UPDATE` carries the word without
+    # changing a row — it reads one and holds it.
+    assert not any(
+        ("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s
+        for s in pool.statements
+        if s != dispute_store._LOCK_DISPUTE_SQL
+    )
 
 
 def test_the_current_state_is_the_newest_row() -> None:
@@ -1082,6 +1386,120 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None
     assert pool.disputes == []
 
 
+def test_the_precondition_is_a_clause_of_the_writing_statement() -> None:
+    """Asserted on the SQL itself, because a precondition checked in Python
+    before the INSERT is not a precondition at all: the dispute can move
+    between the read and the write, which is the whole bug. It has to be the
+    same statement that does the writing."""
+    sql = dispute_store._APPEND_STATUS_SQL
+
+    assert "WHERE $10::text IS NULL OR latest.status = $10::text" in sql
+    # And it gates the INSERT's own SELECT — not the `latest` CTE, which every
+    # column of the new row is copied from.
+    assert sql.index("FROM latest\nWHERE $10::text") > sql.index("INSERT INTO dispute_events")
+
+
+def test_a_stale_transition_writes_no_row_in_postgres() -> None:
+    """The append-only trail is the evidence a chargeback is answered with, so
+    a refused transition must leave no trace in it — not a row recording a
+    verdict the store declined to accept."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "rejected", note=NOTE)
+        return await store.append_status(opened.id, "upheld", expected_status="open")
+
+    refused = asyncio.run(go())
+
+    assert refused is None
+    assert [row["status"] for row in pool.disputes] == ["open", "rejected"]
+
+
+def test_a_refused_transition_is_told_apart_from_an_unknown_dispute() -> None:
+    """RETURNING is empty for both, so the store reads the id back to say which
+    — and pays for that read only on the path that has already failed."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        return await store.append_status(opened.id, "credited", expected_status="open")
+
+    assert asyncio.run(go()) is None
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.append_status("dsp_never", "credited", expected_status="open"))
+
+
+# ── two transitions at once ───────────────────────────────────────────────
+
+
+def test_two_concurrent_transitions_do_not_lose_each_other_s_facts() -> None:
+    """The lost update, on the module's own example: a credit and a rating
+    landing together.
+
+    Both statements read the dispute's newest row, and each writes a row
+    COALESCEd against what it read. Running at once — at READ COMMITTED,
+    without a lock — they read the SAME row, and the one that commits second
+    carries forward a record that never knew about the first. The buyer's
+    receipt then shows a rating and no refund hash, for a refund that was paid.
+
+    The fake models that window (see `_append_status`); what closes it is the
+    row lock, which makes the second append read `latest` only after the first
+    has written it."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> DisputeRecord | None:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await asyncio.gather(
+            store.append_status(opened.id, "credited", refund_tx="tx_paid", credited_usdc=1.5),
+            store.append_status(opened.id, "credited", rating_tx="tx_rating", rating_confirmed=True),
+        )
+        return await store.get_dispute(opened.id)
+
+    final = asyncio.run(go())
+
+    assert final is not None
+    # Every fact either transition recorded is still on the record.
+    assert final.refund_tx == "tx_paid"
+    assert final.credited_usdc == 1.5
+    assert final.rating_tx == "tx_rating"
+    assert final.rating_confirmed is True
+
+
+def test_two_concurrent_adjudications_produce_exactly_one_verdict() -> None:
+    """Two adjudicators, one dispute, both deciding from the same `open` read.
+
+    The precondition can only refuse the second if the second READS what the
+    first wrote, and at READ COMMITTED a statement that started first never
+    will. The lock is what orders them: the loser wakes, reads the verdict
+    already recorded, and declines to write over it."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> list[DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        return list(
+            await asyncio.gather(
+                store.append_status(opened.id, "upheld", expected_status="open"),
+                store.append_status(opened.id, "rejected", note=NOTE, expected_status="open"),
+            )
+        )
+
+    results = asyncio.run(go())
+    written = [record for record in results if record is not None]
+
+    assert len(written) == 1
+    # One verdict on the trail, beside the opening row — not two.
+    assert [row["status"] for row in pool.disputes] == ["open", written[0].status]
+
+
 # ── the pool ──────────────────────────────────────────────────────────────
 
 
@@ -1099,6 +1517,42 @@ def test_close_closes_the_pool_once_and_is_safe_twice() -> None:
     asyncio.run(go())
 
     assert pool.closed == 1
+    assert store._pool is None
+
+
+def test_a_shutdown_racing_the_first_call_closes_the_pool_that_call_dialled() -> None:
+    """Shutdown arrives while the first request is still dialling Postgres.
+
+    `close()` used to run straight through: it found `self._pool` still empty,
+    closed nothing, and the dial it did not wait for assigned a live pool
+    afterwards — up to five sockets held open by a store nobody will call
+    again, on a process that is trying to exit. Taking the creation lock is
+    what makes the pool that was dialled the pool that is closed, and the
+    caller still gets a pool rather than the None it would otherwise have to
+    call a statement on."""
+    store = dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db")
+    dialled: list[FakePool] = []
+
+    async def slow_create() -> FakePool:
+        # The dial, mid-flight when the shutdown lands.
+        await asyncio.sleep(0.01)
+        pool = FakePool()
+        dialled.append(pool)
+        return pool
+
+    store._create_pool = slow_create  # type: ignore[method-assign]
+
+    async def go() -> Any:
+        first = asyncio.create_task(store._ready_pool())
+        await asyncio.sleep(0)
+        await store.close()
+        return await first
+
+    got = asyncio.run(go())
+
+    assert len(dialled) == 1
+    assert dialled[0].closed == 1
+    assert got is dialled[0]
     assert store._pool is None
 
 
@@ -1123,6 +1577,64 @@ def test_the_pool_is_opened_with_min_size_zero(monkeypatch: pytest.MonkeyPatch) 
     assert captured["min_size"] == 0
     assert captured["max_size"] == dispute_store._POOL_MAX_SIZE
     assert captured["dsn"] == "postgres://user:pw@example.invalid/db"
+
+
+def test_the_pool_is_opened_with_a_connect_and_a_command_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without these two, an unreachable database stops the service rather
+    than failing its requests. asyncpg bounds a connect at 60 seconds, which
+    is a hang as far as an HTTP request goes, and a COMMAND at nothing at
+    all — a statement that never returns holds its connection for as long as
+    the socket lives, and five of those is the whole pool."""
+    captured: dict[str, Any] = {}
+
+    async def fake_create_pool(**kwargs: Any) -> FakePool:
+        captured.update(kwargs)
+        return FakePool()
+
+    class FakeAsyncpg:
+        create_pool = staticmethod(fake_create_pool)
+
+    monkeypatch.setattr(dispute_store, "_import_asyncpg", lambda: FakeAsyncpg)
+    store = dispute_store.PostgresDisputeStore("postgres://user:pw@example.invalid/db")
+
+    asyncio.run(store.get_dispute("dsp_never"))
+
+    assert captured["timeout"] == dispute_store._POOL_CONNECT_TIMEOUT
+    assert captured["command_timeout"] == dispute_store._POOL_COMMAND_TIMEOUT
+
+
+def test_every_statement_and_every_acquire_names_its_own_bound() -> None:
+    """The pool default is not enough on its own, because `acquire()` does not
+    take one: a call that waits for a free connection waits forever unless it
+    says otherwise. Every path here is walked, and the one that asks for a
+    connection of its own is checked separately — a bound added to the pool
+    and forgotten at a call site is the call that hangs."""
+    pool = FakePool()
+    store = _pg(pool)
+
+    async def go() -> None:
+        await store.record_settlement(a_settlement())
+        await store.get_settlement(JOB)
+        await store.get_settlement_by_task(TASK)
+        opened = await store.open_dispute(a_dispute())
+        await store.get_dispute(opened.id)
+        await store.find_dispute(JOB, 0)
+        await store.list_disputes_for_task(TASK)
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.list_refund_claims()
+        await store.release_refund_claim(opened.id)
+
+    asyncio.run(go())
+
+    # Every statement the store sent, the DDL included, named a bound.
+    assert pool.statements and None not in pool.timeouts
+    assert len(pool.timeouts) == len(pool.statements)
+    # And the one call that takes a connection of its own bounded the wait for
+    # it — longer than a command, so a waiter is never cut off before the
+    # holder it is waiting for has been.
+    assert pool.acquired == [dispute_store._POOL_ACQUIRE_TIMEOUT]
+    assert dispute_store._POOL_ACQUIRE_TIMEOUT > dispute_store._POOL_COMMAND_TIMEOUT
 
 
 def test_a_missing_driver_names_the_fix() -> None:
