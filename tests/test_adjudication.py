@@ -572,6 +572,49 @@ def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) ->
     assert store._disputes[dispute.id].status == "open"
 
 
+@pytest.mark.parametrize(
+    ("setting", "named"),
+    [
+        ("stellar_signing_key", "STELLAR_SIGNING_KEY is unset"),
+        ("stellar_asset_sac", "STELLAR_ASSET_SAC is unset"),
+    ],
+)
+def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(monkeypatch, caplog, setting: str, named: str) -> None:
+    """The refund was the one money path with no presence check on its config,
+    and the absence was not cosmetic. `execute_refund` reads the settler
+    through `sc.signer_public_key`, which raises on an empty key BEFORE it
+    submits anything; `credit_refund` can only read a raise as "may still have
+    landed", so the claim was kept and the dispute parked in `crediting` with
+    an ERROR line that refuted itself — "MAY HAVE LANDED — do not retry:
+    STELLAR_SIGNING_KEY is empty". Nothing but a database edit ever got it out.
+
+    Asked above the claim, the same deployment refuses with a code that says
+    what is actually wrong, leaves the dispute exactly as the buyer left it,
+    and — the point — takes NO claim, so the buyer is payable the moment the
+    setting is.
+    """
+    dispute = a_dispute()
+    monkeypatch.setattr(settings, setting, "")
+    no_signing(monkeypatch)
+    store = dispute_store.get_dispute_store()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        with pytest.raises(DisputeError) as refused:
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refunds_not_configured"
+    assert refused.value.status_code == 503
+    assert store._disputes[dispute.id].status == "open"
+    assert asyncio.run(store.list_refund_claims()) == ()
+    logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
+    assert any(named in m and dispute.id in m and JOB in m and dispute.payer in m for m in logged), (
+        f"the missing setting was not named beside the dispute: {logged}"
+    )
+    # The refusal an adjudicator reads names no setting: it is the operator's
+    # line above that does, and only the operator can act on it.
+    assert named not in refused.value.message
+
+
 def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
     """A shutdown cancel can land between the submit and its confirmation, and
     `CancelledError` is a BaseException that no `except Exception` sees. It
