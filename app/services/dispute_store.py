@@ -1273,21 +1273,35 @@ class PostgresDisputeStore:
         self._lock = asyncio.Lock()
 
     async def _ready_pool(self) -> Any:
-        if self._ready and self._pool is not None:
-            return self._pool
+        """The pool, dialled and with the DDL run, as a LOCAL.
+
+        Every read of `self._pool` after the first is a chance for a concurrent
+        `close()` to have cleared it, and the DDL below spans three awaits: a
+        shutdown landing between two of them used to turn the next line into
+        `None.execute(...)`, which reaches the caller as a 500 on a request
+        that had a database. Holding the pool in a local means this call works
+        with the pool it actually dialled, whatever happens to the attribute —
+        at worst against a pool that is closing, which raises something that
+        names the problem.
+        """
+        pool = self._pool
+        if self._ready and pool is not None:
+            return pool
         async with self._lock:
-            if self._pool is None:
-                self._pool = await self._create_pool()
+            pool = self._pool
+            if pool is None:
+                pool = await self._create_pool()
+                self._pool = pool
             if not self._ready:
                 # Two statements rather than one string, so each table keeps its
                 # own rationale above it. asyncpg runs argument-less queries
                 # through the simple protocol, which is what lets one execute()
                 # carry a table and its indexes together.
-                await self._pool.execute(_CREATE_SETTLEMENTS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
-                await self._pool.execute(_CREATE_DISPUTES_SQL, timeout=_POOL_COMMAND_TIMEOUT)
-                await self._pool.execute(_CREATE_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await pool.execute(_CREATE_SETTLEMENTS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await pool.execute(_CREATE_DISPUTES_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await pool.execute(_CREATE_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
                 self._ready = True
-        return self._pool
+            return pool
 
     async def _create_pool(self) -> Any:
         asyncpg = _import_asyncpg()
@@ -1589,12 +1603,20 @@ class PostgresDisputeStore:
         return tuple(RefundClaim(dispute_id=row["dispute_id"], claimed_at=float(row["claimed_at"])) for row in rows)
 
     async def close(self) -> None:
-        # Cleared before the await so a close racing a request cannot hand out
-        # the pool that is being torn down, and so a second close is a no-op.
-        pool, self._pool = self._pool, None
-        self._ready = False
-        if pool is not None:
-            await pool.close()
+        # Under the SAME lock that creates the pool, because the two race. A
+        # shutdown landing while the first request is still dialling used to
+        # find `self._pool` empty, close nothing, and leave that dial to assign
+        # a live pool afterwards — five sockets held open by a store nobody
+        # will call again. Waiting for the dial means the pool that was made is
+        # the pool that is closed.
+        async with self._lock:
+            # Cleared before the await so a close racing a request cannot hand
+            # out the pool that is being torn down, and so a second close is a
+            # no-op.
+            pool, self._pool = self._pool, None
+            self._ready = False
+            if pool is not None:
+                await pool.close()
 
 
 _store: DisputeStore | None = None
