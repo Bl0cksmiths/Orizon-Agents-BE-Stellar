@@ -64,14 +64,16 @@ def seeded() -> object:
 
 
 # Rep snapshot for the pin: every agent rated, scores fanned out so ordering is
-# observable, with two deliberate holes —
-#   * agt_04m1's lower bound is under the 5500 floor, so it is filtered out;
-#   * agt_06q4 has no entry at all, so its line must fall back to the registry's
-#     seeded `rep` (4.71) rather than a smoothed score.
+# observable, with one deliberate hole — agt_04m1's lower bound is under the
+# 5500 floor, so it is filtered out.
+#
+# agt_06q4 used to have no entry at all, and its line pinned the registry's
+# seeded `rep` (4.71): the pin asserted that an unscored agent is offered on a
+# rating it wrote about itself. It is scored like everyone else now; what
+# happens to an unscored agent is pinned separately below.
 def _pinned_reps() -> dict[str, RepInfo]:
     reps = {a.id: _info(a.id, smoothed=6000 + i * 100, lower=6000) for i, a in enumerate(state.list_agents())}
     reps["agt_04m1"] = _info("agt_04m1", smoothed=6300, lower=100)
-    del reps["agt_06q4"]
     return reps
 
 
@@ -84,7 +86,7 @@ PINNED_BLOCK = """AVAILABLE_AGENTS:
 - id=agt_02k2 name="design.figma" price=0.018 rep=3.05 skills=ui,tokens,figma
 - id=agt_03d9 name="code.next" price=0.066 rep=3.10 skills=ts,react,next
 - id=agt_05x7 name="seo.brief" price=0.009 rep=3.20 skills=seo,research
-- id=agt_06q4 name="vision.ocr" price=0.014 rep=4.71 skills=vision,ocr
+- id=agt_06q4 name="vision.ocr" price=0.014 rep=3.25 skills=vision,ocr
 - id=agt_07w3 name="ads.meta" price=0.022 rep=3.30 skills=ads,meta
 - id=agt_08j2 name="deploy.v0" price=0.011 rep=3.35 skills=deploy,ci,seal
 - id=agt_09l5 name="research.pro" price=0.024 rep=3.40 skills=research,citations
@@ -111,6 +113,31 @@ def test_starved_registry_prompt_block_is_byte_identical(seeded: object) -> None
     reps = {a.id: _info(a.id, smoothed=1000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
 
     assert orchestrator_svc._registry_prompt_fragment(reps) == PINNED_STARVED_BLOCK
+
+
+def test_an_unscored_agent_is_not_offered_and_its_own_rating_never_shown(seeded: object) -> None:
+    # Routable, but the snapshot has no entry for it. `passes_floor(None)`
+    # would admit it without consulting the floor, and the block used to show
+    # its self-declared `rep` (4.71) as though it were evidence.
+    reps = _pinned_reps()
+    del reps["agt_06q4"]
+
+    block = orchestrator_svc._registry_prompt_fragment(reps)
+
+    assert "agt_06q4" not in block
+    assert "4.71" not in block
+    assert block == "\n".join(ln for ln in PINNED_BLOCK.splitlines() if "agt_06q4" not in ln)
+
+
+def test_an_unscored_agent_is_scored_at_the_prior_never_its_own_claim(seeded: object) -> None:
+    # The ranking and display fallback, for any caller that reaches it: the
+    # prior the service would serve an agent with no evidence, not the 4.71
+    # the registry holds for agt_06q4 or a registrant's claimed 5.0.
+    agent = state.agents["agt_06q4"].model_copy(update={"rep": 5.0})
+
+    assert orchestrator_svc._smoothed_score(agent, {}) == settings.reputation_prior_bps
+    info = _info(agent.id, smoothed=6100, lower=6000)
+    assert orchestrator_svc._smoothed_score(agent, {agent.id: info}) == 6100
 
 
 def test_registry_prompt_block_is_stable_across_runs(seeded: object) -> None:

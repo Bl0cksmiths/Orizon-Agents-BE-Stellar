@@ -18,7 +18,7 @@ import pytest
 from app.demo_kits import detect_kit
 from app.schemas import Agent
 from app.seed import seed_registry
-from app.services import orchestrator_svc
+from app.services import binding_registry, orchestrator_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
@@ -296,3 +296,105 @@ def test_kit_path_reports_unbound_agents_after_its_floor_notices(seeded: object)
     ]
     # Reported, never routed: nothing can execute a step for it.
     assert "ext_idx1" not in [s.agent_id for s in resp.steps]
+
+
+def _rated(agent_id: str, *, smoothed: int) -> RepInfo:
+    """A floor-clearing entry at a chosen smoothed score."""
+    return RepInfo(
+        agent_id=agent_id,
+        smoothed_bps=smoothed,
+        lower_bound_bps=6000,
+        avg_bps=smoothed,
+        count=5,
+        weight=5 * 10_000_000,
+        disputed=0,
+        dispute_rate_bps=0,
+        source="onchain",
+    )
+
+
+def _bound_seo_agent(monkeypatch: pytest.MonkeyPatch, *, claims: float) -> str:
+    """A second off-pipeline stand-in for the brief role: bound, sharing "seo",
+    and claiming `claims` on the registry's self-declared 0–5 scale."""
+    state.add_agent(
+        Agent(
+            id="ext_seo",
+            name="seo-bot",
+            skills=["seo"],
+            price=0.01,
+            rep=claims,
+            status="online",
+            runs=0,
+            source="onchain",
+        )
+    )
+    monkeypatch.setattr(binding_registry, "_bound_ids", {"ext_seo"})
+    return "ext_seo"
+
+
+def test_an_unscored_agent_is_never_a_floor_substitute(seeded: object) -> None:
+    # The copywriter is the brief role's only stand-in, and the snapshot has
+    # no entry for it. `passes_floor(None)` would admit it unjudged, so the
+    # role has no scored substitute and is dropped — reported as the floor's.
+    reps = _scored({"agt_05x7": _sub_floor("agt_05x7")})
+    del reps["agt_01h8"]
+    kit = detect_kit(KIT_INTENT)
+    assert kit is not None
+
+    resp = asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+
+    ids = [s.agent_id for s in resp.steps]
+    assert "agt_01h8" not in ids
+    assert "agt_05x7" not in ids
+    assert [(n.kind, n.agent_id) for n in resp.notices] == [("excluded", "agt_05x7")]
+
+
+def test_an_unscored_kit_agent_is_not_planned(seeded: object) -> None:
+    # A kit role the snapshot did not score cannot be judged by the floor, so
+    # it is not planned on "no entry" — the step is left out.
+    reps = _scored({})
+    del reps["agt_02k2"]
+    kit = detect_kit(KIT_INTENT)
+    assert kit is not None
+
+    resp = asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+
+    assert "agt_02k2" not in [s.agent_id for s in resp.steps]
+    assert len(resp.steps) == 5
+
+
+def test_the_best_scored_substitute_wins_not_the_best_self_declared(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two scored stand-ins for the brief role. The copywriter has the better
+    # evidence; the bound agent claims a perfect 5.0 about itself. Evidence
+    # decides — and the worse of two candidates is never the one picked.
+    ext = _bound_seo_agent(monkeypatch, claims=5.0)
+
+    resp = _run_kit(
+        {
+            "agt_05x7": _sub_floor("agt_05x7"),
+            "agt_01h8": _rated("agt_01h8", smoothed=9000),
+            ext: _rated(ext, smoothed=6500),
+        }
+    )
+
+    sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
+    assert sub.agent_id == "agt_01h8"
+
+
+def test_a_better_scored_bound_agent_takes_the_substitute_slot(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The mirror: the bound agent now has the better evidence, and a modest
+    # claim about itself. The ranking is by score, not by id or seed order.
+    ext = _bound_seo_agent(monkeypatch, claims=1.0)
+
+    resp = _run_kit(
+        {
+            "agt_05x7": _sub_floor("agt_05x7"),
+            "agt_01h8": _rated("agt_01h8", smoothed=6500),
+            ext: _rated(ext, smoothed=9000),
+        }
+    )
+
+    sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
+    assert sub.agent_id == ext

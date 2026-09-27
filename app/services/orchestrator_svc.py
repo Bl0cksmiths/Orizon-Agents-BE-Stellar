@@ -179,6 +179,36 @@ def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
     return any(info.degraded for info in reps.values())
 
 
+def _smoothed_score(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> int:
+    """An agent's smoothed score for ranking and display, in bps.
+
+    The PRIOR when the snapshot has no entry, and never `Agent.rep`: for an
+    on-chain agent that is a number its own registrant wrote, so ranking or
+    displaying it let an unscored agent claiming 5.0 outrank one with real
+    evidence. Every caller already holds only scored agents (see `_scored`),
+    so the fallback is a totality guard, and it is the one number the
+    service itself would serve an agent with no evidence.
+    """
+    info = reps.get(agent.id)
+    return info.smoothed_bps if info is not None else settings.reputation_prior_bps
+
+
+def _scored(agents: list[Agent], reps: dict[str, reputation_svc.RepInfo]) -> list[Agent]:
+    """The agents the snapshot actually scored; the rest are not offered at all.
+
+    `passes_floor(None)` admits an agent without consulting the floor, so an
+    agent with no entry would reach a plan on no evidence whatsoever. With one
+    registry snapshot per decompose and reputation read for exactly its
+    routable agents, a missing entry means the read did not return one — and
+    an agent the floor could not judge is not one a plan may route to.
+    """
+    kept = [a for a in agents if a.id in reps]
+    if len(kept) < len(agents):
+        missing = sorted(a.id for a in agents if a.id not in reps)
+        logger.warning("%d routable agent(s) had no reputation entry and were not offered: %s", len(missing), missing)
+    return kept
+
+
 def _backstop_rank(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> tuple[int, str]:
     """Sort key for the starvation backstop: best smoothed score first, id breaking ties.
 
@@ -263,9 +293,10 @@ def _floor_substitute(
     available at all.
 
     The pool is the decompose's own registry snapshot (listed and dispatchable
-    already), so a substitute is always an agent the reputation read covered.
+    already), narrowed to the agents it scored: a stand-in is chosen on
+    evidence, so an agent with no entry is never one.
     """
-    pool = (registry or _snapshot_registry()).routable
+    pool = _scored(list((registry or _snapshot_registry()).routable), reps)
     wanted = set(designated.skills)
     candidates = [
         a
@@ -277,13 +308,7 @@ def _floor_substitute(
     ]
     if not candidates:
         return None
-    candidates.sort(
-        key=lambda a: (
-            -(reps[a.id].smoothed_bps if a.id in reps else round(a.rep * 2000)),
-            a.id,
-        )
-    )
-    return candidates[0]
+    return min(candidates, key=lambda a: (-_smoothed_score(a, reps), a.id))
 
 
 # Line-break characters that could split one agent's entry into two. Not in
@@ -402,7 +427,7 @@ def _routable_registry(
     #     their own service, and re-admitting on starvation would route paid
     #     work to an operator who asked us to stop.
     registry = registry or _snapshot_registry()
-    agents = list(registry.routable)
+    agents = _scored(list(registry.routable), reps)
     cleared = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
     # Starvation backstop: TOP UP the agents that cleared the floor, never
     # replace them. Re-ranking the whole dispatchable set and keeping the top
@@ -481,10 +506,10 @@ def _routable_registry(
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
-        info = reps.get(a.id)
-        # Live smoothed score on the 0–5 scale the prompt already uses;
-        # seeded rep only when the agent has no reputation entry.
-        rep_display = info.smoothed_bps / 2000 if info is not None else a.rep
+        # Live smoothed score on the 0–5 scale the prompt already uses. Never
+        # the agent's self-declared `rep`: the planner reads this number as
+        # evidence, and an on-chain registrant writes that one about itself.
+        rep_display = _smoothed_score(a, reps) / 2000
         # Only `name` is treated. `id` is a Soroban Symbol
         # ([A-Za-z0-9_]{1,32}), so it can hold no space, quote, newline or
         # fence marker; price and rep are floats this line formats itself.
@@ -612,8 +637,14 @@ async def _build_kit_plan(
             # was never taken for it, so it is dropped the same silent way.
             continue
 
-        eta = _KIT_ETAS.get(agent_id, 1.0)
         info = reps.get(agent.id)
+        if info is None:
+            # Routable but unscored: the floor cannot judge it, so it is not
+            # offered — the same rule `_scored` applies to the free-form path.
+            logger.warning("kit agent %s had no reputation entry and was not planned", agent.id)
+            continue
+
+        eta = _KIT_ETAS.get(agent_id, 1.0)
         if reputation_svc.passes_floor(info):
             placed.append((position, _kit_step(agent, rationale, eta, reps)))
             taken.add(agent.id)
