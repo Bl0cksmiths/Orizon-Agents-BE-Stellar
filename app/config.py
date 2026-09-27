@@ -230,6 +230,13 @@ class Settings(BaseSettings):
     # timeout path — and no production caller passes one, so the value validated
     # here is the bound every live read uses.
     reputation_batch_timeout_seconds: float = 2.5
+    # How long past its TTL an agent's last on-chain read may still be served
+    # when a fresh read does not answer in time (the batch deadline passed, or
+    # the read failed). Served marked `stale` with its age, and judged by the
+    # routing floor on that evidence — instead of the prior, which clears the
+    # floor for everyone. Past this, the agent degrades to the prior as before.
+    # 0 turns stale serving off.
+    reputation_stale_grace_seconds: float = 300.0
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
 

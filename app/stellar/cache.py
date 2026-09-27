@@ -206,6 +206,27 @@ def _sweep(now: float) -> None:
             _store.pop(key, None)
 
 
+def last_stored(key: str) -> tuple[Any, float] | None:
+    """The value most recently stored under `key`, fresh OR expired, with the
+    monotonic time it expired (or will expire) at — None when there is none.
+
+    An expired entry is never served by `get_or_set`; it stays in `_store`
+    only until the next write or sweep. This is how a caller that has run out
+    of time for a fresh read (the reputation batch deadline) can still answer
+    with the last value the upstream actually gave, and say how old it is,
+    instead of pretending it knows nothing. It never spawns work.
+
+    It is exactly as trustworthy as the cache's own write-back: `invalidate`
+    drops the entry, and a flight fenced by it never stores one, so a value a
+    caller has declared stale by invalidating cannot come back through here.
+    """
+    hit = _store.get(key)
+    if hit is None:
+        return None
+    expiry, value = hit
+    return value, expiry
+
+
 def invalidate(key: str) -> None:
     """Forget `key` now, so the next read of it goes upstream.
 

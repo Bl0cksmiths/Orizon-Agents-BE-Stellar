@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -103,6 +104,18 @@ class RepInfo(BaseModel):
     # invisible to callers. Additive with a safe default — the routers'
     # mirror models drop unknown keys, so no client contract changes.
     degraded: bool = False
+    # True when these numbers are the agent's LAST KNOWN on-chain read, served
+    # because a fresh read did not answer in time (the batch deadline passed or
+    # the read failed) — not a prior. Every other field is that earlier read's
+    # evidence, scored exactly as it was then, and the routing floor is applied
+    # to it. Distinct from `degraded`, which means "no evidence was available,
+    # so the prior stands in and the floor fails open for this agent". A stale
+    # row is never degraded; a degraded row is never stale.
+    stale: bool = False
+    # Seconds since the served evidence was read from the ledger. Set only
+    # when `stale`, else None. Never above the read TTL plus
+    # REPUTATION_STALE_GRACE_SECONDS: an older entry is not served.
+    stale_age_seconds: float | None = None
 
 
 def prior_weight_stroops() -> int:
@@ -451,6 +464,76 @@ def _log_degraded(agent_ids: list[str], total: int, reason: str) -> None:
     )
 
 
+def _log_stale(infos: list[RepInfo], total: int, reason: str) -> None:
+    """ONE warning for the agents served their last known on-chain value.
+
+    Not `_log_degraded`: nothing here fails open. These agents are still
+    judged on real evidence, only older than the TTL, so the line says how
+    old — the oldest of them — rather than which way the floor is failing.
+    """
+    ids = [info.agent_id for info in infos]
+    shown = ", ".join(ids[:_DEGRADED_LOG_AGENT_LIMIT])
+    if len(ids) > _DEGRADED_LOG_AGENT_LIMIT:
+        shown = f"{shown}, +{len(ids) - _DEGRADED_LOG_AGENT_LIMIT} more"
+    oldest = max(info.stale_age_seconds or 0.0 for info in infos)
+    logger.warning(
+        "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — the routing "
+        "floor is still applied to that evidence (oldest read %.1f s ago)",
+        len(ids),
+        total,
+        shown,
+        reason,
+        oldest,
+    )
+
+
+def _report(outcomes: list[tuple[RepInfo, str]], total: int) -> None:
+    """Log a batch's fallbacks: at most one stale line and one degraded line.
+
+    `outcomes` holds every agent whose fresh read did not answer, with the
+    reason. A single RPC outage produces the same error for every agent, so
+    each line is reported against its first reason.
+    """
+    stale = [(info, reason) for info, reason in outcomes if info.stale]
+    degraded = [(info, reason) for info, reason in outcomes if not info.stale]
+    if stale:
+        _log_stale([info for info, _ in stale], total, stale[0][1])
+    if degraded:
+        _log_degraded([info.agent_id for info, _ in degraded], total, degraded[0][1])
+
+
+def _stale_info(agent_id: str) -> RepInfo | None:
+    """The agent's last known on-chain read, marked stale — or None.
+
+    None when there is no stored read, when it expired more than
+    REPUTATION_STALE_GRACE_SECONDS ago, or when it does not score (it was
+    stored before a check that now refuses it). The age is measured from
+    when the read was stored: its expiry minus the read TTL.
+    """
+    from ..stellar import cache as rcache
+
+    last = rcache.last_stored(_rep_cache_key(agent_id))
+    if last is None:
+        return None
+    state, expiry = last
+    past_expiry = time.monotonic() - expiry
+    if past_expiry > settings.reputation_stale_grace_seconds:
+        return None
+    try:
+        info = _info_from_state(agent_id, state)
+    except Exception:
+        return None
+    age = max(0.0, settings.reputation_read_ttl_seconds + past_expiry)
+    return info.model_copy(update={"stale": True, "stale_age_seconds": round(age, 1)})
+
+
+def _fallback(agent_id: str) -> RepInfo:
+    """What an agent is scored on when its fresh read did not answer: its
+    last known on-chain read if one is recent enough, else the prior marked
+    degraded."""
+    return _stale_info(agent_id) or _prior_info(agent_id, degraded=True)
+
+
 def _rep_cache_key(agent_id: str) -> str:
     """The read cache's key for one agent's rep_state.
 
@@ -502,14 +585,16 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
         state = await rcache.get_or_set(_rep_cache_key(agent_id), settings.reputation_read_ttl_seconds, _read)
         return _info_from_state(agent_id, state), None
     except Exception as e:
-        return _prior_info(agent_id, degraded=True), _describe(e)
+        return _fallback(agent_id), _describe(e)
 
 
 async def fetch_rep(agent_id: str) -> RepInfo:
-    """Read one agent's decayed rep_state from chain; prior on any failure."""
+    """Read one agent's decayed rep_state from chain. On a failed read: its
+    last known on-chain value marked stale if recent enough, else the prior
+    marked degraded."""
     info, failure = await _read_rep(agent_id)
     if failure is not None:
-        _log_degraded([agent_id], 1, failure)
+        _report([(info, failure)], 1)
     return info
 
 
@@ -569,29 +654,20 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None)
             task.cancel()
 
     infos: dict[str, RepInfo] = {}
-    failures: list[tuple[str, str]] = []
-    pending: list[str] = []
+    outcomes: list[tuple[RepInfo, str]] = []
     for agent_id, task in tasks.items():
         if task in pending_tasks:
-            pending.append(agent_id)
-            infos[agent_id] = _prior_info(agent_id, degraded=True)
-            continue
-        info, failure = task.result()
+            # Cut off by the deadline: its last known on-chain read if it has
+            # a recent one, which the floor can still judge, else the prior.
+            info = _fallback(agent_id)
+            outcomes.append((info, f"read still pending at the {bound:g} s batch deadline"))
+        else:
+            info, failure = task.result()
+            if failure is not None:
+                outcomes.append((info, failure))
         infos[agent_id] = info
-        if failure is not None:
-            failures.append((agent_id, failure))
-    if pending or failures:
-        # One line for the batch. A single RPC outage produces the same error
-        # for every agent, so it is reported against the first failure; reads
-        # the deadline cut off are named as such, since that is a different
-        # remedy (a slow RPC, not a down one).
-        reasons = []
-        if pending:
-            reasons.append(f"{len(pending)} read(s) still pending at the {bound:g} s batch deadline")
-        if failures:
-            reasons.append(failures[0][1])
-        degraded = [agent_id for agent_id in ids if agent_id in set(pending) | {a for a, _ in failures}]
-        _log_degraded(degraded, len(ids), "; ".join(reasons))
+    if outcomes:
+        _report(outcomes, len(ids))
     return infos
 
 

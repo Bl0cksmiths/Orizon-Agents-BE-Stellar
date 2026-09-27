@@ -11,6 +11,7 @@ nothing waits on wall-clock luck.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -199,3 +200,127 @@ def test_a_decompose_behind_a_slow_read_still_excludes_the_sub_floor_agent(chain
 
     assert "agt_04m1" not in [s.agent_id for s in resp.steps]
     assert resp.reputation_degraded is True, "the slow agent's prior is still reported"
+
+
+# ── past the deadline, the last known read beats the prior ──────
+
+
+def _expire(agent: str, seconds_ago: float) -> None:
+    """Age an agent's stored read as if its TTL ran out `seconds_ago`."""
+    key = rep._rep_cache_key(agent)
+    _expiry, value = rcache._store[key]
+    rcache._store[key] = (time.monotonic() - seconds_ago, value)
+
+
+def test_a_just_expired_read_is_served_stale_when_the_refresh_is_slow(chain):
+    """A warm host's first read after the TTL used to miss the deadline and
+    score the agent on the prior — which clears the floor. Its last on-chain
+    read is served instead, marked stale with its age, so a sub-floor agent
+    stays sub-floor; once the slow refresh lands, the next read is fresh."""
+    chain.state["agt_04m1"] = BAD
+
+    async def scenario():
+        fresh = await rep.fetch_reps(["agt_04m1"])
+        _expire("agt_04m1", 2.0)
+        chain.hold("agt_04m1")
+        served = await rep.fetch_reps(["agt_04m1"], timeout_seconds=0.3)
+        chain.release("agt_04m1")
+        await asyncio.wait({_flight("agt_04m1")})
+        after = await rep.fetch_reps(["agt_04m1"])
+        return fresh["agt_04m1"], served["agt_04m1"], after["agt_04m1"]
+
+    fresh, served, after = asyncio.run(scenario())
+
+    assert served.stale is True
+    assert served.degraded is False
+    assert served.source == "onchain"
+    assert served.model_dump(exclude={"stale", "stale_age_seconds"}) == fresh.model_dump(
+        exclude={"stale", "stale_age_seconds"}
+    )
+    assert rep.passes_floor(served) is False
+    # Read TTL (15 s), plus the 2 s it had been expired, plus the 0.3 s the
+    # batch waited before serving it — and not a great deal more.
+    ttl = settings.reputation_read_ttl_seconds
+    assert ttl + 2.3 <= served.stale_age_seconds <= ttl + 3.3
+    assert fresh.stale is False and fresh.stale_age_seconds is None
+    assert after.stale is False and after.degraded is False
+
+
+def test_a_read_expired_past_the_grace_degrades_to_the_prior(chain, monkeypatch):
+    monkeypatch.setattr(settings, "reputation_stale_grace_seconds", 60.0)
+    chain.state["agt_04m1"] = BAD
+
+    async def scenario():
+        await rep.fetch_reps(["agt_04m1"])
+        _expire("agt_04m1", 61.0)
+        chain.hold("agt_04m1")
+        served = await rep.fetch_reps(["agt_04m1"], timeout_seconds=0.3)
+        chain.release("agt_04m1")
+        await asyncio.wait({_flight("agt_04m1")})
+        return served["agt_04m1"]
+
+    served = asyncio.run(scenario())
+
+    assert served.stale is False
+    assert served.degraded is True
+    assert served.source == "prior"
+
+
+def test_a_failed_refresh_serves_the_last_read_stale(chain, caplog):
+    """A read that errors rather than hangs gets the same treatment, and the
+    batch says so on its own line — not the fail-OPEN one, since nothing is."""
+    chain.state["agt_04m1"] = BAD
+
+    async def scenario():
+        await rep.fetch_reps(["agt_04m1"])
+        _expire("agt_04m1", 1.0)
+        chain.state["agt_04m1"] = RuntimeError("rpc down")
+        return await rep.fetch_reps(["agt_04m1", "agt_new"])
+
+    with caplog.at_level(logging.DEBUG, logger="app.services.reputation_svc"):
+        infos = asyncio.run(scenario())
+
+    assert infos["agt_04m1"].stale is True
+    assert infos["agt_04m1"].degraded is False
+    lines = [r.getMessage() for r in caplog.records if r.name == "app.services.reputation_svc"]
+    assert len(lines) == 1
+    assert "last known on-chain value for 1/2 agents [agt_04m1]" in lines[0]
+    assert "rpc down" in lines[0]
+    assert "failing OPEN" not in lines[0]
+
+
+def test_an_invalidated_read_is_never_served_stale(chain):
+    """Invalidation says the stored read is WRONG now — a rating landed. It
+    must not come back as a stale answer while the fresh read is slow."""
+    chain.state["agt_04m1"] = GOOD
+
+    async def scenario():
+        await rep.fetch_reps(["agt_04m1"])
+        rep.invalidate_rep("agt_04m1")
+        chain.hold("agt_04m1")
+        served = await rep.fetch_reps(["agt_04m1"], timeout_seconds=0.3)
+        chain.release("agt_04m1")
+        await asyncio.wait({_flight("agt_04m1")})
+        return served["agt_04m1"]
+
+    served = asyncio.run(scenario())
+
+    assert served.stale is False
+    assert served.degraded is True
+
+
+def test_stale_rows_reach_the_client(chain, client):
+    """On the wire, where the router's mirror model would drop an undeclared
+    field without a word."""
+    chain.state["agt_01h8"] = GOOD
+    assert client.get("/api/stellar/reputation/agt_01h8").json()["stale"] is False
+    _expire("agt_01h8", 1.0)
+    chain.state["agt_01h8"] = RuntimeError("rpc down")
+
+    body = client.get("/api/stellar/reputation/agt_01h8").json()
+
+    assert body["stale"] is True
+    assert body["degraded"] is False
+    assert body["source"] == "onchain"
+    ttl = settings.reputation_read_ttl_seconds
+    assert ttl + 1.0 <= body["stale_age_seconds"] <= ttl + 2.0

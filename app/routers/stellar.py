@@ -75,6 +75,13 @@ class ReputationInfo(BaseModel):
     # reputation_svc.RepInfo has carried this flag since the degradation work;
     # this mirror model silently dropped it, so it never reached a client.
     degraded: bool = False
+    # Whether these numbers are the agent's LAST KNOWN on-chain read, served
+    # because a fresh read did not answer in time — real evidence the routing
+    # floor is still applied to, as opposed to a degraded prior. Never true
+    # together with `degraded`.
+    stale: bool = False
+    # Seconds since that read was taken from the ledger; null unless `stale`.
+    stale_age_seconds: float | None = None
 
 
 class ReputationBatch(BaseModel):

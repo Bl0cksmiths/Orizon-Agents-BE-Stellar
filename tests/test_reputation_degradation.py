@@ -155,7 +155,7 @@ def test_a_deadline_degrades_only_the_reads_still_pending(ledger_configured, mon
     messages = _messages(caplog)
     assert len(messages) == 1
     assert "2/3 agents [agt_b, agt_c]" in messages[0]
-    assert "2 read(s) still pending at the 0.5 s batch deadline" in messages[0]
+    assert "read still pending at the 0.5 s batch deadline" in messages[0]
 
 
 def test_partial_batch_names_only_the_failed_agents(ledger_configured, monkeypatch, caplog):
