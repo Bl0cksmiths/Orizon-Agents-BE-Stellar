@@ -583,8 +583,10 @@ def test_a_dispute_must_say_what_was_wrong() -> None:
     with pytest.raises(DisputeError) as refused:
         _open(payer, reason="   \t  ")
 
-    assert refused.value.code == "reason_required"
+    assert refused.value.code == "reason_invalid"
     assert refused.value.status_code == 422
+    # The message names the bound, so a client can say what to fix.
+    assert str(dispute_svc.MAX_REASON_CHARS) in refused.value.message
     assert asyncio.run(dispute_svc.list_for_task(TASK)) == ()
 
 
@@ -613,7 +615,7 @@ def test_a_reason_of_control_characters_alone_is_no_reason() -> None:
     with pytest.raises(DisputeError) as refused:
         _open(payer, reason="\x00\x1b\x07")
 
-    assert refused.value.code == "reason_required"
+    assert refused.value.code == "reason_invalid"
 
 
 def test_control_characters_are_stripped_from_a_stored_reason() -> None:
@@ -628,16 +630,6 @@ def test_control_characters_are_stripped_from_a_stored_reason() -> None:
     assert "\x00" not in record.reason and "\x1b" not in record.reason
     assert "\n" in record.reason
     assert record.reason.startswith("step one")
-
-
-def test_a_very_long_reason_is_clamped() -> None:
-    payer = Keypair.random()
-    _seed(payer.public_key)
-
-    record = _open(payer, reason="x" * 5_000)
-
-    assert len(record.reason) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
-    assert record.reason.endswith("[truncated]")
 
 
 # ── the refusal type itself ─────────────────────────────────────

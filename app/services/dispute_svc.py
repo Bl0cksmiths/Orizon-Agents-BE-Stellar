@@ -44,11 +44,12 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
@@ -105,6 +106,71 @@ _MAX_SIGNATURE_CHARS = 256
 # fallback holds 500 records and whose rows are read back into every dispute
 # listing.
 MAX_REASON_CHARS = 500
+
+
+# ── dispute free text: the buyer's reason and the adjudicator's note ──
+#
+# Both are FIELDS a person reads — in the console, on the buyer's receipt, in an
+# API response — and never text a model reads: no prompt-building site in this
+# service (`worker_prompt`, `fence_untrusted` and their callers) is handed
+# either one. So they are cleaned for a reader, by `clean_dispute_text`, and
+# not for a prompt fence. `sanitize_untrusted` was the cleaner until D-059 and
+# D-062, and it was the wrong one twice over: it stripped C0 but not C1 or the
+# bidi controls, so a reason made of nothing but zero-width or override
+# characters opened a dispute; and its fence defences rewrote ordinary words
+# (`THE END RESULT` became `THE [redacted marker]`) and pushed a reason at the
+# limit past it, which it then cut and marked `…[truncated]`.
+
+# C0 and C1 controls and DEL, except tab and newline so a buyer may still write
+# a paragraph. Replaced with a space rather than dropped, so `a\x00b` does not
+# silently become one word. These forge structure in whatever renders them —
+# `\x9b` is a one-byte CSI escape to a terminal, `\x85` a line break to some
+# renderers — which is why the old docstring promised C1 was stripped.
+_DISPUTE_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+# Dropped outright. The bidi embeddings, overrides and isolates (U+202A-202E,
+# U+2066-2069) and the implicit marks (U+200E, U+200F, U+061C) reorder how the
+# REST of the text displays, so a reason can make an adjudicator read something
+# other than what was stored; and lone surrogates cannot be encoded as UTF-8 at
+# all, so a store write would fail on them.
+_DISPUTE_TEXT_DROPPED = re.compile(r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+
+# Characters Unicode files as letters or marks that nonetheless render as
+# nothing: the Hangul fillers, the braille blank, the combining grapheme joiner
+# and the Khmer inherent vowels. Each one, alone, used to open a dispute.
+_INVISIBLE_GLYPHS = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5")
+
+
+def _is_visible(ch: str) -> bool:
+    """False for whitespace, controls, format characters and the fillers above."""
+    return unicodedata.category(ch)[0] not in ("C", "Z") and ch not in _INVISIBLE_GLYPHS
+
+
+def clean_dispute_text(text: str | None) -> str:
+    """A dispute's free text as it is stored, or "" when it says nothing a reader can see.
+
+    The rules, in order:
+
+      1. bidi controls and lone surrogates are DROPPED (`_DISPUTE_TEXT_DROPPED`);
+      2. C0 and C1 controls and DEL, except tab and newline, become a space
+         (`_DISPUTE_TEXT_CONTROLS`);
+      3. the ends are trimmed of whitespace;
+      4. text with no VISIBLE character left — nothing outside the control,
+         format and separator categories and the invisible glyphs — is "".
+
+    Nothing else is touched: no marker is redacted, no `====` run collapsed,
+    and NOTHING IS EVER TRUNCATED. Cleaning only ever shortens, so the caller
+    measures the result against its limit and refuses what is over it — the
+    buyer sees their words stored as they wrote them, or a refusal that says
+    why, never a silent cut. It is also not an escaping function: the console
+    escapes on render, as it does for every stored string.
+
+    None reads as "", so a caller that ignores the annotation is refused with
+    its own code rather than a TypeError the API would answer as a 500.
+    """
+    cleaned = _DISPUTE_TEXT_DROPPED.sub("", text or "")
+    cleaned = _DISPUTE_TEXT_CONTROLS.sub(" ", cleaned).strip()
+    return cleaned if any(_is_visible(ch) for ch in cleaned) else ""
 
 
 class DisputeError(Exception):
@@ -255,44 +321,45 @@ def _authenticate_payer(
         raise _refuse("not_the_payer", 403, "only the payer of a workflow may dispute it", job_id_hex, step_index)
 
 
+# What the buyer is told on every refusal of their reason, whichever way it
+# failed: one code (`reason_invalid`) and one sentence that names the bound, so
+# a client can say exactly what to fix without a second mapping.
+REASON_RULE = (
+    f"a dispute reason must say what was wrong with the step in 1 to {MAX_REASON_CHARS} characters, "
+    "at least one of them visible"
+)
+
+
 def _require_reason(reason: str, job_id_hex: str, step_index: int) -> str:
-    """The buyer's reason, cleaned and bounded — or a refusal if there is none.
+    """The buyer's reason, cleaned — or `reason_invalid` (422) if it is empty or too long.
 
-    `sanitize_untrusted` is this repo's existing primitive for text somebody
-    else wrote (`app/agents/workers/prompt_safety.py`), used here for
-    `registry_sync`'s reason rather than its own: it strips C0/C1 control
-    characters — all but tab and newline, so a buyer may still write a
-    paragraph — and clamps the length. The control characters are the part that
-    matters for a dispute: this string is read back into an API response, shown
-    in the console and quoted in the dispute receipt, and an escape sequence or
-    a NUL in any of those forges structure that nobody wrote.
-
-    Deliberately NOT `fence_untrusted`: a reason is a FIELD, not a prompt
-    block, and nothing here sends it to a model. The prompt-fence side effects
-    it does carry (collapsing `====` runs, redacting a forged BEGIN/END marker)
-    cost a buyer nothing to live with and keep one primitive rather than two.
-
-    It is also NOT an escaping function, and must not be mistaken for one: the
-    console escapes on render, as it does for every other stored string. What
-    this decides is what we STORE — evidence the buyer wrote, kept as close to
-    verbatim as is safe.
+    Cleaned by `clean_dispute_text`, whose rules are stated there: controls and
+    bidi overrides out, nothing else changed. This string is read back into an
+    API response, shown in the console and quoted in the dispute receipt, and an
+    escape sequence, a NUL or an override in any of those forges structure
+    nobody wrote. What this decides is what we STORE — evidence the buyer
+    wrote, kept as close to verbatim as is safe.
 
     Empty after cleaning is a refusal, because "the buyer said what was wrong"
     is the whole evidentiary content of a dispute that a human will later
-    adjudicate. Its code sits deliberately outside the frozen set of job-state
-    codes: those describe the WORKFLOW's state and each one is final, while this
-    one describes the request and the caller can fix it — 422, the status the
-    router's own field bound produces for the same mistake.
+    adjudicate — and "empty" includes a reason of nothing but zero-width,
+    override or filler characters (D-059), which displays as nothing. Longer
+    than MAX_REASON_CHARS after cleaning is a refusal too, never a cut
+    (D-062): the reason is the buyer's evidence, and storing the first 500
+    characters of it without a word to them changes what they said.
+
+    ONE code for both, `reason_invalid`, with a message naming the bound
+    (D-061). An empty reason and a blank one used to be answered with two
+    different codes, and an over-long one with a generic `validation_error`
+    that echoed the whole reason back. The code sits deliberately outside the
+    frozen set of job-state codes: those describe the WORKFLOW's state and each
+    one is final, while this one describes the request and the caller can fix
+    it — which is also why it is checked before the signature consumes the
+    challenge.
     """
-    cleaned = sanitize_untrusted(reason, max_chars=MAX_REASON_CHARS)
-    if not cleaned:
-        raise _refuse(
-            "reason_required",
-            422,
-            "a dispute must say what was wrong with the step",
-            job_id_hex,
-            step_index,
-        )
+    cleaned = clean_dispute_text(reason)
+    if not cleaned or len(cleaned) > MAX_REASON_CHARS:
+        raise _refuse("reason_invalid", 422, REASON_RULE, job_id_hex, step_index)
     return cleaned
 
 
@@ -670,7 +737,8 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
     It is checked FIRST, before the dispute is even read: pure text handling
     is the cheapest check there is, and it is the only refusal here an
     adjudicator can fix and send again. A note that is empty AFTER cleaning —
-    missing, blank, or nothing but control characters — is refused as
+    missing, blank, or nothing but control, format or filler characters
+    (`clean_dispute_text`) — is refused as
     `rejection_reason_required` (422, the status the buyer's own missing
     `reason` carries) before anything is written, because storing it would
     print an empty explanation on the receipt.
@@ -697,10 +765,21 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
     an explanation was recorded and whom the decision concerns; the
     explanation itself is read from the record by whoever needs it.
     """
-    # `sanitize_untrusted` reads a None as "", so a caller that ignores the
-    # annotation is refused below with the right code rather than with a
-    # TypeError the API would answer as a 500.
-    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS)
+    # The buyer's reason's cleaner, for the buyer's reason's reasons: it is
+    # read by a person, never a model (D-059, D-062). It reads a None as "",
+    # so a caller that ignores the annotation is refused below with the right
+    # code rather than with a TypeError the API would answer as a 500.
+    cleaned = clean_dispute_text(note)
+    if len(cleaned) > MAX_REASON_CHARS:
+        # Refused, never cut: a rejection the buyer reads with its end missing
+        # is a different rejection. The edge bounds the note at the same number,
+        # so only an in-process caller gets here.
+        logger.warning("adjudication refused: dispute=%s reason=rejection_reason_too_long", dispute_id)
+        raise DisputeError(
+            "rejection_reason_too_long",
+            f"a rejection reason is at most {MAX_REASON_CHARS} characters",
+            422,
+        )
     if not cleaned:
         logger.warning("adjudication refused: dispute=%s reason=rejection_reason_required", dispute_id)
         raise DisputeError(
