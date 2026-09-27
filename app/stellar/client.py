@@ -742,7 +742,7 @@ def _send_signed_xdr(signed_xdr: str) -> str:
         env = TransactionEnvelope.from_xdr(signed_xdr, network_passphrase())
     except Exception as e:
         logger.warning("[stellar.submit] bad XDR: %s", e)
-        raise RuntimeError(f"bad signed XDR (likely wrong networkPassphrase or malformed): {e}") from e
+        raise NotSubmittedError(f"bad signed XDR (likely wrong networkPassphrase or malformed): {e}") from e
 
     # The envelope's own hash and source account identify the transaction; the
     # XDR itself is never logged (it carries the user's signature payload).
@@ -754,7 +754,7 @@ def _send_signed_xdr(signed_xdr: str) -> str:
         if sent.status != SendTransactionStatus.PENDING:
             detail = f"status={sent.status} error={getattr(sent, 'error_result_xdr', None)} hash={sent.hash}"
             logger.error("[stellar.submit] send failed: %s", detail)
-            raise RuntimeError(f"submit failed ({detail})")
+            raise _send_refusal(f"submit failed ({detail})", sent.status)
         span["stage"] = "pending"
     return sent.hash
 
