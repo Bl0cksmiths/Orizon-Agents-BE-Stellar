@@ -40,26 +40,8 @@ class CapacityExhaustedError(RuntimeError):
     maps this to HTTP 503 "capacity_exhausted"."""
 
 
-# How long a stored plan stays executable after decompose built it.
-#
-# Sized from how the plan card is actually used: decompose answers in seconds
-# to tens of seconds, the buyer then READS the card (steps, prices, reputation,
-# notices), and on the paid path signs a PaymentEscrow.authorize the frontend
-# builds with a 600 s validity and broadcasts it (~5 s) immediately before
-# calling /execute. So the plan must outlive a careful read PLUS that signing
-# flow, with room for a buyer who tabs away and comes back — 15 minutes covers
-# it several times over. It must also be short enough that the card the buyer
-# authorised still describes the marketplace: prices, reputation stamps and
-# floor notices are all frozen at `created_at`. The execute-time re-check
-# covers listing and the floor; this bound covers everything else on the card.
-#
-# A module constant until it becomes a setting (`plan_ttl_seconds`); tests
-# patch it here.
-PLAN_TTL_SECONDS = 900.0
-
-
 class PlanExpiredError(CodedHTTPException):
-    """execute_plan refused a stored plan older than PLAN_TTL_SECONDS.
+    """execute_plan refused a stored plan older than `settings.plan_ttl_seconds`.
 
     An HTTP exception rather than a bare RuntimeError like its sibling above so
     that `/execute` answers 410 `plan_expired` in the unified envelope without
@@ -84,13 +66,13 @@ def _wall_clock() -> float:
 
 
 def plan_expired(plan: StoredPlan, now: float | None = None) -> bool:
-    """True once `plan` is strictly older than PLAN_TTL_SECONDS.
+    """True once `plan` is strictly older than `settings.plan_ttl_seconds`.
 
     A plan exactly TTL old still executes: the bound is inclusive, so the
     number means "executable for this long", not "one tick less".
     """
     age = (_wall_clock() if now is None else now) - plan.created_at
-    return age > PLAN_TTL_SECONDS
+    return age > settings.plan_ttl_seconds
 
 
 def _track_background_task(task: asyncio.Task) -> None:
@@ -370,7 +352,7 @@ async def execute_plan(
     so an unbounded burst of executes can't fan out unbounded LLM calls.
 
     Raises PlanExpiredError — also before any task is minted — when the plan is
-    older than PLAN_TTL_SECONDS. Checked first: a stale plan is refused for
+    older than `settings.plan_ttl_seconds`. Checked first: a stale plan is refused for
     what it is, whatever the load.
     """
     if plan_expired(plan):
@@ -378,7 +360,7 @@ async def execute_plan(
             "execute refused for plan %s: built %.0fs ago, past the %.0fs plan TTL",
             plan.id,
             _wall_clock() - plan.created_at,
-            PLAN_TTL_SECONDS,
+            settings.plan_ttl_seconds,
         )
         raise PlanExpiredError(plan.id)
     active = sum(1 for t in _background_tasks if not t.done())
