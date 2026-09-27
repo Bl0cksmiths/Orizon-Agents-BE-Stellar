@@ -241,9 +241,11 @@ class Settings(BaseSettings):
     # Changing it therefore only affects workflows that settle afterwards.
     dispute_window_seconds: float = 86_400.0  # 24 hours
     # Share of the disputed step's settled charge credited back when a dispute
-    # is upheld (story 4.03 pays it; `refund_svc.credited_amount_usdc` clamps
-    # it to [0, 1]). 1.0 = the whole step, which is what ADR 0002 states as the
-    # policy buyer and operator are both told in advance.
+    # is upheld (story 4.03 pays it). 1.0 = the whole step, which is what ADR
+    # 0002 states as the policy buyer and operator are both told in advance.
+    # Anything but a finite number in [0, 1] refuses to boot
+    # (`_money_bounds_bound_something`); `refund_svc.credited_amount_usdc`
+    # still clamps it, for a value set outside `Settings()`.
     dispute_credited_fraction: float = 1.0
     # Hard ceiling on a SINGLE partial-credit refund, checked before anything
     # is signed (story 4.03). Deliberately NOT `max_charge_usdc`: that one
@@ -522,6 +524,12 @@ class Settings(BaseSettings):
             `/api/stellar/server/charge` both compare against; not a number
             lets every plan total through uncapped, and zero or below skips
             the charge, the seal and the ratings of every paid run.
+          * `DISPUTE_CREDITED_FRACTION` — finite, within [0, 1]. The policy
+            share of a step that an upheld dispute credits.
+            `refund_svc.credited_amount_usdc` clamps it with `min(max(…))`,
+            which a NaN passes through untouched and freezes onto every
+            dispute opened as its promise; outside [0, 1] the clamp quietly
+            applies a policy nobody typed, so it is refused rather than bent.
 
         Raised rather than logged, for the reason the reputation bounds are:
         what it prevents is silent, and a refused deploy cannot be missed.
@@ -544,6 +552,13 @@ class Settings(BaseSettings):
                 "MAX_CHARGE_USDC is not a finite number of USDC above zero — it is the ceiling on ONE "
                 "PaymentEscrow.charge, a ceiling that is not a finite number lets every plan total through "
                 "uncapped, and one at or below zero skips the charge and the seal of every paid run"
+            )
+        fraction = self.dispute_credited_fraction
+        if not (math.isfinite(fraction) and 0 <= fraction <= 1):
+            faults.append(
+                "DISPUTE_CREDITED_FRACTION is not a finite fraction from 0 to 1 — it is the share of a disputed "
+                "step an upheld dispute credits, one that is not a finite number is frozen onto every dispute "
+                "opened as the credit it promises, and one outside 0 to 1 is not the policy the buyer was told"
             )
         if faults:
             raise ValueError(
