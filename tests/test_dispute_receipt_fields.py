@@ -90,8 +90,10 @@ def test_a_record_built_without_the_receipt_fields_says_not_known() -> None:
 def test_the_receipt_fields_trail_every_existing_field() -> None:
     # Appended, never inserted: a positional construction anywhere keeps its
     # meaning, and the store's row mapping keeps its order.
+    # The reconcile sweep's `inflight_usdc` was appended after them by the same
+    # rule, and it is not a receipt field: nothing a buyer reads is taken from it.
     names = [f.name for f in fields(DisputeRecord)]
-    assert names[-3:] == ["credited_usdc", "updated_at", "rating_confirmed"]
+    assert names[-4:] == ["credited_usdc", "updated_at", "rating_confirmed", "inflight_usdc"]
 
 
 # ── the schema: a table that already exists ───────────────────────────────
@@ -198,6 +200,8 @@ def test_a_claim_and_a_release_change_only_the_status_and_when_it_changed(name: 
         "status": status,
         "updated_at": "$2::double precision",
         "refund_tx": "NULL::text",
+        # The amount of the transfer that hash named goes with it.
+        "inflight_usdc": "NULL::double precision",
         "opening": "FALSE",
     }
 

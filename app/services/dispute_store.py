@@ -257,6 +257,17 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 # exactly what DisputeRecord promises a reader for a row from before 4.06:
 # "not known", never a zero credit or a 1970 timestamp.
 #
+# `inflight_usdc` arrives with the reconcile sweep, by the same road and for
+# the same reason. It is the amount of the transfer named by `refund_tx`
+# WHILE that transfer's outcome is unknown: written beside the in-flight hash
+# when a submission times out, and never read as money that landed. That is
+# `credited_usdc`'s job, and the receipt reads that one alone — a buyer shown
+# an amount that may never arrive would be shown a promise dressed as a
+# payment. It exists because a timed-out row otherwise records a hash and no
+# amount, so a sweep that later finds the transfer landed would have to
+# re-derive what it was for. NULLABLE, like the receipt's three: every row
+# written before it, and every row with no transfer in flight, says "none".
+#
 # The three read indexes carry (key..., id DESC) so "the newest row for this
 # dispute / this step / this task" is served from the index without a sort.
 _CREATE_DISPUTES_SQL = """
@@ -280,12 +291,14 @@ CREATE TABLE IF NOT EXISTS dispute_events (
     credited_usdc   DOUBLE PRECISION,
     updated_at      DOUBLE PRECISION,
     rating_confirmed BOOLEAN,
+    inflight_usdc   DOUBLE PRECISION,
     opening         BOOLEAN NOT NULL DEFAULT FALSE
 );
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT;
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS credited_usdc DOUBLE PRECISION;
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS updated_at DOUBLE PRECISION;
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS rating_confirmed BOOLEAN;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS inflight_usdc DOUBLE PRECISION;
 CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
     ON dispute_events (job_id_hex, step_index) WHERE opening;
 CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
@@ -399,7 +412,7 @@ INSERT INTO workflow_settlements (
 _SELECT_DISPUTE_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
        charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-       credited_usdc, updated_at, rating_confirmed
+       credited_usdc, updated_at, rating_confirmed, inflight_usdc
 FROM dispute_events
 WHERE dispute_id = $1
 ORDER BY id DESC
@@ -414,7 +427,7 @@ LIMIT 1
 _SELECT_DISPUTE_BY_STEP_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
        charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-       credited_usdc, updated_at, rating_confirmed
+       credited_usdc, updated_at, rating_confirmed, inflight_usdc
 FROM dispute_events
 WHERE job_id_hex = $1 AND step_index = $2
 ORDER BY id DESC
@@ -431,7 +444,7 @@ LIMIT 1
 _SELECT_DISPUTES_FOR_TASK_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
        charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-       credited_usdc, updated_at, rating_confirmed
+       credited_usdc, updated_at, rating_confirmed, inflight_usdc
 FROM (
     SELECT DISTINCT ON (dispute_id) *
     FROM dispute_events
@@ -471,8 +484,8 @@ _INSERT_DISPUTE_SQL = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
     charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-    credited_usdc, updated_at, rating_confirmed, opening
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, TRUE)
+    credited_usdc, updated_at, rating_confirmed, inflight_usdc, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, TRUE)
 ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
 RETURNING dispute_id
 """
@@ -571,6 +584,12 @@ FOR UPDATE
 # submitted stays NULL rather than becoming FALSE — which is the distinction
 # DisputeRecord promises a reader of a receipt.
 #
+# `inflight_usdc` ($11) is COALESCEd like the hash it describes: the row that
+# records a timed-out submission names both, and a later transition that
+# names neither keeps them. It is never cleared here, because nothing written
+# by this statement proves a transfer did not land; the two statements that
+# DO say "nothing landed" (the claim and the release) clear it with the hash.
+#
 # `updated_at` is $7 outright and never COALESCEd, because it is the one column
 # every transition exists to move. It is the same reading of the clock as the
 # `resolved_at` fallback, so the transition that first resolves a dispute
@@ -642,7 +661,7 @@ finished AS (
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
     charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-    credited_usdc, updated_at, rating_confirmed, opening
+    credited_usdc, updated_at, rating_confirmed, inflight_usdc, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, $2,
@@ -657,12 +676,13 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
            WHEN latest.rating_confirmed THEN TRUE
            ELSE COALESCE($9::boolean, latest.rating_confirmed)
        END,
+       COALESCE($11::double precision, latest.inflight_usdc),
        FALSE
 FROM latest
 WHERE $10::text IS NULL OR latest.status = $10::text
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-          credited_usdc, updated_at, rating_confirmed
+          credited_usdc, updated_at, rating_confirmed, inflight_usdc
 """
 
 
@@ -697,23 +717,26 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 # Copying the last hash forward put a transaction that FAILED on the buyer's
 # receipt as the refund "in flight" for the whole of the next attempt (found
 # in story 4.06). The dead hash is not lost: the append-only trail still holds
-# it on the row that recorded it.
+# it on the row that recorded it. `inflight_usdc` goes with it, because it is
+# the amount of the transfer that hash names: an amount left behind would
+# describe a transfer the dispute no longer has.
 _APPEND_UNRESOLVED_ROW = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
     charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-    credited_usdc, updated_at, rating_confirmed, opening
+    credited_usdc, updated_at, rating_confirmed, inflight_usdc, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, '{status}',
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
        latest.resolved_at, NULL::text, latest.rating_tx, latest.note,
        latest.credited_usdc, $2::double precision, latest.rating_confirmed,
+       NULL::double precision,
        FALSE
 FROM latest {gate}
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-          credited_usdc, updated_at, rating_confirmed
+          credited_usdc, updated_at, rating_confirmed, inflight_usdc
 """
 
 
@@ -924,6 +947,13 @@ class DisputeRecord:
     # replay confirming an earlier attempt); False while it is only in flight;
     # None when no rating was ever submitted, or for records from before 4.06.
     rating_confirmed: bool | None = None
+    # The amount of the transfer `refund_tx` names while that transfer's fate
+    # is UNKNOWN — recorded beside the in-flight hash when a submission times
+    # out, so the reconcile sweep can check what it finds on the chain against
+    # what was sent. Never money that landed: that is `credited_usdc`, and it
+    # is the only one of the two a receipt reads. None whenever no transfer is
+    # in flight, and on every row written before the sweep existed.
+    inflight_usdc: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1007,6 +1037,7 @@ class DisputeStore(Protocol):
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
+        inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
     ) -> DisputeRecord | None: ...
 
@@ -1182,6 +1213,7 @@ class InMemoryDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
+        inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
     ) -> DisputeRecord | None:
         """Append the transition and return the dispute, or None if refused.
@@ -1226,6 +1258,7 @@ class InMemoryDisputeStore:
                 else (current.resolved_at if current.resolved_at is not None else now)
             ),
             credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
+            inflight_usdc=inflight_usdc if inflight_usdc is not None else current.inflight_usdc,
             updated_at=now,
             # Monotonic, as the CASE in _APPEND_STATUS_SQL is: a rating the
             # ledger has vouched for cannot be taken back by a later attempt
@@ -1278,7 +1311,7 @@ class InMemoryDisputeStore:
         self._refund_claims[dispute_id] = now
         # No refund hash on a claim: this payout has no transaction yet, and the
         # Postgres statement clears it the same way (see _APPEND_UNRESOLVED_ROW).
-        claimed = replace(current, status="crediting", updated_at=now, refund_tx=None)
+        claimed = replace(current, status="crediting", updated_at=now, refund_tx=None, inflight_usdc=None)
         self._disputes[dispute_id] = claimed
         return claimed
 
@@ -1305,7 +1338,7 @@ class InMemoryDisputeStore:
         self._refund_claims.pop(dispute_id, None)
         # Released only when nothing landed, so the hash of the attempt that
         # failed must not follow the dispute into its next one.
-        released = replace(current, status="upheld", updated_at=time.time(), refund_tx=None)
+        released = replace(current, status="upheld", updated_at=time.time(), refund_tx=None, inflight_usdc=None)
         self._disputes[dispute_id] = released
         return released
 
@@ -1583,6 +1616,7 @@ class PostgresDisputeStore:
             credited_usdc=None if row["credited_usdc"] is None else float(row["credited_usdc"]),
             updated_at=None if row["updated_at"] is None else float(row["updated_at"]),
             rating_confirmed=None if row["rating_confirmed"] is None else bool(row["rating_confirmed"]),
+            inflight_usdc=None if row["inflight_usdc"] is None else float(row["inflight_usdc"]),
         )
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
@@ -1618,6 +1652,7 @@ class PostgresDisputeStore:
             record.credited_usdc,
             record.updated_at,
             record.rating_confirmed,
+            record.inflight_usdc,
             timeout=_POOL_COMMAND_TIMEOUT,
         )
         if won is not None:
@@ -1645,6 +1680,7 @@ class PostgresDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
+        inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
     ) -> DisputeRecord | None:
         """Append the transition and return the dispute as it now stands.
@@ -1713,6 +1749,7 @@ class PostgresDisputeStore:
                 credited_usdc,
                 rating_confirmed,
                 expected_status,
+                inflight_usdc,
                 timeout=_POOL_COMMAND_TIMEOUT,
             )
         # Empty RETURNING with the dispute known to exist means one thing: the

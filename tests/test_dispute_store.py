@@ -37,7 +37,7 @@ import time
 from typing import Any
 
 import pytest
-from pg_support import events, fetch, run, settlements, statuses
+from pg_support import events, execute, fetch, run, settlements, statuses
 
 from app.services import dispute_store
 from app.services.dispute_store import (
@@ -533,6 +533,93 @@ def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation(store: Dispu
         run(store, store.append_status("dsp_never", "upheld", expected_status="open"))
 
 
+# ── the in-flight amount ──────────────────────────────────────────────────
+
+
+def test_an_in_flight_amount_is_kept_beside_its_hash_and_never_read_as_credited(store: DisputeStore) -> None:
+    """A timed-out submission records its hash AND the amount it was for, so a
+    reconcile that later finds it landed has the figure to check the chain
+    against. A later transition naming neither keeps both, as COALESCE keeps
+    the hash. And it is never `credited_usdc`: that is money that landed, the
+    one a receipt prints, and an in-flight amount may never arrive."""
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        timed_out = await store.append_status(
+            opened.id, "crediting", refund_tx="tx_inflight", inflight_usdc=1.25, expected_status="crediting"
+        )
+        noted = await store.append_status(opened.id, "crediting", expected_status="crediting")
+        return timed_out, noted
+
+    timed_out, noted = run(store, go())
+
+    assert timed_out is not None
+    assert (timed_out.refund_tx, timed_out.inflight_usdc, timed_out.credited_usdc) == ("tx_inflight", 1.25, None)
+    assert noted is not None
+    assert (noted.refund_tx, noted.inflight_usdc, noted.credited_usdc) == ("tx_inflight", 1.25, None)
+
+
+def test_a_claim_and_a_release_clear_the_in_flight_amount_with_the_hash(store: DisputeStore) -> None:
+    """Both mutex transitions say "no transfer is in flight", so the amount of
+    the dead one must not follow the dispute into its next attempt, exactly as
+    its hash does not."""
+
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.append_status(opened.id, "crediting", refund_tx="tx_dead", inflight_usdc=1.25)
+        released = await store.release_refund_claim(opened.id)
+        # A released dispute that somehow still carried an amount would hand it
+        # to the claim that follows; claiming clears it on its own account too.
+        await store.append_status(opened.id, "upheld", inflight_usdc=0.5)
+        return released, await store.claim_refund(opened.id)
+
+    released, reclaimed = run(store, go())
+
+    assert released is not None and (released.refund_tx, released.inflight_usdc) == (None, None)
+    assert reclaimed is not None and (reclaimed.refund_tx, reclaimed.inflight_usdc) == (None, None)
+
+
+def test_the_in_flight_column_is_added_to_a_table_that_already_exists(pg: PostgresDisputeStore, pg_dsn: str) -> None:
+    """`dispute_events` is live wherever 4.06 ran, without this column, and
+    CREATE TABLE IF NOT EXISTS does nothing to a table that is there. The ALTER
+    is the whole of the migration: a table as the previous build left it, with
+    a dispute already in flight on it, gains the column on the next boot, and
+    the old row reads as "no amount recorded" rather than as a zero."""
+
+    async def seed() -> None:
+        old = PostgresDisputeStore(pg_dsn)
+        try:
+            opened = await old.open_dispute(a_dispute())
+            await old.append_status(opened.id, "upheld")
+            await old.claim_refund(opened.id)
+            await old.append_status(opened.id, "crediting", refund_tx="tx_before_the_sweep")
+        finally:
+            await old.close()
+        await execute(pg_dsn, "ALTER TABLE dispute_events DROP COLUMN inflight_usdc")
+
+    asyncio.run(seed())
+
+    async def go() -> tuple[Any, ...]:
+        before = await pg.get_dispute("dsp_0001")
+        after = await pg.append_status("dsp_0001", "crediting", inflight_usdc=1.5, expected_status="crediting")
+        columns = await fetch(
+            pg_dsn,
+            "SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema()"
+            " AND table_name = 'dispute_events' AND column_name = 'inflight_usdc'",
+        )
+        return before, after, columns
+
+    before, after, columns = run(pg, go())
+
+    assert [c["data_type"] for c in columns] == ["double precision"]
+    assert before is not None and before.refund_tx == "tx_before_the_sweep" and before.inflight_usdc is None
+    assert after is not None and (after.refund_tx, after.inflight_usdc) == ("tx_before_the_sweep", 1.5)
+
+
 # ── the bound on the in-memory store ──────────────────────────────────────
 
 
@@ -636,6 +723,7 @@ _DISPUTE_COLUMNS = (
     "credited_usdc",
     "updated_at",
     "rating_confirmed",
+    "inflight_usdc",
 )
 
 
@@ -790,7 +878,13 @@ class FakePool:
         # reading; resolved_at, the rating hash and the receipt's facts are
         # copied forward, because `crediting` is not a resolution. The refund
         # hash is cleared: this payout has no transaction yet.
-        row = latest | {"status": "crediting", "updated_at": claimed_at, "refund_tx": None, "opening": False}
+        row = latest | {
+            "status": "crediting",
+            "updated_at": claimed_at,
+            "refund_tx": None,
+            "inflight_usdc": None,
+            "opening": False,
+        }
         self.disputes.append(row)
         return row
 
@@ -810,7 +904,13 @@ class FakePool:
             return None
         self.claims.pop(dispute_id, None)
         # Released only when nothing landed, so no refund hash goes with it.
-        row = latest | {"status": "upheld", "updated_at": now, "refund_tx": None, "opening": False}
+        row = latest | {
+            "status": "upheld",
+            "updated_at": now,
+            "refund_tx": None,
+            "inflight_usdc": None,
+            "opening": False,
+        }
         self.disputes.append(row)
         return row
 
@@ -850,6 +950,7 @@ class FakePool:
             credited_usdc,
             rating_confirmed,
             expected_status,
+            inflight_usdc,
         ) = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
         await asyncio.sleep(0)
@@ -881,6 +982,7 @@ class FakePool:
             "rating_tx": _coalesce(rating_tx, latest["rating_tx"]),
             "note": _coalesce(note, latest["note"]),
             "credited_usdc": _coalesce(credited_usdc, latest["credited_usdc"]),
+            "inflight_usdc": _coalesce(inflight_usdc, latest["inflight_usdc"]),
             "updated_at": now,
             # The CASE, not a COALESCE: a confirmation the ledger has already
             # given cannot be undone by a later FALSE.
