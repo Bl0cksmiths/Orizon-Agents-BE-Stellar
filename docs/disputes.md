@@ -795,6 +795,14 @@ its cap is unfinished, it grows past the cap and logs an ERROR rather than
 forget one. It logs a warning naming every settlement and dispute it does
 shed, so a window that can no longer be honoured is never silent.
 
+**Which store is running.** The dispute store is chosen at startup and named
+in the boot log: `dispute store: postgres (DATABASE_URL is set)` at INFO, or
+`dispute store: in-memory (DATABASE_URL is unset)` at WARNING. `GET /readiness`
+reports the same choice as `"disputes": {"store": "postgres" | "memory"}`,
+never the DSN. It reports the store selected, not a live connection check: an
+unreachable Postgres fails the first request that needs it, loudly, and never
+falls back to memory.
+
 One read is weaker than the records behind it. With `TASK_AUTH_REQUIRED` on,
 `GET /api/tasks/{task_id}/disputes` is gated by the task's read token, and
 those tokens live in memory with the task state, not in Postgres — so after a
