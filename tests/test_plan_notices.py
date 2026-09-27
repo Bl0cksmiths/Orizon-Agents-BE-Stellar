@@ -231,3 +231,53 @@ def test_unbound_exclusions_builds_the_same_notice_as_the_single_builder():
     agent = _agent("ext_a")
 
     assert plan_notices.unbound_exclusions([agent]) == [plan_notices.unbound_exclusion(agent)]
+
+
+# ── the evidence behind a floor verdict ─────────────────────────
+
+
+def _disputed(agent_id: str) -> RepInfo:
+    """Sunk by upheld disputes: 40 ratings, a quarter of them disputes."""
+    return RepInfo(
+        agent_id=agent_id,
+        smoothed_bps=3000,
+        lower_bound_bps=2600,
+        avg_bps=2500,
+        count=40,
+        weight=40 * 10_000_000,
+        disputed=10,
+        dispute_rate_bps=2500,
+        source="onchain",
+    )
+
+
+def test_a_below_floor_notice_says_how_many_ratings_and_how_many_disputed():
+    # "Below routing floor" read the same for an agent sunk by disputes and one
+    # that is new and unlucky; the count and dispute rate tell them apart.
+    disputed = plan_notices.below_floor_exclusion(_agent("agt_04m1"), _disputed("agt_04m1"))
+    unlucky = plan_notices.below_floor_exclusion(_agent("agt_05x7"), _info("agt_05x7", lower=4200))
+
+    assert (disputed.count, disputed.dispute_rate_bps) == (40, 2500)
+    assert (unlucky.count, unlucky.dispute_rate_bps) == (5, 0)
+    # The sentence is a compatibility surface and does not change.
+    assert disputed.reason == "below routing floor (2600 < 5500 bps)"
+
+
+def test_substitution_and_relaxation_carry_the_same_evidence():
+    info = _disputed("agt_05x7")
+
+    sub = plan_notices.substitution(_agent("agt_05x7"), _agent("agt_01h8"), info)
+    relaxed = plan_notices.relaxation(_agent("agt_05x7"), info, min_routable=3)
+
+    # The designated agent's evidence — the numbers that lost it the step.
+    assert (sub.count, sub.dispute_rate_bps) == (40, 2500)
+    assert (relaxed.count, relaxed.dispute_rate_bps) == (40, 2500)
+
+
+def test_a_notice_without_a_reputation_entry_has_no_evidence_fields():
+    # None, never 0: "no entry" and "no ratings" are different facts.
+    unbound = plan_notices.unbound_exclusion(_agent("ext_9"))
+    unscored = plan_notices.below_floor_exclusion(_agent("agt_02k2"), None)
+
+    for n in (unbound, unscored):
+        assert (n.count, n.dispute_rate_bps) == (None, None)

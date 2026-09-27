@@ -18,7 +18,7 @@ import pytest
 from app.demo_kits import detect_kit
 from app.schemas import Agent
 from app.seed import seed_registry
-from app.services import orchestrator_svc
+from app.services import binding_registry, orchestrator_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
@@ -44,6 +44,34 @@ def _sub_floor(agent_id: str, *, smoothed: int = 4000) -> RepInfo:
     )
 
 
+def _clears(agent_id: str) -> RepInfo:
+    """A rated entry comfortably over the 5500 floor."""
+    return RepInfo(
+        agent_id=agent_id,
+        smoothed_bps=8000,
+        lower_bound_bps=8000,
+        avg_bps=8000,
+        count=5,
+        weight=5 * 10_000_000,
+        disputed=0,
+        dispute_rate_bps=0,
+        source="onchain",
+    )
+
+
+def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
+    """A snapshot that scores EVERY registry agent: `overrides` over clearing entries.
+
+    Never a partial map. An agent left out of the snapshot used to reach
+    `passes_floor(None)`, which admits it without consulting the floor, so a
+    test built on a partial map passed whatever the floor said about the
+    agents it forgot — the substitute below was chosen with no score at all.
+    """
+    reps = {a.id: _clears(a.id) for a in state.list_agents()}
+    reps.update(overrides)
+    return reps
+
+
 @pytest.fixture()
 def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     """Fresh 12-agent registry, restored after; kit thinking-sleep no-op'd."""
@@ -56,16 +84,17 @@ def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     state.agents.update(saved)
 
 
-def _run_kit(reps: dict[str, RepInfo]) -> orchestrator_svc.DecomposeResponse:
+def _run_kit(overrides: dict[str, RepInfo]) -> orchestrator_svc.DecomposeResponse:
+    """The kit plan for a FULL snapshot: every agent scored, `overrides` on top."""
     kit = detect_kit(KIT_INTENT)
     assert kit is not None
-    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, _scored(overrides)))
 
 
 def test_sub_floor_agent_is_excluded_from_kit_plan(seeded: object) -> None:
     # agt_02k2 (design.figma) has no off-pipeline agent sharing its skills, so
     # a sub-floor rating drops it outright. The other five roles clear the
-    # floor (cold start), so the backstop never fires.
+    # floor on their own scores, so the backstop never fires.
     resp = _run_kit({"agt_02k2": _sub_floor("agt_02k2")})
 
     ids = [s.agent_id for s in resp.steps]
@@ -76,7 +105,7 @@ def test_sub_floor_agent_is_excluded_from_kit_plan(seeded: object) -> None:
 
 def test_sub_floor_agent_is_substituted_and_surfaced(seeded: object) -> None:
     # agt_05x7 (seo.brief) shares the "seo" skill with off-pipeline agt_01h8
-    # (copywrite.v3), which clears the floor at cold start — so the role is
+    # (copywrite.v3), which clears the floor on its own score — so the role is
     # filled by a substitute rather than dropped, and the swap is recorded.
     resp = _run_kit({"agt_05x7": _sub_floor("agt_05x7")})
 
@@ -87,6 +116,8 @@ def test_sub_floor_agent_is_substituted_and_surfaced(seeded: object) -> None:
 
     step = next(s for s in resp.steps if s.agent_id == "agt_01h8")
     assert step.substituted_for == "agt_05x7"
+    # Judged on its own evidence, which the step carries.
+    assert step.rep_lower_bound_bps == 8000
 
     note = next(n for n in resp.notices if n.kind == "substituted")
     assert note.agent_id == "agt_05x7"
@@ -124,7 +155,7 @@ def test_kit_path_applies_floor_without_calling_the_llm(seeded: object, monkeypa
 
     monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
 
-    reps = {"agt_05x7": _sub_floor("agt_05x7")}
+    reps = _scored({"agt_05x7": _sub_floor("agt_05x7")})
 
     async def _fake_reps(_ids: object, *_a: object, **_k: object) -> dict[str, RepInfo]:
         return reps
@@ -218,7 +249,7 @@ def test_backstop_re_admits_code_gen_before_higher_scored_roles(seeded: object) 
 
 
 def test_re_admitted_kit_steps_keep_their_pipeline_position(seeded: object) -> None:
-    # code.gen clears the floor (no entry == cold start) and every other role
+    # code.gen clears the floor on its own score and every other role
     # is dropped, so the backstop re-admits two: tokens and research, the two
     # best scores. Appended after the loop they used to land AFTER code.gen,
     # and execution runs steps in list order — code.gen would build before the
@@ -265,3 +296,117 @@ def test_kit_path_reports_unbound_agents_after_its_floor_notices(seeded: object)
     ]
     # Reported, never routed: nothing can execute a step for it.
     assert "ext_idx1" not in [s.agent_id for s in resp.steps]
+
+
+def _rated(agent_id: str, *, smoothed: int) -> RepInfo:
+    """A floor-clearing entry at a chosen smoothed score."""
+    return RepInfo(
+        agent_id=agent_id,
+        smoothed_bps=smoothed,
+        lower_bound_bps=6000,
+        avg_bps=smoothed,
+        count=5,
+        weight=5 * 10_000_000,
+        disputed=0,
+        dispute_rate_bps=0,
+        source="onchain",
+    )
+
+
+def _bound_seo_agent(monkeypatch: pytest.MonkeyPatch, *, claims: float) -> str:
+    """A second off-pipeline stand-in for the brief role: bound, sharing "seo",
+    and claiming `claims` on the registry's self-declared 0–5 scale."""
+    state.add_agent(
+        Agent(
+            id="ext_seo",
+            name="seo-bot",
+            skills=["seo"],
+            price=0.01,
+            rep=claims,
+            status="online",
+            runs=0,
+            source="onchain",
+        )
+    )
+    monkeypatch.setattr(binding_registry, "_bound_ids", {"ext_seo"})
+    return "ext_seo"
+
+
+def test_an_unscored_agent_is_never_a_floor_substitute(seeded: object) -> None:
+    # The copywriter is the brief role's only stand-in, and the snapshot has
+    # no entry for it. `passes_floor(None)` would admit it unjudged, so the
+    # role has no scored substitute and is dropped — reported as the floor's.
+    reps = _scored({"agt_05x7": _sub_floor("agt_05x7")})
+    del reps["agt_01h8"]
+    kit = detect_kit(KIT_INTENT)
+    assert kit is not None
+
+    resp = asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+
+    ids = [s.agent_id for s in resp.steps]
+    assert "agt_01h8" not in ids
+    assert "agt_05x7" not in ids
+    assert [(n.kind, n.agent_id) for n in resp.notices] == [("excluded", "agt_05x7")]
+
+
+def test_an_unscored_kit_agent_is_not_planned(seeded: object) -> None:
+    # A kit role the snapshot did not score cannot be judged by the floor, so
+    # it is not planned on "no entry" — the step is left out.
+    reps = _scored({})
+    del reps["agt_02k2"]
+    kit = detect_kit(KIT_INTENT)
+    assert kit is not None
+
+    resp = asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+
+    assert "agt_02k2" not in [s.agent_id for s in resp.steps]
+    assert len(resp.steps) == 5
+
+
+def test_the_best_scored_substitute_wins_not_the_best_self_declared(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two scored stand-ins for the brief role. The copywriter has the better
+    # evidence; the bound agent claims a perfect 5.0 about itself. Evidence
+    # decides — and the worse of two candidates is never the one picked.
+    ext = _bound_seo_agent(monkeypatch, claims=5.0)
+
+    resp = _run_kit(
+        {
+            "agt_05x7": _sub_floor("agt_05x7"),
+            "agt_01h8": _rated("agt_01h8", smoothed=9000),
+            ext: _rated(ext, smoothed=6500),
+        }
+    )
+
+    sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
+    assert sub.agent_id == "agt_01h8"
+
+
+def test_a_better_scored_bound_agent_takes_the_substitute_slot(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The mirror: the bound agent now has the better evidence, and a modest
+    # claim about itself. The ranking is by score, not by id or seed order.
+    ext = _bound_seo_agent(monkeypatch, claims=1.0)
+
+    resp = _run_kit(
+        {
+            "agt_05x7": _sub_floor("agt_05x7"),
+            "agt_01h8": _rated("agt_01h8", smoothed=6500),
+            ext: _rated(ext, smoothed=9000),
+        }
+    )
+
+    sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
+    assert sub.agent_id == ext
+
+
+def test_a_substitute_takes_the_role_eta_and_its_own_price(seeded: object) -> None:
+    # The stand-in fills the brief role's slot in the pipeline, so it inherits
+    # that role's timing (0.5 s), not an ETA of its own; the buyer pays the
+    # agent actually doing the work, so the price is the substitute's.
+    resp = _run_kit({"agt_05x7": _sub_floor("agt_05x7")})
+
+    sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
+    assert sub.agent_id == "agt_01h8"
+    assert sub.est_eta_seconds == orchestrator_svc._KIT_ETAS["agt_05x7"] == 0.5
+    assert sub.est_price_usdc == state.agents["agt_01h8"].price

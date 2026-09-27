@@ -45,7 +45,10 @@ def _step(agent_id: str) -> PlanStep:
 @pytest.fixture()
 def indexed_agent():
     """A story-1.02 indexed agent: present in the registry, no local worker.
-    (ext_ namespace on purpose — agt_ is the seeded catalog.)"""
+    (ext_ namespace on purpose — agt_ is the seeded catalog.) The whole
+    registry is restored afterwards, not just the one agent added here."""
+    saved = dict(state.agents)
+    state.agents.clear()
     seed_registry()
     state.add_agent(
         Agent(
@@ -60,7 +63,8 @@ def indexed_agent():
         )
     )
     yield
-    state.agents.pop("ext_idx1", None)
+    state.agents.clear()
+    state.agents.update(saved)
 
 
 def test_prompt_fragment_excludes_workerless_agent(indexed_agent):

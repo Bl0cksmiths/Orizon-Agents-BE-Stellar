@@ -94,6 +94,18 @@ def _clears_floor(agent_id: str) -> RepInfo:
     return _rep(agent_id, smoothed=8000, lower=8000)
 
 
+def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
+    """A snapshot that scores EVERY registry agent: `overrides` over clearing entries.
+
+    Never a partial map. An omitted agent used to pass the floor on "no entry",
+    which never consults the floor, so a comparison built on one compared two
+    paths that had both skipped the gate for every agent the test forgot.
+    """
+    reps = {a.id: _clears_floor(a.id) for a in state.list_agents()}
+    reps.update(overrides)
+    return reps
+
+
 @pytest.fixture()
 def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     """Fresh 12-agent registry, restored after; kit thinking-sleep no-op'd.
@@ -197,10 +209,10 @@ def test_both_paths_report_the_same_floor_action(seeded: object, monkeypatch: py
     renderer — plan card, integration guide, dispute evidence — then has to
     special-case which intent produced the plan.
     """
-    # One agent under the floor, everyone else silent (no entry == cold start
-    # == routable), so each path has exactly one action to report and the two
-    # responses can be compared element for element.
-    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+    # One agent under the floor and everyone else scored clear of it, so each
+    # path has exactly one action to report and the two responses can be
+    # compared element for element.
+    reps = _scored({UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)})
 
     kit = _run_kit(monkeypatch, reps)
     free_form = _run_free_form(monkeypatch, reps, ["agt_11c0", "agt_01h8"])
@@ -241,11 +253,11 @@ def test_both_paths_report_the_configured_floor(seeded: object, monkeypatch: pyt
     the buyer uses to judge whether the exclusion was fair. Two different
     floors are exercised so a constant baked into the response cannot pass.
     """
-    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+    reps = _scored({UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)})
 
     for floor in (4200, 3300):
-        # Both below the shipped 5500 default, so a prior-only agent still
-        # clears them and the only floor action stays the one this test set up.
+        # Both below every other agent's score, so the only floor action stays
+        # the one this test set up.
         monkeypatch.setattr(settings, "reputation_floor_bps", floor)
 
         kit = _run_kit(monkeypatch, reps)
@@ -478,11 +490,11 @@ def test_notices_are_internally_consistent_on_both_paths(seeded: object, monkeyp
         "agt_12r0": 4800,
         "agt_08j2": 4700,
     }
-    reps = {aid: _sub_floor(aid, smoothed=score) for aid, score in scores.items()}
+    reps = _scored({aid: _sub_floor(aid, smoothed=score) for aid, score in scores.items()})
 
     kit = _run_kit(monkeypatch, reps)
-    # agt_01h8 is off the kit pipeline and keeps its cold-start score, so the
-    # model names an agent that actually clears the floor.
+    # agt_01h8 is off the kit pipeline and scored clear of the floor, so the
+    # model names an agent that actually clears it.
     free_form = _run_free_form(monkeypatch, reps, ["agt_01h8"])
 
     # Non-empty on BOTH paths, or the loop below asserts nothing. Six agents
@@ -510,18 +522,25 @@ def test_both_paths_report_a_degraded_reputation_snapshot(seeded: object, monkey
     assert _run_kit(monkeypatch, healthy).reputation_degraded is False
     assert _run_free_form(monkeypatch, healthy, ["agt_11c0"]).reputation_degraded is False
 
-    # Same scores, but every one of them is a prior standing in for a read
-    # that failed — the shape fetch_reps returns during a Soroban outage.
+    # A partial outage: every read failed and was served the prior — except
+    # the one agent whose read DID land, with evidence that sinks it. The prior
+    # clears the floor, so the degraded agents fail open; the evidence that
+    # arrived must still decide its agent's verdict, on both paths, even when
+    # the planner names that agent.
+    known_bad = UNSUBSTITUTABLE_KIT_AGENT
     outage = {a.id: _rep(a.id, smoothed=7000, lower=5677, degraded=True) for a in state.list_agents()}
+    outage[known_bad] = _sub_floor(known_bad)
     kit = _run_kit(monkeypatch, outage)
-    free_form = _run_free_form(monkeypatch, outage, ["agt_11c0"])
+    free_form = _run_free_form(monkeypatch, outage, [known_bad, "agt_11c0"])
 
-    assert kit.reputation_degraded is True
-    assert free_form.reputation_degraded is True
-
-    # Fail-open, not fail-empty: the outage must not cost the buyer a plan.
-    assert kit.steps
-    assert free_form.steps
+    for resp in (kit, free_form):
+        assert resp.reputation_degraded is True
+        # Fail-open for the agents nothing is known about — the outage must not
+        # cost the buyer a plan — and never for the one something is known about.
+        assert resp.steps
+        assert known_bad not in [s.agent_id for s in resp.steps]
+        assert _reported(resp) == [("excluded", known_bad, "below_floor", SUB_FLOOR_LOWER_BPS, resp.floor_bps)]
+        assert all(s.rep_degraded for s in resp.steps)
 
 
 def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -549,7 +568,7 @@ def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypat
                 source="onchain",
             )
         )
-    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+    reps = _scored({UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)})
 
     kit = _run_kit(monkeypatch, reps)
     free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
@@ -688,3 +707,29 @@ def test_both_backstops_re_admit_by_one_rule(seeded: object, monkeypatch: pytest
 
     assert [n.agent_id for n in kit.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
     assert [n.agent_id for n in free_form.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
+
+
+def test_the_floor_boundary_holds_through_decompose_on_both_paths(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lower bound exactly AT the floor clears it; one bps under does not.
+
+    Pinned at the function level elsewhere; this is the plan a buyer actually
+    gets, on both paths, so an off-by-one in any stage between the predicate
+    and the response shows up here.
+    """
+    floor = settings.reputation_floor_bps
+    at = _scored({UNSUBSTITUTABLE_KIT_AGENT: _rep(UNSUBSTITUTABLE_KIT_AGENT, smoothed=7000, lower=floor)})
+    under = _scored({UNSUBSTITUTABLE_KIT_AGENT: _rep(UNSUBSTITUTABLE_KIT_AGENT, smoothed=7000, lower=floor - 1)})
+
+    kit = _run_kit(monkeypatch, at)
+    free_form = _run_free_form(monkeypatch, at, [UNSUBSTITUTABLE_KIT_AGENT])
+    for resp in (kit, free_form):
+        assert UNSUBSTITUTABLE_KIT_AGENT in [s.agent_id for s in resp.steps]
+        assert resp.notices == []
+
+    kit = _run_kit(monkeypatch, under)
+    free_form = _run_free_form(monkeypatch, under, [UNSUBSTITUTABLE_KIT_AGENT, "agt_11c0"])
+    for resp in (kit, free_form):
+        assert UNSUBSTITUTABLE_KIT_AGENT not in [s.agent_id for s in resp.steps]
+        assert _reported(resp) == [("excluded", UNSUBSTITUTABLE_KIT_AGENT, "below_floor", floor - 1, floor)]

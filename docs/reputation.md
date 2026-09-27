@@ -161,13 +161,19 @@ unconditionally, with no arithmetic. "No entry" means routing was handed no
 claim about this agent, and the system's answer to no claim is "do not block".
 It returns True with the floor set to 10000.
 
-In production every listed agent is read at the top of a decompose and every
-read yields an entry, including failed ones, so `None` is the narrow window
-where the registry gained an agent — the sync loop runs on a 15 s cadence —
-between that read and the filter, plus any caller that supplies a partial map.
-It is a deliberate fail-open, not the cold-start path. ADR 0006 D5 is the
-buyer-facing half of the same distinction: a notice reports `lower_bound_bps`
-as `null` for an agent with no entry, never `0`.
+Routing never relies on that answer. Each decompose takes one snapshot of the
+registry and reads reputation for exactly the agents in it that are listed and
+dispatchable. Unbound and delisted agents are never read: no plan can use them,
+and the registry is permissionless, so reading them let spam registrations eat
+the batch deadline. Every stage then plans from that same snapshot, and an
+agent it did not score is not offered, substituted or planned. Before this,
+`None` covered an agent the sync loop added (on its 15 s cadence) between the
+read and the filter. That agent was offered with no floor check and ranked on
+its self-declared `Agent.rep`, a number its own registrant writes. Where
+routing needs a score for an unscored agent, for ranking or for the prompt, it
+uses the prior, never `Agent.rep`. ADR 0006 D5 is the buyer-facing half of the
+same distinction: a notice reports `lower_bound_bps` as `null` for an agent
+with no entry, never `0`.
 
 The practical consequence: a test asserting `passes_floor(None)` is True proves
 nothing about the cold-start guarantee, and would keep passing under a
@@ -378,8 +384,10 @@ the limit: every disputed step gets its own id.
 | `smoothed_bps`, `lower_bound_bps` | pulled down by a 10/100 at the step's weight | yes, like all evidence — 92.5 % per weekly epoch |
 
 `disputed` and `dispute_rate_bps` are on `GET /api/stellar/reputation` and
-`GET /api/stellar/reputation/{agent_id}`, and every plan step carries the rate
-as `rep_dispute_rate_bps`. The dispute rate is **reported, not routed on**: the
+`GET /api/stellar/reputation/{agent_id}`. Every plan step carries the rate as
+`rep_dispute_rate_bps`, and every floor notice carries `count` and
+`dispute_rate_bps`, so a buyer can tell an agent excluded after upheld disputes
+from one that is merely new. The dispute rate is **reported, not routed on**: the
 floor is applied to `lower_bound_bps` alone, and the dispute moves that only
 through the rating's own weight.
 

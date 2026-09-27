@@ -1,10 +1,14 @@
+import hashlib
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from ..config import settings
+from ..demo_kits import detect_kit
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse
+from ..security import KeyedRateLimiter, client_key
 from ..services.execution_svc import CapacityExhaustedError, execute_plan
-from ..services.orchestrator_svc import NoRoutableAgentsError, decompose
+from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
 
 logger = logging.getLogger(__name__)
@@ -12,27 +16,56 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
 
 
+def _intent_ref(intent: str) -> str:
+    """How a log line names a buyer's intent: its length and a short hash.
+
+    Never the text. An intent is whatever the buyer typed about their own
+    business, up to 500 characters of it, and the redaction filter only
+    removes secret-shaped tokens. The hash still lets an operator tie
+    together every refusal of the same intent without reading it.
+    """
+    digest = hashlib.sha256(intent.encode("utf-8")).hexdigest()[:12]
+    return f"len={len(intent)} sha256={digest}"
+
+
+# Per-client budget for the planner. The global limiter is sized for polling,
+# and every free-form decompose is an LLM call.
+_planner_limiter = KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute)
+
+
 @router.post("/decompose", response_model=DecomposeResponse, summary="Decompose an intent into a plan")
-async def orchestrator_decompose(req: DecomposeRequest) -> DecomposeResponse:
+async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse:
+    # Only an intent that will reach the planner is counted. A kit intent is
+    # the demo path and makes no LLM call, so throttling it would cost a demo
+    # its safety net to save nothing; `decompose` makes the same call.
+    if detect_kit(req.intent) is None:
+        retry_after = _planner_limiter.hit(client_key(dict(request.scope)))
+        if retry_after is not None:
+            raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
         return await decompose(req.intent)
     except TimeoutError as e:
         # asyncio.wait_for tripped decompose_timeout_seconds — the LLM hung,
         # nothing else failed. Distinct from the blanket 502 below.
-        logger.warning("decompose timed out for intent %r", req.intent)
+        logger.warning("decompose timed out for intent %s", _intent_ref(req.intent))
         raise HTTPException(504, "decompose_timeout") from e
     except NoRoutableAgentsError as e:
         # Nothing listed and dispatchable was left to offer the planner. The
         # request was fine and the condition clears when an operator binds or
         # relists an agent, so this is a retryable 503 — not the 502 below,
         # which is a fault, and not worth a traceback.
-        logger.warning("decompose refused for intent %r: %s", req.intent, e)
+        logger.warning("decompose refused for intent %s: %s", _intent_ref(req.intent), e)
         raise HTTPException(503, "no_routable_agents") from e
+    except PlannerBusyError as e:
+        # Every planning slot is busy and the wait queue is full. Refused at
+        # once rather than queued: retryable, and never a planner call.
+        logger.warning("decompose refused, planner busy: %s", e)
+        raise HTTPException(503, "planner_busy") from e
     except Exception as e:
         # A planner that failed never lands here: `decompose` serves the
         # fallback plan for it and flags it `planner_fallback` (BLO-121). What
         # is left is a fault nothing anticipated, so it keeps its traceback.
-        logger.exception("decompose failed for intent %r", req.intent)
+        logger.exception("decompose failed for intent %s", _intent_ref(req.intent))
         raise HTTPException(502, "decompose_failed") from e
 
 

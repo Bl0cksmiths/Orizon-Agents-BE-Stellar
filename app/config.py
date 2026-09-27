@@ -359,6 +359,25 @@ class Settings(BaseSettings):
     pdax_ramp_min_php: float = 200
     pdax_ramp_quote_reference_php: str = "1000"
 
+    # ── Planner spend (/decompose) ────────────────────────────
+    # Every free-form decompose is one real LLM call; the demo-kit path makes
+    # none and is never limited here. decompose_max_concurrent bounds how
+    # many run at once, and this bounds how many may WAIT for a slot. Waiters
+    # used to queue without limit, each holding a connection for up to
+    # decompose_timeout_seconds; past this many, a request is refused at once
+    # with 503 "planner_busy" instead of joining the queue.
+    decompose_max_queued: int = 16
+    # Free-form (LLM) decompose calls one client may make per minute, on top
+    # of the global rate_limit_per_minute, keyed by the same client_key(). A
+    # breach is 429 "decompose_rate_limited" with Retry-After; kit intents
+    # make no LLM call and are not counted. 0 disables it. At
+    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this.
+    decompose_rate_limit_per_minute: int = 10
+    # Most agents listed in the planning prompt. Prompt tokens per planner call
+    # grew with every bound agent; past this many that cleared the floor, the
+    # best-scored are listed. Never below the starvation backstop's minimum.
+    decompose_prompt_max_agents: int = 24
+
     @model_validator(mode="after")
     def _mainnet_requires_mainnet_passphrase(self) -> "Settings":
         """Fail fast on a half-flipped mainnet config.

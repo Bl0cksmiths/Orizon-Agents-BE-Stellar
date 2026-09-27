@@ -110,16 +110,29 @@ def _clearing_reps() -> dict[str, RepInfo]:
     return {a.id: _info(a.id, smoothed=8000, lower=8000) for a in state.list_agents()}
 
 
+def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
+    """A snapshot that scores EVERY registry agent: `overrides` over clearing entries.
+
+    Never a partial map: an omitted agent used to pass the floor on "no entry"
+    without the floor being consulted, so a kit test could route or substitute
+    an agent it never scored and still pass.
+    """
+    reps = _clearing_reps()
+    reps.update(overrides)
+    return reps
+
+
 def _offered_ids(reps: dict[str, RepInfo]) -> list[str]:
     """The agent ids in the AVAILABLE_AGENTS block, in the order shown."""
     block = orchestrator_svc._registry_prompt_fragment(reps)
     return [ln.split(" ")[1].removeprefix("id=") for ln in block.splitlines() if ln.startswith("- id=")]
 
 
-def _run_kit(reps: dict[str, RepInfo]) -> DecomposeResponse:
+def _run_kit(overrides: dict[str, RepInfo]) -> DecomposeResponse:
+    """The kit plan for a FULL snapshot: every agent scored, `overrides` on top."""
     kit = detect_kit(KIT_INTENT)
     assert kit is not None
-    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, _scored(overrides)))
 
 
 def _plan_naming(*agent_ids: str) -> object:
@@ -390,7 +403,7 @@ def test_kit_path_honours_delisting_without_calling_the_llm(seeded: object, monk
         return None
 
     async def _fake_reps(_ids: object, *_a: object, **_k: object) -> dict[str, RepInfo]:
-        return {}
+        return _clearing_reps()
 
     monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
     monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
@@ -400,4 +413,47 @@ def test_kit_path_honours_delisting_without_calling_the_llm(seeded: object, monk
     assert llm_calls == [], "kit path must never call the LLM"
 
     assert "agt_11c0" not in [s.agent_id for s in resp.steps]
+    assert resp.notices == []
+
+
+def test_a_kit_agent_delisted_during_the_kit_pause_is_not_planned(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The kit path snapshots the registry and then pauses before it plans. An
+    # operator delisting an agent in that pause must still be honoured: the
+    # snapshot only says who could be planned, the live registry has the last
+    # word on who still can — for a pipeline role and for a substitute alike.
+    async def _delist_during_the_pause(*_a: object, **_k: object) -> None:
+        _delist("agt_02k2", "agt_01h8")
+
+    monkeypatch.setattr(orchestrator_svc, "_kit_thinking", _delist_during_the_pause)
+
+    resp = _run_kit({"agt_05x7": _sub_floor("agt_05x7")})
+
+    ids = [s.agent_id for s in resp.steps]
+    assert "agt_02k2" not in ids
+    assert "agt_01h8" not in ids  # the brief role's only stand-in went too
+    assert [(n.kind, n.agent_id) for n in resp.notices] == [("excluded", "agt_05x7")]
+
+
+def test_a_kit_agent_with_nothing_to_execute_it_is_not_planned_or_read(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A seeded role whose worker is missing from this deployment: listed, but
+    # no step can run it. It is dropped silently, and its reputation is never
+    # read — a read is only worth taking for an agent a plan could use.
+    real = orchestrator_svc.is_dispatchable
+    monkeypatch.setattr(orchestrator_svc, "is_dispatchable", lambda agent_id: agent_id != "agt_02k2" and real(agent_id))
+    asked: list[str] = []
+
+    async def _fake_reps(ids: list[str], *_a: object, **_k: object) -> dict[str, RepInfo]:
+        asked.extend(ids)
+        return _clearing_reps()
+
+    monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
+
+    resp = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+
+    assert "agt_02k2" not in [s.agent_id for s in resp.steps]
+    assert "agt_02k2" not in asked
     assert resp.notices == []
