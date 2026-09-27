@@ -68,7 +68,7 @@ class Settler:
         self.answers = list(answers)
         self.signed: list[tuple[str, float]] = []
 
-    async def __call__(self, buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def __call__(self, buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         self.signed.append((buyer, amount_usdc))
         # A transfer takes a network round trip, and the other caller is free
         # to run while it does.

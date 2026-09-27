@@ -136,7 +136,7 @@ class Settler:
     def __init__(self) -> None:
         self.transfers: list[tuple[str, float]] = []
 
-    async def __call__(self, buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def __call__(self, buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         self.transfers.append((buyer, amount_usdc))
         return LANDED
 

@@ -244,7 +244,7 @@ class Settler:
         self._results = list(results)
         self.calls: list[tuple[str, float]] = []
 
-    async def __call__(self, buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def __call__(self, buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         self.calls.append((buyer, amount_usdc))
         return self._results.pop(0) if self._results else LANDED
 
@@ -309,7 +309,7 @@ def test_the_refund_is_claimed_before_anything_is_signed(monkeypatch) -> None:
     dispute = a_dispute()
     status_while_signing: list[str] = []
 
-    async def _observe(buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def _observe(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         mid_flight = await dispute_store.get_dispute_store().get_dispute(dispute.id)
         assert mid_flight is not None
         status_while_signing.append(mid_flight.status)
@@ -672,7 +672,7 @@ def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch,
         b_may_proceed = _stalls_the_first_read(monkeypatch)
         transfer_may_answer = asyncio.Event()
 
-        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+        async def _in_flight(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
             chain.calls.append((buyer, amount_usdc))
             await transfer_may_answer.wait()  # A's transfer is on the network
             return REJECTED
@@ -725,7 +725,7 @@ def test_a_rejection_holding_a_stale_open_read_never_drops_a_live_payout(monkeyp
         rejecter_may_proceed = _stalls_the_first_read(monkeypatch)
         transfer_may_answer = asyncio.Event()
 
-        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+        async def _in_flight(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
             chain.calls.append((buyer, amount_usdc))
             await transfer_may_answer.wait()
             return LOST  # submitted, unconfirmed: it MAY STILL LAND
@@ -979,7 +979,7 @@ def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
     to a retry that would credit the buyer twice."""
     dispute = a_dispute()
 
-    async def _cancelled_mid_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def _cancelled_mid_flight(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         raise asyncio.CancelledError
 
     monkeypatch.setattr(refund_svc, "execute_refund", _cancelled_mid_flight)

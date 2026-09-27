@@ -360,7 +360,7 @@ def test_a_refund_refused_before_the_send_is_failed_and_releases_its_claim(monke
     from app.services import refund_svc
     from app.services.dispute_store import DisputeRecord
 
-    async def _refused(buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def _refused(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         raise sc.NotSubmittedError("prepare failed: HostError: Error(Value, InvalidInput)")
 
     monkeypatch.setattr(refund_svc, "execute_refund", _refused)
