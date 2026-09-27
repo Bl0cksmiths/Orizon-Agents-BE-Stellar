@@ -261,8 +261,21 @@ class Settings(BaseSettings):
     reputation_read_concurrency: int = 16
     reputation_read_latency_seconds: float = 0.75
     reputation_batch_agents: int = 32
-    # Per-rating weight cap in USDC — one whale job can't own the score.
+    # Absolute per-rating weight cap in USDC. On its own it did NOT stop one
+    # job owning the score: 100 USDC of weight against the prior's 12 meant a
+    # single self-dealt run at the ceiling set an agent's reputation (one 95/100
+    # took the bound from 5677 to 8980). The ratio below is the cap that
+    # actually binds; this one remains as an outer bound.
     reputation_max_rating_weight_usdc: float = 100.0
+    # The cap on ONE rating's weight, as a multiple of the prior's weight
+    # (REPUTATION_PRIOR_WEIGHT_USDC). At 1.0 a single rating can at most EQUAL
+    # the prior — it moves an agent's score at most halfway to itself and never
+    # overrules the prior on its own — whatever the step was priced at. The
+    # effective cap is min(this x prior weight, REPUTATION_MAX_RATING_WEIGHT_USDC),
+    # 12 USDC with the shipped numbers. An OPEN PRODUCT DECISION: lower it to
+    # make one job count for less (0.25 = a quarter of the prior); it is one
+    # number so it can be changed without touching code. Finite and above zero.
+    reputation_max_rating_to_prior_ratio: float = 1.0
 
     # ── Disputes (story 4.02 — ADR 0002) ──────────────────────
     # How long after a paid workflow settles its buyer may dispute a step.
@@ -632,6 +645,8 @@ class Settings(BaseSettings):
           * `REPUTATION_MAX_RATING_WEIGHT_USDC` — finite and above zero. NaN
             compares false, so it DISABLED the cap: a 50,000 USDC step weighed
             50,000 USDC.
+          * `REPUTATION_MAX_RATING_TO_PRIOR_RATIO` — finite and above zero,
+            for the same reason: it is the cap that binds.
           * `REPUTATION_READ_TTL_SECONDS` — finite and above zero. inf meant a
             read was never repeated; zero or below meant nothing was cached.
           * `REPUTATION_STALE_GRACE_SECONDS` — finite and not below zero (0
@@ -650,6 +665,7 @@ class Settings(BaseSettings):
         for name, value, unit in (
             ("REPUTATION_PRIOR_WEIGHT_USDC", self.reputation_prior_weight_usdc, "USDC"),
             ("REPUTATION_MAX_RATING_WEIGHT_USDC", self.reputation_max_rating_weight_usdc, "USDC"),
+            ("REPUTATION_MAX_RATING_TO_PRIOR_RATIO", self.reputation_max_rating_to_prior_ratio, "multiples"),
             ("REPUTATION_READ_TTL_SECONDS", self.reputation_read_ttl_seconds, "seconds"),
         ):
             if not (math.isfinite(value) and value > 0):

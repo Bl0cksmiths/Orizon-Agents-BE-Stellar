@@ -100,7 +100,10 @@ class ReputationParams(BaseModel):
     prior_bps: int  # Bayesian prior mean, bps of the 0-100 scale
     prior_weight_usdc: float  # evidence mass of the prior, USDC
     floor_bps: int  # routing floor on the Wilson lower bound
-    max_rating_weight_usdc: float  # per-rating weight cap
+    # The per-rating weight cap IN FORCE: min(ratio x prior weight, absolute
+    # cap) — 12 USDC with the shipped numbers, not the 100 USDC outer bound.
+    max_rating_weight_usdc: float
+    max_rating_to_prior_ratio: float  # that cap as a multiple of the prior's weight
     read_ttl_seconds: float  # cache TTL for on-chain rep_state reads
     wilson_z: float  # z of the one-sided lower confidence bound
     epoch_seconds: int  # on-chain decay epoch length
@@ -340,7 +343,8 @@ async def reputation_params() -> ReputationParams:
         prior_bps=settings.reputation_prior_bps,
         prior_weight_usdc=settings.reputation_prior_weight_usdc,
         floor_bps=settings.reputation_floor_bps,
-        max_rating_weight_usdc=settings.reputation_max_rating_weight_usdc,
+        max_rating_weight_usdc=reputation_svc.max_rating_weight_usdc(),
+        max_rating_to_prior_ratio=settings.reputation_max_rating_to_prior_ratio,
         read_ttl_seconds=settings.reputation_read_ttl_seconds,
         wilson_z=reputation_svc.WILSON_Z,
         epoch_seconds=reputation_svc.EPOCH_SECONDS,

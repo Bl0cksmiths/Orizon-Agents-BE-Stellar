@@ -239,8 +239,25 @@ def passes_floor(info: RepInfo | None) -> bool:
     return info.lower_bound_bps >= settings.reputation_floor_bps
 
 
+def max_rating_weight_usdc() -> float:
+    """The most evidence weight ONE rating can carry, in USDC.
+
+    REPUTATION_MAX_RATING_TO_PRIOR_RATIO times the prior's weight, inside the
+    absolute REPUTATION_MAX_RATING_WEIGHT_USDC. Tied to the prior because the
+    prior is what one rating has to be weighed against: at a ratio of 1 a
+    single rating can at most equal the prior, so it pulls an agent's score at
+    most halfway toward itself — a 95/100 whale job lands a newcomer at 8250,
+    not 9232 — and it takes more than one job to overrule the prior. The
+    absolute cap alone was 100 USDC against a 12 USDC prior, which let one
+    self-dealt run at the price ceiling set the score outright.
+    """
+    by_prior = settings.reputation_max_rating_to_prior_ratio * settings.reputation_prior_weight_usdc
+    return min(settings.reputation_max_rating_weight_usdc, by_prior)
+
+
 def rating_weight_stroops(step_price_usdc: float) -> int:
-    """Evidence weight of one rating: the step's QUOTED price, capped.
+    """Evidence weight of one rating: the step's QUOTED price, capped at
+    `max_rating_weight_usdc()`.
 
     Not its settled value. The settler passes `step.est_price_usdc` — what the
     step was quoted at — and every failure path skips the one billing site
@@ -253,7 +270,7 @@ def rating_weight_stroops(step_price_usdc: float) -> int:
     evidence; `registry_sync` refuses an on-chain price low enough for that
     floor to be an exploit (ADR 0005 D4).
     """
-    capped = min(max(step_price_usdc, 0.0), settings.reputation_max_rating_weight_usdc)
+    capped = min(max(step_price_usdc, 0.0), max_rating_weight_usdc())
     return max(1, round(capped * STROOPS_PER_USDC))
 
 

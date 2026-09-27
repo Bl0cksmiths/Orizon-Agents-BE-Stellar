@@ -86,6 +86,9 @@ def test_reputation_params_returns_config(client):
     assert body["prior_bps"] == settings.reputation_prior_bps
     assert body["floor_bps"] == settings.reputation_floor_bps
     assert body["prior_weight_usdc"] == settings.reputation_prior_weight_usdc
+    # The cap in force — the prior's weight — not the 100 USDC outer bound.
+    assert body["max_rating_weight_usdc"] == 12.0
+    assert body["max_rating_to_prior_ratio"] == 1.0
     assert body["wilson_z"] == 1.0
     # On-chain ReputationLedger v2 decay constants, surfaced read-only.
     assert body["epoch_seconds"] == 604_800

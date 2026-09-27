@@ -26,6 +26,7 @@ CASES = (
     + [("reputation_prior_weight_usdc", v) for v in _BAD_FLOATS]
     + [("reputation_max_rating_weight_usdc", v) for v in _BAD_FLOATS]
     + [("reputation_read_ttl_seconds", v) for v in _BAD_FLOATS]
+    + [("reputation_max_rating_to_prior_ratio", v) for v in _BAD_FLOATS]
     + [("reputation_stale_grace_seconds", v) for v in (math.nan, math.inf, -1.0)]
 )
 

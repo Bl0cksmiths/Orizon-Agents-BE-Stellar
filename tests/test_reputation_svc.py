@@ -81,9 +81,48 @@ def test_synthetic_rating_clean_artifact_beats_violations():
 
 
 def test_rating_weight_capped_and_floored():
-    cap = settings.reputation_max_rating_weight_usdc
+    cap = rep.max_rating_weight_usdc()
     assert rep.rating_weight_stroops(cap * 10) == round(cap * USDC)
     assert rep.rating_weight_stroops(0.0) == 1
+
+
+# ── one rating can at most equal the prior ──────────────────────
+
+
+def test_the_cap_that_binds_is_the_prior_weight():
+    """Shipped numbers: 1.0 x the 12 USDC prior, inside the 100 USDC bound."""
+    assert rep.max_rating_weight_usdc() == settings.reputation_prior_weight_usdc == 12.0
+    assert rep.rating_weight_stroops(100.0) == 12 * USDC
+
+
+@pytest.mark.parametrize("rating", [95, 20, 100, 0])
+def test_one_whale_rating_moves_a_newcomer_at_most_halfway(rating):
+    """The audit's self-dealt run: one rating on a step priced at the 100 USDC
+    ceiling. It used to set the score — 9232 for a 95 — because its 100 USDC
+    of weight outweighed the 12 USDC prior eight times over. Capped at the
+    prior, it lands exactly halfway between the prior and itself, and no
+    single rating can get further than that."""
+    weight = rep.rating_weight_stroops(100.0)
+    info = rep._info_from_state("agt_whale", {"sum_w": rating * 100 * weight, "weight": weight, "count": 1})
+    prior = settings.reputation_prior_bps
+    assert info.smoothed_bps == (prior + rating * 100) // 2
+    assert abs(info.smoothed_bps - prior) <= abs(rating * 100 - prior) / 2
+
+
+def test_one_95_on_a_whale_job_no_longer_owns_the_bound():
+    weight = rep.rating_weight_stroops(100.0)
+    info = rep._info_from_state("agt_whale", {"sum_w": 9500 * weight, "weight": weight, "count": 1})
+    assert info.smoothed_bps == 8250
+    assert info.lower_bound_bps < 8980, "the uncapped whale's bound"
+
+
+def test_the_ratio_is_one_number_that_moves_the_cap(monkeypatch):
+    monkeypatch.setattr(settings, "reputation_max_rating_to_prior_ratio", 0.25)
+    assert rep.max_rating_weight_usdc() == 3.0
+    assert rep.rating_weight_stroops(100.0) == 3 * USDC
+    # And the absolute cap still bounds a large ratio.
+    monkeypatch.setattr(settings, "reputation_max_rating_to_prior_ratio", 50.0)
+    assert rep.max_rating_weight_usdc() == settings.reputation_max_rating_weight_usdc
 
 
 def test_fetch_rep_prior_fallback_without_contract():
