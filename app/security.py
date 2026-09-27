@@ -37,6 +37,7 @@ import secrets
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import Header, HTTPException, Security
@@ -794,3 +795,49 @@ class RateLimitMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_quota)
+
+
+class KeyedRateLimiter:
+    """A sliding-window budget per client key, for ONE route's own limit.
+
+    `RateLimitMiddleware` spends one budget on every route alike, sized for
+    dashboard polling. That is the wrong budget for a route whose every call
+    buys an LLM completion: 1200 cheap reads a minute is a usable console, 1200
+    planner calls a minute is a bill. A route that costs real money takes one
+    of these on top, keyed by the same `client_key()` so "per client" means
+    exactly what it means for the global limiter — including its caveat: at
+    TRUSTED_PROXY_HOPS=0 every caller that shares the last forwarded hop
+    shares a budget here too.
+
+    `limit` is read on every hit, so a deployment or a test can tune it
+    without rebuilding the limiter; 0 or less switches it off. Same
+    single-event-loop, lock-free reasoning as the middleware.
+    """
+
+    _SWEEP_EVERY = 1024
+
+    def __init__(self, limit: Callable[[], int], window_seconds: float = 60.0) -> None:
+        self._limit = limit
+        self.window = window_seconds
+        self._hits: dict[str, deque[float]] = {}
+        self._since_sweep = 0
+
+    def hit(self, key: str, now: float | None = None) -> int | None:
+        """Spend one unit of `key`'s budget: None if admitted, else the Retry-After seconds."""
+        limit = self._limit()
+        if limit <= 0:
+            return None
+        now = time.monotonic() if now is None else now
+        cutoff = now - self.window
+        self._since_sweep += 1
+        if self._since_sweep >= self._SWEEP_EVERY:
+            self._since_sweep = 0
+            for stale in [k for k, dq in self._hits.items() if not dq or dq[-1] <= cutoff]:
+                del self._hits[stale]
+        dq = self._hits.setdefault(key, deque())
+        while dq and dq[0] <= cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            return max(1, math.ceil(dq[0] + self.window - now))
+        dq.append(now)
+        return None

@@ -321,6 +321,12 @@ class Settings(BaseSettings):
     # decompose_timeout_seconds; past this many, a request is refused at once
     # with 503 "planner_busy" instead of joining the queue.
     decompose_max_queued: int = 16
+    # Free-form (LLM) decompose calls one client may make per minute, on top
+    # of the global rate_limit_per_minute, keyed by the same client_key(). A
+    # breach is 429 "decompose_rate_limited" with Retry-After; kit intents
+    # make no LLM call and are not counted. 0 disables it. At
+    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this.
+    decompose_rate_limit_per_minute: int = 10
 
     @model_validator(mode="after")
     def _mainnet_requires_mainnet_passphrase(self) -> "Settings":

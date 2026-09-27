@@ -1,8 +1,11 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from ..config import settings
+from ..demo_kits import detect_kit
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse
+from ..security import KeyedRateLimiter, client_key
 from ..services.execution_svc import CapacityExhaustedError, execute_plan
 from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
@@ -11,9 +14,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
 
+# Per-client budget for the planner. The global limiter is sized for polling,
+# and every free-form decompose is an LLM call.
+_planner_limiter = KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute)
+
 
 @router.post("/decompose", response_model=DecomposeResponse, summary="Decompose an intent into a plan")
-async def orchestrator_decompose(req: DecomposeRequest) -> DecomposeResponse:
+async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse:
+    # Only an intent that will reach the planner is counted. A kit intent is
+    # the demo path and makes no LLM call, so throttling it would cost a demo
+    # its safety net to save nothing; `decompose` makes the same call.
+    if detect_kit(req.intent) is None:
+        retry_after = _planner_limiter.hit(client_key(request.scope))
+        if retry_after is not None:
+            raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
         return await decompose(req.intent)
     except TimeoutError as e:
