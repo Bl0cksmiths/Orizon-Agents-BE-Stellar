@@ -852,3 +852,27 @@ def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
     assert during["enabled"] is True and during["running"] is True
     assert task is not None and task.cancelled()
     assert refund_reconcile._task is None
+
+
+def test_one_pass_that_raises_does_not_stop_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    passes: list[int] = []
+
+    async def _pass() -> refund_reconcile.SweepReport:
+        passes.append(len(passes))
+        if len(passes) == 1:
+            raise RuntimeError("a bug in one pass")
+        return refund_reconcile.SweepReport(0.0, 0.0)
+
+    monkeypatch.setattr(refund_reconcile, "sweep_once", _pass)
+    monkeypatch.setattr(settings, "refund_reconcile_interval_seconds", 0.001)
+
+    async def go() -> None:
+        task = asyncio.create_task(refund_reconcile._loop())
+        while len(passes) < 3 and not task.done():
+            await asyncio.sleep(0.005)
+        assert not task.done()
+        task.cancel()
+
+    asyncio.run(go())
+
+    assert passes[:3] == [0, 1, 2]

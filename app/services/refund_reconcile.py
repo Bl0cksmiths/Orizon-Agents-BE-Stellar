@@ -471,7 +471,13 @@ async def _pass(started: float) -> SweepReport:
 
 async def _loop() -> None:
     while True:
-        await sweep_once()
+        # `sweep_once` catches what a pass is expected to meet; this catches
+        # the rest, because a loop that died on one bad pass would leave every
+        # later claim to a human without saying so anywhere but one log line.
+        try:
+            await sweep_once()
+        except Exception:
+            logger.exception("refund reconcile: a pass failed; the next one runs on schedule")
         await asyncio.sleep(settings.refund_reconcile_interval_seconds)
 
 
