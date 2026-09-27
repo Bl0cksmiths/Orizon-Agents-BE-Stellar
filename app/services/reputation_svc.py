@@ -513,13 +513,40 @@ async def fetch_rep(agent_id: str) -> RepInfo:
     return info
 
 
-async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
-    """Concurrent reads for a set of agents, bounded by one overall timeout.
+def _wait_bound(bound: float) -> float | None:
+    """The batch deadline as `asyncio.wait` takes it.
 
-    Never raises: on timeout or error every missing agent falls back to the
-    prior, so decompose latency is capped and routing always has a score. A
-    batch that degrades logs exactly one warning covering every affected
-    agent (see _log_degraded).
+    Settings refuses a bound that is not a positive, finite number, but the
+    explicit argument is not validated, and `asyncio.wait` would schedule a NaN
+    deadline rather than refuse it. Anything not above zero — NaN included —
+    therefore expires on arrival, exactly as `wait_for` treated it, and inf is
+    no deadline at all.
+    """
+    if not bound > 0:
+        return 0
+    if math.isinf(bound):
+        return None
+    return bound
+
+
+async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
+    """Concurrent reads for a set of agents, each judged on its own.
+
+    One task per agent under one shared deadline (`asyncio.wait`). Every read
+    that has answered by the deadline is KEPT — a cache hit, a fresh on-chain
+    read, or a failure it already degraded — and only the agents whose read is
+    still pending fall back. The old shape, one `wait_for` around a `gather`,
+    was all-or-nothing: a single slow agent threw away every other agent's
+    evidence, including answers already served from cache in microseconds, and
+    a known sub-floor agent was then routed on the prior.
+
+    A pending read is cancelled, but cancelling it abandons only THIS batch's
+    wait: `_read_rep` awaits its cache flight through `asyncio.shield`, so the
+    RPC read keeps running and lands in the cache for the next reader.
+
+    Never raises, so decompose latency is capped and routing always has a
+    score. A batch that degrades logs exactly one warning covering every
+    affected agent (see _log_degraded).
     """
     # None means "whatever the deployment is configured for". The bound lives
     # in Settings rather than in this signature so a config validator can see
@@ -528,21 +555,44 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None)
     # value it is validating is theatre. An explicit argument still wins —
     # the timeout-path tests drive it directly.
     bound = settings.reputation_batch_timeout_seconds if timeout_seconds is None else timeout_seconds
+    ids = list(dict.fromkeys(agent_ids))
+    if not ids:
+        return {}
+    tasks = {agent_id: asyncio.ensure_future(_read_rep(agent_id)) for agent_id in ids}
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*(_read_rep(a) for a in agent_ids)),
-            timeout=bound,
-        )
-    except Exception as e:  # TimeoutError included: it subclasses Exception on 3.11+
-        # The gather was aborted, so nothing is known about any agent.
-        _log_degraded(list(agent_ids), len(agent_ids), f"batch read aborted — {_describe(e)}")
-        return {a: _prior_info(a, degraded=True) for a in agent_ids}
-    failures = [(info.agent_id, failure) for info, failure in results if failure is not None]
-    if failures:
-        # One line for the batch, reported against the first failure — a
-        # single RPC outage produces the same error for every agent.
-        _log_degraded([a for a, _ in failures], len(agent_ids), failures[0][1])
-    return {info.agent_id: info for info, _ in results}
+        await asyncio.wait(tasks.values(), timeout=_wait_bound(bound))
+    finally:
+        # Also on the way out of a cancelled caller, so no read outlives the
+        # batch that asked for it (the flight under it still lands).
+        pending_tasks = [task for task in tasks.values() if not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+
+    infos: dict[str, RepInfo] = {}
+    failures: list[tuple[str, str]] = []
+    pending: list[str] = []
+    for agent_id, task in tasks.items():
+        if task in pending_tasks:
+            pending.append(agent_id)
+            infos[agent_id] = _prior_info(agent_id, degraded=True)
+            continue
+        info, failure = task.result()
+        infos[agent_id] = info
+        if failure is not None:
+            failures.append((agent_id, failure))
+    if pending or failures:
+        # One line for the batch. A single RPC outage produces the same error
+        # for every agent, so it is reported against the first failure; reads
+        # the deadline cut off are named as such, since that is a different
+        # remedy (a slow RPC, not a down one).
+        reasons = []
+        if pending:
+            reasons.append(f"{len(pending)} read(s) still pending at the {bound:g} s batch deadline")
+        if failures:
+            reasons.append(failures[0][1])
+        degraded = [agent_id for agent_id in ids if agent_id in set(pending) | {a for a, _ in failures}]
+        _log_degraded(degraded, len(ids), "; ".join(reasons))
+    return infos
 
 
 def invalidate_rep(agent_id: str) -> None:

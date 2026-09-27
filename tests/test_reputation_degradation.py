@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from types import SimpleNamespace
 
 import pytest
 
 from app.config import settings
 from app.services import reputation_svc as rep
 from app.stellar import cache as rcache
+from app.stellar import client as sc
 
 LOGGER_NAME = "app.services.reputation_svc"
 USDC = rep.STROOPS_PER_USDC
@@ -108,21 +111,51 @@ def test_batch_degradation_logs_once_not_per_agent(ledger_configured, monkeypatc
     assert "12/12 agents" in messages[0]
 
 
-def test_batch_timeout_logs_once_and_marks_every_agent_degraded(ledger_configured, monkeypatch, caplog):
-    async def never(key: str, ttl_seconds: float, producer):
-        await asyncio.sleep(5.0)
+def test_a_deadline_degrades_only_the_reads_still_pending(ledger_configured, monkeypatch, caplog):
+    """The deadline cuts off the reads that have not answered — and only them.
 
-    monkeypatch.setattr(rcache, "get_or_set", never)
-    ids = ["agt_a", "agt_b", "agt_c"]
+    This used to assert the opposite: every agent slow, every agent degraded,
+    one "batch read aborted" line. That was the whole-batch bug pinned as
+    correct, because with every read slow nothing distinguishes "degrade the
+    pending reads" from "degrade everything". Here one agent answers and two do
+    not, through the real cache with only the RPC held, so the answered agent
+    must keep its on-chain score and the line must name only the other two.
+    """
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    held = threading.Event()
 
-    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
-        infos = asyncio.run(rep.fetch_reps(ids, timeout_seconds=0.02))
+    def simulate_read(_contract, _method, args, **_kw):
+        if args[0] != "agt_a":
+            held.wait(10)
+        return {"sum_w": 9000 * 10 * USDC, "weight": 10 * USDC, "count": 4, "disputed": 0}
 
-    assert all(i.degraded for i in infos.values())
+    monkeypatch.setattr(sc, "simulate_read", simulate_read)
+
+    async def batch():
+        try:
+            return await rep.fetch_reps(["agt_a", "agt_b", "agt_c"], timeout_seconds=0.5)
+        finally:
+            # Released inside the loop: asyncio.run joins its worker threads
+            # on the way out, and a read still parked there would hold it.
+            held.set()
+
+    rcache.clear()
+    try:
+        with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+            infos = asyncio.run(batch())
+    finally:
+        held.set()
+        rcache.clear()
+
+    assert infos["agt_a"].source == "onchain"
+    assert infos["agt_a"].degraded is False
+    assert infos["agt_b"].degraded is True
+    assert infos["agt_c"].degraded is True
     messages = _messages(caplog)
     assert len(messages) == 1
-    assert "batch read aborted" in messages[0]
-    assert "3/3 agents" in messages[0]
+    assert "2/3 agents [agt_b, agt_c]" in messages[0]
+    assert "2 read(s) still pending at the 0.5 s batch deadline" in messages[0]
 
 
 def test_partial_batch_names_only_the_failed_agents(ledger_configured, monkeypatch, caplog):

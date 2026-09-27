@@ -104,3 +104,98 @@ def test_a_non_map_answer_is_negatively_cached_not_stored_for_the_ttl(chain):
     assert exc_type is TypeError
     assert "expected a map" in message
     assert expiry - time.monotonic() <= rcache._NEGATIVE_TTL_SECONDS
+
+
+# ── a deadline keeps every answer it has ────────────────────────
+
+
+def _flight(agent: str):
+    return rcache._flights[rep._rep_cache_key(agent)]
+
+
+def test_one_slow_read_degrades_only_that_agent_and_still_lands(chain):
+    """The audit's D′ on the real path. One agent's read is held past the
+    deadline; every other agent keeps its on-chain answer, the held agent alone
+    falls back, and its read — abandoned by the batch, not cancelled — lands in
+    the cache so the next batch reads nobody twice."""
+    ids = [f"agt_{i:02d}" for i in range(6)]
+    for agent in ids:
+        chain.state[agent] = GOOD
+    chain.state["agt_03"] = BAD
+    chain.hold("agt_05")
+
+    async def scenario():
+        first = await rep.fetch_reps(ids, timeout_seconds=0.5)
+        chain.release("agt_05")
+        await asyncio.wait({_flight("agt_05")})
+        second = await rep.fetch_reps(ids, timeout_seconds=0.5)
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert {a for a, i in first.items() if i.degraded} == {"agt_05"}
+    assert all(first[a].source == "onchain" for a in ids if a != "agt_05")
+    assert rep.passes_floor(first["agt_03"]) is False, "a known sub-floor agent must stay sub-floor"
+    assert not any(i.degraded for i in second.values())
+    assert second["agt_05"].source == "onchain"
+    assert sorted(chain.reads) == sorted(ids), "the aborted read landed; nothing was read twice"
+
+
+def test_a_cached_verdict_survives_a_slow_unrelated_read(chain):
+    """The routing audit's P1. A sub-floor agent's state is already cached;
+    an unrelated read then hangs. The cached verdict is an answer the batch
+    already has, and it must not be traded for the prior."""
+    chain.state["agt_04m1"] = BAD
+    chain.hold("agt_06q4")
+
+    async def scenario():
+        warm = await rep.fetch_reps(["agt_04m1"])
+        batch = await rep.fetch_reps(["agt_04m1", "agt_06q4"], timeout_seconds=0.3)
+        chain.release("agt_06q4")
+        await asyncio.wait({_flight("agt_06q4")})
+        return warm, batch
+
+    warm, batch = asyncio.run(scenario())
+
+    assert rep.passes_floor(warm["agt_04m1"]) is False
+    assert batch["agt_04m1"].model_dump() == warm["agt_04m1"].model_dump()
+    assert batch["agt_06q4"].degraded is True
+
+
+def test_a_decompose_behind_a_slow_read_still_excludes_the_sub_floor_agent(chain, monkeypatch):
+    """The same, one layer up: through `decompose` a known sub-floor agent is
+    kept out of the plan while an unrelated read is slow, instead of being
+    routed on the prior's 5677."""
+    from app.schemas import Plan, PlanStep
+    from app.seed import seed_registry
+    from app.services import orchestrator_svc
+    from app.state import state
+
+    saved = dict(state.agents)
+    state.agents.clear()
+    seed_registry()
+    chain.state["agt_04m1"] = BAD
+    chain.hold("agt_06q4")
+    monkeypatch.setattr(settings, "reputation_batch_timeout_seconds", 0.3)
+
+    async def planner(_prompt):
+        step = PlanStep(agent_id="agt_04m1", rationale="r", est_price_usdc=0.0, est_eta_seconds=1)
+        return SimpleNamespace(content=Plan(steps=[step]))
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", planner)
+
+    async def scenario():
+        await rep.fetch_reps(["agt_04m1"])
+        resp = await orchestrator_svc.decompose("write a haiku about databases")
+        chain.release("agt_06q4")
+        await asyncio.wait({_flight("agt_06q4")})
+        return resp
+
+    try:
+        resp = asyncio.run(scenario())
+    finally:
+        state.agents.clear()
+        state.agents.update(saved)
+
+    assert "agt_04m1" not in [s.agent_id for s in resp.steps]
+    assert resp.reputation_degraded is True, "the slow agent's prior is still reported"
