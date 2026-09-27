@@ -10,6 +10,8 @@ statement rather than what the statement says:
     transaction holds the lock and the append must wait for it and then read
     what it wrote; and while an append runs, nobody else can take the lock
     until its write commits;
+  - two claims racing one dispute, lined up deterministically, so that only
+    the PRIMARY KEY can tell them apart;
   - a dozen verdicts racing one dispute, and ten opens racing one step;
   - a `dispute_events` table exactly as story 4.02 created it, migrated in
     place by the store's DDL on first use;
@@ -184,6 +186,60 @@ def test_an_append_holds_the_lock_from_its_read_until_its_write_commits(
 
     assert written is not None and written.status == "rejected"
     assert probes == ["held"]
+
+
+@pytest.mark.parametrize("holder_ends", ["commit", "rollback"])
+def test_a_claim_racing_a_claim_is_settled_by_the_primary_key(
+    pg: PostgresDisputeStore, pg_dsn: str, holder_ends: str
+) -> None:
+    """Two claimants that both read `upheld`, made deterministic.
+
+    Another transaction has claimed the dispute — its mutex row and its
+    `crediting` row are written — and has not committed. Our claim starts now,
+    so its snapshot still says `upheld`: the status cannot stop it, and only the
+    PRIMARY KEY can. Its INSERT must wait on the other transaction's row; if
+    that transaction commits, ours must come back with nothing and write
+    nothing, and if it rolls back, ours must win. A twenty-way gather rarely
+    lines two claims up this closely, because each statement is quick."""
+
+    async def go() -> tuple[bool, DisputeRecord | None, list[str], dict[str, float]]:
+        upheld = await _upheld(pg)
+        holder = await asyncpg.connect(pg_dsn)
+        try:
+            transaction = holder.transaction()
+            await transaction.start()
+            await holder.execute("INSERT INTO refund_claims (dispute_id, claimed_at) VALUES ($1, 1.0)", upheld.id)
+            await holder.execute(
+                """
+                INSERT INTO dispute_events (
+                    dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
+                    charged_usdc, creditable_usdc, opened_at, updated_at, opening
+                )
+                SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 'crediting',
+                       charged_usdc, creditable_usdc, opened_at, 1.0, FALSE
+                FROM dispute_events WHERE dispute_id = $1 AND opening
+                """,
+                upheld.id,
+            )
+            ours = asyncio.create_task(pg.claim_refund(upheld.id))
+            waited = await _waiting_on_a_lock(pg_dsn, ours)
+            await (transaction.commit() if holder_ends == "commit" else transaction.rollback())
+        finally:
+            await holder.close()
+        return waited, await ours, await statuses(pg_dsn, upheld.id), await claims(pg_dsn)
+
+    waited, claimed, trail, held = run(pg, go())
+
+    assert waited, "the claim did not wait on the other claimant's uncommitted mutex row"
+    assert list(held) == ["dsp_0001"]
+    if holder_ends == "commit":
+        assert claimed is None
+        assert trail == ["open", "upheld", "crediting"]
+        assert held["dsp_0001"] == 1.0  # still the other claimant's row
+    else:
+        assert claimed is not None and claimed.status == "crediting"
+        assert trail == ["open", "upheld", "crediting"]
+        assert held["dsp_0001"] != 1.0
 
 
 def test_a_dozen_concurrent_verdicts_leave_exactly_one(pg: PostgresDisputeStore, pg_dsn: str) -> None:
