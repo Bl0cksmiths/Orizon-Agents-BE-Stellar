@@ -327,6 +327,11 @@ will be refused the same way until that cause is fixed. `TIMEOUT` ("it may
 still land") is reserved for failures after the send: a connection dropped
 mid-send, a `DUPLICATE`, or a poll that ran out.
 
+Every dispute-rating log line reads `dispute rating <event>: outcome=<SUCCESS|REPLAY|TIMEOUT|FAILED|->
+dispute=… job=… derived=… agent=… payer=… credited_usdc=… refund_tx=… tx=…
+reason=…`, so a failed rating can be reconciled against the credit from the
+ERROR line alone. `outcome=-` marks a line where no attempt was made.
+
 ## The trust model, stated plainly
 
 - **The platform funds the credit.** The disputed agent's only consequence is
