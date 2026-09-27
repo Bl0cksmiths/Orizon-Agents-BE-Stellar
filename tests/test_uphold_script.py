@@ -330,6 +330,45 @@ def test_help_says_the_platform_funds_it_and_that_it_moves_real_money() -> None:
     assert "Signs nothing" in help_text
 
 
+def test_the_exit_numbers_are_the_ones_the_help_and_the_docstring_promise() -> None:
+    """O01-O03: every other test compares against the constants, and `--help`
+    is a literal — so renumbering 6, 10 or 12 passed the whole suite while the
+    help, the module docstring and every operator's wrapper kept the old
+    numbers. The numbers are the contract, so they are pinned as numbers."""
+    assert {
+        name: getattr(uphold_dispute, name)
+        for name in (
+            "EXIT_OK",
+            "EXIT_NOT_CONFIGURED",
+            "EXIT_UNKNOWN_DISPUTE",
+            "EXIT_NOT_ADJUDICABLE",
+            "EXIT_IN_FLIGHT",
+            "EXIT_NOTHING_TO_CREDIT",
+            "EXIT_ABOVE_CAP",
+            "EXIT_TRANSFER_FAILED",
+            "EXIT_TIMEOUT",
+            "EXIT_UNEXPECTED",
+            "EXIT_RATING_NOT_LANDED",
+            "EXIT_RATING_COLLISION",
+            "EXIT_ADJUDICATION_RACE",
+        )
+    } == {
+        "EXIT_OK": 0,
+        "EXIT_NOT_CONFIGURED": 3,
+        "EXIT_UNKNOWN_DISPUTE": 4,
+        "EXIT_NOT_ADJUDICABLE": 5,
+        "EXIT_IN_FLIGHT": 6,
+        "EXIT_NOTHING_TO_CREDIT": 7,
+        "EXIT_ABOVE_CAP": 8,
+        "EXIT_TRANSFER_FAILED": 9,
+        "EXIT_TIMEOUT": 10,
+        "EXIT_UNEXPECTED": 11,
+        "EXIT_RATING_NOT_LANDED": 12,
+        "EXIT_RATING_COLLISION": 13,
+        "EXIT_ADJUDICATION_RACE": 14,
+    }
+
+
 def test_help_tells_the_two_post_signature_rules_apart() -> None:
     """After a signature the right next move depends on which half failed, and
     the two rules point in opposite directions: a timed-out CREDIT is never
@@ -1329,6 +1368,29 @@ def test_a_definitively_failed_transfer_is_payable_again(
     assert code == uphold_dispute.EXIT_TRANSFER_FAILED
     assert "the transfer FAILED" in out
     assert "running this again once the cause is fixed" in out
+
+
+def test_a_clean_return_that_leaves_the_dispute_upheld_is_never_success(capsys: pytest.CaptureFixture[str]) -> None:
+    """O10: `uphold` returning normally while the record still reads `upheld`
+    means the claim was released and nothing moved — the transfer failed. No
+    test drove that path, so narrowing the check to `refund_failed` alone
+    passed the suite and exited 0 for a buyer who was never paid."""
+    dispute = seed(status="upheld")
+
+    code = uphold_dispute.report(dispute, dispute.id, CREDITABLE_USDC, uphold_dispute.EXIT_OK)
+
+    assert code == uphold_dispute.EXIT_TRANSFER_FAILED
+    assert "the transfer FAILED" in capsys.readouterr().out
+
+
+def test_no_upheld_dispute_is_ever_reported_as_success() -> None:
+    """The structural half: whatever the call reported, a record left at
+    `upheld` — an unpaid buyer — never exits 0."""
+    dispute = seed(status="upheld")
+    fallbacks = {value for name, value in vars(uphold_dispute).items() if name.startswith("EXIT_")}
+
+    for fallback in fallbacks:
+        assert uphold_dispute.report(dispute, dispute.id, CREDITABLE_USDC, fallback) != uphold_dispute.EXIT_OK
 
 
 def test_an_unexpected_exception_does_not_override_what_the_store_says(
