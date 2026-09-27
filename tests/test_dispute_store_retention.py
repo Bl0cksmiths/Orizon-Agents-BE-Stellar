@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import random
 
 import pytest
 
@@ -62,6 +63,18 @@ def _dispute(dispute_id: str, n: int, step_index: int) -> DisputeRecord:
         creditable_usdc=1.0,
         opened_at=1_700_000_100.0 + n,
     )
+
+
+async def _assert_retained_settlements_keep_their_disputes(
+    store: InMemoryDisputeStore, ledger: dict[str, DisputeRecord]
+) -> None:
+    """Every dispute ever opened on a settlement the store still holds is still held."""
+    for dispute in ledger.values():
+        if await store.get_settlement(dispute.job_id_hex) is None:
+            continue
+        assert await store.get_dispute(dispute.id) is not None, dispute.id
+        found = await store.find_dispute(dispute.job_id_hex, dispute.step_index)
+        assert found is not None and found.id == dispute.id, dispute.id
 
 
 def test_a_paid_step_can_never_be_disputed_again_while_its_settlement_is_held(
@@ -120,6 +133,49 @@ def test_settlements_leave_with_their_disputes_and_never_without_them(monkeypatc
     for n in (1, 2):
         assert asyncio.run(store.get_settlement(_job(n))) is not None
         assert all(asyncio.run(store.get_dispute(f"dsp_{n}_{step}")) is not None for step in range(3))
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
+    monkeypatch: pytest.MonkeyPatch, seed: int
+) -> None:
+    """The invariant as a property: after any sequence of settlements, disputes
+    and transitions pushed well past the caps, no retained settlement is missing
+    a dispute that was ever opened on it — and memory stays bounded."""
+    cap = 4
+    monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", cap)
+    rng = random.Random(seed)
+    store = InMemoryDisputeStore()
+    ledger: dict[str, DisputeRecord] = {}
+    settled: list[int] = []
+
+    async def run() -> None:
+        for op in range(200):
+            action = rng.random()
+            if action < 0.3 or not settled:
+                n = len(settled)
+                await store.record_settlement(_settlement(n))
+                settled.append(n)
+            elif action < 0.85:
+                # Any job ever settled, held or not, and any of its steps.
+                n = rng.choice(settled)
+                step = rng.randrange(len(STEPS))
+                dispute = _dispute(f"dsp_{op}", n, step)
+                try:
+                    ledger[dispute.id] = await store.open_dispute(dispute)
+                except DuplicateDisputeError as dup:
+                    assert dup.existing.id in ledger
+            else:
+                held = [d for d in ledger.values() if d.id in store._disputes]
+                if held:
+                    target = rng.choice(held)
+                    await store.append_status(target.id, "credited", refund_tx=f"tx_{op}", credited_usdc=1.0)
+
+            await _assert_retained_settlements_keep_their_disputes(store, ledger)
+            assert len(store._settlements) <= cap
+            assert len(store._disputes) <= 2 * cap * len(STEPS)
+
+    asyncio.run(run())
 
 
 def test_a_dispute_on_a_job_with_no_settlement_is_bounded_too(monkeypatch: pytest.MonkeyPatch) -> None:
