@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -172,12 +171,22 @@ def test_a_second_start_keeps_the_check_already_running(monkeypatch, caplog):
 
 def test_stop_cancels_a_check_still_waiting_on_the_chain(monkeypatch, caplog):
     _signs_as(monkeypatch, SIGNER)
-    release = _hanging_chain(monkeypatch)
+    release = threading.Event()
+    entered = threading.Event()
+
+    def _hung(ledger: str) -> str | None:
+        entered.set()
+        release.wait(5)
+        return SIGNER
+
+    monkeypatch.setattr(sc, "ledger_scorer", _hung)
 
     async def _boot_then_shut_down():
         rw.start()
         report_task = rw._report_task
-        await asyncio.sleep(0.05)  # the read is now in flight
+        # The read is in flight once the worker thread has entered it —
+        # waited for, not assumed after a fixed sleep.
+        assert await asyncio.to_thread(entered.wait, 5)
         await rw.stop()
         release.set()  # let the abandoned worker thread finish
         return report_task
@@ -214,15 +223,26 @@ def test_a_startup_check_that_dies_is_logged_not_lost(monkeypatch, caplog):
 # ── on the real boot path ───────────────────────────────────────
 
 
-def _wait_for_line(caplog, timeout: float = 5.0) -> logging.LogRecord:
-    """The boot line lands shortly after startup, from a background task."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        records = _writer_records(caplog)
-        if records:
-            return records[0]
-        time.sleep(0.01)
-    raise AssertionError("the ratings writer never reported at boot")
+def _join(client, task: asyncio.Task | None) -> None:
+    """Wait, on the app's own loop, for a background task to finish.
+
+    Deterministic where the old poll was not: it returns the moment the task
+    is done, and never gives up on a slow runner after a fixed five seconds.
+    """
+    assert task is not None, "the task was never started"
+
+    async def join() -> None:
+        await asyncio.wait({task})
+
+    client.portal.call(join)
+
+
+def _wait_for_line(client, caplog) -> logging.LogRecord:
+    """The boot line lands from a background task; wait for THAT task."""
+    _join(client, rw._report_task)
+    records = _writer_records(caplog)
+    assert records, "the ratings writer never reported at boot"
+    return records[0]
 
 
 def test_boot_reports_the_verdict(monkeypatch, caplog):
@@ -232,7 +252,7 @@ def test_boot_reports_the_verdict(monkeypatch, caplog):
     monkeypatch.setattr(sc, "ledger_scorer", lambda ledger: OTHER)
     with caplog.at_level(logging.DEBUG, logger=WRITER_LOG), TestClient(app) as client:
         client.get("/health")
-        record = _wait_for_line(caplog)
+        record = _wait_for_line(client, caplog)
     assert record.levelno == logging.WARNING
     assert SIGNER in record.getMessage() and OTHER in record.getMessage()
 
@@ -243,7 +263,7 @@ def test_the_hermetic_default_boots_disabled_without_a_chain_read(monkeypatch, c
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "")
     with caplog.at_level(logging.DEBUG, logger=WRITER_LOG), TestClient(app) as client:
         client.get("/health")
-        record = _wait_for_line(caplog)
+        record = _wait_for_line(client, caplog)
     assert record.levelno == logging.WARNING
     assert "ratings writer off (disabled)" in record.getMessage()
 
@@ -254,11 +274,13 @@ def test_boot_does_not_wait_for_the_chain(monkeypatch):
     that hangs must cost that request nothing."""
     _signs_as(monkeypatch, SIGNER)
     release = _hanging_chain(monkeypatch)
-    started = time.monotonic()
     with TestClient(app) as client:
         try:
             assert client.get("/health").status_code == 200
-            assert time.monotonic() - started < 3
+            # Served while the chain read is still hung: lifespan returned
+            # without waiting on it. Asserted on the task, not on a wall-clock
+            # budget a slow runner could blow.
+            assert rw._report_task is not None and not rw._report_task.done()
             assert client.get("/readiness").json()["ratings"]["writer"] == "unchecked"
         finally:
             # Inside the client: its loop's executor would otherwise wait out
