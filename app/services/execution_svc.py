@@ -13,12 +13,14 @@ from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..schemas import PlanStep, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer
+from . import failure_tracker, rating_writer, reputation_svc
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
+from .orchestrator_svc import _is_listed
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,59 @@ class CapacityExhaustedError(RuntimeError):
     """execute_plan refused to start: the concurrent-workflow ceiling
     (settings.orchestrator_max_concurrent) is already in flight. The router
     maps this to HTTP 503 "capacity_exhausted"."""
+
+
+# How long a stored plan stays executable after decompose built it.
+#
+# Sized from how the plan card is actually used: decompose answers in seconds
+# to tens of seconds, the buyer then READS the card (steps, prices, reputation,
+# notices), and on the paid path signs a PaymentEscrow.authorize the frontend
+# builds with a 600 s validity and broadcasts it (~5 s) immediately before
+# calling /execute. So the plan must outlive a careful read PLUS that signing
+# flow, with room for a buyer who tabs away and comes back — 15 minutes covers
+# it several times over. It must also be short enough that the card the buyer
+# authorised still describes the marketplace: prices, reputation stamps and
+# floor notices are all frozen at `created_at`. The execute-time re-check
+# covers listing and the floor; this bound covers everything else on the card.
+#
+# A module constant until it becomes a setting (`plan_ttl_seconds`); tests
+# patch it here.
+PLAN_TTL_SECONDS = 900.0
+
+
+class PlanExpiredError(CodedHTTPException):
+    """execute_plan refused a stored plan older than PLAN_TTL_SECONDS.
+
+    An HTTP exception rather than a bare RuntimeError like its sibling above so
+    that `/execute` answers 410 `plan_expired` in the unified envelope without
+    the router having to learn it — the router belongs to another lane, and an
+    unmapped domain error would surface as a 500. Raised before any task is
+    minted, so nothing runs and nothing is charged. The message names no
+    configured limit, per `CodedHTTPException`'s disclosure rule.
+    """
+
+    def __init__(self, plan_id: str) -> None:
+        super().__init__(
+            410,
+            "plan_expired",
+            "this plan is too old to execute — build a fresh plan from the same intent and authorise that one",
+        )
+        self.plan_id = plan_id
+
+
+def _wall_clock() -> float:
+    """`time.time`, behind a seam the expiry tests can pin."""
+    return time.time()
+
+
+def plan_expired(plan: StoredPlan, now: float | None = None) -> bool:
+    """True once `plan` is strictly older than PLAN_TTL_SECONDS.
+
+    A plan exactly TTL old still executes: the bound is inclusive, so the
+    number means "executable for this long", not "one tick less".
+    """
+    age = (_wall_clock() if now is None else now) - plan.created_at
+    return age > PLAN_TTL_SECONDS
 
 
 def _track_background_task(task: asyncio.Task) -> None:
@@ -240,6 +295,64 @@ def _stored_summary(task_id: str, step_index: int, summary: str) -> str | None:
     return cleaned or None
 
 
+def _execute_refusal(step: PlanStep, info: reputation_svc.RepInfo | None) -> str | None:
+    """Why `step` must not be dispatched NOW, or None to dispatch it.
+
+    The routing floor and the listing filter are applied when a plan is BUILT
+    (`orchestrator_svc`), and a stored plan used to be executed on that verdict
+    alone — so an agent its operator delisted between decompose and execute
+    still received the step and the payment (ADR 0006:162, "routing honours
+    delisting everywhere a candidate is chosen"). Executing a step IS choosing
+    its agent, so the registry is asked again here, at the last moment before
+    dispatch, exactly as the decompose clamp asks it before a step is stored.
+
+    The returned sentence is buyer-facing (trace lines are world-readable when
+    TASK_AUTH_REQUIRED is off): it names the agent and the reason, never the
+    operator's own data.
+
+    `info` is the agent's reputation as read at the START of this run, and the
+    routing floor is re-applied to it by three rules:
+
+      * A read that FAILED (`degraded`, the prior served in its place) proves
+        nothing about the agent, so it cannot overturn the verdict the buyer
+        authorised: the step runs on its plan-time stamps. Refusing here would
+        strip a plan the buyer already signed for because the chain was slow —
+        and on a warm host the batch read degrades routinely, so that would be
+        most plans.
+      * A read that succeeded and clears the floor dispatches.
+      * A read that succeeded and does NOT clear it refuses — the agent is now
+        provably below the floor — with one exception: a step the starvation
+        backstop re-admitted below the floor at plan time (`step.degraded`).
+        The buyer authorised that step knowing it was below the floor, flagged
+        inline and with a `floor_relaxed` notice, so it still runs as long as
+        its bound is no worse than the one the card showed. Worse than that,
+        it is refused like any other: the buyer consented to the evidence
+        they saw, not to whatever arrives after.
+    """
+    agent = state.agents.get(step.agent_id)
+    if agent is None:
+        # The registry dropped it — registry sync evicts an on-chain record it
+        # no longer believes (a reprice past the bounds). The decompose clamp
+        # treats a missing agent as unroutable, and so does this.
+        return f"{step.agent_id} is no longer in the agent registry"
+    if not _is_listed(agent):
+        return f"{step.agent_id} was delisted by its operator after this plan was built"
+    if info is None or info.degraded or reputation_svc.passes_floor(info):
+        return None
+    floor = settings.reputation_floor_bps
+    if step.degraded:
+        shown = step.rep_lower_bound_bps
+        if shown is not None and info.lower_bound_bps >= shown:
+            return None
+        return (
+            f"{step.agent_id} fell further below the routing floor than this plan showed "
+            f"({info.lower_bound_bps} < {shown if shown is not None else floor} bps)"
+        )
+    return (
+        f"{step.agent_id} fell below the routing floor after this plan was built ({info.lower_bound_bps} < {floor} bps)"
+    )
+
+
 async def execute_plan(
     plan: StoredPlan,
     *,
@@ -255,7 +368,19 @@ async def execute_plan(
     Raises CapacityExhaustedError — before any task is minted — when
     `settings.orchestrator_max_concurrent` workflows are already running,
     so an unbounded burst of executes can't fan out unbounded LLM calls.
+
+    Raises PlanExpiredError — also before any task is minted — when the plan is
+    older than PLAN_TTL_SECONDS. Checked first: a stale plan is refused for
+    what it is, whatever the load.
     """
+    if plan_expired(plan):
+        logger.warning(
+            "execute refused for plan %s: built %.0fs ago, past the %.0fs plan TTL",
+            plan.id,
+            _wall_clock() - plan.created_at,
+            PLAN_TTL_SECONDS,
+        )
+        raise PlanExpiredError(plan.id)
     active = sum(1 for t in _background_tasks if not t.done())
     if active >= settings.orchestrator_max_concurrent:
         raise CapacityExhaustedError(f"{active} workflows in flight (limit {settings.orchestrator_max_concurrent})")
@@ -363,7 +488,44 @@ async def _run(
                 f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
             )
 
+        # The routing floor, re-applied at execute (see `_execute_refusal`): one
+        # bounded batch read for every agent the plan names, taken now rather
+        # than trusted from the stamps on the plan. One read for the run, not
+        # one per step — `fetch_reps` caps it at the configured batch deadline,
+        # so the worst case delays the first step by that bound once, and the
+        # buyer's /execute has already been answered. Listing, which costs
+        # nothing to read, is still checked per step at the moment of dispatch.
+        agent_ids = sorted({s.agent_id for s in plan.plan.steps})
+        fresh = await reputation_svc.fetch_reps(agent_ids) if agent_ids else {}
+        unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded]
+        if unread:
+            # Said out loud, because it is the one case where a step runs on
+            # evidence older than this run: the buyer should know which.
+            await _emit(
+                task_id,
+                start,
+                "exec",
+                f"reputation re-check unavailable for [{', '.join(unread)}] — "
+                "those steps run on the scores this plan was authorised with",
+            )
+
         for step_index, step in enumerate(plan.plan.steps):
+            refusal = _execute_refusal(step, fresh.get(step.agent_id))
+            if refusal is not None:
+                # Story 2.03's rule for a step that fails, applied to a step
+                # that is refused: it is skipped, nothing is added to `spent`
+                # (so neither the simulated total nor the on-chain charge
+                # includes it), the settlement records it as not delivered,
+                # and the run carries on with the steps that remain. It is
+                # also NOT rated and NOT counted as a failure — the agent was
+                # never asked, and a withdrawal is its operator's decision,
+                # not a delivery it failed (ADR 0005 D5). By index, like every
+                # other per-step set here.
+                undispatched.add(step_index)
+                logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
+                await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
+                continue
+
             # Resolution deliberately stays OUTSIDE the per-step try/except
             # below. It is a lookup, not the step's work: resolve_worker fails
             # OPEN — an unreadable binding store logs and returns None — so the
@@ -1336,7 +1498,6 @@ async def _submit_ratings(
         return
 
     from ..stellar import client as sc
-    from . import reputation_svc
 
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
@@ -1430,6 +1591,15 @@ async def _submit_ratings(
                     f"{rating_writer.unlanded_reason(status)} · tx {tx[:10]}…",
                 )
                 continue
+            # Landed, so the score every reader sees has moved: drop the cached
+            # rep_state, as a landed dispute rating already does. Without this
+            # a plan decomposed inside the read TTL was routed and stamped on
+            # the pre-run score — worst after a failed run's 20/100, the very
+            # evidence the floor exists to act on. Only here, past the SUCCESS
+            # check: a rating that failed or is still unconfirmed changed
+            # nothing on the ledger, and dropping the entry for it would only
+            # buy an extra RPC read of the same score.
+            reputation_svc.invalidate_rep(step.agent_id)
             await _emit(
                 task_id,
                 start,
