@@ -650,6 +650,11 @@ MONEY_BOUND_REFUSALS = [
     ("MAX_CHARGE_USDC", "-inf", _UNBOUNDED),
     ("MAX_CHARGE_USDC", "0", _ZERO),
     ("MAX_CHARGE_USDC", "-7.3141", r"7\.3141"),
+    ("DISPUTE_CREDITED_FRACTION", "nan", _NOT_A_NUMBER),
+    ("DISPUTE_CREDITED_FRACTION", "inf", _UNBOUNDED),
+    ("DISPUTE_CREDITED_FRACTION", "-inf", _UNBOUNDED),
+    ("DISPUTE_CREDITED_FRACTION", "1.5", r"1\.5"),
+    ("DISPUTE_CREDITED_FRACTION", "-0.25", r"0\.25"),
 ]
 
 
@@ -675,6 +680,11 @@ MONEY_BOUNDS_THAT_BOOT = [
     ("MAX_REFUND_USDC", "0.25", "max_refund_usdc", 0.25),
     ("MAX_REFUND_USDC", "1e-7", "max_refund_usdc", 1e-7),
     ("MAX_CHARGE_USDC", "2.5", "max_charge_usdc", 2.5),
+    # Both ends of the fraction are policies someone can mean: nothing back,
+    # or the whole step.
+    ("DISPUTE_CREDITED_FRACTION", "0", "dispute_credited_fraction", 0.0),
+    ("DISPUTE_CREDITED_FRACTION", "0.5", "dispute_credited_fraction", 0.5),
+    ("DISPUTE_CREDITED_FRACTION", "1", "dispute_credited_fraction", 1.0),
 ]
 
 
@@ -693,3 +703,4 @@ def test_the_money_bound_defaults_boot():
     s = _settings()
     assert s.max_refund_usdc == 1.0
     assert s.max_charge_usdc == 100.0
+    assert s.dispute_credited_fraction == 1.0
