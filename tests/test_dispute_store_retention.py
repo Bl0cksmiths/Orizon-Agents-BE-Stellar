@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import random
 
 import pytest
@@ -25,6 +26,7 @@ from app.services.dispute_store import (
 )
 
 PAYER = "G" + "B" * 55
+STORE_LOGGER = "app.services.dispute_store"
 STEPS = tuple(
     SettlementStep(step_index=i, agent_id=f"agt_{i}", agent_name=None, price_usdc=1.0, delivered=True) for i in range(3)
 )
@@ -221,3 +223,43 @@ def test_the_order_disputes_are_opened_in_does_not_decide_what_is_kept(monkeypat
     assert asyncio.run(store.get_dispute("dsp_0")) is None
     newest = asyncio.run(store.get_settlement_by_task("task_0"))
     assert newest is not None and newest.job_id_hex == _job(1)
+
+
+# ── what is still owed is never shed ──────────────────────────────────────
+
+
+async def _bring_to(store: InMemoryDisputeStore, dispute_id: str, status: str) -> None:
+    """Walk a freshly opened dispute to `status` the way the service does."""
+    if status in ("upheld", "crediting"):
+        await store.append_status(dispute_id, "upheld", expected_status="open")
+    if status == "crediting":
+        assert await store.claim_refund(dispute_id) is not None
+
+
+@pytest.mark.parametrize("status", ["open", "upheld", "crediting"])
+def test_an_unfinished_dispute_keeps_its_settlement_far_past_the_cap(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, status: str
+) -> None:
+    """An open dispute is owed an adjudication, an upheld one a payment, and a
+    crediting one a reconciliation of a transfer whose outcome may be unknown.
+    The settlement it hangs on outlives the cap many times over, while the
+    settlements around it that owe nothing are shed as usual."""
+    monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
+    store = InMemoryDisputeStore()
+
+    async def fill() -> None:
+        await store.record_settlement(_settlement(0))
+        await store.open_dispute(_dispute("dsp_owed", 0, 0))
+        await _bring_to(store, "dsp_owed", status)
+        for n in range(1, 20):
+            await store.record_settlement(_settlement(n))
+
+    with caplog.at_level(logging.WARNING, logger=STORE_LOGGER):
+        asyncio.run(fill())
+
+    assert list(store._settlements) == [_job(0), _job(19)]
+    owed = asyncio.run(store.find_dispute(_job(0), 0))
+    assert owed is not None and owed.id == "dsp_owed" and owed.status == status
+    claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
+    assert claims == (["dsp_owed"] if status == "crediting" else [])
+    assert not [r for r in caplog.records if r.name == STORE_LOGGER and r.levelno >= logging.ERROR]
