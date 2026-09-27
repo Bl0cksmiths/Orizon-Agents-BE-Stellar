@@ -180,3 +180,47 @@ def test_a_full_scale_mean_is_in_range():
     """The edge of the check is inclusive: every rating at 100/100."""
     info = rep._info_from_state("agt_x", {"sum_w": 10_000 * USDC, "weight": USDC, "count": 1, "disputed": 0})
     assert info.avg_bps == 10_000
+
+
+# ── the scoring helpers at their edges (audit mutants M1, M2, M15) ─
+
+
+def test_a_negative_weight_adds_no_confidence_to_the_bound():
+    """M1: `lower_bound_bps` clamps weight at 0. Unclamped, a negative weight
+    SUBTRACTS from the prior's sample size and widens the bound."""
+    assert rep.lower_bound_bps(7000, -6 * USDC) == rep.lower_bound_bps(7000, 0)
+
+
+def test_no_mass_at_all_smooths_to_the_prior():
+    """M2: prior mass plus evidence at or below zero has no mean to take."""
+    assert rep.smoothed_bps(0, -rep.prior_weight_stroops()) == settings.reputation_prior_bps
+    assert rep.smoothed_bps(5_000 * USDC, -rep.prior_weight_stroops() - USDC) == settings.reputation_prior_bps
+
+
+def test_smoothed_is_clamped_to_the_scale():
+    """M15: the mean is clamped into 0..10000 whatever the accumulator says."""
+    assert rep.smoothed_bps(10**18, 1) == 10_000
+    assert rep.smoothed_bps(-(10**18), 1) == 0
+
+
+# ── the prior's bound follows the config (audit mutant M8) ──────
+
+
+@pytest.mark.parametrize(
+    ("prior_bps", "prior_weight_usdc", "expected"),
+    [
+        # p - sqrt(p(1-p)/n), worked by hand rather than by the helper under
+        # test: 0.70 - sqrt(0.21/12) = 0.5677; 0.80 - sqrt(0.16/12) = 0.6845;
+        # 0.70 - sqrt(0.21/48) = 0.6339.
+        (7000, 12.0, 5677),
+        (8000, 12.0, 6845),
+        (7000, 48.0, 6339),
+    ],
+)
+def test_the_prior_bound_is_computed_from_the_config(monkeypatch, prior_bps, prior_weight_usdc, expected):
+    monkeypatch.setattr(settings, "reputation_prior_bps", prior_bps)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", prior_weight_usdc)
+    info = rep._prior_info("agt_new")
+    assert info.smoothed_bps == prior_bps
+    assert info.lower_bound_bps == expected
+    assert rep.cold_start_margin().lower_bound_bps == expected
