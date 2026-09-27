@@ -149,8 +149,9 @@ class Settings(BaseSettings):
     orchestrator_max_concurrent: int = 8
     # Ceiling on concurrent free-form decompose planning calls (each is a
     # real LLM call; the demo-kit path makes none and is never gated).
-    # Overflow queues inside decompose_timeout_seconds, so a saturated gate
-    # degrades to 504 "decompose_timeout" rather than unbounded LLM spend.
+    # Up to decompose_max_queued more wait for a slot, inside
+    # decompose_timeout_seconds (504 "decompose_timeout" if the wait runs
+    # out); past that, a request is refused at once with 503 "planner_busy".
     decompose_max_concurrent: int = 8
     # Ceiling for a single PaymentEscrow.charge, in USDC.
     max_charge_usdc: float = 100.0
