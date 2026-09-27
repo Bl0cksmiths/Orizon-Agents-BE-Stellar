@@ -853,7 +853,7 @@ async def tell_the_service(agent_id: str, service_url: str | None) -> None:
     TTL that bounds the damage.
     """
     say("  running service:")
-    url = (service_url or "").strip()
+    url = (service_url or "").strip().rstrip("/")
     if not url or not settings.api_key:
         missing = "no --service-url / " + SERVICE_URL_ENV if not url else "no API_KEY in this process"
         say(f"    NOT TOLD ({missing}),")
@@ -861,7 +861,7 @@ async def tell_the_service(agent_id: str, service_url: str | None) -> None:
         say("    Pass --service-url with API_KEY set to the deployment's key to drop it at once.")
         say()
         return
-    endpoint = f"{url.rstrip('/')}/api/stellar/reputation/{agent_id}/invalidate"
+    endpoint = f"{url}/api/stellar/reputation/{agent_id}/invalidate"
     try:
         async with httpx.AsyncClient(timeout=_INVALIDATE_TIMEOUT_SECONDS) as client:
             response = await client.post(endpoint, headers={"X-API-Key": settings.api_key})
@@ -877,7 +877,8 @@ async def tell_the_service(agent_id: str, service_url: str | None) -> None:
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
     say(f"    WARNING: could not tell {url} ({reason}).")
-    say("    The uphold above STANDS and this run's exit code does not change,")
+    say("    The uphold above STANDS and this run's exit code does not change. But the")
+    say("    service was not told,")
     _stale_score_note(agent_id)
     say(f"    To retry by hand: POST {endpoint} with the X-API-Key header.")
     say()
