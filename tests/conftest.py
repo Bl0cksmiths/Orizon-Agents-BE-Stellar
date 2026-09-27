@@ -74,6 +74,25 @@ def no_live_rpc(monkeypatch):
     monkeypatch.setattr(_stellar_client, "_server", _no_live_rpc)
 
 
+@pytest.fixture(autouse=True)
+def fresh_planner_limiter(monkeypatch):
+    """Every test starts with an empty per-client /decompose budget.
+
+    The limiter is module-global and every TestClient shares one client key,
+    so without this the suite's free-form decompose calls accumulate across
+    tests and a test run late enough is answered 429 for work it never did.
+    A test that exercises the limiter swaps in its own, which overrides this.
+    """
+    from app.routers import orchestrator as _orchestrator_router
+    from app.security import KeyedRateLimiter
+
+    monkeypatch.setattr(
+        _orchestrator_router,
+        "_planner_limiter",
+        KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute),
+    )
+
+
 @pytest.fixture()
 def client():
     with TestClient(app) as c:
