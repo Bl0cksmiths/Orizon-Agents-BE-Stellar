@@ -417,3 +417,33 @@ def test_a_re_admitted_model_step_is_flagged_degraded(seeded: object, monkeypatc
     resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_12r0")
 
     assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_12r0", True)]
+
+
+# ── the prompt is bounded ───────────────────────────────────────
+
+
+def test_the_prompt_lists_at_most_the_configured_number_of_agents(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every listed agent is prompt tokens on every planner call, and binding is
+    # open to any registrant. Past the cap, the best-scored agents that cleared
+    # the floor are listed — in registry order, like every block — and the
+    # rest get no notice: clearing the floor and not being listed is not a
+    # floor verdict.
+    monkeypatch.setattr(settings, "decompose_prompt_max_agents", 4)
+    reps = {a.id: _info(a.id, smoothed=6000 + i * 100, lower=6000) for i, a in enumerate(state.list_agents())}
+
+    assert _offered_ids(reps) == ["agt_09l5", "agt_10b6", "agt_11c0", "agt_12r0"]
+
+    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_12r0")
+
+    assert [s.agent_id for s in resp.steps] == ["agt_12r0"]  # the unlisted pick is clamped away
+    assert resp.notices == []
+
+
+def test_the_prompt_cap_never_starves_the_backstop(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A cap configured under the backstop's minimum is read as the minimum.
+    monkeypatch.setattr(settings, "decompose_prompt_max_agents", 1)
+    reps = {a.id: _info(a.id, smoothed=6000 + i * 100, lower=6000) for i, a in enumerate(state.list_agents())}
+
+    assert len(_offered_ids(reps)) == orchestrator_svc._MIN_ROUTABLE_AGENTS

@@ -503,6 +503,17 @@ def _routable_registry(
     registry = registry or _snapshot_registry()
     agents = _scored(list(registry.routable), reps)
     cleared = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
+    # Prompt cap. Every listed agent is prompt tokens on every planner call,
+    # and binding is open to any registrant, so the block is bounded: past the
+    # cap, the best-scored agents that cleared the floor are listed, by the
+    # backstop's own rule. The rest cleared the floor and were simply not
+    # listed, which is not a floor verdict, so it carries no notice — the same
+    # reasoning that keeps `not_selected_by_planner` out of the vocabulary.
+    cap = max(_MIN_ROUTABLE_AGENTS, settings.decompose_prompt_max_agents)
+    if len(cleared) > cap:
+        listed = {a.id for a in sorted(cleared, key=lambda a: _backstop_rank(a, reps))[:cap]}
+        logger.info("%d agents cleared the floor; listing the best-scored %d to the planner", len(cleared), cap)
+        cleared = [a for a in cleared if a.id in listed]
     # Starvation backstop: TOP UP the agents that cleared the floor, never
     # replace them. Re-ranking the whole dispatchable set and keeping the top
     # _MIN_ROUTABLE_AGENTS used to push agents that PASSED the floor out of the
