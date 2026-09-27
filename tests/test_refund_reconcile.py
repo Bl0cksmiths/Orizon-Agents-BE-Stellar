@@ -363,7 +363,7 @@ def test_a_failed_transfer_releases_and_a_later_uphold_can_pay(
     chain.answers[tx_hash] = an_answer(tx_hash, "FAILED", envelope=envelope)
     paid: list[Any] = []
 
-    async def _pays(buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def _pays(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         paid.append((buyer, amount_usdc))
         return {"status": "SUCCESS", "hash": "tx_second_attempt"}
 
