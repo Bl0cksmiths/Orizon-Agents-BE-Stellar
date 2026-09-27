@@ -11,6 +11,7 @@ assertions."""
 from __future__ import annotations
 
 import logging
+import re
 import traceback
 
 import pytest
@@ -618,3 +619,70 @@ def test_a_good_configuration_still_loads_through_the_same_door():
 
     assert isinstance(loaded, Settings)
     assert loaded.api_key == _USABLE_KEY
+
+
+# ── a money bound that is not a finite number bounds nothing ────
+# QA D-054. Every one of these is read by a `<` or a `>` where it guards, and
+# every comparison against NaN is false while nothing exceeds inf — so a bound
+# that is not a finite number fails OPEN, silently. The refusal goes through
+# the same door as every other one, so it is held to the same rule: name the
+# variable, never the value.
+#
+# Set through the ENVIRONMENT, as a deploy sets them, and read from a table
+# rather than written as literals in a call: a traceback renders the source
+# line of every frame, and a literal there would be caught by the leak check
+# on the test's text rather than on the exception's. Each row carries the
+# pattern that would mean its value was printed — word-bounded, because "inf"
+# and "nan" are also fragments of ordinary English.
+
+_NOT_A_NUMBER = r"(?i)\bnan\b"
+_UNBOUNDED = r"(?i)\binf\b"
+_ZERO = r"(?<![\w.])[-+]?0(?:\.0+)?(?![\w.])"
+
+MONEY_BOUND_REFUSALS = [
+    ("MAX_REFUND_USDC", "nan", _NOT_A_NUMBER),
+    ("MAX_REFUND_USDC", "inf", _UNBOUNDED),
+    ("MAX_REFUND_USDC", "-inf", _UNBOUNDED),
+    ("MAX_REFUND_USDC", "0", _ZERO),
+    ("MAX_REFUND_USDC", "-7.3141", r"7\.3141"),
+]
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "leak"),
+    MONEY_BOUND_REFUSALS,
+    ids=[f"{variable}={value}" for variable, value, _ in MONEY_BOUND_REFUSALS],
+)
+def test_an_unusable_money_bound_refuses_to_boot_and_names_only_its_variable(monkeypatch, variable, value, leak):
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ConfigurationError) as info:
+        _load_settings(_env_file=None)
+
+    message = str(info.value)
+    assert "Refusing to boot" in message
+    assert f"{variable} is not a finite" in message
+    printed = _formatted(info.value)
+    assert not re.search(leak, printed), f"{variable}'s refused value reached the log:\n{printed}"
+
+
+MONEY_BOUNDS_THAT_BOOT = [
+    ("MAX_REFUND_USDC", "0.25", "max_refund_usdc", 0.25),
+    ("MAX_REFUND_USDC", "1e-7", "max_refund_usdc", 1e-7),
+]
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "field", "expected"),
+    MONEY_BOUNDS_THAT_BOOT,
+    ids=[f"{variable}={value}" for variable, value, _, _ in MONEY_BOUNDS_THAT_BOOT],
+)
+def test_a_usable_money_bound_boots(monkeypatch, variable, value, field, expected):
+    monkeypatch.setenv(variable, value)
+
+    assert getattr(_load_settings(_env_file=None), field) == expected
+
+
+def test_the_money_bound_defaults_boot():
+    s = _settings()
+    assert s.max_refund_usdc == 1.0
