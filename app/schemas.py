@@ -170,6 +170,19 @@ class StoredPlan(BaseModel):
     # and without a clock a plan stayed executable until 200 newer ones pushed
     # it out of the store — hours, on a quiet deployment.
     created_at: float = Field(default_factory=time.time)
+    # What the buyer was TOLD when they authorised this plan — the same four
+    # plan-level facts `DecomposeResponse` carries, kept so `/execute` and any
+    # later read can tell a plan judged on estimates, served as a fallback or
+    # built with the floor relaxed from one that was not. Dropping them left
+    # the stored plan claiming nothing about how it was built. Defaults are the
+    # "nothing to report" values, so a plan built without them validates.
+    notices: list[PlanFloorNotice] = Field(default_factory=list)
+    # None, not DecomposeResponse's 0: a stored plan that does not record the
+    # floor it was judged against has no floor to report, and 0 would read as
+    # "judged against a floor of zero".
+    floor_bps: int | None = None
+    reputation_degraded: bool = False
+    planner_fallback: bool = False
 
 
 # Why the floor acted on an agent — a CLOSED set, because the plan card renders
