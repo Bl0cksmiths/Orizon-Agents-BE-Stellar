@@ -27,6 +27,7 @@ from functools import lru_cache
 from typing import Any
 
 from stellar_sdk import (
+    Account,
     Address,
     Durability,
     Keypair,
@@ -221,11 +222,25 @@ def simulate_read(
     function_name: str,
     args: list[Any] | None = None,
     source: str | None = None,
+    *,
+    load_source: bool = True,
 ) -> Any:
     """
     Simulate a view-style call — no signature, no fees, no state change.
 
     `args` must be stellar_sdk.scval values (built via `scval.to_*`).
+
+    `load_source=False` skips the `load_account` round trip and builds the
+    envelope from the source at sequence 0. simulateTransaction never checks
+    the envelope's sequence number or the source's existence for a read — it
+    only executes the invocation against current ledger state — so for a pure
+    view call that hop is a whole RPC round trip spent learning a number the
+    simulation ignores. Proven read-only on testnet (ReputationLedger.rep_state
+    for five agents, 2026-09-27): the admin at its loaded sequence, the admin
+    at sequence 0 and a freshly generated, never-funded account at sequence 0
+    returned byte-identical state, and the skipped hop cost 0.28–0.82 s. Opt-in
+    rather than the default, because it is only sound for a call whose result
+    is read and thrown away — never for an envelope that is signed and sent.
     """
     server = _server()
     src_addr = source or settings.stellar_admin_address
@@ -238,10 +253,13 @@ def simulate_read(
     # simulate_transaction.
     with _rpc_span("read", f"{_contract_label(contract_id)}.{function_name}", slow_ms=SLOW_READ_MS) as span:
         span["src"] = _short(src_addr)
-        span["stage"] = "load_account"
-        hop = time.monotonic()
-        account = server.load_account(src_addr)
-        span["load_ms"] = f"{_ms_since(hop):.0f}"
+        if load_source:
+            span["stage"] = "load_account"
+            hop = time.monotonic()
+            account = server.load_account(src_addr)
+            span["load_ms"] = f"{_ms_since(hop):.0f}"
+        else:
+            account = Account(src_addr, 0)
 
         tx = (
             TransactionBuilder(
