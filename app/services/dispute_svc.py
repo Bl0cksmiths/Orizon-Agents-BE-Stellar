@@ -888,9 +888,14 @@ def _tell_observer(observer: RatingObserver, dispute: DisputeRecord, outcome: di
         observer(outcome)
     except Exception:
         logger.exception(
-            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s",
+            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s"
+            " job=%s agent=%s credited_usdc=%s tx=%s",
             dispute.id,
             outcome.status,
+            dispute.job_id_hex,
+            dispute.agent_id,
+            "-" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f}",
+            outcome.tx_hash or "-",
         )
 
 
