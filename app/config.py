@@ -613,6 +613,59 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _reputation_settings_are_in_range(self) -> "Settings":
+        """Refuse a reputation setting the scoring cannot use (audit 3, finding 5).
+
+        Only the batch timeout was ever checked. Every other reputation number
+        was taken as typed, and pydantic parses `nan`, `inf` and any sign for a
+        float field, so a typo did not fail — it changed the scoring, silently:
+
+          * `REPUTATION_PRIOR_BPS` — within 0..10000, the rating scale. Outside
+            it, a prior-only agent was served a smoothed score of 20000 or -100
+            (`_prior_info` does not clamp).
+          * `REPUTATION_FLOOR_BPS` — within 0..10000. A floor below 0 or above
+            the scale admits or refuses every agent without looking.
+          * `REPUTATION_PRIOR_WEIGHT_USDC` — finite and above zero. NaN made
+            every read raise and took lifespan down with an opaque "cannot
+            convert float NaN to integer"; zero or below leaves the prior no
+            mass, scores every newcomer's bound at 0, and excludes them all.
+          * `REPUTATION_MAX_RATING_WEIGHT_USDC` — finite and above zero. NaN
+            compares false, so it DISABLED the cap: a 50,000 USDC step weighed
+            50,000 USDC.
+          * `REPUTATION_READ_TTL_SECONDS` — finite and above zero. inf meant a
+            read was never repeated; zero or below meant nothing was cached.
+          * `REPUTATION_STALE_GRACE_SECONDS` — finite and not below zero (0
+            turns stale serving off). inf would serve a read of any age.
+
+        Raised, like the money bounds, because what it prevents is silent; and
+        the message names each variable and its rule and NEVER the value.
+        """
+        faults: list[str] = []
+        for name, bps in (
+            ("REPUTATION_PRIOR_BPS", self.reputation_prior_bps),
+            ("REPUTATION_FLOOR_BPS", self.reputation_floor_bps),
+        ):
+            if not 0 <= bps <= 10_000:
+                faults.append(f"{name} is not a whole number of basis points from 0 to 10000")
+        for name, value, unit in (
+            ("REPUTATION_PRIOR_WEIGHT_USDC", self.reputation_prior_weight_usdc, "USDC"),
+            ("REPUTATION_MAX_RATING_WEIGHT_USDC", self.reputation_max_rating_weight_usdc, "USDC"),
+            ("REPUTATION_READ_TTL_SECONDS", self.reputation_read_ttl_seconds, "seconds"),
+        ):
+            if not (math.isfinite(value) and value > 0):
+                faults.append(f"{name} is not a finite number of {unit} above zero")
+        grace = self.reputation_stale_grace_seconds
+        if not (math.isfinite(grace) and grace >= 0):
+            faults.append("REPUTATION_STALE_GRACE_SECONDS is not a finite number of seconds, zero or above")
+        if faults:
+            raise ValueError(
+                "A reputation setting cannot be used as configured: " + "; and ".join(faults) + ". Set each "
+                "named variable (in the Render dashboard for the deployed service) to a plain number within the "
+                "rule stated, or unset it to take the default."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _reputation_read_has_a_real_bound(self) -> "Settings":
         """Fail fast when the batched reputation read has no usable deadline.
 
