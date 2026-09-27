@@ -583,7 +583,7 @@ def test_a_dispute_signature_is_refused_by_the_grant_route(client, settled):
         "/api/disputes/read-grant", json={"task_id": TASK, "nonce": challenge["nonce"], "signature_b64": dispute_sig}
     )
 
-    assert r.status_code == 403, r.text
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "not_the_payer"), r.text
 
 
 def test_a_read_signature_is_not_a_dispute_proof(empty_table):
