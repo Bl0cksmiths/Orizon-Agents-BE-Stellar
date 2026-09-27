@@ -431,6 +431,23 @@ def _contract_error_code(simulation_error: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+@contextmanager
+def _before_send(stage: str) -> Iterator[None]:
+    """Mark a stage of the submit path that runs before anything is sent.
+
+    Whatever it raises becomes a `NotSubmittedError` naming the stage, so a
+    caller can tell "refused before it existed" from "lost after it was sent"
+    by type rather than by guessing. A `NotSubmittedError` (a `ContractError`
+    included) passes through untouched.
+    """
+    try:
+        yield
+    except NotSubmittedError:
+        raise
+    except Exception as e:
+        raise NotSubmittedError(f"{stage} failed: {e}") from e
+
+
 def _send_server_signed(
     contract_id: str,
     function_name: str,
@@ -443,33 +460,41 @@ def _send_server_signed(
 
     with _rpc_span("submit", label, slow_ms=SLOW_SUBMIT_MS, notable=True) as span:
         span["signer"] = _short(kp.public_key)
+        # Everything up to the send is `_before_send`: a failure there means
+        # no transaction exists anywhere but this process.
         span["stage"] = "load_account"
-        account = server.load_account(kp.public_key)
+        with _before_send("load_account"):
+            account = server.load_account(kp.public_key)
 
-        tx = (
-            TransactionBuilder(
-                source_account=account,
-                network_passphrase=network_passphrase(),
-                base_fee=100,
+        span["stage"] = "build"
+        with _before_send("build"):
+            tx = (
+                TransactionBuilder(
+                    source_account=account,
+                    network_passphrase=network_passphrase(),
+                    base_fee=100,
+                )
+                .append_invoke_contract_function_op(
+                    contract_id=contract_id,
+                    function_name=function_name,
+                    parameters=args,
+                )
+                .set_timeout(30)
+                .build()
             )
-            .append_invoke_contract_function_op(
-                contract_id=contract_id,
-                function_name=function_name,
-                parameters=args,
-            )
-            .set_timeout(30)
-            .build()
-        )
         span["stage"] = "prepare"
-        try:
-            tx = server.prepare_transaction(tx)
-        except PrepareTransactionException as e:
-            detail = e.simulate_transaction_response.error
-            code = _contract_error_code(detail)
-            if code is not None:
-                raise ContractError(f"prepare failed: {detail}", code) from e
-            raise RuntimeError(f"prepare failed: {detail}") from e
-        tx.sign(kp)
+        with _before_send("prepare"):
+            try:
+                tx = server.prepare_transaction(tx)
+            except PrepareTransactionException as e:
+                detail = e.simulate_transaction_response.error
+                code = _contract_error_code(detail)
+                if code is not None:
+                    raise ContractError(f"prepare failed: {detail}", code) from e
+                raise NotSubmittedError(f"prepare failed: {detail}") from e
+        span["stage"] = "sign"
+        with _before_send("sign"):
+            tx.sign(kp)
 
         span["stage"] = "send"
         sent = server.send_transaction(tx)
