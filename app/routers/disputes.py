@@ -647,7 +647,10 @@ async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> Disp
 _READ_CHALLENGE_RESPONSES: dict[int | str, dict[str, object]] = {
     404: {
         "model": ErrorEnvelope,
-        "description": "`unknown_task`, or `no_settlement` — the task never settled, so there is no payer to prove.",
+        "description": (
+            "`unknown_task`, or `no_settlement` — the task never settled, so there is no payer to prove; "
+            "or `no_disputes` — it settled, but nothing was disputed, so there is nothing to read."
+        ),
     },
     503: {
         "model": ErrorEnvelope,
@@ -681,7 +684,8 @@ async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadCh
     """The first half of D-067's fix: a nonce for the payer to sign.
 
     Public, like `/disputes/challenge`, and safe for the same reasons: it mints
-    only for a task that has a settlement, into the `dispute_read` budget, and
+    only for a task that has a settlement AND at least one dispute, into the
+    `dispute_read` budget, and
     a live challenge comes back as is, so a flood cannot cancel the one the
     payer is signing. The service decides; this renders.
     """
