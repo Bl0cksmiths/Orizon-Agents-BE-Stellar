@@ -968,9 +968,9 @@ async def _rate_credited(
     if gap is not None:
         # The presence-only gate the settler's own ratings pass
         # (`execution_svc._submit_ratings`). Without it a deployment that
-        # cannot sign a rating still submits, the submit raises, and the
-        # outcome is a TIMEOUT — "unconfirmed" on every uphold, forever, when
-        # the truth is "not configured". So nothing is submitted and the line
+        # cannot sign a rating still submits and is refused before the send —
+        # a FAILED on every uphold, whose reason names the symptom rather
+        # than the setting behind it. So nothing is submitted and the line
         # names the setting. ERROR per dispute rather than the settler's
         # hourly note: an upheld dispute whose agent is never rated breaks the
         # disclosed model's one promise about the agent — that its
@@ -988,7 +988,8 @@ async def _rate_credited(
         outcome = await dispute_rating.submit_dispute_rating(credited, settlement)
     except Exception:
         # `submit_dispute_rating` turns every answer the CHAIN can give into
-        # an outcome — a submit that raised included, as a TIMEOUT — and
+        # an outcome — a submit that raised included: FAILED when the client
+        # says nothing was sent, TIMEOUT when it may have been — and
         # raises only when the rating cannot be formed from this dispute's
         # records. Those changed under a paid dispute, and no retry mends
         # that, so this says so rather than inviting one. Answered with the
