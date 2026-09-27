@@ -455,3 +455,14 @@ def test_a_repeated_step_is_kept_once(seeded: object, monkeypatch: pytest.Monkey
         ("agt_12r0", "review it"),
         ("agt_11c0", "write the tests"),
     ]
+
+
+def test_a_model_eta_is_clamped_to_the_plan_card_range(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model's ETA is a guess; the card and the plan total are held to
+    # 0.3–3.0 s a step whatever it guessed.
+    planner = _planner_returning(("agt_11c0", "build", 0.01), ("agt_12r0", "review", 99.0), ("agt_01h8", "copy", 1.5))
+
+    resp = _decompose(monkeypatch, _clearing_reps(), planner)
+
+    assert [s.est_eta_seconds for s in resp.steps] == [0.3, 3.0, 1.5]
+    assert resp.total_eta == pytest.approx(4.8)
