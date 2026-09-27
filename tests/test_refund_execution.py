@@ -424,3 +424,53 @@ def test_cancellation_mid_transfer_is_logged_and_reraised(monkeypatch, caplog) -
         and "0.0500000" in m
         for m in msgs
     ), f"a cancelled credit was never logged with its context: {msgs}"
+
+
+# ── a ceiling that is no ceiling refuses, it does not compare (QA D-054) ──
+# `Settings()` refuses to boot on these, so they are injected straight onto the
+# live settings object — the way a test, a script or a later assignment reaches
+# the refund path without passing through that validator. NaN and inf wave
+# every amount under a `>`; zero and below would call every credit "over the
+# cap" when the fault is the setting. All four must refuse as unusable.
+
+UNUSABLE_CAPS = [float("nan"), float("inf"), float("-inf"), 0.0, -1.0]
+UNUSABLE_CAP_IDS = ["nan", "inf", "-inf", "zero", "negative"]
+
+# The reproduction QA ran: a 50 USDC step, promised, priced and settled in full.
+FIFTY = (SettlementStep(step_index=0, agent_id="agt_writer", agent_name="Copywriter", price_usdc=50.0, delivered=True),)
+
+
+@pytest.mark.parametrize("cap", UNUSABLE_CAPS, ids=UNUSABLE_CAP_IDS)
+def test_an_unusable_ceiling_refuses_the_credit_it_cannot_bound(monkeypatch, caplog, cap: float) -> None:
+    monkeypatch.setattr(settings, "max_refund_usdc", cap)
+    _no_signing(monkeypatch)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        with pytest.raises(RefundRefused) as exc:
+            refund_svc.creditable_for(_settlement(settled_usdc=50.0, steps=FIFTY), _dispute(creditable_usdc=50.0))
+
+    assert exc.value.code == "refund_amount_invalid"
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert any(
+        "MAX_REFUND_USDC" in m and "not a finite amount above zero" in m and "dsp_deadbeefdeadbeef" in m and JOB in m
+        for m in msgs
+    ), f"the unusable ceiling was not named in the refusal: {msgs}"
+
+
+@pytest.mark.parametrize("cap", UNUSABLE_CAPS, ids=UNUSABLE_CAP_IDS)
+def test_an_unusable_ceiling_never_lets_a_hand_rolled_credit_be_signed(monkeypatch, cap: float) -> None:
+    """The transfer wrapper's own gate, and the one that decides whether money moves.
+
+    A RECORDING transfer rather than `_no_signing`'s exploding one, and that is
+    the point: `credit_refund` catches whatever the transfer raises and calls
+    it TIMEOUT, so an exploding stand-in would be swallowed and prove nothing.
+    What proves nothing was signed is that the transfer was never called.
+    """
+    calls = _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": "refund_tx"})
+    monkeypatch.setattr(settings, "max_refund_usdc", cap)
+
+    with pytest.raises(RefundRefused) as exc:
+        asyncio.run(refund_svc.credit_refund(_dispute(creditable_usdc=50.0), 50.0))
+
+    assert exc.value.code == "refund_amount_invalid"
+    assert calls == [], "a credit was signed against a ceiling that bounds nothing"
