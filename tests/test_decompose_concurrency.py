@@ -140,6 +140,31 @@ def test_a_waiter_that_times_out_gives_its_place_back(monkeypatch: pytest.Monkey
     asyncio.run(scenario())
 
 
+def test_a_waiter_cancelled_after_being_handed_the_slot_passes_it_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The race a slot can leak through: a release hands the slot to a queued
+    # caller, and that caller is cancelled before it gets to run. It owns a
+    # slot it will never use, so it must hand it on, or the gate stays one
+    # short for the life of the process.
+    monkeypatch.setattr(settings, "decompose_max_concurrent", 1)
+
+    async def scenario() -> None:
+        gate = orchestrator_svc._decompose_gate()
+        entered: list[int] = []
+        async with gate.slot(1):
+            waiter = asyncio.create_task(_hold(gate, asyncio.Event(), entered))
+            await _until(lambda: gate.waiting == 1)
+        # The slot was handed over on exit, synchronously; cancel before the
+        # waiter ever runs.
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert entered == []
+        assert (gate.in_flight, gate.waiting) == (0, 0)
+        assert not gate.locked()
+
+    asyncio.run(scenario())
+
+
 def test_the_gate_survives_a_second_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     # An asyncio.Semaphore binds to the first loop a waiter contends on and
     # raises in the next one; the gate is module-global, so every test that
