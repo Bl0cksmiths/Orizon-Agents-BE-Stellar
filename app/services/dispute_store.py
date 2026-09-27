@@ -77,7 +77,15 @@ DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
 # for a step the settlement actually has (`dispute_svc` refuses any other).
 # Disputes filed against a job with no settlement held — which the service
 # never does — are bounded by the same number of jobs.
+#
+# The cap is soft in one direction only: a job with an unfinished dispute is
+# never shed, and if every job over the cap has one the store grows and logs
+# at ERROR rather than forget what is still owed.
 _MAX_IN_MEMORY = 500
+
+# The dispute states that still owe something, and so pin their settlement in
+# the in-memory store past its cap (see `InMemoryDisputeStore._is_pinned`).
+_UNFINISHED: frozenset[DisputeStatus] = frozenset({"open", "upheld", "crediting"})
 
 
 # Pool sizing for the Postgres store, taken from binding_store for the reasons
@@ -1021,7 +1029,8 @@ class InMemoryDisputeStore:
     What it drops is a whole job: a settlement and every dispute filed under
     it, in one operation. A dispute is never dropped on its own while its
     settlement is kept, so a step that was disputed stays disputed for as long
-    as it can be disputed at all.
+    as it can be disputed at all. And a job is never dropped while one of its
+    disputes is unfinished (`_is_pinned`).
     """
 
     def __init__(self) -> None:
@@ -1059,14 +1068,50 @@ class InMemoryDisputeStore:
             dropped,
         )
 
+    def _is_pinned(self, job_id_hex: str) -> bool:
+        """Whether this job still carries something the platform owes.
+
+        An `open` dispute is owed an adjudication, an `upheld` one a payment,
+        and a `crediting` one a reconciliation — a transfer whose outcome may
+        not be known yet. Dropping any of them would lose an obligation, not
+        just history, so a job holding one is never shed. `credited` and
+        `rejected` are finished and pin nothing.
+        """
+        return any(
+            (dispute := self._disputes.get(dispute_id)) is not None and dispute.status in _UNFINISHED
+            for dispute_id in self._disputes_by_job.get(job_id_hex, {}).values()
+        )
+
+    def _shed_from(self, jobs: list[str], what: str) -> int:
+        """Drop the oldest unpinned of `jobs` until at most the cap remain.
+
+        Returns how far over the cap `jobs` still are: nonzero only when every
+        job that could have gone is pinned, and the store grows rather than
+        forget an obligation.
+        """
+        over = len(jobs) - _MAX_IN_MEMORY
+        if over <= 0:
+            return 0
+        for job_id_hex in [job for job in jobs if not self._is_pinned(job)][:over]:
+            self._settlements.pop(job_id_hex, None)
+            self._drop_job(job_id_hex, what)
+            over -= 1
+        return over
+
     def _shed(self) -> None:
-        """Bring the store back within its cap, oldest job first."""
-        while len(self._settlements) > _MAX_IN_MEMORY:
-            job_id_hex, _ = self._settlements.popitem(last=False)
-            self._drop_job(job_id_hex, "settlement")
-        unsettled = [job for job in self._disputes_by_job if job not in self._settlements]
-        for job_id_hex in unsettled[: max(0, len(unsettled) - _MAX_IN_MEMORY)]:
-            self._drop_job(job_id_hex, "unsettled job")
+        """Bring the store back within its cap, oldest unpinned job first."""
+        still_over = self._shed_from(list(self._settlements), "settlement")
+        still_over += self._shed_from(
+            [job for job in self._disputes_by_job if job not in self._settlements], "unsettled job"
+        )
+        if still_over:
+            logger.error(
+                "in-memory dispute store is %d over its cap of %d: every job it could drop has an unfinished"
+                " dispute (open, upheld or crediting) — an adjudication, payment or reconciliation still owed —"
+                " so it is growing rather than forget one; resolve them, and set DATABASE_URL to persist disputes",
+                still_over,
+                _MAX_IN_MEMORY,
+            )
 
     async def record_settlement(self, record: SettlementRecord) -> None:
         self._settlements[record.job_id_hex] = record

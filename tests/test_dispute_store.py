@@ -553,6 +553,7 @@ def test_a_dropped_dispute_is_announced_too(monkeypatch: pytest.MonkeyPatch, cap
             for n in range(3):
                 await store.record_settlement(a_settlement(job_id_hex=f"{n:064x}"))
                 await store.open_dispute(a_dispute(id=f"dsp_{n}", job_id_hex=f"{n:064x}"))
+                await store.append_status(f"dsp_{n}", "rejected", note=NOTE)
 
         asyncio.run(go())
 

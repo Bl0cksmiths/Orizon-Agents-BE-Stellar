@@ -116,7 +116,8 @@ def test_a_paid_step_can_never_be_disputed_again_while_its_settlement_is_held(
 
 def test_settlements_leave_with_their_disputes_and_never_without_them(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pushed past its cap, the store drops the oldest settlement and every
-    dispute under it together, and the dropped step cannot be disputed anew."""
+    (finished) dispute under it together, and the dropped step cannot be
+    disputed anew."""
     monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
     store = InMemoryDisputeStore()
 
@@ -125,6 +126,7 @@ def test_settlements_leave_with_their_disputes_and_never_without_them(monkeypatc
             await store.record_settlement(_settlement(n))
             for step in range(3):
                 await store.open_dispute(_dispute(f"dsp_{n}_{step}", n, step))
+                await store.append_status(f"dsp_{n}_{step}", "rejected", note="delivered as asked")
 
     asyncio.run(fill())
 
@@ -141,7 +143,8 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
 ) -> None:
     """The invariant as a property: after any sequence of settlements, disputes
     and transitions pushed well past the caps, no retained settlement is missing
-    a dispute that was ever opened on it — and memory stays bounded."""
+    a dispute that was ever opened on it — and memory stays bounded by what is
+    still owed."""
     cap = 4
     monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", cap)
     rng = random.Random(seed)
@@ -172,8 +175,11 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
                     await store.append_status(target.id, "credited", refund_tx=f"tx_{op}", credited_usdc=1.0)
 
             await _assert_retained_settlements_keep_their_disputes(store, ledger)
-            assert len(store._settlements) <= cap
-            assert len(store._disputes) <= 2 * cap * len(STEPS)
+            if action < 0.85:
+                # Straight after an insertion the store is within its cap,
+                # unless everything it could have dropped still owes something.
+                assert len(store._settlements) <= cap or all(store._is_pinned(j) for j in store._settlements)
+            assert len(store._disputes) <= len(store._disputes_by_job) * len(STEPS)
 
     asyncio.run(run())
 
@@ -187,6 +193,7 @@ def test_a_dispute_on_a_job_with_no_settlement_is_bounded_too(monkeypatch: pytes
     async def fill() -> None:
         for n in range(5):
             await store.open_dispute(_dispute(f"dsp_{n}", n, 0))
+            await store.append_status(f"dsp_{n}", "rejected", note="no such workflow")
 
     asyncio.run(fill())
 
@@ -205,6 +212,7 @@ def test_the_order_disputes_are_opened_in_does_not_decide_what_is_kept(monkeypat
         await store.record_settlement(_settlement(0))
         await store.record_settlement(dataclasses.replace(_settlement(1), task_id="task_0"))
         await store.open_dispute(_dispute("dsp_0", 0, 0))
+        await store.append_status("dsp_0", "credited", refund_tx="tx_refund", credited_usdc=1.0)
         await store.record_settlement(_settlement(2))
 
     asyncio.run(fill())
