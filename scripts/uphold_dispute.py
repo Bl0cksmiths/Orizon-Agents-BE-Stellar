@@ -168,6 +168,7 @@ try:
         SettlementStep,
         get_dispute_store,
     )
+    from app.stellar.client import explorer_network  # noqa: E402
 except ValidationError:
     # The refund switch with no `API_KEY` behind it refuses the whole boot, and
     # that refusal arrives here, as an import error, before any of this file's
@@ -310,13 +311,15 @@ def say(line: str = "") -> None:
 
 
 def expert_url(kind: str, identifier: str) -> str:
-    """A Stellar Expert link on the network this process is configured for.
+    """A Stellar Expert link on the network this process SIGNS for.
 
-    Horizon and Stellar Expert say `public` where our config says `mainnet`, so
-    the mapping is made here rather than assumed at each call site.
+    The segment is `stellar.client.explorer_network`'s, which reads the network
+    PASSPHRASE (`Settings.is_mainnet`) rather than STELLAR_NETWORK (D-074). This
+    used to read the label, so `pubnet` — or `testnet` over the mainnet
+    passphrase — sent the operator to the TESTNET explorer to look for a
+    mainnet credit, and a real transfer read as one that never landed.
     """
-    segment = "public" if settings.stellar_network.strip().lower() in {"mainnet", "public"} else "testnet"
-    return f"https://stellar.expert/explorer/{segment}/{kind}/{identifier}"
+    return f"https://stellar.expert/explorer/{explorer_network()}/{kind}/{identifier}"
 
 
 def refuse(code: int, name: str, *lines: str) -> int:

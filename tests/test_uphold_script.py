@@ -65,6 +65,7 @@ CREDITABLE_USDC = 0.07
 REFUND_TX = "b7c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f809"
 LEDGER = "C" + "LEDGER7Q" * 6 + "ABCDEFG"
 RATING_TX = "d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3"
+TESTNET_PASSPHRASE = "Test SDF Network ; September 2015"
 
 
 class _Refused(Exception):
@@ -135,15 +136,17 @@ def _fresh_store():
     runs the suite must not turn one of these into a live query — the hermetic
     fixture in conftest does not clear that one.
     """
-    saved = settings.database_url, settings.stellar_network
+    saved = settings.database_url, settings.stellar_network, settings.stellar_network_passphrase
     settings.database_url = ""
     # Pinned so the explorer URLs asserted below are the ones a testnet operator
-    # sees, rather than whatever network a developer's .env happens to name.
+    # sees, rather than whatever network a developer's .env happens to name —
+    # the passphrase too, since that is what the links are keyed on (D-074).
     settings.stellar_network = "testnet"
+    settings.stellar_network_passphrase = TESTNET_PASSPHRASE
     dispute_store._store = None
     yield
     dispute_store._store = None
-    settings.database_url, settings.stellar_network = saved
+    settings.database_url, settings.stellar_network, settings.stellar_network_passphrase = saved
 
 
 @pytest.fixture(autouse=True)
@@ -809,6 +812,27 @@ def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
     assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
     assert f"{CREDITABLE_USDC:.7f} USDC  ->  {PAYER}" in out
     assert f"not clawed back from {AGENT}" in out
+
+
+@pytest.mark.parametrize("label", ["pubnet", "testnet"])
+def test_a_mainnet_passphrase_links_the_public_explorer_whatever_the_label(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam, label: str
+) -> None:
+    """D-074: the link an operator follows to check who gets paid used to read
+    STELLAR_NETWORK, so `pubnet` — or `testnet` over the mainnet passphrase —
+    sent them to the TESTNET explorer to look for a mainnet account. The
+    passphrase is what the settler signs under, so it picks the explorer."""
+    from app.config import MAINNET_PASSPHRASE
+
+    forbid_uphold(monkeypatch)
+    monkeypatch.setattr(settings, "stellar_network", label)
+    monkeypatch.setattr(settings, "stellar_network_passphrase", MAINNET_PASSPHRASE)
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert f"https://stellar.expert/explorer/public/account/{PAYER}" in out
+    assert "/explorer/testnet/" not in out
 
 
 def test_the_preview_marks_the_bound_that_actually_binds(
