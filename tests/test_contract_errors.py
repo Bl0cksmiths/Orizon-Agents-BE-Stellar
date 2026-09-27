@@ -9,13 +9,15 @@ is what it must never repeat. Nothing here touches the network.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 from stellar_sdk import Account, Keypair, StrKey
 from stellar_sdk.exceptions import PrepareTransactionException
-from stellar_sdk.soroban_rpc import SimulateTransactionResponse
+from stellar_sdk.soroban_rpc import GetTransactionStatus, SendTransactionStatus, SimulateTransactionResponse
 
+from app.config import settings
 from app.stellar import client as sc
 
 # Verbatim head of a real testnet simulation of ReputationLedger.submit from a
@@ -112,3 +114,218 @@ def test_any_other_simulation_failure_stays_a_plain_runtime_error(monkeypatch):
     with pytest.raises(RuntimeError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
     assert not isinstance(caught.value, sc.ContractError)
+
+
+# ── before the send, or after it: NotSubmittedError (D-076) ─────
+#
+# Every raise on the backend-signed submit path is on one side of
+# `sendTransaction` or the other. Before it, no transaction exists anywhere
+# but this process, so nothing can land later: that is `NotSubmittedError`.
+# After it — a send that raised, a DUPLICATE, a poll that lost track — the
+# transaction may be on its way, and must never be reported as refused.
+
+HOST_SIMULATION_ERROR = (
+    "HostError: Error(Value, InvalidInput)\n\nEvent log (newest first):\n   0: [Diagnostic Event] "
+    'topics:[error, Error(Value, InvalidInput)], data:"byte is not allowed in Symbol", 45'
+)
+PENDING_HASH = "ab" * 32
+
+
+class _Sent:
+    """What `send_transaction` answers: a status, a hash, an error XDR."""
+
+    def __init__(self, status: SendTransactionStatus) -> None:
+        self.status = status
+        self.hash = PENDING_HASH
+        self.error_result_xdr = "AAAAAAAAAGT////7AAAAAA==" if status != SendTransactionStatus.PENDING else None
+
+
+class _Unconfirmed:
+    status = GetTransactionStatus.NOT_FOUND
+
+
+class _FakeRpc:
+    """A Soroban RPC that fails at exactly one stage, and records whether the
+    transaction was ever sent."""
+
+    def __init__(self, *, fail_at: str | None = None, send_status: SendTransactionStatus | None = None) -> None:
+        self.fail_at = fail_at
+        self.send_status = send_status or SendTransactionStatus.PENDING
+        self.sent = False
+        self.prepared = False
+
+    def load_account(self, account_id: str) -> Account:
+        if self.fail_at == "load_account":
+            raise ConnectionError("horizon/rpc unreachable while loading the signer")
+        return Account(account_id, 1)
+
+    def prepare_transaction(self, tx: Any) -> Any:
+        self.prepared = True
+        if self.fail_at == "simulate":
+            response = SimulateTransactionResponse.model_validate({"error": HOST_SIMULATION_ERROR, "latestLedger": 1})
+            raise PrepareTransactionException("simulation failed", response)
+        if self.fail_at == "prepare_transport":
+            raise ConnectionError("rpc unreachable during simulation")
+        return tx
+
+    def send_transaction(self, tx: Any) -> Any:
+        self.sent = True
+        if self.fail_at == "send_raises":
+            raise ConnectionError("the connection dropped after the send")
+        return _Sent(self.send_status)
+
+    def get_transaction(self, tx_hash: str) -> Any:
+        return _Unconfirmed()
+
+
+def _rpc(monkeypatch, rpc: _FakeRpc, *, keypair: Keypair | None = None) -> _FakeRpc:
+    monkeypatch.setattr(sc, "_signer_keypair", lambda: keypair or Keypair.from_raw_ed25519_seed(b"\x03" * 32))
+    monkeypatch.setattr(sc, "_server", lambda *, submit=False: rpc)
+    return rpc
+
+
+def test_a_host_simulation_failure_is_not_submitted(monkeypatch):
+    """The live D-076 refusal: the host, not the contract, rejects the call at
+    simulation. Nothing was signed or sent, and the type says so."""
+    rpc = _rpc(monkeypatch, _FakeRpc(fail_at="simulate"))
+    with pytest.raises(sc.NotSubmittedError) as caught:
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    # Raised as itself, not rewrapped by the stage guard around it: the head
+    # is the host's error, once, which is what an operator reads.
+    assert str(caught.value) == f"prepare failed: {HOST_SIMULATION_ERROR}"
+    assert rpc.prepared and not rpc.sent
+
+
+def test_a_contract_rejection_is_not_submitted_either(monkeypatch):
+    _reject_with(monkeypatch, UNAUTHORIZED_SIMULATION_ERROR)
+    with pytest.raises(sc.NotSubmittedError):
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "stage"),
+    [("load_account", "load_account failed"), ("prepare_transport", "prepare failed")],
+)
+def test_an_rpc_failure_before_the_send_is_not_submitted(monkeypatch, fail_at, stage):
+    rpc = _rpc(monkeypatch, _FakeRpc(fail_at=fail_at))
+    with pytest.raises(sc.NotSubmittedError, match=stage):
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    assert not rpc.sent
+
+
+def test_a_build_that_fails_is_not_submitted(monkeypatch):
+    """A contract id that is not one fails the build, before any RPC call
+    that could carry a transaction."""
+    rpc = _rpc(monkeypatch, _FakeRpc())
+    with pytest.raises(sc.NotSubmittedError, match="build failed"):
+        sc._send_server_signed("CFAKELEDGER", "submit", [])
+    assert not rpc.prepared and not rpc.sent
+
+
+def test_a_signature_that_fails_is_not_submitted(monkeypatch):
+    """A keypair with no secret cannot sign: the envelope never leaves."""
+    public_only = Keypair.from_public_key(Keypair.random().public_key)
+    rpc = _rpc(monkeypatch, _FakeRpc(), keypair=public_only)
+    with pytest.raises(sc.NotSubmittedError, match="sign failed"):
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    assert rpc.prepared and not rpc.sent
+
+
+@pytest.mark.parametrize("key", ["", "SNOTAKEY", "abandon " * 11 + "zebra"])
+def test_a_signing_key_that_will_not_parse_is_not_submitted(monkeypatch, key):
+    monkeypatch.setattr(settings, "stellar_signing_key", key)
+    sc._signer_keypair.cache_clear()
+    try:
+        with pytest.raises(sc.NotSubmittedError, match="STELLAR_SIGNING_KEY"):
+            sc._signer_keypair()
+    finally:
+        sc._signer_keypair.cache_clear()
+
+
+def test_rating_arguments_that_will_not_encode_are_not_submitted(monkeypatch):
+    monkeypatch.setattr(sc, "_signer_keypair", lambda: Keypair.from_raw_ed25519_seed(b"\x03" * 32))
+    with pytest.raises(sc.NotSubmittedError, match="args failed"):
+        sc._submit_rating_args("agt", b"\x00" * 16, 10, 1, "not-an-address", "dispute")
+
+
+@pytest.mark.parametrize("status", [SendTransactionStatus.ERROR, SendTransactionStatus.TRY_AGAIN_LATER])
+def test_a_send_the_rpc_refused_is_not_submitted(monkeypatch, status):
+    """ERROR and TRY_AGAIN_LATER: the RPC answered, and holds nothing."""
+    _rpc(monkeypatch, _FakeRpc(send_status=status))
+    with pytest.raises(sc.NotSubmittedError, match="submit failed"):
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+
+
+def test_a_duplicate_send_may_still_land_and_is_not_called_refused(monkeypatch):
+    """DUPLICATE says an identical transaction is already pending. It may land."""
+    _rpc(monkeypatch, _FakeRpc(send_status=SendTransactionStatus.DUPLICATE))
+    with pytest.raises(RuntimeError, match="submit failed") as caught:
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    assert not isinstance(caught.value, sc.NotSubmittedError)
+
+
+def test_a_send_that_raises_may_still_land_and_is_not_called_refused(monkeypatch):
+    """The request may have reached the RPC before the connection dropped."""
+    rpc = _rpc(monkeypatch, _FakeRpc(fail_at="send_raises"))
+    with pytest.raises(ConnectionError) as caught:
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    assert rpc.sent
+    assert not isinstance(caught.value, sc.NotSubmittedError)
+
+
+def test_a_poll_that_runs_out_after_the_send_is_a_timeout_not_a_refusal(monkeypatch):
+    """Sent and PENDING, then never confirmed: the client's `timeout`, with
+    the in-flight hash — never an exception of either kind."""
+    rpc = _rpc(monkeypatch, _FakeRpc())
+    monkeypatch.setattr(sc, "_POLL_BUDGET_SECONDS", 0.0)
+    result = asyncio.run(sc.invoke_with_server_key_async(LEDGER_ID, "submit", []))
+    assert rpc.sent
+    assert result == {"hash": PENDING_HASH, "status": "timeout"}
+
+
+def test_not_submitted_is_still_caught_by_an_except_runtime_error(monkeypatch):
+    """The subclass is the compatibility promise: a caller written against
+    RuntimeError, as the charge and seal paths were, still catches it."""
+    _rpc(monkeypatch, _FakeRpc(fail_at="simulate"))
+    try:
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    except RuntimeError as caught:
+        assert isinstance(caught, sc.NotSubmittedError)
+    else:  # pragma: no cover - the simulation always refuses
+        pytest.fail("the refused simulation raised nothing")
+
+
+def test_a_user_signed_envelope_that_will_not_decode_is_not_submitted(monkeypatch):
+    rpc = _rpc(monkeypatch, _FakeRpc())
+    with pytest.raises(sc.NotSubmittedError, match="bad signed XDR"):
+        sc._send_signed_xdr("not an envelope")
+    assert not rpc.sent
+
+
+def test_a_refund_refused_before_the_send_is_still_held_as_a_timeout(monkeypatch):
+    """The refund path is NOT changed by the new type: `credit_refund` still
+    files any raise as TIMEOUT and holds the claim. Refunds were out of D-076's
+    scope, and loosening the one rule that stops a double credit is not
+    something a subclass should do by accident."""
+    from app.services import refund_svc
+    from app.services.dispute_store import DisputeRecord
+
+    async def _refused(buyer: str, amount_usdc: float) -> dict[str, Any]:
+        raise sc.NotSubmittedError("prepare failed: HostError: Error(Value, InvalidInput)")
+
+    monkeypatch.setattr(refund_svc, "execute_refund", _refused)
+    dispute = DisputeRecord(
+        id="dsp_refund",
+        job_id_hex="9f" * 16,
+        task_id="tsk",
+        step_index=0,
+        agent_id="agt",
+        payer=Keypair.random().public_key,
+        reason="r",
+        status="crediting",
+        charged_usdc=0.05,
+        creditable_usdc=0.05,
+        opened_at=1.0,
+    )
+    outcome = asyncio.run(refund_svc.credit_refund(dispute, 0.05))
+    assert outcome.status == "TIMEOUT"

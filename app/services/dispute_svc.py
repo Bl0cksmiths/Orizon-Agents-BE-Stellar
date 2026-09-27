@@ -841,27 +841,37 @@ def _log_rating(
     derived_hex: str,
     tx_hash: str | None,
     *,
+    outcome: dispute_rating.RatingOutcome | None = None,
     exc_info: bool = False,
 ) -> None:
     """One line per rating outcome, carrying every id a reconciliation needs.
 
-    The dispute, the sealed job it disputes, the DERIVED id the rating lives
-    under on-chain, the agent it rates and the payer it was written for: with
+    The outcome the ledger's answer was filed as (`-` when no attempt drew
+    one), the dispute, the sealed job it disputes, the DERIVED id the rating
+    lives under on-chain, the agent it rates, the payer it was written for,
+    and what that payer was CREDITED and by which refund transaction: with
     those, whoever holds a block explorer can find the rating or prove it is
-    absent from this line alone. The hash joins them whenever there is one.
-    Nothing secret — all of it is public, and the scorer's key never enters
-    this module.
+    absent, and square it with the money that moved, from this line alone
+    (D-075). The hash joins them whenever there is one, and the reason
+    whenever a FAILED carries one. Nothing secret — all of it is public, and
+    the scorer's key never enters this module.
     """
+    credited = "-" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f}"
     logger.log(
         level,
-        "dispute rating %s: dispute=%s job=%s derived=%s agent=%s payer=%s tx=%s",
+        "dispute rating %s: outcome=%s dispute=%s job=%s derived=%s agent=%s payer=%s credited_usdc=%s"
+        " refund_tx=%s tx=%s reason=%s",
         event,
+        outcome.status if outcome is not None else "-",
         dispute.id,
         dispute.job_id_hex,
         derived_hex,
         dispute.agent_id,
         dispute.payer,
+        credited,
+        dispute.refund_tx or "-",
         tx_hash or "-",
+        (outcome.reason if outcome is not None else None) or "-",
         exc_info=exc_info,
     )
 
@@ -878,9 +888,14 @@ def _tell_observer(observer: RatingObserver, dispute: DisputeRecord, outcome: di
         observer(outcome)
     except Exception:
         logger.exception(
-            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s",
+            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s"
+            " job=%s agent=%s credited_usdc=%s tx=%s",
             dispute.id,
             outcome.status,
+            dispute.job_id_hex,
+            dispute.agent_id,
+            "-" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f}",
+            outcome.tx_hash or "-",
         )
 
 
@@ -953,9 +968,9 @@ async def _rate_credited(
     if gap is not None:
         # The presence-only gate the settler's own ratings pass
         # (`execution_svc._submit_ratings`). Without it a deployment that
-        # cannot sign a rating still submits, the submit raises, and the
-        # outcome is a TIMEOUT — "unconfirmed" on every uphold, forever, when
-        # the truth is "not configured". So nothing is submitted and the line
+        # cannot sign a rating still submits and is refused before the send —
+        # a FAILED on every uphold, whose reason names the symptom rather
+        # than the setting behind it. So nothing is submitted and the line
         # names the setting. ERROR per dispute rather than the settler's
         # hourly note: an upheld dispute whose agent is never rated breaks the
         # disclosed model's one promise about the agent — that its
@@ -973,7 +988,8 @@ async def _rate_credited(
         outcome = await dispute_rating.submit_dispute_rating(credited, settlement)
     except Exception:
         # `submit_dispute_rating` turns every answer the CHAIN can give into
-        # an outcome — a submit that raised included, as a TIMEOUT — and
+        # an outcome — a submit that raised included: FAILED when the client
+        # says nothing was sent, TIMEOUT when it may have been — and
         # raises only when the rating cannot be formed from this dispute's
         # records. Those changed under a paid dispute, and no retry mends
         # that, so this says so rather than inviting one. Answered with the
@@ -1007,6 +1023,7 @@ async def _rate_credited(
                 outcome.job_id_hex,
                 credited.rating_tx,
                 exc_info=True,
+                outcome=outcome,
             )
             return credited
         # After a SUCCESS or a TIMEOUT the answer and its hash are already in
@@ -1028,6 +1045,7 @@ async def _rate_credited(
             outcome.job_id_hex,
             outcome.tx_hash,
             exc_info=True,
+            outcome=outcome,
         )
         return credited
 
@@ -1046,7 +1064,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # Logged and the cache dropped BEFORE the record is written: the
         # rating is on-chain whatever happens to the store next, so the hash
         # must be in the log and the score fresh even if the write fails.
-        _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
+        _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash, outcome=outcome)
         reputation_svc.invalidate_rep(credited.agent_id)
         rated = _recorded(
             await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True),
@@ -1059,7 +1077,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     if outcome.status == "REPLAY":
         if credited.rating_tx:
             reputation_svc.invalidate_rep(credited.agent_id)
-            _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx)
+            _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx, outcome=outcome)
             if credited.rating_confirmed:
                 # Already confirmed: a second row would say nothing new and
                 # would move `updated_at` for a dispute nothing happened to.
@@ -1090,6 +1108,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             credited,
             derived,
             None,
+            outcome=outcome,
         )
         return credited
 
@@ -1118,6 +1137,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
                 credited,
                 derived,
                 outcome.tx_hash,
+                outcome=outcome,
             )
             return credited
         # Logged before it is recorded, for the reason SUCCESS is.
@@ -1127,6 +1147,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             credited,
             derived,
             outcome.tx_hash,
+            outcome=outcome,
         )
         if outcome.tx_hash:
             # Evidence, and explicitly NOT confirmation: the hash is the
@@ -1145,10 +1166,12 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     # record stays, since this attempt says nothing about that one.
     _log_rating(
         logging.ERROR,
-        f"failed ({outcome.status}) — nothing landed; uphold again to retry",
+        f"failed ({outcome.status}) — nothing landed and nothing is in flight; fix what reason= names, then uphold"
+        " again to retry",
         credited,
         derived,
         outcome.tx_hash,
+        outcome=outcome,
     )
     return credited
 

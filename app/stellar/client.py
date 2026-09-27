@@ -354,22 +354,24 @@ def _signer_keypair() -> Keypair:
 
     Memoized: the signing key is immutable at runtime, so we derive once.
     (lru_cache does not cache exceptions, so an unset key keeps raising.)
+    A key that will not parse is a `NotSubmittedError`: nothing can be signed,
+    so nothing was sent.
     """
     secret = settings.stellar_signing_key or ""
     secret = secret.strip()
     if not secret:
-        raise RuntimeError("STELLAR_SIGNING_KEY is empty")
+        raise NotSubmittedError("STELLAR_SIGNING_KEY is empty")
 
     words = secret.split()
     if len(words) >= 12:
         try:
             return Keypair.from_mnemonic_phrase(" ".join(words))
         except Exception as e:
-            raise RuntimeError(f"STELLAR_SIGNING_KEY looks like a mnemonic but is invalid: {e}") from e
+            raise NotSubmittedError(f"STELLAR_SIGNING_KEY looks like a mnemonic but is invalid: {e}") from e
     try:
         return Keypair.from_secret(secret)
     except Exception as e:
-        raise RuntimeError(f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({e})") from e
+        raise NotSubmittedError(f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({e})") from e
 
 
 def signer_public_key() -> str:
@@ -391,7 +393,26 @@ _POLL_MAX_DELAY_SECONDS = 4.0
 _CONTRACT_ERROR_HEAD = re.compile(r"\s*HostError: Error\(Contract, #(\d+)\)")
 
 
-class ContractError(RuntimeError):
+class NotSubmittedError(RuntimeError):
+    """A write that failed BEFORE any transaction reached the network.
+
+    Raised where the submit path fails ahead of `sendTransaction` — the signer
+    key, the source account, the build, the simulation that prepares it, the
+    signature — and where the RPC answers the send by refusing it outright
+    (`ERROR`, `TRY_AGAIN_LATER`). Nothing is in flight after one of these, so
+    nothing can land later: the cause has to be fixed, and a retry as things
+    stand is refused the same way.
+
+    Anything that can fail AFTER the send was attempted is NOT this — a send
+    that raised, a `DUPLICATE`, a poll that lost track — because the
+    transaction may be on its way; those stay plain exceptions and a caller
+    must keep treating them as "may still land".
+
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+
+class ContractError(NotSubmittedError):
     """A backend-signed call the contract itself rejected, with its error code.
 
     The code is the discriminant of the contract's own `Error` enum, carried
@@ -412,6 +433,34 @@ def _contract_error_code(simulation_error: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+@contextmanager
+def _before_send(stage: str) -> Iterator[None]:
+    """Mark a stage of the submit path that runs before anything is sent.
+
+    Whatever it raises becomes a `NotSubmittedError` naming the stage, so a
+    caller can tell "refused before it existed" from "lost after it was sent"
+    by type rather than by guessing. A `NotSubmittedError` (a `ContractError`
+    included) passes through untouched.
+    """
+    try:
+        yield
+    except NotSubmittedError:
+        raise
+    except Exception as e:
+        raise NotSubmittedError(f"{stage} failed: {e}") from e
+
+
+# The send answers that mean the RPC refused the transaction and holds nothing
+# of it. `DUPLICATE` is missing on purpose: it says an identical transaction is
+# already pending, which may yet land.
+_SEND_REFUSED = frozenset({SendTransactionStatus.ERROR, SendTransactionStatus.TRY_AGAIN_LATER})
+
+
+def _send_refusal(message: str, status: Any) -> RuntimeError:
+    """The exception for a send answered with something other than PENDING."""
+    return NotSubmittedError(message) if status in _SEND_REFUSED else RuntimeError(message)
+
+
 def _send_server_signed(
     contract_id: str,
     function_name: str,
@@ -424,38 +473,48 @@ def _send_server_signed(
 
     with _rpc_span("submit", label, slow_ms=SLOW_SUBMIT_MS, notable=True) as span:
         span["signer"] = _short(kp.public_key)
+        # Everything up to the send is `_before_send`: a failure there means
+        # no transaction exists anywhere but this process.
         span["stage"] = "load_account"
-        account = server.load_account(kp.public_key)
+        with _before_send("load_account"):
+            account = server.load_account(kp.public_key)
 
-        tx = (
-            TransactionBuilder(
-                source_account=account,
-                network_passphrase=network_passphrase(),
-                base_fee=100,
+        span["stage"] = "build"
+        with _before_send("build"):
+            tx = (
+                TransactionBuilder(
+                    source_account=account,
+                    network_passphrase=network_passphrase(),
+                    base_fee=100,
+                )
+                .append_invoke_contract_function_op(
+                    contract_id=contract_id,
+                    function_name=function_name,
+                    parameters=args,
+                )
+                .set_timeout(30)
+                .build()
             )
-            .append_invoke_contract_function_op(
-                contract_id=contract_id,
-                function_name=function_name,
-                parameters=args,
-            )
-            .set_timeout(30)
-            .build()
-        )
         span["stage"] = "prepare"
-        try:
-            tx = server.prepare_transaction(tx)
-        except PrepareTransactionException as e:
-            detail = e.simulate_transaction_response.error
-            code = _contract_error_code(detail)
-            if code is not None:
-                raise ContractError(f"prepare failed: {detail}", code) from e
-            raise RuntimeError(f"prepare failed: {detail}") from e
-        tx.sign(kp)
+        with _before_send("prepare"):
+            try:
+                tx = server.prepare_transaction(tx)
+            except PrepareTransactionException as e:
+                detail = e.simulate_transaction_response.error
+                code = _contract_error_code(detail)
+                if code is not None:
+                    raise ContractError(f"prepare failed: {detail}", code) from e
+                raise NotSubmittedError(f"prepare failed: {detail}") from e
+        span["stage"] = "sign"
+        with _before_send("sign"):
+            tx.sign(kp)
 
         span["stage"] = "send"
+        # A send that RAISES is not `_before_send`: the request may have
+        # reached the RPC, so the transaction may be on its way.
         sent = server.send_transaction(tx)
         if sent.status != SendTransactionStatus.PENDING:
-            raise RuntimeError(f"submit failed: {sent.error_result_xdr}")
+            raise _send_refusal(f"submit failed: {sent.error_result_xdr}", sent.status)
         span["stage"] = "pending"
         span["tx"] = sent.hash
     return sent.hash
@@ -562,15 +621,18 @@ def _submit_rating_args(
     payer: str,
     kind: str,
 ) -> list[Any]:
-    return [
-        addr(signer_public_key()),
-        sym(agent_id),
-        bytes16(job_id),
-        u32(rating_0_to_100),
-        i128(weight_stroops),
-        addr(payer),
-        sym(kind),
-    ]
+    # Built before any transaction exists: an argument that will not encode (a
+    # payer that is not an address, an unset signer) is refused every time.
+    with _before_send("args"):
+        return [
+            addr(signer_public_key()),
+            sym(agent_id),
+            bytes16(job_id),
+            u32(rating_0_to_100),
+            i128(weight_stroops),
+            addr(payer),
+            sym(kind),
+        ]
 
 
 def submit_rating(
@@ -680,7 +742,7 @@ def _send_signed_xdr(signed_xdr: str) -> str:
         env = TransactionEnvelope.from_xdr(signed_xdr, network_passphrase())
     except Exception as e:
         logger.warning("[stellar.submit] bad XDR: %s", e)
-        raise RuntimeError(f"bad signed XDR (likely wrong networkPassphrase or malformed): {e}") from e
+        raise NotSubmittedError(f"bad signed XDR (likely wrong networkPassphrase or malformed): {e}") from e
 
     # The envelope's own hash and source account identify the transaction; the
     # XDR itself is never logged (it carries the user's signature payload).
@@ -692,7 +754,7 @@ def _send_signed_xdr(signed_xdr: str) -> str:
         if sent.status != SendTransactionStatus.PENDING:
             detail = f"status={sent.status} error={getattr(sent, 'error_result_xdr', None)} hash={sent.hash}"
             logger.error("[stellar.submit] send failed: %s", detail)
-            raise RuntimeError(f"submit failed ({detail})")
+            raise _send_refusal(f"submit failed ({detail})", sent.status)
         span["stage"] = "pending"
     return sent.hash
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -104,6 +105,10 @@ class RatingOutcome:
     simulation, before any transaction exists — and is the in-flight hash on a
     TIMEOUT. `job_id_hex` is the DERIVED id the rating was written under, the
     one a reviewer finds on Stellar Expert.
+
+    `reason` says why a FAILED did not land, in words an operator can act on:
+    the ledger's name for a refusal, the ledger failing the transaction, or
+    what refused it before it was ever sent. None for every other status.
     """
 
     status: RatingStatus
@@ -111,6 +116,7 @@ class RatingOutcome:
     job_id_hex: str
     rating: int
     weight_stroops: int
+    reason: str | None = None
 
 
 # The score an upheld dispute writes, on the 0..100 scale of the settler's own
@@ -142,6 +148,27 @@ DISPUTE_RATING = 10
 _LEDGER_UNAUTHORIZED = 1
 _LEDGER_REPLAY = 7
 
+# A Stellar secret seed, redacted from any reason on the off chance a signer
+# failure's text quotes one.
+_SECRET_SEED = re.compile(r"S[A-Z2-7]{55}")
+_REASON_LIMIT = 200
+
+
+def not_submitted_reason(exc: BaseException) -> str:
+    """A short reason for a submit refused before anything was sent.
+
+    The head line of the client's message — "prepare failed: HostError: …" —
+    and not the diagnostic event log beneath it, capped, with any secret seed
+    struck out. A signing key that will not parse is named by its setting and
+    never quoted: the SDK's own message about a bad key can echo it.
+    """
+    text = str(exc).strip()
+    if "STELLAR_SIGNING_KEY" in text:
+        return "the signing key will not parse (STELLAR_SIGNING_KEY)"
+    head = text.splitlines()[0] if text else type(exc).__name__
+    head = _SECRET_SEED.sub("S…", head)
+    return head if len(head) <= _REASON_LIMIT else head[: _REASON_LIMIT - 1] + "…"
+
 
 async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
     """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
@@ -165,12 +192,19 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
       - any other `ContractError` → FAILED, with no hash, logged by the
         contract's own name for it. `Unauthorized` is not about the dispute at
         all: it means this deployment's signer is not the ledger's Scorer.
+      - `NotSubmittedError` → FAILED, with no hash and the client's reason: the
+        submit was refused BEFORE any transaction was sent — a simulation the
+        host rejected, an account that would not load, a signer or argument
+        that would not encode, a send the RPC refused outright. Nothing is in
+        flight, so nothing can land later, and the same refusal meets every
+        retry until its cause is fixed. Reporting it as a TIMEOUT told an
+        operator to wait for a rating that could never arrive (D-076).
       - anything else → TIMEOUT, with the in-flight hash when there is one.
         `"timeout"` is the client's word for submitted-then-lost-track, and an
         unrecognised status or a SUCCESS with no hash is the same unknown, and
-        so is any other exception: it can be raised either side of the
-        submission and nothing in it says which. Unlike a refund's, this unknown
-        is harmless to retry: if the first submit landed, the replay guard
+        so is any other exception: the client raises one of those only where
+        the send may already have happened. Unlike a refund's, this unknown is
+        harmless to retry: if the first submit landed, the replay guard
         refuses the second.
       - cancellation is logged and re-raised, never turned into an outcome.
 
@@ -181,16 +215,21 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
     the settlement lacks — so either is a record that changed under a paid
     dispute, and an outcome would let the caller file it as a rating to retry.
     """
+    # What the payer was credited, on every line: the rating follows a paid
+    # refund, and a failure is reconciled against that money (D-075).
+    credited = "unrecorded" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f} USDC"
     step = settlement.step(dispute.step_index)
     if step is None:
         logger.error(
             "dispute %s: cannot rate — settlement %s has no step %d, yet a refund was paid against it "
-            "(agent %s, payer %s)",
+            "(agent %s, payer %s, credited %s, refund %s)",
             dispute.id,
             settlement.job_id_hex,
             dispute.step_index,
             dispute.agent_id,
             dispute.payer,
+            credited,
+            dispute.refund_tx,
         )
         raise LookupError(f"settlement {settlement.job_id_hex} has no step {dispute.step_index} to rate")
 
@@ -199,12 +238,15 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         derived = dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index)
     except ValueError:
         logger.error(
-            "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s)",
+            "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s, credited %s, "
+            "refund %s)",
             dispute.id,
             dispute.job_id_hex,
             dispute.step_index,
             dispute.agent_id,
             dispute.payer,
+            credited,
+            dispute.refund_tx,
             exc_info=True,
         )
         raise
@@ -214,7 +256,8 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
     # the derived id is the one Stellar Expert shows. Identifiers only — no key.
     facts = (
         f"agent {dispute.agent_id}, job {dispute.job_id_hex}, derived {derived_hex}, "
-        f"rating {DISPUTE_RATING}, weight {weight}, payer {dispute.payer}"
+        f"rating {DISPUTE_RATING}, weight {weight}, payer {dispute.payer}, credited {credited}, "
+        f"refund {dispute.refund_tx}"
     )
 
     try:
@@ -261,7 +304,18 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
                 facts,
                 exc_info=True,
             )
-        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight)
+        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
+    except sc.NotSubmittedError as e:
+        reason = not_submitted_reason(e)
+        logger.error(
+            "dispute %s: rating refused before it was submitted — nothing was sent and nothing is in "
+            "flight, and a retry is refused the same way until the cause is fixed: %s (%s)",
+            dispute.id,
+            reason,
+            facts,
+            exc_info=True,
+        )
+        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
     except Exception as e:
         logger.error(
             "dispute %s: rating submit raised and MAY HAVE LANDED: %s (%s)",
@@ -287,7 +341,9 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
             tx_hash,
             facts,
         )
-        return RatingOutcome("FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight)
+        return RatingOutcome(
+            "FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight, "the ledger failed the transaction"
+        )
 
     logger.error(
         "dispute %s: rating unconfirmed and MAY STILL LAND — a retry cannot double it, the replay guard "

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 import pytest
 from stellar_sdk import Keypair
@@ -302,8 +303,9 @@ def test_any_other_refusal_is_failed_and_logged_by_name(monkeypatch, caplog, cod
 
 
 def test_a_raising_submit_is_a_timeout_logged_with_its_traceback(monkeypatch, caplog) -> None:
-    """A raise can happen either side of the submission and nothing in it says
-    which, so the rating's fate is unknown — TIMEOUT, never FAILED."""
+    """A raise that is not `NotSubmittedError` is one the client makes only
+    where the send may already have happened, so the rating's fate is unknown
+    — TIMEOUT, never FAILED. The half of D-076's fix that must not move."""
     _fake_submit(monkeypatch, RuntimeError("soroban rpc unreachable"))
 
     with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
@@ -318,6 +320,69 @@ def test_a_raising_submit_is_a_timeout_logged_with_its_traceback(monkeypatch, ca
         and r.exc_info is not None
         for r in records
     ), f"the raise was not logged with its context and traceback: {[r.getMessage() for r in records]}"
+
+
+# The live testnet refusal behind D-076 (2026-09-26), as the client raises it.
+HOST_REFUSAL = (
+    "prepare failed: HostError: Error(Value, InvalidInput)\n\nEvent log (newest first):\n   0: "
+    '[Diagnostic Event] topics:[error, Error(Value, InvalidInput)], data:"byte is not allowed in Symbol", 45'
+)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        HOST_REFUSAL,
+        "load_account failed: rpc unreachable while loading the signer",
+        "build failed: invalid contract id",
+        "sign failed: no secret seed",
+        "args failed: not-an-address is not a valid address",
+        "submit failed: AAAAAAAAAGT////7AAAAAA==",
+    ],
+)
+def test_a_submit_refused_before_it_was_sent_is_failed_with_its_reason(monkeypatch, caplog, refusal: str) -> None:
+    """D-076. Every before-send site the client classifies: nothing was signed
+    or nothing left, so nothing is in flight and nothing can land later. FAILED
+    with the reason and no hash — never TIMEOUT, never "may have landed"."""
+    _fake_submit(monkeypatch, sc.NotSubmittedError(refusal))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        outcome = _rate()
+
+    assert (outcome.status, outcome.tx_hash, outcome.job_id_hex) == ("FAILED", None, DERIVED)
+    assert outcome.reason == refusal.splitlines()[0]
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert not any("MAY HAVE LANDED" in m for m in msgs), msgs
+    assert any("before it was submitted" in m and outcome.reason in m and _names_every_fact(m) for m in msgs), msgs
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [sc.NotSubmittedError(HOST_REFUSAL), RuntimeError("soroban rpc unreachable"), {"status": "FAILED", "hash": "tx"}],
+)
+def test_every_failure_line_carries_what_the_payer_was_credited(monkeypatch, caplog, answer) -> None:
+    """D-075, on the rating service's own lines: the refund this rating
+    follows is on each ERROR line, so a failure reconciles against the money
+    without joining it to the credit's INFO line."""
+    _fake_submit(monkeypatch, answer)
+    credited = replace(_dispute(), credited_usdc=0.07)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        _rate(credited)
+
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert msgs and all("credited 0.0700000 USDC" in m and "refund tx_refund" in m for m in msgs), msgs
+
+
+def test_a_not_submitted_reason_never_quotes_the_signing_key() -> None:
+    from app.services.dispute_rating import not_submitted_reason
+
+    bad_key = sc.NotSubmittedError(
+        f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({SIGNING_SECRET})"
+    )
+    assert SIGNING_SECRET not in not_submitted_reason(bad_key)
+    stray = sc.NotSubmittedError(f"args failed: {SIGNING_SECRET}")
+    assert SIGNING_SECRET not in not_submitted_reason(stray)
 
 
 def test_cancellation_mid_submit_is_logged_and_reraised(monkeypatch, caplog) -> None:
@@ -389,6 +454,7 @@ def test_no_dispute_rating_line_carries_the_signing_key(monkeypatch, caplog) -> 
         _refused(1),
         _refused(100),
         RuntimeError("soroban rpc unreachable"),
+        sc.NotSubmittedError(HOST_REFUSAL),
     ]
 
     with caplog.at_level(logging.DEBUG, logger="app.services.dispute_rating"):
