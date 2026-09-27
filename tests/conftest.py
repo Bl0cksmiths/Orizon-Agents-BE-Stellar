@@ -193,7 +193,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
-            reporter.ensure_newline()
+            # The progress line is still open in -q mode; end it first.
+            reporter.write("\n")
             reporter.write_line(
                 f"{PG_REQUIRED_ENV} is set but no real-Postgres test ran: the dispute store's SQL went untested",
                 red=True,
