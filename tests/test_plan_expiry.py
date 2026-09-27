@@ -1,4 +1,4 @@
-"""A stored plan is executable for PLAN_TTL_SECONDS after it was built.
+"""A stored plan is executable for `settings.plan_ttl_seconds` after it was built.
 
 It used to be executable until 200 newer plans pushed it out of the store —
 hours on a quiet deployment — so a buyer could pay against a card whose
@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan
 from app.services import execution_svc
 from app.state import state
@@ -71,7 +72,7 @@ def test_a_new_plan_is_stamped_with_the_time_it_was_built():
 
 
 def test_a_plan_exactly_ttl_old_still_executes(clock, runs):
-    clock(BUILT_AT + execution_svc.PLAN_TTL_SECONDS)
+    clock(BUILT_AT + settings.plan_ttl_seconds)
     task_id = _execute(_plan("pln_exp_edge"))
     assert runs == ["pln_exp_edge"]
     assert state.tasks.pop(task_id).status == "running"
@@ -79,7 +80,7 @@ def test_a_plan_exactly_ttl_old_still_executes(clock, runs):
 
 
 def test_a_plan_just_past_its_ttl_is_refused_before_any_task_is_minted(clock, runs):
-    clock(BUILT_AT + execution_svc.PLAN_TTL_SECONDS + 0.001)
+    clock(BUILT_AT + settings.plan_ttl_seconds + 0.001)
     tasks_before = set(state.tasks)
     with pytest.raises(execution_svc.PlanExpiredError) as refused:
         _execute(_plan("pln_exp_past"))
@@ -103,7 +104,7 @@ def test_a_buyer_who_read_the_card_for_fourteen_minutes_can_still_pay(clock, run
 def test_execute_answers_410_plan_expired_in_the_error_envelope(client, clock, runs):
     plan = _plan("pln_exp_http")
     state.add_plan(plan)
-    clock(BUILT_AT + execution_svc.PLAN_TTL_SECONDS + 1)
+    clock(BUILT_AT + settings.plan_ttl_seconds + 1)
     tasks_before = set(state.tasks)
     try:
         resp = client.post("/api/orchestrator/execute", json={"plan_id": plan.id})
