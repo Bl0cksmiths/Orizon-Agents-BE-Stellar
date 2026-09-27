@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 
 MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
 
+# Every spelling of STELLAR_NETWORK that names the public network: ours, and
+# `public`/`pubnet` as Horizon and Stellar Expert say it. Read through
+# `label_names_mainnet`, which ignores case and padding, so no two readers of
+# the label can disagree about what it says. The label never decides whether
+# money is real — `Settings.is_mainnet` does, from the passphrase — it only
+# lets the boot refuse a label that promises mainnet over a testnet signer.
+MAINNET_LABELS = frozenset({"mainnet", "public", "pubnet"})
+
+
+def label_names_mainnet(label: str) -> bool:
+    """True when STELLAR_NETWORK spells the public network, in any case or padding."""
+    return label.strip().lower() in MAINNET_LABELS
+
+
 # The PDAX environments that resolve to a base URL, read from the shared table
 # in app/pdax_environments.py. That module is dependency-free and lives outside
 # the app.pdax package precisely so this one can import it while Settings() is
@@ -421,11 +435,16 @@ class Settings(BaseSettings):
         (testnet), so STELLAR_NETWORK=mainnet with a forgotten passphrase
         would silently sign transactions for the WRONG network. Signing key
         is deliberately not required — read-only deployments are legitimate.
+
+        The label is read through `label_names_mainnet` — any case, any
+        padding, `pubnet` included — so ` Mainnet` or `pubnet` over the
+        testnet passphrase is refused here
+        rather than booting as a testnet deployment that calls itself mainnet.
+        The opposite mismatch, a testnet label over the mainnet passphrase, is
+        not refused: `is_mainnet` reads the passphrase, so the key rule and the
+        explorer links already treat that process as the mainnet it is.
         """
-        if (
-            self.stellar_network.lower() in {"mainnet", "public"}
-            and self.stellar_network_passphrase != MAINNET_PASSPHRASE
-        ):
+        if label_names_mainnet(self.stellar_network) and not self.is_mainnet():
             raise ValueError(
                 "STELLAR_NETWORK is set to mainnet/public but "
                 "STELLAR_NETWORK_PASSPHRASE is not the mainnet passphrase "
