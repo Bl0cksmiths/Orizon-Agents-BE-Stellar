@@ -213,6 +213,14 @@ class PlanFloorNotice(BaseModel):
     # parse an English sentence to get there.
     lower_bound_bps: int | None = None  # None when the agent had no rep entry
     floor_bps: int = 0
+    # The evidence behind that bound: how many ratings it rests on, and what
+    # share of them were disputes. Without them a buyer cannot tell an agent
+    # the floor excluded for upheld disputes from one that is merely new and
+    # unlucky — both read "below routing floor". Reported, not routed on:
+    # whether disputes should weigh more, or carry their own floor, is an open
+    # product decision. None when there is no rep entry (unbound, or absent).
+    count: int | None = None
+    dispute_rate_bps: int | None = None
 
 
 # ───── Trace ───────────────────────────────────────────────

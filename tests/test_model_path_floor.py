@@ -419,6 +419,34 @@ def test_a_re_admitted_model_step_is_flagged_degraded(seeded: object, monkeypatc
     assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_12r0", True)]
 
 
+def test_a_disputed_agent_is_reported_with_its_dispute_rate(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Through decompose, a notice for an agent the floor excluded after upheld
+    # disputes: the buyer sees how many ratings and what share were disputed.
+    reps = _clearing_reps()
+    reps["agt_04m1"] = RepInfo(
+        agent_id="agt_04m1",
+        smoothed_bps=3000,
+        lower_bound_bps=2600,
+        avg_bps=2500,
+        count=40,
+        weight=40 * 10_000_000,
+        disputed=10,
+        dispute_rate_bps=2500,
+        source="onchain",
+    )
+
+    resp = _decompose(monkeypatch, reps, "agt_11c0")
+
+    note = next(n for n in resp.notices if n.agent_id == "agt_04m1")
+    assert (note.reason_code, note.lower_bound_bps, note.count, note.dispute_rate_bps) == (
+        "below_floor",
+        2600,
+        40,
+        2500,
+    )
+    assert resp.model_dump()["notices"][0]["dispute_rate_bps"] == 2500
+
+
 # ── the prompt is bounded ───────────────────────────────────────
 
 

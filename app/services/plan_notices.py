@@ -93,6 +93,23 @@ def _lower_bound(info: RepInfo | None) -> int | None:
     return None if info is None else info.lower_bound_bps
 
 
+def _count(info: RepInfo | None) -> int | None:
+    """How many ratings the deciding bound rests on — None with no rep entry.
+
+    With `_dispute_rate`, the evidence behind a floor verdict: "below routing
+    floor" reads the same for an agent sunk by upheld disputes and for one that
+    is new and unlucky, and these two numbers are what tell them apart. The
+    designated agent's on a substitution, for the reason `lower_bound_bps` is.
+    Reported only — they change no verdict.
+    """
+    return None if info is None else info.count
+
+
+def _dispute_rate(info: RepInfo | None) -> int | None:
+    """What share of those ratings were disputes, in bps — None with no rep entry."""
+    return None if info is None else info.dispute_rate_bps
+
+
 def below_floor_exclusion(agent: Agent, info: RepInfo | None) -> PlanFloorNotice:
     """A sub-floor agent dropped from the plan outright, with no stand-in."""
     return PlanFloorNotice(
@@ -103,6 +120,8 @@ def below_floor_exclusion(agent: Agent, info: RepInfo | None) -> PlanFloorNotice
         reason_code="below_floor",
         lower_bound_bps=_lower_bound(info),
         floor_bps=settings.reputation_floor_bps,
+        count=_count(info),
+        dispute_rate_bps=_dispute_rate(info),
     )
 
 
@@ -150,6 +169,8 @@ def substitution(designated: Agent, replacement: Agent, info: RepInfo | None) ->
         reason_code="below_floor",
         lower_bound_bps=_lower_bound(info),
         floor_bps=settings.reputation_floor_bps,
+        count=_count(info),
+        dispute_rate_bps=_dispute_rate(info),
     )
 
 
@@ -171,6 +192,8 @@ def relaxation(agent: Agent, info: RepInfo | None, *, min_routable: int) -> Plan
         reason_code="floor_relaxed",
         lower_bound_bps=_lower_bound(info),
         floor_bps=settings.reputation_floor_bps,
+        count=_count(info),
+        dispute_rate_bps=_dispute_rate(info),
     )
 
 
