@@ -41,6 +41,7 @@ import logging
 import time
 from typing import Any
 
+import httpx
 import pytest
 
 import app.stellar.client as sc
@@ -1724,3 +1725,155 @@ def test_each_adjudication_refusal_carries_through_to_its_own_exit_code(
     assert exit_code == expected
     assert code in out
     assert "nothing was signed" in out
+
+
+# ── telling the running service (D-066) ───────────────────────────────────
+
+SERVICE = "https://api.orizon.test"
+INVALIDATE_URL = f"{SERVICE}/api/stellar/reputation/{AGENT}/invalidate"
+
+
+class ServiceSeam:
+    """The running service's invalidation route, as the script's HTTP client meets it.
+
+    Bound at `httpx.AsyncClient` with a MockTransport, so the script's real
+    request — URL, method, header — is what gets recorded, and nothing leaves
+    the process. `answer` is a status code or an exception to raise. Each
+    call also records how many ratings the ledger had been asked for by then,
+    which is how "after it writes a rating" is held to its order.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, ledger: RatingSeam) -> None:
+        self.requests: list[httpx.Request] = []
+        self.ratings_before_call: list[int] = []
+        self.answer: int | BaseException = 200
+        self._ledger = ledger
+        real = httpx.AsyncClient
+
+        def _client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            return real(*args, transport=httpx.MockTransport(self._handle), **kwargs)
+
+        monkeypatch.setattr(uphold_dispute.httpx, "AsyncClient", _client)
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        self.ratings_before_call.append(len(self._ledger.calls))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        if self.answer == 200:
+            return httpx.Response(200, json={"agent_id": AGENT, "invalidated": True, "read_ttl_seconds": 15.0})
+        return httpx.Response(self.answer, json={"detail": "invalid_api_key"})
+
+
+@pytest.fixture
+def service(monkeypatch: pytest.MonkeyPatch, ledger: RatingSeam) -> ServiceSeam:
+    monkeypatch.delenv(uphold_dispute.SERVICE_URL_ENV, raising=False)
+    return ServiceSeam(monkeypatch, ledger)
+
+
+def test_a_live_run_given_the_service_url_invalidates_its_cached_score_after_the_rating(
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
+    service: ServiceSeam,
+) -> None:
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", SERVICE + "/")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert [(r.method, str(r.url)) for r in service.requests] == [("POST", INVALIDATE_URL)]
+    assert service.requests[0].headers["X-API-Key"] == configured["api_key"]
+    # After the rating, never before it: an invalidation that ran first would
+    # be refilled with the pre-dispute score by the next read.
+    assert service.ratings_before_call == [1]
+    assert f"{SERVICE} dropped its cached score for {AGENT}" in out
+    assert "NOT TOLD" not in out and "could not tell" not in out
+    # The key went over the wire, never to the terminal.
+    assert configured["api_key"] not in out
+
+
+def test_the_service_url_can_come_from_the_environment(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    paying: list[str],
+    configured: dict[str, str],
+    service: ServiceSeam,
+) -> None:
+    monkeypatch.setenv(uphold_dispute.SERVICE_URL_ENV, SERVICE)
+    seed()
+
+    code, _ = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert [str(r.url) for r in service.requests] == [INVALIDATE_URL]
+
+
+def test_without_a_service_url_the_run_says_the_service_keeps_the_old_score_and_names_the_ttl(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    paying: list[str],
+    configured: dict[str, str],
+    service: ServiceSeam,
+) -> None:
+    monkeypatch.setattr(settings, "reputation_read_ttl_seconds", 120.0)
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert service.requests == []
+    assert f"NOT TOLD (no --service-url / {uphold_dispute.SERVICE_URL_ENV})" in out
+    assert f"so it keeps serving {AGENT}'s PREVIOUS score" in out
+    assert "for up to REPUTATION_READ_TTL_SECONDS" in out
+    assert "120 s as this process reads it" in out
+
+
+def test_a_dry_run_never_calls_the_service(
+    capsys: pytest.CaptureFixture[str], credit: CreditSeam, service: ServiceSeam
+) -> None:
+    seed()
+
+    code, _ = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run", "--service-url", SERVICE)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert service.requests == []
+
+
+@pytest.mark.parametrize("rating", ["SUCCESS", "FAILED"])
+@pytest.mark.parametrize(
+    "answer",
+    [401, 500, httpx.ConnectError("connection refused"), httpx.ReadTimeout("timed out")],
+    ids=["401", "500", "unreachable", "timeout"],
+)
+def test_a_failed_invalidation_is_a_warning_and_never_changes_the_exit_code(
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
+    service: ServiceSeam,
+    rating: dispute_rating.RatingStatus,
+    answer: int | BaseException,
+) -> None:
+    """The credit and the rating have already happened when the call is made,
+    so its failure cannot be the run's failure: the exit code is the one the
+    same run exits with when the service answers 200 — for a clean run, and
+    for the rating-not-landed run whose code asks for a re-run."""
+    ledger.answers(rating, RATING_TX if rating == "SUCCESS" else None)
+    seed()
+    code_told, _ = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", SERVICE)
+    dispute_store._store = None
+    service.answer = answer
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", SERVICE)
+
+    assert len(service.requests) == 2
+    assert code == code_told
+    assert code == (uphold_dispute.EXIT_OK if rating == "SUCCESS" else uphold_dispute.EXIT_RATING_NOT_LANDED)
+    assert f"WARNING: could not tell {SERVICE}" in out
+    assert "The uphold above STANDS and this run's exit code does not change" in out
+    assert "for up to REPUTATION_READ_TTL_SECONDS" in out
+    assert f"POST {INVALIDATE_URL}" in out
+    assert configured["api_key"] not in out
