@@ -474,3 +474,31 @@ def test_an_unusable_ceiling_never_lets_a_hand_rolled_credit_be_signed(monkeypat
 
     assert exc.value.code == "refund_amount_invalid"
     assert calls == [], "a credit was signed against a ceiling that bounds nothing"
+
+
+@pytest.mark.parametrize("settled", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_a_settled_total_that_is_not_a_number_refuses_rather_than_being_skipped(monkeypatch, settled: float) -> None:
+    """QA D-054's second finding. The settled-total clamp is a `<`, so a NaN or
+    inf total is never below the promise and the clamp is skipped silently —
+    the credit is paid as though the settlement had never been read. The
+    promise left over is a good number, so the amount check cannot see it."""
+    _no_signing(monkeypatch)
+
+    with pytest.raises(RefundRefused) as exc:
+        refund_svc.creditable_for(_settlement(settled_usdc=settled), _dispute())
+
+    assert exc.value.code == "refund_amount_invalid"
+
+
+def test_a_step_price_that_is_not_a_number_refuses_rather_than_being_skipped(monkeypatch) -> None:
+    _no_signing(monkeypatch)
+    unpriced = (
+        SettlementStep(
+            step_index=0, agent_id="agt_writer", agent_name="Copywriter", price_usdc=float("nan"), delivered=True
+        ),
+    )
+
+    with pytest.raises(RefundRefused) as exc:
+        refund_svc.creditable_for(_settlement(steps=unpriced), _dispute())
+
+    assert exc.value.code == "refund_amount_invalid"
