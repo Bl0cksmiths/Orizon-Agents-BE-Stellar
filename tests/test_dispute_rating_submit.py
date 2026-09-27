@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 import pytest
 from stellar_sdk import Keypair
@@ -353,6 +354,24 @@ def test_a_submit_refused_before_it_was_sent_is_failed_with_its_reason(monkeypat
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
     assert not any("MAY HAVE LANDED" in m for m in msgs), msgs
     assert any("before it was submitted" in m and outcome.reason in m and _names_every_fact(m) for m in msgs), msgs
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [sc.NotSubmittedError(HOST_REFUSAL), RuntimeError("soroban rpc unreachable"), {"status": "FAILED", "hash": "tx"}],
+)
+def test_every_failure_line_carries_what_the_payer_was_credited(monkeypatch, caplog, answer) -> None:
+    """D-075, on the rating service's own lines: the refund this rating
+    follows is on each ERROR line, so a failure reconciles against the money
+    without joining it to the credit's INFO line."""
+    _fake_submit(monkeypatch, answer)
+    credited = replace(_dispute(), credited_usdc=0.07)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        _rate(credited)
+
+    msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
+    assert msgs and all("credited 0.0700000 USDC" in m and "refund tx_refund" in m for m in msgs), msgs
 
 
 def test_a_not_submitted_reason_never_quotes_the_signing_key() -> None:
