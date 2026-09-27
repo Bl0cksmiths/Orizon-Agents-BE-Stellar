@@ -840,7 +840,12 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         say(f"  dispute {dispute.id} stands at `upheld`: the decision was recorded, the credit was")
         say("  not paid, and no claim is held. Fix what the refusal above names, then re-run.")
         say()
-        return fallback
+        # NEVER 0 from here, whatever `fallback` says: a dispute left `upheld`
+        # is a buyer who has not been paid, and 0 is the code a wrapper reads
+        # as "credit and rating both landed". The branch above is meant to
+        # catch a clean return; if it ever stops doing so, this one must not
+        # turn that into a success.
+        return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
 
     say()
     if fallback != EXIT_OK and dispute.status == "open":
