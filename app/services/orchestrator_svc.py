@@ -634,6 +634,16 @@ def build_planning_prompt(registry_block: str, intent: str) -> str:
     return "\n\n".join([registry_block, fence_user_input(intent), "Return the Plan."])
 
 
+async def _kit_thinking() -> None:
+    """The kit path's randomized "thinking time" — see `_build_kit_plan`.
+
+    Its own function so a test can skip the pause by name, rather than paying
+    1.4–2.4 s of real sleep per kit plan or patching `asyncio.sleep` for the
+    whole process.
+    """
+    await asyncio.sleep(1.4 + random.random() * 1.0)
+
+
 class _DroppedKitRole(NamedTuple):
     """A sub-floor kit role with no substitute, held for the starvation backstop."""
 
@@ -674,7 +684,7 @@ async def _build_kit_plan(
     registry = registry or _snapshot_registry()
     routable = {a.id for a in registry.routable}
     by_id = {a.id: a for a in registry.agents}
-    await asyncio.sleep(1.4 + random.random() * 1.0)
+    await _kit_thinking()
 
     # (pipeline position, step). Execution runs steps in list order and later
     # roles read earlier ones' output from the run context — code.gen takes its
