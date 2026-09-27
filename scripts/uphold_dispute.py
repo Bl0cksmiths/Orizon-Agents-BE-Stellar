@@ -82,6 +82,18 @@ wired up yet (`config._money_capable_config_requires_api_key`, whose comment
 explains why it is the switch alone: a validator that promised "refunds on
 implies a key" must not have a hole in it).
 
+Telling the running service (D-066)
+-----------------------------------
+The rating lands from THIS process, so only this process's reputation cache
+knows. The deployment keeps serving the agent's previous score — to plans,
+routing and its own GET — for up to its `REPUTATION_READ_TTL_SECONDS`. Pass
+`--service-url` (or set `UPHOLD_SERVICE_URL`) and, with `API_KEY` holding the
+deployment's operator key, the script calls `POST
+/api/stellar/reputation/{agent_id}/invalidate` once the rating has been
+written. Without them it says plainly that the service was not told. A failed
+call is a warning and nothing more: the credit and the rating have already
+happened, and the exit code keeps meaning what it meant.
+
 No secret ever reaches the terminal: every line goes out through
 `security.redact_secrets`, which masks this deployment's configured values and
 anything secret-shaped from elsewhere. That is a property of the output path
@@ -94,6 +106,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -142,7 +155,8 @@ EXIT_ADJUDICATION_RACE = 14
 # root on sys.path so the `app` package resolves without PYTHONPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pydantic import ValidationError  # noqa: E402  (after the sys.path bootstrap above)
+import httpx  # noqa: E402  (after the sys.path bootstrap above)
+from pydantic import ValidationError  # noqa: E402
 
 try:
     from app.config import settings  # noqa: E402
@@ -813,6 +827,63 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
     return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
 
 
+# D-066: how a run tells the RUNNING service that the rating it wrote has
+# landed. The URL may come from the environment so a wrapper can set it once;
+# the key is only ever API_KEY — never a flag, which would put the operator key
+# in shell history and in every process listing.
+SERVICE_URL_ENV = "UPHOLD_SERVICE_URL"
+_INVALIDATE_TIMEOUT_SECONDS = 10.0
+
+
+def _stale_score_note(agent_id: str) -> None:
+    ttl = settings.reputation_read_ttl_seconds
+    say(f"    so it keeps serving {agent_id}'s PREVIOUS score — to plans, routing and")
+    say(f"    GET /api/stellar/reputation/{agent_id} — for up to REPUTATION_READ_TTL_SECONDS,")
+    say(f"    {ttl:g} s as this process reads it (the deployment's own value is read_ttl_seconds")
+    say("    on GET /api/stellar/reputation/params).")
+
+
+async def tell_the_service(agent_id: str, service_url: str | None) -> None:
+    """Ask the running service to drop its cached score for this agent (D-066).
+
+    Never raises and never changes the exit code: by the time this runs the
+    credit and the rating have both happened, and a cache that could not be
+    told only means the old score is served for one more read TTL. Every way
+    it can go wrong is therefore a WARNING printed in plain words, beside the
+    TTL that bounds the damage.
+    """
+    say("  running service:")
+    url = (service_url or "").strip().rstrip("/")
+    if not url or not settings.api_key:
+        missing = "no --service-url / " + SERVICE_URL_ENV if not url else "no API_KEY in this process"
+        say(f"    NOT TOLD ({missing}),")
+        _stale_score_note(agent_id)
+        say("    Pass --service-url with API_KEY set to the deployment's key to drop it at once.")
+        say()
+        return
+    endpoint = f"{url}/api/stellar/reputation/{agent_id}/invalidate"
+    try:
+        async with httpx.AsyncClient(timeout=_INVALIDATE_TIMEOUT_SECONDS) as client:
+            response = await client.post(endpoint, headers={"X-API-Key": settings.api_key})
+        if response.status_code == 200:
+            say(f"    {url} dropped its cached score for {agent_id}; its next read comes from the ledger.")
+            say()
+            return
+        try:
+            detail = str(response.json().get("detail", ""))
+        except ValueError:
+            detail = ""
+        reason = f"HTTP {response.status_code}" + (f" {detail}" if detail else "")
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+    say(f"    WARNING: could not tell {url} ({reason}).")
+    say("    The uphold above STANDS and this run's exit code does not change. But the")
+    say("    service was not told,")
+    _stale_score_note(agent_id)
+    say(f"    To retry by hand: POST {endpoint} with the X-API-Key header.")
+    say()
+
+
 async def read_standing(agent_id: str) -> reputation_svc.RepInfo | None:
     """The agent's reputation as the ledger holds it NOW, or None when it cannot be read.
 
@@ -1119,7 +1190,7 @@ def report_rating(dispute: DisputeRecord, outcome: dispute_rating.RatingOutcome 
     return EXIT_OK
 
 
-async def execute(dispute_id: str, agent_id: str, amount: float | None) -> int:
+async def execute(dispute_id: str, agent_id: str, amount: float | None, service_url: str | None = None) -> int:
     """Uphold the dispute, pay the credit, rate the agent, and report both from the store.
 
     Every path — clean return, refusal, unexpected exception — falls through to
@@ -1174,6 +1245,9 @@ async def execute(dispute_id: str, agent_id: str, amount: float | None) -> int:
         return code
     code = report_rating(dispute, ratings[-1] if ratings else None)
     report_standing(agent_id, before, await read_standing(agent_id))
+    # After the rating, whatever became of it: the credit landed, so the
+    # rating was at least asked for, and dropping a cache entry is harmless.
+    await tell_the_service(agent_id, service_url)
     if code == EXIT_OK:
         print_evidence(dispute)
     return code
@@ -1242,10 +1316,22 @@ def build_parser() -> argparse.ArgumentParser:
             "nothing from the chain, and needs no signing key. Always run this first."
         ),
     )
+    parser.add_argument(
+        "--service-url",
+        default=os.environ.get(SERVICE_URL_ENV) or None,
+        metavar="URL",
+        help=(
+            "the running service's base URL, e.g. https://api.example.com. After the rating is "
+            "written the script asks it to drop its cached score for the agent, authenticated with "
+            "API_KEY, which must be the deployment's operator key. Without it the service keeps the "
+            f"previous score for up to its REPUTATION_READ_TTL_SECONDS. Defaults to ${SERVICE_URL_ENV}. "
+            "A failed call is a warning, never a change to the exit code."
+        ),
+    )
     return parser
 
 
-async def run(dispute_id: str, dry_run: bool) -> int:
+async def run(dispute_id: str, dry_run: bool, service_url: str | None = None) -> int:
     """Resolve, preview, and — unless this is a dry run — pay and rate. One event loop.
 
     One loop for the whole run rather than an `asyncio.run` per step, because
@@ -1306,12 +1392,12 @@ async def run(dispute_id: str, dry_run: bool) -> int:
     config_code = check_config()
     if config_code != EXIT_OK:
         return config_code
-    return await execute(dispute_id, dispute.agent_id, amount)
+    return await execute(dispute_id, dispute.agent_id, amount, service_url)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return asyncio.run(run(args.dispute_id, args.dry_run))
+    return asyncio.run(run(args.dispute_id, args.dry_run, args.service_url))
 
 
 if __name__ == "__main__":

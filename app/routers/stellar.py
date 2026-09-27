@@ -14,14 +14,15 @@ import logging
 import re
 import secrets
 import time
+from collections import deque
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Security
 from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import require_api_key
+from ..security import _operator_key_scheme, header_secret_matches, require_api_key
 from ..services import registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
@@ -352,6 +353,99 @@ async def read_reputation(
     """
     info = await reputation_svc.fetch_rep(agent_id)
     return ReputationInfo(**info.model_dump())
+
+
+# ── operator: drop one agent's cached score (D-066) ──────────────
+async def require_operator_key(
+    x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
+) -> None:
+    """The operator key, FAIL CLOSED: with API_KEY empty nobody is admitted.
+
+    `require_adjudicator`'s key half, without its refund switch. That switch
+    says whether THIS process may pay a credit, and the operator script pays
+    credits in its own process precisely so the deployment can keep it off —
+    so a route the script calls afterwards must not be closed by it. The key
+    rules are the adjudicator's own: an empty API_KEY refuses everyone (503,
+    logged at ERROR, never a fall-through to "allow"), and a missing or wrong
+    key is one 401, so the route is no oracle for which of the two it was.
+    """
+    expected = settings.api_key
+    if not expected:
+        logger.error("reputation invalidation refused: API_KEY is empty, so the operator route stays closed")
+        raise HTTPException(status_code=503, detail="operator_key_not_configured")
+    if not header_secret_matches(x_api_key, expected):
+        raise HTTPException(status_code=401, detail="invalid_api_key")
+
+
+class _InvalidationBudget:
+    """At most `limit` admitted invalidations per `window` seconds, process-wide.
+
+    An invalidation is cheap here and expensive one step later: it sends the
+    agent's next read to the ReputationLedger instead of the cache, so a leaked
+    key looping on this route would turn the read cache off and spend RPC on
+    every plan. One rating lands per upheld dispute, so an honest operator
+    needs a handful a minute. Counted AFTER the key check, so callers without
+    the key cannot spend the operator's budget; their guesses are bounded by
+    the service-wide RateLimitMiddleware instead.
+    """
+
+    def __init__(self, limit: int = 30, window: float = 60.0) -> None:
+        self.limit = limit
+        self.window = window
+        self._hits: deque[float] = deque()
+
+    def __call__(self) -> None:
+        now = time.monotonic()
+        while self._hits and self._hits[0] <= now - self.window:
+            self._hits.popleft()
+        if len(self._hits) >= self.limit:
+            raise HTTPException(status_code=429, detail="rate_limited")
+        self._hits.append(now)
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+invalidation_budget = _InvalidationBudget()
+
+
+class InvalidatedReputation(BaseModel):
+    agent_id: str
+    invalidated: bool  # always true: the entry is gone, whether or not one was cached
+    read_ttl_seconds: float  # how long a stale score could otherwise have been served
+
+
+@router.post(
+    "/reputation/{agent_id}/invalidate",
+    response_model=InvalidatedReputation,
+    summary="Drop one agent's cached reputation (operator only)",
+    dependencies=[Depends(require_operator_key), Depends(invalidation_budget)],
+)
+async def invalidate_reputation(
+    agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
+) -> InvalidatedReputation:
+    """Forget this process's cached rep_state for one agent, so its next read
+    — a plan's routing, its stamp, this router's GET — comes from the ledger.
+
+    For a rating that landed from OUTSIDE this process: the uphold script
+    rates in its own process, and `reputation_svc.invalidate_rep` there drops
+    only that process's cache, so without this the server kept serving the
+    pre-dispute score for up to `reputation_read_ttl_seconds` (D-066). The
+    adjudication route needs none of this — it invalidates in-process.
+
+    Per PROCESS, by construction: the cache is a module dict. The deployment
+    runs one uvicorn worker (render.yaml `--workers 1`), so this process is the
+    whole service. A multi-worker deployment would reach one worker per call
+    and must replace this with a shared invalidation (a shared cache, or a
+    broadcast) before it scales out.
+    """
+    reputation_svc.invalidate_rep(agent_id)
+    logger.info("reputation cache invalidated for %s by the operator", agent_id)
+    return InvalidatedReputation(
+        agent_id=agent_id,
+        invalidated=True,
+        read_ttl_seconds=settings.reputation_read_ttl_seconds,
+    )
 
 
 @router.get("/attestation/{job_id_hex}", response_model=AttestationRead)

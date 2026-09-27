@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 
 from agno.utils.log import LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME
 from fastapi import FastAPI, Request
@@ -49,7 +49,7 @@ from .seed import seed_registry
 from .services import execution_svc, rating_writer, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
-from .services.dispute_store import close_dispute_store
+from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
 
 
@@ -174,6 +174,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # line and /readiness's `cold_start`, which has to be asked — so it is
     # stated before anything else can bury it.
     _report_cold_start_routability()
+    # Resolve the dispute store now, so its line (postgres, or the in-memory
+    # fallback at WARNING) is in the boot log rather than inside whichever
+    # request first touches a settlement or a dispute — on a quiet instance
+    # that request may never come, and the line with it (D-063). Constructing
+    # the store dials nothing: a Postgres that is unreachable at boot still
+    # fails its first real use loudly, and never falls back to memory.
+    get_dispute_store()
     seed_registry()
     # Bound the default executor: asyncio.to_thread otherwise sizes it to
     # min(32, cpu_count + 4) from the HOST's core count, while Render grants
@@ -582,6 +589,26 @@ class RatingsReadiness(BaseModel):
     scorer: str | None  # the ledger's stored Scorer as last read; null unless a read found one
 
 
+class DisputesReadiness(BaseModel):
+    """Which store holds settlements and disputes in this process (D-063).
+
+    `postgres` when DATABASE_URL is set, `memory` otherwise — and `memory`
+    loses every settlement and dispute on restart (D-058), which is the check
+    an operator runs after a deploy. The boot log names it too; this is for
+    whoever cannot read that log, or reads it after a restart took the line.
+
+    The KIND of store only, never the DSN or anything derived from it: the DSN
+    carries the database password. It reports the selection, not a live
+    connection — the probe dials nothing, and a Postgres that is unreachable
+    is answered by the first request that needs it, loudly, never by a quiet
+    fall back to memory.
+
+    Informational, like `cold_start`: an in-memory store serves every request.
+    """
+
+    store: Literal["postgres", "memory"]
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. No live network calls, so the probe
     stays cheap and deterministic: everything is config-derived except
@@ -594,6 +621,7 @@ class ReadinessResponse(BaseModel):
     pdax: str  # "configured" | "unconfigured" — informational
     cold_start: ColdStartReadiness  # informational, never gates readiness
     ratings: RatingsReadiness  # informational, never gates readiness
+    disputes: DisputesReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -650,4 +678,7 @@ async def readiness(response: Response) -> ReadinessResponse:
             margin_bps=margin.margin_bps,
         ),
         ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
+        disputes=DisputesReadiness(
+            store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
+        ),
     )
