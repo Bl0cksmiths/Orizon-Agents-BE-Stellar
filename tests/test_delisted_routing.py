@@ -434,3 +434,26 @@ def test_a_kit_agent_delisted_during_the_kit_pause_is_not_planned(
     assert "agt_02k2" not in ids
     assert "agt_01h8" not in ids  # the brief role's only stand-in went too
     assert [(n.kind, n.agent_id) for n in resp.notices] == [("excluded", "agt_05x7")]
+
+
+def test_a_kit_agent_with_nothing_to_execute_it_is_not_planned_or_read(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A seeded role whose worker is missing from this deployment: listed, but
+    # no step can run it. It is dropped silently, and its reputation is never
+    # read — a read is only worth taking for an agent a plan could use.
+    real = orchestrator_svc.is_dispatchable
+    monkeypatch.setattr(orchestrator_svc, "is_dispatchable", lambda agent_id: agent_id != "agt_02k2" and real(agent_id))
+    asked: list[str] = []
+
+    async def _fake_reps(ids: list[str], *_a: object, **_k: object) -> dict[str, RepInfo]:
+        asked.extend(ids)
+        return _clearing_reps()
+
+    monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
+
+    resp = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+
+    assert "agt_02k2" not in [s.agent_id for s in resp.steps]
+    assert "agt_02k2" not in asked
+    assert resp.notices == []
