@@ -316,6 +316,17 @@ trace, as `reputation → agent <id> rated 10/100 for upheld dispute <id> on ste
 console that still has the run on screen; the dispute record is what holds the
 fact.
 
+**A rating refused before it was sent is `FAILED`, not `TIMEOUT`.** When the
+ledger's simulation refuses the rating with a host error (for example
+`HostError: Error(Value, InvalidInput)`), or the signer's account cannot be
+loaded, the signing key will not parse, an argument will not encode, or the RPC
+answers the send with `ERROR` or `TRY_AGAIN_LATER`, no transaction ever reached
+the network. The rating is reported as `FAILED` with the cause in `reason=` on
+the ERROR line, and nothing is recorded or in flight. Re-running is safe but
+will be refused the same way until that cause is fixed. `TIMEOUT` ("it may
+still land") is reserved for failures after the send: a connection dropped
+mid-send, a `DUPLICATE`, or a poll that ran out.
+
 ## The trust model, stated plainly
 
 - **The platform funds the credit.** The disputed agent's only consequence is
