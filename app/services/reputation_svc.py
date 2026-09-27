@@ -6,7 +6,10 @@ Division of labour (mirrors ERC-8004: raw evidence on-chain, aggregation off):
   - The ReputationLedger contract stores decayed, value-weighted rating
     evidence per agent (`rep_state` → sum_w / weight / count / disputed).
   - This service applies the Bayesian prior (Jøsang-style beta smoothing),
-    derives a conservative Wilson-style lower bound for the routing floor,
+    derives a conservative normal-approximation (Wald) lower bound for the
+    routing floor — long called "Wilson" here, and still exposed as
+    `wilson_z`, but it is not the Wilson score interval (see
+    `lower_bound_bps`),
     and computes the synthetic per-step rating the settler submits after a
     settled workflow.
 
@@ -28,14 +31,18 @@ Cold start: with no on-chain evidence the smoothed score IS the prior
 (default 7000 = 3.5/5) and the lower bound still clears the default floor —
 permissionless newcomers are routable, while a few heavily-weighted bad
 ratings sink an agent below the floor quickly. Failures never fabricate
-evidence: if the chain is unreachable the caller gets the prior, marked
+evidence: if a fresh read does not answer — the chain is unreachable, or the
+batch deadline passes first — the caller gets the agent's last known on-chain
+read, marked `stale=True` with its age, while one younger than the read TTL
+plus REPUTATION_STALE_GRACE_SECONDS exists; otherwise the prior, marked
 `source="prior"` and `degraded=True`.
 
-Degradation policy (deliberate, not accidental) — when the ledger cannot be
-read, reads fall back to the prior and the routing floor therefore fails
-OPEN under the shipped config: a prior-only agent clears the floor, so
-low-reputation agents become routable for the duration of the outage. That
-is kept, for three reasons:
+Degradation policy (deliberate, not accidental) — when an agent's ledger
+read cannot be had and there is no recent read to serve stale, that agent
+falls back to the prior and the routing floor therefore fails OPEN for it
+under the shipped config: a prior-only agent clears the floor, so a
+low-reputation agent becomes routable while it lasts. That is kept, for
+three reasons:
 
   - It is the same position the system takes on any agent it knows nothing
     about. An unreadable ledger genuinely means "reputation unknown", and
@@ -44,7 +51,21 @@ is kept, for three reasons:
     floor at once, tripping the orchestrator's _MIN_ROUTABLE_AGENTS backstop,
     which then picks a top-N by identical prior scores — the same agents get
     hired, with less defined semantics.
-  - The window is bounded by the read TTL and by the batch timeout.
+  - It is narrow, and per agent. Each read is judged on its own under the
+    batch deadline, so one slow agent degrades only itself; an agent read in
+    the last TTL + REPUTATION_STALE_GRACE_SECONDS (315 s shipped) is served
+    that read, stale, which the floor still judges; and a read cut off by the
+    deadline keeps running and fills the cache for the next batch. What is
+    left failing open is an agent with no read that recent: never read yet
+    (the boot pre-warm covers the registry as it stands at boot), or a chain
+    unreachable for longer than the grace.
+
+It is NOT bounded in time. Earlier notes here claimed the window was bounded
+by the read TTL and the batch timeout; both audits disproved that. The TTL
+only decides when a read is next attempted and the deadline only how long a
+batch waits for it, so a chain that stays unreachable (or slower than the
+deadline) keeps every agent past its grace on the prior for as long as that
+lasts — loudly, one WARNING per batch.
 
 What was actually broken is that none of this was visible: the fallbacks
 logged at DEBUG under an INFO root logger, i.e. not at all. Every fallback
@@ -71,7 +92,9 @@ logger = logging.getLogger(__name__)
 STROOPS_PER_USDC = 10_000_000
 # One-sided ~84% confidence. Deliberately gentle: paired with the prior mass
 # it lets a prior-only newcomer clear the floor, while real negative evidence
-# still drags the bound down fast.
+# still drags the bound down fast. The name is historical — the bound is a
+# normal-approximation (Wald) bound, not Wilson's (`lower_bound_bps`) — and it
+# is kept because /reputation/params publishes it as `wilson_z`.
 WILSON_Z = 1.0
 
 # Mirrors of the deployed ReputationLedger v2 on-chain constants
@@ -135,7 +158,14 @@ def smoothed_bps(sum_w: int, weight: int) -> int:
 
 
 def lower_bound_bps(mean_bps: int, weight: int) -> int:
-    """Wilson-style lower bound on the smoothed mean.
+    """Normal-approximation (Wald) lower bound on the smoothed mean:
+    p - z * sqrt(p(1-p)/n).
+
+    Not the Wilson score interval, whatever the constant's name says: there
+    is no score correction, so at p -> 1 (or 0) the bound collapses onto the
+    mean. The prior's mass counts toward n as if it were observed jobs. Both
+    are as tuned — the cold-start margin is built on exactly this arithmetic —
+    so it is named for what it is rather than changed.
 
     Effective sample size counts prior mass plus on-chain evidence in units
     of one-USDC jobs, so confidence grows with settled value, not raw count.
@@ -324,7 +354,7 @@ def synthetic_rating(
     reach the base score — an acknowledgement scores as non-delivery (ADR
     0005 D3). Base 70 is exactly `reputation_prior_bps`, so before this gate
     `{"ok": true}` held the mean at the prior while growing the evidence
-    mass, and the Wilson lower bound therefore ROSE with every junk response
+    mass, and the lower bound therefore ROSE with every junk response
     (5677 → 5746 over 25 of them): answering garbage forever scored strictly
     better than failing honestly, and no volume of it could ever cross the
     routing floor. First-party scoring is untouched — a local worker
@@ -798,6 +828,11 @@ def invalidate_rep(agent_id: str) -> None:
     routed and stamped on the very number the dispute was meant to change. A
     read already in flight when this runs is detached rather than cancelled,
     and cannot write its pre-rating result back (`app.stellar.cache.invalidate`).
+
+    Dropping the key also drops the read that would otherwise be served
+    STALE past its TTL (`_stale_info`): a value the caller has just declared
+    wrong must not come back as the "last known" one while a slow fresh read
+    is in flight.
 
     This one key is enough because it is the only cache in front of
     reputation: `fetch_rep`, `fetch_reps`, both /api/stellar/reputation routes,

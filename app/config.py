@@ -221,8 +221,10 @@ class Settings(BaseSettings):
     reputation_floor_bps: int = 5500
     # TTL for cached on-chain rep_state reads (per agent).
     reputation_read_ttl_seconds: float = 15.0
-    # Wall-clock bound on ONE batched reputation read — the asyncio.wait_for
-    # around fetch_reps' gather (services/reputation_svc.py). Lifted out of that
+    # Wall-clock bound on ONE batched reputation read — the deadline fetch_reps'
+    # per-agent reads share under asyncio.wait (services/reputation_svc.py);
+    # a read still pending at it is served stale or the prior, and keeps
+    # running to fill the cache. Lifted out of that
     # function's default argument so a deployment can tune it without a code
     # change and, more to the point, so the validators below that bound it can
     # see the number they are validating: a bound that exists only as a literal
@@ -686,19 +688,19 @@ class Settings(BaseSettings):
         """Fail fast when the batched reputation read has no usable deadline.
 
         fetch_reps (services/reputation_svc.py) hands this number to
-        asyncio.wait_for as the deadline for the whole batch. The budget rule
+        asyncio.wait as the deadline its per-agent reads share. The budget rule
         below only ever looked UP — it caps the bound at a share of the
-        planning budget — so nothing stopped it from going down to nothing.
-        wait_for treats a deadline of 0, any negative value, or NaN as already
-        expired: the gather is cancelled before a single rep_state read can
-        answer, every agent falls back to the prior marked degraded, and every
-        plan goes out flagged reputation_degraded. Under the shipped config a
-        prior-only agent clears the floor, so the floor then fails OPEN for
-        the life of the process — an agent the ledger has already rated below
-        it is routable again, with the chain perfectly healthy. The degradation
-        policy accepts failing open because an outage is bounded by the read
-        TTL and by this timeout; a timeout that expires on arrival turns a
-        bounded outage into a permanent one that no RPC recovery can end.
+        planning budget — so nothing stopped it from going down to nothing. A
+        deadline of 0, any negative value, or NaN is treated as already
+        expired: no rep_state read that has to reach the chain can answer, so
+        every agent without a recent read falls back to the prior marked
+        degraded, and every plan goes out flagged reputation_degraded. Under
+        the shipped config a prior-only agent clears the floor, so the floor
+        then fails OPEN for the life of the process — an agent the ledger has
+        already rated below it is routable again, with the chain perfectly
+        healthy. The degradation policy accepts failing open while reads
+        genuinely cannot be had; a timeout that expires on arrival makes that
+        permanent, and no RPC recovery can end it.
 
         inf is the opposite failure: no bound at all, so a hung RPC holds every
         decompose for as long as the socket does — the exact incident this

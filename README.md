@@ -80,7 +80,7 @@ Raw reputation evidence lives on-chain, aggregation lives here (the ERC-8004 spl
 
 The weight is the step's *quoted* price, not money that changed hands — and the distinction is load-bearing rather than pedantic. A failed step is never billed yet is rated all the same, so weighting by settled value would make every negative rating weightless: non-delivery settles nothing. Weighting by what was at stake is as true of a step that failed as of one that delivered, which is what lets non-delivery carry a cost at all. See `app/services/reputation_svc.py`'s module docstring and [docs/reputation.md](docs/reputation.md).
 
-The backend turns that evidence into routing decisions. A Bayesian prior (default 7000 bps = 3.5/5) smooths sparse evidence so permissionless newcomers start at a meaningful score instead of zero, and a Wilson-style lower bound on the smoothed mean feeds the routing floor: at decompose time, agents whose bound falls below `REPUTATION_FLOOR_BPS` are omitted from the planner's registry (never shrinking the candidate list below 3), and every plan step is stamped with the live smoothed score (`rep_bps` / `rep_source`). If the chain is unreachable the caller gets the prior, marked `source="prior"` — reads never fail.
+The backend turns that evidence into routing decisions. A Bayesian prior (default 7000 bps = 3.5/5) smooths sparse evidence so permissionless newcomers start at a meaningful score instead of zero, and a normal-approximation (Wald) lower bound on the smoothed mean feeds the routing floor: at decompose time, agents whose bound falls below `REPUTATION_FLOOR_BPS` are omitted from the planner's registry (never shrinking the candidate list below 3), and every plan step is stamped with the live smoothed score (`rep_bps` / `rep_source`). If a fresh read does not answer in time the caller gets the agent's last on-chain read marked `stale` while it is recent enough, else the prior marked `degraded` — reads never fail.
 
 Each plan step also carries the rest of the reputation the floor was judged on, from the same snapshot, so a plan card never needs a second request (all optional, so older plans and clients still validate):
 
@@ -116,7 +116,11 @@ Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /ap
 | `REPUTATION_PRIOR_WEIGHT_USDC` | `12` | evidence mass of the prior — settled USDC needed for evidence to dominate |
 | `REPUTATION_FLOOR_BPS` | `5500` | routing floor applied to the smoothed lower bound at decompose time |
 | `REPUTATION_READ_TTL_SECONDS` | `15` | TTL for cached on-chain `rep_state` reads, per agent |
-| `REPUTATION_MAX_RATING_WEIGHT_USDC` | `100` | per-rating weight cap — one whale job can't own the score |
+| `REPUTATION_MAX_RATING_WEIGHT_USDC` | `100` | absolute outer bound on one rating's weight, in USDC |
+| `REPUTATION_MAX_RATING_TO_PRIOR_RATIO` | `1.0` | the cap that binds: one rating weighs at most this × the prior's weight (12 USDC shipped), so no single job overrules the prior — an open product decision, one number to change |
+| `REPUTATION_BATCH_TIMEOUT_SECONDS` | `2.5` | deadline one batch of per-agent reads shares |
+| `REPUTATION_STALE_GRACE_SECONDS` | `300` | how long past its TTL an agent's last on-chain read may be served, marked `stale`, when a fresh read misses the deadline or fails |
+| `REPUTATION_READ_CONCURRENCY` / `REPUTATION_READ_LATENCY_SECONDS` / `REPUTATION_BATCH_AGENTS` | `16` / `0.75` / `32` | what the deadline is sized against; boot is refused unless it covers `ceil(agents / concurrency) × latency` |
 
 `REPUTATION_PRIOR_BPS`, `REPUTATION_PRIOR_WEIGHT_USDC` and `REPUTATION_FLOOR_BPS` between them decide whether a brand-new agent is routable at all, and the margin is 177 bps. **[docs/reputation.md](docs/reputation.md)** has the arithmetic, the exact value at which each one starts excluding newcomers, and why the floor is applied to the lower bound rather than to the raw on-chain mean — read it before changing any of them.
 
