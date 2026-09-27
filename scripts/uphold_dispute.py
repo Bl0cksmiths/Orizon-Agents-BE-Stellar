@@ -494,10 +494,18 @@ def check_status(dispute: DisputeRecord) -> int:
         say("  note: ALREADY CREDITED — the credit will NOT be paid again. Its evidence:")
         say(f"        refund tx:  {dispute.refund_tx}")
         say(f"        evidence:   {expert_url('tx', dispute.refund_tx)}")
-        if dispute.rating_tx:
+        if dispute.rating_tx and dispute.rating_confirmed:
+            # 4.06's `rating_confirmed`: the ledger vouched for this hash when
+            # it was recorded, so it is said to have landed — and a live run
+            # re-confirms it, which is all it will do.
+            say(f"        rating tx:  {dispute.rating_tx}")
+            say("                    on record, CONFIRMED — the ledger vouched for it when it landed;")
+            say("                    a live run re-confirms it and writes nothing new")
+        elif dispute.rating_tx:
             # Not "rated": the service records an in-flight hash on a rating
-            # timeout exactly as it records a landed one, so only the ledger's
-            # answer to a live run can say which this is.
+            # timeout exactly as it records a landed one, so until the record
+            # says `rating_confirmed` only the ledger's answer to a live run can
+            # say which this is.
             say(f"        rating tx:  {dispute.rating_tx}")
             say("                    on record, NOT confirmed — landed, or timed out in flight;")
             say("                    a live run asks the ledger which")
