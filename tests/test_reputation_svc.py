@@ -125,19 +125,63 @@ def test_the_ratio_is_one_number_that_moves_the_cap(monkeypatch):
     assert rep.max_rating_weight_usdc() == settings.reputation_max_rating_weight_usdc
 
 
-def test_fetch_rep_prior_fallback_without_contract():
-    # Hermetic env has no reputation ledger id → prior path, no RPC call.
+def _no_rpc(*_args, **_kwargs):  # pragma: no cover - must never run
+    raise AssertionError("an unconfigured ledger must not be read")
+
+
+def test_fetch_rep_prior_fallback_without_contract(monkeypatch):
+    # No reputation ledger id → prior path, no RPC call. Set here rather than
+    # inherited from conftest's blanking, and the RPC is a trap, so this can
+    # only pass on the disabled path it names.
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "")
+    monkeypatch.setattr(sc, "simulate_read", _no_rpc)
     info = asyncio.run(rep.fetch_rep("agt_01h8"))
     assert info.source == "prior"
+    assert info.degraded is False
     assert info.smoothed_bps == settings.reputation_prior_bps
     assert info.count == 0
 
 
-def test_fetch_reps_returns_entry_per_agent():
+def _fake_ledger(monkeypatch, chain: dict[str, dict[str, int]]) -> None:
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    monkeypatch.setattr(sc, "simulate_read", lambda _c, _m, args, **_k: chain[args[0]])
+    rcache.clear()
+
+
+def test_fetch_rep_reads_the_configured_ledger(monkeypatch):
+    """The on-chain path these tests used to skip because conftest blanks the
+    ledger id: with a ledger configured the numbers come from rep_state."""
+    weight = 10 * USDC
+    _fake_ledger(monkeypatch, {"agt_01h8": {"sum_w": _sum_w(9000, weight), "weight": weight, "count": 4}})
+    try:
+        info = asyncio.run(rep.fetch_rep("agt_01h8"))
+    finally:
+        rcache.clear()
+    assert info.source == "onchain"
+    assert info.avg_bps == 9000
+    assert info.count == 4
+
+
+def test_fetch_reps_returns_each_agent_its_own_entry(monkeypatch):
+    """One entry per agent, each read from ITS rep_state — distinct numbers
+    per agent, so a batch that crossed or dropped reads cannot pass."""
     ids = ["agt_01h8", "agt_02k2", "agt_03d9"]
-    infos = asyncio.run(rep.fetch_reps(ids))
+    weight = 10 * USDC
+    chain = {a: {"sum_w": _sum_w(6000 + 1000 * i, weight), "weight": weight, "count": i + 1} for i, a in enumerate(ids)}
+    _fake_ledger(monkeypatch, chain)
+    try:
+        infos = asyncio.run(rep.fetch_reps(ids))
+    finally:
+        rcache.clear()
     assert set(infos) == set(ids)
-    assert all(i.source == "prior" for i in infos.values())
+    for i, agent_id in enumerate(ids):
+        assert infos[agent_id].agent_id == agent_id
+        assert infos[agent_id].source == "onchain"
+        assert infos[agent_id].avg_bps == 6000 + 1000 * i
+        assert infos[agent_id].count == i + 1
 
 
 def test_info_from_state_zero_evidence_is_prior():
