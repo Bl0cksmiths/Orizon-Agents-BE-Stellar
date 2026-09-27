@@ -493,8 +493,10 @@ def test_a_dispute_signature_is_not_a_read_proof(empty_table):
 
 
 def test_a_dispute_signature_is_refused_by_the_grant_route(client, settled):
+    # The task id standing where a dispute's job id goes, step 0: the dispute
+    # message closest to the read message that the payer could be induced to sign.
     challenge = _challenge(client)
-    dispute_sig = _sign(PAYER, eb.dispute_message(SHARED_ID, 0, challenge["nonce"]))
+    dispute_sig = _sign(PAYER, eb.dispute_message(TASK, 0, challenge["nonce"]))
 
     r = client.post(
         "/api/disputes/read-grant", json={"task_id": TASK, "nonce": challenge["nonce"], "signature_b64": dispute_sig}
