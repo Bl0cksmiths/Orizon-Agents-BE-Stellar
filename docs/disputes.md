@@ -488,15 +488,17 @@ stacked, with their shared prefix underlined.
 | --- | --- | --- |
 | `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign and when the challenge expires. The step's charge, the creditable amount and the window's closing time are on the per-task read |
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
-| `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, the refund and rating transactions once they exist, and the receipt: what was actually credited, when it last changed, whether the rating landed and, for a rejection, why. "What a dispute returns" below has every field |
-| `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
+| `POST /api/disputes/read-challenge` | public | mint a single-use nonce the **payer** signs to read their own disputes' free text from any tab — see "Reading your own dispute: the read grant" below |
+| `POST /api/disputes/read-grant` | the payer, proved by the signature | exchange that signature for a read grant, good for up to an hour, sent back as `X-Dispute-Read-Grant` |
+| `GET /api/disputes/{dispute_id}` | anyone holding the id; the free text only with a task token, an operator key or the payer's read grant | read one dispute back — status, reason, amounts, the refund and rating transactions once they exist, and the receipt: what was actually credited, when it last changed, whether the rating landed and, for a rejection, why. "What a dispute returns" below has every field |
+| `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key. The free text only with a task token, an operator key or the payer's read grant | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
 | `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, transfers the amount to the payer, then writes the dispute rating. On a `credited` dispute it signs no transfer and re-attempts the rating only |
 | `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — body `{"note": "..."}`, **required**, 1 to 500 characters, and **shown to the buyer** as the dispute's `rejection_reason`. Records `rejected` with its resolution time and that reason; nothing is signed and nothing is spent |
 
-The read routes take no credential because both ids are unguessable — a dispute
-id is `dsp_` plus 16 random hex characters — which is the same trade the task
-read token makes, and it keeps a buyer able to check their own dispute without
-an account.
+The read routes take no credential for the money facts — a dispute's status,
+amounts and transactions — and it keeps a buyer able to check their own dispute
+without an account. The two free-text fields are the exception: "Who can read
+what a dispute says" below has who gets them.
 
 **The two adjudication routes are the exception to everything above, and they
 fail closed.** Every other route in this service treats an unset `API_KEY` as
@@ -601,22 +603,106 @@ does not have, is null.
 | `updated_at` | when the dispute last changed state, in epoch seconds. Unlike `resolved_at` it moves: a credit reconciled hours after the verdict carries the time it was credited. Null only for a dispute last written before the field existed |
 | `rating_confirmed` | whether the dispute rating is known to have **landed**. `rating_tx` cannot say on its own, because it is recorded for a submission that timed out as well as for one that succeeded. `true` once the ledger has vouched for it, `false` while it is only in flight, null when no rating was submitted or the dispute predates the field. Null means "not known", never "no" |
 | `rejection_reason` | on a `rejected` dispute, the adjudicator's reason — **shown to the buyer**. Null under every other status, whatever the record holds, and for a rejection recorded before a reason was required |
+| `reason_withheld` | `true` exactly when `reason` and `rejection_reason` were withheld from **this** caller, `false` when they were sent. Never null. With it, a client does not have to guess whether an empty `reason` and a null `rejection_reason` mean "withheld" or "not rejected": if it is `true` and the reader is the payer, ask them to sign a read challenge |
 
 **Who can read what a dispute says.** Two fields on this shape are somebody's
 words rather than facts the chain already publishes: the buyer's `reason` and a
-rejection's `rejection_reason`. The API does not hide either.
-`GET /api/disputes/{dispute_id}` answers anyone holding the id, and the
-per-task read answers anyone who may read the task — which, while
-`TASK_AUTH_REQUIRED` is off (the shipped default, and how the public deployment
-runs), is anyone with the task id; that read hands out every dispute id on the
-task as well. The console shows both fields only to the payer, but that is a
-choice about display, not about access, and it narrows nothing the API
-returns. So a rejection reason is written as something anyone holding the task
-id could read: about this step and this claim, with nothing about another
-buyer, another dispute or the platform's internals that would not be said to
-the buyer in the open. Turning `TASK_AUTH_REQUIRED` on scopes the per-task read
-to the task's own token or an operator key; the single-dispute read stays a
-link whose unguessable id is the credential either way.
+rejection's `rejection_reason`. Both read routes answer anyone they admit —
+the single-dispute read anyone holding the id, the per-task read anyone with
+the task id while `TASK_AUTH_REQUIRED` is off, the shipped default — but they
+send those two fields only to a caller who has proved one of:
+
+- the task's own read token (`X-Task-Token`, or `?token=`), which the tab that
+  ran the task holds;
+- the operator key (`X-API-Key`), which the adjudicator holds. An unset
+  `API_KEY` proves nothing;
+- a **dispute read grant** for this task (`X-Dispute-Read-Grant`), which the
+  task's payer earns by signing. See the next section.
+
+Everyone else gets `reason: ""` — the empty string, never null, because a null
+would fail the type check of every client built against this API and cost the
+reader the whole dispute — `rejection_reason: null`, and `reason_withheld:
+true`. Every other field, the money facts, goes to every caller the route
+admits. A rejection reason is still best written as something the buyer could
+show anyone: about this step and this claim, with nothing about another buyer,
+another dispute or the platform's internals.
+
+### Reading your own dispute: the read grant
+
+The task token dies with the process, is evicted with the 200-task memory ring,
+and lives in the one browser tab that ran the task. Adjudication can take a
+day, so by the time there is a rejection to read, the token is almost always
+gone (D-067). The payer can always prove who they are the way they proved it to
+open the dispute — a wallet signature, checked against the payer the
+**settlement record** names — and these two routes let them:
+
+```
+POST /api/disputes/read-challenge
+  body   {"task_id": str}
+  200    {"nonce": str, "message": str, "expires_at": float}
+         message == "orizon-dispute-read:v1:<task_id>:<nonce>"
+
+POST /api/disputes/read-grant
+  body   {"task_id": str, "nonce": str, "signature_b64": str}
+  200    {"grant": str, "expires_at": float}      expires_at <= now + 3600
+```
+
+Sign `message` exactly as a dispute's challenge is signed — raw UTF-8 bytes or
+SEP-53, the two forms `signMessage` produces — with the wallet that paid. Then
+send the grant as `X-Dispute-Read-Grant` on `GET /api/tasks/{task_id}/disputes`
+or `GET /api/disputes/{dispute_id}`. While it is valid, unexpired and for that
+task, both reasons come back and `reason_withheld` is `false`.
+
+| refusal | when |
+| --- | --- |
+| 404 `unknown_task` | no such task, and no settlement for it |
+| 404 `no_settlement` | the task exists but never settled, so there is no payer to prove |
+| 403 `not_the_payer` | the signature is not the settlement's payer's over this read message: a stranger's wallet, a malformed signature, or a signature over some other message. The challenge is left alone, so a stranger's attempt cannot cancel the payer's |
+| 409 `challenge_unknown` | the nonce is not this task's outstanding read challenge — including one already spent, so a replayed signature never buys a second grant |
+| 409 `challenge_expired` | it was, and its five minutes are up. Ask for another |
+| 422 `validation_error` | a task id outside `[A-Za-z0-9_-]{1,128}`, a nonce over 128 characters or a signature over 256 |
+| 503 `challenge_capacity_dispute_read` | every read-challenge slot is held by a live challenge. Ask again shortly |
+
+**None of the opening rules apply.** Not the window, not the step, not whether
+the step was charged, not whether the task already has a dispute. Those decide
+whether a new claim may be made; reading what was already said about the
+payer's own money is as legitimate a week after the window closed as inside it.
+
+**What a grant does not grant.** It buys the two free-text fields on the two
+dispute reads and nothing else:
+
+- it is **not** a task token. `GET /api/tasks/{task_id}`, its artifact, its
+  trace and the trace stream never look at it, so with `TASK_AUTH_REQUIRED` on
+  a grant-holder is refused there exactly like a stranger — and that includes
+  `GET /api/tasks/{task_id}/disputes` itself, which is gated by the same
+  check. The single-dispute read is not, and serves the grant-holder in full;
+- it opens no dispute, adjudicates nothing and moves no money;
+- it is for one task and one payer. A grant for another task — even one the
+  same wallet paid for — or for another payer reads nothing;
+- it lasts at most an hour, and does not survive a restart (below).
+
+**Separate from the dispute proof, by construction.** A read challenge is its
+own purpose in the shared challenge table, keyed by the task under its own
+subject, so minting or proving a read never consumes or displaces a dispute
+challenge. It has its own budget — 100 outstanding challenges, beside bind's
+150, unbind's 150 and dispute's 200, for a table cap of 600 — so no amount of
+reading can refuse a buyer the challenge that opens a dispute. And the message
+is its own domain: `orizon-dispute-read:v1` is not a prefix of
+`orizon-dispute:v1` nor the other way round, so no signature over one is ever a
+valid signature over the other.
+
+**The grant itself.** Opaque to the client, and stateless on the server: the
+task id, the payer and the expiry, with an HMAC-SHA256 over them. The MAC key
+is derived, under its own label, from 32 random bytes the process draws at
+start-up — never `STELLAR_SIGNING_KEY` or `API_KEY`, and never a secret an
+operator has to provision. So nothing is stored, nothing is evicted, and a
+restart simply invalidates every grant: the payer is asked to sign once more,
+and is never shown text on the strength of a grant this process did not mint.
+Behind several workers a grant would be honoured only by the worker that
+minted it; this service runs one.
+
+The new routes sit behind the same rate limiter and body limit as every other
+route, and their fields are bounded at the edge like the dispute routes'.
 
 ### What the per-task read returns
 
@@ -679,8 +765,9 @@ authorization id itself is left off, because no client needs it.
 The disputes this read lists are the exception, stated here rather than left
 implied: each carries the buyer's `reason` and, once rejected, the
 adjudicator's `rejection_reason`, which nothing else publishes, and this read
-serves them to whoever it admits. "Who can read what a dispute says" above has what that means
-for anyone writing a rejection.
+sends them only to a caller holding the task token, the operator key or the
+payer's read grant — everyone else gets them withheld, with `reason_withheld:
+true`. "Who can read what a dispute says" above has the whole rule.
 
 ## For operators: where the records live
 
