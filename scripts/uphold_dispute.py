@@ -310,6 +310,16 @@ def say(line: str = "") -> None:
     print(redact_secrets(line))
 
 
+def say_private(line: str) -> None:
+    """`say`, to STDERR: for what the operator may read but the evidence must not carry.
+
+    Stdout is the evidence block. The buyer's free text is withheld from
+    strangers by the API, and a bundle built from stdout is published, so it
+    goes here instead — masked by the same `redact_secrets`.
+    """
+    print(redact_secrets(line), file=sys.stderr)
+
+
 def expert_url(kind: str, identifier: str) -> str:
     """A Stellar Expert link on the network this process SIGNS for.
 
@@ -361,7 +371,14 @@ def describe(dispute: DisputeRecord, settlement: SettlementRecord, step: Settlem
     say()
     say(f"  dispute:   {dispute.id}   status={dispute.status}")
     say(f"  job:       {dispute.job_id_hex}   task={dispute.task_id}")
-    say(f"  opened:    {dispute.opened_at:.0f} (epoch)   reason={dispute.reason[:60]!r}")
+    # The buyer's reason is NOT printed here. Stdout is the block the module
+    # tells the operator to paste into the evidence bundle, and the reason is
+    # the buyer's own words — the free text the API withholds from anyone who
+    # has not proved they may read the task. Only its LENGTH goes to stdout;
+    # the words go to stderr (`say_private`), for the operator's eyes alone,
+    # beside the service's log lines, which are never pasted anywhere.
+    say(f"  opened:    {dispute.opened_at:.0f} (epoch)   reason: {len(dispute.reason)} chars, on stderr only")
+    say_private(f"  reason ({dispute.id}, not for the evidence bundle): {dispute.reason!r}")
     say(f"  payer:     {dispute.payer}")
     say(f"             {expert_url('account', dispute.payer)}")
     say("             ^ the account that gets credited — check this before a live run.")
