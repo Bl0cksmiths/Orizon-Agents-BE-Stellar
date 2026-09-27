@@ -177,6 +177,25 @@ def test_registry_spam_does_not_push_the_plan_onto_the_prior(
     assert ("excluded", "below_floor", BAD) in [(n.kind, n.reason_code, n.agent_id) for n in resp.notices]
 
 
+def test_a_partially_failing_read_degrades_only_the_agents_it_failed_for(
+    ledger: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Routing against a real, partly broken read: two agents' simulations
+    # raise, the known-bad agent's succeeds. The failures are served the prior
+    # and flagged; the evidence that DID arrive still decides the floor.
+    ledger.bad = {BAD}
+    ledger.failing = {"agt_03d9", "agt_12r0"}
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _planner(BAD, "agt_03d9"))
+
+    resp = _decompose_on_the_production_pool(FREE_FORM_INTENT)
+
+    assert resp.reputation_degraded is True
+    assert [(s.agent_id, s.rep_degraded, s.rep_source) for s in resp.steps] == [("agt_03d9", True, "prior")]
+    note = next(n for n in resp.notices if n.agent_id == BAD)
+    assert (note.kind, note.reason_code) == ("excluded", "below_floor")
+    assert note.lower_bound_bps is not None and note.lower_bound_bps < settings.reputation_floor_bps
+
+
 def test_an_agent_registered_during_the_reputation_read_is_not_offered(
     seeded: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
