@@ -391,7 +391,26 @@ _POLL_MAX_DELAY_SECONDS = 4.0
 _CONTRACT_ERROR_HEAD = re.compile(r"\s*HostError: Error\(Contract, #(\d+)\)")
 
 
-class ContractError(RuntimeError):
+class NotSubmittedError(RuntimeError):
+    """A write that failed BEFORE any transaction reached the network.
+
+    Raised where the submit path fails ahead of `sendTransaction` — the signer
+    key, the source account, the build, the simulation that prepares it, the
+    signature — and where the RPC answers the send by refusing it outright
+    (`ERROR`, `TRY_AGAIN_LATER`). Nothing is in flight after one of these, so
+    nothing can land later: the cause has to be fixed, and a retry as things
+    stand is refused the same way.
+
+    Anything that can fail AFTER the send was attempted is NOT this — a send
+    that raised, a `DUPLICATE`, a poll that lost track — because the
+    transaction may be on its way; those stay plain exceptions and a caller
+    must keep treating them as "may still land".
+
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+
+class ContractError(NotSubmittedError):
     """A backend-signed call the contract itself rejected, with its error code.
 
     The code is the discriminant of the contract's own `Error` enum, carried
