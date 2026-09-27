@@ -401,3 +401,19 @@ def test_an_unregistered_id_is_404_without_a_chain_read(chain, client):
     assert len(chain.reads) == before, "an unregistered id reached the RPC"
     # A registered agent is still read and served.
     assert client.get("/api/stellar/reputation/agt_01h8").status_code == 200
+
+
+# ── the read is cached for the configured TTL ───────────────────
+
+
+@pytest.mark.parametrize("ttl", [15.0, 42.0])
+def test_a_read_is_cached_for_the_configured_ttl(chain, monkeypatch, ttl):
+    """Audit mutant M4: the TTL was hard-coded to an hour and nothing noticed.
+    The stored entry expires REPUTATION_READ_TTL_SECONDS after the read."""
+    monkeypatch.setattr(settings, "reputation_read_ttl_seconds", ttl)
+    before = time.monotonic()
+    asyncio.run(rep.fetch_reps(["agt_01h8"]))
+    after = time.monotonic()
+
+    expiry, _value = rcache._store[rep._rep_cache_key("agt_01h8")]
+    assert before + ttl <= expiry <= after + ttl
