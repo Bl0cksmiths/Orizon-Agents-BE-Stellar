@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -405,6 +406,15 @@ def creditable_for(
 REFUND_MUX_TAG = b"orizon-refund:v1"
 _MUX_ID_BYTES = 8
 
+# How the host refuses a muxed address a contract does not accept (one whose
+# parameter is a plain `Address`): the simulation fails with this head, and
+# the client raises it as `NotSubmittedError("prepare failed: …")`. Read off a
+# testnet simulation (protocol 28, 2026-09-27) of `balance(M…)` and of a
+# `transfer` FROM an M address — the two SAC parameters that take `Address`.
+# Anchored to the head, as the client's `_CONTRACT_ERROR_HEAD` is: the event
+# log beneath it can quote other errors.
+_MUXED_REFUSED_HEAD = re.compile(r"prepare failed: HostError: Error\(Value, UnexpectedType\)")
+
 
 def refund_muxed_id(dispute_id: str) -> int:
     """The 64-bit id an upheld dispute's refund transfer carries on-chain.
@@ -465,16 +475,17 @@ async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | No
 
     The tag falls back to the plain address, never to a failed credit:
       - when the muxed address cannot be built (`_tagged_recipient`);
-      - when the tagged transfer is refused with `sc.NotSubmittedError` that is
-        not a `sc.ContractError`. That type is the client's proof nothing was
-        sent, so a second transfer cannot pay the buyer twice; it is how a
-        network or asset contract that refuses a muxed `to` would answer, in
-        simulation, before anything is signed. A `ContractError` is the asset
-        contract's own verdict (a settler short of funds), which the plain
-        address would meet the same way, so it is raised as it always was.
-    Anything that may have been sent — any other exception, or an answer — is
-    returned or raised untouched: that transfer may land, and a second one
-    would pay the buyer twice.
+      - when the simulation refuses the muxed `to` itself: a
+        `sc.NotSubmittedError` headed `_MUXED_REFUSED_HEAD`, which is how the
+        host answers an asset contract that takes a plain `Address` there.
+        That type is the client's proof nothing was sent, so the second
+        transfer cannot pay the buyer twice.
+    Every other refusal is raised exactly as before — a settler short of funds,
+    an RPC down at `load_account`, a send the RPC refused — because the plain
+    address would meet it too, and a second attempt would change what the
+    money path does on a failure that has nothing to do with the tag. Anything
+    that may have been sent is returned or raised untouched: that transfer may
+    land, and a second one would pay the buyer twice.
     """
     settler = sc.signer_public_key()
     sac = sc.contract_ids().asset_sac
@@ -485,14 +496,14 @@ async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | No
         logger.info("dispute %s: refund to %s tagged with muxed id %d", dispute_id, buyer, muxed_id)
         try:
             return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), to, amount])
-        except sc.ContractError:
-            raise
         except sc.NotSubmittedError as e:
+            if isinstance(e, sc.ContractError) or not _MUXED_REFUSED_HEAD.match(str(e)):
+                raise
             logger.warning(
-                "dispute %s: tagged refund to %s was refused before it was sent (%s) — paying the plain address",
+                "dispute %s: the asset contract refused the muxed address for %s (%s) — paying the plain address",
                 dispute_id,
                 buyer,
-                e,
+                str(e).splitlines()[0],
             )
     return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), sc.addr(buyer), amount])
 
