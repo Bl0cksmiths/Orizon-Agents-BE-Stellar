@@ -99,15 +99,30 @@ def test_reputation_params_returns_config(client):
     assert body["network"] == settings.stellar_network
 
 
-def test_reputation_params_not_shadowed_by_agent_route(client):
-    # /reputation/params is declared before /reputation/{agent_id}; if the
-    # dynamic route captured it, "params" would come back as an agent id.
-    r = client.get("/api/stellar/reputation/params")
-    assert r.status_code == 200
-    body = r.json()
-    assert "agent_id" not in body
-    assert "smoothed_bps" not in body
-    assert "prior_weight_usdc" in body
+def test_params_is_reserved_so_no_agent_is_shadowed_by_the_route(client):
+    """`/reputation/params` is matched before `/reputation/{agent_id}`, so an
+    agent registered as `params` could never read its own reputation there —
+    this used to be pinned as correct because it checked only the route's side.
+    The id is reserved instead: the builder refuses it before any RPC, and the
+    form's availability check says so."""
+    r = client.post(
+        "/api/stellar/build/register-agent",
+        json={
+            "owner": "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
+            "agent_id": "params",
+            "name": "shadowed",
+            "skills": [],
+            "price_usdc": 0.05,
+        },
+    )
+    assert r.status_code == 409
+    assert "id_reserved" in r.text
+    availability = client.get("/api/stellar/agent-id-available/params").json()
+    assert availability["available"] is False
+    assert availability["reason"] == "id_reserved"
+    # And the route itself still answers with the config.
+    body = client.get("/api/stellar/reputation/params").json()
+    assert "prior_weight_usdc" in body and "agent_id" not in body
 
 
 def test_routing_constants_are_read_per_request(client, monkeypatch):

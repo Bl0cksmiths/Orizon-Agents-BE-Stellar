@@ -269,6 +269,23 @@ class AgentIdAvailability(BaseModel):
     owner: str | None = None
 
 
+# Ids that name a ROUTE rather than an agent. `/reputation/params` is declared
+# ahead of `/reputation/{agent_id}`, so an agent registered as `params` would be
+# unreachable there: its own reputation lookup answers with the system's config.
+# Reserved at registration, like the seeded `agt_` namespace, rather than by
+# moving the route — the frontend reads `/reputation/params` by that path.
+RESERVED_AGENT_IDS = frozenset({"params"})
+
+
+def _reserved_id_message(agent_id: str) -> str | None:
+    """Why an operator cannot register `agent_id`, or None if nothing reserves it."""
+    if agent_id.startswith("agt_"):
+        return "agt_ ids belong to the seeded catalog"
+    if agent_id in RESERVED_AGENT_IDS:
+        return f"{agent_id} is a reserved route name"
+    return None
+
+
 @router.get("/agent-id-available/{agent_id}", response_model=AgentIdAvailability)
 async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentIdAvailability:
     """Advisory pre-signature check for the registration form (id blur).
@@ -284,12 +301,9 @@ async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentI
             reason="id_malformed",
             message="allowed: letters, digits and underscore, 1-32 chars",
         )
-    if agent_id.startswith("agt_"):
-        return AgentIdAvailability(
-            available=False,
-            reason="id_reserved",
-            message="agt_ ids belong to the seeded catalog",
-        )
+    reserved = _reserved_id_message(agent_id)
+    if reserved is not None:
+        return AgentIdAvailability(available=False, reason="id_reserved", message=reserved)
 
     async def _resolve() -> AgentIdAvailability:
         # The same AgentRegistry.get read as read_agent, but under its own cache
@@ -334,7 +348,8 @@ async def read_reputations() -> ReputationBatch:
 
 # Declared BEFORE the dynamic /reputation/{agent_id} route — FastAPI matches
 # routes in declaration order, so this must come first or "params" would be
-# read as an agent id.
+# read as an agent id. That makes `params` unusable AS an agent id, so it is
+# reserved at registration (RESERVED_AGENT_IDS).
 @router.get("/reputation/params", response_model=ReputationParams)
 async def reputation_params() -> ReputationParams:
     """The reputation system's parameter set — pure config, no RPC call."""
@@ -533,9 +548,10 @@ async def build_register_agent(req: RegisterAgentReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.register. Owner signs via Freighter."""
     from stellar_sdk.exceptions import AccountNotFoundException
 
-    # The seeded catalog owns the agt_ namespace (seed.py) — refuse it before
-    # spending an RPC round-trip, and never silently rewrite an operator's id.
-    if req.agent_id.startswith("agt_"):
+    # The seeded catalog owns the agt_ namespace (seed.py), and a route name is
+    # not an agent — refuse both before spending an RPC round-trip, and never
+    # silently rewrite an operator's id.
+    if _reserved_id_message(req.agent_id) is not None:
         raise HTTPException(409, "id_reserved")
 
     # UX preflight: refuse a taken id BEFORE the wallet signs — a duplicate
