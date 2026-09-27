@@ -65,6 +65,7 @@ CREDITABLE_USDC = 0.07
 REFUND_TX = "b7c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f809"
 LEDGER = "C" + "LEDGER7Q" * 6 + "ABCDEFG"
 RATING_TX = "d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3"
+TESTNET_PASSPHRASE = "Test SDF Network ; September 2015"
 
 
 class _Refused(Exception):
@@ -135,15 +136,17 @@ def _fresh_store():
     runs the suite must not turn one of these into a live query — the hermetic
     fixture in conftest does not clear that one.
     """
-    saved = settings.database_url, settings.stellar_network
+    saved = settings.database_url, settings.stellar_network, settings.stellar_network_passphrase
     settings.database_url = ""
     # Pinned so the explorer URLs asserted below are the ones a testnet operator
-    # sees, rather than whatever network a developer's .env happens to name.
+    # sees, rather than whatever network a developer's .env happens to name —
+    # the passphrase too, since that is what the links are keyed on (D-074).
     settings.stellar_network = "testnet"
+    settings.stellar_network_passphrase = TESTNET_PASSPHRASE
     dispute_store._store = None
     yield
     dispute_store._store = None
-    settings.database_url, settings.stellar_network = saved
+    settings.database_url, settings.stellar_network, settings.stellar_network_passphrase = saved
 
 
 @pytest.fixture(autouse=True)
@@ -327,6 +330,45 @@ def test_help_says_the_platform_funds_it_and_that_it_moves_real_money() -> None:
     assert "Signs nothing" in help_text
 
 
+def test_the_exit_numbers_are_the_ones_the_help_and_the_docstring_promise() -> None:
+    """O01-O03: every other test compares against the constants, and `--help`
+    is a literal — so renumbering 6, 10 or 12 passed the whole suite while the
+    help, the module docstring and every operator's wrapper kept the old
+    numbers. The numbers are the contract, so they are pinned as numbers."""
+    assert {
+        name: getattr(uphold_dispute, name)
+        for name in (
+            "EXIT_OK",
+            "EXIT_NOT_CONFIGURED",
+            "EXIT_UNKNOWN_DISPUTE",
+            "EXIT_NOT_ADJUDICABLE",
+            "EXIT_IN_FLIGHT",
+            "EXIT_NOTHING_TO_CREDIT",
+            "EXIT_ABOVE_CAP",
+            "EXIT_TRANSFER_FAILED",
+            "EXIT_TIMEOUT",
+            "EXIT_UNEXPECTED",
+            "EXIT_RATING_NOT_LANDED",
+            "EXIT_RATING_COLLISION",
+            "EXIT_ADJUDICATION_RACE",
+        )
+    } == {
+        "EXIT_OK": 0,
+        "EXIT_NOT_CONFIGURED": 3,
+        "EXIT_UNKNOWN_DISPUTE": 4,
+        "EXIT_NOT_ADJUDICABLE": 5,
+        "EXIT_IN_FLIGHT": 6,
+        "EXIT_NOTHING_TO_CREDIT": 7,
+        "EXIT_ABOVE_CAP": 8,
+        "EXIT_TRANSFER_FAILED": 9,
+        "EXIT_TIMEOUT": 10,
+        "EXIT_UNEXPECTED": 11,
+        "EXIT_RATING_NOT_LANDED": 12,
+        "EXIT_RATING_COLLISION": 13,
+        "EXIT_ADJUDICATION_RACE": 14,
+    }
+
+
 def test_help_tells_the_two_post_signature_rules_apart() -> None:
     """After a signature the right next move depends on which half failed, and
     the two rules point in opposite directions: a timed-out CREDIT is never
@@ -442,6 +484,23 @@ def test_a_credited_disputes_recorded_rating_is_never_previewed_as_landed(
     assert f"rating tx:  {RATING_TX}" in out
     assert "on record, NOT confirmed — landed, or timed out in flight;" in out
     assert "RATED" not in out
+
+
+def test_a_confirmed_rating_is_previewed_as_confirmed(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The preview said "NOT confirmed" even when the record carried
+    `rating_confirmed=True` — the ledger's own word that the rating landed."""
+    forbid_uphold(monkeypatch)
+    dispute = seed(status="credited", refund_tx=REFUND_TX, rating_tx=RATING_TX)
+    asyncio.run(dispute_store.get_dispute_store().append_status(dispute.id, "credited", rating_confirmed=True))
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert f"rating tx:  {RATING_TX}" in out
+    assert "on record, CONFIRMED" in out
+    assert "NOT confirmed" not in out
 
 
 def test_a_credited_dispute_with_no_refund_hash_is_still_refused(
@@ -809,6 +868,46 @@ def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
     assert f"https://stellar.expert/explorer/testnet/account/{PAYER}" in out
     assert f"{CREDITABLE_USDC:.7f} USDC  ->  {PAYER}" in out
     assert f"not clawed back from {AGENT}" in out
+
+
+@pytest.mark.parametrize("label", ["pubnet", "testnet"])
+def test_a_mainnet_passphrase_links_the_public_explorer_whatever_the_label(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam, label: str
+) -> None:
+    """D-074: the link an operator follows to check who gets paid used to read
+    STELLAR_NETWORK, so `pubnet` — or `testnet` over the mainnet passphrase —
+    sent them to the TESTNET explorer to look for a mainnet account. The
+    passphrase is what the settler signs under, so it picks the explorer."""
+    from app.config import MAINNET_PASSPHRASE
+
+    forbid_uphold(monkeypatch)
+    monkeypatch.setattr(settings, "stellar_network", label)
+    monkeypatch.setattr(settings, "stellar_network_passphrase", MAINNET_PASSPHRASE)
+    seed()
+
+    _, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert f"https://stellar.expert/explorer/public/account/{PAYER}" in out
+    assert "/explorer/testnet/" not in out
+
+
+def test_the_buyers_reason_never_reaches_the_evidence_stdout(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """Stdout is the block the module says to paste into the evidence bundle,
+    and it printed the buyer's reason — the words the API withholds from anyone
+    who has not proved they may read the task. Its length goes to stdout; the
+    words go to stderr, for the operator alone."""
+    forbid_uphold(monkeypatch)
+    seed()
+
+    code = uphold_dispute.main(["--dispute-id", DISPUTE_ID, "--dry-run"])
+    captured = capsys.readouterr()
+
+    assert code == uphold_dispute.EXIT_OK
+    assert "the brief came back empty" not in captured.out
+    assert f"reason: {len('the brief came back empty')} chars, on stderr only" in captured.out
+    assert "the brief came back empty" in captured.err
 
 
 def test_the_preview_marks_the_bound_that_actually_binds(
@@ -1269,6 +1368,29 @@ def test_a_definitively_failed_transfer_is_payable_again(
     assert code == uphold_dispute.EXIT_TRANSFER_FAILED
     assert "the transfer FAILED" in out
     assert "running this again once the cause is fixed" in out
+
+
+def test_a_clean_return_that_leaves_the_dispute_upheld_is_never_success(capsys: pytest.CaptureFixture[str]) -> None:
+    """O10: `uphold` returning normally while the record still reads `upheld`
+    means the claim was released and nothing moved — the transfer failed. No
+    test drove that path, so narrowing the check to `refund_failed` alone
+    passed the suite and exited 0 for a buyer who was never paid."""
+    dispute = seed(status="upheld")
+
+    code = uphold_dispute.report(dispute, dispute.id, CREDITABLE_USDC, uphold_dispute.EXIT_OK)
+
+    assert code == uphold_dispute.EXIT_TRANSFER_FAILED
+    assert "the transfer FAILED" in capsys.readouterr().out
+
+
+def test_no_upheld_dispute_is_ever_reported_as_success() -> None:
+    """The structural half: whatever the call reported, a record left at
+    `upheld` — an unpaid buyer — never exits 0."""
+    dispute = seed(status="upheld")
+    fallbacks = {value for name, value in vars(uphold_dispute).items() if name.startswith("EXIT_")}
+
+    for fallback in fallbacks:
+        assert uphold_dispute.report(dispute, dispute.id, CREDITABLE_USDC, fallback) != uphold_dispute.EXIT_OK
 
 
 def test_an_unexpected_exception_does_not_override_what_the_store_says(
@@ -1792,6 +1914,49 @@ def test_a_live_run_given_the_service_url_invalidates_its_cached_score_after_the
     assert "NOT TOLD" not in out and "could not tell" not in out
     # The key went over the wire, never to the terminal.
     assert configured["api_key"] not in out
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://api.orizon.test", "http://10.0.0.5:8000", "ftp://api.orizon.test", "api.orizon.test"],
+    ids=["http-remote", "http-private-ip", "ftp", "no-scheme"],
+)
+def test_the_operator_key_is_never_sent_in_the_clear(
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
+    service: ServiceSeam,
+    url: str,
+) -> None:
+    """The invalidation carries API_KEY. Over plain http to a real host that is
+    the deployment's operator key on the network in the clear, so it is refused
+    before any request — a warning, and the run's exit code is unchanged."""
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", url)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert service.requests == []
+    assert "NOT TOLD — refused to send the operator key" in out
+    assert configured["api_key"] not in out
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_plain_http_to_this_machine_is_allowed(
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
+    service: ServiceSeam,
+    host: str,
+) -> None:
+    seed()
+
+    code, _ = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", f"http://{host}:8000")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert [str(r.url) for r in service.requests] == [f"http://{host}:8000/api/stellar/reputation/{AGENT}/invalidate"]
 
 
 def test_the_service_url_can_come_from_the_environment(

@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 
 MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
 
+# Every spelling of STELLAR_NETWORK that names the public network: ours, and
+# `public`/`pubnet` as Horizon and Stellar Expert say it. Read through
+# `label_names_mainnet`, which ignores case and padding, so no two readers of
+# the label can disagree about what it says. The label never decides whether
+# money is real — `Settings.is_mainnet` does, from the passphrase — it only
+# lets the boot refuse a label that promises mainnet over a testnet signer.
+MAINNET_LABELS = frozenset({"mainnet", "public", "pubnet"})
+
+
+def label_names_mainnet(label: str) -> bool:
+    """True when STELLAR_NETWORK spells the public network, in any case or padding."""
+    return label.strip().lower() in MAINNET_LABELS
+
+
 # The PDAX environments that resolve to a base URL, read from the shared table
 # in app/pdax_environments.py. That module is dependency-free and lives outside
 # the app.pdax package precisely so this one can import it while Settings() is
@@ -381,6 +395,15 @@ class Settings(BaseSettings):
     # budget for every visitor. 30 keeps a demo or a QA run clear of it while
     # still bounding spend; tune it down once the key is truly per-visitor.
     decompose_rate_limit_per_minute: int = 30
+    # Dispute challenges one client may mint per minute (POST
+    # /api/disputes/challenge), keyed by the same client_key(). Every mint that
+    # takes a slot holds it for five minutes out of a 200-slot `dispute` budget,
+    # so an unbounded client could fill that budget alone; at 20 a minute one
+    # client holds at most 100. A buyer disputes one step at a time, and a
+    # re-mint of a live challenge returns the same nonce, so no honest flow
+    # comes near it. A breach is 429 "dispute_challenge_rate_limited" with
+    # Retry-After; 0 disables it. Same TRUSTED_PROXY_HOPS caveat as above.
+    dispute_challenge_rate_limit_per_minute: int = 20
     # Most agents listed in the planning prompt. Prompt tokens per planner call
     # grew with every bound agent; past this many that cleared the floor, the
     # best-scored are listed. Never below the starvation backstop's minimum.
@@ -421,11 +444,15 @@ class Settings(BaseSettings):
         (testnet), so STELLAR_NETWORK=mainnet with a forgotten passphrase
         would silently sign transactions for the WRONG network. Signing key
         is deliberately not required — read-only deployments are legitimate.
+
+        The label is read through `label_names_mainnet` — any case, any
+        padding, `pubnet` included — so ` Mainnet` or `pubnet` over the
+        testnet passphrase is refused here rather than booting as a testnet
+        deployment that calls itself mainnet. The opposite mismatch, a testnet label over the mainnet passphrase, is
+        not refused: `is_mainnet` reads the passphrase, so the key rule and the
+        explorer links already treat that process as the mainnet it is.
         """
-        if (
-            self.stellar_network.lower() in {"mainnet", "public"}
-            and self.stellar_network_passphrase != MAINNET_PASSPHRASE
-        ):
+        if label_names_mainnet(self.stellar_network) and not self.is_mainnet():
             raise ValueError(
                 "STELLAR_NETWORK is set to mainnet/public but "
                 "STELLAR_NETWORK_PASSPHRASE is not the mainnet passphrase "
@@ -477,7 +504,8 @@ class Settings(BaseSettings):
         internet, with the backend signing on their behalf.
 
         "Can move real value" is scoped narrowly on purpose, so local dev and
-        CI keep booting: a signing key on mainnet, or PDAX credentials in the
+        CI keep booting: a signing key on mainnet (the mainnet PASSPHRASE,
+        whatever STELLAR_NETWORK says — see `is_mainnet`), or PDAX credentials in the
         production environment. Testnet signers and uat/stage PDAX move play
         money and stay open, as does a read-only mainnet deployment.
 
@@ -499,7 +527,9 @@ class Settings(BaseSettings):
         if self.api_key:
             return self
         exposures: list[str] = []
-        if self.stellar_network.strip().lower() in {"mainnet", "public"} and self.stellar_signing_key:
+        # The passphrase, not the label: see `is_mainnet`. A `testnet` label
+        # beside the mainnet passphrase still signs real transactions.
+        if self.is_mainnet() and self.stellar_signing_key:
             exposures.append(
                 "STELLAR_SIGNING_KEY is set on mainnet, so /api/stellar/server/charge "
                 "and /server/seal sign real transactions"
@@ -1076,6 +1106,26 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    def is_mainnet(self) -> bool:
+        """True when this process signs for the Stellar PUBLIC network (D-074).
+
+        Keyed on the network PASSPHRASE, never on STELLAR_NETWORK. The
+        passphrase is hashed into every transaction this process signs, so it
+        is the fact that decides which chain a signature is valid on; the label
+        is only a name somebody typed. Asking the label let `pubnet`, a padded
+        or upper-cased `mainnet`, and even `testnet` beside the mainnet
+        passphrase boot a real-money signer with no API_KEY.
+
+        An exact comparison, deliberately: a passphrase that differs by one
+        byte — padding included — hashes to a network id no chain answers to,
+        so it signs for nothing and moves nothing.
+
+        Every place that asks "is this real money?" asks here: the two boot
+        validators below, `stellar.client.explorer_network`, and the operator
+        script's explorer links through it.
+        """
+        return self.stellar_network_passphrase == MAINNET_PASSPHRASE
 
 
 class ConfigurationError(RuntimeError):

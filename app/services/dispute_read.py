@@ -66,13 +66,26 @@ async def _settlement(task_id: str) -> SettlementRecord:
 async def issue_read_challenge(task_id: str) -> tuple[str, float]:
     """Mint the challenge the payer signs to read `task_id`'s disputes: (nonce, expires_at).
 
-    Refuses a task with no settlement BEFORE touching the table — the table is
-    bounded and public, so it may only hold keys that could really be proved
-    against (`dispute_svc.issue_dispute_challenge`'s rule). Raises
-    `ChallengeBudgetExhausted("dispute_read")` when that budget is full of live
-    challenges, which `main.py` answers as 503 `challenge_capacity_dispute_read`.
+    Refuses BEFORE touching the table — the table is bounded and public, so it
+    may only hold keys that could really be proved against, and are worth
+    proving (`dispute_svc.issue_dispute_challenge`'s rule):
+
+      * a task with no settlement has no payer to prove (`unknown_task` /
+        `no_settlement`, 404);
+      * a settled task with NO DISPUTE on it has nothing to read
+        (`no_disputes`, 404). Settled alone used to be enough, so any hundred
+        settled tasks — whose ids `GET /api/tasks` hands out — held the whole
+        `dispute_read` budget and refused every payer who had something to
+        read. A dispute takes the payer's own signature to open, so a stranger
+        cannot conjure the tasks this now mints for.
+
+    Raises `ChallengeBudgetExhausted("dispute_read")` when that budget is full
+    of live challenges, which `main.py` answers as 503
+    `challenge_capacity_dispute_read`.
     """
     await _settlement(task_id)
+    if not await dispute_svc.list_for_task(task_id):
+        raise dispute_svc.DisputeError("no_disputes", "that task has no disputes to read", 404)
     return eb.issue_dispute_read_challenge(task_id)
 
 

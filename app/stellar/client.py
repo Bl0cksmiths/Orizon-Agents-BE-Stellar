@@ -72,8 +72,16 @@ def network_passphrase() -> str:
 
 
 def explorer_network() -> str:
-    """stellar.expert network segment for the configured network."""
-    return "public" if settings.stellar_network in ("mainnet", "public") else settings.stellar_network
+    """stellar.expert network segment for the network this process SIGNS for.
+
+    From the passphrase (`Settings.is_mainnet`), never from STELLAR_NETWORK
+    (D-074): the label is a name somebody typed, and it used to send `pubnet`
+    to a `/explorer/pubnet/` page that does not exist and a `testnet` label
+    over the mainnet passphrase to the testnet explorer for a real transfer.
+    Stellar Expert says `public` where this config says `mainnet`; anything
+    that is not the mainnet passphrase is testnet here.
+    """
+    return "public" if settings.is_mainnet() else "testnet"
 
 
 # ── observability ───────────────────────────────────────────────────────

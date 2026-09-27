@@ -1281,10 +1281,12 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
     assert "\x00" not in messy.note and "\x1b" not in messy.note
     assert "\n" in messy.note and messy.note.startswith("checked")
 
-    long_note = asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
+    # Bounded by REFUSAL, never by a cut (D-062): a note the buyer reads with
+    # its end missing is a different note.
+    with pytest.raises(DisputeError) as too_long:
+        asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
 
-    assert long_note.note is not None
-    assert len(long_note.note) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
+    assert too_long.value.code == "rejection_reason_too_long"
 
 
 def test_a_rejection_reason_has_no_default() -> None:

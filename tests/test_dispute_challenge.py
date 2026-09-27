@@ -449,3 +449,21 @@ def test_a_nonce_from_another_step_is_not_live() -> None:
     issue_dispute_challenge("job_crossstep", 1)
 
     assert eb.dispute_challenge_is_live("job_crossstep", 1, nonce) is False
+
+
+def test_the_dispute_nonce_is_compared_in_constant_time(monkeypatch) -> None:
+    """E08: the nonce is a live credential for its window, so it is compared
+    with `compare_digest` — a timing property no functional test can see, so
+    the call itself is what is held. `==` in its place passed every other test."""
+    nonce, _ = issue_dispute_challenge(JOB, 0)
+    calls: list[tuple[str, str]] = []
+    real = eb.secrets.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(eb.secrets, "compare_digest", _spy)
+
+    assert eb.dispute_challenge_is_live(JOB, 0, nonce) is True
+    assert (nonce, nonce) in calls

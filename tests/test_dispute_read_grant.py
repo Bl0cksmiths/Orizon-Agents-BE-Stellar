@@ -27,6 +27,7 @@ happens to take:
 from __future__ import annotations
 
 import base64
+import math
 import time
 
 import pytest
@@ -303,6 +304,50 @@ def test_the_token_still_opens_what_the_grant_does_not(client, settled, running_
     assert client.get(path, headers={"X-Task-Token": TOKEN}).status_code == 200
 
 
+def test_with_task_auth_on_the_grant_still_reaches_the_listing(client, settled, monkeypatch):
+    """D-067 under TASK_AUTH_REQUIRED: the listing was gated by
+    `require_task_read`, which never looks at a grant, so the payer holding one
+    was answered 404 `unknown_task` by the one route their receipt reads."""
+    grant = _grant(client)["grant"]
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    r = client.get(READ_ROUTES[0], headers={"X-Dispute-Read-Grant": grant})
+
+    assert r.status_code == 200, r.text
+    assert _dispute_of(r.json())["reason"] == REASON
+    assert _dispute_of(r.json())["reason_withheld"] is False
+
+
+@pytest.mark.parametrize("label", list(WITHHELD))
+def test_with_task_auth_on_nothing_but_a_live_grant_reaches_the_listing(client, settled, monkeypatch, label):
+    """And nothing wider: every grant the free-text gate refuses is refused
+    the listing too, as the same bare 404 a stranger gets."""
+    monkeypatch.setattr(settings, "task_auth_required", True)
+    grant = WITHHELD[label]()
+
+    r = client.get(READ_ROUTES[0], headers={} if grant is None else {"X-Dispute-Read-Grant": grant})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_task"), label
+
+
+def test_with_task_auth_on_a_grant_for_a_task_with_no_settlement_is_refused(client, settled, monkeypatch):
+    grant, _ = task_auth.mint_read_grant("tsk_unsettled", PAYER.public_key)
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    r = client.get("/api/tasks/tsk_unsettled/disputes", headers={"X-Dispute-Read-Grant": grant})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_task")
+
+
+def test_with_task_auth_on_the_token_still_reaches_the_listing(client, settled, running_task, monkeypatch):
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    r = client.get(READ_ROUTES[0], headers={"X-Task-Token": TOKEN})
+
+    assert r.status_code == 200
+    assert _dispute_of(r.json())["reason"] == REASON
+
+
 def test_the_grant_is_not_a_task_read_proof():
     """At the seam itself: `proves` — the one answer every task-scoped guard
     shares — is no for a grant-holder; only `proves_free_text` is yes."""
@@ -394,6 +439,42 @@ def test_a_task_with_no_payer_to_prove_is_404(client, settled, route):
 
     assert (unknown.status_code, unknown.json()["error"]["code"]) == (404, "unknown_task")
     assert (unsettled.status_code, unsettled.json()["error"]["code"]) == (404, "no_settlement")
+
+
+def test_a_settled_task_with_nothing_disputed_mints_no_read_challenge(client, settled, empty_table, monkeypatch):
+    """Settled alone used to be enough, so any hundred settled tasks held the
+    whole `dispute_read` budget. A task nobody disputed has nothing to read."""
+    settled["tsk_undisputed"] = settlement("tsk_undisputed")
+
+    async def _list(task_id: str) -> tuple[DisputeRecord, ...]:
+        return () if task_id == "tsk_undisputed" else (rejected(task_id),)
+
+    monkeypatch.setattr(dispute_svc, "list_for_task", _list)
+
+    r = client.post("/api/disputes/read-challenge", json={"task_id": "tsk_undisputed"})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "no_disputes")
+    assert len(empty_table) == 0
+
+
+def test_a_hundred_undisputed_tasks_cannot_hold_the_read_budget(client, settled, monkeypatch):
+    """The audit's scenario: a full budget's worth of settled, undisputed tasks
+    is minted against, and the payer with a dispute still gets a challenge."""
+    budget = eb.CHALLENGE_BUDGETS["dispute_read"]
+    for i in range(budget):
+        settled[f"tsk_any{i}"] = settlement(f"tsk_any{i}")
+
+    async def _list(task_id: str) -> tuple[DisputeRecord, ...]:
+        return (rejected(task_id),) if task_id == TASK else ()
+
+    monkeypatch.setattr(dispute_svc, "list_for_task", _list)
+
+    codes = {
+        client.post("/api/disputes/read-challenge", json={"task_id": f"tsk_any{i}"}).status_code for i in range(budget)
+    }
+
+    assert codes == {404}
+    assert _challenge(client)["nonce"]
 
 
 @pytest.mark.parametrize(
@@ -502,7 +583,7 @@ def test_a_dispute_signature_is_refused_by_the_grant_route(client, settled):
         "/api/disputes/read-grant", json={"task_id": TASK, "nonce": challenge["nonce"], "signature_b64": dispute_sig}
     )
 
-    assert r.status_code == 403, r.text
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "not_the_payer"), r.text
 
 
 def test_a_read_signature_is_not_a_dispute_proof(empty_table):
@@ -550,3 +631,138 @@ def test_a_closed_window_still_reads(client, settled):
     granted = _grant(client)
 
     assert _read(client, READ_ROUTES[0], granted["grant"])["reason"] == REASON
+
+
+# ── the edges of the free-text gate, pinned one by one ──────────
+#
+# Each of these was a mutation the rest of the suite let through (the Epic 4
+# API audit's survivors). They are the exact boundaries of "who reads the
+# buyer's words", so each is pinned where it would otherwise move silently.
+
+
+@pytest.mark.parametrize("path", READ_ROUTES, ids=READ_IDS)
+def test_an_empty_key_on_a_keyless_deployment_buys_no_free_text(client, settled, path):
+    """S03, the one that matters most. On a keyless deployment — the demo, and
+    every deployment with refunds off — an EMPTY `X-API-Key` compared equal to
+    the empty configured key under a one-clause mutation of
+    `header_secret_matches`, and every buyer's reason went to anyone who sent
+    the header blank."""
+    assert settings.api_key == ""
+
+    r = client.get(path, headers={"X-API-Key": ""})
+
+    assert r.status_code == 200
+    dispute = _dispute_of(r.json())
+    assert (dispute["reason"], dispute["rejection_reason"], dispute["reason_withheld"]) == ("", None, True)
+
+
+def test_an_empty_key_on_a_keyless_deployment_opens_no_guarded_read(client, settled, running_task, monkeypatch):
+    # The same compare admits `require_task_read`: with enforcement on, an
+    # empty header must not stand in for the operator key there either.
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    assert client.get(f"/api/tasks/{TASK}", headers={"X-API-Key": ""}).status_code == 404
+
+
+def test_a_grant_for_a_task_whose_settlement_is_gone_is_withheld_not_a_500(client, settled, monkeypatch):
+    """T08: the grant check reads the settlement's payer, and with no
+    settlement there is no payer. Without the `payer is None` guard that was an
+    AttributeError — a 500 on the receipt's own read."""
+    grant = _grant(client)["grant"]
+    settled.pop(TASK)
+
+    async def _still_listed(task_id: str) -> tuple[DisputeRecord, ...]:
+        return (rejected(task_id),)
+
+    monkeypatch.setattr(dispute_svc, "list_for_task", _still_listed)
+
+    r = client.get(READ_ROUTES[0], headers={"X-Dispute-Read-Grant": grant})
+
+    assert r.status_code == 200, r.text
+    assert _dispute_of(r.json())["reason_withheld"] is True
+    assert task_auth.read_grant_admits(grant, TASK, None) is False
+
+
+@pytest.mark.parametrize("path", READ_ROUTES, ids=READ_IDS)
+def test_the_task_token_in_the_query_buys_the_free_text(client, settled, running_task, path):
+    """T11: EventSource cannot set headers, so the token also rides as
+    `?token=`, and `task_read_proof` must read it there too — otherwise a
+    client that only has the query form is told its own words are withheld."""
+    dispute = _dispute_of(client.get(f"{path}?token={TOKEN}").json())
+
+    assert dispute["reason"] == REASON
+    assert dispute["reason_withheld"] is False
+
+
+def test_a_non_ascii_read_nonce_is_unknown_not_a_500(client, settled):
+    """E13: `compare_digest` raises TypeError on a str holding non-ASCII, so
+    the read nonce is screened first, exactly as the dispute nonce is."""
+    _challenge(client)
+
+    r = client.post("/api/disputes/read-grant", json={"task_id": TASK, "nonce": "é" * 32, "signature_b64": "AAAA"})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "challenge_unknown")
+
+
+def test_a_refused_read_mint_takes_no_slot(client, settled, empty_table):
+    """D03: the table is bounded and public, so a mint that is refused — no
+    settlement, no payer to prove — must be refused BEFORE a slot is taken,
+    not after."""
+    r = client.post("/api/disputes/read-challenge", json={"task_id": "tsk_nobody"})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_task")
+    assert len(empty_table) == 0
+
+
+def test_the_read_challenge_expiry_is_coarse(client, settled, empty_table):
+    """R09: the read mint is idempotent inside its window, so an exact expiry
+    would tell anyone who can name a task when its payer last started reading.
+    Floored to the minute, like the dispute mint's — and never later."""
+    answered = _challenge(client)["expires_at"]
+    real = empty_table[(TASK, eb.DISPUTE_READ_SUBJECT)][1]
+
+    assert answered == math.floor(real / 60) * 60
+    assert answered <= real
+
+
+def test_a_grant_is_dead_at_its_expiry_second():
+    """T04: `expires_at` is the first second the grant no longer works."""
+    grant, expires_at = task_auth.mint_read_grant(TASK, PAYER.public_key)
+
+    assert task_auth.read_grant_admits(grant, TASK, PAYER.public_key, now=expires_at - 1) is True
+    assert task_auth.read_grant_admits(grant, TASK, PAYER.public_key, now=expires_at) is False
+
+
+def _compare_digest_spy(monkeypatch, owner) -> list[tuple[object, object]]:
+    """Record every constant-time compare made through `owner.compare_digest`.
+
+    A timing property cannot be seen by a functional test, so these assert the
+    compare is MADE through `compare_digest` — `==` in its place passes every
+    other test in the suite."""
+    calls: list[tuple[object, object]] = []
+    real = owner.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(owner, "compare_digest", _spy)
+    return calls
+
+
+def test_the_grant_mac_is_compared_in_constant_time(monkeypatch):
+    """T06: the MAC is compared before any field in the grant is believed."""
+    grant, _ = task_auth.mint_read_grant(TASK, PAYER.public_key)
+    calls = _compare_digest_spy(monkeypatch, task_auth.hmac)
+
+    assert task_auth.read_grant_admits(grant, TASK, PAYER.public_key) is True
+    assert any(isinstance(a, bytes) and len(a) == 32 and len(b) == 32 for a, b in calls)
+
+
+def test_the_read_nonce_is_compared_in_constant_time(monkeypatch, empty_table):
+    """E09."""
+    nonce, _ = eb.issue_dispute_read_challenge(TASK)
+    calls = _compare_digest_spy(monkeypatch, eb.secrets)
+
+    assert eb.dispute_read_challenge_state(TASK, nonce) == "live"
+    assert (nonce, nonce) in calls

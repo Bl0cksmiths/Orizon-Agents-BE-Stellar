@@ -53,6 +53,15 @@ def test_mainnet_requires_mainnet_passphrase():
     assert s.stellar_network == "mainnet"
 
 
+@pytest.mark.parametrize("label", ["pubnet", "PUBLIC", " mainnet", "Mainnet "])
+def test_every_spelling_of_mainnet_over_a_testnet_passphrase_is_refused(label):
+    """D-074: the label was read case-sensitively and unpadded here, and without
+    `pubnet`, while the key rule stripped it — so the two disagreed about what a
+    label said. One reading now, `label_names_mainnet`."""
+    with pytest.raises(ValidationError, match="STELLAR_NETWORK_PASSPHRASE"):
+        _settings(stellar_network=label)
+
+
 def test_production_rejects_unsigned_webhook_escape_hatch():
     with pytest.raises(ValidationError, match="PDAX_ALLOW_UNSIGNED_WEBHOOKS"):
         _settings(
@@ -124,6 +133,23 @@ def test_testnet_signer_does_not_require_api_key():
     s = _settings(stellar_signing_key=_SIGNER)
     assert s.stellar_network == "testnet"
     assert s.api_key == ""
+
+
+@pytest.mark.parametrize("label", ["pubnet", "testnet", "Mainnet", " mainnet ", "futurenet", ""])
+def test_a_mainnet_passphrase_demands_the_key_whatever_the_label_says(label):
+    """D-074: the passphrase decides which chain a signature is valid on, so it
+    decides whether the signer moves real money — not STELLAR_NETWORK. `pubnet`
+    and `testnet` beside the mainnet passphrase both used to boot keyless."""
+    with pytest.raises(ValidationError, match="API_KEY is required"):
+        _settings(stellar_network=label, stellar_network_passphrase=MAINNET_PASSPHRASE, stellar_signing_key=_SIGNER)
+
+
+def test_is_mainnet_reads_the_passphrase_and_never_the_label():
+    assert _settings(stellar_network="testnet", stellar_network_passphrase=MAINNET_PASSPHRASE).is_mainnet()
+    assert not _settings(stellar_network="testnet").is_mainnet()
+    # A padded passphrase hashes to a network id no chain answers to: it signs
+    # for nothing, so it is not mainnet.
+    assert not _settings(stellar_network_passphrase=MAINNET_PASSPHRASE + " ").is_mainnet()
 
 
 def test_production_pdax_credentials_without_api_key_refuse_to_boot():
