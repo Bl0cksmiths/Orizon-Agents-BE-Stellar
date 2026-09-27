@@ -362,7 +362,7 @@ app.add_middleware(
     # console proxies same-origin today, so nothing exercises this list — which
     # is precisely why it would have been found the first time it mattered.
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["content-type", "authorization", "x-api-key", "x-task-token"],
+    allow_headers=["content-type", "authorization", "x-api-key", "x-task-token", "x-dispute-read-grant"],
 )
 
 # Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
