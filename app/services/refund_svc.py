@@ -271,6 +271,22 @@ def creditable_for(
     # `dispute_svc` used to write `creditable_usdc` share one rounding rule.
     amount = max(dispute.creditable_usdc, 0.0)
     step_credit = credited_amount_usdc(step.price_usdc, fraction)
+    # The two bounds are asked to BE numbers before either is compared, for
+    # the reason the amount is below and the ceiling is in `_refuse_above_cap`:
+    # each clamp is a `<`, a NaN bound is never less than anything, and an inf
+    # one never less than a finite promise — so a bound that is not a finite
+    # number is skipped without a word, and the credit is paid as if the
+    # settlement had never been consulted (QA D-054's NaN `settled_usdc`).
+    # The amount check below cannot catch it: the promise it is left holding
+    # is a perfectly good number, just an unbounded one.
+    if not (math.isfinite(step_credit) and math.isfinite(settlement.settled_usdc)):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"step {dispute.step_index} credits {step_credit} USDC and the workflow settled "
+            f"{settlement.settled_usdc} USDC, and a bound that is not a finite number bounds nothing",
+            amount,
+        )
     if step_credit < amount:
         logger.warning(
             "dispute %s: credit clamped by the step price — %.7f USDC promised at open time, "
