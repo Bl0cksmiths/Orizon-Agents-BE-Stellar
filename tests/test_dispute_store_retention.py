@@ -296,3 +296,37 @@ def test_a_settlement_is_sheddable_again_once_its_dispute_is_credited(monkeypatc
     assert list(store._settlements) == [_job(3), _job(4)]
     assert asyncio.run(store.get_dispute("dsp_paid")) is None
     assert asyncio.run(store.list_refund_claims()) == ()
+
+
+def test_with_every_settlement_pinned_the_store_grows_loses_nothing_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When nothing over the cap can be dropped without forgetting something
+    still owed, the store grows past the cap instead — and that is an operator
+    emergency, so it is an ERROR naming how far over it is and why."""
+    monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
+    store = InMemoryDisputeStore()
+    statuses = ["open", "upheld", "crediting", "open", "crediting"]
+
+    async def fill() -> None:
+        for n, status in enumerate(statuses):
+            await store.record_settlement(_settlement(n))
+            await store.open_dispute(_dispute(f"dsp_{n}", n, 0))
+            await _bring_to(store, f"dsp_{n}", status)
+
+    with caplog.at_level(logging.WARNING, logger=STORE_LOGGER):
+        asyncio.run(fill())
+
+    assert list(store._settlements) == [_job(n) for n in range(5)]
+    for n, status in enumerate(statuses):
+        kept = asyncio.run(store.find_dispute(_job(n), 0))
+        assert kept is not None and kept.id == f"dsp_{n}" and kept.status == status
+    claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
+    assert claims == ["dsp_2", "dsp_4"]
+
+    records = [r for r in caplog.records if r.name == STORE_LOGGER]
+    assert not [r for r in records if "dropped" in r.getMessage()], "nothing was dropped"
+    errors = [r.getMessage() for r in records if r.levelno == logging.ERROR]
+    assert errors, "growing past the cap must be an ERROR"
+    assert "3 over its cap of 2" in errors[-1]
+    assert "unfinished dispute" in errors[-1] and "DATABASE_URL" in errors[-1]
