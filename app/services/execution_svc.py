@@ -1498,7 +1498,6 @@ async def _submit_ratings(
         return
 
     from ..stellar import client as sc
-    from . import reputation_svc
 
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
@@ -1592,6 +1591,15 @@ async def _submit_ratings(
                     f"{rating_writer.unlanded_reason(status)} · tx {tx[:10]}…",
                 )
                 continue
+            # Landed, so the score every reader sees has moved: drop the cached
+            # rep_state, as a landed dispute rating already does. Without this
+            # a plan decomposed inside the read TTL was routed and stamped on
+            # the pre-run score — worst after a failed run's 20/100, the very
+            # evidence the floor exists to act on. Only here, past the SUCCESS
+            # check: a rating that failed or is still unconfirmed changed
+            # nothing on the ledger, and dropping the entry for it would only
+            # buy an extra RPC read of the same score.
+            reputation_svc.invalidate_rep(step.agent_id)
             await _emit(
                 task_id,
                 start,
