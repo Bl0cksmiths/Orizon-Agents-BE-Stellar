@@ -283,6 +283,23 @@ def test_a_cancelled_settlement_names_the_job_it_was_charged_under(monkeypatch, 
     assert any("cancelled mid-flight" in m and job_id.hex() in m for m in msgs), msgs
 
 
+def test_a_charge_success_without_a_hash_mints_no_job_id(monkeypatch):
+    """A SUCCESS with no hash is no receipt: nothing to reconcile against and
+    nothing to prove the charge landed, so no job id is minted from it and no
+    settlement can be recorded against one."""
+    _use_fake_signer(monkeypatch)
+    invoked: list[str] = []
+
+    async def invoke(contract_id, function_name, args):
+        invoked.append(function_name)
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", invoke)
+
+    assert _settle("tsk_settle_hashless")[2] is None
+    assert invoked == ["charge"]  # and nothing was sealed against it
+
+
 def test_settlement_failure_trace_line_is_generic(monkeypatch):
     """Trace lines are world-readable when TASK_AUTH_REQUIRED is off — the raw
     exception text belongs in the server log, never in the trace stream."""
