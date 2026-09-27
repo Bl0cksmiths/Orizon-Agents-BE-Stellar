@@ -760,6 +760,14 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
     )
 
 
+# The most steps a free-form plan may carry, matching the "1–6 ordered steps"
+# the planner is instructed to return (app/agents/orchestrator.py). Every step
+# is a paid dispatch and `/execute` runs them all, so the count is the buyer's
+# bill: the model is asked for six, and the clamp is what makes six a limit
+# rather than a request. A 200-step plan was storable before this.
+_MAX_PLAN_STEPS = 6
+
+
 # Enough of a failure message to say what went wrong, never a whole body.
 _FAILURE_EXCERPT_CHARS = 200
 
@@ -893,7 +901,14 @@ async def decompose(intent: str) -> DecomposeResponse:
     # empty-plan fallback below by the same road as a plan the clamp emptied.
     proposed = plan.steps if plan is not None else []
     cleaned: list[PlanStep] = []
+    # (agent, rationale) pairs already kept. A repeated pair is the same paid
+    # work bought twice — whitespace and case are the model's, not the task's.
+    seen: set[tuple[str, str]] = set()
     for step in proposed:
+        if len(cleaned) >= _MAX_PLAN_STEPS:
+            # Capped on the steps KEPT, so an invented id the clamp drops
+            # never costs the plan a legitimate step.
+            break
         if step.agent_id not in shortlist.offered:
             # The planner may only route to what it was OFFERED. The block is
             # what it was SHOWN and this is what it RETURNED, and the two are
@@ -918,12 +933,16 @@ async def decompose(intent: str) -> DecomposeResponse:
             # agent reaching /execute is the whole bug, and a step with nothing
             # to execute it would only reach /execute's unknown-agent skip.
             continue
+        rationale = step.rationale.strip()
+        if (agent.id, rationale.casefold()) in seen:
+            continue
+        seen.add((agent.id, rationale.casefold()))
         info = reps.get(agent.id)
         cleaned.append(
             PlanStep(
                 agent_id=agent.id,
                 agent_name=agent.name,
-                rationale=step.rationale.strip(),
+                rationale=rationale,
                 est_price_usdc=agent.price,
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
                 # An OFFERED agent below the floor can only be one the
