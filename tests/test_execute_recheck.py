@@ -75,7 +75,7 @@ def _settles(monkeypatch) -> dict[str, Any]:
     """Capture what the charge was asked for and which steps were rated."""
     seen: dict[str, Any] = {"totals": [], "undispatched": None}
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         seen["totals"].append(total_usdc)
         return ("chargehash", "sealhash", b"\x02" * 16)
 

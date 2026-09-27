@@ -6,7 +6,8 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from ..agents.registry import get_worker
@@ -761,25 +762,20 @@ async def _run(
                     first_party_ids=frozenset(first_party_ids),
                 )
             else:
-                charge_tx, proof_tx, job_id = await _settle_onchain(
-                    task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
-                )
-                # Recorded here, before the ratings below, because the ratings
-                # are a SEQUENTIAL run of on-chain submits — one per step, each
-                # waiting up to ~30s on a status poll — and a process that dies
-                # partway through them (a Render redeploy, an idle spin-down)
-                # would otherwise take the buyer's only evidence of what they
-                # paid for with it. It touches no chain, and a store that is
-                # down cannot fail the run — see `_record_settlement`.
-                await _record_settlement(
+                # The settlement is recorded inside this, the moment the charge
+                # confirms and before the seal — and so before the ratings
+                # below, which are a SEQUENTIAL run of on-chain submits, one per
+                # step, each waiting up to ~30s on a status poll. A process that
+                # dies partway through any of them (a Render redeploy, an idle
+                # spin-down) would otherwise take the buyer's only evidence of
+                # what they paid for with it. It touches no chain, and a store
+                # that is down cannot fail the run — see `_record_settlement`.
+                charge_tx, proof_tx, job_id = await _settle_and_record(
                     task_id,
                     start,
                     plan,
                     payer=payer,
                     auth_id_hex=auth_id_hex,
-                    job_id=job_id,
-                    charge_tx=charge_tx,
-                    proof_tx=proof_tx,
                     total_usdc=spent,
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
@@ -930,8 +926,15 @@ async def _settle_onchain(
     payer: str,
     auth_id_hex: str,
     total_usdc: float,
+    on_charged: Callable[[str, bytes], Awaitable[None]] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Perform the real PaymentEscrow.charge + AttestationRegistry.seal calls.
+
+    `on_charged(charge_tx, job_id)` is awaited the moment the charge CONFIRMS,
+    before the seal is submitted. The seal is another ~30s poll, and a
+    cancellation during it (main.py's shutdown drain, a Render redeploy)
+    propagates out of here without returning the job id — so whatever must
+    survive a confirmed charge has to be written by then, not after.
 
     Returns (charge_tx, proof_tx, job_id); either tx may be None if that step
     failed, and job_id is None whenever the charge did not CONFIRM — skipped,
@@ -1026,6 +1029,8 @@ async def _settle_onchain(
                 "cost",
                 f"x402 charge → {total_usdc:.3f} USDC settled · tx {charge_tx[:10]}…",
             )
+            if on_charged is not None:
+                await on_charged(charge_tx, job_id)
         elif charge_status == "FAILED":
             # The ledger rejected it after simulation passed: nothing moved.
             logger.error(
@@ -1245,7 +1250,7 @@ async def _record_settlement(
     total_usdc: float,
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
-) -> None:
+) -> SettlementRecord | None:
     """Write the one record a dispute is later judged against (story 4.02).
 
     Nothing else keeps these facts. The job id is minted inside the charge and
@@ -1264,8 +1269,12 @@ async def _record_settlement(
     unconfirmed charge does land, the buyer is charged and has no window, which
     `_settle_onchain` logs as the unreconciled charge it is.
 
-    A charge that landed and a seal that then failed DOES record, with
-    `proof_tx` None: the buyer paid, so the buyer has recourse, attested or not.
+    It is written as soon as the charge confirms, with `proof_tx` None, and
+    before the seal is even submitted (`_settle_and_record`): the buyer paid,
+    so the buyer has recourse, attested or not — and whether or not the
+    process lives through the seal. The seal's hash follows in a second row.
+
+    Returns the record it wrote, or None when it wrote nothing.
 
     Best-effort in the same sense as `_submit_ratings`, and for a stronger
     reason: the money has already moved by the time this runs, so a store that
@@ -1274,7 +1283,7 @@ async def _record_settlement(
     refund, and the trace line that says so is evicted long before they notice.
     """
     if job_id is None:
-        return
+        return None
 
     settled_at = time.time()
     # Stamped, never recomputed on read: the buyer is told a closing time in
@@ -1283,38 +1292,37 @@ async def _record_settlement(
     window_closes_at = settled_at + settings.dispute_window_seconds
 
     try:
-        await get_dispute_store().record_settlement(
-            SettlementRecord(
-                task_id=task_id,
-                payer=payer,
-                auth_id_hex=auth_id_hex,
-                job_id_hex=job_id.hex(),
-                charge_tx=charge_tx,
-                proof_tx=proof_tx,
-                settled_usdc=_settled_usdc(total_usdc),
-                steps=tuple(
-                    SettlementStep(
-                        step_index=index,
-                        agent_id=step.agent_id,
-                        agent_name=step.agent_name,
-                        price_usdc=step.est_price_usdc,
-                        # A step that failed, or that no worker ever resolved
-                        # for, delivered nothing and was never billed — 4.02
-                        # refuses to dispute it. Same condition that moved
-                        # `succeeded` and `spent` in the run loop.
-                        delivered=index in delivered_steps,
-                        # Already cleaned and bounded by `_stored_summary` in
-                        # the run loop. Gated on delivery here as well, so "an
-                        # undelivered step has no summary" holds where the
-                        # record is built rather than only where it was fed.
-                        output_summary=output_summaries.get(index) if index in delivered_steps else None,
-                    )
-                    for index, step in enumerate(plan.plan.steps)
-                ),
-                settled_at=settled_at,
-                window_closes_at=window_closes_at,
-            )
+        record = SettlementRecord(
+            task_id=task_id,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id_hex=job_id.hex(),
+            charge_tx=charge_tx,
+            proof_tx=proof_tx,
+            settled_usdc=_settled_usdc(total_usdc),
+            steps=tuple(
+                SettlementStep(
+                    step_index=index,
+                    agent_id=step.agent_id,
+                    agent_name=step.agent_name,
+                    price_usdc=step.est_price_usdc,
+                    # A step that failed, or that no worker ever resolved
+                    # for, delivered nothing and was never billed — 4.02
+                    # refuses to dispute it. Same condition that moved
+                    # `succeeded` and `spent` in the run loop.
+                    delivered=index in delivered_steps,
+                    # Already cleaned and bounded by `_stored_summary` in
+                    # the run loop. Gated on delivery here as well, so "an
+                    # undelivered step has no summary" holds where the
+                    # record is built rather than only where it was fed.
+                    output_summary=output_summaries.get(index) if index in delivered_steps else None,
+                )
+                for index, step in enumerate(plan.plan.steps)
+            ),
+            settled_at=settled_at,
+            window_closes_at=window_closes_at,
         )
+        await get_dispute_store().record_settlement(record)
     except Exception as e:
         logger.error(
             "task %s: settlement NOT recorded: %s — the buyer has no way to dispute this run "
@@ -1332,7 +1340,7 @@ async def _record_settlement(
         # The buyer is told too: a window they cannot actually use must not
         # appear in their trace as if it were open.
         await _emit(task_id, start, "error", "settlement not recorded — this run cannot be disputed")
-        return
+        return None
 
     # The window is a promise, so it is made in the buyer's own record of the
     # run. The job id stays OUT of it: trace lines are world-readable when
@@ -1344,6 +1352,98 @@ async def _record_settlement(
         "dispute window open — any delivered step can be disputed until "
         f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(window_closes_at))}",
     )
+    return record
+
+
+async def _record_proof(task_id: str, record: SettlementRecord, proof_tx: str) -> None:
+    """Add the seal's hash to a settlement already recorded at charge time.
+
+    The settlement tables are append-only and the newest row for a job wins,
+    so this APPENDS the same record again with `proof_tx` filled in — every
+    other field, `settled_at` and `window_closes_at` above all, is the first
+    row's own, so the buyer's deadline cannot move. Best-effort for
+    `_record_settlement`'s reason, and a failure here costs less: the window
+    is already open, and only the link to the attestation is missing.
+    """
+    try:
+        await get_dispute_store().record_settlement(replace(record, proof_tx=proof_tx))
+    except Exception as e:
+        logger.error(
+            "task %s: the seal's proof tx was NOT added to the settlement: %s — the dispute window is open,"
+            " the record lacks its attestation link (job %s, charge_tx %s, proof_tx %s)",
+            task_id,
+            e,
+            record.job_id_hex,
+            record.charge_tx,
+            proof_tx,
+            exc_info=True,
+        )
+
+
+async def _settle_and_record(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    *,
+    payer: str,
+    auth_id_hex: str,
+    total_usdc: float,
+    delivered_steps: frozenset[int],
+    output_summaries: Mapping[int, str | None],
+) -> tuple[str | None, str | None, bytes | None]:
+    """Charge, record the settlement, seal, then record the seal — in that order.
+
+    The order is the point. The record used to be written after
+    `_settle_onchain` returned, which is after the seal's ~30s poll; a
+    cancellation during that poll (a redeploy's shutdown drain) left a buyer
+    whose charge CONFIRMED with no settlement and so no dispute window. Now the
+    settlement is written the moment the charge confirms, with `proof_tx`
+    None, and the seal's hash is appended afterwards when there is one.
+
+    If that first write did not happen — the store failed it, or it was never
+    asked — it is attempted once more after the seal, with everything then
+    known. Returns what `_settle_onchain` returns.
+    """
+    recorded: list[SettlementRecord] = []
+
+    async def _on_charged(charge_tx: str, job_id: bytes) -> None:
+        record = await _record_settlement(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id=job_id,
+            charge_tx=charge_tx,
+            proof_tx=None,
+            total_usdc=total_usdc,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+        )
+        if record is not None:
+            recorded.append(record)
+
+    charge_tx, proof_tx, job_id = await _settle_onchain(
+        task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=total_usdc, on_charged=_on_charged
+    )
+    if recorded:
+        if proof_tx is not None:
+            await _record_proof(task_id, recorded[0], proof_tx)
+    else:
+        await _record_settlement(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id=job_id,
+            charge_tx=charge_tx,
+            proof_tx=proof_tx,
+            total_usdc=total_usdc,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+        )
+    return charge_tx, proof_tx, job_id
 
 
 # A failure class is a token, never free text. Validated by SHAPE rather than

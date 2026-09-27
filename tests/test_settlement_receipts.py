@@ -246,7 +246,7 @@ def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
     settle_calls: list = []
     rating_calls: list = []
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         settle_calls.append((payer, auth_id_hex, total_usdc))
         return ("chargehash123", "sealhash456", b"\x01" * 16)
 
