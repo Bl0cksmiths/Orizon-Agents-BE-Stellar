@@ -1160,7 +1160,8 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     # record stays, since this attempt says nothing about that one.
     _log_rating(
         logging.ERROR,
-        f"failed ({outcome.status}) — nothing landed; uphold again to retry",
+        f"failed ({outcome.status}) — nothing landed and nothing is in flight; fix what reason= names, then uphold"
+        " again to retry",
         credited,
         derived,
         outcome.tx_hash,
