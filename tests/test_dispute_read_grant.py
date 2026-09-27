@@ -303,6 +303,50 @@ def test_the_token_still_opens_what_the_grant_does_not(client, settled, running_
     assert client.get(path, headers={"X-Task-Token": TOKEN}).status_code == 200
 
 
+def test_with_task_auth_on_the_grant_still_reaches_the_listing(client, settled, monkeypatch):
+    """D-067 under TASK_AUTH_REQUIRED: the listing was gated by
+    `require_task_read`, which never looks at a grant, so the payer holding one
+    was answered 404 `unknown_task` by the one route their receipt reads."""
+    grant = _grant(client)["grant"]
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    r = client.get(READ_ROUTES[0], headers={"X-Dispute-Read-Grant": grant})
+
+    assert r.status_code == 200, r.text
+    assert _dispute_of(r.json())["reason"] == REASON
+    assert _dispute_of(r.json())["reason_withheld"] is False
+
+
+@pytest.mark.parametrize("label", list(WITHHELD))
+def test_with_task_auth_on_nothing_but_a_live_grant_reaches_the_listing(client, settled, monkeypatch, label):
+    """And nothing wider: every grant the free-text gate refuses is refused
+    the listing too, as the same bare 404 a stranger gets."""
+    monkeypatch.setattr(settings, "task_auth_required", True)
+    grant = WITHHELD[label]()
+
+    r = client.get(READ_ROUTES[0], headers={} if grant is None else {"X-Dispute-Read-Grant": grant})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_task"), label
+
+
+def test_with_task_auth_on_a_grant_for_a_task_with_no_settlement_is_refused(client, settled, monkeypatch):
+    grant, _ = task_auth.mint_read_grant("tsk_unsettled", PAYER.public_key)
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    r = client.get("/api/tasks/tsk_unsettled/disputes", headers={"X-Dispute-Read-Grant": grant})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_task")
+
+
+def test_with_task_auth_on_the_token_still_reaches_the_listing(client, settled, running_task, monkeypatch):
+    monkeypatch.setattr(settings, "task_auth_required", True)
+
+    r = client.get(READ_ROUTES[0], headers={"X-Task-Token": TOKEN})
+
+    assert r.status_code == 200
+    assert _dispute_of(r.json())["reason"] == REASON
+
+
 def test_the_grant_is_not_a_task_read_proof():
     """At the seam itself: `proves` — the one answer every task-scoped guard
     shares — is no for a grant-holder; only `proves_free_text` is yes."""
