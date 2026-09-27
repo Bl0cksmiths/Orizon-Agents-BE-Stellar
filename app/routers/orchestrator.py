@@ -25,7 +25,7 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
     # the demo path and makes no LLM call, so throttling it would cost a demo
     # its safety net to save nothing; `decompose` makes the same call.
     if detect_kit(req.intent) is None:
-        retry_after = _planner_limiter.hit(client_key(request.scope))
+        retry_after = _planner_limiter.hit(client_key(dict(request.scope)))
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
