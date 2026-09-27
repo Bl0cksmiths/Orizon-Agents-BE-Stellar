@@ -20,6 +20,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # A real Postgres 16 for the dispute store's SQL (tests/conftest.py
+    # `pg_dsn`). The refund mutex, the verdict compare-and-set and the row lock
+    # every append queues on all live in that SQL, and a fake pool can only
+    # restate what it was meant to do — ten of eleven mutants to it once passed
+    # the whole suite. 16 because it is what the audit proved the SQL on.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orizon
+          POSTGRES_PASSWORD: orizon
+          POSTGRES_DB: orizon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orizon -d orizon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,5 +83,11 @@ jobs:
       - name: Contract address drift
         run: python scripts/check_contract_drift.py contracts
 
+      # ORIZON_TEST_PG_REQUIRED turns every way the real-Postgres tests could
+      # quietly not run into a failure: the DSN unset or unreachable, one of
+      # them skipped, or none of them collected at all (tests/conftest.py).
       - name: Test (with coverage gate)
         run: python -m pytest -q --cov
+        env:
+          ORIZON_TEST_PG_DSN: postgresql://orizon:orizon@localhost:5432/orizon_test
+          ORIZON_TEST_PG_REQUIRED: "1"
