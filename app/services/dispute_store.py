@@ -1082,8 +1082,14 @@ class InMemoryDisputeStore:
             for dispute_id in self._disputes_by_job.get(job_id_hex, {}).values()
         )
 
-    def _shed_from(self, jobs: list[str], what: str) -> int:
+    def _shed_from(self, jobs: list[str], what: str, spare: str | None) -> int:
         """Drop the oldest unpinned of `jobs` until at most the cap remain.
+
+        `spare` is the job whose insertion called this, and it is never the
+        one dropped for it: a settlement recorded while everything older is
+        pinned would otherwise be forgotten the moment it arrived, and the
+        store would claim to be within its cap by discarding a charge that
+        just moved money. It can still be shed by a later insertion.
 
         Returns how far over the cap `jobs` still are: nonzero only when every
         job that could have gone is pinned, and the store grows rather than
@@ -1092,17 +1098,17 @@ class InMemoryDisputeStore:
         over = len(jobs) - _MAX_IN_MEMORY
         if over <= 0:
             return 0
-        for job_id_hex in [job for job in jobs if not self._is_pinned(job)][:over]:
+        for job_id_hex in [job for job in jobs if job != spare and not self._is_pinned(job)][:over]:
             self._settlements.pop(job_id_hex, None)
             self._drop_job(job_id_hex, what)
             over -= 1
         return over
 
-    def _shed(self) -> None:
+    def _shed(self, spare: str) -> None:
         """Bring the store back within its cap, oldest unpinned job first."""
-        still_over = self._shed_from(list(self._settlements), "settlement")
+        still_over = self._shed_from(list(self._settlements), "settlement", spare)
         still_over += self._shed_from(
-            [job for job in self._disputes_by_job if job not in self._settlements], "unsettled job"
+            [job for job in self._disputes_by_job if job not in self._settlements], "unsettled job", spare
         )
         if still_over:
             logger.error(
@@ -1116,7 +1122,7 @@ class InMemoryDisputeStore:
     async def record_settlement(self, record: SettlementRecord) -> None:
         self._settlements[record.job_id_hex] = record
         self._settlements.move_to_end(record.job_id_hex)
-        self._shed()
+        self._shed(spare=record.job_id_hex)
 
     async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
         return self._settlements.get(job_id_hex)
@@ -1136,7 +1142,7 @@ class InMemoryDisputeStore:
         record = replace(record, updated_at=record.opened_at)
         self._disputes_by_job.setdefault(record.job_id_hex, {})[record.step_index] = record.id
         self._disputes[record.id] = record
-        self._shed()
+        self._shed(spare=record.job_id_hex)
         return record
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:

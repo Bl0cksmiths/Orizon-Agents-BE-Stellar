@@ -157,10 +157,12 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
     async def run() -> None:
         for op in range(200):
             action = rng.random()
+            inserted: str | None = None
             if action < 0.3 or not settled:
                 n = len(settled)
                 await store.record_settlement(_settlement(n))
                 settled.append(n)
+                inserted = _job(n)
             elif action < 0.85:
                 # Any job ever settled, held or not, and any of its steps.
                 n = rng.choice(settled)
@@ -168,6 +170,7 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
                 dispute = _dispute(f"dsp_{op}", n, step)
                 try:
                     ledger[dispute.id] = await store.open_dispute(dispute)
+                    inserted = _job(n)
                 except DuplicateDisputeError as dup:
                     assert dup.existing.id in ledger
             else:
@@ -177,10 +180,13 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
                     await store.append_status(target.id, "credited", refund_tx=f"tx_{op}", credited_usdc=1.0)
 
             await _assert_retained_settlements_keep_their_disputes(store, ledger)
-            if action < 0.85:
+            if inserted is not None:
                 # Straight after an insertion the store is within its cap,
-                # unless everything it could have dropped still owes something.
-                assert len(store._settlements) <= cap or all(store._is_pinned(j) for j in store._settlements)
+                # unless everything it could have dropped still owes something
+                # — everything but the job just inserted, which is spared.
+                assert len(store._settlements) <= cap or all(
+                    store._is_pinned(j) for j in store._settlements if j != inserted
+                )
             assert len(store._disputes) <= len(store._disputes_by_job) * len(STEPS)
 
     asyncio.run(run())
