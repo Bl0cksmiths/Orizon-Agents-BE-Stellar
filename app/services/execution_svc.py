@@ -510,13 +510,6 @@ async def _run(
             )
 
         for step_index, step in enumerate(plan.plan.steps):
-            # Resolution deliberately stays OUTSIDE the per-step try/except
-            # below. It is a lookup, not the step's work: resolve_worker fails
-            # OPEN — an unreadable binding store logs and returns None — so the
-            # only thing left that could raise here is a bug in resolution
-            # itself, which would repeat on every step anyway. Letting that
-            # reach the run-level handler (status "failed", stream closed) is
-            # therefore the honest outcome, and is what the suite pins.
             refusal = _execute_refusal(step, fresh.get(step.agent_id))
             if refusal is not None:
                 # Story 2.03's rule for a step that fails, applied to a step
@@ -533,6 +526,13 @@ async def _run(
                 await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
                 continue
 
+            # Resolution deliberately stays OUTSIDE the per-step try/except
+            # below. It is a lookup, not the step's work: resolve_worker fails
+            # OPEN — an unreadable binding store logs and returns None — so the
+            # only thing left that could raise here is a bug in resolution
+            # itself, which would repeat on every step anyway. Letting that
+            # reach the run-level handler (status "failed", stream closed) is
+            # therefore the honest outcome, and is what the suite pins.
             worker = await resolve_worker(step.agent_id)
             if worker is None:
                 # No local worker and no resolvable binding. A bound agent
