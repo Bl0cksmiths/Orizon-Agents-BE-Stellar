@@ -502,3 +502,50 @@ def test_a_step_price_that_is_not_a_number_refuses_rather_than_being_skipped(mon
         refund_svc.creditable_for(_settlement(steps=unpriced), _dispute())
 
     assert exc.value.code == "refund_amount_invalid"
+
+
+# ── the exact edges of the ceiling and of the client's answers ──
+
+
+def test_a_credit_exactly_at_the_ceiling_is_paid(monkeypatch) -> None:
+    """The ceiling is inclusive: `>`, never `>=`."""
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.05)
+    calls = _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": "refund_tx"})
+
+    assert asyncio.run(refund_svc.credit_refund(_dispute(), 0.05)).status == "SUCCESS"
+    assert len(calls) == 1
+    one_step = _settlement(steps=(STEPS[0],), settled_usdc=0.05)
+    assert refund_svc.creditable_for(one_step, _dispute(creditable_usdc=0.05)) == 0.05
+
+
+def test_one_stroop_over_the_ceiling_is_refused(monkeypatch) -> None:
+    """And exact to the stroop: no slack above it."""
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.05)
+    calls = _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": "refund_tx"})
+
+    with pytest.raises(RefundRefused) as refused:
+        asyncio.run(refund_svc.credit_refund(_dispute(), 0.0500001))
+
+    assert refused.value.code == "refund_above_cap"
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", [12345, b"refund_tx", ["refund_tx"], ""])
+def test_a_success_whose_hash_is_not_a_hash_is_unconfirmed(monkeypatch, bad) -> None:
+    """A SUCCESS is only a SUCCESS with a receipt the record can hold: a hash
+    that is not a non-empty string is no receipt, and the credit is unknown."""
+    _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": bad})
+
+    outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash) == ("TIMEOUT", None)
+
+
+def test_failed_without_a_hash_is_still_failed(monkeypatch) -> None:
+    """The ledger's FAILED is the answer that says nothing moved, hash or not;
+    holding it as TIMEOUT would strand a dispute nothing was paid for."""
+    _fake_transfer(monkeypatch, {"status": "FAILED"})
+
+    outcome = asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+
+    assert (outcome.status, outcome.tx_hash) == ("FAILED", None)

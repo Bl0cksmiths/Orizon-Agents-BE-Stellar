@@ -242,7 +242,7 @@ def _settles(monkeypatch) -> list[tuple[str, int]]:
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
     monkeypatch.setattr(settings, "stellar_signing_key", "SFAKEKEY")
 
-    async def _fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def _fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         return ("0x" + "c" * 8, "0x" + "p" * 8, JOB_ID)
 
     monkeypatch.setattr(execution_svc, "_settle_onchain", _fake_settle)

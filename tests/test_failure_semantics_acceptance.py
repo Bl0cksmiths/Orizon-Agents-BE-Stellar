@@ -105,7 +105,7 @@ def _settled_total(monkeypatch) -> list[float]:
     """Record what the charge was actually asked to settle."""
     totals: list[float] = []
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         totals.append(total_usdc)
         return ("chargehash", "sealhash", b"\x02" * 16)
 
@@ -241,7 +241,7 @@ def _rates(monkeypatch, settle_result: tuple[str | None, str | None, bytes | Non
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
     monkeypatch.setattr(settings, "stellar_signing_key", "SFAKEKEY")
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         return settle_result
 
     monkeypatch.setattr(execution_svc, "_settle_onchain", fake_settle)

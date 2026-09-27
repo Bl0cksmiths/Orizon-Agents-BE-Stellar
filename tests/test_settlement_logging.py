@@ -257,6 +257,49 @@ def test_cancellation_mid_settlement_is_logged_and_reraised(monkeypatch, caplog)
     ), f"a cancelled settlement was never logged with its context: {msgs}"
 
 
+@pytest.mark.parametrize("cancelled_at", ["charge", "seal"])
+def test_a_cancelled_settlement_names_the_job_it_was_charged_under(monkeypatch, caplog, cancelled_at):
+    """A settlement is keyed by the job id, so the reconstruction line of a
+    charge that may have landed is useless without it — and once the charge
+    has confirmed, a cancel during the seal is exactly that charge."""
+    _use_fake_signer(monkeypatch)
+    minted: list[bytes] = []
+    monkeypatch.setattr(sc, "bytes16", lambda b: b)
+
+    async def invoke(contract_id, function_name, args):
+        if function_name == "charge":
+            minted.append(args[3])
+        if function_name == cancelled_at:
+            raise asyncio.CancelledError
+        return {"status": "SUCCESS", "hash": "chargehash123", "result": "11" * 16}
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", invoke)
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        with pytest.raises(asyncio.CancelledError):
+            _settle("tsk_settle_cancel_job")
+
+    [job_id] = minted
+    msgs = [r.getMessage() for r in _errors(caplog)]
+    assert any("cancelled mid-flight" in m and job_id.hex() in m for m in msgs), msgs
+
+
+def test_a_charge_success_without_a_hash_mints_no_job_id(monkeypatch):
+    """A SUCCESS with no hash is no receipt: nothing to reconcile against and
+    nothing to prove the charge landed, so no job id is minted from it and no
+    settlement can be recorded against one."""
+    _use_fake_signer(monkeypatch)
+    invoked: list[str] = []
+
+    async def invoke(contract_id, function_name, args):
+        invoked.append(function_name)
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", invoke)
+
+    assert _settle("tsk_settle_hashless")[2] is None
+    assert invoked == ["charge"]  # and nothing was sealed against it
+
+
 def test_settlement_failure_trace_line_is_generic(monkeypatch):
     """Trace lines are world-readable when TASK_AUTH_REQUIRED is off — the raw
     exception text belongs in the server log, never in the trace stream."""

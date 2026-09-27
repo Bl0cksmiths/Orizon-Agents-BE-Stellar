@@ -161,7 +161,7 @@ def _rates(monkeypatch, worker: _AnswersInTurn, job_id: bytes = JOB_ID) -> _Fake
 
     monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
 
-    async def _fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def _fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         return ("chargehash", "sealhash", job_id)
 
     monkeypatch.setattr(execution_svc, "_settle_onchain", _fake_settle)
