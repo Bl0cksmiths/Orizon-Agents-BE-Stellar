@@ -953,3 +953,56 @@ def bytes32(b: bytes) -> SCVal:
 def usdc_to_i128(amount_usdc: float) -> int:
     """0.012 → 120_000 (Stellar uses 7 decimals)."""
     return round(amount_usdc * 10_000_000)
+
+
+# ── read-only transaction lookup (the refund reconcile sweep) ───────────
+@dataclass(frozen=True)
+class LedgerTransaction:
+    """What the RPC answers about one transaction hash, and the window it answers for.
+
+    `status` is the RPC's own word — `SUCCESS`, `FAILED` or `NOT_FOUND` — and
+    NOT_FOUND is only as good as the window beside it: the RPC keeps a limited
+    stretch of history (`oldest_ledger` … `latest_ledger`), so a hash it cannot
+    find may simply be older than it remembers, or newer than it has ingested.
+    Both ends of that window are carried, with their ledgers' CLOSE TIMES, so a
+    caller can tell "never landed" from "outside what this RPC can see" by the
+    ledger's clock rather than its own.
+
+    `envelope_xdr` is the transaction as signed, present when it was found; a
+    caller that needs to know what the transaction DID reads it from there
+    rather than trusting its own record of what it meant to send.
+    """
+
+    tx_hash: str
+    status: str
+    latest_ledger: int
+    latest_ledger_close_time: int
+    oldest_ledger: int
+    oldest_ledger_close_time: int
+    ledger: int | None
+    envelope_xdr: str | None
+
+
+def get_transaction(tx_hash: str) -> LedgerTransaction:
+    """Ask the RPC about `tx_hash`. Read-only: nothing is built, signed or sent.
+
+    Blocking, so an async caller runs it through `asyncio.to_thread`. It uses
+    the READ profile of `_server()` — 5 s, no retry — so a slow RPC costs one
+    worker thread for at most that long, never the event loop and never the
+    submit profile's minute and a half. Raises whatever the RPC raises: a
+    failed lookup is not an answer, and a caller must not read it as one.
+    """
+    with _rpc_span("get_transaction", _short(tx_hash), slow_ms=SLOW_READ_MS) as span:
+        answer = _server().get_transaction(tx_hash)
+        span["status"] = answer.status.value
+    return LedgerTransaction(
+        tx_hash=tx_hash,
+        status=answer.status.value,
+        latest_ledger=int(answer.latest_ledger),
+        latest_ledger_close_time=int(answer.latest_ledger_close_time),
+        oldest_ledger=int(answer.oldest_ledger),
+        oldest_ledger_close_time=int(answer.oldest_ledger_close_time),
+        # NOT_FOUND answers `ledger: 0`, which is no ledger at all.
+        ledger=int(answer.ledger) if answer.ledger else None,
+        envelope_xdr=answer.envelope_xdr,
+    )
