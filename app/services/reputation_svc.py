@@ -720,6 +720,57 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None)
     return infos
 
 
+_prewarm_task: asyncio.Task[None] | None = None
+
+
+async def _prewarm() -> None:
+    from ..state import state
+
+    ids = [agent.id for agent in state.list_agents()]
+    # No batch deadline: nothing is waiting on this read, and each RPC call is
+    # still bounded by the read client's own timeout. A read that fails is
+    # logged like any other batch's, and simply is not cached.
+    infos = await fetch_reps(ids, timeout_seconds=math.inf)
+    warmed = sum(1 for info in infos.values() if not info.degraded)
+    logger.info("reputation cache pre-warmed: %d/%d agents read from the ledger", warmed, len(ids))
+
+
+def start_prewarm() -> None:
+    """Read every registered agent's reputation once, in the background, at boot.
+
+    Without it the first plan after a deploy is the first reader of every
+    agent: a whole cold batch — new TLS sessions, a waking RPC — racing one
+    deadline, and whatever it cuts off has no earlier read to serve stale, so
+    it is routed on the prior. Started in the background so the request that
+    woke the instance is not held behind the chain; a plan that arrives while
+    it runs joins its in-flight reads instead of issuing its own. Reads the
+    registry as it stands at boot — agents the first registry sync indexes
+    later are read on first use. A no-op while reputation is off or no ledger
+    is configured.
+    """
+    global _prewarm_task
+    if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
+        return
+    if _prewarm_task is not None and not _prewarm_task.done():
+        return
+    _prewarm_task = asyncio.get_running_loop().create_task(_prewarm())
+    _prewarm_task.add_done_callback(_on_prewarm_done)
+
+
+def _on_prewarm_done(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("reputation pre-warm died: %s", _describe(task.exception()))  # type: ignore[arg-type]
+
+
+async def stop_prewarm() -> None:
+    """Cancel a pre-warm still running (shutdown path)."""
+    global _prewarm_task
+    task, _prewarm_task = _prewarm_task, None
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.wait({task})
+
+
 def invalidate_rep(agent_id: str) -> None:
     """Forget the cached rep_state for one agent, so the next read goes back
     to the ledger.

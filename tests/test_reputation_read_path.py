@@ -309,10 +309,24 @@ def test_an_invalidated_read_is_never_served_stale(chain):
     assert served.degraded is True
 
 
+def _join_prewarm(client) -> None:
+    """Wait, on the app's own loop, for the boot pre-warm to finish."""
+    task = rep._prewarm_task
+    if task is None:
+        return
+
+    async def join() -> None:
+        await asyncio.wait({task})
+
+    client.portal.call(join)
+
+
 def test_stale_rows_reach_the_client(chain, client):
     """On the wire, where the router's mirror model would drop an undeclared
     field without a word."""
+    _join_prewarm(client)
     chain.state["agt_01h8"] = GOOD
+    rep.invalidate_rep("agt_01h8")  # the boot pre-warm read it before GOOD was set
     assert client.get("/api/stellar/reputation/agt_01h8").json()["stale"] is False
     _expire("agt_01h8", 1.0)
     chain.state["agt_01h8"] = RuntimeError("rpc down")
@@ -324,3 +338,47 @@ def test_stale_rows_reach_the_client(chain, client):
     assert body["source"] == "onchain"
     ttl = settings.reputation_read_ttl_seconds
     assert ttl + 1.0 <= body["stale_age_seconds"] <= ttl + 2.0
+
+
+# ── the boot pre-warm ───────────────────────────────────────────
+
+
+def test_boot_prewarms_every_registered_agent(chain):
+    """The first plan after a deploy used to be the first reader of every
+    agent. Now lifespan reads them all once, in the background, and the first
+    batch is served from cache without another read."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.state import state
+
+    with TestClient(app) as client:
+        _join_prewarm(client)
+        ids = {a.id for a in state.list_agents()}
+        assert sorted(chain.reads) == sorted(ids)
+        body = client.get("/api/stellar/reputation").json()
+
+    assert sorted(chain.reads) == sorted(ids), "the first batch after boot read nothing again"
+    assert not any(info["degraded"] for info in body["reputations"].values())
+
+
+def test_boot_does_not_wait_for_the_prewarm(chain):
+    """The request that woke the instance must not queue behind the chain."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    chain.hold("agt_01h8")
+    try:
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
+            assert rep._prewarm_task is not None and not rep._prewarm_task.done()
+            chain.release("agt_01h8")
+            _join_prewarm(client)
+    finally:
+        chain.release("agt_01h8")
+
+
+def test_no_prewarm_without_a_ledger(client):
+    """The hermetic default: nothing configured, nothing read, no task."""
+    assert rep._prewarm_task is None
