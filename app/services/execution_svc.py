@@ -13,13 +13,14 @@ from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..schemas import PlanStep, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
 from . import failure_tracker, rating_writer
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
+from .orchestrator_svc import _is_listed
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,32 @@ def _stored_summary(task_id: str, step_index: int, summary: str) -> str | None:
     return cleaned or None
 
 
+def _execute_refusal(step: PlanStep) -> str | None:
+    """Why `step` must not be dispatched NOW, or None to dispatch it.
+
+    The routing floor and the listing filter are applied when a plan is BUILT
+    (`orchestrator_svc`), and a stored plan used to be executed on that verdict
+    alone — so an agent its operator delisted between decompose and execute
+    still received the step and the payment (ADR 0006:162, "routing honours
+    delisting everywhere a candidate is chosen"). Executing a step IS choosing
+    its agent, so the registry is asked again here, at the last moment before
+    dispatch, exactly as the decompose clamp asks it before a step is stored.
+
+    The returned sentence is buyer-facing (trace lines are world-readable when
+    TASK_AUTH_REQUIRED is off): it names the agent and the reason, never the
+    operator's own data.
+    """
+    agent = state.agents.get(step.agent_id)
+    if agent is None:
+        # The registry dropped it — registry sync evicts an on-chain record it
+        # no longer believes (a reprice past the bounds). The decompose clamp
+        # treats a missing agent as unroutable, and so does this.
+        return f"{step.agent_id} is no longer in the agent registry"
+    if not _is_listed(agent):
+        return f"{step.agent_id} was delisted by its operator after this plan was built"
+    return None
+
+
 async def execute_plan(
     plan: StoredPlan,
     *,
@@ -437,6 +464,22 @@ async def _run(
             # itself, which would repeat on every step anyway. Letting that
             # reach the run-level handler (status "failed", stream closed) is
             # therefore the honest outcome, and is what the suite pins.
+            refusal = _execute_refusal(step)
+            if refusal is not None:
+                # Story 2.03's rule for a step that fails, applied to a step
+                # that is refused: it is skipped, nothing is added to `spent`
+                # (so neither the simulated total nor the on-chain charge
+                # includes it), the settlement records it as not delivered,
+                # and the run carries on with the steps that remain. It is
+                # also NOT rated and NOT counted as a failure — the agent was
+                # never asked, and a withdrawal is its operator's decision,
+                # not a delivery it failed (ADR 0005 D5). By index, like every
+                # other per-step set here.
+                undispatched.add(step_index)
+                logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
+                await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
+                continue
+
             worker = await resolve_worker(step.agent_id)
             if worker is None:
                 # No local worker and no resolvable binding. A bound agent
