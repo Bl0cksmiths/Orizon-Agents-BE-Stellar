@@ -86,8 +86,18 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
         "pdax": "unconfigured",
         "cold_start": {"routable": True, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177},
         "ratings": {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER},
-        # No DATABASE_URL in the hermetic suite: the in-memory fallback.
-        "disputes": {"store": "memory"},
+        # No DATABASE_URL in the hermetic suite: the in-memory fallback, and
+        # the refund reconcile sweep as it ships — off, and never run.
+        "disputes": {
+            "store": "memory",
+            "reconcile": {
+                "enabled": False,
+                "running": False,
+                "last_run_at": None,
+                "last_skipped": None,
+                "last_outcomes": {},
+            },
+        },
     }
 
 

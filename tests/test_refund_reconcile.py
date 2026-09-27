@@ -736,12 +736,14 @@ def test_a_pass_on_a_deployment_that_cannot_pay_reads_nothing(
 
 def test_the_sweep_starts_only_with_both_switches_on(monkeypatch: pytest.MonkeyPatch) -> None:
     started: list[bool] = []
+    reported: list[bool] = []
 
     async def go() -> None:
         for sweep, refunds in ((False, False), (True, False), (False, True), (True, True)):
             monkeypatch.setattr(settings, "refund_reconcile_enabled", sweep)
             monkeypatch.setattr(settings, "dispute_refunds_enabled", refunds)
             started.append(refund_reconcile.start())
+            reported.append(refund_reconcile.status()["enabled"])
             await refund_reconcile.stop()
 
     async def _idle() -> None:
@@ -751,6 +753,8 @@ def test_the_sweep_starts_only_with_both_switches_on(monkeypatch: pytest.MonkeyP
     asyncio.run(go())
 
     assert started == [False, False, False, True]
+    # /readiness says "enabled" exactly when the sweep would run.
+    assert reported == started
 
 
 def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(chain: Chain) -> None:
@@ -797,6 +801,37 @@ def test_a_claim_settled_after_the_queue_was_read_is_not_mistaken_for_a_wedge(
     assert chain.asked == []
 
 
+def test_readiness_reports_the_sweep_and_its_last_pass_by_count_only(
+    store: DisputeStore, chain: Chain, configured: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counts by action and when — never a dispute id or a hash, because the
+    probe answers anybody."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    tx_hash, envelope = a_refund_envelope(stroops=500_000)
+    chain.answers[tx_hash] = an_answer(tx_hash, "SUCCESS", envelope=envelope)
+
+    async def go() -> str:
+        parked = await in_flight(store, tx_hash)
+        await refund_reconcile.sweep_once()
+        return parked.id
+
+    dispute_id = run(store, go())
+    monkeypatch.setattr(settings, "refund_reconcile_enabled", True)
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
+    monkeypatch.setattr(refund_reconcile, "start", lambda: False)
+    with TestClient(app) as client:
+        response = client.get("/readiness")
+
+    reconcile = response.json()["disputes"]["reconcile"]
+    assert reconcile["enabled"] is True and reconcile["running"] is False
+    assert reconcile["last_outcomes"] == {"credited": 1} and reconcile["last_skipped"] is None
+    assert isinstance(reconcile["last_run_at"], float)
+    assert dispute_id not in response.text and tx_hash not in response.text
+
+
 def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -810,9 +845,10 @@ def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
     monkeypatch.setattr(refund_reconcile, "_loop", _idle)
     monkeypatch.setattr(settings, "refund_reconcile_enabled", True)
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
-    with TestClient(app):
+    with TestClient(app) as client:
+        during = client.get("/readiness").json()["disputes"]["reconcile"]
         task = refund_reconcile._task
-        assert task is not None and not task.done()
 
-    assert task.cancelled()
+    assert during["enabled"] is True and during["running"] is True
+    assert task is not None and task.cancelled()
     assert refund_reconcile._task is None

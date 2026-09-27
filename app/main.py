@@ -603,6 +603,26 @@ class RatingsReadiness(BaseModel):
     scorer: str | None  # the ledger's stored Scorer as last read; null unless a read found one
 
 
+class RefundReconcileReadiness(BaseModel):
+    """The refund reconcile sweep (services/refund_reconcile.py) and its last pass.
+
+    `enabled` is both switches together — REFUND_RECONCILE_ENABLED and the
+    DISPUTE_REFUNDS_ENABLED it depends on — and `running` whether the loop is
+    alive in this process. The last pass is counts by action and nothing
+    else: no dispute ids and no hashes reach this unauthenticated route. A
+    nonzero `history_gap`, `no_hash`, `not_this_refund`, `amount_mismatch`,
+    `not_crediting`, `missing` or `lost_race` is a claim waiting on a human,
+    and the log names it. `last_skipped` says why a pass read nothing, such
+    as a deployment that cannot pay credits. Informational, like the rest.
+    """
+
+    enabled: bool
+    running: bool
+    last_run_at: float | None  # epoch seconds, this process's clock
+    last_skipped: str | None
+    last_outcomes: dict[str, int]
+
+
 class DisputesReadiness(BaseModel):
     """Which store holds settlements and disputes in this process (D-063).
 
@@ -621,6 +641,7 @@ class DisputesReadiness(BaseModel):
     """
 
     store: Literal["postgres", "memory"]
+    reconcile: RefundReconcileReadiness
 
 
 class ReadinessResponse(BaseModel):
@@ -694,5 +715,6 @@ async def readiness(response: Response) -> ReadinessResponse:
         ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
         disputes=DisputesReadiness(
             store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
+            reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
         ),
     )
