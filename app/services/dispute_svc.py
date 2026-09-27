@@ -841,27 +841,37 @@ def _log_rating(
     derived_hex: str,
     tx_hash: str | None,
     *,
+    outcome: dispute_rating.RatingOutcome | None = None,
     exc_info: bool = False,
 ) -> None:
     """One line per rating outcome, carrying every id a reconciliation needs.
 
-    The dispute, the sealed job it disputes, the DERIVED id the rating lives
-    under on-chain, the agent it rates and the payer it was written for: with
+    The outcome the ledger's answer was filed as (`-` when no attempt drew
+    one), the dispute, the sealed job it disputes, the DERIVED id the rating
+    lives under on-chain, the agent it rates, the payer it was written for,
+    and what that payer was CREDITED and by which refund transaction: with
     those, whoever holds a block explorer can find the rating or prove it is
-    absent from this line alone. The hash joins them whenever there is one.
-    Nothing secret — all of it is public, and the scorer's key never enters
-    this module.
+    absent, and square it with the money that moved, from this line alone
+    (D-075). The hash joins them whenever there is one, and the reason
+    whenever a FAILED carries one. Nothing secret — all of it is public, and
+    the scorer's key never enters this module.
     """
+    credited = "-" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f}"
     logger.log(
         level,
-        "dispute rating %s: dispute=%s job=%s derived=%s agent=%s payer=%s tx=%s",
+        "dispute rating %s: outcome=%s dispute=%s job=%s derived=%s agent=%s payer=%s credited_usdc=%s"
+        " refund_tx=%s tx=%s reason=%s",
         event,
+        outcome.status if outcome is not None else "-",
         dispute.id,
         dispute.job_id_hex,
         derived_hex,
         dispute.agent_id,
         dispute.payer,
+        credited,
+        dispute.refund_tx or "-",
         tx_hash or "-",
+        (outcome.reason if outcome is not None else None) or "-",
         exc_info=exc_info,
     )
 
@@ -1007,6 +1017,7 @@ async def _rate_credited(
                 outcome.job_id_hex,
                 credited.rating_tx,
                 exc_info=True,
+                outcome=outcome,
             )
             return credited
         # After a SUCCESS or a TIMEOUT the answer and its hash are already in
@@ -1028,6 +1039,7 @@ async def _rate_credited(
             outcome.job_id_hex,
             outcome.tx_hash,
             exc_info=True,
+            outcome=outcome,
         )
         return credited
 
@@ -1046,7 +1058,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # Logged and the cache dropped BEFORE the record is written: the
         # rating is on-chain whatever happens to the store next, so the hash
         # must be in the log and the score fresh even if the write fails.
-        _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
+        _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash, outcome=outcome)
         reputation_svc.invalidate_rep(credited.agent_id)
         rated = _recorded(
             await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True),
@@ -1059,7 +1071,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     if outcome.status == "REPLAY":
         if credited.rating_tx:
             reputation_svc.invalidate_rep(credited.agent_id)
-            _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx)
+            _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx, outcome=outcome)
             if credited.rating_confirmed:
                 # Already confirmed: a second row would say nothing new and
                 # would move `updated_at` for a dispute nothing happened to.
@@ -1090,6 +1102,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             credited,
             derived,
             None,
+            outcome=outcome,
         )
         return credited
 
@@ -1118,6 +1131,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
                 credited,
                 derived,
                 outcome.tx_hash,
+                outcome=outcome,
             )
             return credited
         # Logged before it is recorded, for the reason SUCCESS is.
@@ -1127,6 +1141,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             credited,
             derived,
             outcome.tx_hash,
+            outcome=outcome,
         )
         if outcome.tx_hash:
             # Evidence, and explicitly NOT confirmation: the hash is the
@@ -1149,6 +1164,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         credited,
         derived,
         outcome.tx_hash,
+        outcome=outcome,
     )
     return credited
 
