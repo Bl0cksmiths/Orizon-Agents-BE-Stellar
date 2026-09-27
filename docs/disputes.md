@@ -457,12 +457,75 @@ disputed job in different ways.
 
 **The refund transfer** (`refund_tx`) is a `transfer` on the asset contract,
 signed by the settler: from the settler, to the payer, for the credited
-amount. It is what shows the buyer was paid, and it carries **no job id** — a
-token transfer names a sender, a recipient and an amount, and nothing else. Its
-link to the job runs through the dispute record. On-chain it is corroborated
-rather than proved: the recipient is the payer recorded at settlement — the
-address that authorized the escrow, and the one the attestation seal names —
-and the amount is no more than that step's charge.
+amount. It is what shows the buyer was paid. It carries **no job id**, but it
+does carry **its dispute**: the `to` is the payer's address **muxed** with a
+64-bit id derived from the dispute id (CAP-67, protocol 23 and later). The
+funds land in the payer's own `G…` account — a muxed address has no balance of
+its own, and the asset contract credits the account underneath it — and the
+id is published in the transfer event. So two credits of the same amount to
+the same payer are no longer indistinguishable on-chain: each names the
+dispute it pays. Its link to the job still runs through the dispute record,
+and the rest is corroborated as before: the recipient is the payer recorded at
+settlement — the address that authorized the escrow, and the one the
+attestation seal names — and the amount is no more than that step's charge.
+
+**Tying the refund to its dispute, without reading any code.** The id is
+
+```
+refund id = uint64, big-endian, of the first 8 bytes of
+            sha256( utf8(dispute_id) ‖ "orizon-refund:v1" )
+```
+
+— the same domain-separated style as the rating's derived job id below, with
+its own tag so the two can never be confused. It is recomputed from the
+dispute id, never stored; nothing else goes into it.
+
+```bash
+python3 -c 'import hashlib,sys; print(int.from_bytes(hashlib.sha256(sys.argv[1].encode()+b"orizon-refund:v1").digest()[:8],"big"))' <dispute_id>
+```
+
+For `dsp_deadbeefdeadbeefdeadbeefdeadbeef` that prints `594641790416058175`
+(`0x0840978ece59f73f`), the vector `tests/test_refund_dispute_tag.py` pins.
+With stellar-sdk to hand, the full `M…` address is
+`MuxedAccount(<payer>, <refund id>).account_muxed`.
+
+1. Open `refund_tx` on Stellar Expert. The `transfer` invocation's `to`
+   argument is an `M…` address.
+2. The asset contract's `transfer` event names the plain payer `G…` as its
+   recipient (its third topic), and its data is a map,
+   `{amount, to_muxed_id}`, rather than a bare amount.
+3. `to_muxed_id` equals the refund id computed from the dispute id above, and
+   the recipient equals the dispute's `payer`. That is the link. The id is 64
+   bits of a hash of a 128-bit random dispute id, so an unrelated dispute
+   matches with probability 2⁻⁶⁴.
+
+The other direction works too: holding a transfer and a payer, compute the
+refund id of each of that payer's disputes and see which one matches.
+
+**A refund may be untagged, and that is deliberate.** The tag must never cost a
+buyer their credit, so the service pays the plain `G…` address instead when
+the muxed form cannot be built — a payer that is a contract (`C…`) address,
+which cannot be muxed — or when simulation refuses the muxed address itself
+(`HostError: Error(Value, UnexpectedType)`, the host's answer for a contract
+that takes a plain `Address` there). Nothing was signed in either case, so the
+plain transfer is the only one. Every other failure is handled exactly as it
+was before the tag. An untagged refund logs a WARNING naming the dispute, and
+it is matched the old way, by payer, amount and time. A successful tagged
+refund logs `dispute <id>: refund to <payer> tagged with muxed id <n>` at
+INFO.
+
+*Why a muxed address and not a memo.* Soroban RPC refuses a memo on a contract
+invocation outright: a simulation of this exact transfer with a text memo
+answered `Transaction contains a memo. Soroban transactions do not support
+memos.`. A memo would also sit on the transaction envelope, where neither the
+contract nor its events can see it.
+
+*Evidence.* Simulated read-only on testnet on 2026-09-27 (protocol 28): the
+settler's `transfer` to a muxed payer succeeded and emitted
+`transfer(settler, <payer G…>, "native")` with data
+`{amount: 1200000, to_muxed_id: 81985529216486895}`. The minimum resource fee
+was 23,847 stroops, against 23,468 for the same transfer to the plain address,
+which is 379 stroops or +1.6%. Nothing was signed or sent.
 
 **The dispute rating** (`rating_tx`) is a call to `ReputationLedger.submit`,
 signed by the settler as the ledger's Scorer:
