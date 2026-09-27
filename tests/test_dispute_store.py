@@ -1761,3 +1761,21 @@ def test_the_in_memory_default_announces_that_it_loses_disputes(
         dispute_store.get_dispute_store()
 
     assert any("in-memory" in m and "LOST on restart" in m for m in _messages(caplog))
+
+
+def test_choosing_the_in_memory_store_is_a_warning_that_records_are_not_kept(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Records of money that moved are not kept on this path, so choosing it is
+    not routine news: it is a WARNING, and it says both ways a record goes —
+    a restart, and the cap."""
+    monkeypatch.setattr(dispute_store.settings, "database_url", "")
+
+    with caplog.at_level(logging.WARNING, logger=STORE_LOGGER):
+        dispute_store.get_dispute_store()
+
+    (chosen,) = [r for r in caplog.records if r.name == STORE_LOGGER and "in-memory" in r.getMessage()]
+    assert chosen.levelno == logging.WARNING
+    message = chosen.getMessage()
+    assert "dispute and settlement records are held in memory only" in message
+    assert "LOST on restart" in message and f"cap of {dispute_store._MAX_IN_MEMORY}" in message
