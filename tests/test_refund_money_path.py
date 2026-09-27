@@ -15,14 +15,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from stellar_sdk import Keypair
 from test_adjudication import (  # noqa: F401 - autouse fixtures and helpers
+    JOB,
     LANDED,
+    STEPS,
     SVC_LOGGER,
+    TASK,
     _fresh_state,
+    _sign,
     a_dispute,
     invalidated,
     rater,
@@ -32,7 +39,9 @@ from test_refund_execution import _dispute as _upheld_dispute
 import app.stellar.client as sc
 from app.config import settings
 from app.services import dispute_store, dispute_svc, refund_svc
-from app.services.dispute_svc import DisputeError
+from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
+from app.services.dispute_svc import DisputeError, dispute_message
+from app.services.execution_svc import _settled_usdc
 
 
 def _chain(monkeypatch, *answers: dict[str, Any] | BaseException) -> list[tuple[str, str, list[Any]]]:
@@ -326,3 +335,112 @@ def test_an_unconfirmed_credit_never_overwrites_a_dispute_moved_mid_flight(monke
     assert (current.status, current.refund_tx) == ("upheld", None)
     critical = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.CRITICAL]
     assert any("tx_inflight" in m and "MAY STILL LAND" in m and "now upheld" in m for m in critical), critical
+
+
+# ── B5: the settled total bounds a workflow's credits together ──
+
+
+def _two_disputes_of_one_job(settled_usdc: float) -> tuple[DisputeRecord, DisputeRecord]:
+    """One buyer, one settlement, both steps disputed — opened as a buyer opens them."""
+    payer = Keypair.random()
+    now = time.time()
+    asyncio.run(
+        dispute_store.get_dispute_store().record_settlement(
+            SettlementRecord(
+                TASK, payer.public_key, "ab" * 16, JOB, "tx_c", "tx_p", settled_usdc, STEPS, now, now + 3600
+            )
+        )
+    )
+    opened = []
+    for step in (0, 1):
+        nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, step))
+        opened.append(
+            asyncio.run(
+                dispute_svc.open_dispute(
+                    job_id_hex=JOB,
+                    step_index=step,
+                    reason="it did not deliver",
+                    payer=payer.public_key,
+                    nonce=nonce,
+                    signature_b64=_sign(payer, dispute_message(JOB, step, nonce)),
+                )
+            )
+        )
+    return opened[0], opened[1]
+
+
+def test_a_second_credit_is_bounded_by_what_the_first_left_of_the_settlement(monkeypatch) -> None:
+    """Steps of 0.05 and 0.07 whose charge settled 0.10 in all: each step alone
+    fits under the settled total, both together do not."""
+    calls = _chain(monkeypatch)
+    first, second = _two_disputes_of_one_job(settled_usdc=0.10)
+
+    assert asyncio.run(dispute_svc.uphold(second.id)).credited_usdc == 0.07
+    assert asyncio.run(dispute_svc.uphold(first.id)).credited_usdc == pytest.approx(0.03, abs=1e-12)
+    assert [args[2][1] for _, _, args in calls] == [700_000, 300_000]
+
+
+def test_a_credit_still_in_flight_is_reserved_at_its_promise(monkeypatch) -> None:
+    calls = _chain(monkeypatch, {"status": "timeout", "hash": "tx_inflight"})
+    first, second = _two_disputes_of_one_job(settled_usdc=0.10)
+
+    with pytest.raises(DisputeError):
+        asyncio.run(dispute_svc.uphold(second.id))  # 0.07 out, may still land
+    assert asyncio.run(dispute_svc.uphold(first.id)).credited_usdc == pytest.approx(0.03, abs=1e-12)
+    assert [args[2][1] for _, _, args in calls] == [700_000, 300_000]
+
+
+def test_nothing_left_of_the_settlement_is_nothing_to_credit(monkeypatch) -> None:
+    calls = _chain(monkeypatch)
+    first, second = _two_disputes_of_one_job(settled_usdc=0.07)
+
+    asyncio.run(dispute_svc.uphold(second.id))
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(first.id))
+
+    assert refused.value.code == "nothing_to_credit"
+    assert len(calls) == 1
+    current, queue = _stored(first.id)
+    assert (current.status, queue) == ("upheld", [])
+
+
+def _credit_every_step(prices: list[float]) -> tuple[int, int]:
+    """(stroops charged, stroops credited) when every step of a job is credited in turn."""
+    steps = tuple(SettlementStep(i, f"agt_{i}", None, p, True) for i, p in enumerate(prices))
+    spent = 0.0
+    for p in prices:
+        spent += p
+    settlement = SettlementRecord(TASK, "GP", "ab" * 16, JOB, "tx", None, _settled_usdc(spent), steps, 0.0, 1.0)
+    paid: list[float] = []
+    for i, p in enumerate(prices):
+        promise = refund_svc.credited_amount_usdc(p)
+        dispute = DisputeRecord(f"dsp_{i}", JOB, TASK, i, f"agt_{i}", "GP", "r", "crediting", p, promise, 0.0)
+        try:
+            paid.append(refund_svc.creditable_for(settlement, dispute, credited_elsewhere_usdc=tuple(paid)))
+        except refund_svc.RefundRefused:
+            continue
+    return sc.usdc_to_i128(max(spent, 0.000001)), sum(sc.usdc_to_i128(c) for c in paid)
+
+
+def test_the_audits_worst_case_is_no_longer_over_credited(monkeypatch) -> None:
+    monkeypatch.setattr(refund_svc.logger, "disabled", True)
+    charged, credited = _credit_every_step([8e-8, 8e-8, 0.01614268, 8e-8, 7e-8, 0.195193159])
+    assert charged == 2_113_361
+    assert credited == charged  # was 2_113_363: two stroops the charge never moved
+
+
+def test_no_job_is_ever_credited_a_stroop_more_than_it_was_charged(monkeypatch) -> None:
+    """The audit's brute force, cut to 20,000 jobs: it found over-credits in
+    about one job in fifteen, of up to 2 stroops, before the net bound."""
+    monkeypatch.setattr(refund_svc.logger, "disabled", True)
+    rng = random.Random(7)
+    over = []
+    for _ in range(20_000):
+        prices = [
+            rng.choice([rng.randint(1, 9) * 10**-8, round(rng.uniform(0, 0.2), rng.randint(3, 9))])
+            for _ in range(rng.randint(1, 6))
+        ]
+        charged, credited = _credit_every_step(prices)
+        if credited > charged:
+            over.append((prices, charged, credited))
+    assert over == []

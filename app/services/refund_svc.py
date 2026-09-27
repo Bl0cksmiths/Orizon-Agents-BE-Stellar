@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 # price. Stated up front so buyer and operator both know the terms in advance,
 # rather than a case-by-case judgement (product rule).
 DEFAULT_CREDITED_FRACTION = 1.0
+
+# The ledger's unit: USDC has 7 decimals on Stellar (`sc.usdc_to_i128`).
+_STROOPS_PER_USDC = 10_000_000
 
 
 class RefundRefused(Exception):
@@ -213,6 +217,8 @@ def creditable_for(
     settlement: SettlementRecord,
     dispute: DisputeRecord,
     fraction: float = DEFAULT_CREDITED_FRACTION,
+    *,
+    credited_elsewhere_usdc: Sequence[float] = (),
 ) -> float:
     """The USDC to credit for `dispute`, bounded by what actually settled (D4).
 
@@ -240,7 +246,13 @@ def creditable_for(
         applies to disputes already open (raising it cannot, because the promise
         above still caps it).
       - `settlement.settled_usdc` is the hard ceiling of what ever came out of
-        the buyer's escrow for the whole workflow.
+        the buyer's escrow for the whole workflow — and it is a ceiling on the
+        workflow's credits TOGETHER, so it is applied net of
+        `credited_elsewhere_usdc`: what the job's other disputes have been
+        paid, or may yet be. Counted in stroops, because that is the unit the
+        charge moved: each step's credit is rounded to 7 decimals on its own,
+        and without the net bound the rounding alone let a workflow's credits
+        add up to a stroop or two more than its charge.
 
     Every clamp that actually bites is logged at WARNING with both numbers,
     because a clamp means two records disagree about money. Taking the smaller
@@ -335,6 +347,34 @@ def creditable_for(
             f"the bounds compute to {amount} USDC for step {dispute.step_index}, which is not an amount of money",
             amount,
         )
+    if credited_elsewhere_usdc:
+        if not all(math.isfinite(c) for c in credited_elsewhere_usdc):
+            raise _refuse(
+                dispute,
+                "refund_amount_invalid",
+                f"another dispute of job {dispute.job_id_hex} records a credit that is not a number "
+                f"({list(credited_elsewhere_usdc)}), so what is left of the settled total is unknown",
+                amount,
+            )
+        left_stroops = sc.usdc_to_i128(settlement.settled_usdc) - sum(
+            sc.usdc_to_i128(c) for c in credited_elsewhere_usdc
+        )
+        if sc.usdc_to_i128(amount) > left_stroops:
+            left = max(left_stroops, 0) / _STROOPS_PER_USDC
+            logger.warning(
+                "dispute %s: credit clamped by what is left of the settled total — %.7f USDC computed for step %d, "
+                "%.7f USDC settled for the workflow, %.7f USDC already credited or in flight on its other "
+                "disputes, %.7f USDC left (job %s, payer %s)",
+                dispute.id,
+                amount,
+                dispute.step_index,
+                settlement.settled_usdc,
+                sum(credited_elsewhere_usdc),
+                left,
+                dispute.job_id_hex,
+                dispute.payer,
+            )
+            amount = left
     if amount <= 0:
         raise _refuse(
             dispute,

@@ -1259,6 +1259,24 @@ async def _already_adjudicated(dispute: DisputeRecord, *, on_rating: RatingObser
     return None
 
 
+def _credited_elsewhere(claimed: DisputeRecord, disputes: tuple[DisputeRecord, ...]) -> tuple[float, ...]:
+    """What the job's OTHER disputes have been paid, or may yet be.
+
+    The settled total bounds a workflow's credits together (D4), so each
+    credit is bounded by what the others have left of it. A `credited`
+    dispute counts what it moved (its promise, for one recorded before 4.06
+    kept the amount); a `crediting` one counts its promise, because its
+    transfer may still land and can move no more than that. Read AFTER this
+    dispute's claim is taken, so of two credits of one job racing each other
+    the second always sees the first — as `crediting` at the least.
+    """
+    return tuple(
+        (d.credited_usdc if d.status == "credited" and d.credited_usdc is not None else d.creditable_usdc)
+        for d in disputes
+        if d.id != claimed.id and d.job_id_hex == claimed.job_id_hex and d.status in ("credited", "crediting")
+    )
+
+
 async def _hand_back(claimed: DisputeRecord, why: str, *, failed_tx: str | None = None) -> bool:
     """Release the refund claim on a path where NOTHING WAS PAID; never raises.
 
@@ -1494,7 +1512,14 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         amount_usdc = (
             0.0
             if settlement is None
-            else refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
+            else refund_svc.creditable_for(
+                settlement,
+                claimed,
+                settings.dispute_credited_fraction,
+                credited_elsewhere_usdc=_credited_elsewhere(
+                    claimed, await store.list_disputes_for_task(claimed.task_id)
+                ),
+            )
         )
     except refund_svc.RefundRefused as refused:
         await _hand_back(claimed, refused.code)
