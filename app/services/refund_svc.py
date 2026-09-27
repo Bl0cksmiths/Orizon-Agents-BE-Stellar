@@ -27,6 +27,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from stellar_sdk.xdr import SCVal
+
 from ..config import settings
 from ..stellar import client as sc
 from .dispute_store import DisputeRecord, SettlementRecord
@@ -425,20 +427,74 @@ def refund_muxed_id(dispute_id: str) -> int:
     return int.from_bytes(digest[:_MUX_ID_BYTES], "big")
 
 
-async def execute_refund(buyer: str, amount_usdc: float) -> dict[str, Any]:
+def _tagged_recipient(buyer: str, dispute_id: str) -> tuple[SCVal, int] | None:
+    """The buyer's G address muxed with the dispute's refund id, and the id.
+
+    None when the muxed form cannot be built — a payer that is not a G
+    address (a contract wallet cannot be muxed), or anything else the SDK
+    refuses — and the caller pays the plain address. Logged, never raised: the
+    tag exists to make a credit findable, and it must never be the reason one
+    is not paid.
+    """
+    try:
+        muxed_id = refund_muxed_id(dispute_id)
+        return sc.muxed_addr(buyer, muxed_id), muxed_id
+    except Exception as e:
+        logger.warning(
+            "dispute %s: refund to %s cannot carry its dispute tag (%s) — paying the plain address",
+            dispute_id,
+            buyer,
+            e,
+        )
+        return None
+
+
+async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
     """Settler-funded platform credit: transfer `amount_usdc` from the settler
     to the buyer over the asset SAC. Returns the invoke result (incl. `hash`).
 
     A credit, never a clawback — the funds leave the platform wallet, so the
     settler must hold enough of the asset. The server signing key IS the
     settler, so the SAC `transfer(settler → buyer)` is authorised by that key.
+
+    With `dispute_id`, the `to` is the buyer's G address muxed with
+    `refund_muxed_id(dispute_id)`. The funds land in the same G account — the
+    SAC credits the underlying account — and the transfer event carries the id
+    as `to_muxed_id`, which is what ties the credit to its dispute on-chain.
+    Without one (the 4.01 spike script), the plain address, as before.
+
+    The tag falls back to the plain address, never to a failed credit:
+      - when the muxed address cannot be built (`_tagged_recipient`);
+      - when the tagged transfer is refused with `sc.NotSubmittedError` that is
+        not a `sc.ContractError`. That type is the client's proof nothing was
+        sent, so a second transfer cannot pay the buyer twice; it is how a
+        network or asset contract that refuses a muxed `to` would answer, in
+        simulation, before anything is signed. A `ContractError` is the asset
+        contract's own verdict (a settler short of funds), which the plain
+        address would meet the same way, so it is raised as it always was.
+    Anything that may have been sent — any other exception, or an answer — is
+    returned or raised untouched: that transfer may land, and a second one
+    would pay the buyer twice.
     """
     settler = sc.signer_public_key()
-    return await sc.invoke_with_server_key_async(
-        sc.contract_ids().asset_sac,
-        "transfer",
-        [sc.addr(settler), sc.addr(buyer), sc.i128(sc.usdc_to_i128(amount_usdc))],
-    )
+    sac = sc.contract_ids().asset_sac
+    amount = sc.i128(sc.usdc_to_i128(amount_usdc))
+    tagged = _tagged_recipient(buyer, dispute_id) if dispute_id is not None else None
+    if tagged is not None:
+        to, muxed_id = tagged
+        logger.info("dispute %s: refund to %s tagged with muxed id %d", dispute_id, buyer, muxed_id)
+        try:
+            return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), to, amount])
+        except sc.ContractError:
+            raise
+        except sc.NotSubmittedError as e:
+            logger.warning(
+                "dispute %s: tagged refund to %s was refused before it was sent (%s) — paying the plain address",
+                dispute_id,
+                buyer,
+                e,
+            )
+    return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), sc.addr(buyer), amount])
 
 
 async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOutcome:
