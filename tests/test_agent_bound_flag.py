@@ -96,14 +96,17 @@ def _external(agent_id: str) -> Agent:
 
 @pytest.fixture()
 def marketplace(client, monkeypatch):
-    """The catalog plus two indexed on-chain agents, one bound and one not."""
+    """The catalog plus two indexed on-chain agents, one bound and one not.
+    The whole registry is restored afterwards, not just the two added here."""
+    saved = dict(state.agents)
+    state.agents.clear()
     seed_registry()
     state.add_agent(_external(BOUND))
     state.add_agent(_external(UNBOUND))
     _load_bound(monkeypatch, BOUND)
     yield client
-    state.agents.pop(BOUND, None)
-    state.agents.pop(UNBOUND, None)
+    state.agents.clear()
+    state.agents.update(saved)
     _load_bound(monkeypatch)
 
 
