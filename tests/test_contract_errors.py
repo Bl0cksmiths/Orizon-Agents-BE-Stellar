@@ -188,8 +188,11 @@ def test_a_host_simulation_failure_is_not_submitted(monkeypatch):
     """The live D-076 refusal: the host, not the contract, rejects the call at
     simulation. Nothing was signed or sent, and the type says so."""
     rpc = _rpc(monkeypatch, _FakeRpc(fail_at="simulate"))
-    with pytest.raises(sc.NotSubmittedError, match=r"prepare failed: HostError: Error\(Value, InvalidInput\)"):
+    with pytest.raises(sc.NotSubmittedError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
+    # Raised as itself, not rewrapped by the stage guard around it: the head
+    # is the host's error, once, which is what an operator reads.
+    assert str(caught.value) == f"prepare failed: {HOST_SIMULATION_ERROR}"
     assert rpc.prepared and not rpc.sent
 
 
