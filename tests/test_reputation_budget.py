@@ -13,13 +13,19 @@ assertions."""
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import logging
+import threading
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from app.config import REPUTATION_READ_BUDGET_SHARE, Settings
+from app.config import REPUTATION_READ_BUDGET_SHARE, Settings, settings
 from app.services import reputation_svc
+from app.stellar import cache as rcache
+from app.stellar import client as sc
 
 
 def _settings(**overrides) -> Settings:
@@ -51,19 +57,48 @@ def test_ordinary_tuning_on_either_side_still_boots():
     assert _settings(decompose_timeout_seconds=30.0).decompose_timeout_seconds == 30.0
 
 
-def test_the_setting_is_the_bound_a_read_actually_uses():
+def test_the_setting_is_the_bound_a_read_actually_uses(monkeypatch, caplog):
     """A validator that cannot see the value it validates is theatre.
 
     The bound was lifted out of fetch_reps' signature so this one can be
-    checked at boot. While the service still carries its own literal default
-    the number lives in two places, and two places drift — so pin them equal. A
-    `None` default means fetch_reps resolves the bound from Settings and there
-    is nothing left to drift; anything else (a different literal, or a
-    parameter made required) is the drift this exists to catch.
+    checked at boot. This used to assert only on the signature — and asserted
+    nothing at all once the default became None, so a fetch_reps that ignored
+    the setting for a literal of its own passed (audit mutant M3). Now it
+    watches a read: with the setting at 0.2 s and one read held, fetch_reps
+    called with NO timeout gives up at the setting's deadline and says so.
     """
     default = inspect.signature(reputation_svc.fetch_reps).parameters["timeout_seconds"].default
-    if default is not None:
-        assert default == _settings().reputation_batch_timeout_seconds
+    assert default is None, "fetch_reps must resolve its bound from Settings, not carry a literal"
+
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(settings, "reputation_batch_timeout_seconds", 0.2)
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    held = threading.Event()
+
+    def simulate_read(*_args, **_kw):
+        held.wait(10)
+        return {"sum_w": 0, "weight": 0, "count": 0, "disputed": 0}
+
+    monkeypatch.setattr(sc, "simulate_read", simulate_read)
+
+    async def batch():
+        try:
+            return await reputation_svc.fetch_reps(["agt_01h8"])
+        finally:
+            held.set()
+
+    rcache.clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.services.reputation_svc"):
+            infos = asyncio.run(batch())
+    finally:
+        held.set()
+        rcache.clear()
+
+    assert infos["agt_01h8"].degraded is True
+    assert any("at the 0.2 s batch deadline" in r.getMessage() for r in caplog.records)
 
 
 def test_a_raised_reputation_bound_refuses_to_boot():
