@@ -53,6 +53,15 @@ def test_mainnet_requires_mainnet_passphrase():
     assert s.stellar_network == "mainnet"
 
 
+@pytest.mark.parametrize("label", ["pubnet", "PUBLIC", " mainnet", "Mainnet "])
+def test_every_spelling_of_mainnet_over_a_testnet_passphrase_is_refused(label):
+    """D-074: the label was read case-sensitively and unpadded here, and without
+    `pubnet`, while the key rule stripped it — so the two disagreed about what a
+    label said. One reading now, `label_names_mainnet`."""
+    with pytest.raises(ValidationError, match="STELLAR_NETWORK_PASSPHRASE"):
+        _settings(stellar_network=label)
+
+
 def test_production_rejects_unsigned_webhook_escape_hatch():
     with pytest.raises(ValidationError, match="PDAX_ALLOW_UNSIGNED_WEBHOOKS"):
         _settings(
