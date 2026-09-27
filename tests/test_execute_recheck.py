@@ -21,8 +21,9 @@ from typing import Any
 
 import pytest
 
+from app.config import settings
 from app.schemas import Agent, Plan, PlanStep, StoredPlan, Task
-from app.services import execution_svc
+from app.services import execution_svc, reputation_svc
 from app.state import state
 
 INTENT = "ship the launch page"
@@ -195,3 +196,131 @@ def test_a_plan_whose_every_agent_was_delisted_charges_nothing(monkeypatch):
     assert seen["totals"] == []
     assert state.tasks["tsk_rc_all_gone"].status == "failed"
     assert state.tasks["tsk_rc_all_gone"].spent == 0.0
+
+
+# ── the routing floor, re-applied to a fresh read ───────────────────
+#
+# The rule (`execution_svc._execute_refusal`):
+#   * a read that FAILED cannot overturn what the buyer authorised — the step
+#     runs, and the trace says it ran on the plan's own scores;
+#   * a read that succeeded and is below the floor refuses the step — unless
+#     the buyer authorised it below the floor (a starvation re-admission) and
+#     it is no worse than the bound the card showed.
+
+
+def _onchain(agent_id: str, lower_bound_bps: int) -> reputation_svc.RepInfo:
+    return reputation_svc._prior_info(agent_id).model_copy(
+        update={"source": "onchain", "lower_bound_bps": lower_bound_bps, "count": 5}
+    )
+
+
+def _reads(monkeypatch, infos: dict[str, reputation_svc.RepInfo]) -> list[list[str]]:
+    """The execute-time batch read answers with `infos`; returns each batch asked for."""
+    asked: list[list[str]] = []
+
+    async def fake_fetch_reps(agent_ids, timeout_seconds=None):
+        asked.append(list(agent_ids))
+        return {a: infos.get(a, reputation_svc._prior_info(a)) for a in agent_ids}
+
+    monkeypatch.setattr(reputation_svc, "fetch_reps", fake_fetch_reps)
+    return asked
+
+
+def test_an_agent_that_fell_below_the_floor_since_planning_is_not_paid(monkeypatch):
+    """Planned at 5700 (clear of a 5500 floor); a rating has since landed and
+    the fresh read says 5499. It is provably below the floor now, so it is not
+    dispatched, not charged and not rated, and the buyer is told why."""
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+    _register(monkeypatch, "agt_ok")
+    _register(monkeypatch, "agt_sunk")
+    asked = _reads(monkeypatch, {"agt_sunk": _onchain("agt_sunk", 5499), "agt_ok": _onchain("agt_ok", 6000)})
+    resolved = _dispatches(monkeypatch, "agt_ok", "agt_sunk")
+    seen = _settles(monkeypatch)
+
+    trace = _run(
+        "tsk_rc_sunk",
+        _plan("pln_rc_sunk", _step("agt_ok"), _step("agt_sunk", rep_lower_bound_bps=5700)),
+    )
+
+    assert asked == [["agt_ok", "agt_sunk"]], "one batch read for the run, covering every agent"
+    assert resolved == ["agt_ok"]
+    assert seen["totals"] == [pytest.approx(PRICE)]
+    assert seen["undispatched"] == frozenset({1})
+    assert (
+        "step refused: agt_sunk fell below the routing floor after this plan was built (5499 < 5500 bps)"
+        " — not dispatched, not charged"
+    ) in trace
+
+
+def test_an_agent_exactly_on_the_floor_is_still_paid(monkeypatch):
+    """The floor is inclusive at execute as it is at planning."""
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+    _register(monkeypatch, "agt_edge")
+    _reads(monkeypatch, {"agt_edge": _onchain("agt_edge", 5500)})
+    resolved = _dispatches(monkeypatch, "agt_edge")
+    seen = _settles(monkeypatch)
+
+    _run("tsk_rc_edge", _plan("pln_rc_edge", _step("agt_edge")))
+
+    assert resolved == ["agt_edge"]
+    assert seen["totals"] == [pytest.approx(PRICE)]
+
+
+def test_a_degraded_read_at_execute_does_not_strip_an_authorised_step(monkeypatch):
+    """The chain was slow: the batch read degraded and served the prior. Under
+    a floor ABOVE the prior's bound (the fail-closed configuration) that prior
+    fails the floor arithmetically — but it is not evidence about the agent,
+    and the buyer authorised this step on a real 6200. It runs, is charged,
+    and the trace says which scores it ran on."""
+    monkeypatch.setattr(settings, "reputation_floor_bps", 6000)
+    degraded = reputation_svc._prior_info("agt_ok", degraded=True)
+    assert not reputation_svc.passes_floor(degraded), "precondition: the prior alone would be refused"
+    _register(monkeypatch, "agt_ok")
+    _reads(monkeypatch, {"agt_ok": degraded})
+    resolved = _dispatches(monkeypatch, "agt_ok")
+    seen = _settles(monkeypatch)
+
+    trace = _run("tsk_rc_slow", _plan("pln_rc_slow", _step("agt_ok", rep_lower_bound_bps=6200)))
+
+    assert resolved == ["agt_ok"]
+    assert seen["totals"] == [pytest.approx(PRICE)]
+    assert seen["undispatched"] == frozenset()
+    assert (
+        "reputation re-check unavailable for [agt_ok] — those steps run on the scores this plan was authorised with"
+    ) in trace
+    assert not any(m.startswith("step refused") for m in trace)
+
+
+def test_a_step_the_buyer_authorised_below_the_floor_runs_while_no_worse(monkeypatch):
+    """A starvation re-admission: the card flagged it below the floor at 5000
+    and the buyer authorised it anyway. A fresh 5000 is exactly what they
+    consented to, so it runs."""
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+    _register(monkeypatch, "agt_relaxed")
+    _reads(monkeypatch, {"agt_relaxed": _onchain("agt_relaxed", 5000)})
+    resolved = _dispatches(monkeypatch, "agt_relaxed")
+    seen = _settles(monkeypatch)
+
+    _run("tsk_rc_relaxed", _plan("pln_rc_relaxed", _step("agt_relaxed", degraded=True, rep_lower_bound_bps=5000)))
+
+    assert resolved == ["agt_relaxed"]
+    assert seen["totals"] == [pytest.approx(PRICE)]
+
+
+def test_a_step_authorised_below_the_floor_is_refused_once_it_is_worse(monkeypatch):
+    """The buyer consented to the evidence they were shown, not to whatever
+    arrived after: one point below the shown bound and it is refused."""
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+    _register(monkeypatch, "agt_relaxed")
+    _reads(monkeypatch, {"agt_relaxed": _onchain("agt_relaxed", 4999)})
+    resolved = _dispatches(monkeypatch, "agt_relaxed")
+    seen = _settles(monkeypatch)
+
+    trace = _run("tsk_rc_worse", _plan("pln_rc_worse", _step("agt_relaxed", degraded=True, rep_lower_bound_bps=5000)))
+
+    assert resolved == []
+    assert seen["totals"] == []
+    assert (
+        "step refused: agt_relaxed fell further below the routing floor than this plan showed (4999 < 5000 bps)"
+        " — not dispatched, not charged"
+    ) in trace
