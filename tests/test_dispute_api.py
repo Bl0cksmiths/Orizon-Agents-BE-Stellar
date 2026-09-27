@@ -629,6 +629,7 @@ def test_an_anonymous_reader_gets_the_money_facts_and_not_the_buyers_words(clien
     # Withheld, and nowhere else in the body either.
     assert dispute["reason"] == ""
     assert dispute["rejection_reason"] is None
+    assert dispute["reason_withheld"] is True
     assert ADJUDICATOR_NOTE not in r.text
     assert "the step returned an empty file" not in r.text
     # And the chain-public facts are all still there: the shared trace link
@@ -656,6 +657,7 @@ def test_an_anonymous_reader_of_one_dispute_gets_no_free_text_either(client, mon
     assert r.status_code == 200, r.text
     assert r.json()["reason"] == ""
     assert r.json()["rejection_reason"] is None
+    assert r.json()["reason_withheld"] is True
     assert ADJUDICATOR_NOTE not in r.text
     assert r.json()["status"] == "rejected"
 
@@ -679,6 +681,7 @@ def test_the_task_token_buys_the_free_text_on_both_reads(client, monkeypatch, pr
     dispute = r.json()["disputes"][0] if "disputes" in r.json() else r.json()
     assert dispute["reason"] == "the step returned an empty file"
     assert dispute["rejection_reason"] == ADJUDICATOR_NOTE
+    assert dispute["reason_withheld"] is False
 
 
 @pytest.mark.parametrize(
@@ -701,6 +704,7 @@ def test_the_operator_key_buys_the_free_text_on_both_reads(client, monkeypatch, 
     dispute = r.json()["disputes"][0] if "disputes" in r.json() else r.json()
     assert dispute["reason"] == "the step returned an empty file"
     assert dispute["rejection_reason"] == ADJUDICATOR_NOTE
+    assert dispute["reason_withheld"] is False
 
 
 @pytest.mark.parametrize(
@@ -729,6 +733,7 @@ def test_a_credential_that_is_not_this_tasks_buys_nothing(client, monkeypatch, l
     (dispute,) = r.json()["disputes"]
     assert dispute["reason"] == "", label
     assert dispute["rejection_reason"] is None, label
+    assert dispute["reason_withheld"] is True, label
 
 
 def test_the_payer_who_just_signed_reads_back_what_they_wrote(client, monkeypatch):
