@@ -565,10 +565,13 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
     function rather than as a change to `_refuse`. Every message reachable
     from `issue_dispute_challenge` and `open_dispute` either states a rule
     ("only the payer of a workflow may dispute it"), states a format ("an
-    ed25519 signature is 64 bytes"), or echoes back a value the caller sent —
-    a step index the edge has already bounded to an int. The ones that name
-    private state all sit AFTER `_authenticate_payer` in the service's own
-    order, so nobody reaches them without having signed as the payer first.
+    ed25519 signature is 64 bytes"), echoes back a value the caller sent —
+    a step index the edge has already bounded to an int — or states a fact
+    `SettlementView` already serves to anyone who can name the task: when the
+    window closed, whether a step delivered, whether it was free. The mint
+    refuses on those last three too. Anything that names PRIVATE state sits
+    AFTER `_authenticate_payer` in the service's own order, so nobody reaches
+    it without having signed as the payer first.
 
     That ordering is the whole of the argument, so it is the thing to re-read
     before routing a new code through here: a refusal moved to before the

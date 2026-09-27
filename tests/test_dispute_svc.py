@@ -106,6 +106,17 @@ def _open(
     )
 
 
+def _raw_nonce(job: str, step: int) -> str:
+    """A challenge minted straight from the table, past the service's own mint.
+
+    `issue_dispute_challenge` refuses a closed window, an undelivered step and a
+    free one before spending a slot; `open_dispute` asks the same rules again
+    behind the signature, and reaching those re-checks takes a nonce the
+    service's mint would not have handed out.
+    """
+    return eb.issue_dispute_challenge(job, step)[0]
+
+
 # ── the happy path ──────────────────────────────────────────────
 
 
@@ -249,10 +260,13 @@ def test_a_caller_claiming_someone_else_s_address_is_refused() -> None:
 
 
 def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
-    """The signature gate stands in front of every private fact. This job's
-    window has closed and its step was never delivered, and a caller who cannot
-    prove they are the buyer is told neither — the refusal is the same code,
-    status and message they would get against a perfectly healthy job."""
+    """Inside `open_dispute` the signature is asked before the window and the
+    step. Those two are public now (`SettlementView` serves them, and the mint
+    refuses on them), but a caller who cannot prove they are the buyer still
+    gets one answer here whatever state the job is in — the refusal is the same
+    code, status and message they would get against a perfectly healthy job.
+    The nonce is minted straight from the challenge table, since the service's
+    own mint refuses this job before any signature is asked."""
     payer = Keypair.random()
     impostor = Keypair.random()
     _seed(payer.public_key)
@@ -267,7 +281,7 @@ def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
     with pytest.raises(DisputeError) as healthy:
         _open(impostor, claimed_payer=payer.public_key)
     with pytest.raises(DisputeError) as damaged:
-        _open(impostor, job="dead" * 8, claimed_payer=payer.public_key)
+        _open(impostor, job="dead" * 8, nonce=_raw_nonce("dead" * 8, 0), claimed_payer=payer.public_key)
 
     assert (healthy.value.code, healthy.value.status_code) == ("not_the_payer", 403)
     assert (damaged.value.code, damaged.value.status_code) == ("not_the_payer", 403)
@@ -379,7 +393,7 @@ def test_a_dispute_after_the_window_closed_is_refused_and_says_when() -> None:
     closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "dispute_window_closed"
     assert refused.value.status_code == 409
@@ -397,7 +411,7 @@ def test_the_window_is_judged_on_the_stamped_value_not_the_setting(monkeypatch) 
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 365 * 86_400.0)
     with pytest.raises(DisputeError) as still_closed:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
     assert still_closed.value.code == "dispute_window_closed"
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 0.0)
@@ -432,7 +446,7 @@ def test_a_step_that_produced_no_output_cannot_be_disputed() -> None:
     )
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "step_not_settled"
     assert refused.value.status_code == 409
@@ -449,7 +463,7 @@ def test_a_workflow_that_charged_nothing_cannot_be_disputed() -> None:
     _seed(payer.public_key, settled_usdc=0.0)
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "nothing_was_charged"
     assert refused.value.status_code == 409
@@ -463,7 +477,7 @@ def test_a_free_step_cannot_be_disputed() -> None:
     )
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "nothing_was_charged"
     assert "free" in refused.value.message
