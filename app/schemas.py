@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 # Agent ids are contract Symbols: short alphanumeric/underscore tokens. Reject
 # garbage at the router edge instead of paying an RPC round-trip to find out.
@@ -259,6 +259,11 @@ class OverviewMetrics(BaseModel):
 
 # ───── Requests ────────────────────────────────────────────
 class DecomposeRequest(BaseModel):
+    # Stripped BEFORE the length bounds apply, so whitespace can neither make
+    # up the three characters nor count toward the 500. A blank intent used to
+    # pass and was sent to the planner as one paid LLM call about nothing.
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     intent: str = Field(..., min_length=3, max_length=500)
 
 

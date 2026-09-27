@@ -104,3 +104,30 @@ def test_the_planner_budget_slides_and_can_be_switched_off() -> None:
 
     budget = 0
     assert all(limiter.hit("a", now=61.0) is None for _ in range(50))
+
+
+# ── what counts as an intent ────────────────────────────────────
+
+
+@pytest.mark.parametrize("intent", ["   ", "\n\t \n", "  hi  ", "a" * 501, " " + "a" * 501])
+def test_an_intent_that_is_blank_short_or_long_is_refused_before_planning(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, intent: str
+) -> None:
+    # Whitespace is stripped before the 3–500 bounds apply: a blank intent
+    # used to pass validation and spend one planner call on nothing.
+    calls: list[str] = []
+    monkeypatch.setattr(router, "decompose", _answering(calls))
+
+    assert _post(client, intent)[0] == 422
+    assert calls == []
+
+
+def test_an_intent_is_planned_stripped_and_up_to_500_characters(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(router, "decompose", _answering(calls))
+
+    assert _post(client, "  " + "a" * 500 + "\n")[0] == 200
+    assert _post(client, "  write a haiku  ")[0] == 200
+    assert calls == ["a" * 500, "write a haiku"]
