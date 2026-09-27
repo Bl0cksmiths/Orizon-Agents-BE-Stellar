@@ -267,10 +267,57 @@ def test_a_duplicate_send_may_still_land_and_is_not_called_refused(monkeypatch):
 def test_a_send_that_raises_may_still_land_and_is_not_called_refused(monkeypatch):
     """The request may have reached the RPC before the connection dropped."""
     rpc = _rpc(monkeypatch, _FakeRpc(fail_at="send_raises"))
-    with pytest.raises(ConnectionError) as caught:
+    with pytest.raises(sc.InFlightError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
     assert rpc.sent
     assert not isinstance(caught.value, sc.NotSubmittedError)
+    assert isinstance(caught.value.__cause__, ConnectionError)
+
+
+class _SigningRpc(_FakeRpc):
+    """A `_FakeRpc` that remembers the hash of the envelope it was handed."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.signed_hash: str | None = None
+
+    def send_transaction(self, tx: Any) -> Any:
+        self.signed_hash = tx.hash_hex()
+        return super().send_transaction(tx)
+
+
+def test_a_send_that_raises_carries_the_hash_of_what_it_signed(monkeypatch):
+    """B4: the hash is known once the envelope is signed, and it is the one
+    fact a reconciliation needs — so a failure after the send must carry it."""
+    rpc = _rpc(monkeypatch, _SigningRpc(fail_at="send_raises"))
+    with pytest.raises(sc.InFlightError) as caught:
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    assert rpc.signed_hash is not None and len(rpc.signed_hash) == 64
+    assert caught.value.tx_hash == rpc.signed_hash
+
+
+def test_a_duplicate_send_carries_the_hash_of_what_it_signed(monkeypatch):
+    rpc = _rpc(monkeypatch, _SigningRpc(send_status=SendTransactionStatus.DUPLICATE))
+    with pytest.raises(sc.InFlightError, match="submit failed") as caught:
+        sc._send_server_signed(LEDGER_ID, "submit", [])
+    assert caught.value.tx_hash == rpc.signed_hash
+
+
+class _PollRaises(_FakeRpc):
+    def get_transaction(self, tx_hash: str) -> Any:
+        raise ConnectionError("rpc unreachable while polling")
+
+
+def test_a_poll_that_raises_after_the_send_carries_the_pending_hash(monkeypatch):
+    """Sent and PENDING, then the poll itself raised: in flight, with its hash."""
+    _rpc(monkeypatch, _PollRaises())
+    with pytest.raises(sc.InFlightError) as caught:
+        asyncio.run(sc.invoke_with_server_key_async(LEDGER_ID, "submit", []))
+    assert caught.value.tx_hash == PENDING_HASH
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    with pytest.raises(sc.InFlightError) as caught_sync:
+        sc.invoke_with_server_key(LEDGER_ID, "submit", [])
+    assert caught_sync.value.tx_hash == PENDING_HASH
 
 
 def test_a_poll_that_runs_out_after_the_send_is_a_timeout_not_a_refusal(monkeypatch):

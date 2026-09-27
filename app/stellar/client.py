@@ -445,6 +445,29 @@ class ContractError(NotSubmittedError):
         self.code = code
 
 
+class InFlightError(RuntimeError):
+    """A backend-signed write that failed AFTER it may have reached the network.
+
+    The opposite of `NotSubmittedError`, and raised only once the transaction
+    is signed: the send raised (the request may have reached the RPC before
+    the connection dropped), the RPC answered `DUPLICATE` (an identical
+    transaction is already pending), or the status poll itself raised. Any of
+    these may still land, so a caller must keep treating it as in flight.
+
+    What it adds over a bare exception is `tx_hash`, the hash of the signed
+    transaction. It is known the moment the envelope is signed, and it is the
+    one fact a reconciliation needs to ask the ledger what happened — without
+    it, all that is left is to scan the signer's history for a match by amount.
+    The original exception is its `__cause__`.
+
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+    def __init__(self, message: str, tx_hash: str) -> None:
+        super().__init__(message)
+        self.tx_hash = tx_hash
+
+
 def _contract_error_code(simulation_error: str | None) -> int | None:
     """The contract error code heading a simulation error, or None."""
     match = _CONTRACT_ERROR_HEAD.match(simulation_error or "")
@@ -526,13 +549,22 @@ def _send_server_signed(
         span["stage"] = "sign"
         with _before_send("sign"):
             tx.sign(kp)
+            # Known from here on, and carried on every failure after the send
+            # (`InFlightError`), so a transaction that may still land never
+            # leaves this function without the hash that identifies it.
+            tx_hash = tx.hash_hex()
 
         span["stage"] = "send"
         # A send that RAISES is not `_before_send`: the request may have
         # reached the RPC, so the transaction may be on its way.
-        sent = server.send_transaction(tx)
+        try:
+            sent = server.send_transaction(tx)
+        except Exception as e:
+            raise InFlightError(f"send failed: {e}", tx_hash) from e
         if sent.status != SendTransactionStatus.PENDING:
-            raise _send_refusal(f"submit failed: {sent.error_result_xdr}", sent.status)
+            if sent.status in _SEND_REFUSED:
+                raise NotSubmittedError(f"submit failed: {sent.error_result_xdr}")
+            raise InFlightError(f"submit failed: {sent.error_result_xdr}", tx_hash)
         span["stage"] = "pending"
         span["tx"] = sent.hash
     return sent.hash
@@ -618,7 +650,10 @@ def invoke_with_server_key(
     `invoke_with_server_key_async`, which waits between polls on the loop.
     """
     tx_hash = _send_server_signed(contract_id, function_name, args)
-    return _poll_final_sync(tx_hash, _finalize_invoke)
+    try:
+        return _poll_final_sync(tx_hash, _finalize_invoke)
+    except Exception as e:
+        raise InFlightError(f"poll failed: {e}", tx_hash) from e
 
 
 async def invoke_with_server_key_async(
@@ -628,7 +663,11 @@ async def invoke_with_server_key_async(
 ) -> dict[str, Any]:
     """Async invoke_with_server_key: submit in a worker thread, wait on the loop."""
     tx_hash = await asyncio.to_thread(_send_server_signed, contract_id, function_name, args)
-    return await _poll_final(tx_hash, _finalize_invoke)
+    try:
+        return await _poll_final(tx_hash, _finalize_invoke)
+    except Exception as e:
+        # Sent and PENDING, then the poll raised: the transaction may land.
+        raise InFlightError(f"poll failed: {e}", tx_hash) from e
 
 
 def _submit_rating_args(
