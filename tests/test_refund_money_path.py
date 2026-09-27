@@ -159,3 +159,120 @@ def test_a_raise_that_is_not_in_flight_still_has_no_hash(monkeypatch) -> None:
 
     assert (first.status, first.tx_hash) == ("TIMEOUT", "7a" * 32)
     assert (second.status, second.tx_hash) == ("TIMEOUT", None)
+
+
+# ── B3: the store failing mid-uphold never strands a dispute nothing paid ──
+
+
+class _Flaky:
+    """The real store, with `method` failing once the claim has been taken."""
+
+    def __init__(self, inner: Any, method: str, error: BaseException) -> None:
+        self._inner, self._method, self._error, self._armed = inner, method, error, False
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if name == "claim_refund":
+
+            async def _claim(*args: Any, **kwargs: Any) -> Any:
+                claimed = await attr(*args, **kwargs)
+                self._armed = True
+                return claimed
+
+            return _claim
+        if name == self._method:
+
+            async def _maybe_fail(*args: Any, **kwargs: Any) -> Any:
+                if self._armed:
+                    raise self._error
+                return await attr(*args, **kwargs)
+
+            return _maybe_fail
+        return attr
+
+
+def _flaky(monkeypatch, method: str, error: BaseException) -> Any:
+    real = dispute_store.get_dispute_store()
+    monkeypatch.setattr(dispute_store, "_store", _Flaky(real, method, error))
+    return real
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionError("database unreachable"), asyncio.CancelledError()],
+    ids=["store_down", "cancelled"],
+)
+def test_a_failure_between_the_claim_and_the_transfer_hands_the_claim_back(monkeypatch, error) -> None:
+    calls = _chain(monkeypatch)
+    dispute = a_dispute()
+    real = _flaky(monkeypatch, "get_settlement", error)
+
+    with pytest.raises(type(error)):
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    monkeypatch.setattr(dispute_store, "_store", real)
+    assert calls == []  # nothing was signed
+    current, queue = _stored(dispute.id)
+    assert (current.status, current.refund_tx, queue) == ("upheld", None, [])
+    assert asyncio.run(dispute_svc.uphold(dispute.id)).status == "credited"
+
+
+def test_a_bug_while_pricing_the_credit_hands_the_claim_back(monkeypatch) -> None:
+    calls = _chain(monkeypatch)
+    dispute = a_dispute()
+
+    def _broken(*args: Any, **kwargs: Any) -> float:
+        raise TypeError("a bug in the arithmetic")
+
+    monkeypatch.setattr(refund_svc, "creditable_for", _broken)
+    with pytest.raises(TypeError):
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert calls == []
+    current, queue = _stored(dispute.id)
+    assert (current.status, queue) == ("upheld", [])
+
+
+def test_a_release_that_fails_after_failed_records_the_failed_hash(monkeypatch) -> None:
+    calls = _chain(monkeypatch, {"status": "FAILED", "hash": "tx_rejected"})
+    dispute = a_dispute()
+    real = _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    monkeypatch.setattr(dispute_store, "_store", real)
+    assert refused.value.code == "refund_failed"
+    assert "released by hand" in str(refused.value)
+    assert len(calls) == 1
+    current, queue = _stored(dispute.id)
+    # Held (the release failed), but no longer indistinguishable from a
+    # transfer in flight: the record names the one the ledger rejected.
+    assert (current.status, current.refund_tx, queue) == ("crediting", "tx_rejected", [dispute.id])
+
+
+def test_a_release_that_fails_on_a_refusal_still_answers_the_refusal(monkeypatch) -> None:
+    calls = _chain(monkeypatch)
+    dispute = a_dispute()
+    monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
+    _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert refused.value.code == "refund_above_cap"
+    assert calls == []
+
+
+def test_a_cancel_after_the_transfer_was_handed_over_holds_the_claim(monkeypatch) -> None:
+    """The guard ends where the transfer begins: a cancellation there may have
+    come after the send, so the claim is kept whatever else happens."""
+    calls = _chain(monkeypatch, asyncio.CancelledError())
+    dispute = a_dispute()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert len(calls) == 1
+    current, queue = _stored(dispute.id)
+    assert (current.status, queue) == ("crediting", [dispute.id])

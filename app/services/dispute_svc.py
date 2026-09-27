@@ -1259,6 +1259,51 @@ async def _already_adjudicated(dispute: DisputeRecord, *, on_rating: RatingObser
     return None
 
 
+async def _hand_back(claimed: DisputeRecord, why: str, *, failed_tx: str | None = None) -> bool:
+    """Release the refund claim on a path where NOTHING WAS PAID; never raises.
+
+    Only for the paths that know that: a refusal before anything was signed,
+    or a transfer the ledger answered FAILED. Never after a TIMEOUT (D3).
+
+    Best effort, because the caller is already on its way out with a better
+    answer than a store error — the refusal, or the exception that brought it
+    here. A release that fails leaves the dispute `crediting` with its claim
+    held, which is safe (nothing can pay it twice) but looks exactly like a
+    transfer still on the network. So it is logged at ERROR as the opposite,
+    and when the ledger's FAILED answer came with a hash that hash is written
+    onto the dispute itself: positive evidence, on the record rather than in
+    a log line, that the transfer it names moved nothing.
+
+    Returns whether the claim was handed back.
+    """
+    store = get_dispute_store()
+    try:
+        await store.release_refund_claim(claimed.id)
+        return True
+    except Exception:
+        logger.error(
+            "dispute %s: NOTHING WAS PAID (%s) but the refund claim could NOT be released — it stays crediting;"
+            " release it by hand (job %s, payer %s, failed tx %s)",
+            claimed.id,
+            why,
+            claimed.job_id_hex,
+            claimed.payer,
+            failed_tx or "-",
+            exc_info=True,
+        )
+    if failed_tx is not None:
+        try:
+            await store.append_status(claimed.id, "crediting", refund_tx=failed_tx, expected_status="crediting")
+        except Exception:
+            logger.error(
+                "dispute %s: the FAILED refund tx %s could not be recorded either — it is in this line only",
+                claimed.id,
+                failed_tx,
+                exc_info=True,
+            )
+    return False
+
+
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
@@ -1436,14 +1481,34 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         logger.info("dispute %s is already claimed (%s) — nothing signed here", current.id, current.status)
         return current
 
-    settlement = await store.get_settlement(claimed.job_id_hex)
+    # From the claim to the transfer NOTHING HAS BEEN SIGNED, so whatever goes
+    # wrong in between — the store dropping out mid-read, a cancellation, a
+    # bug — hands the claim back. Left held, it parks the dispute in
+    # `crediting` with no hash: exactly what a transfer still on the network
+    # looks like, so every later uphold refuses and only a human can pay the
+    # buyer, for money that never moved. The guard ends where `credit_refund`
+    # begins; past that line a transfer MAY have been sent and nothing may
+    # ever be released on a guess.
+    try:
+        settlement = await store.get_settlement(claimed.job_id_hex)
+        amount_usdc = (
+            0.0
+            if settlement is None
+            else refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
+        )
+    except refund_svc.RefundRefused as refused:
+        await _hand_back(claimed, refused.code)
+        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
+    except BaseException:
+        await _hand_back(claimed, "the uphold failed before anything was signed")
+        raise
     if settlement is None:
         # The amount is bounded by what the settlement says actually moved
         # (D4), so without the settlement there is no number that is safe to
         # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
         # settlement to price it from can only be paid by a human, and the
         # claim is handed back so that a human still can.
-        await store.release_refund_claim(dispute_id)
+        await _hand_back(claimed, "settlement_missing")
         raise _refuse_credit(
             claimed,
             "settlement_missing",
@@ -1455,17 +1520,16 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         )
 
     try:
-        amount_usdc = refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
         outcome = await refund_svc.credit_refund(claimed, amount_usdc)
     except refund_svc.RefundRefused as refused:
         # Every refusal — the cap, "nothing to credit", and an amount that is
         # not a finite number — is raised before `execute_refund` is called,
-        # from `creditable_for` and again from the transfer wrapper's own
-        # re-check, so NOTHING WAS SIGNED on any of those paths. That is what
-        # makes releasing the claim correct here and wrong after a timeout.
-        # `refund_svc` has already logged the numbers, so this only re-raises
-        # in the vocabulary the API answers with.
-        await store.release_refund_claim(dispute_id)
+        # from `creditable_for` above and again from the transfer wrapper's
+        # own re-check, so NOTHING WAS SIGNED on any of those paths. That is
+        # what makes releasing the claim correct here and wrong after a
+        # timeout. `refund_svc` has already logged the numbers, so this only
+        # re-raises in the vocabulary the API answers with.
+        await _hand_back(claimed, refused.code)
         raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
 
     if outcome.status == "SUCCESS":
@@ -1512,13 +1576,16 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # moved. The buyer is still owed, so the claim goes back and the
         # dispute is left `upheld` — a second uphold will claim it and try
         # again, which is the whole reason this release exists.
-        await store.release_refund_claim(dispute_id)
+        released = await _hand_back(claimed, "refund_failed", failed_tx=outcome.tx_hash)
         raise _refuse_credit(
             claimed,
             "refund_failed",
             502,
             "the credit transfer did not settle, so nothing was paid — the dispute is still upheld"
-            " and can be credited again",
+            " and can be credited again"
+            if released
+            else "the credit transfer did not settle, so nothing was paid — but the dispute could not be"
+            " handed back, and it stays crediting until it is released by hand",
             amount_usdc=outcome.amount_usdc,
             tx_hash=outcome.tx_hash,
             level=logging.ERROR,
