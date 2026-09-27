@@ -620,6 +620,75 @@ def test_the_in_flight_column_is_added_to_a_table_that_already_exists(pg: Postgr
     assert after is not None and (after.refund_tx, after.inflight_usdc) == ("tx_before_the_sweep", 1.5)
 
 
+def test_a_release_naming_a_transfer_refuses_a_claim_taken_again_over_another(store: DisputeStore) -> None:
+    """The reconcile sweep's race, in the store. A sweep reads `tx_old` as
+    never-landed and decides to release; before it writes, the dispute is
+    released by somebody else, claimed again, and a NEW transfer goes out
+    (`tx_new`) and times out. The status is `crediting` again, so a release
+    gated on the status alone would drop the claim protecting `tx_new` — and the
+    next uphold would pay the buyer a second time when it lands. Naming the
+    transfer the decision was about refuses it, and leaves the claim held."""
+
+    async def go() -> tuple[Any, ...]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.append_status(opened.id, "crediting", refund_tx="tx_old", inflight_usdc=1.5)
+        await store.release_refund_claim(opened.id)
+        await store.claim_refund(opened.id)
+        no_hash_yet = await store.release_refund_claim(opened.id, expected_refund_tx="tx_old")
+        await store.append_status(opened.id, "crediting", refund_tx="tx_new", inflight_usdc=1.5)
+        stale = await store.release_refund_claim(opened.id, expected_refund_tx="tx_old")
+        held = [c.dispute_id for c in await store.list_refund_claims()]
+        current = await store.release_refund_claim(opened.id, expected_refund_tx="tx_new")
+        return no_hash_yet, stale, held, current, await store.list_refund_claims()
+
+    no_hash_yet, stale, held, current, after = run(store, go())
+
+    assert no_hash_yet is None and stale is None
+    assert held == ["dsp_0001"]
+    assert current is not None and current.status == "upheld"
+    assert after == ()
+
+
+def test_a_credit_naming_a_transfer_refuses_a_dispute_now_waiting_on_another(store: DisputeStore) -> None:
+    """The same race on the `credited` side. A verdict that `tx_old` landed is
+    not a verdict about `tx_new`, and closing the dispute over it would drop
+    the claim protecting a transfer that may still land unrecorded. Refused,
+    and the refusal is the WHOLE statement: the mutex stays too."""
+
+    async def go() -> tuple[Any, ...]:
+        opened = await store.open_dispute(a_dispute())
+        await store.append_status(opened.id, "upheld")
+        await store.claim_refund(opened.id)
+        await store.append_status(opened.id, "crediting", refund_tx="tx_new", inflight_usdc=1.5)
+        refused = await store.append_status(
+            opened.id,
+            "credited",
+            refund_tx="tx_old",
+            credited_usdc=1.5,
+            expected_status="crediting",
+            expected_refund_tx="tx_old",
+        )
+        held = [c.dispute_id for c in await store.list_refund_claims()]
+        landed = await store.append_status(
+            opened.id,
+            "credited",
+            refund_tx="tx_new",
+            credited_usdc=1.5,
+            expected_status="crediting",
+            expected_refund_tx="tx_new",
+        )
+        return refused, held, landed, await store.list_refund_claims()
+
+    refused, held, landed, after = run(store, go())
+
+    assert refused is None
+    assert held == ["dsp_0001"]
+    assert landed is not None and (landed.status, landed.refund_tx, landed.credited_usdc) == ("credited", "tx_new", 1.5)
+    assert after == ()
+
+
 # ── the bound on the in-memory store ──────────────────────────────────────
 
 
@@ -888,7 +957,9 @@ class FakePool:
         self.disputes.append(row)
         return row
 
-    async def _release_refund_claim(self, dispute_id: str, now: float) -> dict[str, Any] | None:
+    async def _release_refund_claim(
+        self, dispute_id: str, now: float, expected_refund_tx: str | None
+    ) -> dict[str, Any] | None:
         """_RELEASE_REFUND_CLAIM_SQL: the DELETE and the `upheld` row, one
         statement and one snapshot.
 
@@ -901,6 +972,8 @@ class FakePool:
         latest = _newest(self.disputes, dispute_id=dispute_id)
         await asyncio.sleep(0)
         if latest is None or latest["status"] != "crediting":
+            return None
+        if expected_refund_tx is not None and latest["refund_tx"] != expected_refund_tx:
             return None
         self.claims.pop(dispute_id, None)
         # Released only when nothing landed, so no refund hash goes with it.
@@ -951,6 +1024,7 @@ class FakePool:
             rating_confirmed,
             expected_status,
             inflight_usdc,
+            expected_refund_tx,
         ) = args
         latest = _newest(self.disputes, dispute_id=dispute_id)
         await asyncio.sleep(0)
@@ -960,20 +1034,20 @@ class FakePool:
         # return rather than after it — and it repeats the precondition, from
         # the same snapshot, because a transition that is refused must leave
         # the mutex where it is.
-        if (
-            status in ("credited", "rejected")
-            and latest is not None
-            and (expected_status is None or latest["status"] == expected_status)
-        ):
+        holds = latest is not None and (
+            (expected_status is None or latest["status"] == expected_status)
+            and (expected_refund_tx is None or latest["refund_tx"] == expected_refund_tx)
+        )
+        if status in ("credited", "rejected") and holds:
             self.claims.pop(dispute_id, None)
         # `INSERT ... SELECT FROM latest`: with no history there is nothing to
         # select, so nothing is written and nothing comes back.
         if latest is None:
             return None
-        # `WHERE $10::text IS NULL OR latest.status = $10::text` — the
-        # precondition, read from the SAME snapshot the row would be copied
+        # `WHERE ($10 IS NULL OR latest.status = $10) AND ($12 IS NULL OR
+        # latest.refund_tx = $12)` — the precondition, read from the SAME snapshot the row would be copied
         # from, which is why it is checked on this side of the sleep.
-        if expected_status is not None and latest["status"] != expected_status:
+        if not holds:
             return None
         row = latest | {
             "status": status,
@@ -1519,10 +1593,12 @@ def test_the_precondition_is_a_clause_of_the_writing_statement() -> None:
     same statement that does the writing."""
     sql = dispute_store._APPEND_STATUS_SQL
 
-    assert "WHERE $10::text IS NULL OR latest.status = $10::text" in sql
+    assert "WHERE ($10::text IS NULL OR latest.status = $10::text)" in sql
+    # The reconcile sweep's hash precondition is part of the same clause.
+    assert "AND ($12::text IS NULL OR latest.refund_tx = $12::text)" in sql
     # And it gates the INSERT's own SELECT — not the `latest` CTE, which every
     # column of the new row is copied from.
-    assert sql.index("FROM latest\nWHERE $10::text") > sql.index("INSERT INTO dispute_events")
+    assert sql.index("FROM latest\nWHERE ($10::text") > sql.index("INSERT INTO dispute_events")
 
 
 def test_a_stale_transition_writes_no_row_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:

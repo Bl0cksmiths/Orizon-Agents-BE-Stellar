@@ -611,6 +611,17 @@ FOR UPDATE
 # refuses the write instead: the INSERT selects from `latest` only while its
 # status still matches, so nothing is written and RETURNING comes back empty.
 #
+# `expected_refund_tx` ($12) narrows the same precondition to ONE transfer,
+# and it exists for the reconcile sweep. A sweep decides from the chain's
+# answer about the hash it read; between that read and this write the dispute
+# can be released and claimed again, and it is then `crediting` over a NEW
+# transfer the sweep knows nothing about. The status alone would match, and a
+# verdict about the old transfer would close the dispute over the new one.
+# Naming the hash refuses that: the write lands only while the dispute is
+# still waiting on the transaction the decision was made about. A NULL hash on
+# record never equals anything, so a claim that has not yet been handed a
+# transfer is refused too.
+#
 # NULL means unconditional, and that is a decision rather than a default nobody
 # made. The reconciliation writes in docs/disputes.md are made by a person who
 # has read the chain and is correcting the record ON PURPOSE — the one caller
@@ -654,7 +665,8 @@ finished AS (
       AND EXISTS (
           SELECT 1
           FROM latest
-          WHERE $10::text IS NULL OR latest.status = $10::text
+          WHERE ($10::text IS NULL OR latest.status = $10::text)
+            AND ($12::text IS NULL OR latest.refund_tx = $12::text)
       )
     RETURNING dispute_id
 )
@@ -679,7 +691,8 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        COALESCE($11::double precision, latest.inflight_usdc),
        FALSE
 FROM latest
-WHERE $10::text IS NULL OR latest.status = $10::text
+WHERE ($10::text IS NULL OR latest.status = $10::text)
+  AND ($12::text IS NULL OR latest.refund_tx = $12::text)
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
           credited_usdc, updated_at, rating_confirmed, inflight_usdc
@@ -796,6 +809,11 @@ _CLAIM_REFUND_SQL = _CLAIM_REFUND_CTES + _APPEND_UNRESOLVED_ROW.format(
 # that "somehow" is not hypothetical. Gating on the status makes this call
 # REPAIR that state instead of preserving it: the dispute goes back to `upheld`
 # where it can be claimed again, and the DELETE is a no-op.
+#
+# $3 is the reconcile sweep's hash precondition, `_APPEND_STATUS_SQL`'s $12
+# and for its reason: a release decided from the chain's answer about one
+# transfer must not release a claim that has since been taken again over
+# another. NULL, which every other caller passes, leaves the gate as it was.
 _RELEASE_REFUND_CLAIM_CTES = """
 WITH latest AS (
     SELECT *
@@ -806,13 +824,17 @@ WITH latest AS (
 ),
 released AS (
     DELETE FROM refund_claims
-    WHERE dispute_id = $1 AND EXISTS (SELECT 1 FROM latest WHERE latest.status = 'crediting')
+    WHERE dispute_id = $1 AND EXISTS (
+        SELECT 1
+        FROM latest
+        WHERE latest.status = 'crediting' AND ($3::text IS NULL OR latest.refund_tx = $3::text)
+    )
     RETURNING dispute_id
 )"""
 
 _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.format(
     status="upheld",
-    gate="WHERE latest.status = 'crediting'",
+    gate="WHERE latest.status = 'crediting' AND ($3::text IS NULL OR latest.refund_tx = $3::text)",
 )
 
 
@@ -1039,11 +1061,14 @@ class DisputeStore(Protocol):
         rating_confirmed: bool | None = None,
         inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
+        expected_refund_tx: str | None = None,
     ) -> DisputeRecord | None: ...
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
 
-    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None: ...
+    async def release_refund_claim(
+        self, dispute_id: str, *, expected_refund_tx: str | None = None
+    ) -> DisputeRecord | None: ...
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]: ...
 
@@ -1215,6 +1240,7 @@ class InMemoryDisputeStore:
         rating_confirmed: bool | None = None,
         inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
+        expected_refund_tx: str | None = None,
     ) -> DisputeRecord | None:
         """Append the transition and return the dispute, or None if refused.
 
@@ -1235,6 +1261,11 @@ class InMemoryDisputeStore:
             # The decision was made against a dispute that no longer reads that
             # way. Refusing is the whole point: what the caller was about to
             # record is a verdict on a state somebody else has already left.
+            return None
+        if expected_refund_tx is not None and current.refund_tx != expected_refund_tx:
+            # The same refusal narrowed to one transfer: the dispute has moved
+            # on to another (or to none), and a verdict about this one is not
+            # a verdict about that.
             return None
         # One reading of the clock for both timestamps, as _APPEND_STATUS_SQL
         # reads $7 once: the transition that first resolves a dispute must
@@ -1315,7 +1346,9 @@ class InMemoryDisputeStore:
         self._disputes[dispute_id] = claimed
         return claimed
 
-    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+    async def release_refund_claim(
+        self, dispute_id: str, *, expected_refund_tx: str | None = None
+    ) -> DisputeRecord | None:
         """Hand the claim back, so an unpaid dispute can be paid later.
 
         Released ONLY when the caller knows with certainty that nothing was
@@ -1328,9 +1361,18 @@ class InMemoryDisputeStore:
         transaction may still settle, so the claim stays held and the dispute
         stays in `crediting` until a human reconciles it. Paying that buyer
         twice is a worse failure than paying them late.
+
+        `expected_refund_tx` is for the reconcile sweep, which releases only
+        what the chain has shown moved nothing: named, the release lands only
+        while the dispute still waits on that very transfer, and None comes
+        back when it has since been claimed again over another.
         """
         current = self._disputes.get(dispute_id)
         if current is None or current.status != "crediting":
+            return None
+        if expected_refund_tx is not None and current.refund_tx != expected_refund_tx:
+            # The claim is over another transfer now — see
+            # _RELEASE_REFUND_CLAIM_SQL's $3.
             return None
         # Gated on the STATUS and never on the claim, so a dispute somehow left
         # in `crediting` without one is repaired rather than stranded — the
@@ -1682,6 +1724,7 @@ class PostgresDisputeStore:
         rating_confirmed: bool | None = None,
         inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
+        expected_refund_tx: str | None = None,
     ) -> DisputeRecord | None:
         """Append the transition and return the dispute as it now stands.
 
@@ -1750,6 +1793,7 @@ class PostgresDisputeStore:
                 rating_confirmed,
                 expected_status,
                 inflight_usdc,
+                expected_refund_tx,
                 timeout=_POOL_COMMAND_TIMEOUT,
             )
         # Empty RETURNING with the dispute known to exist means one thing: the
@@ -1773,7 +1817,9 @@ class PostgresDisputeStore:
         row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
-    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+    async def release_refund_claim(
+        self, dispute_id: str, *, expected_refund_tx: str | None = None
+    ) -> DisputeRecord | None:
         """Put a still-unpaid dispute back where another attempt can find it.
 
         One statement drops the mutex and restores `upheld` together, so no
@@ -1791,10 +1837,17 @@ class PostgresDisputeStore:
         transaction may still settle, so the claim stays held and the dispute
         stays in `crediting` until a human reconciles it. Paying that buyer
         twice is a worse failure than paying them late.
+
+        `expected_refund_tx` is for the reconcile sweep, which releases only
+        what the chain has shown moved nothing: named, the release lands only
+        while the dispute still waits on that very transfer, and None comes
+        back when it has since been claimed again over another.
         """
         pool = await self._ready_pool()
         # Our own clock for the row's `updated_at`, never the database's.
-        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
+        row = await pool.fetchrow(
+            _RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time(), expected_refund_tx, timeout=_POOL_COMMAND_TIMEOUT
+        )
         return None if row is None else self._to_dispute(row)
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
