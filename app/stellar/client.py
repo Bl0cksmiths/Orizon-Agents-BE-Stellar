@@ -621,15 +621,18 @@ def _submit_rating_args(
     payer: str,
     kind: str,
 ) -> list[Any]:
-    return [
-        addr(signer_public_key()),
-        sym(agent_id),
-        bytes16(job_id),
-        u32(rating_0_to_100),
-        i128(weight_stroops),
-        addr(payer),
-        sym(kind),
-    ]
+    # Built before any transaction exists: an argument that will not encode (a
+    # payer that is not an address, an unset signer) is refused every time.
+    with _before_send("args"):
+        return [
+            addr(signer_public_key()),
+            sym(agent_id),
+            bytes16(job_id),
+            u32(rating_0_to_100),
+            i128(weight_stroops),
+            addr(payer),
+            sym(kind),
+        ]
 
 
 def submit_rating(
