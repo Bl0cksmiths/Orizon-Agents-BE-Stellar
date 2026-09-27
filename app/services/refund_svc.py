@@ -91,12 +91,14 @@ def config_gap() -> ConfigGap | None:
     It exists because the credit was the one money path with no such check, and
     the absence was not merely untidy. `execute_refund` reads the settler
     through `sc.signer_public_key`, which RAISES on an empty key BEFORE it
-    submits anything; `credit_refund` can only read a raise as "may still have
-    landed", because a raise out of a transfer genuinely can come from either
-    side of the submission. So an unconfigured deployment looked exactly like a
-    transfer lost on the network: the dispute kept its refund claim, parked in
-    `crediting`, and nothing could free it but an edit to the database. That
-    difference is knowable here, and without touching the key at all.
+    submits anything. `credit_refund` now reads that raise — a
+    `NotSubmittedError`, like a key that is present but will not parse — as
+    FAILED and hands the claim back; before it did, an unconfigured deployment
+    looked exactly like a transfer lost on the network and wedged the dispute
+    in `crediting`. Asking here is still better than finding out there: the
+    adjudicator is refused before anything is claimed, with a reason that
+    names the gap. That difference is knowable here, and without touching the
+    key at all.
 
     DISPUTE_REFUNDS_ENABLED is deliberately NOT among these. It is the
     operator's switch over the platform's wallet, `dispute_svc.uphold` refuses
@@ -374,27 +376,35 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
 
     A wrapper over `execute_refund`, which keeps the signature the 4.01 spike
     script and its tests call it with. What this adds is the one distinction a
-    caller must not get wrong, because `sc.invoke_with_server_key_async` NEVER
-    RAISES on failure — it returns a dict, and a caller that only looks for a
-    hash cannot tell a transfer that failed from one still in flight.
+    caller must not get wrong. `sc.invoke_with_server_key_async` answers a
+    transfer that reached the ledger with a dict — and a caller that only looks
+    for a hash cannot tell one that failed from one still in flight — and it
+    RAISES for everything else: `sc.NotSubmittedError` when the write failed
+    before anything was sent, and any other exception when it may have been.
 
     The mapping, in the order it is decided:
 
+      - `sc.NotSubmittedError` → FAILED. The client raises it only ahead of
+        `sendTransaction` — the signing key, the source account, the build,
+        the simulation (a settler holding too little USDC is refused here),
+        the signature — or for a send the RPC refused outright. No transaction
+        exists anywhere after one of these, so nothing can land later.
+      - any other exception → TIMEOUT. It may have been raised after the send.
       - `status == "SUCCESS"` with a hash → SUCCESS. The credit landed.
       - `status == "FAILED"` → FAILED. The ledger rejected it, so no funds
-        moved; this is the ONLY answer that says that. Matched EXACTLY, the way
-        SUCCESS is above and the way `dispute_rating` matches both of its own:
-        this is the branch that RELEASES the refund claim, and case-folding it
-        would widen the one door in this module that says "nothing was signed"
-        on the strength of a word the client wrote and this module did not. A
+        moved; of the dict's answers this is the ONLY one that says that.
+        Matched EXACTLY, the way SUCCESS is above and the way `dispute_rating`
+        matches both of its own: this is the branch that RELEASES the refund
+        claim, and case-folding it would widen a door that says "nothing was
+        signed" on the strength of a word the client wrote and this module
+        did not. A
         client that ever answered `failed` falls through to TIMEOUT instead,
         which holds the claim — the buyer is paid late rather than twice.
       - anything else → TIMEOUT. `"timeout"` is the client's own word for
         "submitted, then lost track of it", and the leftovers land here on
         purpose: an unrecognised status, or a SUCCESS with no hash, is a
         transfer whose fate is unknown, which is the same hazard by another
-        name. An exception is mapped here too — it can be raised before the
-        submission or after it, and nothing in the dict distinguishes those.
+        name.
 
     **TIMEOUT MEANS THE TRANSFER MAY STILL LAND, so it must NEVER be retried
     automatically and the refund claim must NEVER be released** (D3). Releasing
@@ -438,6 +448,27 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
             amount_usdc,
         )
         raise
+    except sc.NotSubmittedError as e:
+        # FAILED, and so the claim is released — which is safe for exactly the
+        # reason `dispute_rating` already treats this type as a refusal:
+        # `NotSubmittedError` is PROOF that nothing was sent, not a guess. The
+        # client raises it only before `sendTransaction`, or when the RPC
+        # refused the send and holds nothing of it. Filing it as TIMEOUT, as
+        # the catch-all below would, parked the dispute in `crediting` over a
+        # transfer that never existed — an under-funded settler or an RPC
+        # outage at `load_account` wedged every uphold it met, and only a hand
+        # edit could pay the buyer. Anything else still falls through to the
+        # catch-all, because only this type carries that proof.
+        logger.error(
+            "dispute %s: refund transfer was refused before it was sent — no funds moved: %s "
+            "(job %s, payer %s, %.7f USDC)",
+            dispute.id,
+            e,
+            dispute.job_id_hex,
+            dispute.payer,
+            amount_usdc,
+        )
+        return RefundOutcome("FAILED", None, amount_usdc)
     except Exception as e:
         logger.error(
             "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s (job %s, payer %s, %.7f USDC)",

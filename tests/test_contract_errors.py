@@ -302,11 +302,14 @@ def test_a_user_signed_envelope_that_will_not_decode_is_not_submitted(monkeypatc
     assert not rpc.sent
 
 
-def test_a_refund_refused_before_the_send_is_still_held_as_a_timeout(monkeypatch):
-    """The refund path is NOT changed by the new type: `credit_refund` still
-    files any raise as TIMEOUT and holds the claim. Refunds were out of D-076's
-    scope, and loosening the one rule that stops a double credit is not
-    something a subclass should do by accident."""
+def test_a_refund_refused_before_the_send_is_failed_and_releases_its_claim(monkeypatch):
+    """A refusal before the send is FAILED on the refund path too.
+
+    Refunds were first left out of D-076, on the grounds that loosening the
+    rule that stops a double credit should not happen by accident. It is done
+    on purpose now, for the reason the rating path gave: the type is proof that
+    no transaction exists, so nothing can land later. Filing it as TIMEOUT
+    parked the dispute in `crediting` over a transfer that was never sent."""
     from app.services import refund_svc
     from app.services.dispute_store import DisputeRecord
 
@@ -328,4 +331,4 @@ def test_a_refund_refused_before_the_send_is_still_held_as_a_timeout(monkeypatch
         opened_at=1.0,
     )
     outcome = asyncio.run(refund_svc.credit_refund(dispute, 0.05))
-    assert outcome.status == "TIMEOUT"
+    assert (outcome.status, outcome.tx_hash) == ("FAILED", None)
