@@ -126,6 +126,23 @@ def test_testnet_signer_does_not_require_api_key():
     assert s.api_key == ""
 
 
+@pytest.mark.parametrize("label", ["pubnet", "testnet", "Mainnet", " mainnet ", "futurenet", ""])
+def test_a_mainnet_passphrase_demands_the_key_whatever_the_label_says(label):
+    """D-074: the passphrase decides which chain a signature is valid on, so it
+    decides whether the signer moves real money — not STELLAR_NETWORK. `pubnet`
+    and `testnet` beside the mainnet passphrase both used to boot keyless."""
+    with pytest.raises(ValidationError, match="API_KEY is required"):
+        _settings(stellar_network=label, stellar_network_passphrase=MAINNET_PASSPHRASE, stellar_signing_key=_SIGNER)
+
+
+def test_is_mainnet_reads_the_passphrase_and_never_the_label():
+    assert _settings(stellar_network="testnet", stellar_network_passphrase=MAINNET_PASSPHRASE).is_mainnet()
+    assert not _settings(stellar_network="testnet").is_mainnet()
+    # A padded passphrase hashes to a network id no chain answers to: it signs
+    # for nothing, so it is not mainnet.
+    assert not _settings(stellar_network_passphrase=MAINNET_PASSPHRASE + " ").is_mainnet()
+
+
 def test_production_pdax_credentials_without_api_key_refuse_to_boot():
     with pytest.raises(ValidationError, match="API_KEY is required"):
         _settings(
