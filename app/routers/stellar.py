@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import _operator_key_scheme, header_secret_matches, require_api_key
+from ..security import _operator_key_scheme, check_operator_key, require_api_key
 from ..services import registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
@@ -402,7 +402,8 @@ async def require_operator_key(
 ) -> None:
     """The operator key, FAIL CLOSED: with API_KEY empty nobody is admitted.
 
-    `require_adjudicator`'s key half, without its refund switch. That switch
+    `require_adjudicator`'s key half — `security.check_operator_key`, the
+    one both call — without its refund switch. That switch
     says whether THIS process may pay a credit, and the operator script pays
     credits in its own process precisely so the deployment can keep it off —
     so a route the script calls afterwards must not be closed by it. The key
@@ -410,12 +411,11 @@ async def require_operator_key(
     logged at ERROR, never a fall-through to "allow"), and a missing or wrong
     key is one 401, so the route is no oracle for which of the two it was.
     """
-    expected = settings.api_key
-    if not expected:
-        logger.error("reputation invalidation refused: API_KEY is empty, so the operator route stays closed")
-        raise HTTPException(status_code=503, detail="operator_key_not_configured")
-    if not header_secret_matches(x_api_key, expected):
-        raise HTTPException(status_code=401, detail="invalid_api_key")
+    check_operator_key(
+        x_api_key,
+        unconfigured="operator_key_not_configured",
+        log_unconfigured="reputation invalidation refused: API_KEY is empty, so the operator route stays closed",
+    )
 
 
 class _InvalidationBudget:

@@ -939,7 +939,7 @@ async def list_task_disputes(
 # spec stops understating them. It advertises the production server, so a
 # generated client reads it as the contract: with only 422/429/500 merged in by
 # `include_router`, the 401 an operator meets on their first call, the 503 a
-# deployment with the switch off answers to everyone, and the 502/504 that say
+# deployment with the switch off answers its operator, and the 502/504 that say
 # whether a credit moved were all absent — and a 504 that means "this may still
 # land, reconcile by hand, never retry" is the last thing to leave undeclared.
 #
@@ -962,8 +962,8 @@ _ADJUDICATION_RESPONSES: dict[int | str, dict[str, object]] = {
     503: {
         "model": ErrorEnvelope,
         "description": (
-            "`dispute_refunds_disabled` — the deployment cannot adjudicate at all; or "
-            "`adjudication_not_configured` — the switch is on with no API_KEY behind it. "
+            "`adjudication_not_configured` — no API_KEY is configured, so nobody can adjudicate; or, "
+            "once the key has matched, `dispute_refunds_disabled` — the refund switch is off. "
             "Both are the operator's, never the caller's."
         ),
     },
@@ -1072,7 +1072,9 @@ async def reject_dispute(
     rejection is terminal, so an open reject route would let anyone close
     every dispute raised against the platform before an adjudicator ever saw
     one. The refund switch gates it too, for the same reason — a deployment
-    that cannot pay a dispute out must not be able to dispose of one either.
+    that cannot pay a dispute out must not be able to dispose of one either —
+    but only once the key has matched, so the switch's state is the
+    operator's to read and nobody else's (D-052).
 
     The note is REQUIRED and it is the buyer's to read — it comes back as the
     dispute's `rejection_reason`. The body is required with it, so no body, no
@@ -1085,16 +1087,16 @@ async def reject_dispute(
 
     ONE ANSWER HERE PRECEDES THE GUARD, deliberately. FastAPI decodes the body
     before it solves dependencies, so a body that is not JSON at all — `{not
-    json` — is a 422 rather than the 401 or 503 this pair otherwise gives an
-    anonymous caller. It was worth checking what that discloses, and the
-    answer is nothing:
+    json` — is a 422 rather than the 401 this pair otherwise gives an
+    anonymous caller (503 `adjudication_not_configured` on a keyless one). It
+    was worth checking what that discloses, and the answer is nothing:
 
       * the ROUTE'S EXISTENCE is already disclosed by the guarded answer. A
-        well-formed anonymous POST here gets 503 `dispute_refunds_disabled`,
-        where a path that does not exist gets 404. Whoever the 422 would tell
-        has already been told;
+        well-formed anonymous POST here gets 401 `invalid_api_key`, where a
+        path that does not exist gets 404. Whoever the 422 would tell has
+        already been told;
       * the SHAPE is not disclosed at all. A well-formed body with no `note`
-        is 503 too — the model is validated after the dependency like
+        is 401 too — the model is validated after the dependency like
         everything else, and only an undecodable body is answered earlier. So
         the 422 says "this endpoint parses JSON" and no more;
       * NOTHING RUNS. No store read, no signature, no money — the request dies
