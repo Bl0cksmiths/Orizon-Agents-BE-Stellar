@@ -959,9 +959,13 @@ and the amount. Search it for the dispute id before touching anything.
    there is nothing to look up, so go straight to the next step.
 2. **The settler's own history**, if the hash turns up nothing. Read the
    settler account's transfers over the asset contract around the claim time,
-   looking for one to that payer for that amount. A timeout is exactly the case
-   where this service's view and the chain's disagree, so confirm from the
-   account rather than concluding from a single absent hash.
+   looking for one whose event carries `to_muxed_id` equal to this dispute's
+   refund id ("Tying the refund to its dispute" above). That match names the
+   dispute, even when the same payer has another credit of the same amount in
+   flight. An untagged refund (its WARNING is in the log) has no id, so look
+   for one to that payer for that amount. A timeout is exactly the case where
+   this service's view and the chain's disagree, so confirm from the account
+   rather than concluding from a single absent hash.
 3. **Only after both** is it safe to say the transfer never landed.
 
 **Then settle the record to match the chain**, and only then:
