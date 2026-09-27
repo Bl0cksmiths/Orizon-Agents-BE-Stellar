@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 
 from app.config import settings
 from app.services import reputation_svc as rep
+from app.stellar import cache as rcache
+from app.stellar import client as sc
 
 USDC = rep.STROOPS_PER_USDC
 
@@ -112,3 +117,66 @@ def test_info_from_state_math():
     assert info.avg_bps == 9000
     assert settings.reputation_prior_bps < info.smoothed_bps < 9000
     assert info.dispute_rate_bps == 2500
+
+
+# ── ledger state the scorer must refuse ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        # A negative weight scored the MAXIMUM: smoothed and bound both 10000.
+        {"sum_w": -(10**9), "weight": -(10**8), "count": 1, "disputed": 0},
+        {"sum_w": 0, "weight": -12 * USDC, "count": 1, "disputed": 0},
+        # sum_w above 10000 x weight: an average of 10^12 bps.
+        {"sum_w": 10**12, "weight": 1, "count": 1, "disputed": 0},
+        {"sum_w": 1, "weight": 0, "count": 5, "disputed": 0},
+        {"sum_w": -(10**12), "weight": USDC, "count": 1, "disputed": 0},
+        {"sum_w": 0, "weight": 0, "count": -1, "disputed": 0},
+        {"sum_w": 0, "weight": 0, "count": 1, "disputed": -1},
+        # Not integers at all: NaN and inf must never reach the arithmetic.
+        {"sum_w": float("nan"), "weight": USDC, "count": 1, "disputed": 0},
+        {"sum_w": 9000 * USDC, "weight": float("inf"), "count": 1, "disputed": 0},
+        {"sum_w": True, "weight": USDC, "count": 1, "disputed": 0},
+        {"sum_w": "9000", "weight": USDC, "count": 1, "disputed": 0},
+    ],
+)
+def test_out_of_range_state_is_refused_not_scored(state):
+    with pytest.raises((ValueError, TypeError)):
+        rep._info_from_state("agt_x", state)
+
+
+def test_out_of_range_state_reads_as_a_failed_read(monkeypatch):
+    """Through the real read: refused state degrades to the prior, it does not
+    score — and a negative weight in particular no longer scores 10000."""
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    monkeypatch.setattr(
+        sc, "simulate_read", lambda *_a, **_k: {"sum_w": -(10**9), "weight": -(10**8), "count": 1, "disputed": 0}
+    )
+    rcache.clear()
+    try:
+        info = asyncio.run(rep.fetch_reps(["agt_x"]))["agt_x"]
+    finally:
+        rcache.clear()
+
+    assert info.degraded is True
+    assert info.source == "prior"
+    assert info.lower_bound_bps == rep._prior_info("agt_x").lower_bound_bps
+
+
+def test_zero_weight_with_ratings_is_the_prior_mean_not_a_failure():
+    """Fully decayed evidence: ratings were counted, their weight has gone.
+    Readable and in range, so it scores — at the prior mean, average 0."""
+    info = rep._info_from_state("agt_x", {"sum_w": 0, "weight": 0, "count": 5, "disputed": 0})
+    assert info.degraded is False
+    assert info.smoothed_bps == settings.reputation_prior_bps
+    assert info.avg_bps == 0
+
+
+def test_a_full_scale_mean_is_in_range():
+    """The edge of the check is inclusive: every rating at 100/100."""
+    info = rep._info_from_state("agt_x", {"sum_w": 10_000 * USDC, "weight": USDC, "count": 1, "disputed": 0})
+    assert info.avg_bps == 10_000

@@ -352,11 +352,46 @@ def _prior_info(agent_id: str, degraded: bool = False) -> RepInfo:
     )
 
 
+_STATE_FIELDS = ("sum_w", "weight", "count", "disputed")
+
+
+def _checked_state(state: Any) -> tuple[int, int, int, int]:
+    """(sum_w, weight, count, disputed) from a rep_state map, or raise.
+
+    The ledger is trusted to write sane evidence, and this is what stops a
+    state it did NOT write sanely from scoring as evidence. Without it a
+    negative weight scored the maximum — smoothed and lower bound both 10000 —
+    and a sum_w above 10000 x weight reported an average of 10^12 bps. Neither
+    is a reputation; both are a contract bug or a redeploy mid-migration, and
+    the honest reading of either is "this read failed". Raising makes it one:
+    inside the cache's producer the state is negatively cached for the short
+    failure window instead of stored for the TTL, and `_read_rep` degrades the
+    agent to the prior with the reason in the batch warning.
+
+    A missing field reads as 0, as it always has. Every present field must be
+    a non-negative integer — not a bool, not a float, so a NaN or an infinity
+    can never reach the arithmetic — and the evidence mean sum_w / weight must
+    sit on the 0..10_000 scale.
+    """
+    if not isinstance(state, dict):
+        raise TypeError(f"rep_state returned {type(state).__name__}, expected a map")
+    values: list[int] = []
+    for field in _STATE_FIELDS:
+        value = state.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"rep_state.{field} is {type(value).__name__}, expected an integer")
+        if value < 0:
+            raise ValueError(f"rep_state.{field} is negative")
+        values.append(value)
+    sum_w, weight, count, disputed = values
+    if sum_w > 10_000 * weight:
+        raise ValueError("rep_state.sum_w exceeds 10000 x weight, a mean above the rating scale")
+    return sum_w, weight, count, disputed
+
+
 def _info_from_state(agent_id: str, state: dict[str, Any]) -> RepInfo:
-    sum_w = int(state.get("sum_w", 0))
-    weight = int(state.get("weight", 0))
-    count = int(state.get("count", 0))
-    disputed = int(state.get("disputed", 0))
+    """Score one rep_state map. Raises on a state `_checked_state` refuses."""
+    sum_w, weight, count, disputed = _checked_state(state)
     if count == 0 and weight == 0:
         # A readable ledger with no evidence IS the prior — report it as such
         # so clients can distinguish "rated on-chain" from "not yet rated".
@@ -458,18 +493,16 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
         # negatively cached for its short window and retried after it — rather
         # than storing the bad payload as a success that every hit then reads
         # as degraded for the full TTL. `simulate_read` returns None for an
-        # empty result set, which is the reachable case.
-        if not isinstance(raw, dict):
-            raise TypeError(f"rep_state returned {type(raw).__name__}, expected a map")
+        # empty result set, which is the reachable case; an out-of-range state
+        # is refused the same way.
+        _checked_state(raw)
         return raw
 
     try:
         state = await rcache.get_or_set(_rep_cache_key(agent_id), settings.reputation_read_ttl_seconds, _read)
+        return _info_from_state(agent_id, state), None
     except Exception as e:
         return _prior_info(agent_id, degraded=True), _describe(e)
-    if not isinstance(state, dict):
-        return _prior_info(agent_id, degraded=True), f"rep_state returned {type(state).__name__}, expected a map"
-    return _info_from_state(agent_id, state), None
 
 
 async def fetch_rep(agent_id: str) -> RepInfo:
