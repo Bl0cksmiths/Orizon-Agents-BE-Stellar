@@ -236,7 +236,14 @@ def _identify(
         return None, f"the transfer is over {transfer.contract}, not the asset SAC"
     if transfer.source != settler:
         return None, f"the transfer is from {transfer.source}, not the settler"
-    if transfer.to != dispute.payer:
+    # A refund pays the payer muxed with this dispute's id, or the plain payer
+    # when the tag could not be built; the payer muxed with any other id is a
+    # credit for another dispute, never evidence about this one.
+    try:
+        tagged = scval.from_address(sc.muxed_addr(dispute.payer, refund_svc.refund_muxed_id(dispute.id))).address
+    except ValueError:
+        tagged = dispute.payer
+    if transfer.to not in {dispute.payer, tagged}:
         return None, f"the transfer is to {transfer.to}, not this dispute's payer"
     if transfer.stroops <= 0:
         return None, f"the transfer moves {transfer.stroops} stroops"
