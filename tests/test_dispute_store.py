@@ -542,7 +542,8 @@ def test_a_dropped_settlement_is_announced_rather_than_lost_quietly(
 
 def test_a_dropped_dispute_is_announced_too(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """A dispute that evaporates is worse than a feature that was never
-    offered: the buyer believes a complaint is on file."""
+    offered: the buyer believes a complaint is on file. It only ever goes
+    with its settlement, and the warning names both."""
     monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
     store = InMemoryDisputeStore()
 
@@ -550,13 +551,16 @@ def test_a_dropped_dispute_is_announced_too(monkeypatch: pytest.MonkeyPatch, cap
 
         async def go() -> None:
             for n in range(3):
-                await store.open_dispute(a_dispute(id=f"dsp_{n}", step_index=n))
+                await store.record_settlement(a_settlement(job_id_hex=f"{n:064x}"))
+                await store.open_dispute(a_dispute(id=f"dsp_{n}", job_id_hex=f"{n:064x}"))
+                await store.append_status(f"dsp_{n}", "rejected", note=NOTE)
 
         asyncio.run(go())
 
     assert len(store._disputes) == 2
     assert asyncio.run(store.get_dispute("dsp_0")) is None
-    assert any("dsp_0" in m and "DATABASE_URL" in m for m in _messages(caplog))
+    assert asyncio.run(store.get_settlement(f"{0:064x}")) is None
+    assert any("dsp_0" in m and f"{0:064x}" in m and "DATABASE_URL" in m for m in _messages(caplog))
 
 
 def test_closing_the_in_memory_store_is_safe_twice() -> None:
@@ -1758,3 +1762,21 @@ def test_the_in_memory_default_announces_that_it_loses_disputes(
         dispute_store.get_dispute_store()
 
     assert any("in-memory" in m and "LOST on restart" in m for m in _messages(caplog))
+
+
+def test_choosing_the_in_memory_store_is_a_warning_that_records_are_not_kept(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Records of money that moved are not kept on this path, so choosing it is
+    not routine news: it is a WARNING, and it says both ways a record goes —
+    a restart, and the cap."""
+    monkeypatch.setattr(dispute_store.settings, "database_url", "")
+
+    with caplog.at_level(logging.WARNING, logger=STORE_LOGGER):
+        dispute_store.get_dispute_store()
+
+    (chosen,) = [r for r in caplog.records if r.name == STORE_LOGGER and "in-memory" in r.getMessage()]
+    assert chosen.levelno == logging.WARNING
+    message = chosen.getMessage()
+    assert "dispute and settlement records are held in memory only" in message
+    assert "LOST on restart" in message and f"cap of {dispute_store._MAX_IN_MEMORY}" in message
