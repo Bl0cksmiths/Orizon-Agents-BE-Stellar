@@ -12,6 +12,15 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+from app.stellar import client as _stellar_client
+
+
+class _NoLiveRpc(RuntimeError):
+    """Raised by the hermetic suite's Soroban server stand-in."""
+
+
+def _no_live_rpc(*, submit: bool = False):
+    raise _NoLiveRpc("hermetic suite: no live Soroban RPC — patch the call under test")
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +54,24 @@ def hermetic_settings():
     yield settings
     for k, v in saved.items():
         setattr(settings, k, v)
+
+
+@pytest.fixture(autouse=True)
+def no_live_rpc(monkeypatch):
+    """Every Soroban call in the suite fails fast instead of reaching testnet.
+
+    Blanking the ledger and registry ids above keeps the DEFAULT paths offline,
+    but a test that arms a ledger id to reach the on-chain branch — and every
+    background read lifespan starts (the ratings writer's scorer check, the
+    reputation pre-warm) — would otherwise dial the real RPC whenever a test
+    forgot to patch the one call it exercises. Such a test passes on a laptop
+    with a network and on nothing else, and what it asserts is testnet's state
+    that day. `_server` is the single constructor every read and write goes
+    through, so replacing it here closes all of them; a test that means to
+    drive the client patches `_server` (or the call above it) itself, which
+    overrides this.
+    """
+    monkeypatch.setattr(_stellar_client, "_server", _no_live_rpc)
 
 
 @pytest.fixture()
