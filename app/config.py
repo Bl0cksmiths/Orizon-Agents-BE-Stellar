@@ -374,8 +374,13 @@ class Settings(BaseSettings):
     # of the global rate_limit_per_minute, keyed by the same client_key(). A
     # breach is 429 "decompose_rate_limited" with Retry-After; kit intents
     # make no LLM call and are not counted. 0 disables it. At
-    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this.
-    decompose_rate_limit_per_minute: int = 10
+    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this —
+    # and browser traffic arrives through the frontend's /api rewrite, most
+    # likely from one shared egress address, so until the hop count is
+    # confirmed from the deploy's forwarded_chain_samples this is probably one
+    # budget for every visitor. 30 keeps a demo or a QA run clear of it while
+    # still bounding spend; tune it down once the key is truly per-visitor.
+    decompose_rate_limit_per_minute: int = 30
     # Most agents listed in the planning prompt. Prompt tokens per planner call
     # grew with every bound agent; past this many that cleared the floor, the
     # best-scored are listed. Never below the starvation backstop's minimum.
