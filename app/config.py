@@ -252,7 +252,11 @@ class Settings(BaseSettings):
     # so sharing a number between them would be a coincidence rather than a
     # control. A step settles for hundredths of a USDC on this deployment, so
     # 1.0 is far above anything legitimate and still keeps the blast radius of
-    # a leaked settler key, or a mistaken uphold, small.
+    # a mistaken uphold small. It bounds what the refund path will sign, and
+    # nothing else: a leaked settler key can transfer without asking it.
+    # A ceiling only while it is a finite number above zero — NaN and inf
+    # compare as "under the cap" for every amount — so anything else refuses to
+    # boot (`_money_bounds_bound_something`, QA D-054).
     max_refund_usdc: float = 1.0
     # The master switch on the refund path (story 4.03). OFF by default, so a
     # deployment only pays out once an operator has deliberately turned it on
@@ -490,6 +494,50 @@ class Settings(BaseSettings):
                 f"{_MIN_API_KEY_CHARS} printable ascii characters with no surrounding whitespace — "
                 "otherwise the adjudication routes answer 401 to the operator's own key, "
                 "indistinguishably from an attacker, for as long as the deployment lives."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _money_bounds_bound_something(self) -> "Settings":
+        """Refuse a money bound that cannot bound anything (QA D-054).
+
+        Each setting checked here is read, at the point it guards, by a `<` or
+        a `>` — and every comparison against NaN is false, while nothing is
+        greater than inf. So a bound that is not a finite number does not fail
+        loudly: it FAILS OPEN, silently, on exactly the guard whose job is to
+        limit a loss. `MAX_REFUND_USDC=nan` was observed doing it: the 50 USDC
+        credit it exists to refuse came back creditable at 50.0. pydantic
+        accepts `nan`, `inf` and `-inf` for a float field by default, so
+        nothing upstream of this validator stands in the way.
+
+        The rules, one per bound:
+
+          * `MAX_REFUND_USDC` — finite and strictly above zero. The ceiling on
+            one credit the PLATFORM pays out of its own wallet on an
+            adjudicator's say-so; not a number is no ceiling at all, and zero
+            or below refuses every credit, which is a refund path switched off
+            by a typo rather than by `DISPUTE_REFUNDS_ENABLED`.
+
+        Raised rather than logged, for the reason the reputation bounds are:
+        what it prevents is silent, and a refused deploy cannot be missed.
+        The message names the variable and the rule and NEVER the value, the
+        property `_boot_failure_message` depends on — `API_KEY`'s validator is
+        the model. These values are not secrets, but a message that quotes its
+        input is one edit away from a message that quotes a secret.
+        """
+        faults: list[str] = []
+        refund_cap = self.max_refund_usdc
+        if not (math.isfinite(refund_cap) and refund_cap > 0):
+            faults.append(
+                "MAX_REFUND_USDC is not a finite number of USDC above zero — it is the ceiling on ONE credit "
+                "the platform pays from its own wallet, a ceiling that is not a finite number compares false "
+                "against every amount and so bounds nothing, and one at or below zero refuses every credit"
+            )
+        if faults:
+            raise ValueError(
+                "A money bound cannot be used as configured: " + "; and ".join(faults) + ". Set each named "
+                "variable (in the Render dashboard for the deployed service) to a plain decimal number within "
+                "the rule stated, or unset it to take the default."
             )
         return self
 
