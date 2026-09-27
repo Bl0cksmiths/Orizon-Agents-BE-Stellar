@@ -60,6 +60,12 @@ SAC = REAL_ASSET_SAC
 _ANOTHER_CONTRACT = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
 
 
+@pytest.fixture(autouse=True)
+def _no_pass_leaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass run here must not show up on another test's /readiness."""
+    monkeypatch.setattr(refund_reconcile, "_last", None)
+
+
 @pytest.fixture(params=["in-memory", pytest.param("postgres", marks=pytest.mark.postgres)])
 def store(request: pytest.FixtureRequest) -> Iterator[DisputeStore]:
     """The store the sweep and the service both reach through the singleton."""
@@ -789,3 +795,24 @@ def test_a_claim_settled_after_the_queue_was_read_is_not_mistaken_for_a_wedge(
 
     assert decision.action == "already_settled"
     assert chain.asked == []
+
+
+def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    async def _idle() -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(refund_reconcile, "_loop", _idle)
+    monkeypatch.setattr(settings, "refund_reconcile_enabled", True)
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
+    with TestClient(app):
+        task = refund_reconcile._task
+        assert task is not None and not task.done()
+
+    assert task.cancelled()
+    assert refund_reconcile._task is None
