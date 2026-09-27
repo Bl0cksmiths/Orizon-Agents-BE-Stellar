@@ -398,3 +398,15 @@ def test_a_better_scored_bound_agent_takes_the_substitute_slot(seeded: object, m
 
     sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
     assert sub.agent_id == ext
+
+
+def test_a_substitute_takes_the_role_eta_and_its_own_price(seeded: object) -> None:
+    # The stand-in fills the brief role's slot in the pipeline, so it inherits
+    # that role's timing (0.5 s), not an ETA of its own; the buyer pays the
+    # agent actually doing the work, so the price is the substitute's.
+    resp = _run_kit({"agt_05x7": _sub_floor("agt_05x7")})
+
+    sub = next(s for s in resp.steps if s.substituted_for == "agt_05x7")
+    assert sub.agent_id == "agt_01h8"
+    assert sub.est_eta_seconds == orchestrator_svc._KIT_ETAS["agt_05x7"] == 0.5
+    assert sub.est_price_usdc == state.agents["agt_01h8"].price
