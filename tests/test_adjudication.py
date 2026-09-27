@@ -38,6 +38,7 @@ import functools
 import inspect
 import logging
 import time
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -450,6 +451,54 @@ def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(mon
     # winner of the claim is the one paying it.
     assert answered.status == "upheld"
     assert answered.refund_tx is None
+
+
+def test_a_lost_claim_answers_with_what_the_winner_wrote(monkeypatch) -> None:
+    """The test above stubs the claim to lose WITHOUT anybody winning it, so
+    the stale record and a fresh read are the same and either answer passes.
+    Here the winner really claims first — the store moves to `crediting` — and
+    this caller must answer with that, not with the `upheld` it last saw."""
+    dispute = a_dispute()
+    store = dispute_store.get_dispute_store()
+    real_claim = store.claim_refund
+
+    async def _somebody_else_won(dispute_id: str) -> DisputeRecord | None:
+        await real_claim(dispute_id)
+        return None
+
+    monkeypatch.setattr(store, "claim_refund", _somebody_else_won)
+    no_signing(monkeypatch)
+
+    answered = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert answered.status == "crediting"
+
+
+def test_a_dispute_on_the_exact_closing_second_is_accepted(monkeypatch) -> None:
+    """The window closes AFTER its stamped second, never on it: a buyer told
+    "until 12:00:00" who disputes at 12:00:00 is in time."""
+    payer = Keypair.random()
+    closes = 1_900_000_000.0
+    settlement = SettlementRecord(
+        TASK, payer.public_key, "ab" * 16, JOB, "tx", None, 0.12, STEPS, closes - 3600, closes
+    )
+    asyncio.run(dispute_store.get_dispute_store().record_settlement(settlement))
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+    # dispute_svc's own clock only: the challenge table keeps the real one.
+    monkeypatch.setattr(dispute_svc, "time", SimpleNamespace(time=lambda: closes))
+
+    opened = asyncio.run(
+        dispute_svc.open_dispute(
+            job_id_hex=JOB,
+            step_index=0,
+            reason="the draft ignored half the brief",
+            payer=payer.public_key,
+            nonce=nonce,
+            signature_b64=_sign(payer, dispute_message(JOB, 0, nonce)),
+        )
+    )
+
+    assert opened.status == "open"
 
 
 def _stalls_the_first_read(monkeypatch) -> asyncio.Event:
