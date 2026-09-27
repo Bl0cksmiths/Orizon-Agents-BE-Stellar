@@ -645,6 +645,11 @@ MONEY_BOUND_REFUSALS = [
     ("MAX_REFUND_USDC", "-inf", _UNBOUNDED),
     ("MAX_REFUND_USDC", "0", _ZERO),
     ("MAX_REFUND_USDC", "-7.3141", r"7\.3141"),
+    ("MAX_CHARGE_USDC", "nan", _NOT_A_NUMBER),
+    ("MAX_CHARGE_USDC", "inf", _UNBOUNDED),
+    ("MAX_CHARGE_USDC", "-inf", _UNBOUNDED),
+    ("MAX_CHARGE_USDC", "0", _ZERO),
+    ("MAX_CHARGE_USDC", "-7.3141", r"7\.3141"),
 ]
 
 
@@ -669,6 +674,7 @@ def test_an_unusable_money_bound_refuses_to_boot_and_names_only_its_variable(mon
 MONEY_BOUNDS_THAT_BOOT = [
     ("MAX_REFUND_USDC", "0.25", "max_refund_usdc", 0.25),
     ("MAX_REFUND_USDC", "1e-7", "max_refund_usdc", 1e-7),
+    ("MAX_CHARGE_USDC", "2.5", "max_charge_usdc", 2.5),
 ]
 
 
@@ -686,3 +692,4 @@ def test_a_usable_money_bound_boots(monkeypatch, variable, value, field, expecte
 def test_the_money_bound_defaults_boot():
     s = _settings()
     assert s.max_refund_usdc == 1.0
+    assert s.max_charge_usdc == 100.0
