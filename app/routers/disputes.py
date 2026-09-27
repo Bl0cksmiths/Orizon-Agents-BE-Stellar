@@ -179,14 +179,29 @@ class DisputeReadGrantResponse(BaseModel):
 class OpenDisputeReq(BaseModel):
     job_id_hex: str = Field(..., pattern=_JOB_ID_PATTERN)
     step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
-    # Bounded by the service's own ceiling, never a second number. The service
-    # cleans every reason and trims it to MAX_REASON_CHARS, so an edge bound
-    # above that accepted a paragraph and then stored only its start: a
-    # 1,500-character reason was cut to 500 without a word to the buyer. At the
-    # same constant it is a 422 they can see and fix. The one trim left is the
-    # service's marker redaction lengthening a reason already at the bound,
-    # which only text that forges a prompt-fence marker can reach.
-    reason: str = Field(..., min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
+    # Bounded by the SERVICE, not here (D-061). A pydantic bound answered an
+    # over-long reason with the generic `validation_error`, echoed the whole
+    # reason back in `detail[].input`, and gave an empty reason a different
+    # code from a blank one. `dispute_svc._require_reason` is the one judge:
+    # empty, invisible or longer than MAX_REASON_CHARS once cleaned is 422
+    # `reason_invalid`, whose message names the limit and quotes nothing. It is
+    # the service's FIRST check, before the settlement is read or the signature
+    # verified, so a bad reason still costs nothing — and the body limit
+    # (`BodyLimitMiddleware`) still bounds what can arrive at all.
+    #
+    # Nothing past the bound is ever trimmed, and no word is rewritten: the
+    # service refuses rather than cuts, and cleans for a reader, not for a
+    # prompt fence (D-062) — so what the buyer sent is what is stored, less
+    # control characters. The bound is still published in the schema, so a
+    # generated client can check it before sending.
+    reason: str = Field(
+        ...,
+        json_schema_extra={"minLength": 1, "maxLength": dispute_svc.MAX_REASON_CHARS},
+        description=(
+            "What was wrong with the step. 1 to MAX_REASON_CHARS characters once control characters are "
+            "removed, at least one visible; anything else is 422 `reason_invalid`."
+        ),
+    )
     payer: str = Field(..., pattern=_PAYER_PATTERN)
     nonce: str = Field(..., min_length=1, max_length=128)
     # Upper bound only, exactly as `BindReq.signature` has it: a lower bound
@@ -210,13 +225,15 @@ class RejectDisputeReq(BaseModel):
     characters passes this bound, cleans to nothing, and is refused there as
     `rejection_reason_required`.
 
-    Bounded identically to `OpenDisputeReq.reason` — one paragraph — because
-    it is the same kind of thing from the other side of the table, and a
-    rejection that outgrew the complaint it answers would be the one free-text
-    field in this surface nobody had sized. Identically down to the number:
-    `dispute_svc.reject` cleans and trims the note to the same
-    MAX_REASON_CHARS, so a longer bound here would show the buyer an
-    adjudicator's reason cut short with nothing to say it was.
+    Bounded at the buyer's reason's number — one paragraph — because it is
+    the same kind of thing from the other side of the table, and a rejection
+    that outgrew the complaint it answers would be the one free-text field in
+    this surface nobody had sized. Bounded HERE, unlike the reason, because
+    the caller is the operator holding the key rather than a buyer, so the
+    generic field-level 422 is an answer they can read. `dispute_svc.reject`
+    refuses a note past the same MAX_REASON_CHARS (`rejection_reason_too_long`)
+    rather than cutting it, so no bound anywhere shows the buyer an
+    adjudicator's reason cut short.
     """
 
     note: str = Field(
@@ -324,9 +341,9 @@ class DisputeResponse(BaseModel):
         API, so a null would not be read as "withheld" — it would fail the
         row's type check and cost the reader the whole dispute, statuses and
         refund hash included, which is more than is being withheld. Empty is
-        unambiguous because `OpenDisputeReq.reason` has `min_length=1`: no
-        stored reason is ever empty, so an empty one on the wire can only mean
-        this. `rejection_reason` is already nullable and is nulled, which is
+        unambiguous because `dispute_svc._require_reason` refuses a reason
+        with nothing visible in it: no stored reason is ever empty, so an
+        empty one on the wire can only mean this. `rejection_reason` is already nullable and is nulled, which is
         the same answer it gives for every dispute that was not rejected.
 
         A proof-carrying read is unchanged, as is every route that answers a

@@ -326,11 +326,6 @@ MALFORMED_BODIES = [
     ("step-above-cap", {"step_index": 64}),
     ("payer-not-an-address", {"payer": "not-an-address"}),
     ("payer-wrong-prefix", {"payer": "M" + PAYER[1:]}),
-    ("reason-empty", {"reason": ""}),
-    ("reason-too-long", {"reason": "x" * (dispute_svc.MAX_REASON_CHARS + 1)}),
-    # The paragraph the old 2,000-character edge let through and the service
-    # then cut to its first 500 without a word: refused now, never trimmed.
-    ("reason-a-paragraph-over", {"reason": "x" * 1500}),
     ("signature-too-long", {"signature_b64": "x" * 257}),
     ("nonce-too-long", {"nonce": "x" * 129}),
 ]
@@ -347,10 +342,51 @@ def test_a_malformed_body_never_reaches_the_service(client, monkeypatch, label, 
     assert calls == []
 
 
+# Every way a reason can be unusable, and ONE answer for all of them (D-061):
+# 422 `reason_invalid`, from the service's first check, with a message naming
+# the bound and not one character of what was sent. The edge used to answer the
+# empty and over-long ones itself, as the generic `validation_error` carrying
+# the whole reason back in `detail[].input`, while a blank one got
+# `reason_required` from the service — three shapes for one mistake.
+UNUSABLE_REASONS = [
+    ("empty", ""),
+    ("blank", "   \t "),
+    ("invisible", "\u200b\u202e\u3164"),
+    ("one-over", "q" * (dispute_svc.MAX_REASON_CHARS + 1)),
+    # The paragraph the old 2,000-character edge let through and the service
+    # then cut to its first 500 without a word: refused, never trimmed.
+    ("a-paragraph-over", "q" * 1500),
+]
+
+
+@pytest.mark.parametrize(("label", "reason"), UNUSABLE_REASONS, ids=[label for label, _ in UNUSABLE_REASONS])
+def test_every_unusable_reason_is_one_code_that_names_the_bound(client, monkeypatch, label, reason):
+    def _no_store():
+        raise AssertionError("the reason is judged before the settlement is read")
+
+    monkeypatch.setattr(dispute_svc, "get_dispute_store", _no_store)
+
+    r = client.post("/api/disputes", json=open_body(reason=reason))
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["error"]["code"] == "reason_invalid"
+    assert body["detail"] == "reason_invalid"
+    assert str(dispute_svc.MAX_REASON_CHARS) in body["error"]["message"]
+    # Nothing the buyer wrote comes back.
+    if reason.strip():
+        assert reason not in r.text and "q" * 50 not in r.text
+
+
+def test_the_published_schema_still_states_the_reason_bound(client):
+    schema = client.get("/openapi.json").json()["components"]["schemas"]["OpenDisputeReq"]["properties"]["reason"]
+    assert (schema["minLength"], schema["maxLength"]) == (1, dispute_svc.MAX_REASON_CHARS)
+
+
 def test_a_reason_at_the_service_ceiling_reaches_it_whole(client, monkeypatch):
-    # The edge bound IS the service's MAX_REASON_CHARS, inclusive — so the
-    # longest reason the route accepts is one the service keeps whole, and the
-    # buyer is never told "filed" about words that were quietly dropped.
+    # The route passes the reason through untouched, so the longest reason the
+    # service accepts reaches it whole, and the buyer is never told "filed"
+    # about words that were quietly dropped.
     reason = "x" * dispute_svc.MAX_REASON_CHARS
     calls = opens_with(monkeypatch, record(reason=reason))
 
