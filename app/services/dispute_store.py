@@ -67,6 +67,16 @@ DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
 # everything; this cap exists so a long-lived local process cannot grow without
 # bound, and it is logged when it bites so nobody mistakes a dropped record for
 # a bug in the window arithmetic.
+#
+# It counts SETTLEMENTS, and there is deliberately no cap of its own on
+# disputes. A dispute is the record that a step was already contested — and
+# perhaps already paid back — so forgetting one while its settlement is still
+# held would leave that step looking undisputed. A settlement and the disputes
+# filed under it therefore leave together or not at all. Disputes are bounded
+# through their settlement instead: one per step (the duplicate rule), and only
+# for a step the settlement actually has (`dispute_svc` refuses any other).
+# Disputes filed against a job with no settlement held — which the service
+# never does — are bounded by the same number of jobs.
 _MAX_IN_MEMORY = 500
 
 
@@ -1007,11 +1017,20 @@ class InMemoryDisputeStore:
     moment that matters — when a record it was given is dropped — because a
     dispute that silently evaporates is worse than a feature that was never
     offered.
+
+    What it drops is a whole job: a settlement and every dispute filed under
+    it, in one operation. A dispute is never dropped on its own while its
+    settlement is kept, so a step that was disputed stays disputed for as long
+    as it can be disputed at all.
     """
 
     def __init__(self) -> None:
         self._settlements: OrderedDict[str, SettlementRecord] = OrderedDict()
-        self._disputes: OrderedDict[str, DisputeRecord] = OrderedDict()
+        self._disputes: dict[str, DisputeRecord] = {}
+        # Every dispute id, filed by job and then by step: the index the
+        # duplicate rule is read from, and the unit a job is dropped as. In the
+        # order each job was first disputed.
+        self._disputes_by_job: OrderedDict[str, dict[int, str]] = OrderedDict()
         # `refund_claims`, modelled rather than inferred from the status. The
         # status alone would be enough to make this store behave correctly, and
         # that is the trap: the two implementations would then differ in what
@@ -1020,17 +1039,39 @@ class InMemoryDisputeStore:
         # the order a reconciliation queue is read in.
         self._refund_claims: dict[str, float] = {}
 
+    def _drop_job(self, job_id_hex: str, what: str) -> None:
+        """Forget a job's disputes — and the refund claims over them — at once.
+
+        The one place a dispute is ever removed. A claim goes with its dispute:
+        a claim over a dispute that no longer exists would sit in the queue as
+        a payout nobody can look up.
+        """
+        dropped = sorted(self._disputes_by_job.pop(job_id_hex, {}).values())
+        for dispute_id in dropped:
+            self._disputes.pop(dispute_id, None)
+            self._refund_claims.pop(dispute_id, None)
+        logger.warning(
+            "in-memory dispute store full (%d): dropped %s %s with its disputes %s —"
+            " its window can no longer be honoured; set DATABASE_URL to persist settlements and disputes",
+            _MAX_IN_MEMORY,
+            what,
+            job_id_hex,
+            dropped,
+        )
+
+    def _shed(self) -> None:
+        """Bring the store back within its cap, oldest job first."""
+        while len(self._settlements) > _MAX_IN_MEMORY:
+            job_id_hex, _ = self._settlements.popitem(last=False)
+            self._drop_job(job_id_hex, "settlement")
+        unsettled = [job for job in self._disputes_by_job if job not in self._settlements]
+        for job_id_hex in unsettled[: max(0, len(unsettled) - _MAX_IN_MEMORY)]:
+            self._drop_job(job_id_hex, "unsettled job")
+
     async def record_settlement(self, record: SettlementRecord) -> None:
         self._settlements[record.job_id_hex] = record
         self._settlements.move_to_end(record.job_id_hex)
-        while len(self._settlements) > _MAX_IN_MEMORY:
-            dropped, _ = self._settlements.popitem(last=False)
-            logger.warning(
-                "in-memory dispute store full (%d): dropped settlement %s — its window can no longer be honoured;"
-                " set DATABASE_URL to persist settlements",
-                _MAX_IN_MEMORY,
-                dropped,
-            )
+        self._shed()
 
     async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
         return self._settlements.get(job_id_hex)
@@ -1048,27 +1089,17 @@ class InMemoryDisputeStore:
         # Opening is the dispute's first change of state, so it is stamped with
         # the moment it was opened — the rule _INSERT_DISPUTE_SQL writes.
         record = replace(record, updated_at=record.opened_at)
+        self._disputes_by_job.setdefault(record.job_id_hex, {})[record.step_index] = record.id
         self._disputes[record.id] = record
-        while len(self._disputes) > _MAX_IN_MEMORY:
-            dropped, _ = self._disputes.popitem(last=False)
-            # Its mutex goes with it: a claim over a dispute that no longer
-            # exists would sit in the queue as a payout nobody can look up.
-            self._refund_claims.pop(dropped, None)
-            logger.warning(
-                "in-memory dispute store full (%d): dropped dispute %s — set DATABASE_URL to persist disputes",
-                _MAX_IN_MEMORY,
-                dropped,
-            )
+        self._shed()
         return record
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
         return self._disputes.get(dispute_id)
 
     async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
-        return next(
-            (d for d in self._disputes.values() if d.job_id_hex == job_id_hex and d.step_index == step_index),
-            None,
-        )
+        dispute_id = self._disputes_by_job.get(job_id_hex, {}).get(step_index)
+        return self._disputes.get(dispute_id) if dispute_id is not None else None
 
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
         # Ordered the way _SELECT_DISPUTES_FOR_TASK_SQL orders: oldest dispute

@@ -542,7 +542,8 @@ def test_a_dropped_settlement_is_announced_rather_than_lost_quietly(
 
 def test_a_dropped_dispute_is_announced_too(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """A dispute that evaporates is worse than a feature that was never
-    offered: the buyer believes a complaint is on file."""
+    offered: the buyer believes a complaint is on file. It only ever goes
+    with its settlement, and the warning names both."""
     monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
     store = InMemoryDisputeStore()
 
@@ -550,13 +551,15 @@ def test_a_dropped_dispute_is_announced_too(monkeypatch: pytest.MonkeyPatch, cap
 
         async def go() -> None:
             for n in range(3):
-                await store.open_dispute(a_dispute(id=f"dsp_{n}", step_index=n))
+                await store.record_settlement(a_settlement(job_id_hex=f"{n:064x}"))
+                await store.open_dispute(a_dispute(id=f"dsp_{n}", job_id_hex=f"{n:064x}"))
 
         asyncio.run(go())
 
     assert len(store._disputes) == 2
     assert asyncio.run(store.get_dispute("dsp_0")) is None
-    assert any("dsp_0" in m and "DATABASE_URL" in m for m in _messages(caplog))
+    assert asyncio.run(store.get_settlement(f"{0:064x}")) is None
+    assert any("dsp_0" in m and f"{0:064x}" in m and "DATABASE_URL" in m for m in _messages(caplog))
 
 
 def test_closing_the_in_memory_store_is_safe_twice() -> None:
