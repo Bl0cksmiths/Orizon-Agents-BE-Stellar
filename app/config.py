@@ -378,6 +378,33 @@ class Settings(BaseSettings):
     # best-scored are listed. Never below the starvation backstop's minimum.
     decompose_prompt_max_agents: int = 24
 
+    # ── Stored plans ──────────────────────────────────────────
+    # How long a built plan stays executable. The card the buyer authorises
+    # freezes prices, reputation stamps and floor notices at the moment the
+    # plan was built, so it must not outlive the marketplace it describes;
+    # the execute-time re-check covers listing and the floor, and this covers
+    # everything else on the card. It must still outlive decompose, a careful
+    # read, a wallet signature and /execute, with room for a buyer who tabs
+    # away: 15 minutes covers that several times over. An expired plan is
+    # refused with 410 "plan_expired" before any task is minted.
+    plan_ttl_seconds: float = 900.0
+
+    @model_validator(mode="after")
+    def _plan_ttl_is_usable(self) -> "Settings":
+        """Refuse a plan TTL that no buyer could execute inside, or never expires.
+
+        A NaN compares false with every age, so it would never expire a plan;
+        infinity does the same openly; anything under a minute expires the plan
+        before a buyer can read the card and sign. Names the variable, never
+        the value, per the boot-failure rule.
+        """
+        if not math.isfinite(self.plan_ttl_seconds) or self.plan_ttl_seconds < 60:
+            raise ValueError(
+                "PLAN_TTL_SECONDS must be finite and at least 60 — a plan has to outlive "
+                "reading the card, signing the authorisation and executing it"
+            )
+        return self
+
     @model_validator(mode="after")
     def _mainnet_requires_mainnet_passphrase(self) -> "Settings":
         """Fail fast on a half-flipped mainnet config.
