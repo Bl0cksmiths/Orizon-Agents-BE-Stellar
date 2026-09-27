@@ -1767,10 +1767,14 @@ def get_dispute_store() -> DisputeStore:
             _store = InMemoryDisputeStore()
             # The in-memory path cannot honour a window that outlives the
             # process, so a deployment running it has to be able to find that
-            # out from its own startup log rather than from a lost dispute.
-            logger.info(
-                "dispute store: in-memory (DATABASE_URL is unset) — settlements and disputes are LOST on restart;"
-                " set DATABASE_URL to persist them"
+            # out from its own log rather than from a lost dispute — at
+            # WARNING, because on this path records of money that moved are
+            # not kept.
+            logger.warning(
+                "dispute store: in-memory (DATABASE_URL is unset) — dispute and settlement records are held in"
+                " memory only and are LOST on restart and at the cap of %d settlements;"
+                " set DATABASE_URL to persist them",
+                _MAX_IN_MEMORY,
             )
     return _store
 
