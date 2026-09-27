@@ -94,6 +94,18 @@ def _clears_floor(agent_id: str) -> RepInfo:
     return _rep(agent_id, smoothed=8000, lower=8000)
 
 
+def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
+    """A snapshot that scores EVERY registry agent: `overrides` over clearing entries.
+
+    Never a partial map. An omitted agent used to pass the floor on "no entry",
+    which never consults the floor, so a comparison built on one compared two
+    paths that had both skipped the gate for every agent the test forgot.
+    """
+    reps = {a.id: _clears_floor(a.id) for a in state.list_agents()}
+    reps.update(overrides)
+    return reps
+
+
 @pytest.fixture()
 def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     """Fresh 12-agent registry, restored after; kit thinking-sleep no-op'd.
@@ -197,10 +209,10 @@ def test_both_paths_report_the_same_floor_action(seeded: object, monkeypatch: py
     renderer — plan card, integration guide, dispute evidence — then has to
     special-case which intent produced the plan.
     """
-    # One agent under the floor, everyone else silent (no entry == cold start
-    # == routable), so each path has exactly one action to report and the two
-    # responses can be compared element for element.
-    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+    # One agent under the floor and everyone else scored clear of it, so each
+    # path has exactly one action to report and the two responses can be
+    # compared element for element.
+    reps = _scored({UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)})
 
     kit = _run_kit(monkeypatch, reps)
     free_form = _run_free_form(monkeypatch, reps, ["agt_11c0", "agt_01h8"])
@@ -241,11 +253,11 @@ def test_both_paths_report_the_configured_floor(seeded: object, monkeypatch: pyt
     the buyer uses to judge whether the exclusion was fair. Two different
     floors are exercised so a constant baked into the response cannot pass.
     """
-    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+    reps = _scored({UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)})
 
     for floor in (4200, 3300):
-        # Both below the shipped 5500 default, so a prior-only agent still
-        # clears them and the only floor action stays the one this test set up.
+        # Both below every other agent's score, so the only floor action stays
+        # the one this test set up.
         monkeypatch.setattr(settings, "reputation_floor_bps", floor)
 
         kit = _run_kit(monkeypatch, reps)
@@ -478,11 +490,11 @@ def test_notices_are_internally_consistent_on_both_paths(seeded: object, monkeyp
         "agt_12r0": 4800,
         "agt_08j2": 4700,
     }
-    reps = {aid: _sub_floor(aid, smoothed=score) for aid, score in scores.items()}
+    reps = _scored({aid: _sub_floor(aid, smoothed=score) for aid, score in scores.items()})
 
     kit = _run_kit(monkeypatch, reps)
-    # agt_01h8 is off the kit pipeline and keeps its cold-start score, so the
-    # model names an agent that actually clears the floor.
+    # agt_01h8 is off the kit pipeline and scored clear of the floor, so the
+    # model names an agent that actually clears it.
     free_form = _run_free_form(monkeypatch, reps, ["agt_01h8"])
 
     # Non-empty on BOTH paths, or the loop below asserts nothing. Six agents
@@ -549,7 +561,7 @@ def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypat
                 source="onchain",
             )
         )
-    reps = {UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)}
+    reps = _scored({UNSUBSTITUTABLE_KIT_AGENT: _sub_floor(UNSUBSTITUTABLE_KIT_AGENT)})
 
     kit = _run_kit(monkeypatch, reps)
     free_form = _run_free_form(monkeypatch, reps, ["agt_11c0"])
