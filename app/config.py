@@ -113,7 +113,9 @@ class Settings(BaseSettings):
     #
     # It still bounds abuse: 20 req/s is a coarse flood cut, and it is not the
     # cost control for the expensive routes — orchestrator_max_concurrent caps
-    # in-flight workflows (503 capacity_exhausted), and contract reads are
+    # in-flight workflows (503 capacity_exhausted), every free-form /decompose
+    # is one LLM call with its own per-client budget, concurrency gate and
+    # bounded wait queue (the planner-spend block below), and contract reads are
     # TTL-cached per key. A cache only absorbs a flood of the SAME key, though:
     # a flood of distinct keys is a distinct upstream read each, so a read
     # route whose key a caller chooses must bound the key space itself —
