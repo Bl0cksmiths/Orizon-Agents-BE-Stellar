@@ -835,6 +835,25 @@ def test_a_mainnet_passphrase_links_the_public_explorer_whatever_the_label(
     assert "/explorer/testnet/" not in out
 
 
+def test_the_buyers_reason_never_reaches_the_evidence_stdout(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """Stdout is the block the module says to paste into the evidence bundle,
+    and it printed the buyer's reason — the words the API withholds from anyone
+    who has not proved they may read the task. Its length goes to stdout; the
+    words go to stderr, for the operator alone."""
+    forbid_uphold(monkeypatch)
+    seed()
+
+    code = uphold_dispute.main(["--dispute-id", DISPUTE_ID, "--dry-run"])
+    captured = capsys.readouterr()
+
+    assert code == uphold_dispute.EXIT_OK
+    assert "the brief came back empty" not in captured.out
+    assert f"reason: {len('the brief came back empty')} chars, on stderr only" in captured.out
+    assert "the brief came back empty" in captured.err
+
+
 def test_the_preview_marks_the_bound_that_actually_binds(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
 ) -> None:
