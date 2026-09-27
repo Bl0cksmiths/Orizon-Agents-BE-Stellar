@@ -50,11 +50,12 @@ class RefundRefused(Exception):
       - `refund_above_cap` — the amount is over `MAX_REFUND_USDC`. A refusal,
         never a clamp: quietly paying the ceiling would hide the mistaken uphold
         (or the bad settlement record) that the ceiling exists to catch;
-      - `refund_amount_invalid` — the amount is not a finite number, so no bound
-        in this module can say anything about it. Kept apart from the two above
-        because it is neither a judgement about this dispute nor a ceiling an
-        operator raised: it means a figure on the records or in the environment
-        is not a quantity of money, and the fix is to that, not to the dispute.
+      - `refund_amount_invalid` — the amount, or the `MAX_REFUND_USDC` it is
+        bounded by, is not a usable number, so no bound in this module can say
+        anything about it. Kept apart from the two above because it is neither
+        a judgement about this dispute nor a ceiling an operator raised: it
+        means a figure on the records or in the environment is not a quantity
+        of money, and the fix is to that, not to the dispute.
 
     The code is what a caller maps to a response; `message` carries the numbers,
     for the operator who has to reconcile it afterwards.
@@ -161,6 +162,42 @@ def _refuse(dispute: DisputeRecord, code: str, detail: str, amount_usdc: float) 
         amount_usdc,
     )
     return RefundRefused(code, message)
+
+
+def _refuse_above_cap(dispute: DisputeRecord, amount_usdc: float) -> None:
+    """Hold `amount_usdc` to `MAX_REFUND_USDC`, failing CLOSED on a cap that is no cap.
+
+    The ceiling is a `>`, and a `>` against NaN is false for every amount while
+    nothing is greater than inf — so a cap that is not a finite number waves
+    every credit through, which is exactly the failure a ceiling exists to
+    prevent (QA D-054: `MAX_REFUND_USDC=nan` let a 50 USDC credit through at
+    50.0). `Settings()` refuses to boot on such a value, but settings are also
+    assigned outside it — by tests, by tooling, by anything that sets an
+    attribute — and a cap check that trusts its caller to have validated the
+    cap is the check that failed open. So the cap's own usability is asked
+    first, here, and a cap at or below zero is refused the same way: it is
+    not a ceiling anyone meant, and comparing against it would report every
+    credit as "above the cap" when the fault is the setting.
+
+    `refund_amount_invalid` rather than `refund_above_cap`: the amount has not
+    been judged against a ceiling, because there is no ceiling to judge it
+    against, and the fix is to the environment rather than to the dispute.
+    """
+    cap = settings.max_refund_usdc
+    if not (math.isfinite(cap) and cap > 0):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"MAX_REFUND_USDC={cap} is not a finite amount above zero, so no credit can be held to it",
+            amount_usdc,
+        )
+    if amount_usdc > cap:
+        raise _refuse(
+            dispute,
+            "refund_above_cap",
+            f"{amount_usdc:.7f} USDC exceeds MAX_REFUND_USDC={cap:.7f}",
+            amount_usdc,
+        )
 
 
 def credited_amount_usdc(step_charged_usdc: float, fraction: float = DEFAULT_CREDITED_FRACTION) -> float:
@@ -296,13 +333,7 @@ def creditable_for(
     # site is the thing a later caller most easily writes a second copy of.
     # `credit_refund` re-checks what it is handed as a cheap second gate, but
     # this is the one that has to hold.
-    if amount > settings.max_refund_usdc:
-        raise _refuse(
-            dispute,
-            "refund_above_cap",
-            f"{amount:.7f} USDC exceeds MAX_REFUND_USDC={settings.max_refund_usdc:.7f}",
-            amount,
-        )
+    _refuse_above_cap(dispute, amount)
     return amount
 
 
@@ -371,13 +402,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         )
     if amount_usdc <= 0:
         raise _refuse(dispute, "nothing_to_credit", f"{amount_usdc:.7f} USDC is not payable", amount_usdc)
-    if amount_usdc > settings.max_refund_usdc:
-        raise _refuse(
-            dispute,
-            "refund_above_cap",
-            f"{amount_usdc:.7f} USDC exceeds MAX_REFUND_USDC={settings.max_refund_usdc:.7f}",
-            amount_usdc,
-        )
+    _refuse_above_cap(dispute, amount_usdc)
 
     try:
         raw = await execute_refund(dispute.payer, amount_usdc)
