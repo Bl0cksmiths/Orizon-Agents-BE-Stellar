@@ -448,6 +448,17 @@ def _before_send(stage: str) -> Iterator[None]:
         raise NotSubmittedError(f"{stage} failed: {e}") from e
 
 
+# The send answers that mean the RPC refused the transaction and holds nothing
+# of it. `DUPLICATE` is missing on purpose: it says an identical transaction is
+# already pending, which may yet land.
+_SEND_REFUSED = frozenset({SendTransactionStatus.ERROR, SendTransactionStatus.TRY_AGAIN_LATER})
+
+
+def _send_refusal(message: str, status: Any) -> RuntimeError:
+    """The exception for a send answered with something other than PENDING."""
+    return NotSubmittedError(message) if status in _SEND_REFUSED else RuntimeError(message)
+
+
 def _send_server_signed(
     contract_id: str,
     function_name: str,
@@ -497,9 +508,11 @@ def _send_server_signed(
             tx.sign(kp)
 
         span["stage"] = "send"
+        # A send that RAISES is not `_before_send`: the request may have
+        # reached the RPC, so the transaction may be on its way.
         sent = server.send_transaction(tx)
         if sent.status != SendTransactionStatus.PENDING:
-            raise RuntimeError(f"submit failed: {sent.error_result_xdr}")
+            raise _send_refusal(f"submit failed: {sent.error_result_xdr}", sent.status)
         span["stage"] = "pending"
         span["tx"] = sent.hash
     return sent.hash
