@@ -396,6 +396,42 @@ def test_a_task_with_no_payer_to_prove_is_404(client, settled, route):
     assert (unsettled.status_code, unsettled.json()["error"]["code"]) == (404, "no_settlement")
 
 
+def test_a_settled_task_with_nothing_disputed_mints_no_read_challenge(client, settled, empty_table, monkeypatch):
+    """Settled alone used to be enough, so any hundred settled tasks held the
+    whole `dispute_read` budget. A task nobody disputed has nothing to read."""
+    settled["tsk_undisputed"] = settlement("tsk_undisputed")
+
+    async def _list(task_id: str) -> tuple[DisputeRecord, ...]:
+        return () if task_id == "tsk_undisputed" else (rejected(task_id),)
+
+    monkeypatch.setattr(dispute_svc, "list_for_task", _list)
+
+    r = client.post("/api/disputes/read-challenge", json={"task_id": "tsk_undisputed"})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "no_disputes")
+    assert len(empty_table) == 0
+
+
+def test_a_hundred_undisputed_tasks_cannot_hold_the_read_budget(client, settled, monkeypatch):
+    """The audit's scenario: a full budget's worth of settled, undisputed tasks
+    is minted against, and the payer with a dispute still gets a challenge."""
+    budget = eb.CHALLENGE_BUDGETS["dispute_read"]
+    for i in range(budget):
+        settled[f"tsk_any{i}"] = settlement(f"tsk_any{i}")
+
+    async def _list(task_id: str) -> tuple[DisputeRecord, ...]:
+        return (rejected(task_id),) if task_id == TASK else ()
+
+    monkeypatch.setattr(dispute_svc, "list_for_task", _list)
+
+    codes = {
+        client.post("/api/disputes/read-challenge", json={"task_id": f"tsk_any{i}"}).status_code for i in range(budget)
+    }
+
+    assert codes == {404}
+    assert _challenge(client)["nonce"]
+
+
 @pytest.mark.parametrize(
     "body",
     [
