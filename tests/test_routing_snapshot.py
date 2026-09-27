@@ -127,7 +127,7 @@ def ledger(seeded: None, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(sc, "sym", lambda s: s)
     cfg = SimpleNamespace(bad=set(), failing=set(), delay=0.0, read=[])
 
-    def _simulate(_contract: str, fn: str, args: list[str]) -> dict[str, int]:
+    def _simulate(_contract: str, fn: str, args: list[str], **_kw: object) -> dict[str, int]:
         assert fn == "rep_state"
         agent_id = args[0]
         cfg.read.append(agent_id)
