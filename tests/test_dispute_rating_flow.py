@@ -377,7 +377,19 @@ def test_a_failed_rating_records_nothing_and_the_retry_lands_it(ledger, settler,
     assert failed.rating_tx is None
     assert invalidated == []
     (logged,) = svc_errors(caplog)
-    for fact in ("failed", dispute.id, JOB, derived(0).hex(), AGENT, dispute.payer):
+    # D-075: the money and the outcome are on the ERROR line itself, so it
+    # reconciles without the INFO line the credit wrote earlier.
+    for fact in (
+        "failed",
+        "outcome=FAILED",
+        dispute.id,
+        JOB,
+        derived(0).hex(),
+        AGENT,
+        dispute.payer,
+        "credited_usdc=0.0500000",
+        "refund_tx=tx_credit",
+    ):
         assert fact in logged
 
     landed = uphold(dispute.id)
