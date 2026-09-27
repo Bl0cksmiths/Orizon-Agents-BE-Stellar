@@ -395,6 +395,38 @@ def test_a_padded_configured_key_admits_the_key_without_the_padding(client, adju
     assert reached == [DISPUTE_ID]
 
 
+@pytest.mark.parametrize("padding", [" ", "\t", "  \t "], ids=["space", "tab", "mixed"])
+def test_a_key_padded_on_the_wire_admits_the_operator(client, adjudicating, monkeypatch, padding):
+    """S05, the wire half the docstring promises: optional whitespace around a
+    header value is the HTTP parser's to keep or drop, so it must not decide
+    who gets in. Only the CONFIGURED side's padding was tested."""
+    reached = upholds_with(monkeypatch, credited())
+
+    r = client.post(UPHOLD, json={}, headers={"X-API-Key": f"{API_KEY}{padding}"})
+
+    assert r.status_code == 200, r.text
+    assert reached == [DISPUTE_ID]
+
+
+def test_the_operator_key_is_compared_in_constant_time(monkeypatch):
+    """S02: a timing property no functional test can see, so the compare is
+    held to going through `compare_digest` — `==` in its place passed every
+    other test in the suite."""
+    from app import security
+
+    calls: list[tuple[bytes, bytes]] = []
+    real = security.secrets.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(security.secrets, "compare_digest", _spy)
+
+    assert security.header_secret_matches(API_KEY, API_KEY) is True
+    assert calls == [(API_KEY.encode(), API_KEY.encode())]
+
+
 # ── the door: it admits ─────────────────────────────────────────
 
 
@@ -440,6 +472,18 @@ def test_a_successful_uphold_is_credited_with_a_refund_tx(client, adjudicating, 
     assert body["id"] == DISPUTE_ID
     assert body["payer"] == PAYER
     assert body["creditable_usdc"] == 0.25
+
+
+def test_the_uphold_answer_carries_the_buyers_words(client, adjudicating, monkeypatch):
+    """R13: the adjudicator came in on the operator key, which is strictly more
+    than the free text is gated on. The reject answer was checked; this one was
+    not, and could have gone out withheld."""
+    upholds_with(monkeypatch, credited())
+
+    body = client.post(UPHOLD, json={}, headers=AUTH).json()
+
+    assert body["reason"] == "the step returned an empty file"
+    assert body["reason_withheld"] is False
 
 
 def test_a_repeat_uphold_returns_the_same_hash(client, adjudicating, monkeypatch):
