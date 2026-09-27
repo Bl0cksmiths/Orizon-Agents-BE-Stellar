@@ -113,8 +113,12 @@ class Settings(BaseSettings):
     #
     # It still bounds abuse: 20 req/s is a coarse flood cut, and it is not the
     # cost control for the expensive routes — orchestrator_max_concurrent caps
-    # in-flight workflows (503 capacity_exhausted) and contract reads are
-    # TTL-cached, so a flood buys cheap cached JSON, not LLM calls or RPC.
+    # in-flight workflows (503 capacity_exhausted), and contract reads are
+    # TTL-cached per key. A cache only absorbs a flood of the SAME key, though:
+    # a flood of distinct keys is a distinct upstream read each, so a read
+    # route whose key a caller chooses must bound the key space itself —
+    # /api/stellar/reputation/{agent_id} answers only registered ids, and 404s
+    # the rest before any RPC. This limit alone does not make a flood cheap.
     # Once trusted_proxy_hops is tuned this becomes per-visitor and can come
     # back down; the frontend backs off on 429 and honours Retry-After, so a
     # tightened limit degrades cadence rather than breaking the console.

@@ -382,3 +382,22 @@ def test_boot_does_not_wait_for_the_prewarm(chain):
 def test_no_prewarm_without_a_ledger(client):
     """The hermetic default: nothing configured, nothing read, no task."""
     assert rep._prewarm_task is None
+
+
+# ── an unregistered id costs no RPC ─────────────────────────────
+
+
+def test_an_unregistered_id_is_404_without_a_chain_read(chain, client):
+    """The audit's flood: 40 unregistered ids were 40 x 200 and 40 upstream
+    reads, and 120 queued ahead of the registry batch degraded all 23 agents.
+    Now each is refused before the chain is asked anything."""
+    _join_prewarm(client)
+    before = len(chain.reads)
+
+    codes = {client.get(f"/api/stellar/reputation/nobody_{i}").status_code for i in range(40)}
+
+    assert codes == {404}
+    assert client.get("/api/stellar/reputation/nobody_0").json()["detail"] == "unknown_agent"
+    assert len(chain.reads) == before, "an unregistered id reached the RPC"
+    # A registered agent is still read and served.
+    assert client.get("/api/stellar/reputation/agt_01h8").status_code == 200

@@ -19,7 +19,9 @@ import pytest
 
 from app.config import settings
 from app.routers import stellar as stellar_router
+from app.schemas import Agent
 from app.services.reputation_svc import STROOPS_PER_USDC
+from app.state import state
 from app.stellar import cache as rcache
 from app.stellar import client as sc
 
@@ -54,7 +56,15 @@ def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger=LEDGER))
     rcache.clear()
     stellar_router.invalidation_budget.reset()
+    # Registered, because the read route answers 404 for an id the registry
+    # does not hold — before any RPC — and this agent is an external one.
+    state.add_agent(
+        Agent(
+            id=AGENT, name="code agent", skills=["code"], price=0.05, rep=0.0, status="online", runs=0, source="onchain"
+        )
+    )
     yield chain
+    state.agents.pop(AGENT, None)
     rcache.clear()
     stellar_router.invalidation_budget.reset()
 

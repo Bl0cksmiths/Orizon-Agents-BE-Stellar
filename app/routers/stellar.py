@@ -355,9 +355,24 @@ async def reputation_params() -> ReputationParams:
 async def read_reputation(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
 ) -> ReputationInfo:
-    """Smoothed reputation for one agent — cached ReputationLedger.rep_state
-    read with Bayesian prior smoothing; prior fallback on any failure.
+    """Smoothed reputation for one REGISTERED agent — cached
+    ReputationLedger.rep_state read with Bayesian prior smoothing; stale or
+    prior fallback on a failed read.
+
+    404 `unknown_agent` for an id the registry does not hold, answered before
+    any RPC. The route used to read the chain for any id matching the
+    pattern: every unregistered id was a cache miss, so each one cost a
+    Soroban round trip, and a stream of them queued enough reads to push the
+    real registry batch past its deadline (120 unknown ids degraded all 23
+    agents) — an unauthenticated way to switch the routing floor off for
+    everyone. 404 rather than the prior with no RPC: the prior would tell the
+    caller an id nobody registered is a routable newcomer, which is a claim,
+    not an absence; the frontend already treats 404 on this route as "no such
+    agent". An agent registered on-chain but not yet indexed by the registry
+    sync reads 404 until the next pass — it has no ratings to show yet anyway.
     """
+    if agent_id not in state.agents:
+        raise HTTPException(404, "unknown_agent")
     info = await reputation_svc.fetch_rep(agent_id)
     return ReputationInfo(**info.model_dump())
 
