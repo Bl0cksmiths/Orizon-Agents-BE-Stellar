@@ -146,8 +146,11 @@ def test_routing_constants_are_read_per_request(client, monkeypatch):
     assert batch["floor_bps"] == params["floor_bps"] == 6100
     assert batch["prior_bps"] == params["prior_bps"] == 7100
     # And the live prior has to reach the per-agent scores too, not just the
-    # header the client draws its floor line against.
+    # header the client draws its floor line against — the bound as well as
+    # the mean, since the bound is what the floor is applied to. Worked by
+    # hand: 0.71 - sqrt(0.71 x 0.29 / 12) = 0.5790.
     assert {info["smoothed_bps"] for info in batch["reputations"].values()} == {7100}
+    assert {info["lower_bound_bps"] for info in batch["reputations"].values()} == {5790}
 
 
 # ── degradation on the wire ─────────────────────────────────────
