@@ -354,22 +354,24 @@ def _signer_keypair() -> Keypair:
 
     Memoized: the signing key is immutable at runtime, so we derive once.
     (lru_cache does not cache exceptions, so an unset key keeps raising.)
+    A key that will not parse is a `NotSubmittedError`: nothing can be signed,
+    so nothing was sent.
     """
     secret = settings.stellar_signing_key or ""
     secret = secret.strip()
     if not secret:
-        raise RuntimeError("STELLAR_SIGNING_KEY is empty")
+        raise NotSubmittedError("STELLAR_SIGNING_KEY is empty")
 
     words = secret.split()
     if len(words) >= 12:
         try:
             return Keypair.from_mnemonic_phrase(" ".join(words))
         except Exception as e:
-            raise RuntimeError(f"STELLAR_SIGNING_KEY looks like a mnemonic but is invalid: {e}") from e
+            raise NotSubmittedError(f"STELLAR_SIGNING_KEY looks like a mnemonic but is invalid: {e}") from e
     try:
         return Keypair.from_secret(secret)
     except Exception as e:
-        raise RuntimeError(f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({e})") from e
+        raise NotSubmittedError(f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({e})") from e
 
 
 def signer_public_key() -> str:
