@@ -217,6 +217,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await stop_refresh_retry()
     # Same reason: a scorer read still in flight must not outlive the loop.
     await rating_writer.stop()
+    reputation_svc.shutdown_read_pool()
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
     await registry_sync.stop()

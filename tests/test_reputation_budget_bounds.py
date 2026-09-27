@@ -39,7 +39,15 @@ from app.stellar import client as sc
 
 
 def _settings(**overrides: float) -> Settings:
-    return Settings(_env_file=None, **overrides)
+    """Settings with the batch's read latency sized down to nothing.
+
+    These tests drive the planning-share rule with budgets as small as 0.07 s,
+    far under what the shipped read latency needs; the separate rule that the
+    deadline covers the batch (`_reputation_deadline_covers_the_batch`, pinned
+    in test_reputation_batch_sizing.py) would refuse them first. A test that
+    means to exercise that rule passes the latency itself.
+    """
+    return Settings(_env_file=None, **{"reputation_read_latency_seconds": 1e-6, **overrides})
 
 
 def _typed_share(decompose: float) -> float:

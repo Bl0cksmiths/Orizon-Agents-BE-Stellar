@@ -58,6 +58,8 @@ import asyncio
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -534,6 +536,49 @@ def _fallback(agent_id: str) -> RepInfo:
     return _stale_info(agent_id) or _prior_info(agent_id, degraded=True)
 
 
+_pool: ThreadPoolExecutor | None = None
+_oversize_logged = False
+
+
+def _read_pool() -> ThreadPoolExecutor:
+    """The worker threads reserved for rep_state reads.
+
+    Reserved, not shared: on the default executor a batch queued behind the
+    registry sync, the ratings writer and every other read in the process,
+    so the time it took depended on traffic it had no part in. Sized by
+    REPUTATION_READ_CONCURRENCY, the number the config validator checks the
+    batch deadline against. Created on first use.
+    """
+    global _pool
+    if _pool is None:
+        _pool = ThreadPoolExecutor(max_workers=settings.reputation_read_concurrency, thread_name_prefix="repread")
+    return _pool
+
+
+def shutdown_read_pool() -> None:
+    """Release the read threads (lifespan shutdown). A read still running is
+    abandoned, not joined; the next read creates a fresh pool."""
+    global _pool
+    pool, _pool = _pool, None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _note_batch_size(size: int) -> None:
+    """Say once per process when a batch outgrows what its deadline was sized
+    for — the validator can only check the size it was told to expect."""
+    global _oversize_logged
+    if size > settings.reputation_batch_agents and not _oversize_logged:
+        _oversize_logged = True
+        logger.warning(
+            "reputation batch of %d agents is larger than REPUTATION_BATCH_AGENTS=%d, the size its deadline "
+            "was sized for — its last wave of reads may miss the deadline on a healthy chain. Raise "
+            "REPUTATION_READ_CONCURRENCY or REPUTATION_BATCH_AGENTS (and the deadline with it).",
+            size,
+            settings.reputation_batch_agents,
+        )
+
+
 def _rep_cache_key(agent_id: str) -> str:
     """The read cache's key for one agent's rep_state.
 
@@ -565,12 +610,15 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
         # load_account hop is skipped and each read is ONE round trip, not two
         # (client.simulate_read). That halves the per-read latency the batch
         # deadline has to cover.
-        raw = await asyncio.to_thread(
-            sc.simulate_read,
-            sc.contract_ids().reputation_ledger,
-            "rep_state",
-            [sc.sym(agent_id)],
-            load_source=False,
+        raw = await asyncio.get_running_loop().run_in_executor(
+            _read_pool(),
+            partial(
+                sc.simulate_read,
+                sc.contract_ids().reputation_ledger,
+                "rep_state",
+                [sc.sym(agent_id)],
+                load_source=False,
+            ),
         )
         # Refused HERE, inside the producer, so the cache records a failure —
         # negatively cached for its short window and retried after it — rather
@@ -643,6 +691,7 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None)
     ids = list(dict.fromkeys(agent_ids))
     if not ids:
         return {}
+    _note_batch_size(len(ids))
     tasks = {agent_id: asyncio.ensure_future(_read_rep(agent_id)) for agent_id in ids}
     try:
         await asyncio.wait(tasks.values(), timeout=_wait_bound(bound))

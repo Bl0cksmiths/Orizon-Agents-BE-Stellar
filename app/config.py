@@ -237,6 +237,26 @@ class Settings(BaseSettings):
     # floor for everyone. Past this, the agent degrades to the prior as before.
     # 0 turns stale serving off.
     reputation_stale_grace_seconds: float = 300.0
+    # What the batch deadline above has to cover, as three numbers the
+    # validator `_reputation_deadline_covers_the_batch` multiplies out. A batch
+    # reads every agent at once, but only `reputation_read_concurrency` reads
+    # run at a time (the worker threads reserved for them), so it takes
+    # ceil(agents / concurrency) waves of one read each. The live defect this
+    # exists for: 23 agents on the shared 8-thread pool is 3 waves, at two RPC
+    # hops a read, and 2.5 s broke at 0.83 s a read — 3 of 4 warm reads
+    # degraded on a healthy chain.
+    #   * concurrency — threads that ONLY reputation reads use, so a registry
+    #     sync, the ratings writer or a flood of other reads cannot queue ahead
+    #     of the batch a plan is waiting on.
+    #   * latency — the time one read is sized at: a single simulate round
+    #     trip (the load_account hop is gone), measured at 0.27–0.63 s against
+    #     SDF testnet, with room over it.
+    #   * agents — how many agents one batch is sized for. The live registry is
+    #     23. A batch larger than this still runs, and logs once that the
+    #     deadline was not sized for it.
+    reputation_read_concurrency: int = 16
+    reputation_read_latency_seconds: float = 0.75
+    reputation_batch_agents: int = 32
     # Per-rating weight cap in USDC — one whale job can't own the score.
     reputation_max_rating_weight_usdc: float = 100.0
 
@@ -720,6 +740,51 @@ class Settings(BaseSettings):
                 f"REPUTATION_BATCH_TIMEOUT_SECONDS to {_seconds(allowance)} or less, or raise "
                 "DECOMPOSE_TIMEOUT_SECONDS to at least "
                 f"{_seconds(self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE)}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reputation_deadline_covers_the_batch(self) -> "Settings":
+        """Refuse a batch deadline too short for the reads it has to wait on.
+
+        The budget rule above only ever asked whether the deadline fits the
+        PLANNING budget. Nothing asked whether it fits the WORK: a batch of
+        REPUTATION_BATCH_AGENTS reads, REPUTATION_READ_CONCURRENCY at a time,
+        each sized at REPUTATION_READ_LATENCY_SECONDS, needs
+        ceil(agents / concurrency) x latency to finish. A deadline under that
+        is not a bound on an outage; it is an outage on a healthy chain — every
+        batch cuts off its last wave, those agents fall back, and with no
+        recent read to serve they fall back to the prior and the floor fails
+        open for them. That is the configuration that shipped: 23 agents, 8
+        shared threads, two hops a read, 2.5 s.
+
+        Each number must also be a real one — a finite latency above zero, a
+        concurrency from 1 to 64 (they are threads), at least one agent — or
+        the product is meaningless. As with the money bounds, the message
+        names the variables and the rule and never a value.
+        """
+        faults: list[str] = []
+        latency = self.reputation_read_latency_seconds
+        if not (math.isfinite(latency) and latency > 0):
+            faults.append("REPUTATION_READ_LATENCY_SECONDS is not a finite number of seconds above zero")
+        if not 1 <= self.reputation_read_concurrency <= 64:
+            faults.append("REPUTATION_READ_CONCURRENCY is not a whole number of threads from 1 to 64")
+        if self.reputation_batch_agents < 1:
+            faults.append("REPUTATION_BATCH_AGENTS is not a whole number of agents of at least 1")
+        if not faults:
+            waves = math.ceil(self.reputation_batch_agents / self.reputation_read_concurrency)
+            if waves * latency > self.reputation_batch_timeout_seconds:
+                faults.append(
+                    "REPUTATION_BATCH_TIMEOUT_SECONDS is shorter than the batch it bounds: "
+                    "ceil(REPUTATION_BATCH_AGENTS / REPUTATION_READ_CONCURRENCY) x "
+                    "REPUTATION_READ_LATENCY_SECONDS must fit inside it, or every batch cuts off its last wave "
+                    "of reads on a healthy chain and those agents are routed on the prior"
+                )
+        if faults:
+            raise ValueError(
+                "The reputation batch cannot be sized as configured: " + "; and ".join(faults) + ". Raise "
+                "REPUTATION_BATCH_TIMEOUT_SECONDS (within the planning budget) or REPUTATION_READ_CONCURRENCY, "
+                "or unset the named variables to take the defaults."
             )
         return self
 
