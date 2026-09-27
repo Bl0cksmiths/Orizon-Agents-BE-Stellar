@@ -9,12 +9,11 @@ it implies, so the two cannot come apart however the process dies.
 
 What is asserted here, and why each one is here rather than assumed:
 
-  1. Two claims racing over one dispute produce exactly ONE claim. The fake
-     pool models a statement's SNAPSHOT — the status is read before anything is
-     written and a claim committed in between is invisible — so a store that
-     leaned on the status alone would append two `crediting` rows and fail
-     this. That is what gives the test teeth rather than the appearance of
-     them.
+  1. Claims racing over one dispute produce exactly ONE claim — two of them
+     on the store fixture, twenty at once against a real Postgres. Every
+     statement in the race reads the same `upheld` from its own snapshot, so
+     a store that leaned on the status alone would append several `crediting`
+     rows and fail this; only the PRIMARY KEY can separate the claimants.
   2. Only an `upheld` dispute can be claimed. open, crediting, credited and
      rejected all answer None and write nothing, because to a payer they all
      mean the same thing: do not sign anything.
@@ -27,9 +26,16 @@ What is asserted here, and why each one is here rather than assumed:
   6. The two stores agree. Every rule that can be is asserted over both, and a
      rule that holds only on the store this suite happens to run is not a rule.
 
-Hermetic, and the idioms are test_dispute_store.py's: `asyncio.run` rather than
-pytest-asyncio, which is not installed, and a fake pool that dispatches on the
-store's SQL constants by equality.
+The Postgres half runs the store's real SQL against a real Postgres (conftest
+`pg_dsn`; marked `postgres`). It used to run against test_dispute_store.py's
+FakePool, which re-implements each statement in Python, so a claim statement
+edited to drop its `upheld` gate or its ON CONFLICT still passed here. FakePool
+remains only for the two tests about the SHAPE of a call — how many statements
+it sends — which is the Python around the SQL rather than the SQL.
+
+The idiom is test_dispute_store.py's: `asyncio.run` rather than pytest-asyncio,
+which is not installed, through `pg_support.run` so a real pool is closed in
+the loop that dialled it.
 """
 
 from __future__ import annotations
@@ -39,11 +45,18 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from test_dispute_durability import process
+from pg_support import claims, execute, fetch, run, statuses
+from test_dispute_durability import pg_process
 from test_dispute_store import FakePool, _pg, a_dispute, a_settlement
 
 from app.services import dispute_store
-from app.services.dispute_store import DisputeRecord, DisputeStatus, DisputeStore, InMemoryDisputeStore
+from app.services.dispute_store import (
+    DisputeRecord,
+    DisputeStatus,
+    DisputeStore,
+    InMemoryDisputeStore,
+    PostgresDisputeStore,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +67,7 @@ def reset_singleton() -> Iterator[None]:
     dispute_store._store = None
 
 
-@pytest.fixture(params=["in-memory", "postgres"])
+@pytest.fixture(params=["in-memory", pytest.param("postgres", marks=pytest.mark.postgres)])
 def store(request: pytest.FixtureRequest) -> DisputeStore:
     """The same rules, asserted against both implementations.
 
@@ -63,8 +76,18 @@ def store(request: pytest.FixtureRequest) -> DisputeStore:
     keeps it in a dict, and a case the two answer differently is a case that
     behaves one way in the hermetic suite and another way in production — on
     the money path, where the difference is a second transfer.
+
+    `postgres` is the real store over a real database (conftest `pg_dsn`).
     """
-    return InMemoryDisputeStore() if request.param == "in-memory" else _pg(FakePool())
+    if request.param == "in-memory":
+        return InMemoryDisputeStore()
+    return PostgresDisputeStore(request.getfixturevalue("pg_dsn"))
+
+
+@pytest.fixture
+def pg(pg_dsn: str) -> PostgresDisputeStore:
+    """The Postgres store alone, for what only a table can show: its rows."""
+    return PostgresDisputeStore(pg_dsn)
 
 
 async def _upheld(store: DisputeStore, **overrides: Any) -> DisputeRecord:
@@ -91,7 +114,7 @@ def test_claiming_an_upheld_dispute_holds_the_mutex_and_moves_it_to_crediting(st
         claimed = await store.claim_refund(upheld.id)
         return claimed, await store.get_dispute(upheld.id), await _queued(store)
 
-    claimed, stored, queue = asyncio.run(go())
+    claimed, stored, queue = run(store, go())
 
     assert claimed is not None
     assert claimed.status == "crediting"
@@ -115,7 +138,7 @@ def test_a_second_claim_over_a_held_dispute_is_refused(store: DisputeStore) -> N
         second = await store.claim_refund(upheld.id)
         return first, second, await _queued(store)
 
-    first, second, queue = asyncio.run(go())
+    first, second, queue = run(store, go())
 
     assert first is not None
     assert second is None
@@ -141,7 +164,7 @@ def test_a_dispute_that_is_not_upheld_cannot_be_claimed(store: DisputeStore, sta
         claimed = await store.claim_refund(opened.id)
         return claimed, await store.get_dispute(opened.id), await _queued(store)
 
-    claimed, stored, queue = asyncio.run(go())
+    claimed, stored, queue = run(store, go())
 
     assert claimed is None
     assert stored is not None and stored.status == status
@@ -155,7 +178,7 @@ def test_claiming_a_dispute_that_does_not_exist_is_none(store: DisputeStore) -> 
     async def go() -> tuple[DisputeRecord | None, list[str]]:
         return await store.claim_refund("dsp_never"), await _queued(store)
 
-    claimed, queue = asyncio.run(go())
+    claimed, queue = run(store, go())
 
     assert claimed is None
     assert queue == []
@@ -180,7 +203,7 @@ def test_a_release_restores_upheld_and_a_later_claim_succeeds(store: DisputeStor
         reclaimed = await store.claim_refund(upheld.id)
         return released, after_release, reclaimed, await _queued(store)
 
-    released, after_release, reclaimed, after_reclaim = asyncio.run(go())
+    released, after_release, reclaimed, after_reclaim = run(store, go())
 
     assert released is not None and released.status == "upheld"
     assert after_release == []
@@ -209,7 +232,7 @@ def test_a_failed_attempts_hash_never_follows_the_dispute_into_the_next_one(stor
         reclaimed = await store.claim_refund(upheld.id)
         return timed_out, released, reclaimed
 
-    timed_out, released, reclaimed = asyncio.run(go())
+    timed_out, released, reclaimed = run(store, go())
 
     assert timed_out.refund_tx == "tx_never_settled"  # the in-flight hash was on record
     assert released is not None and released.refund_tx is None
@@ -233,7 +256,7 @@ def test_a_dispute_that_is_not_crediting_cannot_be_released(store: DisputeStore,
         released = await store.release_refund_claim(opened.id)
         return released, await store.get_dispute(opened.id), await _queued(store)
 
-    released, stored, queue = asyncio.run(go())
+    released, stored, queue = run(store, go())
 
     assert released is None
     assert stored is not None and stored.status == status
@@ -249,14 +272,14 @@ def test_releasing_twice_does_not_rewind_a_second_time(store: DisputeStore) -> N
         await store.claim_refund(upheld.id)
         return await store.release_refund_claim(upheld.id), await store.release_refund_claim(upheld.id)
 
-    first, second = asyncio.run(go())
+    first, second = run(store, go())
 
     assert first is not None and first.status == "upheld"
     assert second is None
 
 
 def test_releasing_a_dispute_that_does_not_exist_is_none(store: DisputeStore) -> None:
-    assert asyncio.run(store.release_refund_claim("dsp_never")) is None
+    assert run(store, store.release_refund_claim("dsp_never")) is None
 
 
 # ── ending the payout ─────────────────────────────────────────────────────
@@ -276,7 +299,7 @@ def test_finishing_a_dispute_drops_its_claim(store: DisputeStore, status: Disput
         finished = await store.append_status(upheld.id, status, refund_tx="tx_refund")
         return held, finished, await _queued(store), await store.claim_refund(upheld.id)
 
-    held, finished, queue, reclaimed = asyncio.run(go())
+    held, finished, queue, reclaimed = run(store, go())
 
     assert held == ["dsp_0001"]
     assert finished.status == status
@@ -284,6 +307,28 @@ def test_finishing_a_dispute_drops_its_claim(store: DisputeStore, status: Disput
     # Dropping the mutex does not make the dispute payable again. The status
     # refuses now, and it refuses forever.
     assert reclaimed is None
+
+
+def test_recording_the_in_flight_hash_keeps_the_claim(store: DisputeStore) -> None:
+    """The TIMEOUT path's own write, and the one transition the mutex must
+    outlive: `crediting` again, with the hash of a transfer that may still land.
+
+    Only `credited` and `rejected` end a payout. A store that dropped the claim
+    on any transition would drop it HERE, while the transfer is on the network,
+    and the next uphold after a release — or a stray claim — could sign a
+    second one."""
+
+    async def go() -> tuple[DisputeRecord | None, list[str]]:
+        upheld = await _upheld(store)
+        await store.claim_refund(upheld.id)
+        in_flight = await store.append_status(upheld.id, "crediting", refund_tx="tx_inflight")
+        return in_flight, await _queued(store)
+
+    in_flight, queue = run(store, go())
+
+    assert in_flight is not None and in_flight.status == "crediting"
+    assert in_flight.refund_tx == "tx_inflight"
+    assert queue == ["dsp_0001"]
 
 
 def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeStore) -> None:
@@ -302,7 +347,7 @@ def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeSto
         claimed = await store.claim_refund(opened.id)
         return upheld, claimed, await store.release_refund_claim(opened.id)
 
-    upheld, claimed, released = asyncio.run(go())
+    upheld, claimed, released = run(store, go())
 
     assert upheld.resolved_at == 1_700_009_999.0
     assert claimed is not None and claimed.resolved_at == 1_700_009_999.0
@@ -315,11 +360,11 @@ def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeSto
 def test_two_concurrent_claims_produce_exactly_one_claim(store: DisputeStore) -> None:
     """The race, run as a race.
 
-    Both calls are in flight at once. Against the fake pool each statement
-    takes its snapshot, yields, and only then writes — which is what a real
-    statement does, and it is why the status BOTH claimants read says `upheld`.
-    Nothing except the PRIMARY KEY can separate them at that point, so a store
-    that decided on the status alone would pay this buyer twice and fail here.
+    Both calls are in flight at once — against Postgres, on two connections.
+    Each statement takes its snapshot before either has written, which is why
+    the status BOTH claimants read says `upheld`. Nothing except the PRIMARY
+    KEY can separate them at that point, so a store that decided on the status
+    alone would pay this buyer twice and fail here.
     """
 
     async def go() -> tuple[list[DisputeRecord | None], list[str], DisputeRecord | None]:
@@ -327,7 +372,7 @@ def test_two_concurrent_claims_produce_exactly_one_claim(store: DisputeStore) ->
         raced = await asyncio.gather(store.claim_refund(upheld.id), store.claim_refund(upheld.id))
         return list(raced), await _queued(store), await store.get_dispute(upheld.id)
 
-    raced, queue, stored = asyncio.run(go())
+    raced, queue, stored = run(store, go())
 
     assert len([result for result in raced if result is not None]) == 1
     assert len([result for result in raced if result is None]) == 1
@@ -335,26 +380,26 @@ def test_two_concurrent_claims_produce_exactly_one_claim(store: DisputeStore) ->
     assert stored is not None and stored.status == "crediting"
 
 
-def test_the_losing_claimant_writes_no_row() -> None:
-    """The loser's INSERT selects through `claim`, which returned nothing, so
-    it appends no event row either.
+def test_the_losing_claimants_write_no_row(pg: PostgresDisputeStore, pg_dsn: str) -> None:
+    """Twenty claimants at once, on as many connections as the pool will give
+    them. Each loser's INSERT selects through `claim`, which returned nothing,
+    so it appends no event row either.
 
-    One `crediting` transition in the trail rather than a pair — two would read
-    to anyone answering a chargeback as two payouts, which is precisely the
-    thing that must not have happened.
+    One `crediting` transition in the trail rather than a pile of them — two
+    would read to anyone answering a chargeback as two payouts, which is
+    precisely the thing that must not have happened.
     """
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> list[DisputeRecord | None]:
-        upheld = await _upheld(store)
-        return list(await asyncio.gather(store.claim_refund(upheld.id), store.claim_refund(upheld.id)))
+    async def go() -> tuple[list[DisputeRecord | None], list[str], dict[str, float]]:
+        upheld = await _upheld(pg)
+        raced = await asyncio.gather(*(pg.claim_refund(upheld.id) for _ in range(20)))
+        return list(raced), await statuses(pg_dsn, upheld.id), await claims(pg_dsn)
 
-    raced = asyncio.run(go())
+    raced, trail, held = run(pg, go())
 
     assert len([result for result in raced if result is not None]) == 1
-    assert [row["status"] for row in pool.disputes] == ["open", "upheld", "crediting"]
-    assert list(pool.claims) == ["dsp_0001"]
+    assert trail == ["open", "upheld", "crediting"]
+    assert list(held) == ["dsp_0001"]
 
 
 # ── atomicity, on the shape of the call ───────────────────────────────────
@@ -398,7 +443,8 @@ def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
 
     The row lock is the statement before it, inside the same transaction: it
     changes nothing and writes nothing, and the DELETE and the event row are
-    still the one statement they have to be."""
+    still the one statement they have to be. That the statement really does
+    drop the claim is `test_finishing_a_dispute_drops_its_claim[postgres]`."""
     pool = FakePool()
     store = _pg(pool)
 
@@ -410,10 +456,11 @@ def test_finishing_a_dispute_drops_the_claim_in_the_same_statement() -> None:
         return pool.statements[mark:]
 
     assert asyncio.run(go()) == [dispute_store._LOCK_DISPUTE_SQL, dispute_store._APPEND_STATUS_SQL]
-    assert pool.claims == {}
 
 
-def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice() -> None:
+def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice(
+    pg: PostgresDisputeStore, pg_dsn: str
+) -> None:
     """The one state the mutex cannot repair, asserted so that it reads as a
     decision rather than an accident.
 
@@ -424,32 +471,35 @@ def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice() ->
     is the direction that fails safe: the alternative is a second transfer out
     of the platform wallet. A release cannot clear it either, because dropping
     a claim over a dispute that is not `crediting` is exactly the move that
-    would let a second payer in while the first is still signing.
+    would let a second payer in while the first is still signing. Nor can a
+    transition that does not finish the dispute.
 
     What makes that liveable is that the row is in the reconciliation queue,
     where an operator can see it — and the way out is the only safe one there
     is: decide from the chain whether the buyer was paid, and record that
     decision, which drops the claim with it.
     """
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, list[str]]:
-        upheld = await _upheld(store)
-        pool.claims[upheld.id] = 1_700_000_500.0
-        blocked = await store.claim_refund(upheld.id)
-        return blocked, await store.release_refund_claim(upheld.id), await _queued(store)
+    async def go() -> tuple[Any, ...]:
+        upheld = await _upheld(pg)
+        # The stray row, written the way only a hand or a bug could write it.
+        await execute(pg_dsn, "INSERT INTO refund_claims (dispute_id, claimed_at) VALUES ($1, $2)", upheld.id, 1.0)
+        blocked = await pg.claim_refund(upheld.id)
+        released = await pg.release_refund_claim(upheld.id)
+        after_refusals = await _queued(pg)
+        await pg.append_status(upheld.id, "upheld")
+        after_unfinishing = await _queued(pg)
+        resolved = await pg.append_status(upheld.id, "credited", refund_tx="tx_found_on_chain")
+        return blocked, released, after_refusals, after_unfinishing, resolved, await _queued(pg)
 
-    blocked, released, queue = asyncio.run(go())
+    blocked, released, after_refusals, after_unfinishing, resolved, after_resolution = run(pg, go())
 
     assert blocked is None
     assert released is None
-    assert queue == ["dsp_0001"]
-
-    resolved = asyncio.run(store.append_status("dsp_0001", "credited", refund_tx="tx_found_on_chain"))
-
-    assert resolved.status == "credited"
-    assert asyncio.run(_queued(store)) == []
+    assert after_refusals == ["dsp_0001"]
+    assert after_unfinishing == ["dsp_0001"]
+    assert resolved is not None and resolved.status == "credited"
+    assert after_resolution == []
 
 
 def test_a_refused_verdict_leaves_the_mutex_over_a_live_payout(store: DisputeStore) -> None:
@@ -469,7 +519,7 @@ def test_a_refused_verdict_leaves_the_mutex_over_a_live_payout(store: DisputeSto
         refused = await store.append_status(upheld.id, "rejected", note="not upheld", expected_status="open")
         return refused, await store.get_dispute(upheld.id), await _queued(store)
 
-    refused, current, queue = asyncio.run(go())
+    refused, current, queue = run(store, go())
 
     assert refused is None
     # The payout is untouched: still mid-flight, still held, still findable.
@@ -477,20 +527,19 @@ def test_a_refused_verdict_leaves_the_mutex_over_a_live_payout(store: DisputeSto
     assert queue == ["dsp_0001"]
 
 
-def test_a_verdict_on_a_dispute_with_no_history_drops_no_claim_row() -> None:
+def test_a_verdict_on_a_dispute_with_no_history_drops_no_claim_row(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """A claim row whose dispute this store has never heard of is the one row
     an operator most needs to see — it is money that may have left the wallet
     with nothing to account for it. Writing a verdict against the id used to
     delete it silently, because the DELETE only ever looked at the status being
     written."""
-    pool = FakePool()
-    pool.claims["dsp_ghost"] = 1_700_000_500.0
-    store = _pg(pool)
+    run(pg, pg.list_refund_claims())  # the schema, created the store's own way
+    asyncio.run(execute(pg_dsn, "INSERT INTO refund_claims (dispute_id, claimed_at) VALUES ('dsp_ghost', 1.0)"))
 
     with pytest.raises(KeyError):
-        asyncio.run(store.append_status("dsp_ghost", "credited", refund_tx="tx_guess"))
+        run(pg, pg.append_status("dsp_ghost", "credited", refund_tx="tx_guess"))
 
-    assert list(pool.claims) == ["dsp_ghost"]
+    assert list(asyncio.run(claims(pg_dsn))) == ["dsp_ghost"]
 
 
 def test_the_mutex_delete_is_gated_on_the_transition_being_written() -> None:
@@ -505,26 +554,25 @@ def test_the_mutex_delete_is_gated_on_the_transition_being_written() -> None:
     assert "$10::text IS NULL OR latest.status = $10::text" in delete
 
 
-def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to() -> None:
+def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to(pg: PostgresDisputeStore) -> None:
     """The two halves of finding the wedge, in one interleaving.
 
     A payer claims the dispute and starts signing; an adjudicator's `rejected`,
     computed from a read taken while it was still `open`, arrives in the middle
-    of that. The verdict is refused — the dispute has moved — and the claim
-    protecting the transfer has to survive the refusal, or the buyer drops off
-    the reconciliation queue while their money is still in flight."""
-    pool = FakePool()
-    store = _pg(pool)
+    of that, on another connection. The verdict is refused — the dispute has
+    moved — and the claim protecting the transfer has to survive the refusal,
+    or the buyer drops off the reconciliation queue while their money is still
+    in flight."""
 
     async def go() -> tuple[Any, Any, DisputeRecord | None, list[str]]:
-        upheld = await _upheld(store)
+        upheld = await _upheld(pg)
         claimed, refused = await asyncio.gather(
-            store.claim_refund(upheld.id),
-            store.append_status(upheld.id, "rejected", note="not upheld", expected_status="open"),
+            pg.claim_refund(upheld.id),
+            pg.append_status(upheld.id, "rejected", note="not upheld", expected_status="open"),
         )
-        return claimed, refused, await store.get_dispute(upheld.id), await _queued(store)
+        return claimed, refused, await pg.get_dispute(upheld.id), await _queued(pg)
 
-    claimed, refused, current, queue = asyncio.run(go())
+    claimed, refused, current, queue = run(pg, go())
 
     assert claimed is not None and claimed.status == "crediting"
     assert refused is None
@@ -535,7 +583,9 @@ def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to() -> None:
 # ── across a restart ──────────────────────────────────────────────────────
 
 
-def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(
+    monkeypatch: pytest.MonkeyPatch, pg_dsn: str
+) -> None:
     """The failure this table is durable for.
 
     A refund is claimed, the transfer goes out, and the instance is spun down
@@ -548,51 +598,67 @@ def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(monk
     DATABASE survives the boundary; everything the process held — the store
     object, its pool, the singleton — does not.
     """
-    database = FakePool()
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        asyncio.run(store.record_settlement(a_settlement()))
-        opened = asyncio.run(store.open_dispute(a_dispute()))
-        asyncio.run(store.append_status(opened.id, "upheld"))
-        claimed = asyncio.run(store.claim_refund(opened.id))
+        async def before() -> tuple[DisputeRecord, DisputeRecord | None]:
+            await store.record_settlement(a_settlement())
+            opened = await store.open_dispute(a_dispute())
+            await store.append_status(opened.id, "upheld")
+            return opened, await store.claim_refund(opened.id)
+
+        opened, claimed = run(store, before())
         assert claimed is not None and claimed.status == "crediting"
-        claimed_at = database.claims[opened.id]
+        claimed_at = asyncio.run(claims(pg_dsn))[opened.id]
 
     assert dispute_store._store is None
-    assert database.closed == 1
 
-    with process(monkeypatch, database) as store:
-        restored = asyncio.run(store.get_dispute(opened.id))
+    with pg_process(monkeypatch, pg_dsn) as store:
+
+        async def after() -> tuple[Any, ...]:
+            return (
+                await store.get_dispute(opened.id),
+                await store.claim_refund(opened.id),
+                await store.list_refund_claims(),
+            )
+
+        restored, reclaimed, queue = run(store, after())
         assert restored is not None and restored.status == "crediting"
         # Still blocked: the mutex came back held, so this process refuses to
         # pay a buyer the last one may already have paid.
-        assert asyncio.run(store.claim_refund(opened.id)) is None
+        assert reclaimed is None
         # And still visible, with the moment it was taken — which is how an
         # operator knows how long this buyer has been waiting on it.
-        queue = asyncio.run(store.list_refund_claims())
         assert [claim.dispute_id for claim in queue] == [opened.id]
         assert queue[0].claimed_at == claimed_at
 
 
-def test_a_stuck_payout_can_still_be_released_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stuck_payout_can_still_be_released_after_a_restart(monkeypatch: pytest.MonkeyPatch, pg_dsn: str) -> None:
     """Blocked is not stranded.
 
     Once a human has established that the transfer definitively failed, the
     dispute goes back to `upheld` in a later process exactly as it would have
     in the one that claimed it — and the buyer, who is still owed, can be paid.
     """
-    database = FakePool()
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        opened = asyncio.run(store.open_dispute(a_dispute()))
-        asyncio.run(store.append_status(opened.id, "upheld"))
-        assert asyncio.run(store.claim_refund(opened.id)) is not None
+        async def before() -> tuple[DisputeRecord, DisputeRecord | None]:
+            opened = await store.open_dispute(a_dispute())
+            await store.append_status(opened.id, "upheld")
+            return opened, await store.claim_refund(opened.id)
 
-    with process(monkeypatch, database) as store:
-        released = asyncio.run(store.release_refund_claim(opened.id))
+        opened, claimed = run(store, before())
+        assert claimed is not None
+
+    with pg_process(monkeypatch, pg_dsn) as store:
+
+        async def after() -> tuple[Any, ...]:
+            released = await store.release_refund_claim(opened.id)
+            queue = await store.list_refund_claims()
+            return released, queue, await store.claim_refund(opened.id)
+
+        released, queue, reclaimed = run(store, after())
         assert released is not None and released.status == "upheld"
-        assert asyncio.run(store.list_refund_claims()) == ()
-        reclaimed = asyncio.run(store.claim_refund(opened.id))
+        assert queue == ()
         assert reclaimed is not None and reclaimed.status == "crediting"
 
 
@@ -624,20 +690,17 @@ async def _payout_trace(store: DisputeStore) -> list[tuple[str, str | None, tupl
     return trace
 
 
-def test_the_two_stores_take_the_same_path_through_a_payout() -> None:
-    """The tests above assert each rule on both stores; this one asserts they
-    agree STEP BY STEP, including on what the queue holds in between.
+def test_the_two_stores_take_the_same_path_through_a_payout(store: DisputeStore) -> None:
+    """The tests above assert each rule on both stores; this one asserts each
+    store takes the same path STEP BY STEP, including what the queue holds in
+    between.
 
     That is where a store which inferred the mutex from the status instead of
     keeping one would drift without failing anything else — and the expected
     trace is written out rather than only compared, so two stores agreeing on
     the wrong answer fails as loudly as two that disagree.
     """
-    in_memory = asyncio.run(_payout_trace(InMemoryDisputeStore()))
-    postgres = asyncio.run(_payout_trace(_pg(FakePool())))
-
-    assert in_memory == postgres
-    assert in_memory == [
+    assert run(store, _payout_trace(store)) == [
         ("upheld", "upheld", ()),
         ("claim", "crediting", ("dsp_0001",)),
         ("claim again", None, ("dsp_0001",)),
@@ -649,7 +712,7 @@ def test_the_two_stores_take_the_same_path_through_a_payout() -> None:
     ]
 
 
-def test_an_adjudicators_note_survives_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_adjudicators_note_survives_a_restart(monkeypatch: pytest.MonkeyPatch, pg_dsn: str) -> None:
     """A rejection is the outcome most likely to be contested, so the argument
     for it has to outlive the process that made it exactly as the buyer's
     `reason` does. A note held only in a log line is a note nobody can produce
@@ -658,19 +721,24 @@ def test_an_adjudicators_note_survives_a_restart(monkeypatch: pytest.MonkeyPatch
     It sits beside the claim's restart test because the restart idiom it needs
     lives in tests/test_dispute_durability.py, which story 4.03 does not own.
     """
-    database = FakePool()
     note = "  step 0 delivered; the brief did not ask for charts\n"
 
-    with process(monkeypatch, database) as store:
-        opened = asyncio.run(store.open_dispute(a_dispute()))
-        asyncio.run(store.append_status(opened.id, "rejected", note=note))
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        restored = asyncio.run(store.get_dispute(opened.id))
+        async def before() -> DisputeRecord:
+            opened = await store.open_dispute(a_dispute())
+            await store.append_status(opened.id, "rejected", note=note)
+            return opened
+
+        opened = run(store, before())
+
+    with pg_process(monkeypatch, pg_dsn) as store:
+        restored = run(store, store.get_dispute(opened.id))
         assert restored is not None
         assert restored.status == "rejected"
         assert restored.note == note
         # The opening row never carried one, so the trail still shows a dispute
         # opened on the buyer's reason alone and refused later, with the
         # platform's answer on its own line.
-        assert [row["note"] for row in database.disputes] == [None, note]
+        trail = asyncio.run(fetch(pg_dsn, "SELECT note FROM dispute_events ORDER BY id"))
+        assert [row["note"] for row in trail] == [None, note]
