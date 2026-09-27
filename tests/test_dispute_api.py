@@ -499,6 +499,7 @@ def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch, prove
         "updated_at": 1_700_003_600.0,
         "rating_confirmed": True,
         "rejection_reason": None,
+        "reason_withheld": False,
     }
 
 
