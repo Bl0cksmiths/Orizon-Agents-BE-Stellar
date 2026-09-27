@@ -14,12 +14,14 @@ chain answers. Nothing is signed, paid or submitted.
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from test_adjudication import (  # noqa: F401 - autouse fixtures and helpers
     LANDED,
+    SVC_LOGGER,
     _fresh_state,
     a_dispute,
     invalidated,
@@ -276,3 +278,51 @@ def test_a_cancel_after_the_transfer_was_handed_over_holds_the_claim(monkeypatch
     assert len(calls) == 1
     current, queue = _stored(dispute.id)
     assert (current.status, queue) == ("crediting", [dispute.id])
+
+
+# ── B6: the writes after a transfer are compare-and-set on `crediting` ──
+
+
+def _operator_releases_mid_flight(monkeypatch, answer: dict[str, Any]) -> list[Any]:
+    """The transfer is out when somebody hands the claim back by hand."""
+    calls: list[Any] = []
+
+    async def _invoke(contract_id: str, fn: str, args: list[Any]) -> dict[str, Any]:
+        calls.append(fn)
+        store = dispute_store.get_dispute_store()
+        [claim] = await store.list_refund_claims()
+        await store.release_refund_claim(claim.dispute_id)
+        return answer
+
+    _chain(monkeypatch)
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", _invoke)
+    return calls
+
+
+def test_a_credit_landing_on_a_dispute_moved_mid_flight_is_recorded_and_critical(monkeypatch, caplog) -> None:
+    calls = _operator_releases_mid_flight(monkeypatch, {"status": "SUCCESS", "hash": "tx_landed"})
+    dispute = a_dispute()
+
+    with caplog.at_level(logging.CRITICAL, logger=SVC_LOGGER):
+        credited = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert calls == ["transfer"]
+    # The money moved, so the record says so whatever happened to it meanwhile.
+    assert (credited.status, credited.refund_tx) == ("credited", "tx_landed")
+    critical = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.CRITICAL]
+    assert any("tx_landed" in m and "no longer in crediting" in m and "now upheld" in m for m in critical), critical
+
+
+def test_an_unconfirmed_credit_never_overwrites_a_dispute_moved_mid_flight(monkeypatch, caplog) -> None:
+    _operator_releases_mid_flight(monkeypatch, {"status": "timeout", "hash": "tx_inflight"})
+    dispute = a_dispute()
+
+    with caplog.at_level(logging.CRITICAL, logger=SVC_LOGGER):
+        with pytest.raises(DisputeError) as unconfirmed:
+            asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert unconfirmed.value.code == "refund_unconfirmed"
+    current, _ = _stored(dispute.id)
+    assert (current.status, current.refund_tx) == ("upheld", None)
+    critical = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.CRITICAL]
+    assert any("tx_inflight" in m and "MAY STILL LAND" in m and "now upheld" in m for m in critical), critical

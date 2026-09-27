@@ -1539,13 +1539,40 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # receipt prints this beside the refund hash, so it must be the number
         # the hash proves.
         try:
-            credited = _recorded(
-                await store.append_status(
-                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
-                ),
+            # Conditional on `crediting`, the status this outcome was decided
+            # from: while the claim is held nothing else may move the dispute.
+            written = await store.append_status(
                 dispute_id,
                 "credited",
+                refund_tx=outcome.tx_hash,
+                credited_usdc=outcome.amount_usdc,
+                expected_status="crediting",
             )
+            if written is None:
+                # Something moved it mid-flight — only an operator can, by
+                # releasing or editing a dispute whose transfer was out, which
+                # docs/disputes.md warns against — and a second uphold may
+                # already have paid it. The money HAS moved, so it is recorded
+                # anyway: a record that hid a landed credit would invite a
+                # third. CRITICAL, because this is the one line that says a
+                # buyer may have been paid twice.
+                moved = await store.get_dispute(dispute_id)
+                logger.critical(
+                    "dispute %s: %.7f USDC LANDED as tx %s on a dispute no longer in crediting (now %s, refund tx"
+                    " %s) — an operator intervened mid-flight; POSSIBLE DOUBLE PAYMENT, reconcile by hand; the"
+                    " landed credit is recorded (job %s, payer %s)",
+                    dispute_id,
+                    outcome.amount_usdc,
+                    outcome.tx_hash,
+                    moved.status if moved else "missing",
+                    moved.refund_tx if moved else "-",
+                    claimed.job_id_hex,
+                    claimed.payer,
+                )
+                written = await store.append_status(
+                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+                )
+            credited = _recorded(written, dispute_id, "credited")
         except Exception:
             # The money has MOVED and nothing else would say so where anyone
             # would see it: `credit_refund`'s SUCCESS line is INFO, and an
@@ -1599,9 +1626,26 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # dispute so the reconciliation starts from the record rather than from a
     # log search.
     try:
-        _recorded(
-            await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash), dispute_id, "crediting"
-        )
+        # Conditional on `crediting`, as the credited write above is. Losing it
+        # means somebody moved the dispute while the transfer was out; that
+        # record is theirs and is not overwritten, and this line is what says
+        # a transfer that may still land was sent against it.
+        if (
+            await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash, expected_status="crediting")
+            is None
+        ):
+            moved = await store.get_dispute(dispute_id)
+            logger.critical(
+                "dispute %s: refund tx %s is UNCONFIRMED and MAY STILL LAND, but the dispute is no longer in"
+                " crediting (now %s) — an operator intervened mid-flight; it was NOT overwritten, and a"
+                " second credit may follow — reconcile by hand (job %s, payer %s, %.7f USDC)",
+                dispute_id,
+                outcome.tx_hash,
+                moved.status if moved else "missing",
+                claimed.job_id_hex,
+                claimed.payer,
+                outcome.amount_usdc,
+            )
     except Exception:
         # Only the HASH was lost. `claim_refund` already moved this dispute to
         # `crediting` and the claim is still held, so both of the things that
