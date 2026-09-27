@@ -814,6 +814,11 @@ async def _build_kit_plan(
         plan=Plan(steps=steps),
         total_usdc=total_price,
         total_eta=total_eta,
+        # What the buyer is about to be shown, kept with the plan so
+        # `/execute` judges the plan the buyer actually authorised.
+        notices=notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
     )
     state.add_plan(stored)
 
