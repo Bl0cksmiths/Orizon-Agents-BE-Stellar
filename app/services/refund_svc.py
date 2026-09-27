@@ -20,6 +20,7 @@ Honest trust model, disclosed in every artifact (SOW §3.8 standard):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 from collections.abc import Sequence
@@ -393,6 +394,35 @@ def creditable_for(
     # this is the one that has to hold.
     _refuse_above_cap(dispute, amount)
     return amount
+
+
+# Domain separation for the refund's muxed id, in the style of
+# `dispute_rating.DISPUTE_ID_TAG` and deliberately a different tag: the two
+# derivations must never be mistaken for one another. Versioned, so a future
+# change of formula cannot reproduce an id already paid under this one.
+REFUND_MUX_TAG = b"orizon-refund:v1"
+_MUX_ID_BYTES = 8
+
+
+def refund_muxed_id(dispute_id: str) -> int:
+    """The 64-bit id an upheld dispute's refund transfer carries on-chain.
+
+    `uint64_be(sha256(utf8(dispute_id) ‖ REFUND_MUX_TAG)[:8])`.
+
+    The credit is paid to the payer's G address muxed with this id (CAP-67),
+    so the SAC's transfer event carries it as `to_muxed_id` and the transfer
+    names the dispute it pays — two credits of one amount to one payer are no
+    longer indistinguishable. Recomputable from the dispute id alone, so
+    nothing needs storing: a reviewer holding a dispute id computes the id (or
+    the M address) and finds the transfer; one holding a transfer checks the
+    `to_muxed_id` against the dispute ids of that payer.
+
+    A hash rather than a counter, for the same reason as the rating's derived
+    id: a dispute id is 128 random bits (`dsp_` + 32 hex), and eight hash bytes
+    keep two disputes apart with odds of 2**-64 per pair, with no state.
+    """
+    digest = hashlib.sha256(dispute_id.encode("utf-8") + REFUND_MUX_TAG).digest()
+    return int.from_bytes(digest[:_MUX_ID_BYTES], "big")
 
 
 async def execute_refund(buyer: str, amount_usdc: float) -> dict[str, Any]:
