@@ -215,16 +215,21 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
     the settlement lacks — so either is a record that changed under a paid
     dispute, and an outcome would let the caller file it as a rating to retry.
     """
+    # What the payer was credited, on every line: the rating follows a paid
+    # refund, and a failure is reconciled against that money (D-075).
+    credited = "unrecorded" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f} USDC"
     step = settlement.step(dispute.step_index)
     if step is None:
         logger.error(
             "dispute %s: cannot rate — settlement %s has no step %d, yet a refund was paid against it "
-            "(agent %s, payer %s)",
+            "(agent %s, payer %s, credited %s, refund %s)",
             dispute.id,
             settlement.job_id_hex,
             dispute.step_index,
             dispute.agent_id,
             dispute.payer,
+            credited,
+            dispute.refund_tx,
         )
         raise LookupError(f"settlement {settlement.job_id_hex} has no step {dispute.step_index} to rate")
 
@@ -233,12 +238,15 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         derived = dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index)
     except ValueError:
         logger.error(
-            "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s)",
+            "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s, credited %s, "
+            "refund %s)",
             dispute.id,
             dispute.job_id_hex,
             dispute.step_index,
             dispute.agent_id,
             dispute.payer,
+            credited,
+            dispute.refund_tx,
             exc_info=True,
         )
         raise
@@ -248,7 +256,8 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
     # the derived id is the one Stellar Expert shows. Identifiers only — no key.
     facts = (
         f"agent {dispute.agent_id}, job {dispute.job_id_hex}, derived {derived_hex}, "
-        f"rating {DISPUTE_RATING}, weight {weight}, payer {dispute.payer}"
+        f"rating {DISPUTE_RATING}, weight {weight}, payer {dispute.payer}, credited {credited}, "
+        f"refund {dispute.refund_tx}"
     )
 
     try:
