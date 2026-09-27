@@ -951,8 +951,11 @@ in-flight hash and acts on the answer:
 
 "This dispute's refund" means the envelope the chain holds hashes to the hash
 on record and is a single `transfer` over the asset SAC, from the settler, to
-this dispute's payer — and, when the record carries the amount the transfer was
-for (`inflight_usdc`, written on a timeout since this sweep), for that amount.
+this dispute's payer — the payer's address muxed with this dispute's refund id,
+or the plain payer for an untagged refund, and never the payer muxed with any
+other id, which is another dispute's credit — and, when the record carries the
+amount the transfer was for (`inflight_usdc`, written on a timeout since this
+sweep), for that amount.
 
 **The last valid moment** is read, not guessed. A refund is built with a
 30-second time bound, so it can be valid until 30 seconds after it was built
