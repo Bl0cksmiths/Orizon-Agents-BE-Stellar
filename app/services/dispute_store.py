@@ -802,9 +802,10 @@ _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.
 #
 # It bounds the CONTENT, not the stored length: `sanitize_untrusted` cuts at
 # this many characters and then appends its ` …[truncated]` marker, so a cut
-# summary is stored a few characters longer — the same trade the dispute
-# reason makes, and deliberately so, because a reader must be able to tell a
-# summary that was cut from one that simply ended.
+# summary is stored a few characters longer, deliberately, because a reader
+# must be able to tell a summary that was cut from one that simply ended.
+# The dispute reason no longer makes this trade: a reason past its limit is
+# refused, never cut, because the buyer's own words are the record.
 OUTPUT_SUMMARY_MAX_CHARS = 280
 
 
