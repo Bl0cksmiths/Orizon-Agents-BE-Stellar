@@ -14,10 +14,18 @@ Four things are asserted here, and they are the four that can silently rot:
   4. The store is chosen from `database_url` at first USE, not at import, so a
      DATABASE_URL that arrives later is honoured instead of ignored.
 
-The suite is hermetic: no database, no network, no asyncpg. Postgres is
-exercised against a fake pool injected into the store — one that dispatches on
-this module's SQL constants BY EQUALITY — and the async calls run through
-`asyncio.run`, the repo's idiom, since pytest-asyncio is not installed.
+Postgres is exercised against a REAL Postgres (conftest `pg_dsn`: a CI service,
+or pgserver locally, or a skip that says which to install). Those tests are
+marked `postgres`, and each runs in a schema of its own. The SQL is where the
+rules above live, so the SQL is what has to run: a fake that answers in Python
+can only restate what the SQL was meant to do.
+
+FakePool is kept below for what a fake is actually good for — the Python
+AROUND the SQL: which statements the store sends and how many, that every
+call names its bound, the pool's lifecycle. Its docstring says so. The async
+calls run through `asyncio.run`, the repo's idiom, since pytest-asyncio is not
+installed; against a real pool, through `pg_support.run`, which closes the
+store inside the loop that dialled it.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ import time
 from typing import Any
 
 import pytest
+from pg_support import events, fetch, run, settlements, statuses
 
 from app.services import dispute_store
 from app.services.dispute_store import (
@@ -36,6 +45,7 @@ from app.services.dispute_store import (
     DisputeStore,
     DuplicateDisputeError,
     InMemoryDisputeStore,
+    PostgresDisputeStore,
     SettlementRecord,
     SettlementStep,
 )
@@ -92,6 +102,22 @@ def a_dispute(**overrides: Any) -> DisputeRecord:
         opened_at=1_700_000_100.0,
     )
     return dataclasses.replace(base, **overrides)
+
+
+@pytest.fixture(params=["in-memory", pytest.param("postgres", marks=pytest.mark.postgres)])
+def store(request: pytest.FixtureRequest) -> DisputeStore:
+    """Both implementations, for the rules they share: the in-memory store, and
+    the Postgres store over a real database (conftest `pg_dsn`). A rule that
+    holds only on the store the hermetic suite happens to run is not a rule."""
+    if request.param == "in-memory":
+        return InMemoryDisputeStore()
+    return PostgresDisputeStore(request.getfixturevalue("pg_dsn"))
+
+
+@pytest.fixture
+def pg(pg_dsn: str) -> PostgresDisputeStore:
+    """The Postgres store over a real database, in a schema of this test's own."""
+    return PostgresDisputeStore(pg_dsn)
 
 
 # ── settlements, in memory ────────────────────────────────────────────────
@@ -390,7 +416,7 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
         asyncio.run(store.append_status("dsp_never", "upheld"))
 
 
-def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution() -> None:
+def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution(store: DisputeStore) -> None:
     """`resolved_at` is stamped once and never moved, and 0.0 is a moment like
     any other. COALESCE keeps it in Postgres; read with truthiness rather than
     `is not None` — the rule this file states everywhere else — the in-memory
@@ -404,14 +430,17 @@ def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution() -> None:
         assert upheld is not None and credited is not None
         return upheld.resolved_at, credited.resolved_at
 
-    assert asyncio.run(go(InMemoryDisputeStore())) == (0.0, 0.0)
-    assert asyncio.run(go(_pg(FakePool()))) == (0.0, 0.0)
+    assert run(store, go(store)) == (0.0, 0.0)
 
 
 # ── the precondition on a transition ──────────────────────────────────────
+#
+# The compare-and-set every adjudication rests on (`expected_status`), asserted
+# on BOTH stores: in memory it is an `if`, in Postgres it is a clause of the
+# INSERT's own SELECT, and only running that statement shows the clause works.
 
 
-def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld() -> None:
+def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld(store: DisputeStore) -> None:
     """The double payment, in four lines.
 
     A caller reads a dispute, decides, and appends; the append is a round trip
@@ -422,7 +451,6 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld() -> Non
     to take the second transfer back.
 
     Naming the status the decision was read from is what refuses it."""
-    store = InMemoryDisputeStore()
 
     async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, DisputeRecord | None]:
         opened = await store.open_dispute(a_dispute())
@@ -436,7 +464,7 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld() -> Non
         refused = await store.append_status(opened.id, "upheld", expected_status=stale.status)
         return refused, await store.get_dispute(opened.id), await store.claim_refund(opened.id)
 
-    refused, current, second_claim = asyncio.run(go())
+    refused, current, second_claim = run(store, go())
 
     assert refused is None
     # Nothing was written: the dispute still reads as paid, with its hash.
@@ -446,11 +474,10 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld() -> Non
     assert second_claim is None
 
 
-def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected() -> None:
+def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected(store: DisputeStore) -> None:
     """The other half of the same bug, and the one that pays out money the
     adjudicator refused: `rejected` dragged back to `upheld` is a dispute
     decided AGAINST the buyer becoming claimable and payable."""
-    store = InMemoryDisputeStore()
 
     async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
         opened = await store.open_dispute(a_dispute())
@@ -458,7 +485,7 @@ def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected() -> None:
         refused = await store.append_status(opened.id, "upheld", expected_status="open")
         return refused, await store.get_dispute(opened.id)
 
-    refused, current = asyncio.run(go())
+    refused, current = run(store, go())
 
     assert refused is None
     assert current is not None and current.status == "rejected"
@@ -466,12 +493,11 @@ def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected() -> None:
     assert current.note == NOTE
 
 
-def test_a_transition_that_names_no_expectation_still_lands_unconditionally() -> None:
+def test_a_transition_that_names_no_expectation_still_lands_unconditionally(store: DisputeStore) -> None:
     """The operator's reconciliation write (docs/disputes.md): a person who has
     read the chain is correcting the record ON PURPOSE, and their write has to
     land whatever the dispute currently says. Passing no expectation is how
     that is asked for, so the default cannot be a precondition."""
-    store = InMemoryDisputeStore()
 
     async def go() -> DisputeRecord | None:
         opened = await store.open_dispute(a_dispute())
@@ -479,35 +505,32 @@ def test_a_transition_that_names_no_expectation_still_lands_unconditionally() ->
         await store.claim_refund(opened.id)
         return await store.append_status(opened.id, "credited", refund_tx="tx_reconciled", credited_usdc=1.5)
 
-    recorded = asyncio.run(go())
+    recorded = run(store, go())
 
     assert recorded is not None and recorded.status == "credited"
     assert recorded.refund_tx == "tx_reconciled"
 
 
-def test_a_transition_that_matches_the_expectation_is_written() -> None:
+def test_a_transition_that_matches_the_expectation_is_written(store: DisputeStore) -> None:
     """The precondition refuses a dispute that MOVED, and nothing else. An
     implementation that refused whenever an expectation was named would break
     every adjudication while passing the two tests above."""
-    store = InMemoryDisputeStore()
 
     async def go() -> DisputeRecord | None:
         opened = await store.open_dispute(a_dispute())
         return await store.append_status(opened.id, "upheld", expected_status="open")
 
-    upheld = asyncio.run(go())
+    upheld = run(store, go())
 
     assert upheld is not None and upheld.status == "upheld"
 
 
-def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation() -> None:
+def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation(store: DisputeStore) -> None:
     """None means "this dispute has moved"; KeyError means "there is no such
     dispute". Folding the second into the first would let a caller with a typo
     in an id read it as a lost race and move on."""
-    store = InMemoryDisputeStore()
-
     with pytest.raises(KeyError):
-        asyncio.run(store.append_status("dsp_never", "upheld", expected_status="open"))
+        run(store, store.append_status("dsp_never", "upheld", expected_status="open"))
 
 
 # ── the bound on the in-memory store ──────────────────────────────────────
@@ -630,6 +653,22 @@ def _coalesce(*values: Any) -> Any:
 class FakePool:
     """Stands in for an asyncpg pool: records every statement and models the two
     tables just well enough to answer the queries the store sends.
+
+    A MODEL OF THE SQL, NOT THE SQL, and nothing it answers is evidence about
+    the SQL. It picks a Python branch by comparing the statement with this
+    module's own constant, so a statement edited to do something else still
+    matches and the branch still answers as if it were right: ten of eleven
+    mutants to the money path's SQL once passed every test that ran here. Every
+    behaviour modelled below is therefore asserted against a real Postgres too
+    (the `postgres`-marked tests, and tests/test_dispute_store_postgres.py), and
+    a new claim about what a statement DOES belongs there, never here alone.
+
+    What it is kept for is what needs no database: the statements the store
+    sends and in what order (a claim is ONE statement; an append is the lock
+    and then the write), the bound every call names, the lazy one-time DDL and
+    the pool's lifecycle — at unit speed, on a machine with no Postgres. The
+    modelling itself stays because tests/test_dispute_receipt_fields.py still
+    runs its store rules over it.
 
     Rows are kept in plain lists, and list order IS the BIGSERIAL `id` order the
     real queries sort by — so "the newest row" means the same thing here as it
@@ -1065,171 +1104,169 @@ def test_nothing_is_dated_by_the_database() -> None:
 
 
 # ── settlements, in Postgres ──────────────────────────────────────────────
+#
+# From here to "the pool", every test runs the store's real statements against
+# a real Postgres (conftest `pg_dsn`): the behaviour asserted is the SQL's, and
+# the rows inspected are the table's. These used to run against FakePool, which
+# answers with its own Python model of the SQL — so they checked the model, and
+# a mutated statement still passed them.
 
 
-def test_a_settlement_round_trips_through_the_json_column() -> None:
+def test_a_settlement_round_trips_through_the_json_column(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """The step breakdown is stored as one JSON value, so the encode/decode pair
     is the only thing standing between a settled price and the credit computed
     from it a day later."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> SettlementRecord | None:
-        await store.record_settlement(a_settlement())
-        return await store.get_settlement(JOB)
+    async def go() -> tuple[SettlementRecord | None, list[dict[str, Any]]]:
+        await pg.record_settlement(a_settlement())
+        return await pg.get_settlement(JOB), await fetch(
+            pg_dsn, "SELECT jsonb_typeof(steps) AS t FROM workflow_settlements"
+        )
 
-    stored = asyncio.run(go())
+    stored, kinds = run(pg, go())
 
     assert stored == a_settlement()
     assert stored is not None and stored.steps == STEPS
-    # It really went through JSON: the row holds text, not the tuple.
-    assert isinstance(pool.settlements[0]["steps"], str)
+    # It really went through JSON: the column holds a JSON array, not text.
+    assert kinds == [{"t": "array"}]
 
 
-def test_a_settlement_is_also_read_back_by_task() -> None:
-    pool = FakePool()
-    store = _pg(pool)
-
+def test_a_settlement_is_also_read_back_by_task(pg: PostgresDisputeStore) -> None:
     async def go() -> SettlementRecord | None:
-        await store.record_settlement(a_settlement())
-        return await store.get_settlement_by_task(TASK)
+        await pg.record_settlement(a_settlement())
+        return await pg.get_settlement_by_task(TASK)
 
-    stored = asyncio.run(go())
+    stored = run(pg, go())
 
     assert stored is not None
     assert stored.job_id_hex == JOB
     assert stored.window_closes_at == 1_700_086_400.0
 
 
-def test_settling_twice_appends_a_row_and_the_newest_one_wins() -> None:
+def test_settling_twice_appends_a_row_and_the_newest_one_wins(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """Append-only, on the money path: the second settlement must not fail on a
     unique key, and the first must stay on the audit trail."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> SettlementRecord | None:
-        await store.record_settlement(a_settlement())
-        await store.record_settlement(a_settlement(job_id_hex=OTHER_JOB, window_closes_at=1_700_172_800.0))
-        return await store.get_settlement_by_task(TASK)
+    async def go() -> tuple[SettlementRecord | None, SettlementRecord | None, list[dict[str, Any]]]:
+        await pg.record_settlement(a_settlement())
+        await pg.record_settlement(a_settlement(job_id_hex=OTHER_JOB, window_closes_at=1_700_172_800.0))
+        await pg.record_settlement(a_settlement(window_closes_at=1_700_259_200.0))
+        return await pg.get_settlement_by_task(TASK), await pg.get_settlement(JOB), await settlements(pg_dsn)
 
-    latest = asyncio.run(go())
+    by_task, by_job, rows = run(pg, go())
 
-    assert latest is not None
-    assert latest.job_id_hex == OTHER_JOB
-    assert len(pool.settlements) == 2
-    assert all("INSERT INTO workflow_settlements" in s for s in pool.writes)
+    # The newest row by `id`, for both keys — not the first one written.
+    assert by_task is not None and by_task.job_id_hex == JOB
+    assert by_task.window_closes_at == 1_700_259_200.0
+    assert by_job == by_task
+    assert len(rows) == 3
 
 
-def test_an_unsettled_job_or_task_reads_as_none_in_postgres() -> None:
-    pool = FakePool()
-    store = _pg(pool)
+def test_an_unsettled_job_or_task_reads_as_none_in_postgres(pg: PostgresDisputeStore) -> None:
+    async def go() -> tuple[SettlementRecord | None, SettlementRecord | None]:
+        return await pg.get_settlement(OTHER_JOB), await pg.get_settlement_by_task("task_never")
 
-    assert asyncio.run(store.get_settlement(OTHER_JOB)) is None
-    assert asyncio.run(store.get_settlement_by_task("task_never")) is None
+    assert run(pg, go()) == (None, None)
 
 
 # ── disputes, in Postgres ─────────────────────────────────────────────────
 
 
-def test_an_opened_dispute_is_read_back_by_id_and_by_step() -> None:
+def test_an_opened_dispute_is_read_back_by_id_and_by_step(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """Round-tripped exactly as given, save the one field the store assigns:
     opening is the dispute's first change of state, so `updated_at` is the
     moment it was opened (story 4.06)."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None]:
-        opened = await store.open_dispute(a_dispute())
-        return opened, await store.get_dispute(opened.id), await store.find_dispute(JOB, 0)
+    async def go() -> tuple[DisputeRecord, DisputeRecord | None, DisputeRecord | None, list[dict[str, Any]]]:
+        opened = await pg.open_dispute(a_dispute())
+        return opened, await pg.get_dispute(opened.id), await pg.find_dispute(JOB, 0), await events(pg_dsn)
 
-    opened, by_id, by_step = asyncio.run(go())
+    opened, by_id, by_step, rows = run(pg, go())
 
     assert by_id == opened == a_dispute(updated_at=a_dispute().opened_at)
     assert by_step == opened
-    assert len(pool.disputes) == 1
-    assert pool.disputes[0]["opening"] is True
-    assert all("INSERT INTO dispute_events" in s for s in pool.writes)
+    assert len(rows) == 1
+    assert rows[0]["opening"] is True
 
 
-def test_an_unknown_dispute_reads_as_none_in_postgres() -> None:
-    pool = FakePool()
-    store = _pg(pool)
+def test_an_unknown_dispute_reads_as_none_in_postgres(pg: PostgresDisputeStore) -> None:
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+        return await pg.get_dispute("dsp_never"), await pg.find_dispute(JOB, 9)
 
-    assert asyncio.run(store.get_dispute("dsp_never")) is None
-    assert asyncio.run(store.find_dispute(JOB, 9)) is None
+    assert run(pg, go()) == (None, None)
 
 
-def test_a_duplicate_dispute_is_refused_by_the_index_and_answered_with_the_first() -> None:
+def test_a_duplicate_dispute_is_refused_by_the_index_and_answered_with_the_first(
+    pg: PostgresDisputeStore, pg_dsn: str
+) -> None:
     """The second insert conflicts with dispute_events_one_per_step_idx and does
     nothing, so the loser writes NO row — and the caller gets the dispute that
     already exists rather than a failure it cannot explain to the buyer."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    first = asyncio.run(store.open_dispute(a_dispute()))
+    async def go() -> tuple[DisputeRecord, Any, DisputeRecord | None, list[dict[str, Any]]]:
+        first = await pg.open_dispute(a_dispute())
+        try:
+            await pg.open_dispute(a_dispute(id="dsp_0002", reason="a second try"))
+        except DuplicateDisputeError as exc:
+            refused: Any = exc
+        else:
+            refused = None
+        return first, refused, await pg.get_dispute("dsp_0002"), await events(pg_dsn)
 
-    with pytest.raises(DuplicateDisputeError) as excinfo:
-        asyncio.run(store.open_dispute(a_dispute(id="dsp_0002", reason="a second try")))
+    first, refused, second, rows = run(pg, go())
 
-    assert excinfo.value.existing == first
-    assert len(pool.disputes) == 1
-    assert asyncio.run(store.get_dispute("dsp_0002")) is None
+    assert isinstance(refused, DuplicateDisputeError)
+    assert refused.existing == first
+    assert second is None
+    assert len(rows) == 1
 
 
-def test_a_different_step_or_job_is_not_refused_in_postgres() -> None:
+def test_a_different_step_or_job_is_not_refused_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """The index is on the PAIR — scoping it to the job alone would let one bad
     step block every other dispute of the same workflow."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> None:
-        await store.open_dispute(a_dispute())
-        await store.open_dispute(a_dispute(id="dsp_0002", step_index=1))
-        await store.open_dispute(a_dispute(id="dsp_0003", job_id_hex=OTHER_JOB))
+    async def go() -> list[dict[str, Any]]:
+        await pg.open_dispute(a_dispute())
+        await pg.open_dispute(a_dispute(id="dsp_0002", step_index=1))
+        await pg.open_dispute(a_dispute(id="dsp_0003", job_id_hex=OTHER_JOB))
+        return await events(pg_dsn)
 
-    asyncio.run(go())
-
-    assert len(pool.disputes) == 3
+    assert [row["dispute_id"] for row in run(pg, go())] == ["dsp_0001", "dsp_0002", "dsp_0003"]
 
 
-def test_a_task_s_disputes_are_listed_oldest_first_and_nobody_else_s() -> None:
-    pool = FakePool()
-    store = _pg(pool)
+def test_a_task_s_disputes_are_listed_oldest_first_and_nobody_else_s(pg: PostgresDisputeStore) -> None:
+    async def go() -> tuple[tuple[DisputeRecord, ...], tuple[DisputeRecord, ...]]:
+        await pg.open_dispute(a_dispute(id="dsp_0002", step_index=1, opened_at=1_700_000_200.0))
+        await pg.open_dispute(a_dispute())
+        await pg.open_dispute(a_dispute(id="dsp_0003", task_id="task_beta", job_id_hex=OTHER_JOB))
+        # A transition on the older one: the list shows each dispute's CURRENT
+        # state, once, not a row per event.
+        await pg.append_status("dsp_0001", "upheld")
+        return await pg.list_disputes_for_task(TASK), await pg.list_disputes_for_task("task_never")
 
-    async def go() -> tuple[DisputeRecord, ...]:
-        await store.open_dispute(a_dispute(id="dsp_0002", step_index=1, opened_at=1_700_000_200.0))
-        await store.open_dispute(a_dispute())
-        await store.open_dispute(a_dispute(id="dsp_0003", task_id="task_beta", job_id_hex=OTHER_JOB))
-        return await store.list_disputes_for_task(TASK)
-
-    listed = asyncio.run(go())
+    listed, nobody = run(pg, go())
 
     # Sorted by the moment each was opened, not by the order the rows landed.
-    assert [d.id for d in listed] == ["dsp_0001", "dsp_0002"]
-    assert asyncio.run(store.list_disputes_for_task("task_never")) == ()
+    assert [(d.id, d.status) for d in listed] == [("dsp_0001", "upheld"), ("dsp_0002", "open")]
+    assert nobody == ()
 
 
-def test_two_concurrent_disputes_of_one_step_produce_one_dispute() -> None:
-    """The race the index exists for, run as a race.
+def test_two_concurrent_disputes_of_one_step_produce_one_dispute(pg: PostgresDisputeStore, pg_dsn: str) -> None:
+    """The race the index exists for, run as a race: both inserts are in flight
+    on two connections at once. A guard that lived in Python would open two
+    disputes here and credit the buyer twice; the guard that lives in the index
+    lets exactly one row land and tells the other request which dispute already
+    owns the step. (Ten at once is in test_dispute_store_postgres.py.)"""
 
-    Both calls are in flight at once and the fake interleaves their statements
-    the way a pool does, so each one reaches the table having seen a step with
-    no dispute on it. A guard that lived in Python would open two disputes here
-    and credit the buyer twice; the guard that lives in the index lets exactly
-    one row land and tells the other request which dispute already owns the
-    step.
-    """
-    pool = FakePool()
-    store = _pg(pool)
-
-    async def go() -> list[Any]:
-        return await asyncio.gather(
-            store.open_dispute(a_dispute(id="dsp_first", reason="the first reason")),
-            store.open_dispute(a_dispute(id="dsp_second", reason="the second reason")),
+    async def go() -> tuple[list[Any], DisputeRecord | None, list[dict[str, Any]]]:
+        results = await asyncio.gather(
+            pg.open_dispute(a_dispute(id="dsp_first", reason="the first reason")),
+            pg.open_dispute(a_dispute(id="dsp_second", reason="the second reason")),
             return_exceptions=True,
         )
+        return list(results), await pg.find_dispute(JOB, 0), await events(pg_dsn)
 
-    results = asyncio.run(go())
+    results, found, rows = run(pg, go())
 
     opened = [r for r in results if isinstance(r, DisputeRecord)]
     refused = [r for r in results if isinstance(r, DuplicateDisputeError)]
@@ -1237,68 +1274,56 @@ def test_two_concurrent_disputes_of_one_step_produce_one_dispute() -> None:
     assert len(refused) == 1
     # One row written, and it is the winner's — not a row per request, and not
     # a row whose reason belongs to the request that lost.
-    assert len(pool.disputes) == 1
+    assert [row["dispute_id"] for row in rows] == [opened[0].id]
     assert refused[0].existing == opened[0]
-    assert asyncio.run(store.find_dispute(JOB, 0)) == opened[0]
+    assert found == opened[0]
 
 
 # ── status transitions, in Postgres ───────────────────────────────────────
 
 
-def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone() -> None:
+def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """The append-only rule at its most tempting breaking point: the obvious
     implementation of "mark this credited" is an UPDATE, and that would erase
     the evidence of what the dispute said when it was opened."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> DisputeRecord:
-        opened = await store.open_dispute(a_dispute())
-        return await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+    async def go() -> tuple[DisputeRecord | None, list[dict[str, Any]]]:
+        opened = await pg.open_dispute(a_dispute())
+        credited = await pg.append_status(opened.id, "credited", refund_tx="tx_refund")
+        return credited, await events(pg_dsn)
 
-    credited = asyncio.run(go())
+    credited, rows = run(pg, go())
 
-    assert credited.status == "credited"
+    assert credited is not None and credited.status == "credited"
     assert credited.refund_tx == "tx_refund"
-    assert len(pool.disputes) == 2
+    assert len(rows) == 2
     # The opening row still says exactly what it always said.
-    assert pool.disputes[0]["status"] == "open"
-    assert pool.disputes[0]["refund_tx"] is None
-    assert pool.disputes[0]["opening"] is True
+    assert rows[0]["status"] == "open"
+    assert rows[0]["refund_tx"] is None
+    assert rows[0]["opening"] is True
     # And the new row is NOT an opening, or it would collide with its own
     # dispute in the partial unique index.
-    assert pool.disputes[1]["opening"] is False
-    # `dispute_events` stays append-only. The only DELETE this path may issue
-    # is against `refund_claims`, which is a mutex rather than a record: it is
-    # meant to be released, and releasing it destroys no history. The lock
-    # statement is named out because `FOR UPDATE` carries the word without
-    # changing a row — it reads one and holds it.
-    assert not any(
-        ("UPDATE" in s or "DELETE" in s) and "refund_claims" not in s
-        for s in pool.statements
-        if s != dispute_store._LOCK_DISPUTE_SQL
-    )
+    assert rows[1]["opening"] is False
 
 
-def test_the_current_state_is_the_newest_row() -> None:
+def test_the_current_state_is_the_newest_row(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """Every read answers with the latest event, so a resolved dispute never
     reads as open again — and the immutable half of the record is carried
     forward by the SQL rather than restated by the caller."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, tuple[DisputeRecord, ...]]:
-        opened = await store.open_dispute(a_dispute())
-        await store.append_status(opened.id, "upheld")
-        await store.append_status(opened.id, "credited", refund_tx="tx_refund")
-        await store.append_status(opened.id, "credited", rating_tx="tx_rating")
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, tuple[DisputeRecord, ...], list[str]]:
+        opened = await pg.open_dispute(a_dispute())
+        await pg.append_status(opened.id, "upheld")
+        await pg.append_status(opened.id, "credited", refund_tx="tx_refund")
+        await pg.append_status(opened.id, "credited", rating_tx="tx_rating")
         return (
-            await store.get_dispute(opened.id),
-            await store.find_dispute(JOB, 0),
-            await store.list_disputes_for_task(TASK),
+            await pg.get_dispute(opened.id),
+            await pg.find_dispute(JOB, 0),
+            await pg.list_disputes_for_task(TASK),
+            await statuses(pg_dsn, opened.id),
         )
 
-    by_id, by_step, listed = asyncio.run(go())
+    by_id, by_step, listed, trail = run(pg, go())
 
     assert by_id is not None
     assert by_id.status == "credited"
@@ -1308,61 +1333,58 @@ def test_the_current_state_is_the_newest_row() -> None:
     assert by_id.charged_usdc == 1.5
     assert by_step == by_id
     # Four rows, one dispute: the list collapses a history to current states.
-    assert len(pool.disputes) == 4
+    assert trail == ["open", "upheld", "credited", "credited"]
     assert listed == (by_id,)
 
 
-def test_the_moment_a_dispute_resolved_is_stamped_once_and_never_moved() -> None:
+def test_the_moment_a_dispute_resolved_is_stamped_once_and_never_moved(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """From this process's clock, on the transition that first resolved it. A
     later event re-dating it would rewrite when the buyer was made whole."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> tuple[DisputeRecord, DisputeRecord]:
-        opened = await store.open_dispute(a_dispute())
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, list[dict[str, Any]]]:
+        opened = await pg.open_dispute(a_dispute())
         return (
-            await store.append_status(opened.id, "upheld"),
-            await store.append_status(opened.id, "credited", refund_tx="tx_refund"),
+            await pg.append_status(opened.id, "upheld"),
+            await pg.append_status(opened.id, "credited", refund_tx="tx_refund"),
+            await events(pg_dsn),
         )
 
     before = time.time()
-    upheld, credited = asyncio.run(go())
+    upheld, credited, rows = run(pg, go())
     after = time.time()
 
-    assert upheld.resolved_at is not None and before <= upheld.resolved_at <= after
-    assert credited.resolved_at == upheld.resolved_at
-    assert pool.disputes[-1]["resolved_at"] == upheld.resolved_at
+    assert upheld is not None and upheld.resolved_at is not None
+    assert before <= upheld.resolved_at <= after
+    assert credited is not None and credited.resolved_at == upheld.resolved_at
+    assert rows[-1]["resolved_at"] == upheld.resolved_at
 
 
-def test_a_caller_may_supply_the_moment_it_resolved() -> None:
-    pool = FakePool()
-    store = _pg(pool)
+def test_a_caller_may_supply_the_moment_it_resolved(pg: PostgresDisputeStore) -> None:
+    async def go() -> DisputeRecord | None:
+        opened = await pg.open_dispute(a_dispute())
+        return await pg.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
 
-    async def go() -> DisputeRecord:
-        opened = await store.open_dispute(a_dispute())
-        return await store.append_status(opened.id, "rejected", resolved_at=1_700_009_999.0)
+    rejected = run(pg, go())
 
-    assert asyncio.run(go()).resolved_at == 1_700_009_999.0
+    assert rejected is not None and rejected.resolved_at == 1_700_009_999.0
 
 
-def test_an_adjudicators_note_is_appended_and_read_back_in_postgres() -> None:
+def test_an_adjudicators_note_is_appended_and_read_back_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """The column, end to end: written by the transition that names it, carried
     forward by the one that does not, and never written onto the opening row
     the buyer's complaint lives on."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> tuple[DisputeRecord, DisputeRecord | None]:
-        opened = await store.open_dispute(a_dispute())
-        rejected = await store.append_status(opened.id, "rejected", note=NOTE)
-        await store.append_status(opened.id, "rejected", rating_tx="tx_rating")
-        return rejected, await store.get_dispute(opened.id)
+    async def go() -> tuple[DisputeRecord | None, DisputeRecord | None, list[dict[str, Any]]]:
+        opened = await pg.open_dispute(a_dispute())
+        rejected = await pg.append_status(opened.id, "rejected", note=NOTE)
+        await pg.append_status(opened.id, "rejected", rating_tx="tx_rating")
+        return rejected, await pg.get_dispute(opened.id), await events(pg_dsn)
 
-    rejected, stored = asyncio.run(go())
+    rejected, stored, rows = run(pg, go())
 
-    assert rejected.note == NOTE
+    assert rejected is not None and rejected.note == NOTE
     assert stored is not None and stored.note == NOTE and stored.rating_tx == "tx_rating"
-    assert [row["note"] for row in pool.disputes] == [None, NOTE, NOTE]
+    assert [row["note"] for row in rows] == [None, NOTE, NOTE]
 
 
 def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
@@ -1370,7 +1392,8 @@ def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
     IF NOT EXISTS does nothing whatever to a table that is already there. This
     ALTER is the whole of the deploy for this column, since the repo has no
     migration tool, and without it the first INSERT naming `note` would fail
-    every dispute write on a service that had already run once."""
+    every dispute write on a service that had already run once. The migration
+    itself is run against a 4.02 table in test_dispute_store_postgres.py."""
     ddl = dispute_store._CREATE_DISPUTES_SQL
 
     assert "ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT" in ddl
@@ -1378,16 +1401,13 @@ def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
     assert any(line.strip().startswith("note ") for line in ddl.splitlines())
 
 
-def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres() -> None:
+def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """`INSERT ... SELECT FROM latest` writes nothing when there is no history,
     so the store says so instead of inventing a dispute out of an id."""
-    pool = FakePool()
-    store = _pg(pool)
-
     with pytest.raises(KeyError):
-        asyncio.run(store.append_status("dsp_never", "upheld"))
+        run(pg, pg.append_status("dsp_never", "upheld"))
 
-    assert pool.disputes == []
+    assert asyncio.run(events(pg_dsn)) == []
 
 
 def test_the_precondition_is_a_clause_of_the_writing_statement() -> None:
@@ -1403,71 +1423,68 @@ def test_the_precondition_is_a_clause_of_the_writing_statement() -> None:
     assert sql.index("FROM latest\nWHERE $10::text") > sql.index("INSERT INTO dispute_events")
 
 
-def test_a_stale_transition_writes_no_row_in_postgres() -> None:
+def test_a_stale_transition_writes_no_row_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """The append-only trail is the evidence a chargeback is answered with, so
     a refused transition must leave no trace in it — not a row recording a
     verdict the store declined to accept."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> DisputeRecord | None:
-        opened = await store.open_dispute(a_dispute())
-        await store.append_status(opened.id, "rejected", note=NOTE)
-        return await store.append_status(opened.id, "upheld", expected_status="open")
+    async def go() -> tuple[DisputeRecord | None, list[str]]:
+        opened = await pg.open_dispute(a_dispute())
+        await pg.append_status(opened.id, "rejected", note=NOTE)
+        refused = await pg.append_status(opened.id, "upheld", expected_status="open")
+        return refused, await statuses(pg_dsn, opened.id)
 
-    refused = asyncio.run(go())
+    refused, trail = run(pg, go())
 
     assert refused is None
-    assert [row["status"] for row in pool.disputes] == ["open", "rejected"]
+    assert trail == ["open", "rejected"]
 
 
-def test_a_refused_transition_is_told_apart_from_an_unknown_dispute() -> None:
-    """RETURNING is empty for both, so the store reads the id back to say which
-    — and pays for that read only on the path that has already failed."""
-    pool = FakePool()
-    store = _pg(pool)
+def test_a_refused_transition_is_told_apart_from_an_unknown_dispute(pg: PostgresDisputeStore) -> None:
+    """RETURNING is empty for both, so the store's lock statement — which finds
+    the opening row or does not — is what says which."""
 
     async def go() -> DisputeRecord | None:
-        opened = await store.open_dispute(a_dispute())
-        await store.append_status(opened.id, "upheld")
-        return await store.append_status(opened.id, "credited", expected_status="open")
+        opened = await pg.open_dispute(a_dispute())
+        await pg.append_status(opened.id, "upheld")
+        return await pg.append_status(opened.id, "credited", expected_status="open")
 
-    assert asyncio.run(go()) is None
+    assert run(pg, go()) is None
 
     with pytest.raises(KeyError):
-        asyncio.run(store.append_status("dsp_never", "credited", expected_status="open"))
+        run(pg, pg.append_status("dsp_never", "credited", expected_status="open"))
 
 
 # ── two transitions at once ───────────────────────────────────────────────
 
 
-def test_two_concurrent_transitions_do_not_lose_each_other_s_facts() -> None:
+@pytest.mark.parametrize("round_", range(5))
+def test_two_concurrent_transitions_do_not_lose_each_other_s_facts(pg: PostgresDisputeStore, round_: int) -> None:
     """The lost update, on the module's own example: a credit and a rating
-    landing together.
+    landing together, on two connections at once.
 
     Both statements read the dispute's newest row, and each writes a row
-    COALESCEd against what it read. Running at once — at READ COMMITTED,
-    without a lock — they read the SAME row, and the one that commits second
-    carries forward a record that never knew about the first. The buyer's
-    receipt then shows a rating and no refund hash, for a refund that was paid.
+    COALESCEd against what it read. At READ COMMITTED, without a lock, they can
+    read the SAME row, and the one that commits second carries forward a record
+    that never knew about the first. The buyer's receipt then shows a rating and
+    no refund hash, for a refund that was paid.
 
-    The fake models that window (see `_append_status`); what closes it is the
-    row lock, which makes the second append read `latest` only after the first
-    has written it."""
-    pool = FakePool()
-    store = _pg(pool)
+    What closes it is the row lock, which makes the second append read `latest`
+    only after the first has written it. A race is not a proof, so it runs a few
+    rounds here; test_dispute_store_postgres.py holds the lock from a second
+    transaction to make the same point deterministically."""
 
     async def go() -> DisputeRecord | None:
-        opened = await store.open_dispute(a_dispute())
-        await store.append_status(opened.id, "upheld")
-        await store.claim_refund(opened.id)
+        opened = await pg.open_dispute(a_dispute())
+        await pg.append_status(opened.id, "upheld")
+        await pg.claim_refund(opened.id)
         await asyncio.gather(
-            store.append_status(opened.id, "credited", refund_tx="tx_paid", credited_usdc=1.5),
-            store.append_status(opened.id, "credited", rating_tx="tx_rating", rating_confirmed=True),
+            pg.append_status(opened.id, "credited", refund_tx="tx_paid", credited_usdc=1.5),
+            pg.append_status(opened.id, "credited", rating_tx="tx_rating", rating_confirmed=True),
         )
-        return await store.get_dispute(opened.id)
+        return await pg.get_dispute(opened.id)
 
-    final = asyncio.run(go())
+    final = run(pg, go())
 
     assert final is not None
     # Every fact either transition recorded is still on the record.
@@ -1477,31 +1494,29 @@ def test_two_concurrent_transitions_do_not_lose_each_other_s_facts() -> None:
     assert final.rating_confirmed is True
 
 
-def test_two_concurrent_adjudications_produce_exactly_one_verdict() -> None:
-    """Two adjudicators, one dispute, both deciding from the same `open` read.
+def test_two_concurrent_adjudications_produce_exactly_one_verdict(pg: PostgresDisputeStore, pg_dsn: str) -> None:
+    """Two adjudicators, one dispute, both deciding from the same `open` read,
+    on two connections at once.
 
     The precondition can only refuse the second if the second READS what the
     first wrote, and at READ COMMITTED a statement that started first never
     will. The lock is what orders them: the loser wakes, reads the verdict
     already recorded, and declines to write over it."""
-    pool = FakePool()
-    store = _pg(pool)
 
-    async def go() -> list[DisputeRecord | None]:
-        opened = await store.open_dispute(a_dispute())
-        return list(
-            await asyncio.gather(
-                store.append_status(opened.id, "upheld", expected_status="open"),
-                store.append_status(opened.id, "rejected", note=NOTE, expected_status="open"),
-            )
+    async def go() -> tuple[list[DisputeRecord | None], list[str]]:
+        opened = await pg.open_dispute(a_dispute())
+        results = await asyncio.gather(
+            pg.append_status(opened.id, "upheld", expected_status="open"),
+            pg.append_status(opened.id, "rejected", note=NOTE, expected_status="open"),
         )
+        return list(results), await statuses(pg_dsn, opened.id)
 
-    results = asyncio.run(go())
+    results, trail = run(pg, go())
     written = [record for record in results if record is not None]
 
     assert len(written) == 1
     # One verdict on the trail, beside the opening row — not two.
-    assert [row["status"] for row in pool.disputes] == ["open", written[0].status]
+    assert trail == ["open", written[0].status]
 
 
 # ── the pool ──────────────────────────────────────────────────────────────
