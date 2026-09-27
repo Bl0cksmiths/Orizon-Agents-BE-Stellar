@@ -263,3 +263,30 @@ def test_an_unfinished_dispute_keeps_its_settlement_far_past_the_cap(
     claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
     assert claims == (["dsp_owed"] if status == "crediting" else [])
     assert not [r for r in caplog.records if r.name == STORE_LOGGER and r.levelno >= logging.ERROR]
+
+
+def test_a_settlement_is_sheddable_again_once_its_dispute_is_credited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the payout is recorded as landed nothing is owed, so the pin goes
+    with it: the next insertion sheds that settlement, with its dispute, like
+    any other. No sweep is needed for that to happen."""
+    monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", 2)
+    store = InMemoryDisputeStore()
+
+    async def fill() -> None:
+        await store.record_settlement(_settlement(0))
+        await store.open_dispute(_dispute("dsp_paid", 0, 0))
+        await _bring_to(store, "dsp_paid", "crediting")
+        for n in range(1, 4):
+            await store.record_settlement(_settlement(n))
+
+    asyncio.run(fill())
+    assert list(store._settlements) == [_job(0), _job(3)]
+
+    asyncio.run(store.append_status("dsp_paid", "credited", refund_tx="tx_refund", credited_usdc=1.0))
+    assert list(store._settlements) == [_job(0), _job(3)], "a transition alone sheds nothing"
+
+    asyncio.run(store.record_settlement(_settlement(4)))
+
+    assert list(store._settlements) == [_job(3), _job(4)]
+    assert asyncio.run(store.get_dispute("dsp_paid")) is None
+    assert asyncio.run(store.list_refund_claims()) == ()
