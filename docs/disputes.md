@@ -367,6 +367,20 @@ A rejected dispute writes nothing on-chain at all. It stays on the record,
 with its reason, as part of the agent's history with that buyer — not as part
 of its score.
 
+**After a script uphold.** `scripts/uphold_dispute.py` writes the rating from
+its own process, so the running service keeps the agent's previous score for
+up to its `REPUTATION_READ_TTL_SECONDS`. Pass `--service-url https://<service>`
+(or set `UPHOLD_SERVICE_URL`) with `API_KEY` set to the deployment's operator
+key, and the script calls `POST /api/stellar/reputation/{agent_id}/invalidate`
+once the rating is written. Without them it prints that the service was not
+told and names the TTL. A failed call is a warning only: the credit and the
+rating stand, and the exit code keeps its meaning. The route is operator-only,
+fails closed when `API_KEY` is empty, is not gated on `DISPUTE_REFUNDS_ENABLED`
+— the script pays from its own process precisely so a deployment can leave
+that switch off — and allows 30 calls a minute. It drops this process's cache
+only, which is the whole service under `--workers 1`; a multi-worker
+deployment would need shared invalidation.
+
 ## The lifecycle
 
 A dispute has one status at a time, and it only ever moves forward. The record
