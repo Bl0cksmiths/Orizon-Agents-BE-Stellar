@@ -1115,6 +1115,10 @@ async def decompose(intent: str) -> DecomposeResponse:
         plan=Plan(steps=cleaned),
         total_usdc=total_price,
         total_eta=total_eta,
+        notices=shortlist.notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
+        planner_fallback=planner_fallback,
     )
     state.add_plan(stored)
 
