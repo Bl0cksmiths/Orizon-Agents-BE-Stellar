@@ -164,6 +164,12 @@ class StoredPlan(BaseModel):
     plan: Plan
     total_usdc: float
     total_eta: float
+    # Unix epoch seconds, like `TaskSummary.started_at`. `/execute` refuses a
+    # plan older than its TTL (`execution_svc.PLAN_TTL_SECONDS`): the card the
+    # buyer authorised stamps prices, reputation and notices at this instant,
+    # and without a clock a plan stayed executable until 200 newer ones pushed
+    # it out of the store — hours, on a quiet deployment.
+    created_at: float = Field(default_factory=time.time)
 
 
 # Why the floor acted on an agent — a CLOSED set, because the plan card renders
