@@ -517,6 +517,11 @@ class Settings(BaseSettings):
             adjudicator's say-so; not a number is no ceiling at all, and zero
             or below refuses every credit, which is a refund path switched off
             by a typo rather than by `DISPUTE_REFUNDS_ENABLED`.
+          * `MAX_CHARGE_USDC` — finite and strictly above zero. The ceiling on
+            one `PaymentEscrow.charge`, which `execution_svc` and
+            `/api/stellar/server/charge` both compare against; not a number
+            lets every plan total through uncapped, and zero or below skips
+            the charge, the seal and the ratings of every paid run.
 
         Raised rather than logged, for the reason the reputation bounds are:
         what it prevents is silent, and a refused deploy cannot be missed.
@@ -532,6 +537,13 @@ class Settings(BaseSettings):
                 "MAX_REFUND_USDC is not a finite number of USDC above zero — it is the ceiling on ONE credit "
                 "the platform pays from its own wallet, a ceiling that is not a finite number compares false "
                 "against every amount and so bounds nothing, and one at or below zero refuses every credit"
+            )
+        charge_cap = self.max_charge_usdc
+        if not (math.isfinite(charge_cap) and charge_cap > 0):
+            faults.append(
+                "MAX_CHARGE_USDC is not a finite number of USDC above zero — it is the ceiling on ONE "
+                "PaymentEscrow.charge, a ceiling that is not a finite number lets every plan total through "
+                "uncapped, and one at or below zero skips the charge and the seal of every paid run"
             )
         if faults:
             raise ValueError(
