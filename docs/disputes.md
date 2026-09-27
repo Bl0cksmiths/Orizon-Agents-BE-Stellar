@@ -786,8 +786,14 @@ rejects. It is also the reconciliation queue, which is the section below.
 the whole of this document becomes true only until the next restart — which a
 free-tier instance performs whenever it idles. The fallback is there so local
 development and the test suite need no database; it is not a deployment. It
-says so once at startup, and it logs a warning naming any record it drops, so a
-window that can no longer be honoured is never silent.
+is bounded, and it sheds whole settlements — a settlement leaves together with
+every dispute and refund claim under it, never a dispute on its own, so a step
+whose settlement it still holds can never be disputed a second time. It never
+sheds a settlement while any of its disputes is unfinished (`open`, `upheld`
+or `crediting`): each of those is something still owed. If everything over
+its cap is unfinished, it grows past the cap and logs an ERROR rather than
+forget one. It logs a warning naming every settlement and dispute it does
+shed, so a window that can no longer be honoured is never silent.
 
 One read is weaker than the records behind it. With `TASK_AUTH_REQUIRED` on,
 `GET /api/tasks/{task_id}/disputes` is gated by the task's read token, and
