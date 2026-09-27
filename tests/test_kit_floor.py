@@ -44,6 +44,34 @@ def _sub_floor(agent_id: str, *, smoothed: int = 4000) -> RepInfo:
     )
 
 
+def _clears(agent_id: str) -> RepInfo:
+    """A rated entry comfortably over the 5500 floor."""
+    return RepInfo(
+        agent_id=agent_id,
+        smoothed_bps=8000,
+        lower_bound_bps=8000,
+        avg_bps=8000,
+        count=5,
+        weight=5 * 10_000_000,
+        disputed=0,
+        dispute_rate_bps=0,
+        source="onchain",
+    )
+
+
+def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
+    """A snapshot that scores EVERY registry agent: `overrides` over clearing entries.
+
+    Never a partial map. An agent left out of the snapshot used to reach
+    `passes_floor(None)`, which admits it without consulting the floor, so a
+    test built on a partial map passed whatever the floor said about the
+    agents it forgot — the substitute below was chosen with no score at all.
+    """
+    reps = {a.id: _clears(a.id) for a in state.list_agents()}
+    reps.update(overrides)
+    return reps
+
+
 @pytest.fixture()
 def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     """Fresh 12-agent registry, restored after; kit thinking-sleep no-op'd."""
@@ -56,16 +84,17 @@ def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     state.agents.update(saved)
 
 
-def _run_kit(reps: dict[str, RepInfo]) -> orchestrator_svc.DecomposeResponse:
+def _run_kit(overrides: dict[str, RepInfo]) -> orchestrator_svc.DecomposeResponse:
+    """The kit plan for a FULL snapshot: every agent scored, `overrides` on top."""
     kit = detect_kit(KIT_INTENT)
     assert kit is not None
-    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, _scored(overrides)))
 
 
 def test_sub_floor_agent_is_excluded_from_kit_plan(seeded: object) -> None:
     # agt_02k2 (design.figma) has no off-pipeline agent sharing its skills, so
     # a sub-floor rating drops it outright. The other five roles clear the
-    # floor (cold start), so the backstop never fires.
+    # floor on their own scores, so the backstop never fires.
     resp = _run_kit({"agt_02k2": _sub_floor("agt_02k2")})
 
     ids = [s.agent_id for s in resp.steps]
@@ -76,7 +105,7 @@ def test_sub_floor_agent_is_excluded_from_kit_plan(seeded: object) -> None:
 
 def test_sub_floor_agent_is_substituted_and_surfaced(seeded: object) -> None:
     # agt_05x7 (seo.brief) shares the "seo" skill with off-pipeline agt_01h8
-    # (copywrite.v3), which clears the floor at cold start — so the role is
+    # (copywrite.v3), which clears the floor on its own score — so the role is
     # filled by a substitute rather than dropped, and the swap is recorded.
     resp = _run_kit({"agt_05x7": _sub_floor("agt_05x7")})
 
@@ -87,6 +116,8 @@ def test_sub_floor_agent_is_substituted_and_surfaced(seeded: object) -> None:
 
     step = next(s for s in resp.steps if s.agent_id == "agt_01h8")
     assert step.substituted_for == "agt_05x7"
+    # Judged on its own evidence, which the step carries.
+    assert step.rep_lower_bound_bps == 8000
 
     note = next(n for n in resp.notices if n.kind == "substituted")
     assert note.agent_id == "agt_05x7"
@@ -124,7 +155,7 @@ def test_kit_path_applies_floor_without_calling_the_llm(seeded: object, monkeypa
 
     monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
 
-    reps = {"agt_05x7": _sub_floor("agt_05x7")}
+    reps = _scored({"agt_05x7": _sub_floor("agt_05x7")})
 
     async def _fake_reps(_ids: object, *_a: object, **_k: object) -> dict[str, RepInfo]:
         return reps
@@ -218,7 +249,7 @@ def test_backstop_re_admits_code_gen_before_higher_scored_roles(seeded: object) 
 
 
 def test_re_admitted_kit_steps_keep_their_pipeline_position(seeded: object) -> None:
-    # code.gen clears the floor (no entry == cold start) and every other role
+    # code.gen clears the floor on its own score and every other role
     # is dropped, so the backstop re-admits two: tokens and research, the two
     # best scores. Appended after the loop they used to land AFTER code.gen,
     # and execution runs steps in list order — code.gen would build before the
