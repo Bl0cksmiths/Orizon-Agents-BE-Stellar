@@ -88,3 +88,30 @@ def test_the_postgres_store_is_named_at_boot_before_any_request(
     message = lines[0].getMessage()
     assert "dispute store: postgres" in message
     assert "dsn-password-7c1e" not in message and "db.internal.example" not in message
+
+
+# ── /readiness ─────────────────────────────────────────────────────────────
+
+
+def test_readiness_reports_memory_with_no_database_url() -> None:
+    with TestClient(app) as client:
+        body = client.get("/readiness").json()
+
+    assert body["disputes"] == {"store": "memory"}
+
+
+def test_readiness_reports_postgres_with_a_database_url_and_never_the_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No database exists here, and none is needed: the probe reports the
+    store this process SELECTED, which is what D-058's check asks, and it
+    dials nothing to do it (the driver import is booby-trapped above). No
+    part of the DSN — password, host, user, database — may reach an
+    unauthenticated route."""
+    monkeypatch.setattr(settings, "database_url", DSN)
+    with TestClient(app) as client:
+        response = client.get("/readiness")
+
+    assert response.json()["disputes"] == {"store": "postgres"}
+    for fragment in ("dsn-password-7c1e", "db.internal.example", "orizon:", "postgresql://", "5432"):
+        assert fragment not in response.text
