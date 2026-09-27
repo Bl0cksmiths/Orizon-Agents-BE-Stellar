@@ -447,6 +447,23 @@ def test_a_credited_disputes_recorded_rating_is_never_previewed_as_landed(
     assert "RATED" not in out
 
 
+def test_a_confirmed_rating_is_previewed_as_confirmed(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
+) -> None:
+    """The preview said "NOT confirmed" even when the record carried
+    `rating_confirmed=True` — the ledger's own word that the rating landed."""
+    forbid_uphold(monkeypatch)
+    dispute = seed(status="credited", refund_tx=REFUND_TX, rating_tx=RATING_TX)
+    asyncio.run(dispute_store.get_dispute_store().append_status(dispute.id, "credited", rating_confirmed=True))
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert f"rating tx:  {RATING_TX}" in out
+    assert "on record, CONFIRMED" in out
+    assert "NOT confirmed" not in out
+
+
 def test_a_credited_dispute_with_no_refund_hash_is_still_refused(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, credit: CreditSeam
 ) -> None:
