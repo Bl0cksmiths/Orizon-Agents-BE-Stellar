@@ -559,6 +559,52 @@ def test_a_transaction_that_is_not_this_dispute_s_refund_is_never_acted_on(
     assert unchanged
 
 
+def _tagged(dispute_id: str) -> str:
+    """The payer's M address carrying `dispute_id`'s refund id, as a refund pays it."""
+    return scval.from_address(sc.muxed_addr(PAYER, refund_svc.refund_muxed_id(dispute_id))).address
+
+
+@pytest.mark.parametrize(
+    ("status", "action"),
+    [("SUCCESS", "credited"), ("FAILED", "released")],
+    ids=["landed", "failed"],
+)
+def test_a_refund_tagged_with_this_dispute_is_this_dispute_s_refund(
+    store: DisputeStore, chain: Chain, status: str, action: str
+) -> None:
+    """A refund pays the payer's G address muxed with the dispute's refund id
+    (`refund_svc.refund_muxed_id`), so the chain's copy names an M address, not
+    the payer's G. That is this dispute's refund and is settled like one."""
+    tx_hash, envelope = a_refund_envelope(stroops=500_000, to=_tagged(a_dispute().id))
+    chain.answers[tx_hash] = an_answer(tx_hash, status, envelope=envelope)
+
+    async def go() -> Decision:
+        await in_flight(store, tx_hash)
+        return await decide(store)
+
+    decision = run(store, go())
+
+    assert decision.action == action, decision
+
+
+def test_a_refund_tagged_with_another_dispute_is_never_acted_on(store: DisputeStore, chain: Chain) -> None:
+    """The same payer muxed with ANOTHER dispute's id is that dispute's credit.
+    Recording it here would close this dispute over money paid for another."""
+    tx_hash, envelope = a_refund_envelope(stroops=500_000, to=_tagged("dsp_" + "f" * 32))
+    chain.answers[tx_hash] = an_answer(tx_hash, "SUCCESS", envelope=envelope)
+
+    async def go() -> tuple[Decision, bool]:
+        parked = await in_flight(store, tx_hash)
+        before = (await store.get_dispute(parked.id), await store.list_refund_claims())
+        decision = await decide(store)
+        return decision, before == (await store.get_dispute(parked.id), await store.list_refund_claims())
+
+    decision, unchanged = run(store, go())
+
+    assert decision.action == "not_this_refund", decision
+    assert unchanged
+
+
 def test_an_answer_about_another_transaction_is_never_acted_on(store: DisputeStore, chain: Chain) -> None:
     """The RPC's envelope must hash to the hash that was asked about: an
     answer carrying some other transaction — even a perfectly good refund to
