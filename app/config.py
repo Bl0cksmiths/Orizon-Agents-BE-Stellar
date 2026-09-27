@@ -395,6 +395,15 @@ class Settings(BaseSettings):
     # budget for every visitor. 30 keeps a demo or a QA run clear of it while
     # still bounding spend; tune it down once the key is truly per-visitor.
     decompose_rate_limit_per_minute: int = 30
+    # Dispute challenges one client may mint per minute (POST
+    # /api/disputes/challenge), keyed by the same client_key(). Every mint that
+    # takes a slot holds it for five minutes out of a 200-slot `dispute` budget,
+    # so an unbounded client could fill that budget alone; at 20 a minute one
+    # client holds at most 100. A buyer disputes one step at a time, and a
+    # re-mint of a live challenge returns the same nonce, so no honest flow
+    # comes near it. A breach is 429 "dispute_challenge_rate_limited" with
+    # Retry-After; 0 disables it. Same TRUSTED_PROXY_HOPS caveat as above.
+    dispute_challenge_rate_limit_per_minute: int = 20
     # Most agents listed in the planning prompt. Prompt tokens per planner call
     # grew with every bound agent; past this many that cleared the floor, the
     # best-scored are listed. Never below the starvation backstop's minimum.

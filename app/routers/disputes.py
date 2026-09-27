@@ -42,12 +42,19 @@ import logging
 import time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..security import CodedHTTPException, ErrorEnvelope, request_id_var, require_adjudicator
+from ..security import (
+    CodedHTTPException,
+    ErrorEnvelope,
+    KeyedRateLimiter,
+    client_key,
+    request_id_var,
+    require_adjudicator,
+)
 from ..services import dispute_read, dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
@@ -76,6 +83,16 @@ _TASK_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 # real check is that the settlement record actually has such a step, which only
 # the service can make.
 _MAX_STEP_INDEX = 63
+
+
+# Per-client budget for the dispute challenge mint, on top of the global
+# limiter. The service refuses a mint for any step that could not be disputed,
+# which leaves only steps inside their window — but those are still public, and
+# each mint holds one of the `dispute` purpose's 200 slots for five minutes. So
+# one client may spend only a slice of it. Counted before the service is asked,
+# so a refused mint costs the caller as much as an admitted one: a stranger
+# probing for slots pays for every probe.
+_challenge_limiter = KeyedRateLimiter(lambda: settings.dispute_challenge_rate_limit_per_minute)
 
 
 class DisputeChallengeReq(BaseModel):
@@ -585,7 +602,7 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
     response_model=DisputeChallengeResponse,
     summary="Mint a dispute challenge to sign",
 )
-async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeResponse:
+async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> DisputeChallengeResponse:
     """Issue the nonce and the exact string the payer's wallet must sign.
 
     The handler itself decides nothing: it validates the two fields, calls the
@@ -605,7 +622,14 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
     anonymous caller how long ago somebody started disputing a step they can
     name. The idempotency stays — it is what keeps a flood from cancelling the
     nonce a buyer is mid-way through signing — and only the clock is blurred.
+
+    One client may mint `DISPUTE_CHALLENGE_RATE_LIMIT_PER_MINUTE` a minute
+    (`_challenge_limiter`); past it, 429 `dispute_challenge_rate_limited` with
+    Retry-After, before the settlement is read.
     """
+    retry_after = _challenge_limiter.hit(client_key(dict(request.scope)))
+    if retry_after is not None:
+        raise HTTPException(429, "dispute_challenge_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
         nonce, expires_at = await dispute_svc.issue_dispute_challenge(body.job_id_hex, body.step_index)
     except dispute_svc.DisputeError as e:
