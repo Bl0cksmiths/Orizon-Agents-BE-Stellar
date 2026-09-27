@@ -618,6 +618,47 @@ def test_a_reason_of_control_characters_alone_is_no_reason() -> None:
     assert refused.value.code == "reason_invalid"
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "\u200b",  # zero-width space
+        "\u200c\u2060",  # zero-width non-joiner, word joiner
+        "\ufeff",  # byte-order mark
+        "\u00ad",  # soft hyphen
+        "\u202e",  # right-to-left override
+        "\u3164",  # Hangul filler
+        "\u2800",  # braille blank
+        "\x85\x9b",  # C1 controls
+        "\u2066\u00a0\u2069",  # an isolate around a no-break space
+    ],
+    ids=["zwsp", "zwnj-wj", "bom", "soft-hyphen", "rlo", "hangul-filler", "braille-blank", "c1", "isolate-nbsp"],
+)
+def test_a_reason_nobody_can_see_is_no_reason(reason: str) -> None:
+    """D-059: each of these displays as nothing, and each used to open a
+    dispute an adjudicator would have to rule on with nothing to read."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason=reason)
+
+    assert (refused.value.code, refused.value.status_code) == ("reason_invalid", 422)
+    assert asyncio.run(dispute_svc.list_for_task(TASK)) == ()
+
+
+def test_c1_controls_and_bidi_overrides_are_stripped_from_a_stored_reason() -> None:
+    """D-059: the docstring promised C1 was stripped and it was not — `\\x9b`
+    is a one-byte CSI to a terminal. A bidi override reorders how the rest of
+    the reason displays, so an adjudicator could read something else."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    record = _open(payer, reason="late\x9b31m and \x85wrong \u202eeht\u202c done")
+
+    assert not any(ch in record.reason for ch in "\x9b\x85\u202e\u202c")
+    assert record.reason == "late 31m and  wrong eht done"
+
+
 def test_control_characters_are_stripped_from_a_stored_reason() -> None:
     """The reason is read back into an API response, shown in the console and
     quoted in the receipt. Tab and newline survive — a buyer may write a
@@ -630,6 +671,45 @@ def test_control_characters_are_stripped_from_a_stored_reason() -> None:
     assert "\x00" not in record.reason and "\x1b" not in record.reason
     assert "\n" in record.reason
     assert record.reason.startswith("step one")
+
+
+def test_a_reason_past_the_limit_is_refused_and_never_cut() -> None:
+    """D-062: it used to be trimmed to the limit and marked `…[truncated]`,
+    storing words the buyer did not write in place of ones they did. Refused
+    before the proof, so the buyer can shorten it and resend the same nonce."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+    signature = _sign(payer, dispute_message(JOB, 0, nonce))
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason="x" * (dispute_svc.MAX_REASON_CHARS + 1), nonce=nonce, signature=signature)
+
+    assert (refused.value.code, refused.value.status_code) == ("reason_invalid", 422)
+    assert str(dispute_svc.MAX_REASON_CHARS) in refused.value.message
+    assert eb.dispute_challenge_is_live(JOB, 0, nonce) is True
+
+
+def test_a_reason_at_the_limit_is_stored_whole() -> None:
+    """D-062: `"x"*490 + " END ABCD"` is 499 characters; the prompt-fence
+    redaction rewrote it to 513 and then cut it. Nothing is rewritten now."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    reason = "x" * 490 + " END ABCD"
+
+    assert len(_open(payer, reason=reason).reason) == 499
+    assert _open(payer, step=1, reason="y" * dispute_svc.MAX_REASON_CHARS).reason == "y" * dispute_svc.MAX_REASON_CHARS
+
+
+def test_ordinary_upper_case_words_are_stored_as_written() -> None:
+    """D-062: `THE END RESULT` was stored as `THE [redacted marker]` — the
+    prompt-fence defence redacting a marker that no prompt ever reads, since
+    a reason never reaches a model."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    reason = "THE END RESULT WAS WRONG and BEGIN SECTION was missing ==== entirely"
+
+    assert _open(payer, reason=reason).reason == reason
 
 
 # ── the refusal type itself ─────────────────────────────────────
