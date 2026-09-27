@@ -313,6 +313,15 @@ class Settings(BaseSettings):
     pdax_ramp_min_php: float = 200
     pdax_ramp_quote_reference_php: str = "1000"
 
+    # ── Planner spend (/decompose) ────────────────────────────
+    # Every free-form decompose is one real LLM call; the demo-kit path makes
+    # none and is never limited here. decompose_max_concurrent bounds how
+    # many run at once, and this bounds how many may WAIT for a slot. Waiters
+    # used to queue without limit, each holding a connection for up to
+    # decompose_timeout_seconds; past this many, a request is refused at once
+    # with 503 "planner_busy" instead of joining the queue.
+    decompose_max_queued: int = 16
+
     @model_validator(mode="after")
     def _mainnet_requires_mainnet_passphrase(self) -> "Settings":
         """Fail fast on a half-flipped mainnet config.

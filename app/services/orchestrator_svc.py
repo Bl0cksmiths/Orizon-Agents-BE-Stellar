@@ -5,6 +5,9 @@ import logging
 import random
 import re
 import secrets
+from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
 
 from agno.run.base import RunStatus
@@ -45,22 +48,93 @@ class NoRoutableAgentsError(RuntimeError):
     """
 
 
+class PlannerBusyError(RuntimeError):
+    """Every planning slot is taken and the wait queue is full.
+
+    The request was fine and the condition clears as soon as a planning call
+    finishes, so this is a retryable 503 — refused at once, before it holds a
+    connection in a queue it would most likely time out of anyway.
+    """
+
+
+class _PlanGate:
+    """Concurrency gate on the free-form planning call, with a BOUNDED wait queue.
+
+    `limit` calls run at once; up to `max_waiting` more wait for a slot, first
+    come first served, and anything past that raises `PlannerBusyError`. The
+    queue used to be unbounded: every waiter held a connection for up to the
+    whole decompose budget, so a burst bought a pile of stalled requests and
+    then a pile of planning calls.
+
+    Not an `asyncio.Semaphore`, which binds itself to the first event loop a
+    waiter contends on and then raises in any other — harmless in production's
+    single loop, and a trap for every test that plans under contention in a
+    second `asyncio.run`. The waiters here are futures created on whichever
+    loop is running at the time, so nothing outlives the loop it waited on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.in_flight = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    @property
+    def waiting(self) -> int:
+        return sum(1 for w in self._waiters if not w.done())
+
+    def locked(self) -> bool:
+        """Whether a new caller would have to wait for a slot."""
+        return self.in_flight >= self.limit or self.waiting > 0
+
+    def _release(self) -> None:
+        # Hand the slot straight to the next live waiter, so a newcomer can
+        # never jump the queue between a release and the waiter waking up.
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+        self.in_flight -= 1
+
+    @asynccontextmanager
+    async def slot(self, max_waiting: int) -> AsyncIterator[None]:
+        if self.locked():
+            if self.waiting >= max_waiting:
+                raise PlannerBusyError(f"{self.in_flight} planning call(s) running and {self.waiting} waiting")
+            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._waiters.append(waiter)
+            try:
+                await waiter
+            except BaseException:
+                # Cancelled or timed out while queued. If a release had
+                # already handed this caller the slot, pass it on; otherwise
+                # just leave the queue.
+                if waiter.done() and not waiter.cancelled():
+                    self._release()
+                elif waiter in self._waiters:
+                    self._waiters.remove(waiter)
+                raise
+        else:
+            self.in_flight += 1
+        try:
+            yield
+        finally:
+            self._release()
+
+
 # Gate on the free-form planning LLM call. /execute's fan-out is bounded by
 # orchestrator_max_concurrent (execution_svc); this is the same protection for
-# /decompose, whose non-kit path makes a real LLM call per request while the
-# rate limiter spends one shared bucket. Sized at call time from settings like
-# execute_plan's ceiling — the semaphore is rebuilt only when the configured
-# limit changes (production never does; tests tune it).
-_plan_gate: asyncio.Semaphore | None = None
-_plan_gate_limit: int | None = None
+# /decompose, whose non-kit path makes a real LLM call per request. Sized at
+# call time from settings like execute_plan's ceiling — rebuilt only when the
+# configured limit changes (production never does; tests tune it).
+_plan_gate: _PlanGate | None = None
 
 
-def _decompose_gate() -> asyncio.Semaphore:
-    global _plan_gate, _plan_gate_limit
+def _decompose_gate() -> _PlanGate:
+    global _plan_gate
     limit = max(1, settings.decompose_max_concurrent)
-    if _plan_gate is None or _plan_gate_limit != limit:
-        _plan_gate = asyncio.Semaphore(limit)
-        _plan_gate_limit = limit
+    if _plan_gate is None or _plan_gate.limit != limit:
+        _plan_gate = _PlanGate(limit)
     return _plan_gate
 
 
@@ -863,8 +937,9 @@ async def decompose(intent: str) -> DecomposeResponse:
     async def _bounded_plan() -> Any:
         # The kit short circuit above never takes this gate; every request
         # here is a real LLM call, so concurrency is capped the same way
-        # /execute's fan-out is. Queue time counts against the budget below.
-        async with _decompose_gate():
+        # /execute's fan-out is. Queue time counts against the budget below,
+        # and a full queue refuses the request outright (PlannerBusyError).
+        async with _decompose_gate().slot(max(0, settings.decompose_max_queued)):
             return await orchestrator_agent.arun(prompt)
 
     # Hard end-to-end budget for the planning call — without it a hung
@@ -875,10 +950,12 @@ async def decompose(intent: str) -> DecomposeResponse:
             _bounded_plan(),
             timeout=settings.decompose_timeout_seconds,
         )
-    except TimeoutError:
+    except (TimeoutError, PlannerBusyError):
         # Kept out of the degradation below on purpose: a hung planner has
         # already cost the caller the whole budget, and 504 `decompose_timeout`
-        # is the answer the router and its clients already speak for that.
+        # is the answer the router and its clients already speak for that. A
+        # full queue never reached the planner at all — a fallback plan would
+        # dress a refusal up as an answer — so it is the router's 503.
         raise
     except Exception as e:
         # agno hands provider errors back as a failed run, which

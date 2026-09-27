@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse
 from ..services.execution_svc import CapacityExhaustedError, execute_plan
-from ..services.orchestrator_svc import NoRoutableAgentsError, decompose
+from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,11 @@ async def orchestrator_decompose(req: DecomposeRequest) -> DecomposeResponse:
         # which is a fault, and not worth a traceback.
         logger.warning("decompose refused for intent %r: %s", req.intent, e)
         raise HTTPException(503, "no_routable_agents") from e
+    except PlannerBusyError as e:
+        # Every planning slot is busy and the wait queue is full. Refused at
+        # once rather than queued: retryable, and never a planner call.
+        logger.warning("decompose refused, planner busy: %s", e)
+        raise HTTPException(503, "planner_busy") from e
     except Exception as e:
         # A planner that failed never lands here: `decompose` serves the
         # fallback plan for it and flags it `planner_fallback` (BLO-121). What
