@@ -29,6 +29,7 @@ tests touch.
 from __future__ import annotations
 
 import base64
+import math
 import time
 from typing import get_args
 
@@ -1028,8 +1029,15 @@ def test_the_challenge_expiry_is_coarse_and_never_later_than_the_real_one(client
 def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, monkeypatch):
     # Quantised on the absolute expiry, not on the remaining time, so the
     # answer cannot be sharpened by asking twice and differencing.
+    #
+    # ONE expiry, as the real idempotent mint returns it: the same live
+    # challenge, read twice. The stub used to compute a fresh `time.time()`
+    # per call, so the two floors differed whenever a minute boundary fell
+    # between the reads — flaky by construction, and not the path described.
+    live_expiry = time.time() + 137.0
+
     async def _issue(job_id_hex: str, step_index: int) -> tuple[str, float]:
-        return NONCE, time.time() + 137.0
+        return NONCE, live_expiry
 
     monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _issue)
     body = {"job_id_hex": JOB_ID, "step_index": 1}
@@ -1037,7 +1045,7 @@ def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, mon
     first = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
     second = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
 
-    assert first == second
+    assert first == second == math.floor(live_expiry / 60) * 60
 
 
 def test_one_client_cannot_mint_past_its_share_of_the_dispute_budget(client, monkeypatch, challenge_stub):
