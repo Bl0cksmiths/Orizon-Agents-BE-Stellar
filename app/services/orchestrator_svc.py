@@ -109,6 +109,37 @@ def _is_listed(agent: Agent) -> bool:
     return agent.status != "offline"
 
 
+class _RegistrySnapshot(NamedTuple):
+    """The registry as ONE decompose sees it: read once, handed to every stage.
+
+    `agents` is every entry, in registry order; `routable` is the listed,
+    dispatchable subset — the only agents any planning path may put in a plan,
+    and so the only ones whose reputation is worth reading.
+
+    Taken once, before the reputation read, and passed down rather than
+    re-read by each stage. The registry is live — `registry_sync` indexes
+    permissionless registrations and operators bind, unbind and delist while a
+    plan is being built — and a stage that read it again could meet an agent
+    the reputation snapshot never covered. That agent had no entry, so it
+    passed the floor on "no entry" and was offered, ranked and even promoted to
+    a kit slot on the rating its own registrant wrote. With one snapshot, every
+    stage agrees on the agent set the reputation read was taken for.
+
+    The two point-of-use checks — the clamp and `_fallback_agent` — still ask
+    the live registry, deliberately: they only ever NARROW this set, dropping
+    an agent delisted or unbound while the planner ran, and never widen it.
+    """
+
+    agents: tuple[Agent, ...]
+    routable: tuple[Agent, ...]
+
+
+def _snapshot_registry() -> _RegistrySnapshot:
+    """Read the registry once and split out what planning may route to."""
+    agents = tuple(state.list_agents())
+    return _RegistrySnapshot(agents, tuple(a for a in agents if _is_listed(a) and is_dispatchable(a.id)))
+
+
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     """PlanStep reputation stamp — empty when the agent has no rep entry.
 
@@ -213,6 +244,7 @@ def _floor_substitute(
     designated: Agent,
     reps: dict[str, reputation_svc.RepInfo],
     taken: set[str],
+    registry: _RegistrySnapshot | None = None,
 ) -> Agent | None:
     """Deterministically pick a floor-clearing replacement for a sub-floor kit
     agent: dispatchable, OFF the kit pipeline, sharing >=1 skill, not already
@@ -229,15 +261,17 @@ def _floor_substitute(
     and it lands in the plan with a `substituted_for` badge implying we picked
     the best available stand-in. An agent whose operator withdrew it is not
     available at all.
+
+    The pool is the decompose's own registry snapshot (listed and dispatchable
+    already), so a substitute is always an agent the reputation read covered.
     """
+    pool = (registry or _snapshot_registry()).routable
     wanted = set(designated.skills)
     candidates = [
         a
-        for a in state.list_agents()
+        for a in pool
         if a.id not in taken
         and a.id not in _KIT_AGENT_IDS
-        and _is_listed(a)
-        and is_dispatchable(a.id)
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
     ]
@@ -311,7 +345,7 @@ class _Shortlist(NamedTuple):
     offered: frozenset[str]
 
 
-def _unbound_notices() -> list[PlanFloorNotice]:
+def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     """`unbound_endpoint` notices for the registry as it stands — both paths.
 
     Unbound on-chain agents are a registry fact, not a floor verdict, so they
@@ -328,14 +362,19 @@ def _unbound_notices() -> list[PlanFloorNotice]:
     Reads registry and binding state, never reputation, and `unbound_exclusions`
     orders by id before it caps, so the kit path's determinism promise holds:
     the same registry yields the same notices.
+
+    Listed and not routable is listed and not dispatchable, read off the same
+    snapshot the plan was built from.
     """
+    routable = {a.id for a in registry.routable}
     return unbound_exclusions(
-        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
+        a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
     )
 
 
 def _routable_registry(
     reps: dict[str, reputation_svc.RepInfo],
+    registry: _RegistrySnapshot | None = None,
 ) -> _Shortlist:
     """The AVAILABLE_AGENTS block, the floor actions that shaped it, and its ids.
 
@@ -362,7 +401,8 @@ def _routable_registry(
     #     working; `set_active(id, false)` is someone else's decision about
     #     their own service, and re-admitting on starvation would route paid
     #     work to an operator who asked us to stop.
-    agents = [a for a in state.list_agents() if _is_listed(a) and is_dispatchable(a.id)]
+    registry = registry or _snapshot_registry()
+    agents = list(registry.routable)
     cleared = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
     # Starvation backstop: TOP UP the agents that cleared the floor, never
     # replace them. Re-ranking the whole dispatchable set and keeping the top
@@ -437,7 +477,7 @@ def _routable_registry(
     # Concretely, that means a delisted-AND-unbound agent is filtered rather
     # than reported: "no endpoint bound" is true of it but is not why it is
     # absent, and it is advice nobody wants acted on.
-    notices += _unbound_notices()
+    notices += _unbound_notices(registry)
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
@@ -493,7 +533,12 @@ class _DroppedKitRole(NamedTuple):
     info: reputation_svc.RepInfo | None
 
 
-async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_svc.RepInfo]) -> DecomposeResponse:
+async def _build_kit_plan(
+    intent: str,
+    kit: DemoKit,
+    reps: dict[str, reputation_svc.RepInfo],
+    registry: _RegistrySnapshot | None = None,
+) -> DecomposeResponse:
     """Deterministic 6-step plan for a curated demo intent. No LLM call.
 
     The reputation floor is applied to every pipeline agent, exactly as on the
@@ -514,6 +559,11 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     the Decompose UX feels like real LLM planning instead of a hardcoded dict
     being unpacked. It changes timing only, never plan content.
     """
+    # Snapshot before the pause, not after: an agent that lands during it was
+    # never covered by the reputation read this plan is judged on.
+    registry = registry or _snapshot_registry()
+    routable = {a.id for a in registry.routable}
+    by_id = {a.id: a for a in registry.agents}
     await asyncio.sleep(1.4 + random.random() * 1.0)
 
     # (pipeline position, step). Execution runs steps in list order and later
@@ -530,7 +580,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     dropped: list[_DroppedKitRole] = []
 
     for position, (agent_id, rationale) in enumerate(_KIT_PIPELINE):
-        agent = state.agents.get(agent_id)
+        agent = by_id.get(agent_id)
         if agent is None:
             # The kit pipeline references an agent that isn't seeded — this
             # is a programmer error. Skip the step rather than crash the
@@ -556,6 +606,12 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             # would be the silently reshuffled pipeline story 3.02 forbids.
             continue
 
+        if agent.id not in routable:
+            # Listed but with nothing to execute it — a seeded worker missing
+            # from this deployment. No step can run it, and the reputation read
+            # was never taken for it, so it is dropped the same silent way.
+            continue
+
         eta = _KIT_ETAS.get(agent_id, 1.0)
         info = reps.get(agent.id)
         if reputation_svc.passes_floor(info):
@@ -565,7 +621,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
 
         # Sub-floor: substitute with a floor-clearing off-pipeline worker that
         # shares a skill, else drop the step. Either way the buyer is told.
-        sub = _floor_substitute(agent, reps, taken)
+        sub = _floor_substitute(agent, reps, taken, registry)
         if sub is not None:
             placed.append((position, _kit_step(sub, rationale, eta, reps, substituted_for=agent.id)))
             taken.add(sub.id)
@@ -605,7 +661,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     # the floor did first, then registry entries nothing could dispatch. This
     # path used to report none, so a demo intent showed a marketplace with
     # agents its plan card never accounted for.
-    notices += _unbound_notices()
+    notices += _unbound_notices(registry)
     steps = [step for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
@@ -737,10 +793,16 @@ def _planner_plan(result: Any) -> Plan | None:
 
 
 async def decompose(intent: str) -> DecomposeResponse:
-    # One live reputation snapshot per decompose — timeout-bounded and never
-    # raises (prior fallback), shared by the kit path, the routing prompt,
-    # and the per-step reputation stamps.
-    reps = await reputation_svc.fetch_reps([a.id for a in state.list_agents()])
+    # One registry snapshot and one live reputation snapshot per decompose,
+    # shared by the kit path, the routing prompt and the per-step stamps.
+    #
+    # Reputation is read for the ROUTABLE agents only. The registry is
+    # permissionless and indexes every registration with no cap, and unbound
+    # or delisted agents are unroutable by definition — reading them spent
+    # the batch deadline on agents no plan could use, so enough spam
+    # registrations timed out every read and pushed every plan onto the prior.
+    registry = _snapshot_registry()
+    reps = await reputation_svc.fetch_reps([a.id for a in registry.routable])
 
     # ── Demo-kit short circuit ─────────────────────────────────────────────
     # If the intent matches a curated kit (tetris / calculator / snake /
@@ -748,10 +810,10 @@ async def decompose(intent: str) -> DecomposeResponse:
     # deterministic 6-step pipeline. Reliable for live demos; no LLM cost.
     kit = detect_kit(intent)
     if kit is not None:
-        return await _build_kit_plan(intent, kit, reps)
+        return await _build_kit_plan(intent, kit, reps, registry)
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
-    shortlist = _routable_registry(reps)
+    shortlist = _routable_registry(reps, registry)
     if not shortlist.offered:
         # Checked before the gate, not after the call: an empty AVAILABLE_AGENTS
         # block can only produce steps the clamp discards, so the LLM call would
