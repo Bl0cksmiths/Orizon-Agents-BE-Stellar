@@ -31,8 +31,10 @@ from stellar_sdk import (
     Address,
     Durability,
     Keypair,
+    MuxedAccount,
     Network,
     SorobanServer,
+    StrKey,
     TransactionBuilder,
     scval,
 )
@@ -926,6 +928,28 @@ def sym(s: str) -> SCVal:
 
 def addr(a: str) -> SCVal:
     return scval.to_address(Address(a))
+
+
+def muxed_addr(account: str, muxed_id: int) -> SCVal:
+    """`account` (a G address) with `muxed_id` attached: an M address, as an SCVal.
+
+    For the one argument that accepts it since protocol 23 (CAP-67): the `to`
+    of a Stellar Asset Contract `transfer`. The SAC credits the underlying G
+    account — a muxed address has no balance of its own — and publishes the id
+    as `to_muxed_id` in the transfer event, so a payment carries a 64-bit tag
+    the ledger keeps. Proven read-only on testnet (protocol 28, 2026-09-27):
+    the simulated event named the plain G in its `to` topic and `{amount,
+    to_muxed_id}` as its data.
+
+    Raises `ValueError` for anything but a G address and an unsigned 64-bit id:
+    a contract (C) address cannot be muxed, and an M address already carries
+    an id this would silently replace.
+    """
+    if not StrKey.is_valid_ed25519_public_key(account):
+        raise ValueError(f"only a G address can be muxed, not {account!r}")
+    if not 0 <= muxed_id < 2**64:
+        raise ValueError(f"a muxed id is an unsigned 64-bit integer, not {muxed_id}")
+    return scval.to_address(Address(MuxedAccount(account, muxed_id).account_muxed))
 
 
 def i128(v: int) -> SCVal:
