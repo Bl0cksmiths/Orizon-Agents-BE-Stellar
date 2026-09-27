@@ -949,7 +949,10 @@ def muxed_addr(account: str, muxed_id: int) -> SCVal:
         raise ValueError(f"only a G address can be muxed, not {account!r}")
     if not 0 <= muxed_id < 2**64:
         raise ValueError(f"a muxed id is an unsigned 64-bit integer, not {muxed_id}")
-    return scval.to_address(Address(MuxedAccount(account, muxed_id).account_muxed))
+    muxed = MuxedAccount(account, muxed_id).account_muxed
+    if muxed is None:  # the SDK answers None only for an account without an id
+        raise ValueError(f"no muxed address for {account!r} with id {muxed_id}")
+    return scval.to_address(Address(muxed))
 
 
 def i128(v: int) -> SCVal:
