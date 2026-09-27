@@ -48,11 +48,19 @@ def reset_singleton() -> Iterator[None]:
     dispute_store._store = None
 
 
-@pytest.fixture(params=["in-memory", "postgres"])
+@pytest.fixture(params=["in-memory", "postgres-model"])
 def store(request: pytest.FixtureRequest) -> DisputeStore:
     """The same rules, asserted against both implementations: a receipt field
     that one store stamped and the other forgot would read correctly in the
-    hermetic suite and wrongly in production."""
+    hermetic suite and wrongly in production.
+
+    `postgres-model` is the Postgres store over `FakePool`, a Python MODEL of
+    its SQL, so it checks the store's Python and says nothing about the SQL.
+    The SQL behind these receipt fields (the credited amount and refund hash
+    carried forward, a rating confirmation that never goes back, `updated_at`
+    on every row, and the receipt-column migration) is asserted against a real
+    Postgres in `test_dispute_store_postgres.py`.
+    """
     return InMemoryDisputeStore() if request.param == "in-memory" else _pg(FakePool())
 
 
