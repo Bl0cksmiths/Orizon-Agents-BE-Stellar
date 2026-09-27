@@ -392,3 +392,77 @@ def test_the_model_cannot_write_its_own_reputation_onto_a_step(seeded: object, m
     assert step.est_price_usdc == state.agents["agt_11c0"].price
     assert step.substituted_for is None
     assert step.degraded is False
+
+
+# ── the model does not decide how many paid steps a plan has ────
+
+
+def _planner_returning(*steps: tuple[str, str, float]) -> Callable[[str], Awaitable[SimpleNamespace]]:
+    """A stand-in planner returning `(agent_id, rationale, eta)` steps verbatim."""
+
+    async def _arun(_prompt: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            content=Plan(
+                steps=[
+                    PlanStep(agent_id=aid, rationale=why, est_price_usdc=0.0, est_eta_seconds=eta)
+                    for aid, why, eta in steps
+                ]
+            )
+        )
+
+    return _arun
+
+
+def test_a_plan_is_capped_at_six_steps(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The planner is asked for 1–6 steps; nothing enforced it, and a 200-step
+    # plan of the dearest agent was stored for /execute to run and bill.
+    planner = _planner_returning(*((("agt_04m1", f"audit pass {i}", 1.0)) for i in range(200)))
+
+    resp = _decompose(monkeypatch, _clearing_reps(), planner)
+
+    assert len(resp.steps) == orchestrator_svc._MAX_PLAN_STEPS == 6
+    assert len(_stored_ids(resp)) == 6
+    assert resp.total_usdc == pytest.approx(6 * state.agents["agt_04m1"].price)
+
+
+def test_the_cap_counts_kept_steps_not_proposed_ones(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Steps the clamp drops never spend the cap: five invented ids ahead of
+    # seven real steps still leave a full plan of six real ones.
+    invented = [(f"agt_fake{i}", "made up", 1.0) for i in range(5)]
+    real = [("agt_11c0", f"build part {i}", 1.0) for i in range(7)]
+
+    resp = _decompose(monkeypatch, _clearing_reps(), _planner_returning(*invented, *real))
+
+    assert [s.rationale for s in resp.steps] == [f"build part {i}" for i in range(6)]
+
+
+def test_a_repeated_step_is_kept_once(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same agent on the same task, twice, is the same work bought twice —
+    # whatever whitespace or case the model wrapped it in. The same agent on a
+    # different task is a different step and stays.
+    planner = _planner_returning(
+        ("agt_11c0", "build the app", 1.0),
+        ("agt_11c0", "  Build the APP ", 1.0),
+        ("agt_12r0", "review it", 1.0),
+        ("agt_11c0", "build the app", 1.0),
+        ("agt_11c0", "write the tests", 1.0),
+    )
+
+    resp = _decompose(monkeypatch, _clearing_reps(), planner)
+
+    assert [(s.agent_id, s.rationale) for s in resp.steps] == [
+        ("agt_11c0", "build the app"),
+        ("agt_12r0", "review it"),
+        ("agt_11c0", "write the tests"),
+    ]
+
+
+def test_a_model_eta_is_clamped_to_the_plan_card_range(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model's ETA is a guess; the card and the plan total are held to
+    # 0.3–3.0 s a step whatever it guessed.
+    planner = _planner_returning(("agt_11c0", "build", 0.01), ("agt_12r0", "review", 99.0), ("agt_01h8", "copy", 1.5))
+
+    resp = _decompose(monkeypatch, _clearing_reps(), planner)
+
+    assert [s.est_eta_seconds for s in resp.steps] == [0.3, 3.0, 1.5]
+    assert resp.total_eta == pytest.approx(4.8)

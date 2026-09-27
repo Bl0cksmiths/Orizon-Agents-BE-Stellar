@@ -38,6 +38,7 @@ import functools
 import inspect
 import logging
 import time
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -243,7 +244,7 @@ class Settler:
         self._results = list(results)
         self.calls: list[tuple[str, float]] = []
 
-    async def __call__(self, buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def __call__(self, buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         self.calls.append((buyer, amount_usdc))
         return self._results.pop(0) if self._results else LANDED
 
@@ -308,7 +309,7 @@ def test_the_refund_is_claimed_before_anything_is_signed(monkeypatch) -> None:
     dispute = a_dispute()
     status_while_signing: list[str] = []
 
-    async def _observe(buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def _observe(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         mid_flight = await dispute_store.get_dispute_store().get_dispute(dispute.id)
         assert mid_flight is not None
         status_while_signing.append(mid_flight.status)
@@ -450,6 +451,54 @@ def test_a_claim_held_by_somebody_else_returns_the_record_rather_than_paying(mon
     # winner of the claim is the one paying it.
     assert answered.status == "upheld"
     assert answered.refund_tx is None
+
+
+def test_a_lost_claim_answers_with_what_the_winner_wrote(monkeypatch) -> None:
+    """The test above stubs the claim to lose WITHOUT anybody winning it, so
+    the stale record and a fresh read are the same and either answer passes.
+    Here the winner really claims first — the store moves to `crediting` — and
+    this caller must answer with that, not with the `upheld` it last saw."""
+    dispute = a_dispute()
+    store = dispute_store.get_dispute_store()
+    real_claim = store.claim_refund
+
+    async def _somebody_else_won(dispute_id: str) -> DisputeRecord | None:
+        await real_claim(dispute_id)
+        return None
+
+    monkeypatch.setattr(store, "claim_refund", _somebody_else_won)
+    no_signing(monkeypatch)
+
+    answered = asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert answered.status == "crediting"
+
+
+def test_a_dispute_on_the_exact_closing_second_is_accepted(monkeypatch) -> None:
+    """The window closes AFTER its stamped second, never on it: a buyer told
+    "until 12:00:00" who disputes at 12:00:00 is in time."""
+    payer = Keypair.random()
+    closes = 1_900_000_000.0
+    settlement = SettlementRecord(
+        TASK, payer.public_key, "ab" * 16, JOB, "tx", None, 0.12, STEPS, closes - 3600, closes
+    )
+    asyncio.run(dispute_store.get_dispute_store().record_settlement(settlement))
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+    # dispute_svc's own clock only: the challenge table keeps the real one.
+    monkeypatch.setattr(dispute_svc, "time", SimpleNamespace(time=lambda: closes))
+
+    opened = asyncio.run(
+        dispute_svc.open_dispute(
+            job_id_hex=JOB,
+            step_index=0,
+            reason="the draft ignored half the brief",
+            payer=payer.public_key,
+            nonce=nonce,
+            signature_b64=_sign(payer, dispute_message(JOB, 0, nonce)),
+        )
+    )
+
+    assert opened.status == "open"
 
 
 def _stalls_the_first_read(monkeypatch) -> asyncio.Event:
@@ -623,7 +672,7 @@ def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch,
         b_may_proceed = _stalls_the_first_read(monkeypatch)
         transfer_may_answer = asyncio.Event()
 
-        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+        async def _in_flight(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
             chain.calls.append((buyer, amount_usdc))
             await transfer_may_answer.wait()  # A's transfer is on the network
             return REJECTED
@@ -676,7 +725,7 @@ def test_a_rejection_holding_a_stale_open_read_never_drops_a_live_payout(monkeyp
         rejecter_may_proceed = _stalls_the_first_read(monkeypatch)
         transfer_may_answer = asyncio.Event()
 
-        async def _in_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+        async def _in_flight(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
             chain.calls.append((buyer, amount_usdc))
             await transfer_may_answer.wait()
             return LOST  # submitted, unconfirmed: it MAY STILL LAND
@@ -930,7 +979,7 @@ def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
     to a retry that would credit the buyer twice."""
     dispute = a_dispute()
 
-    async def _cancelled_mid_flight(buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def _cancelled_mid_flight(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         raise asyncio.CancelledError
 
     monkeypatch.setattr(refund_svc, "execute_refund", _cancelled_mid_flight)
@@ -1281,10 +1330,12 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
     assert "\x00" not in messy.note and "\x1b" not in messy.note
     assert "\n" in messy.note and messy.note.startswith("checked")
 
-    long_note = asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
+    # Bounded by REFUSAL, never by a cut (D-062): a note the buyer reads with
+    # its end missing is a different note.
+    with pytest.raises(DisputeError) as too_long:
+        asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
 
-    assert long_note.note is not None
-    assert len(long_note.note) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
+    assert too_long.value.code == "rejection_reason_too_long"
 
 
 def test_a_rejection_reason_has_no_default() -> None:

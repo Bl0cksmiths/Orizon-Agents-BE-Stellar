@@ -20,10 +20,15 @@ Honest trust model, disclosed in every artifact (SOW §3.8 standard):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from stellar_sdk.xdr import SCVal
 
 from ..config import settings
 from ..stellar import client as sc
@@ -36,6 +41,9 @@ logger = logging.getLogger(__name__)
 # price. Stated up front so buyer and operator both know the terms in advance,
 # rather than a case-by-case judgement (product rule).
 DEFAULT_CREDITED_FRACTION = 1.0
+
+# The ledger's unit: USDC has 7 decimals on Stellar (`sc.usdc_to_i128`).
+_STROOPS_PER_USDC = 10_000_000
 
 
 class RefundRefused(Exception):
@@ -50,11 +58,12 @@ class RefundRefused(Exception):
       - `refund_above_cap` — the amount is over `MAX_REFUND_USDC`. A refusal,
         never a clamp: quietly paying the ceiling would hide the mistaken uphold
         (or the bad settlement record) that the ceiling exists to catch;
-      - `refund_amount_invalid` — the amount is not a finite number, so no bound
-        in this module can say anything about it. Kept apart from the two above
-        because it is neither a judgement about this dispute nor a ceiling an
-        operator raised: it means a figure on the records or in the environment
-        is not a quantity of money, and the fix is to that, not to the dispute.
+      - `refund_amount_invalid` — the amount, or the `MAX_REFUND_USDC` it is
+        bounded by, is not a usable number, so no bound in this module can say
+        anything about it. Kept apart from the two above because it is neither
+        a judgement about this dispute nor a ceiling an operator raised: it
+        means a figure on the records or in the environment is not a quantity
+        of money, and the fix is to that, not to the dispute.
 
     The code is what a caller maps to a response; `message` carries the numbers,
     for the operator who has to reconcile it afterwards.
@@ -90,12 +99,14 @@ def config_gap() -> ConfigGap | None:
     It exists because the credit was the one money path with no such check, and
     the absence was not merely untidy. `execute_refund` reads the settler
     through `sc.signer_public_key`, which RAISES on an empty key BEFORE it
-    submits anything; `credit_refund` can only read a raise as "may still have
-    landed", because a raise out of a transfer genuinely can come from either
-    side of the submission. So an unconfigured deployment looked exactly like a
-    transfer lost on the network: the dispute kept its refund claim, parked in
-    `crediting`, and nothing could free it but an edit to the database. That
-    difference is knowable here, and without touching the key at all.
+    submits anything. `credit_refund` now reads that raise — a
+    `NotSubmittedError`, like a key that is present but will not parse — as
+    FAILED and hands the claim back; before it did, an unconfigured deployment
+    looked exactly like a transfer lost on the network and wedged the dispute
+    in `crediting`. Asking here is still better than finding out there: the
+    adjudicator is refused before anything is claimed, with a reason that
+    names the gap. That difference is knowable here, and without touching the
+    key at all.
 
     DISPUTE_REFUNDS_ENABLED is deliberately NOT among these. It is the
     operator's switch over the platform's wallet, `dispute_svc.uphold` refuses
@@ -163,6 +174,42 @@ def _refuse(dispute: DisputeRecord, code: str, detail: str, amount_usdc: float) 
     return RefundRefused(code, message)
 
 
+def _refuse_above_cap(dispute: DisputeRecord, amount_usdc: float) -> None:
+    """Hold `amount_usdc` to `MAX_REFUND_USDC`, failing CLOSED on a cap that is no cap.
+
+    The ceiling is a `>`, and a `>` against NaN is false for every amount while
+    nothing is greater than inf — so a cap that is not a finite number waves
+    every credit through, which is exactly the failure a ceiling exists to
+    prevent (QA D-054: `MAX_REFUND_USDC=nan` let a 50 USDC credit through at
+    50.0). `Settings()` refuses to boot on such a value, but settings are also
+    assigned outside it — by tests, by tooling, by anything that sets an
+    attribute — and a cap check that trusts its caller to have validated the
+    cap is the check that failed open. So the cap's own usability is asked
+    first, here, and a cap at or below zero is refused the same way: it is
+    not a ceiling anyone meant, and comparing against it would report every
+    credit as "above the cap" when the fault is the setting.
+
+    `refund_amount_invalid` rather than `refund_above_cap`: the amount has not
+    been judged against a ceiling, because there is no ceiling to judge it
+    against, and the fix is to the environment rather than to the dispute.
+    """
+    cap = settings.max_refund_usdc
+    if not (math.isfinite(cap) and cap > 0):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"MAX_REFUND_USDC={cap} is not a finite amount above zero, so no credit can be held to it",
+            amount_usdc,
+        )
+    if amount_usdc > cap:
+        raise _refuse(
+            dispute,
+            "refund_above_cap",
+            f"{amount_usdc:.7f} USDC exceeds MAX_REFUND_USDC={cap:.7f}",
+            amount_usdc,
+        )
+
+
 def credited_amount_usdc(step_charged_usdc: float, fraction: float = DEFAULT_CREDITED_FRACTION) -> float:
     """The USDC credited back to the buyer for a disputed step, clamped to
     [0, the step charge]. `fraction` outside [0, 1] is clamped."""
@@ -174,6 +221,8 @@ def creditable_for(
     settlement: SettlementRecord,
     dispute: DisputeRecord,
     fraction: float = DEFAULT_CREDITED_FRACTION,
+    *,
+    credited_elsewhere_usdc: Sequence[float] = (),
 ) -> float:
     """The USDC to credit for `dispute`, bounded by what actually settled (D4).
 
@@ -201,7 +250,13 @@ def creditable_for(
         applies to disputes already open (raising it cannot, because the promise
         above still caps it).
       - `settlement.settled_usdc` is the hard ceiling of what ever came out of
-        the buyer's escrow for the whole workflow.
+        the buyer's escrow for the whole workflow — and it is a ceiling on the
+        workflow's credits TOGETHER, so it is applied net of
+        `credited_elsewhere_usdc`: what the job's other disputes have been
+        paid, or may yet be. Counted in stroops, because that is the unit the
+        charge moved: each step's credit is rounded to 7 decimals on its own,
+        and without the net bound the rounding alone let a workflow's credits
+        add up to a stroop or two more than its charge.
 
     Every clamp that actually bites is logged at WARNING with both numbers,
     because a clamp means two records disagree about money. Taking the smaller
@@ -234,6 +289,22 @@ def creditable_for(
     # `dispute_svc` used to write `creditable_usdc` share one rounding rule.
     amount = max(dispute.creditable_usdc, 0.0)
     step_credit = credited_amount_usdc(step.price_usdc, fraction)
+    # The two bounds are asked to BE numbers before either is compared, for
+    # the reason the amount is below and the ceiling is in `_refuse_above_cap`:
+    # each clamp is a `<`, a NaN bound is never less than anything, and an inf
+    # one never less than a finite promise — so a bound that is not a finite
+    # number is skipped without a word, and the credit is paid as if the
+    # settlement had never been consulted (QA D-054's NaN `settled_usdc`).
+    # The amount check below cannot catch it: the promise it is left holding
+    # is a perfectly good number, just an unbounded one.
+    if not (math.isfinite(step_credit) and math.isfinite(settlement.settled_usdc)):
+        raise _refuse(
+            dispute,
+            "refund_amount_invalid",
+            f"step {dispute.step_index} credits {step_credit} USDC and the workflow settled "
+            f"{settlement.settled_usdc} USDC, and a bound that is not a finite number bounds nothing",
+            amount,
+        )
     if step_credit < amount:
         logger.warning(
             "dispute %s: credit clamped by the step price — %.7f USDC promised at open time, "
@@ -280,6 +351,34 @@ def creditable_for(
             f"the bounds compute to {amount} USDC for step {dispute.step_index}, which is not an amount of money",
             amount,
         )
+    if credited_elsewhere_usdc:
+        if not all(math.isfinite(c) for c in credited_elsewhere_usdc):
+            raise _refuse(
+                dispute,
+                "refund_amount_invalid",
+                f"another dispute of job {dispute.job_id_hex} records a credit that is not a number "
+                f"({list(credited_elsewhere_usdc)}), so what is left of the settled total is unknown",
+                amount,
+            )
+        left_stroops = sc.usdc_to_i128(settlement.settled_usdc) - sum(
+            sc.usdc_to_i128(c) for c in credited_elsewhere_usdc
+        )
+        if sc.usdc_to_i128(amount) > left_stroops:
+            left = max(left_stroops, 0) / _STROOPS_PER_USDC
+            logger.warning(
+                "dispute %s: credit clamped by what is left of the settled total — %.7f USDC computed for step %d, "
+                "%.7f USDC settled for the workflow, %.7f USDC already credited or in flight on its other "
+                "disputes, %.7f USDC left (job %s, payer %s)",
+                dispute.id,
+                amount,
+                dispute.step_index,
+                settlement.settled_usdc,
+                sum(credited_elsewhere_usdc),
+                left,
+                dispute.job_id_hex,
+                dispute.payer,
+            )
+            amount = left
     if amount <= 0:
         raise _refuse(
             dispute,
@@ -296,30 +395,117 @@ def creditable_for(
     # site is the thing a later caller most easily writes a second copy of.
     # `credit_refund` re-checks what it is handed as a cheap second gate, but
     # this is the one that has to hold.
-    if amount > settings.max_refund_usdc:
-        raise _refuse(
-            dispute,
-            "refund_above_cap",
-            f"{amount:.7f} USDC exceeds MAX_REFUND_USDC={settings.max_refund_usdc:.7f}",
-            amount,
-        )
+    _refuse_above_cap(dispute, amount)
     return amount
 
 
-async def execute_refund(buyer: str, amount_usdc: float) -> dict[str, Any]:
+# Domain separation for the refund's muxed id, in the style of
+# `dispute_rating.DISPUTE_ID_TAG` and deliberately a different tag: the two
+# derivations must never be mistaken for one another. Versioned, so a future
+# change of formula cannot reproduce an id already paid under this one.
+REFUND_MUX_TAG = b"orizon-refund:v1"
+_MUX_ID_BYTES = 8
+
+# How the host refuses a muxed address a contract does not accept (one whose
+# parameter is a plain `Address`): the simulation fails with this head, and
+# the client raises it as `NotSubmittedError("prepare failed: …")`. Read off a
+# testnet simulation (protocol 28, 2026-09-27) of `balance(M…)` and of a
+# `transfer` FROM an M address — the two SAC parameters that take `Address`.
+# Anchored to the head, as the client's `_CONTRACT_ERROR_HEAD` is: the event
+# log beneath it can quote other errors.
+_MUXED_REFUSED_HEAD = re.compile(r"prepare failed: HostError: Error\(Value, UnexpectedType\)")
+
+
+def refund_muxed_id(dispute_id: str) -> int:
+    """The 64-bit id an upheld dispute's refund transfer carries on-chain.
+
+    `uint64_be(sha256(utf8(dispute_id) ‖ REFUND_MUX_TAG)[:8])`.
+
+    The credit is paid to the payer's G address muxed with this id (CAP-67),
+    so the SAC's transfer event carries it as `to_muxed_id` and the transfer
+    names the dispute it pays — two credits of one amount to one payer are no
+    longer indistinguishable. Recomputable from the dispute id alone, so
+    nothing needs storing: a reviewer holding a dispute id computes the id (or
+    the M address) and finds the transfer; one holding a transfer checks the
+    `to_muxed_id` against the dispute ids of that payer.
+
+    A hash rather than a counter, for the same reason as the rating's derived
+    id: a dispute id is 128 random bits (`dsp_` + 32 hex), and eight hash bytes
+    keep two disputes apart with odds of 2**-64 per pair, with no state.
+    """
+    digest = hashlib.sha256(dispute_id.encode("utf-8") + REFUND_MUX_TAG).digest()
+    return int.from_bytes(digest[:_MUX_ID_BYTES], "big")
+
+
+def _tagged_recipient(buyer: str, dispute_id: str) -> tuple[SCVal, int] | None:
+    """The buyer's G address muxed with the dispute's refund id, and the id.
+
+    None when the muxed form cannot be built — a payer that is not a G
+    address (a contract wallet cannot be muxed), or anything else the SDK
+    refuses — and the caller pays the plain address. Logged, never raised: the
+    tag exists to make a credit findable, and it must never be the reason one
+    is not paid.
+    """
+    try:
+        muxed_id = refund_muxed_id(dispute_id)
+        return sc.muxed_addr(buyer, muxed_id), muxed_id
+    except Exception as e:
+        logger.warning(
+            "dispute %s: refund to %s cannot carry its dispute tag (%s) — paying the plain address",
+            dispute_id,
+            buyer,
+            e,
+        )
+        return None
+
+
+async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
     """Settler-funded platform credit: transfer `amount_usdc` from the settler
     to the buyer over the asset SAC. Returns the invoke result (incl. `hash`).
 
     A credit, never a clawback — the funds leave the platform wallet, so the
     settler must hold enough of the asset. The server signing key IS the
     settler, so the SAC `transfer(settler → buyer)` is authorised by that key.
+
+    With `dispute_id`, the `to` is the buyer's G address muxed with
+    `refund_muxed_id(dispute_id)`. The funds land in the same G account — the
+    SAC credits the underlying account — and the transfer event carries the id
+    as `to_muxed_id`, which is what ties the credit to its dispute on-chain.
+    Without one (the 4.01 spike script), the plain address, as before.
+
+    The tag falls back to the plain address, never to a failed credit:
+      - when the muxed address cannot be built (`_tagged_recipient`);
+      - when the simulation refuses the muxed `to` itself: a
+        `sc.NotSubmittedError` headed `_MUXED_REFUSED_HEAD`, which is how the
+        host answers an asset contract that takes a plain `Address` there.
+        That type is the client's proof nothing was sent, so the second
+        transfer cannot pay the buyer twice.
+    Every other refusal is raised exactly as before — a settler short of funds,
+    an RPC down at `load_account`, a send the RPC refused — because the plain
+    address would meet it too, and a second attempt would change what the
+    money path does on a failure that has nothing to do with the tag. Anything
+    that may have been sent is returned or raised untouched: that transfer may
+    land, and a second one would pay the buyer twice.
     """
     settler = sc.signer_public_key()
-    return await sc.invoke_with_server_key_async(
-        sc.contract_ids().asset_sac,
-        "transfer",
-        [sc.addr(settler), sc.addr(buyer), sc.i128(sc.usdc_to_i128(amount_usdc))],
-    )
+    sac = sc.contract_ids().asset_sac
+    amount = sc.i128(sc.usdc_to_i128(amount_usdc))
+    tagged = _tagged_recipient(buyer, dispute_id) if dispute_id is not None else None
+    if tagged is not None:
+        to, muxed_id = tagged
+        logger.info("dispute %s: refund to %s tagged with muxed id %d", dispute_id, buyer, muxed_id)
+        try:
+            return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), to, amount])
+        except sc.NotSubmittedError as e:
+            if isinstance(e, sc.ContractError) or not _MUXED_REFUSED_HEAD.match(str(e)):
+                raise
+            logger.warning(
+                "dispute %s: the asset contract refused the muxed address for %s (%s) — paying the plain address",
+                dispute_id,
+                buyer,
+                str(e).splitlines()[0],
+            )
+    return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), sc.addr(buyer), amount])
 
 
 async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOutcome:
@@ -327,27 +513,37 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
 
     A wrapper over `execute_refund`, which keeps the signature the 4.01 spike
     script and its tests call it with. What this adds is the one distinction a
-    caller must not get wrong, because `sc.invoke_with_server_key_async` NEVER
-    RAISES on failure — it returns a dict, and a caller that only looks for a
-    hash cannot tell a transfer that failed from one still in flight.
+    caller must not get wrong. `sc.invoke_with_server_key_async` answers a
+    transfer that reached the ledger with a dict — and a caller that only looks
+    for a hash cannot tell one that failed from one still in flight — and it
+    RAISES for everything else: `sc.NotSubmittedError` when the write failed
+    before anything was sent, and any other exception when it may have been.
 
     The mapping, in the order it is decided:
 
+      - `sc.NotSubmittedError` → FAILED. The client raises it only ahead of
+        `sendTransaction` — the signing key, the source account, the build,
+        the simulation (a settler holding too little USDC is refused here),
+        the signature — or for a send the RPC refused outright. No transaction
+        exists anywhere after one of these, so nothing can land later.
+      - any other exception → TIMEOUT. It may have been raised after the send.
+        When it is the client's `sc.InFlightError`, its `tx_hash` — the signed
+        transaction's hash — is the outcome's hash.
       - `status == "SUCCESS"` with a hash → SUCCESS. The credit landed.
       - `status == "FAILED"` → FAILED. The ledger rejected it, so no funds
-        moved; this is the ONLY answer that says that. Matched EXACTLY, the way
-        SUCCESS is above and the way `dispute_rating` matches both of its own:
-        this is the branch that RELEASES the refund claim, and case-folding it
-        would widen the one door in this module that says "nothing was signed"
-        on the strength of a word the client wrote and this module did not. A
+        moved; of the dict's answers this is the ONLY one that says that.
+        Matched EXACTLY, the way SUCCESS is above and the way `dispute_rating`
+        matches both of its own: this is the branch that RELEASES the refund
+        claim, and case-folding it would widen a door that says "nothing was
+        signed" on the strength of a word the client wrote and this module
+        did not. A
         client that ever answered `failed` falls through to TIMEOUT instead,
         which holds the claim — the buyer is paid late rather than twice.
       - anything else → TIMEOUT. `"timeout"` is the client's own word for
         "submitted, then lost track of it", and the leftovers land here on
         purpose: an unrecognised status, or a SUCCESS with no hash, is a
         transfer whose fate is unknown, which is the same hazard by another
-        name. An exception is mapped here too — it can be raised before the
-        submission or after it, and nothing in the dict distinguishes those.
+        name.
 
     **TIMEOUT MEANS THE TRANSFER MAY STILL LAND, so it must NEVER be retried
     automatically and the refund claim must NEVER be released** (D3). Releasing
@@ -371,16 +567,10 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         )
     if amount_usdc <= 0:
         raise _refuse(dispute, "nothing_to_credit", f"{amount_usdc:.7f} USDC is not payable", amount_usdc)
-    if amount_usdc > settings.max_refund_usdc:
-        raise _refuse(
-            dispute,
-            "refund_above_cap",
-            f"{amount_usdc:.7f} USDC exceeds MAX_REFUND_USDC={settings.max_refund_usdc:.7f}",
-            amount_usdc,
-        )
+    _refuse_above_cap(dispute, amount_usdc)
 
     try:
-        raw = await execute_refund(dispute.payer, amount_usdc)
+        raw = await execute_refund(dispute.payer, amount_usdc, dispute_id=dispute.id)
     except asyncio.CancelledError:
         # A shutdown cancel (main.py's drain window) can land between the submit
         # and its confirmation, exactly like `_settle_onchain`'s — and
@@ -397,17 +587,44 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
             amount_usdc,
         )
         raise
-    except Exception as e:
+    except sc.NotSubmittedError as e:
+        # FAILED, and so the claim is released — which is safe for exactly the
+        # reason `dispute_rating` already treats this type as a refusal:
+        # `NotSubmittedError` is PROOF that nothing was sent, not a guess. The
+        # client raises it only before `sendTransaction`, or when the RPC
+        # refused the send and holds nothing of it. Filing it as TIMEOUT, as
+        # the catch-all below would, parked the dispute in `crediting` over a
+        # transfer that never existed — an under-funded settler or an RPC
+        # outage at `load_account` wedged every uphold it met, and only a hand
+        # edit could pay the buyer. Anything else still falls through to the
+        # catch-all, because only this type carries that proof.
         logger.error(
-            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s (job %s, payer %s, %.7f USDC)",
+            "dispute %s: refund transfer was refused before it was sent — no funds moved: %s "
+            "(job %s, payer %s, %.7f USDC)",
             dispute.id,
             e,
             dispute.job_id_hex,
             dispute.payer,
             amount_usdc,
+        )
+        return RefundOutcome("FAILED", None, amount_usdc)
+    except Exception as e:
+        # The client raises `InFlightError` for a failure after the transfer
+        # was signed and sent, carrying the signed transaction's hash; keep it,
+        # so the dispute records what a reconciliation asks the ledger about.
+        in_flight = e.tx_hash if isinstance(e, sc.InFlightError) else None
+        logger.error(
+            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s "
+            "(hash %s, job %s, payer %s, %.7f USDC)",
+            dispute.id,
+            e,
+            in_flight,
+            dispute.job_id_hex,
+            dispute.payer,
+            amount_usdc,
             exc_info=True,
         )
-        return RefundOutcome("TIMEOUT", None, amount_usdc)
+        return RefundOutcome("TIMEOUT", in_flight, amount_usdc)
 
     raw_hash = raw.get("hash")
     tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None

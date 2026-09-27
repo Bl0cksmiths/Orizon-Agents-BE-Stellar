@@ -220,12 +220,15 @@ again. A buyer who was not paid stays payable.
 
 **When the transfer times out, nothing is retried.** A submission that timed
 out may still settle, so the dispute stays in `crediting` with the in-flight
-transaction hash recorded, and an operator reconciles it against the chain.
-This is a deliberate trade: **paying late rather than ever paying twice.** A
-late credit is a support question; a double credit comes out of the platform's
-own wallet and cannot be reversed, because the asset contract has no more of an
-undo than the escrow does. If a buyer's dispute sits in `crediting`, it has not
-been forgotten — it is waiting on a person with a block explorer.
+transaction hash recorded — and the amount it was for, kept apart from the
+credited amount — and it is reconciled against the chain: by the reconcile
+sweep when it is switched on, by an operator otherwise, and always by an
+operator when the chain cannot answer. This is a deliberate trade: **paying
+late rather than ever paying twice.** A late credit is a support question; a
+double credit comes out of the platform's own wallet and cannot be reversed,
+because the asset contract has no more of an undo than the escrow does. If a
+buyer's dispute sits in `crediting`, it has not been forgotten — it is waiting
+on the chain to say what happened, or on a person with a block explorer.
 
 ## After `credited`: the dispute rating
 
@@ -316,6 +319,22 @@ trace, as `reputation → agent <id> rated 10/100 for upheld dispute <id> on ste
 console that still has the run on screen; the dispute record is what holds the
 fact.
 
+**A rating refused before it was sent is `FAILED`, not `TIMEOUT`.** When the
+ledger's simulation refuses the rating with a host error (for example
+`HostError: Error(Value, InvalidInput)`), or the signer's account cannot be
+loaded, the signing key will not parse, an argument will not encode, or the RPC
+answers the send with `ERROR` or `TRY_AGAIN_LATER`, no transaction ever reached
+the network. The rating is reported as `FAILED` with the cause in `reason=` on
+the ERROR line, and nothing is recorded or in flight. Re-running is safe but
+will be refused the same way until that cause is fixed. `TIMEOUT` ("it may
+still land") is reserved for failures after the send: a connection dropped
+mid-send, a `DUPLICATE`, or a poll that ran out.
+
+Every dispute-rating log line reads `dispute rating <event>: outcome=<SUCCESS|REPLAY|TIMEOUT|FAILED|->
+dispute=… job=… derived=… agent=… payer=… credited_usdc=… refund_tx=… tx=…
+reason=…`, so a failed rating can be reconciled against the credit from the
+ERROR line alone. `outcome=-` marks a line where no attempt was made.
+
 ## The trust model, stated plainly
 
 - **The platform funds the credit.** The disputed agent's only consequence is
@@ -367,6 +386,20 @@ A rejected dispute writes nothing on-chain at all. It stays on the record,
 with its reason, as part of the agent's history with that buyer — not as part
 of its score.
 
+**After a script uphold.** `scripts/uphold_dispute.py` writes the rating from
+its own process, so the running service keeps the agent's previous score for
+up to its `REPUTATION_READ_TTL_SECONDS`. Pass `--service-url https://<service>`
+(or set `UPHOLD_SERVICE_URL`) with `API_KEY` set to the deployment's operator
+key, and the script calls `POST /api/stellar/reputation/{agent_id}/invalidate`
+once the rating is written. Without them it prints that the service was not
+told and names the TTL. A failed call is a warning only: the credit and the
+rating stand, and the exit code keeps its meaning. The route is operator-only,
+fails closed when `API_KEY` is empty, is not gated on `DISPUTE_REFUNDS_ENABLED`
+— the script pays from its own process precisely so a deployment can leave
+that switch off — and allows 30 calls a minute. It drops this process's cache
+only, which is the whole service under `--workers 1`; a multi-worker
+deployment would need shared invalidation.
+
 ## The lifecycle
 
 A dispute has one status at a time, and it only ever moves forward. The record
@@ -377,7 +410,7 @@ stay as they were.
 | --- | --- | --- | --- |
 | `open` | raised inside the window by the payer, not yet adjudicated | the reason, the step's charge, the creditable amount, the opening time | story 4.02 — the only status it ever writes |
 | `upheld` | adjudicated in the buyer's favour | nothing on-chain yet | adjudication (4.03) |
-| `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx, once one has been submitted | the refund path (4.03) |
+| `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx once one has been submitted, and on a timeout the amount it was for (`inflight_usdc`, never shown as paid) | the refund path (4.03) |
 | `credited` | the credit has landed in the buyer's wallet | the refund tx, and the dispute rating's tx once it is written | the refund path (4.03); the rating (4.04) adds its tx to the same status |
 | `rejected` | adjudicated against the claim | the resolution time and the adjudicator's reason, which the buyer is shown; nothing on-chain | adjudication (4.03); the reason is required and buyer-facing since 4.06 |
 
@@ -410,8 +443,9 @@ paid twice. A buyer who sees it should read "your credit is being paid", not
 A dispute leaves `crediting` in one of three ways: the transfer lands and it
 becomes `credited`; the transfer definitively fails, the claim is released and
 it returns to `upheld` to be paid again; or the transfer times out, in which
-case it **stays** in `crediting` until an operator has checked the chain. The
-last of those is the reconciliation case below.
+case it **stays** in `crediting` until the chain has been checked — by the
+reconcile sweep or by an operator. The last of those is the reconciliation
+case below.
 
 `open` is the only status story 4.02 writes. Everything past it belongs to the
 stories that pay the credit and write the rating, which is why a freshly opened
@@ -427,12 +461,75 @@ disputed job in different ways.
 
 **The refund transfer** (`refund_tx`) is a `transfer` on the asset contract,
 signed by the settler: from the settler, to the payer, for the credited
-amount. It is what shows the buyer was paid, and it carries **no job id** — a
-token transfer names a sender, a recipient and an amount, and nothing else. Its
-link to the job runs through the dispute record. On-chain it is corroborated
-rather than proved: the recipient is the payer recorded at settlement — the
-address that authorized the escrow, and the one the attestation seal names —
-and the amount is no more than that step's charge.
+amount. It is what shows the buyer was paid. It carries **no job id**, but it
+does carry **its dispute**: the `to` is the payer's address **muxed** with a
+64-bit id derived from the dispute id (CAP-67, protocol 23 and later). The
+funds land in the payer's own `G…` account — a muxed address has no balance of
+its own, and the asset contract credits the account underneath it — and the
+id is published in the transfer event. So two credits of the same amount to
+the same payer are no longer indistinguishable on-chain: each names the
+dispute it pays. Its link to the job still runs through the dispute record,
+and the rest is corroborated as before: the recipient is the payer recorded at
+settlement — the address that authorized the escrow, and the one the
+attestation seal names — and the amount is no more than that step's charge.
+
+**Tying the refund to its dispute, without reading any code.** The id is
+
+```
+refund id = uint64, big-endian, of the first 8 bytes of
+            sha256( utf8(dispute_id) ‖ "orizon-refund:v1" )
+```
+
+— the same domain-separated style as the rating's derived job id below, with
+its own tag so the two can never be confused. It is recomputed from the
+dispute id, never stored; nothing else goes into it.
+
+```bash
+python3 -c 'import hashlib,sys; print(int.from_bytes(hashlib.sha256(sys.argv[1].encode()+b"orizon-refund:v1").digest()[:8],"big"))' <dispute_id>
+```
+
+For `dsp_deadbeefdeadbeefdeadbeefdeadbeef` that prints `594641790416058175`
+(`0x0840978ece59f73f`), the vector `tests/test_refund_dispute_tag.py` pins.
+With stellar-sdk to hand, the full `M…` address is
+`MuxedAccount(<payer>, <refund id>).account_muxed`.
+
+1. Open `refund_tx` on Stellar Expert. The `transfer` invocation's `to`
+   argument is an `M…` address.
+2. The asset contract's `transfer` event names the plain payer `G…` as its
+   recipient (its third topic), and its data is a map,
+   `{amount, to_muxed_id}`, rather than a bare amount.
+3. `to_muxed_id` equals the refund id computed from the dispute id above, and
+   the recipient equals the dispute's `payer`. That is the link. The id is 64
+   bits of a hash of a 128-bit random dispute id, so an unrelated dispute
+   matches with probability 2⁻⁶⁴.
+
+The other direction works too: holding a transfer and a payer, compute the
+refund id of each of that payer's disputes and see which one matches.
+
+**A refund may be untagged, and that is deliberate.** The tag must never cost a
+buyer their credit, so the service pays the plain `G…` address instead when
+the muxed form cannot be built — a payer that is a contract (`C…`) address,
+which cannot be muxed — or when simulation refuses the muxed address itself
+(`HostError: Error(Value, UnexpectedType)`, the host's answer for a contract
+that takes a plain `Address` there). Nothing was signed in either case, so the
+plain transfer is the only one. Every other failure is handled exactly as it
+was before the tag. An untagged refund logs a WARNING naming the dispute, and
+it is matched the old way, by payer, amount and time. A successful tagged
+refund logs `dispute <id>: refund to <payer> tagged with muxed id <n>` at
+INFO.
+
+*Why a muxed address and not a memo.* Soroban RPC refuses a memo on a contract
+invocation outright: a simulation of this exact transfer with a text memo
+answered `Transaction contains a memo. Soroban transactions do not support
+memos.`. A memo would also sit on the transaction envelope, where neither the
+contract nor its events can see it.
+
+*Evidence.* Simulated read-only on testnet on 2026-09-27 (protocol 28): the
+settler's `transfer` to a muxed payer succeeded and emitted
+`transfer(settler, <payer G…>, "native")` with data
+`{amount: 1200000, to_muxed_id: 81985529216486895}`. The minimum resource fee
+was 23,847 stroops, against 23,468 for the same transfer to the plain address,
+which is 379 stroops or +1.6%. Nothing was signed or sent.
 
 **The dispute rating** (`rating_tx`) is a call to `ReputationLedger.submit`,
 signed by the settler as the ledger's Scorer:
@@ -488,15 +585,17 @@ stacked, with their shared prefix underlined.
 | --- | --- | --- |
 | `POST /api/disputes/challenge` | public | mint a single-use nonce and return the exact message to sign and when the challenge expires. The step's charge, the creditable amount and the window's closing time are on the per-task read |
 | `POST /api/disputes` | the payer, proved by the signature | open the dispute: job, step, written reason, nonce, signature |
-| `GET /api/disputes/{dispute_id}` | anyone holding the id | read one dispute back — status, reason, amounts, the refund and rating transactions once they exist, and the receipt: what was actually credited, when it last changed, whether the rating landed and, for a rejection, why. "What a dispute returns" below has every field |
-| `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
+| `POST /api/disputes/read-challenge` | public | mint a single-use nonce the **payer** signs to read their own disputes' free text from any tab — see "Reading your own dispute: the read grant" below |
+| `POST /api/disputes/read-grant` | the payer, proved by the signature | exchange that signature for a read grant, good for up to an hour, sent back as `X-Dispute-Read-Grant` |
+| `GET /api/disputes/{dispute_id}` | anyone holding the id; the free text only with a task token, an operator key or the payer's read grant | read one dispute back — status, reason, amounts, the refund and rating transactions once they exist, and the receipt: what was actually credited, when it last changed, whether the rating landed and, for a rejection, why. "What a dispute returns" below has every field |
+| `GET /api/tasks/{task_id}/disputes` | anyone while `TASK_AUTH_REQUIRED` is off, the shipped default; otherwise the task's own token, or an operator API key. The free text only with a task token, an operator key or the payer's read grant | everything a first dispute starts from, in one read: the settlement (job id, payer, each step's charge, delivery, credit and output summary, and the credit policy), the window's closing time, the server's clock, and every dispute raised on the task. An unknown or unsettled task is a null settlement, a null window and an empty list, not a 404. "What the per-task read returns" below has every field |
 | `POST /api/disputes/{dispute_id}/uphold` | an adjudicator, with `X-API-Key` | uphold the claim and pay the credit — records `upheld`, takes the refund claim, transfers the amount to the payer, then writes the dispute rating. On a `credited` dispute it signs no transfer and re-attempts the rating only |
 | `POST /api/disputes/{dispute_id}/reject` | an adjudicator, with `X-API-Key` | reject the claim — body `{"note": "..."}`, **required**, 1 to 500 characters, and **shown to the buyer** as the dispute's `rejection_reason`. Records `rejected` with its resolution time and that reason; nothing is signed and nothing is spent |
 
-The read routes take no credential because both ids are unguessable — a dispute
-id is `dsp_` plus 16 random hex characters — which is the same trade the task
-read token makes, and it keeps a buyer able to check their own dispute without
-an account.
+The read routes take no credential for the money facts — a dispute's status,
+amounts and transactions — and it keeps a buyer able to check their own dispute
+without an account. The two free-text fields are the exception: "Who can read
+what a dispute says" below has who gets them.
 
 **The two adjudication routes are the exception to everything above, and they
 fail closed.** Every other route in this service treats an unset `API_KEY` as
@@ -530,7 +629,7 @@ What an adjudicator can be told, and what each answer means:
 | 409 `dispute_not_open` | a rejection aimed at a dispute that is no longer `open` |
 | 409 `dispute_rejected` | an uphold aimed at a rejected dispute: it can never be credited |
 | 409 `adjudication_in_progress` | another adjudication of this dispute is already running. The move from `open` to `upheld` is a compare-and-set, and losing it means the record changed under the read the decision was made on; re-read, the dispute still said `upheld`, so the winner is between its decision and its claim. Refused rather than raced to the mutex. **Nothing was signed here, and whether anything was signed there is not knowable from the refusal** — read the dispute back before deciding again |
-| 409 `refund_amount_invalid` | the credit computes to something that is not a finite number, so no bound can judge it. Refused ahead of both caps, because every other guard on that path is a comparison and a comparison cannot refuse a NaN. It means a figure on the settlement record — or `DISPUTE_CREDITED_FRACTION` in the environment — is not a quantity of money; the fix is to that, not to the dispute |
+| 409 `refund_amount_invalid` | a figure the credit is judged by is not a finite amount of money, so no bound can judge it: the credit itself, the step's price or the settled total on the settlement record, `DISPUTE_CREDITED_FRACTION`, or a `MAX_REFUND_USDC` that is not finite and above zero. Refused ahead of both caps, because every other guard on that path is a comparison and a comparison cannot refuse a NaN. The fix is to that figure, not to the dispute. A bad environment value is refused at boot, so meeting this at runtime means the settings were built some other way |
 | 409 `refund_in_flight` | an uphold aimed at a dispute in `crediting`. Reconcile it by hand; never retry it |
 | 409 `settlement_missing` | the settlement the dispute was judged against is no longer on record, so the credit cannot be bounded by what was actually charged |
 | 409 `nothing_to_credit` | the settlement has no such step, the step never delivered, or the amount prices to zero |
@@ -601,22 +700,106 @@ does not have, is null.
 | `updated_at` | when the dispute last changed state, in epoch seconds. Unlike `resolved_at` it moves: a credit reconciled hours after the verdict carries the time it was credited. Null only for a dispute last written before the field existed |
 | `rating_confirmed` | whether the dispute rating is known to have **landed**. `rating_tx` cannot say on its own, because it is recorded for a submission that timed out as well as for one that succeeded. `true` once the ledger has vouched for it, `false` while it is only in flight, null when no rating was submitted or the dispute predates the field. Null means "not known", never "no" |
 | `rejection_reason` | on a `rejected` dispute, the adjudicator's reason — **shown to the buyer**. Null under every other status, whatever the record holds, and for a rejection recorded before a reason was required |
+| `reason_withheld` | `true` exactly when `reason` and `rejection_reason` were withheld from **this** caller, `false` when they were sent. Never null. With it, a client does not have to guess whether an empty `reason` and a null `rejection_reason` mean "withheld" or "not rejected": if it is `true` and the reader is the payer, ask them to sign a read challenge |
 
 **Who can read what a dispute says.** Two fields on this shape are somebody's
 words rather than facts the chain already publishes: the buyer's `reason` and a
-rejection's `rejection_reason`. The API does not hide either.
-`GET /api/disputes/{dispute_id}` answers anyone holding the id, and the
-per-task read answers anyone who may read the task — which, while
-`TASK_AUTH_REQUIRED` is off (the shipped default, and how the public deployment
-runs), is anyone with the task id; that read hands out every dispute id on the
-task as well. The console shows both fields only to the payer, but that is a
-choice about display, not about access, and it narrows nothing the API
-returns. So a rejection reason is written as something anyone holding the task
-id could read: about this step and this claim, with nothing about another
-buyer, another dispute or the platform's internals that would not be said to
-the buyer in the open. Turning `TASK_AUTH_REQUIRED` on scopes the per-task read
-to the task's own token or an operator key; the single-dispute read stays a
-link whose unguessable id is the credential either way.
+rejection's `rejection_reason`. Both read routes answer anyone they admit —
+the single-dispute read anyone holding the id, the per-task read anyone with
+the task id while `TASK_AUTH_REQUIRED` is off, the shipped default — but they
+send those two fields only to a caller who has proved one of:
+
+- the task's own read token (`X-Task-Token`, or `?token=`), which the tab that
+  ran the task holds;
+- the operator key (`X-API-Key`), which the adjudicator holds. An unset
+  `API_KEY` proves nothing;
+- a **dispute read grant** for this task (`X-Dispute-Read-Grant`), which the
+  task's payer earns by signing. See the next section.
+
+Everyone else gets `reason: ""` — the empty string, never null, because a null
+would fail the type check of every client built against this API and cost the
+reader the whole dispute — `rejection_reason: null`, and `reason_withheld:
+true`. Every other field, the money facts, goes to every caller the route
+admits. A rejection reason is still best written as something the buyer could
+show anyone: about this step and this claim, with nothing about another buyer,
+another dispute or the platform's internals.
+
+### Reading your own dispute: the read grant
+
+The task token dies with the process, is evicted with the 200-task memory ring,
+and lives in the one browser tab that ran the task. Adjudication can take a
+day, so by the time there is a rejection to read, the token is almost always
+gone (D-067). The payer can always prove who they are the way they proved it to
+open the dispute — a wallet signature, checked against the payer the
+**settlement record** names — and these two routes let them:
+
+```
+POST /api/disputes/read-challenge
+  body   {"task_id": str}
+  200    {"nonce": str, "message": str, "expires_at": float}
+         message == "orizon-dispute-read:v1:<task_id>:<nonce>"
+
+POST /api/disputes/read-grant
+  body   {"task_id": str, "nonce": str, "signature_b64": str}
+  200    {"grant": str, "expires_at": float}      expires_at <= now + 3600
+```
+
+Sign `message` exactly as a dispute's challenge is signed — raw UTF-8 bytes or
+SEP-53, the two forms `signMessage` produces — with the wallet that paid. Then
+send the grant as `X-Dispute-Read-Grant` on `GET /api/tasks/{task_id}/disputes`
+or `GET /api/disputes/{dispute_id}`. While it is valid, unexpired and for that
+task, both reasons come back and `reason_withheld` is `false`.
+
+| refusal | when |
+| --- | --- |
+| 404 `unknown_task` | no such task, and no settlement for it |
+| 404 `no_settlement` | the task exists but never settled, so there is no payer to prove |
+| 403 `not_the_payer` | the signature is not the settlement's payer's over this read message: a stranger's wallet, a malformed signature, or a signature over some other message. The challenge is left alone, so a stranger's attempt cannot cancel the payer's |
+| 409 `challenge_unknown` | the nonce is not this task's outstanding read challenge — including one already spent, so a replayed signature never buys a second grant |
+| 409 `challenge_expired` | it was, and its five minutes are up. Ask for another |
+| 422 `validation_error` | a task id outside `[A-Za-z0-9_-]{1,128}`, a nonce over 128 characters or a signature over 256 |
+| 503 `challenge_capacity_dispute_read` | every read-challenge slot is held by a live challenge. Ask again shortly |
+
+**None of the opening rules apply.** Not the window, not the step, not whether
+the step was charged, not whether the task already has a dispute. Those decide
+whether a new claim may be made; reading what was already said about the
+payer's own money is as legitimate a week after the window closed as inside it.
+
+**What a grant does not grant.** It buys the two free-text fields on the two
+dispute reads and nothing else:
+
+- it is **not** a task token. `GET /api/tasks/{task_id}`, its artifact, its
+  trace and the trace stream never look at it, so with `TASK_AUTH_REQUIRED` on
+  a grant-holder is refused there exactly like a stranger — and that includes
+  `GET /api/tasks/{task_id}/disputes` itself, which is gated by the same
+  check. The single-dispute read is not, and serves the grant-holder in full;
+- it opens no dispute, adjudicates nothing and moves no money;
+- it is for one task and one payer. A grant for another task — even one the
+  same wallet paid for — or for another payer reads nothing;
+- it lasts at most an hour, and does not survive a restart (below).
+
+**Separate from the dispute proof, by construction.** A read challenge is its
+own purpose in the shared challenge table, keyed by the task under its own
+subject, so minting or proving a read never consumes or displaces a dispute
+challenge. It has its own budget — 100 outstanding challenges, beside bind's
+150, unbind's 150 and dispute's 200, for a table cap of 600 — so no amount of
+reading can refuse a buyer the challenge that opens a dispute. And the message
+is its own domain: `orizon-dispute-read:v1` is not a prefix of
+`orizon-dispute:v1` nor the other way round, so no signature over one is ever a
+valid signature over the other.
+
+**The grant itself.** Opaque to the client, and stateless on the server: the
+task id, the payer and the expiry, with an HMAC-SHA256 over them. The MAC key
+is derived, under its own label, from 32 random bytes the process draws at
+start-up — never `STELLAR_SIGNING_KEY` or `API_KEY`, and never a secret an
+operator has to provision. So nothing is stored, nothing is evicted, and a
+restart simply invalidates every grant: the payer is asked to sign once more,
+and is never shown text on the strength of a grant this process did not mint.
+Behind several workers a grant would be honoured only by the worker that
+minted it; this service runs one.
+
+The new routes sit behind the same rate limiter and body limit as every other
+route, and their fields are bounded at the edge like the dispute routes'.
 
 ### What the per-task read returns
 
@@ -679,8 +862,9 @@ authorization id itself is left off, because no client needs it.
 The disputes this read lists are the exception, stated here rather than left
 implied: each carries the buyer's `reason` and, once rejected, the
 adjudicator's `rejection_reason`, which nothing else publishes, and this read
-serves them to whoever it admits. "Who can read what a dispute says" above has what that means
-for anyone writing a rejection.
+sends them only to a caller holding the task token, the operator key or the
+payer's read grant — everyone else gets them withheld, with `reason_withheld:
+true`. "Who can read what a dispute says" above has the whole rule.
 
 ## For operators: where the records live
 
@@ -699,8 +883,22 @@ rejects. It is also the reconciliation queue, which is the section below.
 the whole of this document becomes true only until the next restart — which a
 free-tier instance performs whenever it idles. The fallback is there so local
 development and the test suite need no database; it is not a deployment. It
-says so once at startup, and it logs a warning naming any record it drops, so a
-window that can no longer be honoured is never silent.
+is bounded, and it sheds whole settlements — a settlement leaves together with
+every dispute and refund claim under it, never a dispute on its own, so a step
+whose settlement it still holds can never be disputed a second time. It never
+sheds a settlement while any of its disputes is unfinished (`open`, `upheld`
+or `crediting`): each of those is something still owed. If everything over
+its cap is unfinished, it grows past the cap and logs an ERROR rather than
+forget one. It logs a warning naming every settlement and dispute it does
+shed, so a window that can no longer be honoured is never silent.
+
+**Which store is running.** The dispute store is chosen at startup and named
+in the boot log: `dispute store: postgres (DATABASE_URL is set)` at INFO, or
+`dispute store: in-memory (DATABASE_URL is unset)` at WARNING. `GET /readiness`
+reports the same choice as `"disputes": {"store": "postgres" | "memory"}`,
+never the DSN. It reports the store selected, not a live connection check: an
+unreachable Postgres fails the first request that needs it, loudly, and never
+falls back to memory.
 
 One read is weaker than the records behind it. With `TASK_AUTH_REQUIRED` on,
 `GET /api/tasks/{task_id}/disputes` is gated by the task's read token, and
@@ -728,6 +926,85 @@ this service could not confirm. The submission timed out, or the call raised,
 or the process was cancelled between sending and confirming — in each of those
 cases the transaction may be on the network, and whether it settled is knowable
 only from the chain.
+
+### What the reconcile sweep does on its own
+
+With `REFUND_RECONCILE_ENABLED=true` **and** `DISPUTE_REFUNDS_ENABLED=true`, a
+background sweep (`app/services/refund_reconcile.py`) does the first step of
+the procedure below for every claim that has a hash to look up. Both are off
+by default; with the refund switch off the sweep does not start, and says so
+at boot. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 120, from
+30 to 3600 — anything else refuses to boot), one pass at a time, and it
+**signs and submits nothing**: it reads the chain with `getTransaction` and
+writes the dispute record, and that is all.
+
+It only looks at claims older than five minutes, so it never second-guesses a
+payout that is still running. For each one it asks the RPC about the dispute's
+in-flight hash and acts on the answer:
+
+| the chain says | the sweep does |
+| --- | --- |
+| `SUCCESS`, and the transaction is this dispute's refund | records `credited` with the hash and the amount **the transaction moved**, read off its envelope. The claim is dropped by the same write. |
+| `FAILED`, and the transaction is this dispute's refund | releases the claim: the dispute is `upheld` and payable again |
+| `NOT_FOUND`, and the ledger's close time is past the transaction's last valid moment plus two minutes | releases the claim: the transaction can never land |
+| `NOT_FOUND` before that | nothing — it may still land. The next pass asks again. |
+
+"This dispute's refund" means the envelope the chain holds hashes to the hash
+on record and is a single `transfer` over the asset SAC, from the settler, to
+this dispute's payer — the payer's address muxed with this dispute's refund id,
+or the plain payer for an untagged refund, and never the payer muxed with any
+other id, which is another dispute's credit — and, when the record carries the
+amount the transfer was for (`inflight_usdc`, written on a timeout since this
+sweep), for that amount.
+
+**The last valid moment** is read, not guessed. A refund is built with a
+30-second time bound, so it can be valid until 30 seconds after it was built
+at the latest. It was built before the row that recorded its hash was written,
+so that row's `updated_at` plus 30 seconds is at or past its real deadline.
+That number is compared with the **ledger's** close time, taken from the same
+RPC answer that said NOT_FOUND — never with this server's clock — which is what
+the network itself compares it with.
+
+**The RPC forgets.** It keeps a limited window of transaction history (about
+seven days on SDF's testnet RPC; the proof refund in ADR 0002 already answers
+NOT_FOUND there, although it landed). So NOT_FOUND counts only when the RPC's
+oldest retained ledger closed before the claim was taken. When it did not, the
+sweep logs `history_gap` and leaves the claim for you: *forgotten* is not
+*never landed*.
+
+Every write is a compare-and-set on `crediting` **and on the hash that was
+looked up**. Two sweeps, or a sweep and an operator, record a landed credit
+once; and a verdict about one transfer can never close or release a claim that
+has since been taken again over another.
+
+**It does not write the rating.** A credit the sweep records carries its refund
+hash and no `rating_tx` — the same state a hand-written credit is in — and
+upholding it once more writes the rating alone, signing no transfer. Rating
+signs a transaction with the server key, and the sweep signs nothing.
+
+Every decision is one log line, `refund reconcile: dispute=… claim_age_s=…
+tx=… chain=… action=…`, at INFO when nothing needs doing and at WARNING or
+above when a person does. `GET /readiness` reports the sweep under
+`disputes.reconcile`: whether it is enabled and running, when its last pass
+ran, and that pass's counts by action — never a dispute id or a hash.
+
+**What still needs you** — the claims the sweep leaves exactly as it found
+them, each with its own `action`:
+
+- `no_hash` — the submission returned no hash, so there is nothing to look up.
+  Step 2 below (the settler's history) is yours.
+- `history_gap` — the hash is older than the RPC's history.
+- `rpc_error` — the RPC could not be asked, or gave an answer the sweep does
+  not know. The next pass asks again; a claim that stays here needs you.
+- `not_this_refund`, `amount_mismatch` — the chain's transaction under that
+  hash is not this dispute's refund, or not for the amount on record.
+- `not_crediting`, `missing`, `no_expiry_bound` — the record itself is not in
+  a state the sweep can reason about.
+- `lost_race` (CRITICAL) — the dispute moved while the chain was being read;
+  nothing was overwritten.
+- and every claim at all while the sweep is switched off.
+
+### Doing it by hand
 
 **Do not simply retry the payout.** An unconfirmed transaction may still land,
 and a second transfer would credit the buyer twice out of the platform's own
@@ -765,9 +1042,13 @@ and the amount. Search it for the dispute id before touching anything.
    there is nothing to look up, so go straight to the next step.
 2. **The settler's own history**, if the hash turns up nothing. Read the
    settler account's transfers over the asset contract around the claim time,
-   looking for one to that payer for that amount. A timeout is exactly the case
-   where this service's view and the chain's disagree, so confirm from the
-   account rather than concluding from a single absent hash.
+   looking for one whose event carries `to_muxed_id` equal to this dispute's
+   refund id ("Tying the refund to its dispute" above). That match names the
+   dispute, even when the same payer has another credit of the same amount in
+   flight. An untagged refund (its WARNING is in the log) has no id, so look
+   for one to that payer for that amount. A timeout is exactly the case where
+   this service's view and the chain's disagree, so confirm from the account
+   rather than concluding from a single absent hash.
 3. **Only after both** is it safe to say the transfer never landed.
 
 **Then settle the record to match the chain**, and only then:
@@ -791,9 +1072,9 @@ and the amount. Search it for the dispute id before touching anything.
   dispute to `upheld`, and only then may the payout be ordered again.
 - **You cannot tell.** Leave it. Late is recoverable; twice is not.
 
-Both writes are deliberate and manual, because the decision is the part that
-matters and it is one a person has to make by reading the chain. The tooling
-will not make it for you: `scripts/uphold_dispute.py` refuses a dispute in
+Where the sweep could not decide, both writes are deliberate and manual,
+because the decision is the part that matters and it is one a person has to
+make by reading the chain. The tooling will not make it for you: `scripts/uphold_dispute.py` refuses a dispute in
 `crediting` and prints this same block with the explorer links filled in, and
 so does the API, with `refund_in_flight`.
 

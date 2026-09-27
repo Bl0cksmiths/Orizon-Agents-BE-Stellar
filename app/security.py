@@ -37,6 +37,7 @@ import secrets
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import Header, HTTPException, Security
@@ -454,6 +455,35 @@ _operator_key_scheme = APIKeyHeader(
 )
 
 
+def check_operator_key(supplied: str | None, *, unconfigured: str, log_unconfigured: str | None) -> None:
+    """The operator key, FAIL CLOSED — the one key check both operator guards make.
+
+    Shared by `require_adjudicator` and `routers/stellar.require_operator_key`
+    so the two cannot come to disagree about who the operator is. In order:
+
+      1. a key IS configured and the header does not match it -> 401
+         `invalid_api_key`. Missing and wrong are one answer, so the route is
+         no oracle for which it was;
+      2. NO key is configured -> 503 with the caller's own `unconfigured`
+         code, and never a fall-through to "allow". Logged at ERROR with
+         `log_unconfigured` when the caller passes one — a caller for whom an
+         unset key is merely the demo's shape passes None, so an anonymous
+         probe cannot fill the log.
+
+    Every refusal here is decided by the key alone, before any switch is read:
+    a caller who does not hold the key learns nothing about how the
+    deployment is configured beyond it (D-052).
+    """
+    expected = settings.api_key
+    if expected:
+        if not header_secret_matches(supplied, expected):
+            raise HTTPException(status_code=401, detail="invalid_api_key")
+        return
+    if log_unconfigured is not None:
+        logger.error(log_unconfigured)
+    raise HTTPException(status_code=503, detail=unconfigured)
+
+
 async def require_adjudicator(
     x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
 ) -> None:
@@ -489,32 +519,40 @@ async def require_adjudicator(
     it stays: an unset key on a payout route is answered, never waved through,
     whatever is supposed to have stopped it getting here.
 
-    The three refusals, in the order a caller meets them:
+    The three refusals, in the order a caller meets them — the KEY FIRST
+    (D-052). The switch used to be read first, so an anonymous caller was told
+    503 `dispute_refunds_disabled` with it off and 401 with it on: the state
+    of the refund path, free to anyone. Now nobody without the key learns it.
 
-    * switch off -> 503 `dispute_refunds_disabled`. Nothing is adjudicable on
-      this deployment; it is a configuration state, not the caller's mistake.
-    * switch on but no key -> 503 `adjudication_not_configured`. Also the
-      operator's, and NEVER a fall-through to "allow". Logged at ERROR: a live
-      refund switch with no credential behind it is a misconfiguration someone
-      has to see.
-    * key missing or wrong -> 401 `invalid_api_key`, the same token
-      `require_api_key` answers with, so a client needs one mapping, not two.
+    * a key is configured and the header is missing or wrong -> 401
+      `invalid_api_key`, the same token `require_api_key` answers with, so a
+      client needs one mapping, not two;
+    * no key is configured -> 503 `adjudication_not_configured`, whatever the
+      switch says, and NEVER a fall-through to "allow". Logged at ERROR only
+      while the switch is on: a live refund switch with no credential behind
+      it is a misconfiguration someone has to see, while a keyless demo with
+      refunds off is the shipped shape and an anonymous probe must not fill
+      the log with it;
+    * the key matched, and the switch is off -> 503 `dispute_refunds_disabled`.
+      Nothing is adjudicable on this deployment; the operator is told so.
 
-    The key itself is never logged, and no refusal names whether a key was
-    supplied at all: an adjudication endpoint that distinguishes "no key" from
-    "wrong key" in its body is an oracle.
+    The key checks are `check_operator_key`, shared with the reputation
+    invalidation route. The key itself is never logged, and no refusal names
+    whether a key was supplied at all: an adjudication endpoint that
+    distinguishes "no key" from "wrong key" in its body is an oracle.
     """
-    if not settings.dispute_refunds_enabled:
-        raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
-    expected = settings.api_key
-    if not expected:
-        logger.error(
+    check_operator_key(
+        x_api_key,
+        unconfigured="adjudication_not_configured",
+        log_unconfigured=(
             "adjudication refused: DISPUTE_REFUNDS_ENABLED is on but API_KEY is empty, "
             "so the refund routes have no credential to check and stay closed"
         )
-        raise HTTPException(status_code=503, detail="adjudication_not_configured")
-    if not header_secret_matches(x_api_key, expected):
-        raise HTTPException(status_code=401, detail="invalid_api_key")
+        if settings.dispute_refunds_enabled
+        else None,
+    )
+    if not settings.dispute_refunds_enabled:
+        raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
 
 
 class RequestContextMiddleware:
@@ -794,3 +832,49 @@ class RateLimitMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_quota)
+
+
+class KeyedRateLimiter:
+    """A sliding-window budget per client key, for ONE route's own limit.
+
+    `RateLimitMiddleware` spends one budget on every route alike, sized for
+    dashboard polling. That is the wrong budget for a route whose every call
+    buys an LLM completion: 1200 cheap reads a minute is a usable console, 1200
+    planner calls a minute is a bill. A route that costs real money takes one
+    of these on top, keyed by the same `client_key()` so "per client" means
+    exactly what it means for the global limiter — including its caveat: at
+    TRUSTED_PROXY_HOPS=0 every caller that shares the last forwarded hop
+    shares a budget here too.
+
+    `limit` is read on every hit, so a deployment or a test can tune it
+    without rebuilding the limiter; 0 or less switches it off. Same
+    single-event-loop, lock-free reasoning as the middleware.
+    """
+
+    _SWEEP_EVERY = 1024
+
+    def __init__(self, limit: Callable[[], int], window_seconds: float = 60.0) -> None:
+        self._limit = limit
+        self.window = window_seconds
+        self._hits: dict[str, deque[float]] = {}
+        self._since_sweep = 0
+
+    def hit(self, key: str, now: float | None = None) -> int | None:
+        """Spend one unit of `key`'s budget: None if admitted, else the Retry-After seconds."""
+        limit = self._limit()
+        if limit <= 0:
+            return None
+        now = time.monotonic() if now is None else now
+        cutoff = now - self.window
+        self._since_sweep += 1
+        if self._since_sweep >= self._SWEEP_EVERY:
+            self._since_sweep = 0
+            for stale in [k for k, dq in self._hits.items() if not dq or dq[-1] <= cutoff]:
+                del self._hits[stale]
+        dq = self._hits.setdefault(key, deque())
+        while dq and dq[0] <= cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            return max(1, math.ceil(dq[0] + self.window - now))
+        dq.append(now)
+        return None

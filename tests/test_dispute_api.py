@@ -29,12 +29,15 @@ tests touch.
 from __future__ import annotations
 
 import base64
+import math
 import time
 from typing import get_args
 
 import pytest
 
 from app.config import settings
+from app.routers import disputes as disputes_router
+from app.security import KeyedRateLimiter
 from app.services import dispute_svc, refund_svc
 from app.services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep, steps_from_json
 from app.state import state
@@ -105,6 +108,21 @@ def never_called(name: str):
         raise AssertionError(f"{name} was called; the request should have been refused before it")
 
     return _fail
+
+
+@pytest.fixture(autouse=True)
+def fresh_challenge_limiter(monkeypatch):
+    """Every test starts with an empty per-client dispute-mint budget.
+
+    Module-global, and every TestClient shares one client key, so without this
+    the mints below would accumulate across tests — `conftest`'s planner-limiter
+    fixture, for this route's limiter.
+    """
+    monkeypatch.setattr(
+        disputes_router,
+        "_challenge_limiter",
+        KeyedRateLimiter(lambda: settings.dispute_challenge_rate_limit_per_minute),
+    )
 
 
 @pytest.fixture()
@@ -309,11 +327,6 @@ MALFORMED_BODIES = [
     ("step-above-cap", {"step_index": 64}),
     ("payer-not-an-address", {"payer": "not-an-address"}),
     ("payer-wrong-prefix", {"payer": "M" + PAYER[1:]}),
-    ("reason-empty", {"reason": ""}),
-    ("reason-too-long", {"reason": "x" * (dispute_svc.MAX_REASON_CHARS + 1)}),
-    # The paragraph the old 2,000-character edge let through and the service
-    # then cut to its first 500 without a word: refused now, never trimmed.
-    ("reason-a-paragraph-over", {"reason": "x" * 1500}),
     ("signature-too-long", {"signature_b64": "x" * 257}),
     ("nonce-too-long", {"nonce": "x" * 129}),
 ]
@@ -330,10 +343,51 @@ def test_a_malformed_body_never_reaches_the_service(client, monkeypatch, label, 
     assert calls == []
 
 
+# Every way a reason can be unusable, and ONE answer for all of them (D-061):
+# 422 `reason_invalid`, from the service's first check, with a message naming
+# the bound and not one character of what was sent. The edge used to answer the
+# empty and over-long ones itself, as the generic `validation_error` carrying
+# the whole reason back in `detail[].input`, while a blank one got
+# `reason_required` from the service — three shapes for one mistake.
+UNUSABLE_REASONS = [
+    ("empty", ""),
+    ("blank", "   \t "),
+    ("invisible", "\u200b\u202e\u3164"),
+    ("one-over", "q" * (dispute_svc.MAX_REASON_CHARS + 1)),
+    # The paragraph the old 2,000-character edge let through and the service
+    # then cut to its first 500 without a word: refused, never trimmed.
+    ("a-paragraph-over", "q" * 1500),
+]
+
+
+@pytest.mark.parametrize(("label", "reason"), UNUSABLE_REASONS, ids=[label for label, _ in UNUSABLE_REASONS])
+def test_every_unusable_reason_is_one_code_that_names_the_bound(client, monkeypatch, label, reason):
+    def _no_store():
+        raise AssertionError("the reason is judged before the settlement is read")
+
+    monkeypatch.setattr(dispute_svc, "get_dispute_store", _no_store)
+
+    r = client.post("/api/disputes", json=open_body(reason=reason))
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["error"]["code"] == "reason_invalid"
+    assert body["detail"] == "reason_invalid"
+    assert str(dispute_svc.MAX_REASON_CHARS) in body["error"]["message"]
+    # Nothing the buyer wrote comes back.
+    if reason.strip():
+        assert reason not in r.text and "q" * 50 not in r.text
+
+
+def test_the_published_schema_still_states_the_reason_bound(client):
+    schema = client.get("/openapi.json").json()["components"]["schemas"]["OpenDisputeReq"]["properties"]["reason"]
+    assert (schema["minLength"], schema["maxLength"]) == (1, dispute_svc.MAX_REASON_CHARS)
+
+
 def test_a_reason_at_the_service_ceiling_reaches_it_whole(client, monkeypatch):
-    # The edge bound IS the service's MAX_REASON_CHARS, inclusive — so the
-    # longest reason the route accepts is one the service keeps whole, and the
-    # buyer is never told "filed" about words that were quietly dropped.
+    # The route passes the reason through untouched, so the longest reason the
+    # service accepts reaches it whole, and the buyer is never told "filed"
+    # about words that were quietly dropped.
     reason = "x" * dispute_svc.MAX_REASON_CHARS
     calls = opens_with(monkeypatch, record(reason=reason))
 
@@ -499,6 +553,7 @@ def test_a_credited_dispute_carries_its_whole_receipt(client, monkeypatch, prove
         "updated_at": 1_700_003_600.0,
         "rating_confirmed": True,
         "rejection_reason": None,
+        "reason_withheld": False,
     }
 
 
@@ -628,6 +683,7 @@ def test_an_anonymous_reader_gets_the_money_facts_and_not_the_buyers_words(clien
     # Withheld, and nowhere else in the body either.
     assert dispute["reason"] == ""
     assert dispute["rejection_reason"] is None
+    assert dispute["reason_withheld"] is True
     assert ADJUDICATOR_NOTE not in r.text
     assert "the step returned an empty file" not in r.text
     # And the chain-public facts are all still there: the shared trace link
@@ -655,6 +711,7 @@ def test_an_anonymous_reader_of_one_dispute_gets_no_free_text_either(client, mon
     assert r.status_code == 200, r.text
     assert r.json()["reason"] == ""
     assert r.json()["rejection_reason"] is None
+    assert r.json()["reason_withheld"] is True
     assert ADJUDICATOR_NOTE not in r.text
     assert r.json()["status"] == "rejected"
 
@@ -678,6 +735,7 @@ def test_the_task_token_buys_the_free_text_on_both_reads(client, monkeypatch, pr
     dispute = r.json()["disputes"][0] if "disputes" in r.json() else r.json()
     assert dispute["reason"] == "the step returned an empty file"
     assert dispute["rejection_reason"] == ADJUDICATOR_NOTE
+    assert dispute["reason_withheld"] is False
 
 
 @pytest.mark.parametrize(
@@ -700,6 +758,7 @@ def test_the_operator_key_buys_the_free_text_on_both_reads(client, monkeypatch, 
     dispute = r.json()["disputes"][0] if "disputes" in r.json() else r.json()
     assert dispute["reason"] == "the step returned an empty file"
     assert dispute["rejection_reason"] == ADJUDICATOR_NOTE
+    assert dispute["reason_withheld"] is False
 
 
 @pytest.mark.parametrize(
@@ -728,6 +787,7 @@ def test_a_credential_that_is_not_this_tasks_buys_nothing(client, monkeypatch, l
     (dispute,) = r.json()["disputes"]
     assert dispute["reason"] == "", label
     assert dispute["rejection_reason"] is None, label
+    assert dispute["reason_withheld"] is True, label
 
 
 def test_the_payer_who_just_signed_reads_back_what_they_wrote(client, monkeypatch):
@@ -969,8 +1029,15 @@ def test_the_challenge_expiry_is_coarse_and_never_later_than_the_real_one(client
 def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, monkeypatch):
     # Quantised on the absolute expiry, not on the remaining time, so the
     # answer cannot be sharpened by asking twice and differencing.
+    #
+    # ONE expiry, as the real idempotent mint returns it: the same live
+    # challenge, read twice. The stub used to compute a fresh `time.time()`
+    # per call, so the two floors differed whenever a minute boundary fell
+    # between the reads — flaky by construction, and not the path described.
+    live_expiry = time.time() + 137.0
+
     async def _issue(job_id_hex: str, step_index: int) -> tuple[str, float]:
-        return NONCE, time.time() + 137.0
+        return NONCE, live_expiry
 
     monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _issue)
     body = {"job_id_hex": JOB_ID, "step_index": 1}
@@ -978,7 +1045,41 @@ def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, mon
     first = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
     second = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
 
-    assert first == second
+    assert first == second == math.floor(live_expiry / 60) * 60
+
+
+def test_one_client_cannot_mint_past_its_share_of_the_dispute_budget(client, monkeypatch, challenge_stub):
+    """Each mint that takes a slot holds it for five minutes out of 200, so one
+    client alone could fill the budget and refuse every other buyer. Past the
+    per-client limit the answer is 429 with Retry-After, and the service — the
+    settlement read and the slot — is never reached."""
+    monkeypatch.setattr(settings, "dispute_challenge_rate_limit_per_minute", 3)
+    body = {"job_id_hex": JOB_ID, "step_index": 1}
+
+    admitted = [client.post("/api/disputes/challenge", json=body).status_code for _ in range(3)]
+    refused = client.post("/api/disputes/challenge", json=body)
+
+    assert admitted == [200, 200, 200]
+    assert refused.status_code == 429
+    assert refused.json()["error"]["code"] == "dispute_challenge_rate_limited"
+    assert int(refused.headers["retry-after"]) >= 1
+    assert len(challenge_stub) == 3
+
+
+def test_a_refused_mint_still_spends_the_callers_budget(client, monkeypatch):
+    """Counted before the service answers, so probing for mintable steps costs
+    the prober exactly what minting does."""
+    monkeypatch.setattr(settings, "dispute_challenge_rate_limit_per_minute", 2)
+
+    async def _unknown(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        raise dispute_error("unknown_job", 404)
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _unknown)
+    body = {"job_id_hex": JOB_ID, "step_index": 1}
+
+    codes = [client.post("/api/disputes/challenge", json=body).status_code for _ in range(3)]
+
+    assert codes == [404, 404, 429]
 
 
 # ── what a refusal SAYS, not just what it is called ─────────────

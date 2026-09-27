@@ -36,7 +36,9 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-from stellar_sdk import Keypair
+from stellar_sdk import Account, Keypair, StrKey
+from stellar_sdk.exceptions import PrepareTransactionException
+from stellar_sdk.soroban_rpc import GetTransactionStatus, SendTransactionStatus, SimulateTransactionResponse
 
 import app.stellar.client as sc
 from app.config import settings
@@ -134,7 +136,7 @@ class Settler:
     def __init__(self) -> None:
         self.transfers: list[tuple[str, float]] = []
 
-    async def __call__(self, buyer: str, amount_usdc: float) -> dict[str, Any]:
+    async def __call__(self, buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
         self.transfers.append((buyer, amount_usdc))
         return LANDED
 
@@ -377,7 +379,19 @@ def test_a_failed_rating_records_nothing_and_the_retry_lands_it(ledger, settler,
     assert failed.rating_tx is None
     assert invalidated == []
     (logged,) = svc_errors(caplog)
-    for fact in ("failed", dispute.id, JOB, derived(0).hex(), AGENT, dispute.payer):
+    # D-075: the money and the outcome are on the ERROR line itself, so it
+    # reconciles without the INFO line the credit wrote earlier.
+    for fact in (
+        "failed",
+        "outcome=FAILED",
+        dispute.id,
+        JOB,
+        derived(0).hex(),
+        AGENT,
+        dispute.payer,
+        "credited_usdc=0.0500000",
+        "refund_tx=tx_credit",
+    ):
         assert fact in logged
 
     landed = uphold(dispute.id)
@@ -857,4 +871,155 @@ def test_an_observer_that_raises_cannot_turn_a_paid_dispute_into_a_failure(
     assert rated.status == "credited"
     assert rated.rating_tx == "tx_rating_1"
     assert settler.transfers == [(dispute.payer, 0.05)]
-    assert any("observer raised" in message for message in svc_errors(caplog))
+    (logged,) = [m for m in svc_errors(caplog) if "observer raised" in m]
+    for fact in (dispute.id, JOB, AGENT, "credited_usdc=0.0500000", "tx_rating_1"):
+        assert fact in logged, (fact, logged)
+
+
+# ── the real client under uphold: refused before the send, or lost after it (D-076) ─
+#
+# One layer further down than the `ledger` fake: `sc.submit_rating_async` runs
+# for real — arguments, build, simulation, signature, send, poll — against a
+# fake RPC that fails at one stage. What is pinned is the operator's answer:
+# a refusal before the send is FAILED with its cause and nothing on record;
+# a transaction lost after the send is TIMEOUT, exactly as before.
+
+REAL_LEDGER = StrKey.encode_contract(b"\x07" * 32)
+IN_FLIGHT = "cd" * 32
+HOST_REFUSAL = (
+    "HostError: Error(Value, InvalidInput)\n\nEvent log (newest first):\n   0: [Diagnostic Event] "
+    'topics:[error, Error(Value, InvalidInput)], data:"byte is not allowed in Symbol", 45'
+)
+
+
+class _Answer:
+    def __init__(self, status: Any) -> None:
+        self.status = status
+        self.hash = IN_FLIGHT
+        self.error_result_xdr = "AAAAAAAAAGT////7AAAAAA=="
+
+
+class Rpc:
+    """A Soroban RPC that fails at `fail_at`, and records what reached it."""
+
+    def __init__(self, fail_at: str | None = None) -> None:
+        self.fail_at = fail_at
+        self.sent = 0
+
+    def load_account(self, account_id: str) -> Account:
+        if self.fail_at == "load_account":
+            raise ConnectionError("rpc unreachable while loading the signer")
+        return Account(account_id, 1)
+
+    def prepare_transaction(self, tx: Any) -> Any:
+        if self.fail_at == "simulate":
+            response = SimulateTransactionResponse.model_validate({"error": HOST_REFUSAL, "latestLedger": 1})
+            raise PrepareTransactionException("simulation failed", response)
+        return tx
+
+    def send_transaction(self, tx: Any) -> Any:
+        self.sent += 1
+        if self.fail_at == "send_raises":
+            raise ConnectionError("the connection dropped after the send")
+        if self.fail_at in ("ERROR", "TRY_AGAIN_LATER"):
+            return _Answer(SendTransactionStatus[self.fail_at])
+        return _Answer(SendTransactionStatus.PENDING)
+
+    def get_transaction(self, tx_hash: str) -> Any:
+        return _Answer(GetTransactionStatus.NOT_FOUND)
+
+
+def _real_client(monkeypatch, rpc: Rpc, *, keypair: Keypair | None = None) -> Rpc:
+    signer = keypair or Keypair.random()
+    monkeypatch.setattr(sc, "_signer_keypair", lambda: signer)
+    monkeypatch.setattr(sc, "_server", lambda *, submit=False: rpc)
+    monkeypatch.setattr(sc, "contract_ids", lambda: replace(_ids(), reputation_ledger=REAL_LEDGER))
+    monkeypatch.setattr(sc, "_POLL_BUDGET_SECONDS", 0.0)
+    return rpc
+
+
+def _ids() -> sc.ContractIds:
+    return sc.ContractIds(
+        agent_registry="", reputation_ledger="", payment_escrow="", attestation_registry="", asset_sac=""
+    )
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "cause"),
+    [
+        ("simulate", "prepare failed: HostError: Error(Value, InvalidInput)"),
+        ("load_account", "load_account failed"),
+        ("sign", "sign failed"),
+        ("ERROR", "submit failed"),
+        ("TRY_AGAIN_LATER", "submit failed"),
+    ],
+)
+def test_a_rating_refused_before_the_send_is_failed_and_nothing_is_in_flight(
+    monkeypatch, settler, invalidated, caplog, fail_at: str, cause: str
+) -> None:
+    """D-076, end to end. The ledger (or the RPC in front of it) refused the
+    rating before any transaction existed on the network. So: FAILED, with the
+    cause on the ERROR line; no hash recorded and nothing marked in flight; and
+    never "may still land", which sent an operator to wait for a rating that
+    could not arrive."""
+    keypair = Keypair.from_public_key(Keypair.random().public_key) if fail_at == "sign" else None
+    rpc = _real_client(monkeypatch, Rpc(fail_at if fail_at != "sign" else None), keypair=keypair)
+    seen: list[dispute_rating.RatingOutcome] = []
+    dispute = open_dispute()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        after = asyncio.run(dispute_svc.uphold(dispute.id, on_rating=seen.append))
+
+    (outcome,) = seen
+    assert (outcome.status, outcome.tx_hash) == ("FAILED", None)
+    assert outcome.reason is not None and cause in outcome.reason
+    assert after.status == "credited" and after.refund_tx == "tx_credit"
+    assert after.rating_tx is None and after.rating_confirmed is None
+    assert invalidated == []
+    if fail_at in ("ERROR", "TRY_AGAIN_LATER"):
+        assert rpc.sent == 1  # the RPC answered the send, and holds nothing
+    else:
+        assert rpc.sent == 0
+    (logged,) = svc_errors(caplog)
+    for fact in ("outcome=FAILED", "credited_usdc=0.0500000", dispute.id, JOB, AGENT, cause):
+        assert fact in logged, (fact, logged)
+    assert "may still land" not in logged
+    assert "fix what reason= names" in logged
+
+
+def test_a_rating_lost_after_the_send_is_still_a_timeout_with_its_hash_in_flight(
+    monkeypatch, settler, invalidated, caplog
+) -> None:
+    """The half of the doctrine D-076 must not weaken: sent, PENDING, and then
+    never confirmed. It may still land, so it is TIMEOUT, its hash goes on
+    record unconfirmed, and the ERROR line says so — with the money on it."""
+    rpc = _real_client(monkeypatch, Rpc())
+    seen: list[dispute_rating.RatingOutcome] = []
+    dispute = open_dispute()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        after = asyncio.run(dispute_svc.uphold(dispute.id, on_rating=seen.append))
+
+    (outcome,) = seen
+    assert (outcome.status, outcome.tx_hash, outcome.reason) == ("TIMEOUT", IN_FLIGHT, None)
+    assert rpc.sent == 1
+    assert after.rating_tx == IN_FLIGHT and after.rating_confirmed is False
+    (logged,) = svc_errors(caplog)
+    for fact in ("outcome=TIMEOUT", "may still land", "credited_usdc=0.0500000", dispute.id, JOB, AGENT, IN_FLIGHT):
+        assert fact in logged, (fact, logged)
+
+
+def test_a_send_that_raised_is_still_a_timeout(monkeypatch, settler, invalidated, caplog) -> None:
+    """The request may have reached the RPC before the connection dropped:
+    the rating may be on its way, so TIMEOUT, not FAILED."""
+    _real_client(monkeypatch, Rpc("send_raises"))
+    seen: list[dispute_rating.RatingOutcome] = []
+    dispute = open_dispute()
+
+    with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        asyncio.run(dispute_svc.uphold(dispute.id, on_rating=seen.append))
+
+    (outcome,) = seen
+    assert outcome.status == "TIMEOUT"
+    (logged,) = svc_errors(caplog)
+    assert "outcome=TIMEOUT" in logged and "credited_usdc=0.0500000" in logged

@@ -22,9 +22,10 @@ from stellar_sdk import Keypair
 
 from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, TraceLine
-from app.services import execution_svc
+from app.services import execution_svc, reputation_svc
 from app.services import rating_writer as rw
 from app.state import state
+from app.stellar import cache as rcache
 from app.stellar import client as sc
 
 PAYER = Keypair.from_raw_ed25519_seed(b"\x0d" * 32).public_key
@@ -173,3 +174,66 @@ def test_a_rating_that_landed_is_still_a_proof(monkeypatch):
     [line] = _rate()
     assert line.level == "proof"
     assert line.msg.startswith("reputation → w.x rated ")
+
+
+# ── a landed rating moves the score every reader sees ───────────
+#
+# `invalidate_rep` was called only from dispute handling, although its own
+# docstring says to call it whenever a rating lands. So a plan decomposed
+# within the read TTL of a paid run was routed and stamped on the pre-run
+# score. These drive the REAL cache: prime agt_x's rep_state entry, rate, and
+# ask whether the next read would go back to the ledger.
+
+
+def _prime_rep_cache() -> None:
+    async def _stale() -> dict:
+        return {"stale": True}
+
+    rcache.clear()
+    asyncio.run(rcache.get_or_set(reputation_svc._rep_cache_key("agt_x"), 60.0, _stale))
+
+
+def _next_read_goes_to_the_ledger() -> bool:
+    fetched: list[bool] = []
+
+    async def _fresh() -> dict:
+        fetched.append(True)
+        return {"fresh": True}
+
+    asyncio.run(rcache.get_or_set(reputation_svc._rep_cache_key("agt_x"), 60.0, _fresh))
+    return bool(fetched)
+
+
+def test_a_landed_rating_drops_the_cached_score(monkeypatch):
+    _configured(monkeypatch)
+
+    async def _landed(agent_id, job_id, rating, weight, payer, kind="auto"):
+        return {"hash": "c0ffee00" * 8, "status": "SUCCESS"}
+
+    monkeypatch.setattr(sc, "submit_rating_async", _landed)
+    _prime_rep_cache()
+    try:
+        _rate()
+        assert _next_read_goes_to_the_ledger()
+    finally:
+        rcache.clear()
+
+
+@pytest.mark.parametrize("outcome", ["FAILED", "timeout", "raised"])
+def test_a_rating_that_did_not_land_leaves_the_cached_score(monkeypatch, outcome):
+    """Rejected, still unconfirmed, or never sent: the ledger did not move, so
+    neither does the cache."""
+    _configured(monkeypatch)
+
+    async def _unlanded(agent_id, job_id, rating, weight, payer, kind="auto"):
+        if outcome == "raised":
+            raise RuntimeError("rpc down")
+        return {"hash": "feedface" * 8, "status": outcome}
+
+    monkeypatch.setattr(sc, "submit_rating_async", _unlanded)
+    _prime_rep_cache()
+    try:
+        _rate()
+        assert not _next_read_goes_to_the_ledger()
+    finally:
+        rcache.clear()

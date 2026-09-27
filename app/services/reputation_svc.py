@@ -6,7 +6,10 @@ Division of labour (mirrors ERC-8004: raw evidence on-chain, aggregation off):
   - The ReputationLedger contract stores decayed, value-weighted rating
     evidence per agent (`rep_state` → sum_w / weight / count / disputed).
   - This service applies the Bayesian prior (Jøsang-style beta smoothing),
-    derives a conservative Wilson-style lower bound for the routing floor,
+    derives a conservative normal-approximation (Wald) lower bound for the
+    routing floor — long called "Wilson" here, and still exposed as
+    `wilson_z`, but it is not the Wilson score interval (see
+    `lower_bound_bps`),
     and computes the synthetic per-step rating the settler submits after a
     settled workflow.
 
@@ -28,14 +31,18 @@ Cold start: with no on-chain evidence the smoothed score IS the prior
 (default 7000 = 3.5/5) and the lower bound still clears the default floor —
 permissionless newcomers are routable, while a few heavily-weighted bad
 ratings sink an agent below the floor quickly. Failures never fabricate
-evidence: if the chain is unreachable the caller gets the prior, marked
+evidence: if a fresh read does not answer — the chain is unreachable, or the
+batch deadline passes first — the caller gets the agent's last known on-chain
+read, marked `stale=True` with its age, while one younger than the read TTL
+plus REPUTATION_STALE_GRACE_SECONDS exists; otherwise the prior, marked
 `source="prior"` and `degraded=True`.
 
-Degradation policy (deliberate, not accidental) — when the ledger cannot be
-read, reads fall back to the prior and the routing floor therefore fails
-OPEN under the shipped config: a prior-only agent clears the floor, so
-low-reputation agents become routable for the duration of the outage. That
-is kept, for three reasons:
+Degradation policy (deliberate, not accidental) — when an agent's ledger
+read cannot be had and there is no recent read to serve stale, that agent
+falls back to the prior and the routing floor therefore fails OPEN for it
+under the shipped config: a prior-only agent clears the floor, so a
+low-reputation agent becomes routable while it lasts. That is kept, for
+three reasons:
 
   - It is the same position the system takes on any agent it knows nothing
     about. An unreadable ledger genuinely means "reputation unknown", and
@@ -44,7 +51,21 @@ is kept, for three reasons:
     floor at once, tripping the orchestrator's _MIN_ROUTABLE_AGENTS backstop,
     which then picks a top-N by identical prior scores — the same agents get
     hired, with less defined semantics.
-  - The window is bounded by the read TTL and by the batch timeout.
+  - It is narrow, and per agent. Each read is judged on its own under the
+    batch deadline, so one slow agent degrades only itself; an agent read in
+    the last TTL + REPUTATION_STALE_GRACE_SECONDS (315 s shipped) is served
+    that read, stale, which the floor still judges; and a read cut off by the
+    deadline keeps running and fills the cache for the next batch. What is
+    left failing open is an agent with no read that recent: never read yet
+    (the boot pre-warm covers the registry as it stands at boot), or a chain
+    unreachable for longer than the grace.
+
+It is NOT bounded in time. Earlier notes here claimed the window was bounded
+by the read TTL and the batch timeout; both audits disproved that. The TTL
+only decides when a read is next attempted and the deadline only how long a
+batch waits for it, so a chain that stays unreachable (or slower than the
+deadline) keeps every agent past its grace on the prior for as long as that
+lasts — loudly, one WARNING per batch.
 
 What was actually broken is that none of this was visible: the fallbacks
 logged at DEBUG under an INFO root logger, i.e. not at all. Every fallback
@@ -57,6 +78,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -68,7 +92,9 @@ logger = logging.getLogger(__name__)
 STROOPS_PER_USDC = 10_000_000
 # One-sided ~84% confidence. Deliberately gentle: paired with the prior mass
 # it lets a prior-only newcomer clear the floor, while real negative evidence
-# still drags the bound down fast.
+# still drags the bound down fast. The name is historical — the bound is a
+# normal-approximation (Wald) bound, not Wilson's (`lower_bound_bps`) — and it
+# is kept because /reputation/params publishes it as `wilson_z`.
 WILSON_Z = 1.0
 
 # Mirrors of the deployed ReputationLedger v2 on-chain constants
@@ -103,6 +129,18 @@ class RepInfo(BaseModel):
     # invisible to callers. Additive with a safe default — the routers'
     # mirror models drop unknown keys, so no client contract changes.
     degraded: bool = False
+    # True when these numbers are the agent's LAST KNOWN on-chain read, served
+    # because a fresh read did not answer in time (the batch deadline passed or
+    # the read failed) — not a prior. Every other field is that earlier read's
+    # evidence, scored exactly as it was then, and the routing floor is applied
+    # to it. Distinct from `degraded`, which means "no evidence was available,
+    # so the prior stands in and the floor fails open for this agent". A stale
+    # row is never degraded; a degraded row is never stale.
+    stale: bool = False
+    # Seconds since the served evidence was read from the ledger. Set only
+    # when `stale`, else None. Never above the read TTL plus
+    # REPUTATION_STALE_GRACE_SECONDS: an older entry is not served.
+    stale_age_seconds: float | None = None
 
 
 def prior_weight_stroops() -> int:
@@ -120,7 +158,14 @@ def smoothed_bps(sum_w: int, weight: int) -> int:
 
 
 def lower_bound_bps(mean_bps: int, weight: int) -> int:
-    """Wilson-style lower bound on the smoothed mean.
+    """Normal-approximation (Wald) lower bound on the smoothed mean:
+    p - z * sqrt(p(1-p)/n).
+
+    Not the Wilson score interval, whatever the constant's name says: there
+    is no score correction, so at p -> 1 (or 0) the bound collapses onto the
+    mean. The prior's mass counts toward n as if it were observed jobs. Both
+    are as tuned — the cold-start margin is built on exactly this arithmetic —
+    so it is named for what it is rather than changed.
 
     Effective sample size counts prior mass plus on-chain evidence in units
     of one-USDC jobs, so confidence grows with settled value, not raw count.
@@ -224,8 +269,25 @@ def passes_floor(info: RepInfo | None) -> bool:
     return info.lower_bound_bps >= settings.reputation_floor_bps
 
 
+def max_rating_weight_usdc() -> float:
+    """The most evidence weight ONE rating can carry, in USDC.
+
+    REPUTATION_MAX_RATING_TO_PRIOR_RATIO times the prior's weight, inside the
+    absolute REPUTATION_MAX_RATING_WEIGHT_USDC. Tied to the prior because the
+    prior is what one rating has to be weighed against: at a ratio of 1 a
+    single rating can at most equal the prior, so it pulls an agent's score at
+    most halfway toward itself — a 95/100 whale job lands a newcomer at 8250,
+    not 9232 — and it takes more than one job to overrule the prior. The
+    absolute cap alone was 100 USDC against a 12 USDC prior, which let one
+    self-dealt run at the price ceiling set the score outright.
+    """
+    by_prior = settings.reputation_max_rating_to_prior_ratio * settings.reputation_prior_weight_usdc
+    return min(settings.reputation_max_rating_weight_usdc, by_prior)
+
+
 def rating_weight_stroops(step_price_usdc: float) -> int:
-    """Evidence weight of one rating: the step's QUOTED price, capped.
+    """Evidence weight of one rating: the step's QUOTED price, capped at
+    `max_rating_weight_usdc()`.
 
     Not its settled value. The settler passes `step.est_price_usdc` — what the
     step was quoted at — and every failure path skips the one billing site
@@ -238,7 +300,7 @@ def rating_weight_stroops(step_price_usdc: float) -> int:
     evidence; `registry_sync` refuses an on-chain price low enough for that
     floor to be an exploit (ADR 0005 D4).
     """
-    capped = min(max(step_price_usdc, 0.0), settings.reputation_max_rating_weight_usdc)
+    capped = min(max(step_price_usdc, 0.0), max_rating_weight_usdc())
     return max(1, round(capped * STROOPS_PER_USDC))
 
 
@@ -292,7 +354,7 @@ def synthetic_rating(
     reach the base score — an acknowledgement scores as non-delivery (ADR
     0005 D3). Base 70 is exactly `reputation_prior_bps`, so before this gate
     `{"ok": true}` held the mean at the prior while growing the evidence
-    mass, and the Wilson lower bound therefore ROSE with every junk response
+    mass, and the lower bound therefore ROSE with every junk response
     (5677 → 5746 over 25 of them): answering garbage forever scored strictly
     better than failing honestly, and no volume of it could ever cross the
     routing floor. First-party scoring is untouched — a local worker
@@ -352,11 +414,46 @@ def _prior_info(agent_id: str, degraded: bool = False) -> RepInfo:
     )
 
 
+_STATE_FIELDS = ("sum_w", "weight", "count", "disputed")
+
+
+def _checked_state(state: Any) -> tuple[int, int, int, int]:
+    """(sum_w, weight, count, disputed) from a rep_state map, or raise.
+
+    The ledger is trusted to write sane evidence, and this is what stops a
+    state it did NOT write sanely from scoring as evidence. Without it a
+    negative weight scored the maximum — smoothed and lower bound both 10000 —
+    and a sum_w above 10000 x weight reported an average of 10^12 bps. Neither
+    is a reputation; both are a contract bug or a redeploy mid-migration, and
+    the honest reading of either is "this read failed". Raising makes it one:
+    inside the cache's producer the state is negatively cached for the short
+    failure window instead of stored for the TTL, and `_read_rep` degrades the
+    agent to the prior with the reason in the batch warning.
+
+    A missing field reads as 0, as it always has. Every present field must be
+    a non-negative integer — not a bool, not a float, so a NaN or an infinity
+    can never reach the arithmetic — and the evidence mean sum_w / weight must
+    sit on the 0..10_000 scale.
+    """
+    if not isinstance(state, dict):
+        raise TypeError(f"rep_state returned {type(state).__name__}, expected a map")
+    values: list[int] = []
+    for field in _STATE_FIELDS:
+        value = state.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"rep_state.{field} is {type(value).__name__}, expected an integer")
+        if value < 0:
+            raise ValueError(f"rep_state.{field} is negative")
+        values.append(value)
+    sum_w, weight, count, disputed = values
+    if sum_w > 10_000 * weight:
+        raise ValueError("rep_state.sum_w exceeds 10000 x weight, a mean above the rating scale")
+    return sum_w, weight, count, disputed
+
+
 def _info_from_state(agent_id: str, state: dict[str, Any]) -> RepInfo:
-    sum_w = int(state.get("sum_w", 0))
-    weight = int(state.get("weight", 0))
-    count = int(state.get("count", 0))
-    disputed = int(state.get("disputed", 0))
+    """Score one rep_state map. Raises on a state `_checked_state` refuses."""
+    sum_w, weight, count, disputed = _checked_state(state)
     if count == 0 and weight == 0:
         # A readable ledger with no evidence IS the prior — report it as such
         # so clients can distinguish "rated on-chain" from "not yet rated".
@@ -416,6 +513,119 @@ def _log_degraded(agent_ids: list[str], total: int, reason: str) -> None:
     )
 
 
+def _log_stale(infos: list[RepInfo], total: int, reason: str) -> None:
+    """ONE warning for the agents served their last known on-chain value.
+
+    Not `_log_degraded`: nothing here fails open. These agents are still
+    judged on real evidence, only older than the TTL, so the line says how
+    old — the oldest of them — rather than which way the floor is failing.
+    """
+    ids = [info.agent_id for info in infos]
+    shown = ", ".join(ids[:_DEGRADED_LOG_AGENT_LIMIT])
+    if len(ids) > _DEGRADED_LOG_AGENT_LIMIT:
+        shown = f"{shown}, +{len(ids) - _DEGRADED_LOG_AGENT_LIMIT} more"
+    oldest = max(info.stale_age_seconds or 0.0 for info in infos)
+    logger.warning(
+        "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — the routing "
+        "floor is still applied to that evidence (oldest read %.1f s ago)",
+        len(ids),
+        total,
+        shown,
+        reason,
+        oldest,
+    )
+
+
+def _report(outcomes: list[tuple[RepInfo, str]], total: int) -> None:
+    """Log a batch's fallbacks: at most one stale line and one degraded line.
+
+    `outcomes` holds every agent whose fresh read did not answer, with the
+    reason. A single RPC outage produces the same error for every agent, so
+    each line is reported against its first reason.
+    """
+    stale = [(info, reason) for info, reason in outcomes if info.stale]
+    degraded = [(info, reason) for info, reason in outcomes if not info.stale]
+    if stale:
+        _log_stale([info for info, _ in stale], total, stale[0][1])
+    if degraded:
+        _log_degraded([info.agent_id for info, _ in degraded], total, degraded[0][1])
+
+
+def _stale_info(agent_id: str) -> RepInfo | None:
+    """The agent's last known on-chain read, marked stale — or None.
+
+    None when there is no stored read, when it expired more than
+    REPUTATION_STALE_GRACE_SECONDS ago, or when it does not score (it was
+    stored before a check that now refuses it). The age is measured from
+    when the read was stored: its expiry minus the read TTL.
+    """
+    from ..stellar import cache as rcache
+
+    last = rcache.last_stored(_rep_cache_key(agent_id))
+    if last is None:
+        return None
+    state, expiry = last
+    past_expiry = time.monotonic() - expiry
+    if past_expiry > settings.reputation_stale_grace_seconds:
+        return None
+    try:
+        info = _info_from_state(agent_id, state)
+    except Exception:
+        return None
+    age = max(0.0, settings.reputation_read_ttl_seconds + past_expiry)
+    return info.model_copy(update={"stale": True, "stale_age_seconds": round(age, 1)})
+
+
+def _fallback(agent_id: str) -> RepInfo:
+    """What an agent is scored on when its fresh read did not answer: its
+    last known on-chain read if one is recent enough, else the prior marked
+    degraded."""
+    return _stale_info(agent_id) or _prior_info(agent_id, degraded=True)
+
+
+_pool: ThreadPoolExecutor | None = None
+_oversize_logged = False
+
+
+def _read_pool() -> ThreadPoolExecutor:
+    """The worker threads reserved for rep_state reads.
+
+    Reserved, not shared: on the default executor a batch queued behind the
+    registry sync, the ratings writer and every other read in the process,
+    so the time it took depended on traffic it had no part in. Sized by
+    REPUTATION_READ_CONCURRENCY, the number the config validator checks the
+    batch deadline against. Created on first use.
+    """
+    global _pool
+    if _pool is None:
+        _pool = ThreadPoolExecutor(max_workers=settings.reputation_read_concurrency, thread_name_prefix="repread")
+    return _pool
+
+
+def shutdown_read_pool() -> None:
+    """Release the read threads (lifespan shutdown). A read still running is
+    abandoned, not joined; the next read creates a fresh pool."""
+    global _pool
+    pool, _pool = _pool, None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _note_batch_size(size: int) -> None:
+    """Say once per process when a batch outgrows what its deadline was sized
+    for — the validator can only check the size it was told to expect."""
+    global _oversize_logged
+    if size > settings.reputation_batch_agents and not _oversize_logged:
+        _oversize_logged = True
+        logger.warning(
+            "reputation batch of %d agents is larger than REPUTATION_BATCH_AGENTS=%d, the size its deadline "
+            "was sized for — its last wave of reads may miss the deadline on a healthy chain. Raise "
+            "REPUTATION_READ_CONCURRENCY or REPUTATION_BATCH_AGENTS (and the deadline with it).",
+            size,
+            settings.reputation_batch_agents,
+        )
+
+
 def _rep_cache_key(agent_id: str) -> str:
     """The read cache's key for one agent's rep_state.
 
@@ -443,37 +653,80 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
     from ..stellar import client as sc
 
     async def _read() -> dict[str, Any]:
-        return await asyncio.to_thread(
-            sc.simulate_read,
-            sc.contract_ids().reputation_ledger,
-            "rep_state",
-            [sc.sym(agent_id)],
+        # load_source=False: a view read needs no sequence number, so the
+        # load_account hop is skipped and each read is ONE round trip, not two
+        # (client.simulate_read). That halves the per-read latency the batch
+        # deadline has to cover.
+        raw = await asyncio.get_running_loop().run_in_executor(
+            _read_pool(),
+            partial(
+                sc.simulate_read,
+                sc.contract_ids().reputation_ledger,
+                "rep_state",
+                [sc.sym(agent_id)],
+                load_source=False,
+            ),
         )
+        # Refused HERE, inside the producer, so the cache records a failure —
+        # negatively cached for its short window and retried after it — rather
+        # than storing the bad payload as a success that every hit then reads
+        # as degraded for the full TTL. `simulate_read` returns None for an
+        # empty result set, which is the reachable case; an out-of-range state
+        # is refused the same way.
+        _checked_state(raw)
+        return raw
 
     try:
         state = await rcache.get_or_set(_rep_cache_key(agent_id), settings.reputation_read_ttl_seconds, _read)
+        return _info_from_state(agent_id, state), None
     except Exception as e:
-        return _prior_info(agent_id, degraded=True), _describe(e)
-    if not isinstance(state, dict):
-        return _prior_info(agent_id, degraded=True), f"rep_state returned {type(state).__name__}, expected a map"
-    return _info_from_state(agent_id, state), None
+        return _fallback(agent_id), _describe(e)
 
 
 async def fetch_rep(agent_id: str) -> RepInfo:
-    """Read one agent's decayed rep_state from chain; prior on any failure."""
+    """Read one agent's decayed rep_state from chain. On a failed read: its
+    last known on-chain value marked stale if recent enough, else the prior
+    marked degraded."""
     info, failure = await _read_rep(agent_id)
     if failure is not None:
-        _log_degraded([agent_id], 1, failure)
+        _report([(info, failure)], 1)
     return info
 
 
-async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
-    """Concurrent reads for a set of agents, bounded by one overall timeout.
+def _wait_bound(bound: float) -> float | None:
+    """The batch deadline as `asyncio.wait` takes it.
 
-    Never raises: on timeout or error every missing agent falls back to the
-    prior, so decompose latency is capped and routing always has a score. A
-    batch that degrades logs exactly one warning covering every affected
-    agent (see _log_degraded).
+    Settings refuses a bound that is not a positive, finite number, but the
+    explicit argument is not validated, and `asyncio.wait` would schedule a NaN
+    deadline rather than refuse it. Anything not above zero — NaN included —
+    therefore expires on arrival, exactly as `wait_for` treated it, and inf is
+    no deadline at all.
+    """
+    if not bound > 0:
+        return 0
+    if math.isinf(bound):
+        return None
+    return bound
+
+
+async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
+    """Concurrent reads for a set of agents, each judged on its own.
+
+    One task per agent under one shared deadline (`asyncio.wait`). Every read
+    that has answered by the deadline is KEPT — a cache hit, a fresh on-chain
+    read, or a failure it already degraded — and only the agents whose read is
+    still pending fall back. The old shape, one `wait_for` around a `gather`,
+    was all-or-nothing: a single slow agent threw away every other agent's
+    evidence, including answers already served from cache in microseconds, and
+    a known sub-floor agent was then routed on the prior.
+
+    A pending read is cancelled, but cancelling it abandons only THIS batch's
+    wait: `_read_rep` awaits its cache flight through `asyncio.shield`, so the
+    RPC read keeps running and lands in the cache for the next reader.
+
+    Never raises, so decompose latency is capped and routing always has a
+    score. A batch that degrades logs exactly one warning covering every
+    affected agent (see _log_degraded).
     """
     # None means "whatever the deployment is configured for". The bound lives
     # in Settings rather than in this signature so a config validator can see
@@ -482,21 +735,87 @@ async def fetch_reps(agent_ids: list[str], timeout_seconds: float | None = None)
     # value it is validating is theatre. An explicit argument still wins —
     # the timeout-path tests drive it directly.
     bound = settings.reputation_batch_timeout_seconds if timeout_seconds is None else timeout_seconds
+    ids = list(dict.fromkeys(agent_ids))
+    if not ids:
+        return {}
+    _note_batch_size(len(ids))
+    tasks = {agent_id: asyncio.ensure_future(_read_rep(agent_id)) for agent_id in ids}
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*(_read_rep(a) for a in agent_ids)),
-            timeout=bound,
-        )
-    except Exception as e:  # TimeoutError included: it subclasses Exception on 3.11+
-        # The gather was aborted, so nothing is known about any agent.
-        _log_degraded(list(agent_ids), len(agent_ids), f"batch read aborted — {_describe(e)}")
-        return {a: _prior_info(a, degraded=True) for a in agent_ids}
-    failures = [(info.agent_id, failure) for info, failure in results if failure is not None]
-    if failures:
-        # One line for the batch, reported against the first failure — a
-        # single RPC outage produces the same error for every agent.
-        _log_degraded([a for a, _ in failures], len(agent_ids), failures[0][1])
-    return {info.agent_id: info for info, _ in results}
+        await asyncio.wait(tasks.values(), timeout=_wait_bound(bound))
+    finally:
+        # Also on the way out of a cancelled caller, so no read outlives the
+        # batch that asked for it (the flight under it still lands).
+        pending_tasks = [task for task in tasks.values() if not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+
+    infos: dict[str, RepInfo] = {}
+    outcomes: list[tuple[RepInfo, str]] = []
+    for agent_id, task in tasks.items():
+        if task in pending_tasks:
+            # Cut off by the deadline: its last known on-chain read if it has
+            # a recent one, which the floor can still judge, else the prior.
+            info = _fallback(agent_id)
+            outcomes.append((info, f"read still pending at the {bound:g} s batch deadline"))
+        else:
+            info, failure = task.result()
+            if failure is not None:
+                outcomes.append((info, failure))
+        infos[agent_id] = info
+    if outcomes:
+        _report(outcomes, len(ids))
+    return infos
+
+
+_prewarm_task: asyncio.Task[None] | None = None
+
+
+async def _prewarm() -> None:
+    from ..state import state
+
+    ids = [agent.id for agent in state.list_agents()]
+    # No batch deadline: nothing is waiting on this read, and each RPC call is
+    # still bounded by the read client's own timeout. A read that fails is
+    # logged like any other batch's, and simply is not cached.
+    infos = await fetch_reps(ids, timeout_seconds=math.inf)
+    warmed = sum(1 for info in infos.values() if not info.degraded)
+    logger.info("reputation cache pre-warmed: %d/%d agents read from the ledger", warmed, len(ids))
+
+
+def start_prewarm() -> None:
+    """Read every registered agent's reputation once, in the background, at boot.
+
+    Without it the first plan after a deploy is the first reader of every
+    agent: a whole cold batch — new TLS sessions, a waking RPC — racing one
+    deadline, and whatever it cuts off has no earlier read to serve stale, so
+    it is routed on the prior. Started in the background so the request that
+    woke the instance is not held behind the chain; a plan that arrives while
+    it runs joins its in-flight reads instead of issuing its own. Reads the
+    registry as it stands at boot — agents the first registry sync indexes
+    later are read on first use. A no-op while reputation is off or no ledger
+    is configured.
+    """
+    global _prewarm_task
+    if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
+        return
+    if _prewarm_task is not None and not _prewarm_task.done():
+        return
+    _prewarm_task = asyncio.get_running_loop().create_task(_prewarm())
+    _prewarm_task.add_done_callback(_on_prewarm_done)
+
+
+def _on_prewarm_done(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("reputation pre-warm died: %s", _describe(task.exception()))  # type: ignore[arg-type]
+
+
+async def stop_prewarm() -> None:
+    """Cancel a pre-warm still running (shutdown path)."""
+    global _prewarm_task
+    task, _prewarm_task = _prewarm_task, None
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.wait({task})
 
 
 def invalidate_rep(agent_id: str) -> None:
@@ -509,6 +828,11 @@ def invalidate_rep(agent_id: str) -> None:
     routed and stamped on the very number the dispute was meant to change. A
     read already in flight when this runs is detached rather than cancelled,
     and cannot write its pre-rating result back (`app.stellar.cache.invalidate`).
+
+    Dropping the key also drops the read that would otherwise be served
+    STALE past its TTL (`_stale_info`): a value the caller has just declared
+    wrong must not come back as the "last known" one while a slow fresh read
+    is in flight.
 
     This one key is enough because it is the only cache in front of
     reputation: `fetch_rep`, `fetch_reps`, both /api/stellar/reputation routes,

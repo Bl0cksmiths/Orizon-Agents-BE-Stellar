@@ -86,6 +86,18 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
         "pdax": "unconfigured",
         "cold_start": {"routable": True, "lower_bound_bps": 5677, "floor_bps": 5500, "margin_bps": 177},
         "ratings": {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER},
+        # No DATABASE_URL in the hermetic suite: the in-memory fallback, and
+        # the refund reconcile sweep as it ships — off, and never run.
+        "disputes": {
+            "store": "memory",
+            "reconcile": {
+                "enabled": False,
+                "running": False,
+                "last_run_at": None,
+                "last_skipped": None,
+                "last_outcomes": {},
+            },
+        },
     }
 
 
@@ -174,9 +186,16 @@ def test_a_stale_answer_is_served_and_refreshed_behind_the_probe(client, monkeyp
     monkeypatch.setattr(sc, "ledger_scorer", _after_set_scorer)
 
     assert client.get("/readiness").json()["ratings"]["writer"] == "not_scorer"
-    deadline = time.monotonic() + 5
-    while (rw._last_read is None or rw._last_read.scorer != SIGNER) and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # Wait for the one background read that probe started — on the app's own
+    # loop, deterministically, rather than polling for its effect.
+    task = rw._read_task
+    assert task is not None
+
+    async def join() -> None:
+        await asyncio.wait({task})
+
+    client.portal.call(join)
+    assert rw._last_read is not None and rw._last_read.scorer == SIGNER
     for _ in range(3):
         assert client.get("/readiness").json()["ratings"] == {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER}
     assert reads == [LEDGER]  # one read behind four probes

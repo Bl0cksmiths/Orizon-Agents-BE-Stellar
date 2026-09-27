@@ -27,6 +27,7 @@ import asyncio
 import math
 import re
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -34,10 +35,19 @@ from pydantic import ValidationError
 from app.config import REPUTATION_READ_BUDGET_SHARE, Settings, settings
 from app.services import reputation_svc
 from app.stellar import cache as rcache
+from app.stellar import client as sc
 
 
 def _settings(**overrides: float) -> Settings:
-    return Settings(_env_file=None, **overrides)
+    """Settings with the batch's read latency sized down to nothing.
+
+    These tests drive the planning-share rule with budgets as small as 0.07 s,
+    far under what the shipped read latency needs; the separate rule that the
+    deadline covers the batch (`_reputation_deadline_covers_the_batch`, pinned
+    in test_reputation_batch_sizing.py) would refuse them first. A test that
+    means to exercise that rule passes the latency itself.
+    """
+    return Settings(_env_file=None, **{"reputation_read_latency_seconds": 1e-6, **overrides})
 
 
 def _typed_share(decompose: float) -> float:
@@ -186,20 +196,29 @@ def test_the_floor_holds_for_the_strings_a_dashboard_sends(monkeypatch, typed):
 @pytest.mark.parametrize("bound", [0.0, -1.0, math.nan])
 def test_what_the_floor_prevents_is_real(monkeypatch, bound):
     """The refusal's premise, demonstrated rather than asserted: with the
-    ledger answering instantly, a bound of 0, below 0 or NaN still marks every
-    agent degraded, because wait_for gives up before the first read runs. A
-    healthy chain, a working ledger, and reputation that never arrives."""
+    ledger answering at once, a bound of 0, below 0 or NaN still marks every
+    agent degraded, because the deadline passes before the first read can come
+    back from its worker thread. A healthy chain, a working ledger, and
+    reputation that never arrives.
+
+    Driven through the real cache with only `simulate_read` faked: a stand-in
+    for `get_or_set` that answers without ever yielding would be done before
+    any deadline could be checked, which proves nothing about a real read.
+    """
     monkeypatch.setattr(settings, "reputation_enabled", True)
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
-
-    async def healthy(key: str, ttl_seconds: float, producer):
-        return {"sum_w": 0, "weight": 0, "count": 0, "disputed": 0}
-
-    monkeypatch.setattr(rcache, "get_or_set", healthy)
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    monkeypatch.setattr(sc, "simulate_read", lambda *_a, **_k: {"sum_w": 0, "weight": 0, "count": 0, "disputed": 0})
     ids = ["agt_a", "agt_b", "agt_c"]
 
-    assert not any(i.degraded for i in asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=1.0)).values())
-    degraded = asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=bound))
+    rcache.clear()
+    try:
+        assert not any(i.degraded for i in asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=1.0)).values())
+        rcache.clear()
+        degraded = asyncio.run(reputation_svc.fetch_reps(ids, timeout_seconds=bound))
+    finally:
+        rcache.clear()
     assert all(i.degraded for i in degraded.values())
 
 

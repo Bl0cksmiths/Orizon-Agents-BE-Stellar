@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 
 from agno.utils.log import LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME
 from fastapi import FastAPI, Request
@@ -46,10 +46,10 @@ from .security import (
     request_id_var,
 )
 from .seed import seed_registry
-from .services import execution_svc, rating_writer, registry_sync, reputation_svc
+from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
-from .services.dispute_store import close_dispute_store
+from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
 
 
@@ -174,6 +174,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # line and /readiness's `cold_start`, which has to be asked — so it is
     # stated before anything else can bury it.
     _report_cold_start_routability()
+    # Resolve the dispute store now, so its line (postgres, or the in-memory
+    # fallback at WARNING) is in the boot log rather than inside whichever
+    # request first touches a settlement or a dispute — on a quiet instance
+    # that request may never come, and the line with it (D-063). Constructing
+    # the store dials nothing: a Postgres that is unreachable at boot still
+    # fails its first real use loudly, and never falls back to memory.
+    get_dispute_store()
     seed_registry()
     # Bound the default executor: asyncio.to_thread otherwise sizes it to
     # min(32, cpu_count + 4) from the HOST's core count, while Render grants
@@ -192,6 +199,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # loop no-ops while STELLAR_AGENT_REGISTRY is blank, which keeps the
     # hermetic test suite offline.
     registry_sync.start()
+    # Settle refund claims parked in `crediting` from the chain (see
+    # services/refund_reconcile.py). Off unless REFUND_RECONCILE_ENABLED and
+    # DISPUTE_REFUNDS_ENABLED are both on; its chain reads go through the
+    # bounded pool bound above, and it signs nothing.
+    refund_reconcile.start()
     # Seed the planner's routability set from the binding store. Without this a
     # binding made before this process started would stay unroutable until the
     # operator bound it again — which is precisely the restart AC-5 is about.
@@ -204,15 +216,24 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # lifetime, with nothing but a redeploy to fix it. A no-op on the healthy
     # path: the load above has already set `_loaded` and no task is created.
     start_refresh_retry()
+    # Read every agent's reputation once, in the background, so the first plan
+    # after a deploy is routed on the ledger rather than on priors. Last, so
+    # the reads it queues cannot delay anything above.
+    reputation_svc.start_prewarm()
     yield
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
     # would otherwise still be pending when the loop closes.
     await stop_refresh_retry()
     # Same reason: a scorer read still in flight must not outlive the loop.
     await rating_writer.stop()
+    await reputation_svc.stop_prewarm()
+    reputation_svc.shutdown_read_pool()
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
     await registry_sync.stop()
+    # Before the drain below: a pass must not start writing dispute records
+    # while the store it writes to is about to be closed.
+    await refund_reconcile.stop()
     # Drain in-flight background executions: a bounded grace window to let
     # them finish, then cancel stragglers and reap the cancellations so the
     # process exits without "task was destroyed but it is pending" noise.
@@ -355,7 +376,7 @@ app.add_middleware(
     # console proxies same-origin today, so nothing exercises this list — which
     # is precisely why it would have been found the first time it mattered.
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["content-type", "authorization", "x-api-key", "x-task-token"],
+    allow_headers=["content-type", "authorization", "x-api-key", "x-task-token", "x-dispute-read-grant"],
 )
 
 # Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
@@ -582,6 +603,47 @@ class RatingsReadiness(BaseModel):
     scorer: str | None  # the ledger's stored Scorer as last read; null unless a read found one
 
 
+class RefundReconcileReadiness(BaseModel):
+    """The refund reconcile sweep (services/refund_reconcile.py) and its last pass.
+
+    `enabled` is both switches together — REFUND_RECONCILE_ENABLED and the
+    DISPUTE_REFUNDS_ENABLED it depends on — and `running` whether the loop is
+    alive in this process. The last pass is counts by action and nothing
+    else: no dispute ids and no hashes reach this unauthenticated route. A
+    nonzero `history_gap`, `no_hash`, `not_this_refund`, `amount_mismatch`,
+    `not_crediting`, `missing` or `lost_race` is a claim waiting on a human,
+    and the log names it. `last_skipped` says why a pass read nothing, such
+    as a deployment that cannot pay credits. Informational, like the rest.
+    """
+
+    enabled: bool
+    running: bool
+    last_run_at: float | None  # epoch seconds, this process's clock
+    last_skipped: str | None
+    last_outcomes: dict[str, int]
+
+
+class DisputesReadiness(BaseModel):
+    """Which store holds settlements and disputes in this process (D-063).
+
+    `postgres` when DATABASE_URL is set, `memory` otherwise — and `memory`
+    loses every settlement and dispute on restart (D-058), which is the check
+    an operator runs after a deploy. The boot log names it too; this is for
+    whoever cannot read that log, or reads it after a restart took the line.
+
+    The KIND of store only, never the DSN or anything derived from it: the DSN
+    carries the database password. It reports the selection, not a live
+    connection — the probe dials nothing, and a Postgres that is unreachable
+    is answered by the first request that needs it, loudly, never by a quiet
+    fall back to memory.
+
+    Informational, like `cold_start`: an in-memory store serves every request.
+    """
+
+    store: Literal["postgres", "memory"]
+    reconcile: RefundReconcileReadiness
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. No live network calls, so the probe
     stays cheap and deterministic: everything is config-derived except
@@ -594,6 +656,7 @@ class ReadinessResponse(BaseModel):
     pdax: str  # "configured" | "unconfigured" — informational
     cold_start: ColdStartReadiness  # informational, never gates readiness
     ratings: RatingsReadiness  # informational, never gates readiness
+    disputes: DisputesReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -650,4 +713,8 @@ async def readiness(response: Response) -> ReadinessResponse:
             margin_bps=margin.margin_bps,
         ),
         ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
+        disputes=DisputesReadiness(
+            store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
+            reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
+        ),
     )

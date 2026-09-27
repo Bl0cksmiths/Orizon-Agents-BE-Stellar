@@ -11,6 +11,7 @@ assertions."""
 from __future__ import annotations
 
 import logging
+import re
 import traceback
 
 import pytest
@@ -50,6 +51,15 @@ def test_mainnet_requires_mainnet_passphrase():
         _settings(stellar_network="mainnet")
     s = _settings(stellar_network="mainnet", stellar_network_passphrase=MAINNET_PASSPHRASE)
     assert s.stellar_network == "mainnet"
+
+
+@pytest.mark.parametrize("label", ["pubnet", "PUBLIC", " mainnet", "Mainnet "])
+def test_every_spelling_of_mainnet_over_a_testnet_passphrase_is_refused(label):
+    """D-074: the label was read case-sensitively and unpadded here, and without
+    `pubnet`, while the key rule stripped it — so the two disagreed about what a
+    label said. One reading now, `label_names_mainnet`."""
+    with pytest.raises(ValidationError, match="STELLAR_NETWORK_PASSPHRASE"):
+        _settings(stellar_network=label)
 
 
 def test_production_rejects_unsigned_webhook_escape_hatch():
@@ -123,6 +133,23 @@ def test_testnet_signer_does_not_require_api_key():
     s = _settings(stellar_signing_key=_SIGNER)
     assert s.stellar_network == "testnet"
     assert s.api_key == ""
+
+
+@pytest.mark.parametrize("label", ["pubnet", "testnet", "Mainnet", " mainnet ", "futurenet", ""])
+def test_a_mainnet_passphrase_demands_the_key_whatever_the_label_says(label):
+    """D-074: the passphrase decides which chain a signature is valid on, so it
+    decides whether the signer moves real money — not STELLAR_NETWORK. `pubnet`
+    and `testnet` beside the mainnet passphrase both used to boot keyless."""
+    with pytest.raises(ValidationError, match="API_KEY is required"):
+        _settings(stellar_network=label, stellar_network_passphrase=MAINNET_PASSPHRASE, stellar_signing_key=_SIGNER)
+
+
+def test_is_mainnet_reads_the_passphrase_and_never_the_label():
+    assert _settings(stellar_network="testnet", stellar_network_passphrase=MAINNET_PASSPHRASE).is_mainnet()
+    assert not _settings(stellar_network="testnet").is_mainnet()
+    # A padded passphrase hashes to a network id no chain answers to: it signs
+    # for nothing, so it is not mainnet.
+    assert not _settings(stellar_network_passphrase=MAINNET_PASSPHRASE + " ").is_mainnet()
 
 
 def test_production_pdax_credentials_without_api_key_refuse_to_boot():
@@ -618,3 +645,120 @@ def test_a_good_configuration_still_loads_through_the_same_door():
 
     assert isinstance(loaded, Settings)
     assert loaded.api_key == _USABLE_KEY
+
+
+# ── a money bound that is not a finite number bounds nothing ────
+# QA D-054. Every one of these is read by a `<` or a `>` where it guards, and
+# every comparison against NaN is false while nothing exceeds inf — so a bound
+# that is not a finite number fails OPEN, silently. The refusal goes through
+# the same door as every other one, so it is held to the same rule: name the
+# variable, never the value.
+#
+# Set through the ENVIRONMENT, as a deploy sets them, and read from a table
+# rather than written as literals in a call: a traceback renders the source
+# line of every frame, and a literal there would be caught by the leak check
+# on the test's text rather than on the exception's. Each row carries the
+# pattern that would mean its value was printed — word-bounded, because "inf"
+# and "nan" are also fragments of ordinary English.
+
+_NOT_A_NUMBER = r"(?i)\bnan\b"
+_UNBOUNDED = r"(?i)\binf\b"
+_ZERO = r"(?<![\w.])[-+]?0(?:\.0+)?(?![\w.])"
+
+MONEY_BOUND_REFUSALS = [
+    ("MAX_REFUND_USDC", "nan", _NOT_A_NUMBER),
+    ("MAX_REFUND_USDC", "inf", _UNBOUNDED),
+    ("MAX_REFUND_USDC", "-inf", _UNBOUNDED),
+    ("MAX_REFUND_USDC", "0", _ZERO),
+    ("MAX_REFUND_USDC", "-7.3141", r"7\.3141"),
+    ("MAX_CHARGE_USDC", "nan", _NOT_A_NUMBER),
+    ("MAX_CHARGE_USDC", "inf", _UNBOUNDED),
+    ("MAX_CHARGE_USDC", "-inf", _UNBOUNDED),
+    ("MAX_CHARGE_USDC", "0", _ZERO),
+    ("MAX_CHARGE_USDC", "-7.3141", r"7\.3141"),
+    ("DISPUTE_CREDITED_FRACTION", "nan", _NOT_A_NUMBER),
+    ("DISPUTE_CREDITED_FRACTION", "inf", _UNBOUNDED),
+    ("DISPUTE_CREDITED_FRACTION", "-inf", _UNBOUNDED),
+    ("DISPUTE_CREDITED_FRACTION", "1.5", r"1\.5"),
+    ("DISPUTE_CREDITED_FRACTION", "-0.25", r"0\.25"),
+    ("DISPUTE_WINDOW_SECONDS", "nan", _NOT_A_NUMBER),
+    ("DISPUTE_WINDOW_SECONDS", "inf", _UNBOUNDED),
+    ("DISPUTE_WINDOW_SECONDS", "-inf", _UNBOUNDED),
+    ("DISPUTE_WINDOW_SECONDS", "0", _ZERO),
+    ("DISPUTE_WINDOW_SECONDS", "-3607", r"3607"),
+]
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "leak"),
+    MONEY_BOUND_REFUSALS,
+    ids=[f"{variable}={value}" for variable, value, _ in MONEY_BOUND_REFUSALS],
+)
+def test_an_unusable_money_bound_refuses_to_boot_and_names_only_its_variable(monkeypatch, variable, value, leak):
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ConfigurationError) as info:
+        _load_settings(_env_file=None)
+
+    message = str(info.value)
+    assert "Refusing to boot" in message
+    assert f"{variable} is not a finite" in message
+    printed = _formatted(info.value)
+    assert not re.search(leak, printed), f"{variable}'s refused value reached the log:\n{printed}"
+
+
+MONEY_BOUNDS_THAT_BOOT = [
+    ("MAX_REFUND_USDC", "0.25", "max_refund_usdc", 0.25),
+    ("MAX_REFUND_USDC", "1e-7", "max_refund_usdc", 1e-7),
+    ("MAX_CHARGE_USDC", "2.5", "max_charge_usdc", 2.5),
+    # Both ends of the fraction are policies someone can mean: nothing back,
+    # or the whole step.
+    ("DISPUTE_CREDITED_FRACTION", "0", "dispute_credited_fraction", 0.0),
+    ("DISPUTE_CREDITED_FRACTION", "0.5", "dispute_credited_fraction", 0.5),
+    ("DISPUTE_CREDITED_FRACTION", "1", "dispute_credited_fraction", 1.0),
+    ("DISPUTE_WINDOW_SECONDS", "3600", "dispute_window_seconds", 3600.0),
+]
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "field", "expected"),
+    MONEY_BOUNDS_THAT_BOOT,
+    ids=[f"{variable}={value}" for variable, value, _, _ in MONEY_BOUNDS_THAT_BOOT],
+)
+def test_a_usable_money_bound_boots(monkeypatch, variable, value, field, expected):
+    monkeypatch.setenv(variable, value)
+
+    assert getattr(_load_settings(_env_file=None), field) == expected
+
+
+def test_the_money_bound_defaults_boot():
+    s = _settings()
+    assert s.max_refund_usdc == 1.0
+    assert s.max_charge_usdc == 100.0
+    assert s.dispute_credited_fraction == 1.0
+    assert s.dispute_window_seconds == 86_400.0
+
+
+# ── the refund reconcile sweep ────────────────────────────────────────────
+
+
+def test_the_refund_reconcile_sweep_ships_off_like_the_refund_switch():
+    s = _settings()
+    assert s.refund_reconcile_enabled is False
+    assert s.dispute_refunds_enabled is False
+    assert s.refund_reconcile_interval_seconds == 120.0
+
+
+@pytest.mark.parametrize("interval", [30, 120.0, 3600])
+def test_a_refund_reconcile_interval_inside_the_bounds_boots(interval):
+    assert _settings(refund_reconcile_interval_seconds=interval).refund_reconcile_interval_seconds == interval
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), -1, 0, 29.9, 3600.5, 86_400])
+def test_a_refund_reconcile_interval_outside_the_bounds_refuses_to_boot(interval):
+    with pytest.raises(ConfigurationError) as refused:
+        _load_settings(_env_file=None, refund_reconcile_interval_seconds=interval)
+    message = str(refused.value)
+    assert "REFUND_RECONCILE_INTERVAL_SECONDS" in message
+    # The boot-failure rule: the variable is named, the value never is.
+    assert str(interval) not in message.replace("30 to 3600", "")

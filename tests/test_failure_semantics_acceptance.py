@@ -32,6 +32,20 @@ from app.services import execution_svc
 from app.state import state
 from app.stellar import client as sc
 
+
+@pytest.fixture(autouse=True)
+def _execute_time_recheck_passes(monkeypatch):
+    """Every step here is cleared by the execute-time re-check.
+
+    These tests dispatch agent ids nobody put in the registry (`resolve_worker`
+    is their seam) and were written before `/execute` re-checked listing and
+    the floor. What they pin — charging, rating, settling, fencing — is
+    downstream of that gate, so the gate is held open here; its own behaviour
+    is pinned against the real registry in `tests/test_execute_recheck.py`.
+    """
+    monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
+
+
 INTENT = "ship the launch page"
 PRICE = 0.02
 AUTH = "ab" * 16
@@ -91,7 +105,7 @@ def _settled_total(monkeypatch) -> list[float]:
     """Record what the charge was actually asked to settle."""
     totals: list[float] = []
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         totals.append(total_usdc)
         return ("chargehash", "sealhash", b"\x02" * 16)
 
@@ -227,7 +241,7 @@ def _rates(monkeypatch, settle_result: tuple[str | None, str | None, bytes | Non
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
     monkeypatch.setattr(settings, "stellar_signing_key", "SFAKEKEY")
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         return settle_result
 
     monkeypatch.setattr(execution_svc, "_settle_onchain", fake_settle)

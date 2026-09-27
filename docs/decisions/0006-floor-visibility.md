@@ -121,8 +121,27 @@ is the demo safety net and must stay reproducible.
 show "4.10 against a 3.00 floor" should not have to parse English to get there.
 
 `lower_bound_bps` is **null**, never 0, when the agent had no reputation entry.
-Those are different facts: `passes_floor(None)` returns True, so an agent with
-no entry is routed. A 0 would render a contradiction beside a routed agent.
+Those are different facts, and a 0 would read as the worst possible score.
+
+> **Amended 2026-09-27.** This section used to say an agent with no entry is
+> routed, because `passes_floor(None)` returns True. Routing no longer relies
+> on that. Each decompose takes one registry snapshot, reads reputation for
+> exactly its listed, dispatchable agents, and offers, substitutes or plans
+> only agents the snapshot scored. An agent with no entry is not offered at
+> all. That closes a floor bypass: an agent registered while the read was in
+> flight was offered, ranked and even made a kit substitute on the rating its
+> own registrant wrote (`Agent.rep`), which reached the planning prompt as
+> though it were evidence. Where a score is needed for ranking or display, the
+> fallback is the prior, never `Agent.rep`. `null` stays the rule for a notice
+> with no entry behind it, which in practice means `unbound_endpoint`.
+>
+> A floor notice now also carries `count` and `dispute_rate_bps`, the evidence
+> behind `lower_bound_bps`. "Below routing floor" read the same for an agent
+> sunk by upheld disputes as for one that was new and unlucky, and a buyer
+> could not tell the two apart. These fields are reported only and change no
+> verdict. Whether disputes should weigh more, or carry a floor of their own,
+> is still an open product decision. Both fields are null wherever
+> `lower_bound_bps` is.
 
 ### D6 — `reputation_degraded`, not `degraded`
 
@@ -178,3 +197,11 @@ so rejecting the whole payload would trade a rendered plan for no plan.
 - The notices explain which agents the floor removed. They do not explain which
   agent the planner *preferred* among those that cleared it — that is a model
   decision, and claiming to explain it would be a fiction.
+- **Added 2026-09-27.** The planning prompt lists at most
+  `DECOMPOSE_PROMPT_MAX_AGENTS` agents (24 by default). Past the cap, the
+  best-scored agents that cleared the floor are listed, ranked by the
+  starvation backstop's rule. An agent that cleared the floor but was not
+  listed gets no notice, for D3's reason: it is not a verdict the floor
+  reached. The model's plan is also capped at six steps, with repeated
+  (agent, task) pairs dropped, so the planner no longer decides how many paid
+  steps a plan has.

@@ -264,16 +264,46 @@ def test_the_margin_is_reported_as_data(caplog):
     assert margin.lower_bound_bps == rep._prior_info("agt_new").lower_bound_bps
 
 
-def test_the_reported_verdict_and_the_routing_verdict_cannot_disagree(monkeypatch):
+# Worked by hand as p - sqrt(p(1-p)/n), n the prior's weight in USDC — never
+# by the helpers under test, so a helper that drifted from config (audit
+# mutant M8: the prior's bound hard-coded to 5677) cannot agree with itself.
+CONFIGS = [
+    (7000, 12.0, 5677),
+    (8000, 12.0, 6845),
+    (7000, 48.0, 6339),
+    (6000, 4.0, 3551),
+]
+
+
+@pytest.mark.parametrize(("prior_bps", "weight_usdc", "bound"), CONFIGS)
+def test_the_margin_follows_the_config_it_is_given(monkeypatch, prior_bps, weight_usdc, bound):
+    """Not only at the shipped numbers: the reported bound, the router's bound
+    and the arithmetic all agree for configs nobody ships."""
+    monkeypatch.setattr(settings, "reputation_prior_bps", prior_bps)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", weight_usdc)
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5000)
+    margin = rep.cold_start_margin()
+    assert margin.lower_bound_bps == bound
+    assert margin.margin_bps == bound - 5000
+    assert rep._prior_info("agt_new").lower_bound_bps == bound
+
+
+@pytest.mark.parametrize(("prior_bps", "weight_usdc", "bound"), CONFIGS)
+def test_the_reported_verdict_and_the_routing_verdict_cannot_disagree(monkeypatch, prior_bps, weight_usdc, bound):
     """`clears` is the claim the startup line makes about a newcomer;
     `passes_floor` is what the planner will actually do with one. They are
     asserted equal across the interesting floors, including both sides of the
     boundary, because a report that can differ from the behaviour it
-    describes is worse than no report."""
-    for floor in (0, 1000, SHIPPED_PRIOR_BOUND_BPS - 1, SHIPPED_PRIOR_BOUND_BPS, SHIPPED_PRIOR_BOUND_BPS + 1, 10_000):
+    describes is worse than no report — and asserted against the hand-worked
+    bound, across configs, so the two cannot agree by sharing one mistake."""
+    monkeypatch.setattr(settings, "reputation_prior_bps", prior_bps)
+    monkeypatch.setattr(settings, "reputation_prior_weight_usdc", weight_usdc)
+    for floor in (0, 1000, bound - 1, bound, bound + 1, 10_000):
         monkeypatch.setattr(settings, "reputation_floor_bps", floor)
-        assert rep.cold_start_margin().clears is rep.passes_floor(rep._prior_info("agt_new"))
-        assert rep.cold_start_margin().clears is rep.prior_clears_floor()
+        expected = bound >= floor
+        assert rep.cold_start_margin().clears is expected
+        assert rep.passes_floor(rep._prior_info("agt_new")) is expected
+        assert rep.prior_clears_floor() is expected
 
 
 # ── the probe answers what the boot line said ───────────────────

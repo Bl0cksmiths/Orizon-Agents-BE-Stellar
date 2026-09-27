@@ -28,6 +28,8 @@ rules and keeps passing as the rules move.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.config import settings
@@ -197,9 +199,11 @@ def test_adjudication_is_503_when_no_api_key_is_configured(client, hermetic_sett
     `require_api_key` answers an unset API_KEY by returning, which is safe for
     the demo surface and would be a catastrophe here: the switch is on, so
     these routes can sign, and a fall-through would make the settler wallet
-    drainable by anyone who could reach the port. The config validator does
-    not close this either — it only demands API_KEY once a signing key AND an
-    asset SAC are also set, so this exact configuration boots.
+    drainable by anyone who could reach the port. The config validator refuses
+    to BOOT this configuration — `_money_capable_config_requires_api_key`
+    demands API_KEY on the switch alone — but settings are mutable afterwards
+    (a test, a reload), and a route that signs must answer the question per
+    request rather than trust what was true at import.
     """
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
     hermetic_settings.api_key = ""
@@ -228,18 +232,48 @@ def test_an_unconfigured_key_refuses_even_when_the_caller_sends_one(client, herm
     assert reached == []
 
 
-def test_the_switch_is_checked_before_the_key(client, hermetic_settings, monkeypatch):
-    # Both are wrong: no key configured, none supplied, switch off. The answer
-    # names the switch, because that is the operator's first question — "is
-    # this deployment supposed to adjudicate at all?" — and answering "wrong
-    # key" would send them hunting for a credential they do not need yet.
-    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+@pytest.mark.parametrize("switch", [False, True], ids=["refunds-off", "refunds-on"])
+@pytest.mark.parametrize("path", ROUTES, ids=["uphold", "reject"])
+def test_an_anonymous_caller_learns_nothing_about_the_switch(client, hermetic_settings, monkeypatch, path, switch):
+    """D-052: the key is checked BEFORE the switch. The switch used to come
+    first, so an anonymous caller read the refund path's state off the status
+    — 503 `dispute_refunds_disabled` with it off, 401 with it on. Now a caller
+    without the key gets 401 either way, and only the operator learns the
+    switch."""
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", switch)
+    hermetic_settings.api_key = "operator-secret-key"
+    reached = sealed(monkeypatch)
+
+    r = client.post(path, json={})
+
+    assert (r.status_code, r.json()["error"]["code"]) == (401, "invalid_api_key")
+    assert reached == []
+
+
+@pytest.mark.parametrize("switch", [False, True], ids=["refunds-off", "refunds-on"])
+def test_a_keyless_deployment_is_unconfigured_whatever_the_switch(client, hermetic_settings, monkeypatch, switch):
+    """Second in the order: with no key configured nobody can be the operator,
+    and that is the answer — before the switch is read, so it is the same
+    answer either way."""
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", switch)
     hermetic_settings.api_key = ""
 
     r = client.post(UPHOLD, json={})
 
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "dispute_refunds_disabled"
+    assert (r.status_code, r.json()["error"]["code"]) == (503, "adjudication_not_configured")
+
+
+def test_a_keyless_demo_with_refunds_off_logs_nothing_per_probe(client, hermetic_settings, monkeypatch, caplog):
+    # The ERROR line is for a live switch with no key behind it. The shipped
+    # demo is keyless with refunds off, and an anonymous probe must not fill
+    # the log.
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", False)
+    hermetic_settings.api_key = ""
+
+    with caplog.at_level(logging.ERROR, logger="app.security"):
+        client.post(UPHOLD, json={})
+
+    assert not [rec for rec in caplog.records if rec.name == "app.security" and rec.levelno >= logging.ERROR]
 
 
 @pytest.mark.parametrize("path", ROUTES, ids=["uphold", "reject"])
@@ -361,6 +395,38 @@ def test_a_padded_configured_key_admits_the_key_without_the_padding(client, adju
     assert reached == [DISPUTE_ID]
 
 
+@pytest.mark.parametrize("padding", [" ", "\t", "  \t "], ids=["space", "tab", "mixed"])
+def test_a_key_padded_on_the_wire_admits_the_operator(client, adjudicating, monkeypatch, padding):
+    """S05, the wire half the docstring promises: optional whitespace around a
+    header value is the HTTP parser's to keep or drop, so it must not decide
+    who gets in. Only the CONFIGURED side's padding was tested."""
+    reached = upholds_with(monkeypatch, credited())
+
+    r = client.post(UPHOLD, json={}, headers={"X-API-Key": f"{API_KEY}{padding}"})
+
+    assert r.status_code == 200, r.text
+    assert reached == [DISPUTE_ID]
+
+
+def test_the_operator_key_is_compared_in_constant_time(monkeypatch):
+    """S02: a timing property no functional test can see, so the compare is
+    held to going through `compare_digest` — `==` in its place passed every
+    other test in the suite."""
+    from app import security
+
+    calls: list[tuple[bytes, bytes]] = []
+    real = security.secrets.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(security.secrets, "compare_digest", _spy)
+
+    assert security.header_secret_matches(API_KEY, API_KEY) is True
+    assert calls == [(API_KEY.encode(), API_KEY.encode())]
+
+
 # ── the door: it admits ─────────────────────────────────────────
 
 
@@ -406,6 +472,18 @@ def test_a_successful_uphold_is_credited_with_a_refund_tx(client, adjudicating, 
     assert body["id"] == DISPUTE_ID
     assert body["payer"] == PAYER
     assert body["creditable_usdc"] == 0.25
+
+
+def test_the_uphold_answer_carries_the_buyers_words(client, adjudicating, monkeypatch):
+    """R13: the adjudicator came in on the operator key, which is strictly more
+    than the free text is gated on. The reject answer was checked; this one was
+    not, and could have gone out withheld."""
+    upholds_with(monkeypatch, credited())
+
+    body = client.post(UPHOLD, json={}, headers=AUTH).json()
+
+    assert body["reason"] == "the step returned an empty file"
+    assert body["reason_withheld"] is False
 
 
 def test_a_repeat_uphold_returns_the_same_hash(client, adjudicating, monkeypatch):

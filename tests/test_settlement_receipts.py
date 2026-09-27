@@ -20,6 +20,20 @@ from app.services import execution_svc
 from app.state import state
 from app.stellar import client as sc
 
+
+@pytest.fixture(autouse=True)
+def _execute_time_recheck_passes(monkeypatch):
+    """Every step here is cleared by the execute-time re-check.
+
+    These tests dispatch agent ids nobody put in the registry (`resolve_worker`
+    is their seam) and were written before `/execute` re-checked listing and
+    the floor. What they pin — charging, rating, settling, fencing — is
+    downstream of that gate, so the gate is held open here; its own behaviour
+    is pinned against the real registry in `tests/test_execute_recheck.py`.
+    """
+    monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
+
+
 AUTH_ID_HEX = "ab" * 16
 SIGNING_SECRET = Keypair.random().secret
 PAYER = Keypair.random().public_key
@@ -232,7 +246,7 @@ def _patch_settlement_recorders(monkeypatch) -> tuple[list, list]:
     settle_calls: list = []
     rating_calls: list = []
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         settle_calls.append((payer, auth_id_hex, total_usdc))
         return ("chargehash123", "sealhash456", b"\x01" * 16)
 

@@ -27,11 +27,14 @@ from functools import lru_cache
 from typing import Any
 
 from stellar_sdk import (
+    Account,
     Address,
     Durability,
     Keypair,
+    MuxedAccount,
     Network,
     SorobanServer,
+    StrKey,
     TransactionBuilder,
     scval,
 )
@@ -71,8 +74,16 @@ def network_passphrase() -> str:
 
 
 def explorer_network() -> str:
-    """stellar.expert network segment for the configured network."""
-    return "public" if settings.stellar_network in ("mainnet", "public") else settings.stellar_network
+    """stellar.expert network segment for the network this process SIGNS for.
+
+    From the passphrase (`Settings.is_mainnet`), never from STELLAR_NETWORK
+    (D-074): the label is a name somebody typed, and it used to send `pubnet`
+    to a `/explorer/pubnet/` page that does not exist and a `testnet` label
+    over the mainnet passphrase to the testnet explorer for a real transfer.
+    Stellar Expert says `public` where this config says `mainnet`; anything
+    that is not the mainnet passphrase is testnet here.
+    """
+    return "public" if settings.is_mainnet() else "testnet"
 
 
 # ── observability ───────────────────────────────────────────────────────
@@ -221,11 +232,25 @@ def simulate_read(
     function_name: str,
     args: list[Any] | None = None,
     source: str | None = None,
+    *,
+    load_source: bool = True,
 ) -> Any:
     """
     Simulate a view-style call — no signature, no fees, no state change.
 
     `args` must be stellar_sdk.scval values (built via `scval.to_*`).
+
+    `load_source=False` skips the `load_account` round trip and builds the
+    envelope from the source at sequence 0. simulateTransaction never checks
+    the envelope's sequence number or the source's existence for a read — it
+    only executes the invocation against current ledger state — so for a pure
+    view call that hop is a whole RPC round trip spent learning a number the
+    simulation ignores. Proven read-only on testnet (ReputationLedger.rep_state
+    for five agents, 2026-09-27): the admin at its loaded sequence, the admin
+    at sequence 0 and a freshly generated, never-funded account at sequence 0
+    returned byte-identical state, and the skipped hop cost 0.28–0.82 s. Opt-in
+    rather than the default, because it is only sound for a call whose result
+    is read and thrown away — never for an envelope that is signed and sent.
     """
     server = _server()
     src_addr = source or settings.stellar_admin_address
@@ -238,10 +263,13 @@ def simulate_read(
     # simulate_transaction.
     with _rpc_span("read", f"{_contract_label(contract_id)}.{function_name}", slow_ms=SLOW_READ_MS) as span:
         span["src"] = _short(src_addr)
-        span["stage"] = "load_account"
-        hop = time.monotonic()
-        account = server.load_account(src_addr)
-        span["load_ms"] = f"{_ms_since(hop):.0f}"
+        if load_source:
+            span["stage"] = "load_account"
+            hop = time.monotonic()
+            account = server.load_account(src_addr)
+            span["load_ms"] = f"{_ms_since(hop):.0f}"
+        else:
+            account = Account(src_addr, 0)
 
         tx = (
             TransactionBuilder(
@@ -354,22 +382,24 @@ def _signer_keypair() -> Keypair:
 
     Memoized: the signing key is immutable at runtime, so we derive once.
     (lru_cache does not cache exceptions, so an unset key keeps raising.)
+    A key that will not parse is a `NotSubmittedError`: nothing can be signed,
+    so nothing was sent.
     """
     secret = settings.stellar_signing_key or ""
     secret = secret.strip()
     if not secret:
-        raise RuntimeError("STELLAR_SIGNING_KEY is empty")
+        raise NotSubmittedError("STELLAR_SIGNING_KEY is empty")
 
     words = secret.split()
     if len(words) >= 12:
         try:
             return Keypair.from_mnemonic_phrase(" ".join(words))
         except Exception as e:
-            raise RuntimeError(f"STELLAR_SIGNING_KEY looks like a mnemonic but is invalid: {e}") from e
+            raise NotSubmittedError(f"STELLAR_SIGNING_KEY looks like a mnemonic but is invalid: {e}") from e
     try:
         return Keypair.from_secret(secret)
     except Exception as e:
-        raise RuntimeError(f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({e})") from e
+        raise NotSubmittedError(f"STELLAR_SIGNING_KEY must be an S… secret or a 12/24-word mnemonic ({e})") from e
 
 
 def signer_public_key() -> str:
@@ -391,7 +421,26 @@ _POLL_MAX_DELAY_SECONDS = 4.0
 _CONTRACT_ERROR_HEAD = re.compile(r"\s*HostError: Error\(Contract, #(\d+)\)")
 
 
-class ContractError(RuntimeError):
+class NotSubmittedError(RuntimeError):
+    """A write that failed BEFORE any transaction reached the network.
+
+    Raised where the submit path fails ahead of `sendTransaction` — the signer
+    key, the source account, the build, the simulation that prepares it, the
+    signature — and where the RPC answers the send by refusing it outright
+    (`ERROR`, `TRY_AGAIN_LATER`). Nothing is in flight after one of these, so
+    nothing can land later: the cause has to be fixed, and a retry as things
+    stand is refused the same way.
+
+    Anything that can fail AFTER the send was attempted is NOT this — a send
+    that raised, a `DUPLICATE`, a poll that lost track — because the
+    transaction may be on its way; those stay plain exceptions and a caller
+    must keep treating them as "may still land".
+
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+
+class ContractError(NotSubmittedError):
     """A backend-signed call the contract itself rejected, with its error code.
 
     The code is the discriminant of the contract's own `Error` enum, carried
@@ -406,10 +455,61 @@ class ContractError(RuntimeError):
         self.code = code
 
 
+class InFlightError(RuntimeError):
+    """A backend-signed write that failed AFTER it may have reached the network.
+
+    The opposite of `NotSubmittedError`, and raised only once the transaction
+    is signed: the send raised (the request may have reached the RPC before
+    the connection dropped), the RPC answered `DUPLICATE` (an identical
+    transaction is already pending), or the status poll itself raised. Any of
+    these may still land, so a caller must keep treating it as in flight.
+
+    What it adds over a bare exception is `tx_hash`, the hash of the signed
+    transaction. It is known the moment the envelope is signed, and it is the
+    one fact a reconciliation needs to ask the ledger what happened — without
+    it, all that is left is to scan the signer's history for a match by amount.
+    The original exception is its `__cause__`.
+
+    Still a RuntimeError, so every existing `except` keeps catching it.
+    """
+
+    def __init__(self, message: str, tx_hash: str) -> None:
+        super().__init__(message)
+        self.tx_hash = tx_hash
+
+
 def _contract_error_code(simulation_error: str | None) -> int | None:
     """The contract error code heading a simulation error, or None."""
     match = _CONTRACT_ERROR_HEAD.match(simulation_error or "")
     return int(match.group(1)) if match else None
+
+
+@contextmanager
+def _before_send(stage: str) -> Iterator[None]:
+    """Mark a stage of the submit path that runs before anything is sent.
+
+    Whatever it raises becomes a `NotSubmittedError` naming the stage, so a
+    caller can tell "refused before it existed" from "lost after it was sent"
+    by type rather than by guessing. A `NotSubmittedError` (a `ContractError`
+    included) passes through untouched.
+    """
+    try:
+        yield
+    except NotSubmittedError:
+        raise
+    except Exception as e:
+        raise NotSubmittedError(f"{stage} failed: {e}") from e
+
+
+# The send answers that mean the RPC refused the transaction and holds nothing
+# of it. `DUPLICATE` is missing on purpose: it says an identical transaction is
+# already pending, which may yet land.
+_SEND_REFUSED = frozenset({SendTransactionStatus.ERROR, SendTransactionStatus.TRY_AGAIN_LATER})
+
+
+def _send_refusal(message: str, status: Any) -> RuntimeError:
+    """The exception for a send answered with something other than PENDING."""
+    return NotSubmittedError(message) if status in _SEND_REFUSED else RuntimeError(message)
 
 
 def _send_server_signed(
@@ -424,38 +524,57 @@ def _send_server_signed(
 
     with _rpc_span("submit", label, slow_ms=SLOW_SUBMIT_MS, notable=True) as span:
         span["signer"] = _short(kp.public_key)
+        # Everything up to the send is `_before_send`: a failure there means
+        # no transaction exists anywhere but this process.
         span["stage"] = "load_account"
-        account = server.load_account(kp.public_key)
+        with _before_send("load_account"):
+            account = server.load_account(kp.public_key)
 
-        tx = (
-            TransactionBuilder(
-                source_account=account,
-                network_passphrase=network_passphrase(),
-                base_fee=100,
+        span["stage"] = "build"
+        with _before_send("build"):
+            tx = (
+                TransactionBuilder(
+                    source_account=account,
+                    network_passphrase=network_passphrase(),
+                    base_fee=100,
+                )
+                .append_invoke_contract_function_op(
+                    contract_id=contract_id,
+                    function_name=function_name,
+                    parameters=args,
+                )
+                .set_timeout(30)
+                .build()
             )
-            .append_invoke_contract_function_op(
-                contract_id=contract_id,
-                function_name=function_name,
-                parameters=args,
-            )
-            .set_timeout(30)
-            .build()
-        )
         span["stage"] = "prepare"
-        try:
-            tx = server.prepare_transaction(tx)
-        except PrepareTransactionException as e:
-            detail = e.simulate_transaction_response.error
-            code = _contract_error_code(detail)
-            if code is not None:
-                raise ContractError(f"prepare failed: {detail}", code) from e
-            raise RuntimeError(f"prepare failed: {detail}") from e
-        tx.sign(kp)
+        with _before_send("prepare"):
+            try:
+                tx = server.prepare_transaction(tx)
+            except PrepareTransactionException as e:
+                detail = e.simulate_transaction_response.error
+                code = _contract_error_code(detail)
+                if code is not None:
+                    raise ContractError(f"prepare failed: {detail}", code) from e
+                raise NotSubmittedError(f"prepare failed: {detail}") from e
+        span["stage"] = "sign"
+        with _before_send("sign"):
+            tx.sign(kp)
+            # Known from here on, and carried on every failure after the send
+            # (`InFlightError`), so a transaction that may still land never
+            # leaves this function without the hash that identifies it.
+            tx_hash = tx.hash_hex()
 
         span["stage"] = "send"
-        sent = server.send_transaction(tx)
+        # A send that RAISES is not `_before_send`: the request may have
+        # reached the RPC, so the transaction may be on its way.
+        try:
+            sent = server.send_transaction(tx)
+        except Exception as e:
+            raise InFlightError(f"send failed: {e}", tx_hash) from e
         if sent.status != SendTransactionStatus.PENDING:
-            raise RuntimeError(f"submit failed: {sent.error_result_xdr}")
+            if sent.status in _SEND_REFUSED:
+                raise NotSubmittedError(f"submit failed: {sent.error_result_xdr}")
+            raise InFlightError(f"submit failed: {sent.error_result_xdr}", tx_hash)
         span["stage"] = "pending"
         span["tx"] = sent.hash
     return sent.hash
@@ -541,7 +660,10 @@ def invoke_with_server_key(
     `invoke_with_server_key_async`, which waits between polls on the loop.
     """
     tx_hash = _send_server_signed(contract_id, function_name, args)
-    return _poll_final_sync(tx_hash, _finalize_invoke)
+    try:
+        return _poll_final_sync(tx_hash, _finalize_invoke)
+    except Exception as e:
+        raise InFlightError(f"poll failed: {e}", tx_hash) from e
 
 
 async def invoke_with_server_key_async(
@@ -551,7 +673,11 @@ async def invoke_with_server_key_async(
 ) -> dict[str, Any]:
     """Async invoke_with_server_key: submit in a worker thread, wait on the loop."""
     tx_hash = await asyncio.to_thread(_send_server_signed, contract_id, function_name, args)
-    return await _poll_final(tx_hash, _finalize_invoke)
+    try:
+        return await _poll_final(tx_hash, _finalize_invoke)
+    except Exception as e:
+        # Sent and PENDING, then the poll raised: the transaction may land.
+        raise InFlightError(f"poll failed: {e}", tx_hash) from e
 
 
 def _submit_rating_args(
@@ -562,15 +688,18 @@ def _submit_rating_args(
     payer: str,
     kind: str,
 ) -> list[Any]:
-    return [
-        addr(signer_public_key()),
-        sym(agent_id),
-        bytes16(job_id),
-        u32(rating_0_to_100),
-        i128(weight_stroops),
-        addr(payer),
-        sym(kind),
-    ]
+    # Built before any transaction exists: an argument that will not encode (a
+    # payer that is not an address, an unset signer) is refused every time.
+    with _before_send("args"):
+        return [
+            addr(signer_public_key()),
+            sym(agent_id),
+            bytes16(job_id),
+            u32(rating_0_to_100),
+            i128(weight_stroops),
+            addr(payer),
+            sym(kind),
+        ]
 
 
 def submit_rating(
@@ -680,7 +809,7 @@ def _send_signed_xdr(signed_xdr: str) -> str:
         env = TransactionEnvelope.from_xdr(signed_xdr, network_passphrase())
     except Exception as e:
         logger.warning("[stellar.submit] bad XDR: %s", e)
-        raise RuntimeError(f"bad signed XDR (likely wrong networkPassphrase or malformed): {e}") from e
+        raise NotSubmittedError(f"bad signed XDR (likely wrong networkPassphrase or malformed): {e}") from e
 
     # The envelope's own hash and source account identify the transaction; the
     # XDR itself is never logged (it carries the user's signature payload).
@@ -692,7 +821,7 @@ def _send_signed_xdr(signed_xdr: str) -> str:
         if sent.status != SendTransactionStatus.PENDING:
             detail = f"status={sent.status} error={getattr(sent, 'error_result_xdr', None)} hash={sent.hash}"
             logger.error("[stellar.submit] send failed: %s", detail)
-            raise RuntimeError(f"submit failed ({detail})")
+            raise _send_refusal(f"submit failed ({detail})", sent.status)
         span["stage"] = "pending"
     return sent.hash
 
@@ -801,6 +930,31 @@ def addr(a: str) -> SCVal:
     return scval.to_address(Address(a))
 
 
+def muxed_addr(account: str, muxed_id: int) -> SCVal:
+    """`account` (a G address) with `muxed_id` attached: an M address, as an SCVal.
+
+    For the one argument that accepts it since protocol 23 (CAP-67): the `to`
+    of a Stellar Asset Contract `transfer`. The SAC credits the underlying G
+    account — a muxed address has no balance of its own — and publishes the id
+    as `to_muxed_id` in the transfer event, so a payment carries a 64-bit tag
+    the ledger keeps. Proven read-only on testnet (protocol 28, 2026-09-27):
+    the simulated event named the plain G in its `to` topic and `{amount,
+    to_muxed_id}` as its data.
+
+    Raises `ValueError` for anything but a G address and an unsigned 64-bit id:
+    a contract (C) address cannot be muxed, and an M address already carries
+    an id this would silently replace.
+    """
+    if not StrKey.is_valid_ed25519_public_key(account):
+        raise ValueError(f"only a G address can be muxed, not {account!r}")
+    if not 0 <= muxed_id < 2**64:
+        raise ValueError(f"a muxed id is an unsigned 64-bit integer, not {muxed_id}")
+    muxed = MuxedAccount(account, muxed_id).account_muxed
+    if muxed is None:  # the SDK answers None only for an account without an id
+        raise ValueError(f"no muxed address for {account!r} with id {muxed_id}")
+    return scval.to_address(Address(muxed))
+
+
 def i128(v: int) -> SCVal:
     return scval.to_int128(v)
 
@@ -826,3 +980,56 @@ def bytes32(b: bytes) -> SCVal:
 def usdc_to_i128(amount_usdc: float) -> int:
     """0.012 → 120_000 (Stellar uses 7 decimals)."""
     return round(amount_usdc * 10_000_000)
+
+
+# ── read-only transaction lookup (the refund reconcile sweep) ───────────
+@dataclass(frozen=True)
+class LedgerTransaction:
+    """What the RPC answers about one transaction hash, and the window it answers for.
+
+    `status` is the RPC's own word — `SUCCESS`, `FAILED` or `NOT_FOUND` — and
+    NOT_FOUND is only as good as the window beside it: the RPC keeps a limited
+    stretch of history (`oldest_ledger` … `latest_ledger`), so a hash it cannot
+    find may simply be older than it remembers, or newer than it has ingested.
+    Both ends of that window are carried, with their ledgers' CLOSE TIMES, so a
+    caller can tell "never landed" from "outside what this RPC can see" by the
+    ledger's clock rather than its own.
+
+    `envelope_xdr` is the transaction as signed, present when it was found; a
+    caller that needs to know what the transaction DID reads it from there
+    rather than trusting its own record of what it meant to send.
+    """
+
+    tx_hash: str
+    status: str
+    latest_ledger: int
+    latest_ledger_close_time: int
+    oldest_ledger: int
+    oldest_ledger_close_time: int
+    ledger: int | None
+    envelope_xdr: str | None
+
+
+def get_transaction(tx_hash: str) -> LedgerTransaction:
+    """Ask the RPC about `tx_hash`. Read-only: nothing is built, signed or sent.
+
+    Blocking, so an async caller runs it through `asyncio.to_thread`. It uses
+    the READ profile of `_server()` — 5 s, no retry — so a slow RPC costs one
+    worker thread for at most that long, never the event loop and never the
+    submit profile's minute and a half. Raises whatever the RPC raises: a
+    failed lookup is not an answer, and a caller must not read it as one.
+    """
+    with _rpc_span("get_transaction", _short(tx_hash), slow_ms=SLOW_READ_MS) as span:
+        answer = _server().get_transaction(tx_hash)
+        span["status"] = answer.status.value
+    return LedgerTransaction(
+        tx_hash=tx_hash,
+        status=answer.status.value,
+        latest_ledger=int(answer.latest_ledger),
+        latest_ledger_close_time=int(answer.latest_ledger_close_time),
+        oldest_ledger=int(answer.oldest_ledger),
+        oldest_ledger_close_time=int(answer.oldest_ledger_close_time),
+        # NOT_FOUND answers `ledger: 0`, which is no ledger at all.
+        ledger=int(answer.ledger) if answer.ledger else None,
+        envelope_xdr=answer.envelope_xdr,
+    )

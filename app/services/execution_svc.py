@@ -6,19 +6,22 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..schemas import PlanStep, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer
+from . import failure_tracker, rating_writer, reputation_svc
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
+from .orchestrator_svc import _is_listed
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,41 @@ class CapacityExhaustedError(RuntimeError):
     """execute_plan refused to start: the concurrent-workflow ceiling
     (settings.orchestrator_max_concurrent) is already in flight. The router
     maps this to HTTP 503 "capacity_exhausted"."""
+
+
+class PlanExpiredError(CodedHTTPException):
+    """execute_plan refused a stored plan older than `settings.plan_ttl_seconds`.
+
+    An HTTP exception rather than a bare RuntimeError like its sibling above so
+    that `/execute` answers 410 `plan_expired` in the unified envelope without
+    the router having to learn it — the router belongs to another lane, and an
+    unmapped domain error would surface as a 500. Raised before any task is
+    minted, so nothing runs and nothing is charged. The message names no
+    configured limit, per `CodedHTTPException`'s disclosure rule.
+    """
+
+    def __init__(self, plan_id: str) -> None:
+        super().__init__(
+            410,
+            "plan_expired",
+            "this plan is too old to execute — build a fresh plan from the same intent and authorise that one",
+        )
+        self.plan_id = plan_id
+
+
+def _wall_clock() -> float:
+    """`time.time`, behind a seam the expiry tests can pin."""
+    return time.time()
+
+
+def plan_expired(plan: StoredPlan, now: float | None = None) -> bool:
+    """True once `plan` is strictly older than `settings.plan_ttl_seconds`.
+
+    A plan exactly TTL old still executes: the bound is inclusive, so the
+    number means "executable for this long", not "one tick less".
+    """
+    age = (_wall_clock() if now is None else now) - plan.created_at
+    return age > settings.plan_ttl_seconds
 
 
 def _track_background_task(task: asyncio.Task) -> None:
@@ -240,6 +278,64 @@ def _stored_summary(task_id: str, step_index: int, summary: str) -> str | None:
     return cleaned or None
 
 
+def _execute_refusal(step: PlanStep, info: reputation_svc.RepInfo | None) -> str | None:
+    """Why `step` must not be dispatched NOW, or None to dispatch it.
+
+    The routing floor and the listing filter are applied when a plan is BUILT
+    (`orchestrator_svc`), and a stored plan used to be executed on that verdict
+    alone — so an agent its operator delisted between decompose and execute
+    still received the step and the payment (ADR 0006:162, "routing honours
+    delisting everywhere a candidate is chosen"). Executing a step IS choosing
+    its agent, so the registry is asked again here, at the last moment before
+    dispatch, exactly as the decompose clamp asks it before a step is stored.
+
+    The returned sentence is buyer-facing (trace lines are world-readable when
+    TASK_AUTH_REQUIRED is off): it names the agent and the reason, never the
+    operator's own data.
+
+    `info` is the agent's reputation as read at the START of this run, and the
+    routing floor is re-applied to it by three rules:
+
+      * A read that FAILED (`degraded`, the prior served in its place) proves
+        nothing about the agent, so it cannot overturn the verdict the buyer
+        authorised: the step runs on its plan-time stamps. Refusing here would
+        strip a plan the buyer already signed for because the chain was slow —
+        and on a warm host the batch read degrades routinely, so that would be
+        most plans.
+      * A read that succeeded and clears the floor dispatches.
+      * A read that succeeded and does NOT clear it refuses — the agent is now
+        provably below the floor — with one exception: a step the starvation
+        backstop re-admitted below the floor at plan time (`step.degraded`).
+        The buyer authorised that step knowing it was below the floor, flagged
+        inline and with a `floor_relaxed` notice, so it still runs as long as
+        its bound is no worse than the one the card showed. Worse than that,
+        it is refused like any other: the buyer consented to the evidence
+        they saw, not to whatever arrives after.
+    """
+    agent = state.agents.get(step.agent_id)
+    if agent is None:
+        # The registry dropped it — registry sync evicts an on-chain record it
+        # no longer believes (a reprice past the bounds). The decompose clamp
+        # treats a missing agent as unroutable, and so does this.
+        return f"{step.agent_id} is no longer in the agent registry"
+    if not _is_listed(agent):
+        return f"{step.agent_id} was delisted by its operator after this plan was built"
+    if info is None or info.degraded or reputation_svc.passes_floor(info):
+        return None
+    floor = settings.reputation_floor_bps
+    if step.degraded:
+        shown = step.rep_lower_bound_bps
+        if shown is not None and info.lower_bound_bps >= shown:
+            return None
+        return (
+            f"{step.agent_id} fell further below the routing floor than this plan showed "
+            f"({info.lower_bound_bps} < {shown if shown is not None else floor} bps)"
+        )
+    return (
+        f"{step.agent_id} fell below the routing floor after this plan was built ({info.lower_bound_bps} < {floor} bps)"
+    )
+
+
 async def execute_plan(
     plan: StoredPlan,
     *,
@@ -255,7 +351,19 @@ async def execute_plan(
     Raises CapacityExhaustedError — before any task is minted — when
     `settings.orchestrator_max_concurrent` workflows are already running,
     so an unbounded burst of executes can't fan out unbounded LLM calls.
+
+    Raises PlanExpiredError — also before any task is minted — when the plan is
+    older than `settings.plan_ttl_seconds`. Checked first: a stale plan is refused for
+    what it is, whatever the load.
     """
+    if plan_expired(plan):
+        logger.warning(
+            "execute refused for plan %s: built %.0fs ago, past the %.0fs plan TTL",
+            plan.id,
+            _wall_clock() - plan.created_at,
+            settings.plan_ttl_seconds,
+        )
+        raise PlanExpiredError(plan.id)
     active = sum(1 for t in _background_tasks if not t.done())
     if active >= settings.orchestrator_max_concurrent:
         raise CapacityExhaustedError(f"{active} workflows in flight (limit {settings.orchestrator_max_concurrent})")
@@ -363,7 +471,44 @@ async def _run(
                 f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
             )
 
+        # The routing floor, re-applied at execute (see `_execute_refusal`): one
+        # bounded batch read for every agent the plan names, taken now rather
+        # than trusted from the stamps on the plan. One read for the run, not
+        # one per step — `fetch_reps` caps it at the configured batch deadline,
+        # so the worst case delays the first step by that bound once, and the
+        # buyer's /execute has already been answered. Listing, which costs
+        # nothing to read, is still checked per step at the moment of dispatch.
+        agent_ids = sorted({s.agent_id for s in plan.plan.steps})
+        fresh = await reputation_svc.fetch_reps(agent_ids) if agent_ids else {}
+        unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded]
+        if unread:
+            # Said out loud, because it is the one case where a step runs on
+            # evidence older than this run: the buyer should know which.
+            await _emit(
+                task_id,
+                start,
+                "exec",
+                f"reputation re-check unavailable for [{', '.join(unread)}] — "
+                "those steps run on the scores this plan was authorised with",
+            )
+
         for step_index, step in enumerate(plan.plan.steps):
+            refusal = _execute_refusal(step, fresh.get(step.agent_id))
+            if refusal is not None:
+                # Story 2.03's rule for a step that fails, applied to a step
+                # that is refused: it is skipped, nothing is added to `spent`
+                # (so neither the simulated total nor the on-chain charge
+                # includes it), the settlement records it as not delivered,
+                # and the run carries on with the steps that remain. It is
+                # also NOT rated and NOT counted as a failure — the agent was
+                # never asked, and a withdrawal is its operator's decision,
+                # not a delivery it failed (ADR 0005 D5). By index, like every
+                # other per-step set here.
+                undispatched.add(step_index)
+                logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
+                await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
+                continue
+
             # Resolution deliberately stays OUTSIDE the per-step try/except
             # below. It is a lookup, not the step's work: resolve_worker fails
             # OPEN — an unreadable binding store logs and returns None — so the
@@ -617,25 +762,20 @@ async def _run(
                     first_party_ids=frozenset(first_party_ids),
                 )
             else:
-                charge_tx, proof_tx, job_id = await _settle_onchain(
-                    task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=spent
-                )
-                # Recorded here, before the ratings below, because the ratings
-                # are a SEQUENTIAL run of on-chain submits — one per step, each
-                # waiting up to ~30s on a status poll — and a process that dies
-                # partway through them (a Render redeploy, an idle spin-down)
-                # would otherwise take the buyer's only evidence of what they
-                # paid for with it. It touches no chain, and a store that is
-                # down cannot fail the run — see `_record_settlement`.
-                await _record_settlement(
+                # The settlement is recorded inside this, the moment the charge
+                # confirms and before the seal — and so before the ratings
+                # below, which are a SEQUENTIAL run of on-chain submits, one per
+                # step, each waiting up to ~30s on a status poll. A process that
+                # dies partway through any of them (a Render redeploy, an idle
+                # spin-down) would otherwise take the buyer's only evidence of
+                # what they paid for with it. It touches no chain, and a store
+                # that is down cannot fail the run — see `_record_settlement`.
+                charge_tx, proof_tx, job_id = await _settle_and_record(
                     task_id,
                     start,
                     plan,
                     payer=payer,
                     auth_id_hex=auth_id_hex,
-                    job_id=job_id,
-                    charge_tx=charge_tx,
-                    proof_tx=proof_tx,
                     total_usdc=spent,
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
@@ -786,8 +926,15 @@ async def _settle_onchain(
     payer: str,
     auth_id_hex: str,
     total_usdc: float,
+    on_charged: Callable[[str, bytes], Awaitable[None]] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Perform the real PaymentEscrow.charge + AttestationRegistry.seal calls.
+
+    `on_charged(charge_tx, job_id)` is awaited the moment the charge CONFIRMS,
+    before the seal is submitted. The seal is another ~30s poll, and a
+    cancellation during it (main.py's shutdown drain, a Render redeploy)
+    propagates out of here without returning the job id — so whatever must
+    survive a confirmed charge has to be written by then, not after.
 
     Returns (charge_tx, proof_tx, job_id); either tx may be None if that step
     failed, and job_id is None whenever the charge did not CONFIRM — skipped,
@@ -810,6 +957,9 @@ async def _settle_onchain(
     charge_tx: str | None = None
     proof_tx: str | None = None
     settled_job_id: bytes | None = None
+    # The id the charge is submitted under, for the reconstruction lines below:
+    # a settlement is keyed by it, so a line without it cannot be reconciled.
+    job_hex = "-"
 
     if not settings.stellar_signing_key:
         logger.error(
@@ -854,6 +1004,7 @@ async def _settle_onchain(
         settler = sc._signer_keypair().public_key
         auth_id = bytes.fromhex(auth_id_hex)
         job_id = secrets.token_bytes(16)
+        job_hex = job_id.hex()
 
         total_i128 = sc.usdc_to_i128(max(total_usdc, 0.000001))
 
@@ -878,6 +1029,8 @@ async def _settle_onchain(
                 "cost",
                 f"x402 charge → {total_usdc:.3f} USDC settled · tx {charge_tx[:10]}…",
             )
+            if on_charged is not None:
+                await on_charged(charge_tx, job_id)
         elif charge_status == "FAILED":
             # The ledger rejected it after simulation passed: nothing moved.
             logger.error(
@@ -1040,8 +1193,9 @@ async def _settle_onchain(
         # re-raising.
         logger.error(
             "task %s: on-chain settlement cancelled mid-flight "
-            "(auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
+            "(job %s, auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
             task_id,
+            job_hex,
             auth_id_hex,
             payer,
             total_usdc,
@@ -1051,9 +1205,10 @@ async def _settle_onchain(
         raise
     except Exception as e:
         logger.error(
-            "task %s: on-chain settlement failed: %s (auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
+            "task %s: on-chain settlement failed: %s (job %s, auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
             task_id,
             e,
+            job_hex,
             auth_id_hex,
             payer,
             total_usdc,
@@ -1095,7 +1250,7 @@ async def _record_settlement(
     total_usdc: float,
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
-) -> None:
+) -> SettlementRecord | None:
     """Write the one record a dispute is later judged against (story 4.02).
 
     Nothing else keeps these facts. The job id is minted inside the charge and
@@ -1114,8 +1269,12 @@ async def _record_settlement(
     unconfirmed charge does land, the buyer is charged and has no window, which
     `_settle_onchain` logs as the unreconciled charge it is.
 
-    A charge that landed and a seal that then failed DOES record, with
-    `proof_tx` None: the buyer paid, so the buyer has recourse, attested or not.
+    It is written as soon as the charge confirms, with `proof_tx` None, and
+    before the seal is even submitted (`_settle_and_record`): the buyer paid,
+    so the buyer has recourse, attested or not — and whether or not the
+    process lives through the seal. The seal's hash follows in a second row.
+
+    Returns the record it wrote, or None when it wrote nothing.
 
     Best-effort in the same sense as `_submit_ratings`, and for a stronger
     reason: the money has already moved by the time this runs, so a store that
@@ -1124,7 +1283,7 @@ async def _record_settlement(
     refund, and the trace line that says so is evicted long before they notice.
     """
     if job_id is None:
-        return
+        return None
 
     settled_at = time.time()
     # Stamped, never recomputed on read: the buyer is told a closing time in
@@ -1133,38 +1292,40 @@ async def _record_settlement(
     window_closes_at = settled_at + settings.dispute_window_seconds
 
     try:
-        await get_dispute_store().record_settlement(
-            SettlementRecord(
-                task_id=task_id,
-                payer=payer,
-                auth_id_hex=auth_id_hex,
-                job_id_hex=job_id.hex(),
-                charge_tx=charge_tx,
-                proof_tx=proof_tx,
-                settled_usdc=_settled_usdc(total_usdc),
-                steps=tuple(
-                    SettlementStep(
-                        step_index=index,
-                        agent_id=step.agent_id,
-                        agent_name=step.agent_name,
-                        price_usdc=step.est_price_usdc,
-                        # A step that failed, or that no worker ever resolved
-                        # for, delivered nothing and was never billed — 4.02
-                        # refuses to dispute it. Same condition that moved
-                        # `succeeded` and `spent` in the run loop.
-                        delivered=index in delivered_steps,
-                        # Already cleaned and bounded by `_stored_summary` in
-                        # the run loop. Gated on delivery here as well, so "an
-                        # undelivered step has no summary" holds where the
-                        # record is built rather than only where it was fed.
-                        output_summary=output_summaries.get(index) if index in delivered_steps else None,
-                    )
-                    for index, step in enumerate(plan.plan.steps)
-                ),
-                settled_at=settled_at,
-                window_closes_at=window_closes_at,
-            )
+        record = SettlementRecord(
+            task_id=task_id,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id_hex=job_id.hex(),
+            charge_tx=charge_tx,
+            proof_tx=proof_tx,
+            settled_usdc=_settled_usdc(total_usdc),
+            steps=tuple(
+                SettlementStep(
+                    step_index=index,
+                    agent_id=step.agent_id,
+                    agent_name=step.agent_name,
+                    # The plan's estimate: the charge moves one total for the
+                    # run, never a price per step. `settled_usdc` below is what
+                    # it moved, and every credit is bounded by that.
+                    price_usdc=step.est_price_usdc,
+                    # A step that failed, or that no worker ever resolved
+                    # for, delivered nothing and was never billed — 4.02
+                    # refuses to dispute it. Same condition that moved
+                    # `succeeded` and `spent` in the run loop.
+                    delivered=index in delivered_steps,
+                    # Already cleaned and bounded by `_stored_summary` in
+                    # the run loop. Gated on delivery here as well, so "an
+                    # undelivered step has no summary" holds where the
+                    # record is built rather than only where it was fed.
+                    output_summary=output_summaries.get(index) if index in delivered_steps else None,
+                )
+                for index, step in enumerate(plan.plan.steps)
+            ),
+            settled_at=settled_at,
+            window_closes_at=window_closes_at,
         )
+        await get_dispute_store().record_settlement(record)
     except Exception as e:
         logger.error(
             "task %s: settlement NOT recorded: %s — the buyer has no way to dispute this run "
@@ -1182,7 +1343,7 @@ async def _record_settlement(
         # The buyer is told too: a window they cannot actually use must not
         # appear in their trace as if it were open.
         await _emit(task_id, start, "error", "settlement not recorded — this run cannot be disputed")
-        return
+        return None
 
     # The window is a promise, so it is made in the buyer's own record of the
     # run. The job id stays OUT of it: trace lines are world-readable when
@@ -1194,6 +1355,98 @@ async def _record_settlement(
         "dispute window open — any delivered step can be disputed until "
         f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(window_closes_at))}",
     )
+    return record
+
+
+async def _record_proof(task_id: str, record: SettlementRecord, proof_tx: str) -> None:
+    """Add the seal's hash to a settlement already recorded at charge time.
+
+    The settlement tables are append-only and the newest row for a job wins,
+    so this APPENDS the same record again with `proof_tx` filled in — every
+    other field, `settled_at` and `window_closes_at` above all, is the first
+    row's own, so the buyer's deadline cannot move. Best-effort for
+    `_record_settlement`'s reason, and a failure here costs less: the window
+    is already open, and only the link to the attestation is missing.
+    """
+    try:
+        await get_dispute_store().record_settlement(replace(record, proof_tx=proof_tx))
+    except Exception as e:
+        logger.error(
+            "task %s: the seal's proof tx was NOT added to the settlement: %s — the dispute window is open,"
+            " the record lacks its attestation link (job %s, charge_tx %s, proof_tx %s)",
+            task_id,
+            e,
+            record.job_id_hex,
+            record.charge_tx,
+            proof_tx,
+            exc_info=True,
+        )
+
+
+async def _settle_and_record(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    *,
+    payer: str,
+    auth_id_hex: str,
+    total_usdc: float,
+    delivered_steps: frozenset[int],
+    output_summaries: Mapping[int, str | None],
+) -> tuple[str | None, str | None, bytes | None]:
+    """Charge, record the settlement, seal, then record the seal — in that order.
+
+    The order is the point. The record used to be written after
+    `_settle_onchain` returned, which is after the seal's ~30s poll; a
+    cancellation during that poll (a redeploy's shutdown drain) left a buyer
+    whose charge CONFIRMED with no settlement and so no dispute window. Now the
+    settlement is written the moment the charge confirms, with `proof_tx`
+    None, and the seal's hash is appended afterwards when there is one.
+
+    If that first write did not happen — the store failed it, or it was never
+    asked — it is attempted once more after the seal, with everything then
+    known. Returns what `_settle_onchain` returns.
+    """
+    recorded: list[SettlementRecord] = []
+
+    async def _on_charged(charge_tx: str, job_id: bytes) -> None:
+        record = await _record_settlement(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id=job_id,
+            charge_tx=charge_tx,
+            proof_tx=None,
+            total_usdc=total_usdc,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+        )
+        if record is not None:
+            recorded.append(record)
+
+    charge_tx, proof_tx, job_id = await _settle_onchain(
+        task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=total_usdc, on_charged=_on_charged
+    )
+    if recorded:
+        if proof_tx is not None:
+            await _record_proof(task_id, recorded[0], proof_tx)
+    else:
+        await _record_settlement(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id=job_id,
+            charge_tx=charge_tx,
+            proof_tx=proof_tx,
+            total_usdc=total_usdc,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+        )
+    return charge_tx, proof_tx, job_id
 
 
 # A failure class is a token, never free text. Validated by SHAPE rather than
@@ -1336,7 +1589,6 @@ async def _submit_ratings(
         return
 
     from ..stellar import client as sc
-    from . import reputation_svc
 
     # Sequential on purpose: parallel submits from the one scorer account
     # collide on sequence numbers (each tx consumes the account's next seq).
@@ -1430,6 +1682,15 @@ async def _submit_ratings(
                     f"{rating_writer.unlanded_reason(status)} · tx {tx[:10]}…",
                 )
                 continue
+            # Landed, so the score every reader sees has moved: drop the cached
+            # rep_state, as a landed dispute rating already does. Without this
+            # a plan decomposed inside the read TTL was routed and stamped on
+            # the pre-run score — worst after a failed run's 20/100, the very
+            # evidence the floor exists to act on. Only here, past the SUCCESS
+            # check: a rating that failed or is still unconfirmed changed
+            # nothing on the ledger, and dropping the entry for it would only
+            # buy an extra RPC read of the same score.
+            reputation_svc.invalidate_rep(step.agent_id)
             await _emit(
                 task_id,
                 start,

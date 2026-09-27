@@ -44,11 +44,12 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
@@ -60,6 +61,7 @@ from .dispute_store import (
     DisputeStatus,
     DuplicateDisputeError,
     SettlementRecord,
+    SettlementStep,
     get_dispute_store,
     new_dispute_id,
 )
@@ -104,6 +106,71 @@ _MAX_SIGNATURE_CHARS = 256
 # fallback holds 500 records and whose rows are read back into every dispute
 # listing.
 MAX_REASON_CHARS = 500
+
+
+# ── dispute free text: the buyer's reason and the adjudicator's note ──
+#
+# Both are FIELDS a person reads — in the console, on the buyer's receipt, in an
+# API response — and never text a model reads: no prompt-building site in this
+# service (`worker_prompt`, `fence_untrusted` and their callers) is handed
+# either one. So they are cleaned for a reader, by `clean_dispute_text`, and
+# not for a prompt fence. `sanitize_untrusted` was the cleaner until D-059 and
+# D-062, and it was the wrong one twice over: it stripped C0 but not C1 or the
+# bidi controls, so a reason made of nothing but zero-width or override
+# characters opened a dispute; and its fence defences rewrote ordinary words
+# (`THE END RESULT` became `THE [redacted marker]`) and pushed a reason at the
+# limit past it, which it then cut and marked `…[truncated]`.
+
+# C0 and C1 controls and DEL, except tab and newline so a buyer may still write
+# a paragraph. Replaced with a space rather than dropped, so `a\x00b` does not
+# silently become one word. These forge structure in whatever renders them —
+# `\x9b` is a one-byte CSI escape to a terminal, `\x85` a line break to some
+# renderers — which is why the old docstring promised C1 was stripped.
+_DISPUTE_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+# Dropped outright. The bidi embeddings, overrides and isolates (U+202A-202E,
+# U+2066-2069) and the implicit marks (U+200E, U+200F, U+061C) reorder how the
+# REST of the text displays, so a reason can make an adjudicator read something
+# other than what was stored; and lone surrogates cannot be encoded as UTF-8 at
+# all, so a store write would fail on them.
+_DISPUTE_TEXT_DROPPED = re.compile(r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+
+# Characters Unicode files as letters or marks that nonetheless render as
+# nothing: the Hangul fillers, the braille blank, the combining grapheme joiner
+# and the Khmer inherent vowels. Each one, alone, used to open a dispute.
+_INVISIBLE_GLYPHS = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5")
+
+
+def _is_visible(ch: str) -> bool:
+    """False for whitespace, controls, format characters and the fillers above."""
+    return unicodedata.category(ch)[0] not in ("C", "Z") and ch not in _INVISIBLE_GLYPHS
+
+
+def clean_dispute_text(text: str | None) -> str:
+    """A dispute's free text as it is stored, or "" when it says nothing a reader can see.
+
+    The rules, in order:
+
+      1. bidi controls and lone surrogates are DROPPED (`_DISPUTE_TEXT_DROPPED`);
+      2. C0 and C1 controls and DEL, except tab and newline, become a space
+         (`_DISPUTE_TEXT_CONTROLS`);
+      3. the ends are trimmed of whitespace;
+      4. text with no VISIBLE character left — nothing outside the control,
+         format and separator categories and the invisible glyphs — is "".
+
+    Nothing else is touched: no marker is redacted, no `====` run collapsed,
+    and NOTHING IS EVER TRUNCATED. Cleaning only ever shortens, so the caller
+    measures the result against its limit and refuses what is over it — the
+    buyer sees their words stored as they wrote them, or a refusal that says
+    why, never a silent cut. It is also not an escaping function: the console
+    escapes on render, as it does for every stored string.
+
+    None reads as "", so a caller that ignores the annotation is refused with
+    its own code rather than a TypeError the API would answer as a 500.
+    """
+    cleaned = _DISPUTE_TEXT_DROPPED.sub("", text or "")
+    cleaned = _DISPUTE_TEXT_CONTROLS.sub(" ", cleaned).strip()
+    return cleaned if any(_is_visible(ch) for ch in cleaned) else ""
 
 
 class DisputeError(Exception):
@@ -161,18 +228,28 @@ async def issue_dispute_challenge(job_id_hex: str, step_index: int) -> tuple[str
     route would let anyone invent job ids and steps until the table evicts the
     challenges honest buyers and operators are mid-way through signing.
 
-    It refuses an unknown job (`unknown_job`) and a step the settlement does not
-    have (`step_not_settled`) — and NOTHING ELSE. Whether that step was
-    delivered, whether the window is still open and whether a dispute already
-    exists are facts about the workflow's private state, and they are answered
-    in `open_dispute`, behind the signature. Minting a challenge for a dispute
-    that will be refused costs the caller a round trip and tells them nothing.
+    "Could really be disputed" is every rule `open_dispute` asks before the
+    signature is irrelevant — an unknown job (`unknown_job`), and then
+    `_disputable_step`: a closed window (`dispute_window_closed`), a step the
+    settlement does not have or that delivered nothing (`step_not_settled`),
+    and a step nobody paid for (`nothing_was_charged`). This used to refuse
+    only the first two and call the rest "private state", which they are not:
+    job ids are public in the escrow's `charged` event, and `SettlementView`
+    publishes the window, each step's delivery and its price. So a stranger
+    could hold the whole `dispute` budget with (job, step) pairs whose windows
+    closed months ago, re-minted every five minutes, and every buyer inside
+    their 24 hours would be told `challenge_capacity_dispute`. Only a step
+    inside its window, delivered and paid for, can take a slot now; the router
+    adds a per-client rate limit on top.
+
+    Whether a dispute already exists is still answered only in `open_dispute`,
+    behind the signature: a duplicate is answered with the dispute itself,
+    which is the buyer's to read back.
     """
     settlement = await get_dispute_store().get_settlement(job_id_hex)
     if settlement is None:
         raise _refuse("unknown_job", 404, "no settled workflow with that job id", job_id_hex, step_index)
-    if settlement.step(step_index) is None:
-        raise _refuse("step_not_settled", 409, f"that workflow has no step {step_index}", job_id_hex, step_index)
+    _disputable_step(settlement, step_index)
     return eb.issue_dispute_challenge(job_id_hex, step_index)
 
 
@@ -244,44 +321,45 @@ def _authenticate_payer(
         raise _refuse("not_the_payer", 403, "only the payer of a workflow may dispute it", job_id_hex, step_index)
 
 
+# What the buyer is told on every refusal of their reason, whichever way it
+# failed: one code (`reason_invalid`) and one sentence that names the bound, so
+# a client can say exactly what to fix without a second mapping.
+REASON_RULE = (
+    f"a dispute reason must say what was wrong with the step in 1 to {MAX_REASON_CHARS} characters, "
+    "at least one of them visible"
+)
+
+
 def _require_reason(reason: str, job_id_hex: str, step_index: int) -> str:
-    """The buyer's reason, cleaned and bounded — or a refusal if there is none.
+    """The buyer's reason, cleaned — or `reason_invalid` (422) if it is empty or too long.
 
-    `sanitize_untrusted` is this repo's existing primitive for text somebody
-    else wrote (`app/agents/workers/prompt_safety.py`), used here for
-    `registry_sync`'s reason rather than its own: it strips C0/C1 control
-    characters — all but tab and newline, so a buyer may still write a
-    paragraph — and clamps the length. The control characters are the part that
-    matters for a dispute: this string is read back into an API response, shown
-    in the console and quoted in the dispute receipt, and an escape sequence or
-    a NUL in any of those forges structure that nobody wrote.
-
-    Deliberately NOT `fence_untrusted`: a reason is a FIELD, not a prompt
-    block, and nothing here sends it to a model. The prompt-fence side effects
-    it does carry (collapsing `====` runs, redacting a forged BEGIN/END marker)
-    cost a buyer nothing to live with and keep one primitive rather than two.
-
-    It is also NOT an escaping function, and must not be mistaken for one: the
-    console escapes on render, as it does for every other stored string. What
-    this decides is what we STORE — evidence the buyer wrote, kept as close to
-    verbatim as is safe.
+    Cleaned by `clean_dispute_text`, whose rules are stated there: controls and
+    bidi overrides out, nothing else changed. This string is read back into an
+    API response, shown in the console and quoted in the dispute receipt, and an
+    escape sequence, a NUL or an override in any of those forges structure
+    nobody wrote. What this decides is what we STORE — evidence the buyer
+    wrote, kept as close to verbatim as is safe.
 
     Empty after cleaning is a refusal, because "the buyer said what was wrong"
     is the whole evidentiary content of a dispute that a human will later
-    adjudicate. Its code sits deliberately outside the frozen set of job-state
-    codes: those describe the WORKFLOW's state and each one is final, while this
-    one describes the request and the caller can fix it — 422, the status the
-    router's own field bound produces for the same mistake.
+    adjudicate — and "empty" includes a reason of nothing but zero-width,
+    override or filler characters (D-059), which displays as nothing. Longer
+    than MAX_REASON_CHARS after cleaning is a refusal too, never a cut
+    (D-062): the reason is the buyer's evidence, and storing the first 500
+    characters of it without a word to them changes what they said.
+
+    ONE code for both, `reason_invalid`, with a message naming the bound
+    (D-061). An empty reason and a blank one used to be answered with two
+    different codes, and an over-long one with a generic `validation_error`
+    that echoed the whole reason back. The code sits deliberately outside the
+    frozen set of job-state codes: those describe the WORKFLOW's state and each
+    one is final, while this one describes the request and the caller can fix
+    it — which is also why it is checked before the signature consumes the
+    challenge.
     """
-    cleaned = sanitize_untrusted(reason, max_chars=MAX_REASON_CHARS)
-    if not cleaned:
-        raise _refuse(
-            "reason_required",
-            422,
-            "a dispute must say what was wrong with the step",
-            job_id_hex,
-            step_index,
-        )
+    cleaned = clean_dispute_text(reason)
+    if not cleaned or len(cleaned) > MAX_REASON_CHARS:
+        raise _refuse("reason_invalid", 422, REASON_RULE, job_id_hex, step_index)
     return cleaned
 
 
@@ -307,70 +385,17 @@ def _duplicate(existing: DisputeRecord, job_id_hex: str, step_index: int) -> Dis
     )
 
 
-async def open_dispute(
-    *,
-    job_id_hex: str,
-    step_index: int,
-    reason: str,
-    payer: str,
-    nonce: str,
-    signature_b64: str,
-) -> DisputeRecord:
-    """Open a dispute against one settled step, or refuse with a `DisputeError`.
+def _disputable_step(settlement: SettlementRecord, step_index: int) -> SettlementStep:
+    """The settled step a dispute may be raised against, or the refusal that says why not.
 
-    THE ORDER OF THE CHECKS BELOW IS LOAD-BEARING, not house style — the bind
-    route's docstring makes the same point about the same kind of gate. Two
-    principles decide it: cheapest first, and nothing about a workflow's private
-    state is answered before the caller has proved they are its buyer.
-
-      1. **The reason** — pure local text handling: no store read, no crypto,
-         nothing disclosed, so it is the cheapest check there is. It is also
-         the ONLY refusal here the buyer can fix and retry, which is why it
-         must come before step 3 rather than at the end: verifying the
-         signature CONSUMES the challenge, so a buyer refused for an empty
-         reason afterwards would need a fresh nonce and a second trip through
-         their wallet to send the same dispute again.
-      2. **The settlement** — one store read, and every rule after it needs the
-         record anyway: the payer to check the signature against, the stamped
-         window, the step's price. An unknown job is answered before anything
-         else because there is nothing to judge (`unknown_job`, 404). It
-         discloses only what the chain already does — a settled job id is public
-         in the escrow's `charged` event, and this says no more than "we hold a
-         settlement for it".
-      3. **The payer** — see `_authenticate_payer`. Everything after this point
-         is off-chain state that belongs to the buyer: whether a step was
-         delivered, when their window closes, whether they already disputed. A
-         caller who cannot prove they are the buyer learns none of it.
-      4. **The window** — judged on the closing time STAMPED on the settlement
-         record, never recomputed from `settings.dispute_window_seconds`. The
-         buyer was told a deadline at settlement time; tuning the setting
-         afterwards must not move it for work already done, in either direction
-         (`dispute_window_closed`, 409, and the message says when it closed).
-      5. **The step** — it must exist on the settlement and have been delivered.
-         A step that failed was never part of what the buyer paid for, so there
-         is nothing to credit (`step_not_settled`, 409).
-      6. **Money actually moved** — the workflow charged something on-chain and
-         this step had a price (`nothing_was_charged`, 409). A credit is a real
-         transfer out of the platform wallet, so a dispute of a step nobody paid
-         for is a withdrawal request, not a remedy.
-      7. **One dispute per step** — a second attempt is answered with the first
-         dispute, unchanged (`duplicate_dispute`, 409, carrying it). Last
-         because it is the only rule whose answer is a whole record, and the
-         store re-checks it under the race (see below).
-
-    Returns the stored `DisputeRecord` (status `open`). Writes nothing on-chain
-    and touches no reputation: 4.03 pays the credit, 4.04 writes the rating.
+    Rules 4 to 6 of `open_dispute` — the window, the step, the money — stated
+    once and asked twice: by `open_dispute` behind the signature, and by
+    `issue_dispute_challenge` before a challenge slot is spent. None of them is
+    private: `SettlementView` publishes the window, each step's delivery and
+    each step's price to anyone who can name the task, and the job id is public
+    in the escrow's `charged` event.
     """
-    reason = _require_reason(reason, job_id_hex, step_index)
-
-    store = get_dispute_store()
-
-    settlement = await store.get_settlement(job_id_hex)
-    if settlement is None:
-        raise _refuse("unknown_job", 404, "no settled workflow with that job id", job_id_hex, step_index)
-
-    _authenticate_payer(settlement, step_index, payer, nonce, signature_b64)
-
+    job_id_hex = settlement.job_id_hex
     if time.time() > settlement.window_closes_at:
         # `>` rather than `>=`: a dispute arriving on the exact stamped second
         # is inside the window the buyer was promised. The record's own value,
@@ -421,6 +446,77 @@ async def open_dispute(
             step_index,
         )
 
+    return step
+
+
+async def open_dispute(
+    *,
+    job_id_hex: str,
+    step_index: int,
+    reason: str,
+    payer: str,
+    nonce: str,
+    signature_b64: str,
+) -> DisputeRecord:
+    """Open a dispute against one settled step, or refuse with a `DisputeError`.
+
+    THE ORDER OF THE CHECKS BELOW IS LOAD-BEARING, not house style — the bind
+    route's docstring makes the same point about the same kind of gate. Two
+    principles decide it: cheapest first, and nothing about a workflow's private
+    state is answered before the caller has proved they are its buyer.
+
+      1. **The reason** — pure local text handling: no store read, no crypto,
+         nothing disclosed, so it is the cheapest check there is. It is also
+         the ONLY refusal here the buyer can fix and retry, which is why it
+         must come before step 3 rather than at the end: verifying the
+         signature CONSUMES the challenge, so a buyer refused for an empty
+         reason afterwards would need a fresh nonce and a second trip through
+         their wallet to send the same dispute again.
+      2. **The settlement** — one store read, and every rule after it needs the
+         record anyway: the payer to check the signature against, the stamped
+         window, the step's price. An unknown job is answered before anything
+         else because there is nothing to judge (`unknown_job`, 404). It
+         discloses only what the chain already does — a settled job id is public
+         in the escrow's `charged` event, and this says no more than "we hold a
+         settlement for it".
+      3. **The payer** — see `_authenticate_payer`. Rules 4 to 6 are public
+         facts (`SettlementView` serves them) and the mint already asked them,
+         but they are asked again here because the answer can change between
+         the two: a window closes while a buyer sits in a wallet dialog. Rule
+         7 is the one that answers with a record, so only a proven buyer gets
+         that far.
+      4. **The window** — judged on the closing time STAMPED on the settlement
+         record, never recomputed from `settings.dispute_window_seconds`. The
+         buyer was told a deadline at settlement time; tuning the setting
+         afterwards must not move it for work already done, in either direction
+         (`dispute_window_closed`, 409, and the message says when it closed).
+      5. **The step** — it must exist on the settlement and have been delivered.
+         A step that failed was never part of what the buyer paid for, so there
+         is nothing to credit (`step_not_settled`, 409).
+      6. **Money actually moved** — the workflow charged something on-chain and
+         this step had a price (`nothing_was_charged`, 409). A credit is a real
+         transfer out of the platform wallet, so a dispute of a step nobody paid
+         for is a withdrawal request, not a remedy.
+      7. **One dispute per step** — a second attempt is answered with the first
+         dispute, unchanged (`duplicate_dispute`, 409, carrying it). Last
+         because it is the only rule whose answer is a whole record, and the
+         store re-checks it under the race (see below).
+
+    Returns the stored `DisputeRecord` (status `open`). Writes nothing on-chain
+    and touches no reputation: 4.03 pays the credit, 4.04 writes the rating.
+    """
+    reason = _require_reason(reason, job_id_hex, step_index)
+
+    store = get_dispute_store()
+
+    settlement = await store.get_settlement(job_id_hex)
+    if settlement is None:
+        raise _refuse("unknown_job", 404, "no settled workflow with that job id", job_id_hex, step_index)
+
+    _authenticate_payer(settlement, step_index, payer, nonce, signature_b64)
+
+    step = _disputable_step(settlement, step_index)
+
     existing = await store.find_dispute(job_id_hex, step_index)
     if existing is not None:
         # The buyer gets their own dispute back rather than an error they
@@ -448,9 +544,11 @@ async def open_dispute(
         # The cleaned text, which is what every reader of this record gets.
         reason=reason,
         status="open",
-        # The step's own price as it settled, never the plan's estimate: the
-        # credit is computed from this, and a credit larger than what was
-        # charged would be the platform paying for work it never billed.
+        # The step's price as the settlement recorded it — which is the
+        # PLAN'S ESTIMATE (`est_price_usdc`), not a per-step charge: the charge
+        # moves one total for the whole workflow. The credit is therefore
+        # never paid from this alone; `refund_svc.creditable_for` bounds it by
+        # what the charge actually settled, net of the job's other credits.
         charged_usdc=step.price_usdc,
         creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, settings.dispute_credited_fraction),
         opened_at=time.time(),
@@ -505,10 +603,10 @@ async def settlement_for_task(task_id: str) -> SettlementRecord | None:
 # Two facts shape all of it. `store.claim_refund` is the lock, taken before
 # anything is signed and never a read-then-write (D2) — and neither is the
 # adjudication that makes a dispute claimable in the first place, because a
-# lock a stale read can re-open is not a lock. And the Stellar client
-# does not raise on failure — it returns a status, one of whose values means
-# "submitted, may still land" (D3), which is the only way this service can pay
-# a buyer twice.
+# lock a stale read can re-open is not a lock. And a transfer can end in
+# "submitted, may still land" (D3) — a `timeout` status, or any raise after the
+# send — which is the only way this service can pay a buyer twice. Only the
+# client's `NotSubmittedError` proves the opposite before anything was sent.
 
 
 def _refuse_credit(
@@ -641,7 +739,8 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
     It is checked FIRST, before the dispute is even read: pure text handling
     is the cheapest check there is, and it is the only refusal here an
     adjudicator can fix and send again. A note that is empty AFTER cleaning —
-    missing, blank, or nothing but control characters — is refused as
+    missing, blank, or nothing but control, format or filler characters
+    (`clean_dispute_text`) — is refused as
     `rejection_reason_required` (422, the status the buyer's own missing
     `reason` carries) before anything is written, because storing it would
     print an empty explanation on the receipt.
@@ -668,10 +767,21 @@ async def reject(dispute_id: str, *, note: str) -> DisputeRecord:
     an explanation was recorded and whom the decision concerns; the
     explanation itself is read from the record by whoever needs it.
     """
-    # `sanitize_untrusted` reads a None as "", so a caller that ignores the
-    # annotation is refused below with the right code rather than with a
-    # TypeError the API would answer as a 500.
-    cleaned = sanitize_untrusted(note, max_chars=MAX_REASON_CHARS)
+    # The buyer's reason's cleaner, for the buyer's reason's reasons: it is
+    # read by a person, never a model (D-059, D-062). It reads a None as "",
+    # so a caller that ignores the annotation is refused below with the right
+    # code rather than with a TypeError the API would answer as a 500.
+    cleaned = clean_dispute_text(note)
+    if len(cleaned) > MAX_REASON_CHARS:
+        # Refused, never cut: a rejection the buyer reads with its end missing
+        # is a different rejection. The edge bounds the note at the same number,
+        # so only an in-process caller gets here.
+        logger.warning("adjudication refused: dispute=%s reason=rejection_reason_too_long", dispute_id)
+        raise DisputeError(
+            "rejection_reason_too_long",
+            f"a rejection reason is at most {MAX_REASON_CHARS} characters",
+            422,
+        )
     if not cleaned:
         logger.warning("adjudication refused: dispute=%s reason=rejection_reason_required", dispute_id)
         raise DisputeError(
@@ -841,27 +951,37 @@ def _log_rating(
     derived_hex: str,
     tx_hash: str | None,
     *,
+    outcome: dispute_rating.RatingOutcome | None = None,
     exc_info: bool = False,
 ) -> None:
     """One line per rating outcome, carrying every id a reconciliation needs.
 
-    The dispute, the sealed job it disputes, the DERIVED id the rating lives
-    under on-chain, the agent it rates and the payer it was written for: with
+    The outcome the ledger's answer was filed as (`-` when no attempt drew
+    one), the dispute, the sealed job it disputes, the DERIVED id the rating
+    lives under on-chain, the agent it rates, the payer it was written for,
+    and what that payer was CREDITED and by which refund transaction: with
     those, whoever holds a block explorer can find the rating or prove it is
-    absent from this line alone. The hash joins them whenever there is one.
-    Nothing secret — all of it is public, and the scorer's key never enters
-    this module.
+    absent, and square it with the money that moved, from this line alone
+    (D-075). The hash joins them whenever there is one, and the reason
+    whenever a FAILED carries one. Nothing secret — all of it is public, and
+    the scorer's key never enters this module.
     """
+    credited = "-" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f}"
     logger.log(
         level,
-        "dispute rating %s: dispute=%s job=%s derived=%s agent=%s payer=%s tx=%s",
+        "dispute rating %s: outcome=%s dispute=%s job=%s derived=%s agent=%s payer=%s credited_usdc=%s"
+        " refund_tx=%s tx=%s reason=%s",
         event,
+        outcome.status if outcome is not None else "-",
         dispute.id,
         dispute.job_id_hex,
         derived_hex,
         dispute.agent_id,
         dispute.payer,
+        credited,
+        dispute.refund_tx or "-",
         tx_hash or "-",
+        (outcome.reason if outcome is not None else None) or "-",
         exc_info=exc_info,
     )
 
@@ -878,9 +998,14 @@ def _tell_observer(observer: RatingObserver, dispute: DisputeRecord, outcome: di
         observer(outcome)
     except Exception:
         logger.exception(
-            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s",
+            "dispute rating observer raised; the rating stands as the ledger answered it: dispute=%s status=%s"
+            " job=%s agent=%s credited_usdc=%s tx=%s",
             dispute.id,
             outcome.status,
+            dispute.job_id_hex,
+            dispute.agent_id,
+            "-" if dispute.credited_usdc is None else f"{dispute.credited_usdc:.7f}",
+            outcome.tx_hash or "-",
         )
 
 
@@ -953,9 +1078,9 @@ async def _rate_credited(
     if gap is not None:
         # The presence-only gate the settler's own ratings pass
         # (`execution_svc._submit_ratings`). Without it a deployment that
-        # cannot sign a rating still submits, the submit raises, and the
-        # outcome is a TIMEOUT — "unconfirmed" on every uphold, forever, when
-        # the truth is "not configured". So nothing is submitted and the line
+        # cannot sign a rating still submits and is refused before the send —
+        # a FAILED on every uphold, whose reason names the symptom rather
+        # than the setting behind it. So nothing is submitted and the line
         # names the setting. ERROR per dispute rather than the settler's
         # hourly note: an upheld dispute whose agent is never rated breaks the
         # disclosed model's one promise about the agent — that its
@@ -973,7 +1098,8 @@ async def _rate_credited(
         outcome = await dispute_rating.submit_dispute_rating(credited, settlement)
     except Exception:
         # `submit_dispute_rating` turns every answer the CHAIN can give into
-        # an outcome — a submit that raised included, as a TIMEOUT — and
+        # an outcome — a submit that raised included: FAILED when the client
+        # says nothing was sent, TIMEOUT when it may have been — and
         # raises only when the rating cannot be formed from this dispute's
         # records. Those changed under a paid dispute, and no retry mends
         # that, so this says so rather than inviting one. Answered with the
@@ -1007,6 +1133,7 @@ async def _rate_credited(
                 outcome.job_id_hex,
                 credited.rating_tx,
                 exc_info=True,
+                outcome=outcome,
             )
             return credited
         # After a SUCCESS or a TIMEOUT the answer and its hash are already in
@@ -1028,6 +1155,7 @@ async def _rate_credited(
             outcome.job_id_hex,
             outcome.tx_hash,
             exc_info=True,
+            outcome=outcome,
         )
         return credited
 
@@ -1046,7 +1174,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
         # Logged and the cache dropped BEFORE the record is written: the
         # rating is on-chain whatever happens to the store next, so the hash
         # must be in the log and the score fresh even if the write fails.
-        _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash)
+        _log_rating(logging.INFO, f"landed ({outcome.rating}/100)", credited, derived, outcome.tx_hash, outcome=outcome)
         reputation_svc.invalidate_rep(credited.agent_id)
         rated = _recorded(
             await store.append_status(credited.id, "credited", rating_tx=outcome.tx_hash, rating_confirmed=True),
@@ -1059,7 +1187,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     if outcome.status == "REPLAY":
         if credited.rating_tx:
             reputation_svc.invalidate_rep(credited.agent_id)
-            _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx)
+            _log_rating(logging.INFO, "already on-chain — kept", credited, derived, credited.rating_tx, outcome=outcome)
             if credited.rating_confirmed:
                 # Already confirmed: a second row would say nothing new and
                 # would move `updated_at` for a dispute nothing happened to.
@@ -1090,6 +1218,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             credited,
             derived,
             None,
+            outcome=outcome,
         )
         return credited
 
@@ -1118,6 +1247,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
                 credited,
                 derived,
                 outcome.tx_hash,
+                outcome=outcome,
             )
             return credited
         # Logged before it is recorded, for the reason SUCCESS is.
@@ -1127,6 +1257,7 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
             credited,
             derived,
             outcome.tx_hash,
+            outcome=outcome,
         )
         if outcome.tx_hash:
             # Evidence, and explicitly NOT confirmation: the hash is the
@@ -1145,10 +1276,12 @@ async def _apply_rating(credited: DisputeRecord, outcome: dispute_rating.RatingO
     # record stays, since this attempt says nothing about that one.
     _log_rating(
         logging.ERROR,
-        f"failed ({outcome.status}) — nothing landed; uphold again to retry",
+        f"failed ({outcome.status}) — nothing landed and nothing is in flight; fix what reason= names, then uphold"
+        " again to retry",
         credited,
         derived,
         outcome.tx_hash,
+        outcome=outcome,
     )
     return credited
 
@@ -1234,6 +1367,79 @@ async def _already_adjudicated(dispute: DisputeRecord, *, on_rating: RatingObser
         )
 
     return None
+
+
+def _credited_elsewhere(claimed: DisputeRecord, disputes: tuple[DisputeRecord, ...]) -> tuple[float, ...]:
+    """What the job's OTHER disputes have been paid, or may yet be.
+
+    The settled total bounds a workflow's credits together (D4), so each
+    credit is bounded by what the others have left of it. A `credited`
+    dispute counts what it moved (its promise, for one recorded before 4.06
+    kept the amount); a `crediting` one counts its promise, because its
+    transfer may still land and can move no more than that. Read AFTER this
+    dispute's claim is taken, so of two credits of one job racing each other
+    the second always sees the first — as `crediting` at the least.
+    """
+    return tuple(
+        (d.credited_usdc if d.status == "credited" and d.credited_usdc is not None else d.creditable_usdc)
+        for d in disputes
+        if d.id != claimed.id and d.job_id_hex == claimed.job_id_hex and d.status in ("credited", "crediting")
+    )
+
+
+async def _hand_back(
+    claimed: DisputeRecord, why: str, *, failed_tx: str | None = None, failed_usdc: float | None = None
+) -> bool:
+    """Release the refund claim on a path where NOTHING WAS PAID; never raises.
+
+    Only for the paths that know that: a refusal before anything was signed,
+    or a transfer the ledger answered FAILED. Never after a TIMEOUT (D3).
+
+    Best effort, because the caller is already on its way out with a better
+    answer than a store error — the refusal, or the exception that brought it
+    here. A release that fails leaves the dispute `crediting` with its claim
+    held, which is safe (nothing can pay it twice) but looks exactly like a
+    transfer still on the network. So it is logged at ERROR as the opposite,
+    and when the ledger's FAILED answer came with a hash that hash is written
+    onto the dispute itself: positive evidence, on the record rather than in
+    a log line, that the transfer it names moved nothing — beside the amount
+    it was for (`failed_usdc`), so the reconcile sweep that later reads the
+    same FAILED off the chain can check it is the transfer on record.
+
+    Returns whether the claim was handed back.
+    """
+    store = get_dispute_store()
+    try:
+        await store.release_refund_claim(claimed.id)
+        return True
+    except Exception:
+        logger.error(
+            "dispute %s: NOTHING WAS PAID (%s) but the refund claim could NOT be released — it stays crediting;"
+            " release it by hand (job %s, payer %s, failed tx %s)",
+            claimed.id,
+            why,
+            claimed.job_id_hex,
+            claimed.payer,
+            failed_tx or "-",
+            exc_info=True,
+        )
+    if failed_tx is not None:
+        try:
+            await store.append_status(
+                claimed.id,
+                "crediting",
+                refund_tx=failed_tx,
+                inflight_usdc=failed_usdc,
+                expected_status="crediting",
+            )
+        except Exception:
+            logger.error(
+                "dispute %s: the FAILED refund tx %s could not be recorded either — it is in this line only",
+                claimed.id,
+                failed_tx,
+                exc_info=True,
+            )
+    return False
 
 
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
@@ -1413,14 +1619,41 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         logger.info("dispute %s is already claimed (%s) — nothing signed here", current.id, current.status)
         return current
 
-    settlement = await store.get_settlement(claimed.job_id_hex)
+    # From the claim to the transfer NOTHING HAS BEEN SIGNED, so whatever goes
+    # wrong in between — the store dropping out mid-read, a cancellation, a
+    # bug — hands the claim back. Left held, it parks the dispute in
+    # `crediting` with no hash: exactly what a transfer still on the network
+    # looks like, so every later uphold refuses and only a human can pay the
+    # buyer, for money that never moved. The guard ends where `credit_refund`
+    # begins; past that line a transfer MAY have been sent and nothing may
+    # ever be released on a guess.
+    try:
+        settlement = await store.get_settlement(claimed.job_id_hex)
+        amount_usdc = (
+            0.0
+            if settlement is None
+            else refund_svc.creditable_for(
+                settlement,
+                claimed,
+                settings.dispute_credited_fraction,
+                credited_elsewhere_usdc=_credited_elsewhere(
+                    claimed, await store.list_disputes_for_task(claimed.task_id)
+                ),
+            )
+        )
+    except refund_svc.RefundRefused as refused:
+        await _hand_back(claimed, refused.code)
+        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
+    except BaseException:
+        await _hand_back(claimed, "the uphold failed before anything was signed")
+        raise
     if settlement is None:
         # The amount is bounded by what the settlement says actually moved
         # (D4), so without the settlement there is no number that is safe to
         # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
         # settlement to price it from can only be paid by a human, and the
         # claim is handed back so that a human still can.
-        await store.release_refund_claim(dispute_id)
+        await _hand_back(claimed, "settlement_missing")
         raise _refuse_credit(
             claimed,
             "settlement_missing",
@@ -1432,17 +1665,16 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         )
 
     try:
-        amount_usdc = refund_svc.creditable_for(settlement, claimed, settings.dispute_credited_fraction)
         outcome = await refund_svc.credit_refund(claimed, amount_usdc)
     except refund_svc.RefundRefused as refused:
         # Every refusal — the cap, "nothing to credit", and an amount that is
         # not a finite number — is raised before `execute_refund` is called,
-        # from `creditable_for` and again from the transfer wrapper's own
-        # re-check, so NOTHING WAS SIGNED on any of those paths. That is what
-        # makes releasing the claim correct here and wrong after a timeout.
-        # `refund_svc` has already logged the numbers, so this only re-raises
-        # in the vocabulary the API answers with.
-        await store.release_refund_claim(dispute_id)
+        # from `creditable_for` above and again from the transfer wrapper's
+        # own re-check, so NOTHING WAS SIGNED on any of those paths. That is
+        # what makes releasing the claim correct here and wrong after a
+        # timeout. `refund_svc` has already logged the numbers, so this only
+        # re-raises in the vocabulary the API answers with.
+        await _hand_back(claimed, refused.code)
         raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
 
     if outcome.status == "SUCCESS":
@@ -1452,13 +1684,40 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # receipt prints this beside the refund hash, so it must be the number
         # the hash proves.
         try:
-            credited = _recorded(
-                await store.append_status(
-                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
-                ),
+            # Conditional on `crediting`, the status this outcome was decided
+            # from: while the claim is held nothing else may move the dispute.
+            written = await store.append_status(
                 dispute_id,
                 "credited",
+                refund_tx=outcome.tx_hash,
+                credited_usdc=outcome.amount_usdc,
+                expected_status="crediting",
             )
+            if written is None:
+                # Something moved it mid-flight — only an operator can, by
+                # releasing or editing a dispute whose transfer was out, which
+                # docs/disputes.md warns against — and a second uphold may
+                # already have paid it. The money HAS moved, so it is recorded
+                # anyway: a record that hid a landed credit would invite a
+                # third. CRITICAL, because this is the one line that says a
+                # buyer may have been paid twice.
+                moved = await store.get_dispute(dispute_id)
+                logger.critical(
+                    "dispute %s: %.7f USDC LANDED as tx %s on a dispute no longer in crediting (now %s, refund tx"
+                    " %s) — an operator intervened mid-flight; POSSIBLE DOUBLE PAYMENT, reconcile by hand; the"
+                    " landed credit is recorded (job %s, payer %s)",
+                    dispute_id,
+                    outcome.amount_usdc,
+                    outcome.tx_hash,
+                    moved.status if moved else "missing",
+                    moved.refund_tx if moved else "-",
+                    claimed.job_id_hex,
+                    claimed.payer,
+                )
+                written = await store.append_status(
+                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+                )
+            credited = _recorded(written, dispute_id, "credited")
         except Exception:
             # The money has MOVED and nothing else would say so where anyone
             # would see it: `credit_refund`'s SUCCESS line is INFO, and an
@@ -1489,13 +1748,18 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # moved. The buyer is still owed, so the claim goes back and the
         # dispute is left `upheld` — a second uphold will claim it and try
         # again, which is the whole reason this release exists.
-        await store.release_refund_claim(dispute_id)
+        released = await _hand_back(
+            claimed, "refund_failed", failed_tx=outcome.tx_hash, failed_usdc=outcome.amount_usdc
+        )
         raise _refuse_credit(
             claimed,
             "refund_failed",
             502,
             "the credit transfer did not settle, so nothing was paid — the dispute is still upheld"
-            " and can be credited again",
+            " and can be credited again"
+            if released
+            else "the credit transfer did not settle, so nothing was paid — but the dispute could not be"
+            " handed back, and it stays crediting until it is released by hand",
             amount_usdc=outcome.amount_usdc,
             tx_hash=outcome.tx_hash,
             level=logging.ERROR,
@@ -1507,11 +1771,37 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # it would unlock a retry that credits the buyer a second time the moment
     # the first submission settles. The in-flight hash is recorded on the
     # dispute so the reconciliation starts from the record rather than from a
-    # log search.
+    # log search — and so is the amount it was FOR, as `inflight_usdc` and
+    # never as `credited_usdc`: the reconcile sweep that later finds it landed
+    # checks the chain's figure against this one, and a receipt must not show
+    # a payment that may never arrive.
     try:
-        _recorded(
-            await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash), dispute_id, "crediting"
-        )
+        # Conditional on `crediting`, as the credited write above is. Losing it
+        # means somebody moved the dispute while the transfer was out; that
+        # record is theirs and is not overwritten, and this line is what says
+        # a transfer that may still land was sent against it.
+        if (
+            await store.append_status(
+                dispute_id,
+                "crediting",
+                refund_tx=outcome.tx_hash,
+                inflight_usdc=outcome.amount_usdc,
+                expected_status="crediting",
+            )
+            is None
+        ):
+            moved = await store.get_dispute(dispute_id)
+            logger.critical(
+                "dispute %s: refund tx %s is UNCONFIRMED and MAY STILL LAND, but the dispute is no longer in"
+                " crediting (now %s) — an operator intervened mid-flight; it was NOT overwritten, and a"
+                " second credit may follow — reconcile by hand (job %s, payer %s, %.7f USDC)",
+                dispute_id,
+                outcome.tx_hash,
+                moved.status if moved else "missing",
+                claimed.job_id_hex,
+                claimed.payer,
+                outcome.amount_usdc,
+            )
     except Exception:
         # Only the HASH was lost. `claim_refund` already moved this dispute to
         # `crediting` and the claim is still held, so both of the things that

@@ -5,6 +5,9 @@ import logging
 import random
 import re
 import secrets
+from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
 
 from agno.run.base import RunStatus
@@ -45,22 +48,93 @@ class NoRoutableAgentsError(RuntimeError):
     """
 
 
+class PlannerBusyError(RuntimeError):
+    """Every planning slot is taken and the wait queue is full.
+
+    The request was fine and the condition clears as soon as a planning call
+    finishes, so this is a retryable 503 — refused at once, before it holds a
+    connection in a queue it would most likely time out of anyway.
+    """
+
+
+class _PlanGate:
+    """Concurrency gate on the free-form planning call, with a BOUNDED wait queue.
+
+    `limit` calls run at once; up to `max_waiting` more wait for a slot, first
+    come first served, and anything past that raises `PlannerBusyError`. The
+    queue used to be unbounded: every waiter held a connection for up to the
+    whole decompose budget, so a burst bought a pile of stalled requests and
+    then a pile of planning calls.
+
+    Not an `asyncio.Semaphore`, which binds itself to the first event loop a
+    waiter contends on and then raises in any other — harmless in production's
+    single loop, and a trap for every test that plans under contention in a
+    second `asyncio.run`. The waiters here are futures created on whichever
+    loop is running at the time, so nothing outlives the loop it waited on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.in_flight = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    @property
+    def waiting(self) -> int:
+        return sum(1 for w in self._waiters if not w.done())
+
+    def locked(self) -> bool:
+        """Whether a new caller would have to wait for a slot."""
+        return self.in_flight >= self.limit or self.waiting > 0
+
+    def _release(self) -> None:
+        # Hand the slot straight to the next live waiter, so a newcomer can
+        # never jump the queue between a release and the waiter waking up.
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+        self.in_flight -= 1
+
+    @asynccontextmanager
+    async def slot(self, max_waiting: int) -> AsyncIterator[None]:
+        if self.locked():
+            if self.waiting >= max_waiting:
+                raise PlannerBusyError(f"{self.in_flight} planning call(s) running and {self.waiting} waiting")
+            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._waiters.append(waiter)
+            try:
+                await waiter
+            except BaseException:
+                # Cancelled or timed out while queued. If a release had
+                # already handed this caller the slot, pass it on; otherwise
+                # just leave the queue.
+                if waiter.done() and not waiter.cancelled():
+                    self._release()
+                elif waiter in self._waiters:
+                    self._waiters.remove(waiter)
+                raise
+        else:
+            self.in_flight += 1
+        try:
+            yield
+        finally:
+            self._release()
+
+
 # Gate on the free-form planning LLM call. /execute's fan-out is bounded by
 # orchestrator_max_concurrent (execution_svc); this is the same protection for
-# /decompose, whose non-kit path makes a real LLM call per request while the
-# rate limiter spends one shared bucket. Sized at call time from settings like
-# execute_plan's ceiling — the semaphore is rebuilt only when the configured
-# limit changes (production never does; tests tune it).
-_plan_gate: asyncio.Semaphore | None = None
-_plan_gate_limit: int | None = None
+# /decompose, whose non-kit path makes a real LLM call per request. Sized at
+# call time from settings like execute_plan's ceiling — rebuilt only when the
+# configured limit changes (production never does; tests tune it).
+_plan_gate: _PlanGate | None = None
 
 
-def _decompose_gate() -> asyncio.Semaphore:
-    global _plan_gate, _plan_gate_limit
+def _decompose_gate() -> _PlanGate:
+    global _plan_gate
     limit = max(1, settings.decompose_max_concurrent)
-    if _plan_gate is None or _plan_gate_limit != limit:
-        _plan_gate = asyncio.Semaphore(limit)
-        _plan_gate_limit = limit
+    if _plan_gate is None or _plan_gate.limit != limit:
+        _plan_gate = _PlanGate(limit)
     return _plan_gate
 
 
@@ -109,6 +183,50 @@ def _is_listed(agent: Agent) -> bool:
     return agent.status != "offline"
 
 
+class _RegistrySnapshot(NamedTuple):
+    """The registry as ONE decompose sees it: read once, handed to every stage.
+
+    `agents` is every entry, in registry order; `routable` is the listed,
+    dispatchable subset — the only agents any planning path may put in a plan,
+    and so the only ones whose reputation is worth reading.
+
+    Taken once, before the reputation read, and passed down rather than
+    re-read by each stage. The registry is live — `registry_sync` indexes
+    permissionless registrations and operators bind, unbind and delist while a
+    plan is being built — and a stage that read it again could meet an agent
+    the reputation snapshot never covered. That agent had no entry, so it
+    passed the floor on "no entry" and was offered, ranked and even promoted to
+    a kit slot on the rating its own registrant wrote. With one snapshot, every
+    stage agrees on the agent set the reputation read was taken for.
+
+    The two point-of-use checks — the clamp and `_fallback_agent` — still ask
+    the live registry, deliberately: they only ever NARROW this set, dropping
+    an agent delisted or unbound while the planner ran, and never widen it.
+    """
+
+    agents: tuple[Agent, ...]
+    routable: tuple[Agent, ...]
+
+
+def _snapshot_registry() -> _RegistrySnapshot:
+    """Read the registry once and split out what planning may route to."""
+    agents = tuple(state.list_agents())
+    return _RegistrySnapshot(agents, tuple(a for a in agents if _is_listed(a) and is_dispatchable(a.id)))
+
+
+def _still_routable(agent_id: str) -> bool:
+    """Point-of-use check against the LIVE registry: still listed and dispatchable.
+
+    Only ever narrows the snapshot. The kit path pauses before it plans, and
+    an operator can delist or unbind an agent in that pause; the snapshot
+    would still say it was routable, so a step is placed only if the live
+    registry agrees — the same question the free-form clamp asks after the
+    planning call.
+    """
+    agent = state.agents.get(agent_id)
+    return agent is not None and _is_listed(agent) and is_dispatchable(agent_id)
+
+
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     """PlanStep reputation stamp — empty when the agent has no rep entry.
 
@@ -146,6 +264,36 @@ def _reputation_degraded(reps: dict[str, reputation_svc.RepInfo]) -> bool:
     `_rep_fields`, so a card can say WHICH agent's numbers are an estimate.
     """
     return any(info.degraded for info in reps.values())
+
+
+def _smoothed_score(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> int:
+    """An agent's smoothed score for ranking and display, in bps.
+
+    The PRIOR when the snapshot has no entry, and never `Agent.rep`: for an
+    on-chain agent that is a number its own registrant wrote, so ranking or
+    displaying it let an unscored agent claiming 5.0 outrank one with real
+    evidence. Every caller already holds only scored agents (see `_scored`),
+    so the fallback is a totality guard, and it is the one number the
+    service itself would serve an agent with no evidence.
+    """
+    info = reps.get(agent.id)
+    return info.smoothed_bps if info is not None else settings.reputation_prior_bps
+
+
+def _scored(agents: list[Agent], reps: dict[str, reputation_svc.RepInfo]) -> list[Agent]:
+    """The agents the snapshot actually scored; the rest are not offered at all.
+
+    `passes_floor(None)` admits an agent without consulting the floor, so an
+    agent with no entry would reach a plan on no evidence whatsoever. With one
+    registry snapshot per decompose and reputation read for exactly its
+    routable agents, a missing entry means the read did not return one — and
+    an agent the floor could not judge is not one a plan may route to.
+    """
+    kept = [a for a in agents if a.id in reps]
+    if len(kept) < len(agents):
+        missing = sorted(a.id for a in agents if a.id not in reps)
+        logger.warning("%d routable agent(s) had no reputation entry and were not offered: %s", len(missing), missing)
+    return kept
 
 
 def _backstop_rank(agent: Agent, reps: dict[str, reputation_svc.RepInfo]) -> tuple[int, str]:
@@ -213,6 +361,7 @@ def _floor_substitute(
     designated: Agent,
     reps: dict[str, reputation_svc.RepInfo],
     taken: set[str],
+    registry: _RegistrySnapshot | None = None,
 ) -> Agent | None:
     """Deterministically pick a floor-clearing replacement for a sub-floor kit
     agent: dispatchable, OFF the kit pipeline, sharing >=1 skill, not already
@@ -229,27 +378,25 @@ def _floor_substitute(
     and it lands in the plan with a `substituted_for` badge implying we picked
     the best available stand-in. An agent whose operator withdrew it is not
     available at all.
+
+    The pool is the decompose's own registry snapshot (listed and dispatchable
+    already), narrowed to the agents it scored: a stand-in is chosen on
+    evidence, so an agent with no entry is never one.
     """
+    pool = _scored(list((registry or _snapshot_registry()).routable), reps)
     wanted = set(designated.skills)
     candidates = [
         a
-        for a in state.list_agents()
+        for a in pool
         if a.id not in taken
         and a.id not in _KIT_AGENT_IDS
-        and _is_listed(a)
-        and is_dispatchable(a.id)
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
+        and _still_routable(a.id)
     ]
     if not candidates:
         return None
-    candidates.sort(
-        key=lambda a: (
-            -(reps[a.id].smoothed_bps if a.id in reps else round(a.rep * 2000)),
-            a.id,
-        )
-    )
-    return candidates[0]
+    return min(candidates, key=lambda a: (-_smoothed_score(a, reps), a.id))
 
 
 # Line-break characters that could split one agent's entry into two. Not in
@@ -311,7 +458,7 @@ class _Shortlist(NamedTuple):
     offered: frozenset[str]
 
 
-def _unbound_notices() -> list[PlanFloorNotice]:
+def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     """`unbound_endpoint` notices for the registry as it stands — both paths.
 
     Unbound on-chain agents are a registry fact, not a floor verdict, so they
@@ -328,14 +475,19 @@ def _unbound_notices() -> list[PlanFloorNotice]:
     Reads registry and binding state, never reputation, and `unbound_exclusions`
     orders by id before it caps, so the kit path's determinism promise holds:
     the same registry yields the same notices.
+
+    Listed and not routable is listed and not dispatchable, read off the same
+    snapshot the plan was built from.
     """
+    routable = {a.id for a in registry.routable}
     return unbound_exclusions(
-        a for a in state.list_agents() if a.source == "onchain" and _is_listed(a) and not is_dispatchable(a.id)
+        a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
     )
 
 
 def _routable_registry(
     reps: dict[str, reputation_svc.RepInfo],
+    registry: _RegistrySnapshot | None = None,
 ) -> _Shortlist:
     """The AVAILABLE_AGENTS block, the floor actions that shaped it, and its ids.
 
@@ -362,8 +514,20 @@ def _routable_registry(
     #     working; `set_active(id, false)` is someone else's decision about
     #     their own service, and re-admitting on starvation would route paid
     #     work to an operator who asked us to stop.
-    agents = [a for a in state.list_agents() if _is_listed(a) and is_dispatchable(a.id)]
+    registry = registry or _snapshot_registry()
+    agents = _scored(list(registry.routable), reps)
     cleared = [a for a in agents if reputation_svc.passes_floor(reps.get(a.id))]
+    # Prompt cap. Every listed agent is prompt tokens on every planner call,
+    # and binding is open to any registrant, so the block is bounded: past the
+    # cap, the best-scored agents that cleared the floor are listed, by the
+    # backstop's own rule. The rest cleared the floor and were simply not
+    # listed, which is not a floor verdict, so it carries no notice — the same
+    # reasoning that keeps `not_selected_by_planner` out of the vocabulary.
+    cap = max(_MIN_ROUTABLE_AGENTS, settings.decompose_prompt_max_agents)
+    if len(cleared) > cap:
+        listed = {a.id for a in sorted(cleared, key=lambda a: _backstop_rank(a, reps))[:cap]}
+        logger.info("%d agents cleared the floor; listing the best-scored %d to the planner", len(cleared), cap)
+        cleared = [a for a in cleared if a.id in listed]
     # Starvation backstop: TOP UP the agents that cleared the floor, never
     # replace them. Re-ranking the whole dispatchable set and keeping the top
     # _MIN_ROUTABLE_AGENTS used to push agents that PASSED the floor out of the
@@ -437,14 +601,14 @@ def _routable_registry(
     # Concretely, that means a delisted-AND-unbound agent is filtered rather
     # than reported: "no endpoint bound" is true of it but is not why it is
     # absent, and it is advice nobody wants acted on.
-    notices += _unbound_notices()
+    notices += _unbound_notices(registry)
 
     lines = ["AVAILABLE_AGENTS:"]
     for a in routable:
-        info = reps.get(a.id)
-        # Live smoothed score on the 0–5 scale the prompt already uses;
-        # seeded rep only when the agent has no reputation entry.
-        rep_display = info.smoothed_bps / 2000 if info is not None else a.rep
+        # Live smoothed score on the 0–5 scale the prompt already uses. Never
+        # the agent's self-declared `rep`: the planner reads this number as
+        # evidence, and an on-chain registrant writes that one about itself.
+        rep_display = _smoothed_score(a, reps) / 2000
         # Only `name` is treated. `id` is a Soroban Symbol
         # ([A-Za-z0-9_]{1,32}), so it can hold no space, quote, newline or
         # fence marker; price and rep are floats this line formats itself.
@@ -484,6 +648,16 @@ def build_planning_prompt(registry_block: str, intent: str) -> str:
     return "\n\n".join([registry_block, fence_user_input(intent), "Return the Plan."])
 
 
+async def _kit_thinking() -> None:
+    """The kit path's randomized "thinking time" — see `_build_kit_plan`.
+
+    Its own function so a test can skip the pause by name, rather than paying
+    1.4–2.4 s of real sleep per kit plan or patching `asyncio.sleep` for the
+    whole process.
+    """
+    await asyncio.sleep(1.4 + random.random() * 1.0)
+
+
 class _DroppedKitRole(NamedTuple):
     """A sub-floor kit role with no substitute, held for the starvation backstop."""
 
@@ -493,7 +667,12 @@ class _DroppedKitRole(NamedTuple):
     info: reputation_svc.RepInfo | None
 
 
-async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_svc.RepInfo]) -> DecomposeResponse:
+async def _build_kit_plan(
+    intent: str,
+    kit: DemoKit,
+    reps: dict[str, reputation_svc.RepInfo],
+    registry: _RegistrySnapshot | None = None,
+) -> DecomposeResponse:
     """Deterministic 6-step plan for a curated demo intent. No LLM call.
 
     The reputation floor is applied to every pipeline agent, exactly as on the
@@ -514,7 +693,12 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     the Decompose UX feels like real LLM planning instead of a hardcoded dict
     being unpacked. It changes timing only, never plan content.
     """
-    await asyncio.sleep(1.4 + random.random() * 1.0)
+    # Snapshot before the pause, not after: an agent that lands during it was
+    # never covered by the reputation read this plan is judged on.
+    registry = registry or _snapshot_registry()
+    routable = {a.id for a in registry.routable}
+    by_id = {a.id: a for a in registry.agents}
+    await _kit_thinking()
 
     # (pipeline position, step). Execution runs steps in list order and later
     # roles read earlier ones' output from the run context — code.gen takes its
@@ -530,7 +714,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     dropped: list[_DroppedKitRole] = []
 
     for position, (agent_id, rationale) in enumerate(_KIT_PIPELINE):
-        agent = state.agents.get(agent_id)
+        agent = by_id.get(agent_id)
         if agent is None:
             # The kit pipeline references an agent that isn't seeded — this
             # is a programmer error. Skip the step rather than crash the
@@ -556,8 +740,20 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
             # would be the silently reshuffled pipeline story 3.02 forbids.
             continue
 
-        eta = _KIT_ETAS.get(agent_id, 1.0)
+        if agent.id not in routable or not _still_routable(agent.id):
+            # Listed but with nothing to execute it — a seeded worker missing
+            # from this deployment — or delisted or unbound during the pause.
+            # No step can run it, so it is dropped the same silent way.
+            continue
+
         info = reps.get(agent.id)
+        if info is None:
+            # Routable but unscored: the floor cannot judge it, so it is not
+            # offered — the same rule `_scored` applies to the free-form path.
+            logger.warning("kit agent %s had no reputation entry and was not planned", agent.id)
+            continue
+
+        eta = _KIT_ETAS.get(agent_id, 1.0)
         if reputation_svc.passes_floor(info):
             placed.append((position, _kit_step(agent, rationale, eta, reps)))
             taken.add(agent.id)
@@ -565,7 +761,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
 
         # Sub-floor: substitute with a floor-clearing off-pipeline worker that
         # shares a skill, else drop the step. Either way the buyer is told.
-        sub = _floor_substitute(agent, reps, taken)
+        sub = _floor_substitute(agent, reps, taken, registry)
         if sub is not None:
             placed.append((position, _kit_step(sub, rationale, eta, reps, substituted_for=agent.id)))
             taken.add(sub.id)
@@ -605,7 +801,7 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
     # the floor did first, then registry entries nothing could dispatch. This
     # path used to report none, so a demo intent showed a marketplace with
     # agents its plan card never accounted for.
-    notices += _unbound_notices()
+    notices += _unbound_notices(registry)
     steps = [step for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
@@ -618,6 +814,11 @@ async def _build_kit_plan(intent: str, kit: DemoKit, reps: dict[str, reputation_
         plan=Plan(steps=steps),
         total_usdc=total_price,
         total_eta=total_eta,
+        # What the buyer is about to be shown, kept with the plan so
+        # `/execute` judges the plan the buyer actually authorised.
+        notices=notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
     )
     state.add_plan(stored)
 
@@ -671,6 +872,14 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
             _backstop_rank(a, reps),
         ),
     )
+
+
+# The most steps a free-form plan may carry, matching the "1–6 ordered steps"
+# the planner is instructed to return (app/agents/orchestrator.py). Every step
+# is a paid dispatch and `/execute` runs them all, so the count is the buyer's
+# bill: the model is asked for six, and the clamp is what makes six a limit
+# rather than a request. A 200-step plan was storable before this.
+_MAX_PLAN_STEPS = 6
 
 
 # Enough of a failure message to say what went wrong, never a whole body.
@@ -737,10 +946,16 @@ def _planner_plan(result: Any) -> Plan | None:
 
 
 async def decompose(intent: str) -> DecomposeResponse:
-    # One live reputation snapshot per decompose — timeout-bounded and never
-    # raises (prior fallback), shared by the kit path, the routing prompt,
-    # and the per-step reputation stamps.
-    reps = await reputation_svc.fetch_reps([a.id for a in state.list_agents()])
+    # One registry snapshot and one live reputation snapshot per decompose,
+    # shared by the kit path, the routing prompt and the per-step stamps.
+    #
+    # Reputation is read for the ROUTABLE agents only. The registry is
+    # permissionless and indexes every registration with no cap, and unbound
+    # or delisted agents are unroutable by definition — reading them spent
+    # the batch deadline on agents no plan could use, so enough spam
+    # registrations timed out every read and pushed every plan onto the prior.
+    registry = _snapshot_registry()
+    reps = await reputation_svc.fetch_reps([a.id for a in registry.routable])
 
     # ── Demo-kit short circuit ─────────────────────────────────────────────
     # If the intent matches a curated kit (tetris / calculator / snake /
@@ -748,10 +963,10 @@ async def decompose(intent: str) -> DecomposeResponse:
     # deterministic 6-step pipeline. Reliable for live demos; no LLM cost.
     kit = detect_kit(intent)
     if kit is not None:
-        return await _build_kit_plan(intent, kit, reps)
+        return await _build_kit_plan(intent, kit, reps, registry)
 
     # ── Free-form path: LLM orchestrator decides the plan ──────────────────
-    shortlist = _routable_registry(reps)
+    shortlist = _routable_registry(reps, registry)
     if not shortlist.offered:
         # Checked before the gate, not after the call: an empty AVAILABLE_AGENTS
         # block can only produce steps the clamp discards, so the LLM call would
@@ -762,8 +977,9 @@ async def decompose(intent: str) -> DecomposeResponse:
     async def _bounded_plan() -> Any:
         # The kit short circuit above never takes this gate; every request
         # here is a real LLM call, so concurrency is capped the same way
-        # /execute's fan-out is. Queue time counts against the budget below.
-        async with _decompose_gate():
+        # /execute's fan-out is. Queue time counts against the budget below,
+        # and a full queue refuses the request outright (PlannerBusyError).
+        async with _decompose_gate().slot(max(0, settings.decompose_max_queued)):
             return await orchestrator_agent.arun(prompt)
 
     # Hard end-to-end budget for the planning call — without it a hung
@@ -774,10 +990,12 @@ async def decompose(intent: str) -> DecomposeResponse:
             _bounded_plan(),
             timeout=settings.decompose_timeout_seconds,
         )
-    except TimeoutError:
+    except (TimeoutError, PlannerBusyError):
         # Kept out of the degradation below on purpose: a hung planner has
         # already cost the caller the whole budget, and 504 `decompose_timeout`
-        # is the answer the router and its clients already speak for that.
+        # is the answer the router and its clients already speak for that. A
+        # full queue never reached the planner at all — a fallback plan would
+        # dress a refusal up as an answer — so it is the router's 503.
         raise
     except Exception as e:
         # agno hands provider errors back as a failed run, which
@@ -800,7 +1018,14 @@ async def decompose(intent: str) -> DecomposeResponse:
     # empty-plan fallback below by the same road as a plan the clamp emptied.
     proposed = plan.steps if plan is not None else []
     cleaned: list[PlanStep] = []
+    # (agent, rationale) pairs already kept. A repeated pair is the same paid
+    # work bought twice — whitespace and case are the model's, not the task's.
+    seen: set[tuple[str, str]] = set()
     for step in proposed:
+        if len(cleaned) >= _MAX_PLAN_STEPS:
+            # Capped on the steps KEPT, so an invented id the clamp drops
+            # never costs the plan a legitimate step.
+            break
         if step.agent_id not in shortlist.offered:
             # The planner may only route to what it was OFFERED. The block is
             # what it was SHOWN and this is what it RETURNED, and the two are
@@ -825,12 +1050,16 @@ async def decompose(intent: str) -> DecomposeResponse:
             # agent reaching /execute is the whole bug, and a step with nothing
             # to execute it would only reach /execute's unknown-agent skip.
             continue
+        rationale = step.rationale.strip()
+        if (agent.id, rationale.casefold()) in seen:
+            continue
+        seen.add((agent.id, rationale.casefold()))
         info = reps.get(agent.id)
         cleaned.append(
             PlanStep(
                 agent_id=agent.id,
                 agent_name=agent.name,
-                rationale=step.rationale.strip(),
+                rationale=rationale,
                 est_price_usdc=agent.price,
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
                 # An OFFERED agent below the floor can only be one the
@@ -886,6 +1115,10 @@ async def decompose(intent: str) -> DecomposeResponse:
         plan=Plan(steps=cleaned),
         total_usdc=total_price,
         total_eta=total_eta,
+        notices=shortlist.notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
+        planner_fallback=planner_fallback,
     )
     state.add_plan(stored)
 

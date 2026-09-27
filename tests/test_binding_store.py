@@ -165,7 +165,9 @@ def test_eviction_is_logged_loudly(caplog: pytest.LogCaptureFixture) -> None:
 
 
 def test_the_default_cap_matches_the_other_bounded_stores() -> None:
-    # ramp_store._MAX_RAMPS and external_binding's MAX_CHALLENGES are both 500.
+    # ramp_store._MAX_RAMPS is 500 too. external_binding's MAX_CHALLENGES no
+    # longer is: it is the sum of its per-purpose budgets, 600 since the
+    # dispute-read purpose was added.
     assert binding_store._MAX_BINDINGS == 500
     assert InMemoryBindingStore()._max_bindings == 500
 

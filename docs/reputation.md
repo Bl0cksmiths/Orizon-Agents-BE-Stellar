@@ -55,9 +55,13 @@ evidence weight the agent's own record and the prior count equally; beyond that
 the record dominates.
 
 **2. The lower bound.** Routing does not use the smoothed mean. It uses a
-conservative, Wilson-style lower bound on it: the mean, minus one standard error
-of the mean, where the effective sample size is the accumulated evidence weight
-in USDC rather than a count of jobs. This is where thin evidence is paid for. A
+conservative lower bound on it: the mean, minus one standard error of the mean,
+where the effective sample size is the accumulated evidence weight in USDC
+rather than a count of jobs. That is a normal-approximation (Wald) bound. The
+code long called it "Wilson" and still publishes its multiplier as `wilson_z`,
+but it is not the Wilson score interval: there is no score correction, so near
+a mean of 0 or 1 the bound collapses onto the mean, and the prior's weight
+counts toward the sample size as if it were observed jobs. This is where thin evidence is paid for. A
 newcomer's 3.5/5 becomes **2.84/5** for routing purposes, and the whole of that
 0.66 discount is the cost of having no record. An agent with the same 3.5 mean
 and a long settled history is routed on a bound close to 3.5, because there is
@@ -82,7 +86,7 @@ The 0–5 score a buyer sees is basis points ÷ 2000.
 | --- | --- | --- | --- |
 | prior mean | 7000 | 3.50 | `REPUTATION_PRIOR_BPS` |
 | prior weight | — | — | `REPUTATION_PRIOR_WEIGHT_USDC` = 12 USDC |
-| confidence multiplier | — | — | `WILSON_Z` = 1.0, a module constant, not configurable |
+| confidence multiplier | — | — | `WILSON_Z` = 1.0 (a Wald z, despite the name), a module constant, not configurable |
 | newcomer smoothed mean | 7000 | 3.50 | no evidence, so the smoothed mean *is* the prior |
 | newcomer lower bound | **5677** | **2.84** | the number routing actually tests |
 | routing floor | 5500 | 2.75 | `REPUTATION_FLOOR_BPS` |
@@ -157,13 +161,19 @@ unconditionally, with no arithmetic. "No entry" means routing was handed no
 claim about this agent, and the system's answer to no claim is "do not block".
 It returns True with the floor set to 10000.
 
-In production every listed agent is read at the top of a decompose and every
-read yields an entry, including failed ones, so `None` is the narrow window
-where the registry gained an agent — the sync loop runs on a 15 s cadence —
-between that read and the filter, plus any caller that supplies a partial map.
-It is a deliberate fail-open, not the cold-start path. ADR 0006 D5 is the
-buyer-facing half of the same distinction: a notice reports `lower_bound_bps`
-as `null` for an agent with no entry, never `0`.
+Routing never relies on that answer. Each decompose takes one snapshot of the
+registry and reads reputation for exactly the agents in it that are listed and
+dispatchable. Unbound and delisted agents are never read: no plan can use them,
+and the registry is permissionless, so reading them let spam registrations eat
+the batch deadline. Every stage then plans from that same snapshot, and an
+agent it did not score is not offered, substituted or planned. Before this,
+`None` covered an agent the sync loop added (on its 15 s cadence) between the
+read and the filter. That agent was offered with no floor check and ranked on
+its self-declared `Agent.rep`, a number its own registrant writes. Where
+routing needs a score for an unscored agent, for ranking or for the prompt, it
+uses the prior, never `Agent.rep`. ADR 0006 D5 is the buyer-facing half of the
+same distinction: a notice reports `lower_bound_bps` as `null` for an agent
+with no entry, never `0`.
 
 The practical consequence: a test asserting `passes_floor(None)` is True proves
 nothing about the cold-start guarantee, and would keep passing under a
@@ -374,8 +384,10 @@ the limit: every disputed step gets its own id.
 | `smoothed_bps`, `lower_bound_bps` | pulled down by a 10/100 at the step's weight | yes, like all evidence — 92.5 % per weekly epoch |
 
 `disputed` and `dispute_rate_bps` are on `GET /api/stellar/reputation` and
-`GET /api/stellar/reputation/{agent_id}`, and every plan step carries the rate
-as `rep_dispute_rate_bps`. The dispute rate is **reported, not routed on**: the
+`GET /api/stellar/reputation/{agent_id}`. Every plan step carries the rate as
+`rep_dispute_rate_bps`, and every floor notice carries `count` and
+`dispute_rate_bps`, so a buyer can tell an agent excluded after upheld disputes
+from one that is merely new. The dispute rate is **reported, not routed on**: the
 floor is applied to `lower_bound_bps` alone, and the dispute moves that only
 through the rating's own weight.
 
@@ -409,14 +421,25 @@ ratings come from"). A deployment whose signer is not the Scorer pays its
 buyers' credits and rates no disputed agent, and says so in the log and in
 `ratings.writer` on `/readiness`.
 
-## Cold start is not a degraded read
+## Cold start is not a degraded read, and neither is a stale one
 
-Both produce `source: "prior"`. They differ by one flag.
+A cold start and a degraded read both produce `source: "prior"`. They differ by
+one flag. A stale read is a third case with a flag of its own.
 
-| | what happened | `source` | `degraded` |
-| --- | --- | --- | --- |
-| cold start | the ledger was read; this agent has no evidence | `prior` | `false` |
-| degraded read | the ledger could not be read; the prior was served instead | `prior` | `true` |
+| | what happened | `source` | `degraded` | `stale` | `stale_age_seconds` |
+| --- | --- | --- | --- | --- | --- |
+| fresh read | the ledger was read within the TTL | `onchain` (or `prior` with no evidence) | `false` | `false` | `null` |
+| cold start | the ledger was read; this agent has no evidence | `prior` | `false` | `false` | `null` |
+| stale read | a fresh read did not answer in time; the agent's last on-chain read was served | as that read had it | `false` | `true` | seconds since that read |
+| degraded read | no read answered and none recent enough to serve; the prior stands in | `prior` | `true` | `false` | `null` |
+
+A stale read is real evidence, only older than the 15 s TTL: the numbers are the
+last on-chain read, scored exactly as they were, and the routing floor is
+applied to them — a sub-floor agent stays sub-floor. It is served only while
+that read is younger than the TTL plus `REPUTATION_STALE_GRACE_SECONDS` (300 s),
+never after `invalidate_rep` has dropped it (a landed dispute rating), and never
+together with `degraded`. Every batch that serves one logs a single WARNING
+naming the agents and the oldest read's age.
 
 They are different facts. A cold start is a true statement about one agent. A
 degraded read is a statement about the chain, and it makes *every* agent in the
@@ -436,23 +459,46 @@ way to discover that would be to read the code. Keeping the guarantee as
 arithmetic means the floor is the single authority on what is routable, and
 "does a newcomer get in?" has one answer per deployment, computable from config.
 
-The price is that during an outage the floor fails **open** under the shipped
-config: agents that would normally be filtered stay routable until reads
-recover. That is accepted, for the reasons set out in the reputation service's
-own notes — it is the same position the system takes on any agent it knows
-nothing about; failing closed would not fail closed, since every agent would
-drop below the floor at once and routing would fall to the starvation backstop
-picking a top-N among identical prior scores; and the window is bounded by the
-read TTL and the batch timeout. Every occurrence logs a WARNING naming the
+The price is that a degraded agent fails **open** under the shipped config: an
+agent that would normally be filtered stays routable while it is degraded. That
+is accepted, for the reasons set out in the reputation service's own notes — it
+is the same position the system takes on any agent it knows nothing about, and
+failing closed would not fail closed, since every agent would drop below the
+floor at once and routing would fall to the starvation backstop picking a top-N
+among identical prior scores. Every occurrence logs a WARNING naming the
 affected agents.
 
-That last bound only holds because the batch timeout is itself bounded, and the
-service refuses to boot unless it is. `REPUTATION_BATCH_TIMEOUT_SECONDS` must be
-a positive, finite number of seconds, no more than 10% of
-`DECOMPOSE_TIMEOUT_SECONDS`. Zero, a negative value or NaN would expire every
-read before it could answer — a healthy chain, and every agent degraded to the
-prior for as long as the value stayed set — while inf would let one hung RPC
-stall every plan.
+**How wide the fail-open is.** Earlier versions of this page said the window
+was bounded by the read TTL and the batch timeout. It is not, and two audits
+showed it: one slow read used to throw away every agent's evidence, and the
+deadline was too short for the batch, so 3 of 4 warm reads on a healthy chain
+came back all-degraded. What holds now:
+
+- **Per agent, not per batch.** Each read is judged on its own under the
+  deadline. Reads that answered — including cache hits — are kept; only the
+  agents still pending fall back, and their reads keep running and fill the
+  cache for the next batch.
+- **Stale before prior.** An agent read in the last TTL + grace (315 s) is
+  served that read, stale, and the floor still judges it. Only an agent with no
+  read that recent falls to the prior.
+- **Pre-warmed.** Every agent in the registry at boot is read once in the
+  background, so the first plan after a deploy is not routed on priors.
+- **Sized.** A read is one RPC round trip (the `load_account` hop is gone), on
+  `REPUTATION_READ_CONCURRENCY` threads reserved for reputation, and the
+  service refuses to boot unless the deadline covers
+  `ceil(REPUTATION_BATCH_AGENTS / REPUTATION_READ_CONCURRENCY)` reads of
+  `REPUTATION_READ_LATENCY_SECONDS` each.
+- **Not bounded in time.** A chain that stays unreachable, or slower than the
+  deadline, for longer than the grace keeps the affected agents on the prior
+  for as long as that lasts. The TTL only decides when a read is retried and
+  the deadline only how long a batch waits for one.
+
+The deadline itself must be real, and the service refuses to boot unless it is.
+`REPUTATION_BATCH_TIMEOUT_SECONDS` must be a positive, finite number of seconds,
+no more than 10% of `DECOMPOSE_TIMEOUT_SECONDS`. Zero, a negative value or NaN
+would expire every read before it could answer — a healthy chain, and every
+agent without a recent read degraded to the prior for as long as the value
+stayed set — while inf would let one hung RPC stall every plan.
 
 ## Before you change any of these values
 

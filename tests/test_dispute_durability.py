@@ -1,22 +1,25 @@
 """Story 4.02's hardest acceptance criterion — "the dispute survives a restart".
 
-tests/test_dispute_store.py asserts the SQL a fake pool receives, which proves
-the statements are right and proves nothing at all about a restart. This file
-models the restart itself, the way the failure actually happens: Render's free
-instance spins down after ~15 minutes idle and comes back FROM THE IMAGE, so a
-dispute window measured in hours outlives several of this service's processes.
+This file models the restart itself, the way the failure actually happens:
+Render's free instance spins down after ~15 minutes idle and comes back FROM
+THE IMAGE, so a dispute window measured in hours outlives several of this
+service's processes.
 
-The boundary is `process()` below. The DATABASE survives it — that is what
+The boundary is `pg_process()` below. The DATABASE survives it — that is what
 DATABASE_URL buys — and everything the process held does not: the store object,
-its connection pool, and the resolver's singleton. The database here is the same
-FakePool the store tests use, kept across the boundary on purpose, because what
-it holds is ROWS. A store that stopped writing rows — a cache in front of the
-tables, a settlement kept only in the object, a transition that updated instead
-of appending — would show up here as an empty second process, which is exactly
-the bug this criterion exists to catch.
+its connection pool, and the resolver's singleton. The database is a REAL
+Postgres (conftest `pg_dsn`), kept across the boundary on purpose, because what
+it holds is ROWS: the second process dials its own pool, re-runs the DDL over
+tables that already exist, and reads back what the first one committed. A store
+that stopped writing rows — a cache in front of the tables, a settlement kept
+only in the object, a transition that updated instead of appending — would show
+up here as an empty second process, which is exactly the bug this criterion
+exists to catch.
 
-Hermetic: no database and no network. `database_url` is set per test and
-`_create_pool` is replaced, so nothing dials anything.
+These tests used to restart over the same Python FakePool object, which proved
+the store re-reads through the seam and nothing about DDL, types or
+persistence. `process()`, the FakePool version, stays only because
+tests/test_dispute_receipt_fields.py still uses it.
 """
 
 from __future__ import annotations
@@ -27,10 +30,18 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
+from pg_support import run, statuses
 from test_dispute_store import JOB, STEPS, TASK, FakePool, a_dispute, a_settlement
 
 from app.services import dispute_store
-from app.services.dispute_store import DisputeStore, DuplicateDisputeError, InMemoryDisputeStore
+from app.services.dispute_store import (
+    DisputeRecord,
+    DisputeStore,
+    DuplicateDisputeError,
+    InMemoryDisputeStore,
+    PostgresDisputeStore,
+    SettlementRecord,
+)
 
 DSN = "postgres://user:pw@db.example.invalid/orizon"
 
@@ -44,13 +55,35 @@ def reset_singleton() -> Iterator[None]:
 
 
 @contextmanager
+def pg_process(monkeypatch: pytest.MonkeyPatch, dsn: str) -> Iterator[DisputeStore]:
+    """One backend process, start to stop, over a real database.
+
+    Entering resolves the store the way the app does — from `database_url`,
+    through the real `get_dispute_store()`. Every call made inside goes through
+    `pg_support.run`, which closes the pool inside the loop that dialled it;
+    leaving runs the real shutdown and throws the singleton away, which is what
+    a restart does to a container that comes back from the image.
+    """
+    monkeypatch.setattr(dispute_store.settings, "database_url", dsn)
+    dispute_store._store = None
+    try:
+        store = dispute_store.get_dispute_store()
+        assert isinstance(store, PostgresDisputeStore)
+        yield store
+    finally:
+        asyncio.run(dispute_store.close_dispute_store())
+
+
+@contextmanager
 def process(monkeypatch: pytest.MonkeyPatch, database: FakePool) -> Iterator[DisputeStore]:
-    """One backend process, start to stop.
+    """One backend process over a FakePool, for tests/test_dispute_receipt_fields.py.
+
+    A restart over the same Python object says nothing about persistence, so
+    the restart claims in this file are made over `pg_process` instead.
 
     Entering resolves the store the way the app does — from `database_url`,
     through the real `get_dispute_store()`, over `database`. Leaving runs the
-    real shutdown and then throws away everything this process held, which is
-    what a restart does to a container that comes back from the image.
+    real shutdown and then throws away everything this process held.
     """
 
     async def _create_pool(self: Any) -> FakePool:
@@ -65,24 +98,31 @@ def process(monkeypatch: pytest.MonkeyPatch, database: FakePool) -> Iterator[Dis
         asyncio.run(dispute_store.close_dispute_store())
 
 
-def test_a_dispute_opened_before_a_restart_is_still_there_after_it(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_dispute_opened_before_a_restart_is_still_there_after_it(
+    monkeypatch: pytest.MonkeyPatch, pg_dsn: str
+) -> None:
     """The acceptance criterion, in one test: a buyer disputes a step, the
     service restarts, and the dispute is still open with the reason they gave."""
-    database = FakePool()
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        asyncio.run(store.record_settlement(a_settlement()))
-        opened = asyncio.run(store.open_dispute(a_dispute()))
+        async def before() -> DisputeRecord:
+            await store.record_settlement(a_settlement())
+            return await store.open_dispute(a_dispute())
+
+        opened = run(store, before())
         first_store = store
 
     # The process is gone: the store object was closed and released, and the
     # singleton with it. Nothing it learned at runtime is left.
     assert dispute_store._store is None
-    assert database.closed == 1
 
-    with process(monkeypatch, database) as store:
+    with pg_process(monkeypatch, pg_dsn) as store:
         assert store is not first_store
-        restored = asyncio.run(store.get_dispute(opened.id))
+
+        async def after() -> tuple[DisputeRecord | None, DisputeRecord | None]:
+            return await store.get_dispute(opened.id), await store.find_dispute(JOB, 0)
+
+        restored, by_step = run(store, after())
         assert restored is not None
         assert restored == opened
         assert restored.status == "open"
@@ -90,21 +130,25 @@ def test_a_dispute_opened_before_a_restart_is_still_there_after_it(monkeypatch: 
         assert restored.creditable_usdc == 1.5
         # And found by the step as well, which is the lookup the second
         # "dispute this step" request makes.
-        assert asyncio.run(store.find_dispute(JOB, 0)) == opened
+        assert by_step == opened
 
 
-def test_the_window_a_buyer_was_promised_is_the_window_after_the_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_window_a_buyer_was_promised_is_the_window_after_the_restart(
+    monkeypatch: pytest.MonkeyPatch, pg_dsn: str
+) -> None:
     """The settlement is what the window is measured from, and the step prices
     are what a credit is computed from. Losing either turns a live dispute into
     one nothing can be decided about — the state app/state.py would leave it in,
     since it evicts FINISHED tasks first."""
-    database = FakePool()
+    with pg_process(monkeypatch, pg_dsn) as store:
+        run(store, store.record_settlement(a_settlement()))
 
-    with process(monkeypatch, database) as store:
-        asyncio.run(store.record_settlement(a_settlement()))
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        settled = asyncio.run(store.get_settlement(JOB))
+        async def after() -> tuple[SettlementRecord | None, SettlementRecord | None]:
+            return await store.get_settlement(JOB), await store.get_settlement_by_task(TASK)
+
+        settled, by_task = run(store, after())
         assert settled is not None
         # Not recomputed from DISPUTE_WINDOW_SECONDS at read time: the buyer was
         # told a closing time, and a restart must not move it either.
@@ -113,22 +157,25 @@ def test_the_window_a_buyer_was_promised_is_the_window_after_the_restart(monkeyp
         assert settled.steps == STEPS
         assert settled.charge_tx == "tx_charge"
         # And reachable from the task id too, which is all the task view has.
-        assert asyncio.run(store.get_settlement_by_task(TASK)) == settled
+        assert by_task == settled
 
 
-def test_a_resolved_dispute_does_not_reopen_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_resolved_dispute_does_not_reopen_after_a_restart(monkeypatch: pytest.MonkeyPatch, pg_dsn: str) -> None:
     """The dangerous direction. A credited dispute that came back as `open`
     would be paid a second time by the next run of story 4.03, and the refund
     transaction proving the first payment would be gone."""
-    database = FakePool()
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        asyncio.run(store.record_settlement(a_settlement()))
-        opened = asyncio.run(store.open_dispute(a_dispute()))
-        asyncio.run(store.append_status(opened.id, "credited", refund_tx="tx_refund"))
+        async def before() -> DisputeRecord:
+            await store.record_settlement(a_settlement())
+            opened = await store.open_dispute(a_dispute())
+            await store.append_status(opened.id, "credited", refund_tx="tx_refund")
+            return opened
 
-    with process(monkeypatch, database) as store:
-        restored = asyncio.run(store.get_dispute(opened.id))
+        opened = run(store, before())
+
+    with pg_process(monkeypatch, pg_dsn) as store:
+        restored = run(store, store.get_dispute(opened.id))
         assert restored is not None
         assert restored.status == "credited"
         assert restored.refund_tx == "tx_refund"
@@ -136,27 +183,30 @@ def test_a_resolved_dispute_does_not_reopen_after_a_restart(monkeypatch: pytest.
         # The opening row survived the restart as well: the audit trail is what
         # a chargeback is answered with, so a transition must not have replaced
         # what the dispute said when it was opened.
-        assert [r["status"] for r in database.disputes] == ["open", "credited"]
+        assert asyncio.run(statuses(pg_dsn, opened.id)) == ["open", "credited"]
         assert restored.reason == "the summary was empty"
 
 
-def test_the_duplicate_rule_still_holds_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_duplicate_rule_still_holds_after_a_restart(monkeypatch: pytest.MonkeyPatch, pg_dsn: str) -> None:
     """The rule lives in the index, so it is as durable as the rows are. A
     buyer who disputes a step, waits out a spin-down and disputes it again gets
     the dispute they already opened — not a second one, and not a second
     credit."""
-    database = FakePool()
+    with pg_process(monkeypatch, pg_dsn) as store:
 
-    with process(monkeypatch, database) as store:
-        asyncio.run(store.record_settlement(a_settlement()))
-        first = asyncio.run(store.open_dispute(a_dispute()))
+        async def before() -> DisputeRecord:
+            await store.record_settlement(a_settlement())
+            return await store.open_dispute(a_dispute())
 
-    with process(monkeypatch, database) as store:
+        first = run(store, before())
+
+    with pg_process(monkeypatch, pg_dsn) as store:
         with pytest.raises(DuplicateDisputeError) as excinfo:
-            asyncio.run(store.open_dispute(a_dispute(id="dsp_after_restart", reason="trying again")))
+            run(store, store.open_dispute(a_dispute(id="dsp_after_restart", reason="trying again")))
 
         assert excinfo.value.existing == first
-        assert len(database.disputes) == 1
+        assert run(store, store.get_dispute("dsp_after_restart")) is None
+        assert asyncio.run(statuses(pg_dsn, first.id)) == ["open"]
 
 
 def test_the_in_memory_default_loses_the_dispute_at_the_restart(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -224,13 +224,13 @@ def test_an_undecodable_body_is_answered_before_the_guard_and_tells_nobody_anyth
 
     FastAPI decodes a request body before it solves dependencies, so a body
     that is not JSON at all reaches a 422 ahead of `require_adjudicator` and
-    an anonymous caller sees 422 where they would otherwise see 503. Left as
+    an anonymous caller sees 422 where they would otherwise see 401. Left as
     it is, because the 422 discloses strictly less than the guarded answer
     beside it — asserted here rather than argued:
 
-      * a well-formed anonymous POST already answers 503, and a path that does
+      * a well-formed anonymous POST already answers 401, and a path that does
         not exist answers 404, so the route's existence is public either way;
-      * a well-formed body with no `note` is 503 as well, so the model is
+      * a well-formed body with no `note` is 401 as well, so the model is
         validated after the guard like everything else and the 422 says only
         "this endpoint parses JSON";
       * nothing runs on any of these paths — no store read, no signature, no
@@ -240,7 +240,7 @@ def test_an_undecodable_body_is_answered_before_the_guard_and_tells_nobody_anyth
     hand, losing the declared model that makes the second bullet true and the
     request schema in the published spec. `routers/disputes.reject_dispute`
     carries the whole argument. If this test starts failing because the route
-    now answers 401/503, that is an improvement and this test should go — it
+    now answers 401, that is an improvement and this test should go — it
     exists to stop the behaviour being *mistaken for an oversight*, not to
     keep it.
     """
@@ -264,14 +264,16 @@ def test_an_undecodable_body_is_answered_before_the_guard_and_tells_nobody_anyth
     )
 
     assert undecodable.status_code == 422
-    assert uphold_undecodable.status_code == 503
+    # The key is checked before the switch (D-052), so an anonymous caller is
+    # answered 401 whatever the switch says.
+    assert uphold_undecodable.status_code == 401
     assert undecodable.json()["error"]["code"] == "validation_error"
     # What the 422 would supposedly reveal, revealed anyway by the guard.
-    assert well_formed.status_code == 503
-    assert well_formed.json()["error"]["code"] == "dispute_refunds_disabled"
+    assert well_formed.status_code == 401
+    assert well_formed.json()["error"]["code"] == "invalid_api_key"
     # And the schema is NOT revealed: a decodable body with the field missing
     # is refused by the guard, not by the model.
-    assert no_note.status_code == 503
+    assert no_note.status_code == 401
     # A route that does not exist still answers 404, so nothing above is the
     # only way to tell a real path from a made-up one.
     assert absent_route.status_code == 404

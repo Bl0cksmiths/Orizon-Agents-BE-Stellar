@@ -48,11 +48,19 @@ def reset_singleton() -> Iterator[None]:
     dispute_store._store = None
 
 
-@pytest.fixture(params=["in-memory", "postgres"])
+@pytest.fixture(params=["in-memory", "postgres-model"])
 def store(request: pytest.FixtureRequest) -> DisputeStore:
     """The same rules, asserted against both implementations: a receipt field
     that one store stamped and the other forgot would read correctly in the
-    hermetic suite and wrongly in production."""
+    hermetic suite and wrongly in production.
+
+    `postgres-model` is the Postgres store over `FakePool`, a Python MODEL of
+    its SQL, so it checks the store's Python and says nothing about the SQL.
+    The SQL behind these receipt fields (the credited amount and refund hash
+    carried forward, a rating confirmation that never goes back, `updated_at`
+    on every row, and the receipt-column migration) is asserted against a real
+    Postgres in `test_dispute_store_postgres.py`.
+    """
     return InMemoryDisputeStore() if request.param == "in-memory" else _pg(FakePool())
 
 
@@ -82,8 +90,10 @@ def test_a_record_built_without_the_receipt_fields_says_not_known() -> None:
 def test_the_receipt_fields_trail_every_existing_field() -> None:
     # Appended, never inserted: a positional construction anywhere keeps its
     # meaning, and the store's row mapping keeps its order.
+    # The reconcile sweep's `inflight_usdc` was appended after them by the same
+    # rule, and it is not a receipt field: nothing a buyer reads is taken from it.
     names = [f.name for f in fields(DisputeRecord)]
-    assert names[-3:] == ["credited_usdc", "updated_at", "rating_confirmed"]
+    assert names[-4:] == ["credited_usdc", "updated_at", "rating_confirmed", "inflight_usdc"]
 
 
 # ── the schema: a table that already exists ───────────────────────────────
@@ -190,6 +200,8 @@ def test_a_claim_and_a_release_change_only_the_status_and_when_it_changed(name: 
         "status": status,
         "updated_at": "$2::double precision",
         "refund_tx": "NULL::text",
+        # The amount of the transfer that hash named goes with it.
+        "inflight_usdc": "NULL::double precision",
         "opening": "FALSE",
     }
 

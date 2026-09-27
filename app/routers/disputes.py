@@ -4,7 +4,10 @@ A buyer who paid for a step that did not deliver what it promised has 24 hours
 from settlement to say so. Four routes are the whole of how they say it: mint a
 challenge, sign it with the wallet that paid, post the dispute, and read back
 what was raised on a task. Two more — added by story 4.03 — are how the
-platform answers: uphold, and credit; or reject, and say so.
+platform answers: uphold, and credit; or reject, and say so. And two more —
+D-067 — let the payer READ what was said, from any tab and after any restart:
+sign a read challenge, get a grant, send it with the two reads. The grant buys
+those reads' free text and nothing else.
 
 **On the buyer's four, the wallet signature IS the credential** — no API key,
 no account — for `routers/binding.py`'s reason: a shared secret cannot express
@@ -39,15 +42,23 @@ import logging
 import time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..security import CodedHTTPException, ErrorEnvelope, request_id_var, require_adjudicator
-from ..services import dispute_svc, refund_svc
+from ..security import (
+    CodedHTTPException,
+    ErrorEnvelope,
+    KeyedRateLimiter,
+    client_key,
+    request_id_var,
+    require_adjudicator,
+)
+from ..services import dispute_read, dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
-from ..task_auth import TaskReadProof, require_task_read, task_read_proof
+from ..services.external_binding import dispute_read_message
+from ..task_auth import TaskReadProof, task_read_proof
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +73,27 @@ _JOB_ID_PATTERN = r"^[0-9a-fA-F]{32}$"
 # what reaches the verifier.
 _PAYER_PATTERN = r"^G[A-Z2-7]{55}$"
 
+# A task id, as `execution_svc` mints it (`tsk_` and hex) and as every fixture
+# spells one. Bounded to the path parameter's 128 and to characters that cannot
+# carry a `:` or a newline into a message a wallet is about to show and sign.
+_TASK_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
+_MAX_TASK_ID_CHARS = 128
+
 # Twice the 32-entry cap `POST /api/stellar/server/seal` puts on a workflow's
 # agents and receipts, so a plan that grows is not refused *here* first. The
 # real check is that the settlement record actually has such a step, which only
 # the service can make.
 _MAX_STEP_INDEX = 63
+
+
+# Per-client budget for the dispute challenge mint, on top of the global
+# limiter. The service refuses a mint for any step that could not be disputed,
+# which leaves only steps inside their window — but those are still public, and
+# each mint holds one of the `dispute` purpose's 200 slots for five minutes. So
+# one client may spend only a slice of it. Counted before the service is asked,
+# so a refused mint costs the caller as much as an admitted one: a stranger
+# probing for slots pays for every probe.
+_challenge_limiter = KeyedRateLimiter(lambda: settings.dispute_challenge_rate_limit_per_minute)
 
 
 class DisputeChallengeReq(BaseModel):
@@ -113,17 +140,69 @@ class DisputeChallengeResponse(BaseModel):
     expires_at: float
 
 
+class DisputeReadChallengeReq(BaseModel):
+    """Which task's disputes the payer is about to prove they may read (D-067)."""
+
+    task_id: str = Field(..., pattern=_TASK_ID_PATTERN)
+
+
+class DisputeReadChallengeResponse(BaseModel):
+    # Field order is the frozen contract's. `message` is always
+    # `orizon-dispute-read:v1:<task_id>:<nonce>`, returned whole for
+    # `DisputeChallengeResponse`'s reason.
+    nonce: str
+    message: str
+    # COARSE, for `_coarse_expiry`'s reason: the mint is idempotent inside the
+    # window, so an exact expiry would tell anyone who can name a task when its
+    # payer last started reading their disputes.
+    expires_at: float
+
+
+class DisputeReadGrantReq(BaseModel):
+    """The payer's signature over the read challenge. No `payer` field: the
+    signer is checked against the settlement's payer and nobody else, so there
+    is nothing for the caller to claim."""
+
+    task_id: str = Field(..., pattern=_TASK_ID_PATTERN)
+    nonce: str = Field(..., min_length=1, max_length=128)
+    # `OpenDisputeReq.signature_b64`'s bound, for its reason.
+    signature_b64: str = Field(..., min_length=1, max_length=256, description="base64 ed25519 signature")
+
+
+class DisputeReadGrantResponse(BaseModel):
+    # Opaque. Send it back as `X-Dispute-Read-Grant` on the two dispute reads;
+    # it buys their free text and nothing else.
+    grant: str
+    # Exact, and never more than an hour away.
+    expires_at: float
+
+
 class OpenDisputeReq(BaseModel):
     job_id_hex: str = Field(..., pattern=_JOB_ID_PATTERN)
     step_index: int = Field(..., ge=0, le=_MAX_STEP_INDEX)
-    # Bounded by the service's own ceiling, never a second number. The service
-    # cleans every reason and trims it to MAX_REASON_CHARS, so an edge bound
-    # above that accepted a paragraph and then stored only its start: a
-    # 1,500-character reason was cut to 500 without a word to the buyer. At the
-    # same constant it is a 422 they can see and fix. The one trim left is the
-    # service's marker redaction lengthening a reason already at the bound,
-    # which only text that forges a prompt-fence marker can reach.
-    reason: str = Field(..., min_length=1, max_length=dispute_svc.MAX_REASON_CHARS)
+    # Bounded by the SERVICE, not here (D-061). A pydantic bound answered an
+    # over-long reason with the generic `validation_error`, echoed the whole
+    # reason back in `detail[].input`, and gave an empty reason a different
+    # code from a blank one. `dispute_svc._require_reason` is the one judge:
+    # empty, invisible or longer than MAX_REASON_CHARS once cleaned is 422
+    # `reason_invalid`, whose message names the limit and quotes nothing. It is
+    # the service's FIRST check, before the settlement is read or the signature
+    # verified, so a bad reason still costs nothing — and the body limit
+    # (`BodyLimitMiddleware`) still bounds what can arrive at all.
+    #
+    # Nothing past the bound is ever trimmed, and no word is rewritten: the
+    # service refuses rather than cuts, and cleans for a reader, not for a
+    # prompt fence (D-062) — so what the buyer sent is what is stored, less
+    # control characters. The bound is still published in the schema, so a
+    # generated client can check it before sending.
+    reason: str = Field(
+        ...,
+        json_schema_extra={"minLength": 1, "maxLength": dispute_svc.MAX_REASON_CHARS},
+        description=(
+            "What was wrong with the step. 1 to MAX_REASON_CHARS characters once control characters are "
+            "removed, at least one visible; anything else is 422 `reason_invalid`."
+        ),
+    )
     payer: str = Field(..., pattern=_PAYER_PATTERN)
     nonce: str = Field(..., min_length=1, max_length=128)
     # Upper bound only, exactly as `BindReq.signature` has it: a lower bound
@@ -147,13 +226,15 @@ class RejectDisputeReq(BaseModel):
     characters passes this bound, cleans to nothing, and is refused there as
     `rejection_reason_required`.
 
-    Bounded identically to `OpenDisputeReq.reason` — one paragraph — because
-    it is the same kind of thing from the other side of the table, and a
-    rejection that outgrew the complaint it answers would be the one free-text
-    field in this surface nobody had sized. Identically down to the number:
-    `dispute_svc.reject` cleans and trims the note to the same
-    MAX_REASON_CHARS, so a longer bound here would show the buyer an
-    adjudicator's reason cut short with nothing to say it was.
+    Bounded at the buyer's reason's number — one paragraph — because it is
+    the same kind of thing from the other side of the table, and a rejection
+    that outgrew the complaint it answers would be the one free-text field in
+    this surface nobody had sized. Bounded HERE, unlike the reason, because
+    the caller is the operator holding the key rather than a buyer, so the
+    generic field-level 422 is an answer they can read. `dispute_svc.reject`
+    refuses a note past the same MAX_REASON_CHARS (`rejection_reason_too_long`)
+    rather than cutting it, so no bound anywhere shows the buyer an
+    adjudicator's reason cut short.
     """
 
     note: str = Field(
@@ -228,6 +309,12 @@ class DisputeResponse(BaseModel):
     # WITHHELD from a caller who has not proved they may read this task, along
     # with `reason` above — see `of`.
     rejection_reason: str | None = None
+    # True exactly when `reason` and `rejection_reason` were withheld from THIS
+    # caller (D-067, D-068). Without it an empty `reason` and a null
+    # `rejection_reason` were the only tell, and a null rejection reason also
+    # means "not rejected" — so a client could not say "sign to read why"
+    # without re-deriving the server's rule. Always present, never null.
+    reason_withheld: bool = False
 
     @classmethod
     def of(cls, record: DisputeRecord, *, free_text: bool) -> DisputeResponse:
@@ -255,14 +342,19 @@ class DisputeResponse(BaseModel):
         API, so a null would not be read as "withheld" — it would fail the
         row's type check and cost the reader the whole dispute, statuses and
         refund hash included, which is more than is being withheld. Empty is
-        unambiguous because `OpenDisputeReq.reason` has `min_length=1`: no
-        stored reason is ever empty, so an empty one on the wire can only mean
-        this. `rejection_reason` is already nullable and is nulled, which is
+        unambiguous because `dispute_svc._require_reason` refuses a reason
+        with nothing visible in it: no stored reason is ever empty, so an
+        empty one on the wire can only mean this. `rejection_reason` is already nullable and is nulled, which is
         the same answer it gives for every dispute that was not rejected.
 
         A proof-carrying read is unchanged, as is every route that answers a
         caller who has already proved more than a token: the payer who just
         signed `POST /disputes`, and the adjudicator behind the operator key.
+        The payer can also prove themselves on the two READ routes, with a
+        dispute read grant (D-067) — see `TaskReadProof.proves_free_text`.
+
+        `reason_withheld` says which answer this was, so a client never has to
+        infer it from an empty string.
         """
         return cls(
             id=record.id,
@@ -283,6 +375,7 @@ class DisputeResponse(BaseModel):
             updated_at=record.updated_at,
             rating_confirmed=record.rating_confirmed,
             rejection_reason=record.note if free_text and record.status == "rejected" else None,
+            reason_withheld=not free_text,
         )
 
 
@@ -507,10 +600,13 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
     function rather than as a change to `_refuse`. Every message reachable
     from `issue_dispute_challenge` and `open_dispute` either states a rule
     ("only the payer of a workflow may dispute it"), states a format ("an
-    ed25519 signature is 64 bytes"), or echoes back a value the caller sent —
-    a step index the edge has already bounded to an int. The ones that name
-    private state all sit AFTER `_authenticate_payer` in the service's own
-    order, so nobody reaches them without having signed as the payer first.
+    ed25519 signature is 64 bytes"), echoes back a value the caller sent —
+    a step index the edge has already bounded to an int — or states a fact
+    `SettlementView` already serves to anyone who can name the task: when the
+    window closed, whether a step delivered, whether it was free. The mint
+    refuses on those last three too. Anything that names PRIVATE state sits
+    AFTER `_authenticate_payer` in the service's own order, so nobody reaches
+    it without having signed as the payer first.
 
     That ordering is the whole of the argument, so it is the thing to re-read
     before routing a new code through here: a refusal moved to before the
@@ -524,7 +620,7 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
     response_model=DisputeChallengeResponse,
     summary="Mint a dispute challenge to sign",
 )
-async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeResponse:
+async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> DisputeChallengeResponse:
     """Issue the nonce and the exact string the payer's wallet must sign.
 
     The handler itself decides nothing: it validates the two fields, calls the
@@ -544,7 +640,14 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
     anonymous caller how long ago somebody started disputing a step they can
     name. The idempotency stays — it is what keeps a flood from cancelling the
     nonce a buyer is mid-way through signing — and only the clock is blurred.
+
+    One client may mint `DISPUTE_CHALLENGE_RATE_LIMIT_PER_MINUTE` a minute
+    (`_challenge_limiter`); past it, 429 `dispute_challenge_rate_limited` with
+    Retry-After, before the settlement is read.
     """
+    retry_after = _challenge_limiter.hit(client_key(dict(request.scope)))
+    if retry_after is not None:
+        raise HTTPException(429, "dispute_challenge_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
         nonce, expires_at = await dispute_svc.issue_dispute_challenge(body.job_id_hex, body.step_index)
     except dispute_svc.DisputeError as e:
@@ -557,6 +660,89 @@ async def dispute_challenge(body: DisputeChallengeReq) -> DisputeChallengeRespon
         nonce=nonce,
         expires_at=_coarse_expiry(expires_at),
     )
+
+
+_READ_CHALLENGE_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {
+        "model": ErrorEnvelope,
+        "description": (
+            "`unknown_task`, or `no_settlement` — the task never settled, so there is no payer to prove; "
+            "or `no_disputes` — it settled, but nothing was disputed, so there is nothing to read."
+        ),
+    },
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`challenge_capacity_dispute_read` — every read-challenge slot is live. Ask again shortly.",
+    },
+}
+
+_READ_GRANT_RESPONSES: dict[int | str, dict[str, object]] = {
+    403: {
+        "model": ErrorEnvelope,
+        "description": "`not_the_payer` — the signature is not the settlement's payer's over this read challenge.",
+    },
+    404: {"model": ErrorEnvelope, "description": "`unknown_task` or `no_settlement`."},
+    409: {
+        "model": ErrorEnvelope,
+        "description": (
+            "`challenge_unknown` — not this task's read challenge, or already used; "
+            "`challenge_expired` — its five minutes are up. Either way, ask for a new one."
+        ),
+    },
+}
+
+
+@router.post(
+    "/disputes/read-challenge",
+    response_model=DisputeReadChallengeResponse,
+    summary="Mint a challenge the payer signs to read their disputes' free text",
+    responses=_READ_CHALLENGE_RESPONSES,
+)
+async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadChallengeResponse:
+    """The first half of D-067's fix: a nonce for the payer to sign.
+
+    Public, like `/disputes/challenge`, and safe for the same reasons: it mints
+    only for a task that has a settlement AND at least one dispute, into the
+    `dispute_read` budget, and
+    a live challenge comes back as is, so a flood cannot cancel the one the
+    payer is signing. The service decides; this renders.
+    """
+    try:
+        nonce, expires_at = await dispute_read.issue_read_challenge(body.task_id)
+    except dispute_svc.DisputeError as e:
+        raise _refuse_buyer(e) from None
+    logger.info("dispute read challenge issued: task_id=%s", body.task_id)
+    return DisputeReadChallengeResponse(
+        nonce=nonce,
+        message=dispute_read_message(body.task_id, nonce),
+        expires_at=_coarse_expiry(expires_at),
+    )
+
+
+@router.post(
+    "/disputes/read-grant",
+    response_model=DisputeReadGrantResponse,
+    summary="Exchange the payer's read signature for a read grant",
+    responses=_READ_GRANT_RESPONSES,
+)
+async def dispute_read_grant(body: DisputeReadGrantReq) -> DisputeReadGrantResponse:
+    """The second half: verify the payer's signature and hand back a grant.
+
+    The grant goes back as `X-Dispute-Read-Grant` on `GET /tasks/{id}/disputes`
+    and `GET /disputes/{id}`, and buys exactly the two free-text fields there.
+    It is not a task token and nothing treats it as one: no artifact, no trace,
+    no stream. None of the opening rules are asked — the window may be long
+    closed — because reading what was said is not making a new claim.
+
+    The grant is never logged: it is a credential for its hour.
+    """
+    try:
+        grant, expires_at = await dispute_read.grant_read(body.task_id, body.nonce, body.signature_b64)
+    except dispute_svc.DisputeError as e:
+        logger.warning("dispute read grant refused: task_id=%s reason=%s", body.task_id, e.code)
+        raise _refuse_buyer(e) from None
+    logger.info("dispute read grant issued: task_id=%s", body.task_id)
+    return DisputeReadGrantResponse(grant=grant, expires_at=expires_at)
 
 
 def _duplicate_envelope(exc: dispute_svc.DisputeError, existing: DisputeRecord) -> JSONResponse:
@@ -662,7 +848,8 @@ async def get_dispute(
     TASK_AUTH_REQUIRED is off, which is how production runs. So the id buys
     the money facts — status, amounts, the refund hash — and the free text is
     bought separately, with the same proof that route asks for: a task token
-    for the task this dispute belongs to, or the operator key. The dispute
+    for the task this dispute belongs to, the operator key, or a dispute read
+    grant the dispute's own payer earned by signature (D-067). The dispute
     names its own task, so the caller supplies a credential and never a
     second id.
 
@@ -674,17 +861,49 @@ async def get_dispute(
     record = await dispute_svc.get_dispute(dispute_id)
     if record is None:
         raise HTTPException(404, "unknown_dispute")
-    return DisputeResponse.of(record, free_text=proof.proves(record.task_id))
+    # Against the payer the DISPUTE names, never one the caller supplies: a read
+    # grant is honoured only for the party whose signature earned it.
+    return DisputeResponse.of(record, free_text=proof.proves_free_text(record.task_id, record.payer))
+
+
+async def _require_listing_read(
+    task_id: str,
+    proof: Annotated[TaskReadProof, Depends(task_read_proof)],
+) -> None:
+    """`GET /tasks/{id}/disputes`'s gate while TASK_AUTH_REQUIRED is on (D-067).
+
+    Admits exactly what buys the listing's free text,
+    `TaskReadProof.proves_free_text`: a task token or the operator key — what
+    `require_task_read` admits — or a live dispute read grant for THIS task and
+    ITS settlement's payer. `require_task_read` took the first two only, so a
+    payer whose token was gone could not reach the one route their receipt
+    reads, grant in hand.
+
+    A dependency rather than a check in the handler, for `require_task_read`'s
+    reason: it runs before the route's own path bound, so an over-long id is
+    this 404 rather than a 422 that quotes the id back. The settlement is read
+    only for a caller who sent a grant and was not admitted on a token or the
+    key, and never for an id past the path's bound. Every refusal is the same
+    bare `unknown_task` 404, so a refused caller cannot tell a task that exists
+    from one that does not.
+    """
+    if not settings.task_auth_required or proof.proves(task_id):
+        return
+    if proof.read_grant and len(task_id) <= _MAX_TASK_ID_CHARS:
+        settlement = await dispute_svc.settlement_for_task(task_id)
+        if settlement is not None and proof.proves_free_text(task_id, settlement.payer):
+            return
+    raise HTTPException(404, "unknown_task")
 
 
 @router.get(
     "/tasks/{task_id}/disputes",
     response_model=TaskDisputesResponse,
     summary="A task's dispute window and the disputes raised on it",
-    dependencies=[Depends(require_task_read)],
+    dependencies=[Depends(_require_listing_read)],
 )
 async def list_task_disputes(
-    task_id: Annotated[str, Path(min_length=1, max_length=128)],
+    task_id: Annotated[str, Path(min_length=1, max_length=_MAX_TASK_ID_CHARS)],
     proof: Annotated[TaskReadProof, Depends(task_read_proof)],
 ) -> TaskDisputesResponse:
     """The settlement, the window and what has been raised, in one read.
@@ -700,12 +919,23 @@ async def list_task_disputes(
     special-case into the same view.
 
     THE TASK ID IS NOT A CAPABILITY, and this route is built on the assumption
-    that it is not. `require_task_read` gates it like every other
-    `/tasks/{task_id}/...` read, but that dependency is a no-op while
-    TASK_AUTH_REQUIRED is off — the shipped default, and how production runs
-    — and `GET /api/tasks?limit=200` hands out two hundred task ids for the
+    that it is not. While TASK_AUTH_REQUIRED is off — the shipped default, and
+    how production runs — it is open like every other `/tasks/{task_id}/...`
+    read, and `GET /api/tasks?limit=200` hands out two hundred task ids for the
     asking. So in production this read is open, and what it may carry is
     decided on that basis rather than on the gate.
+
+    With TASK_AUTH_REQUIRED ON it is gated, but NOT by `require_task_read`
+    (D-067). That dependency admits a task token or the operator key and
+    nothing else, and it ran before the handler — so a payer holding a dispute
+    read grant, whose token died with the tab or the process, was answered 404
+    `unknown_task` before the grant was ever looked at, from the one route that
+    feeds their receipt. It is gated here instead, on exactly what buys the
+    free text: `proof.proves_free_text` — the token or the key, which
+    `require_task_read` would take, or a live grant for this task and its
+    settlement's payer. Nothing wider: a grant for another task, another payer
+    or no settlement at all still reads as `unknown_task`. See
+    `_require_listing_read`.
 
     What it carries openly is held to what is already public. The settlement's
     job id and payer are on-chain (see `SettlementView`), each output summary
@@ -717,19 +947,25 @@ async def list_task_disputes(
     The two fields that do not meet that standard are the HUMAN-WRITTEN ones —
     each dispute's `reason` and, on a rejection, `rejection_reason` — and they
     are withheld from a caller who has not proved they may read this task,
-    with the proof `require_task_read` would demand if it were switched on: a
-    task token, or the operator key. See `DisputeResponse.of`. This route
+    with the proof `require_task_read` would demand if it were switched on — a
+    task token, or the operator key — or with a dispute read grant, which the
+    task's payer earns by signing and which buys this free text and nothing
+    that `require_task_read` guards. See `DisputeResponse.of`. This route
     stays open to a shared trace link, which is the point of not simply
     turning the switch on; a shared link just does not come with the buyer's
     words attached.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
-    disputes = await dispute_svc.list_for_task(task_id)
     # Resolved ONCE for the whole listing, not per dispute: every row here
     # belongs to this one task, so one proof answers for all of them, and a
     # per-row answer would invite a future row that disagreed with its
     # neighbours about who was reading.
-    free_text = proof.proves(task_id)
+    #
+    # A read grant is checked against the SETTLEMENT's payer, the one the
+    # grant route proved the signature against; with no settlement there is
+    # no payer, and a grant buys nothing.
+    free_text = proof.proves_free_text(task_id, settlement.payer if settlement is not None else None)
+    disputes = await dispute_svc.list_for_task(task_id)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
@@ -745,7 +981,7 @@ async def list_task_disputes(
 # spec stops understating them. It advertises the production server, so a
 # generated client reads it as the contract: with only 422/429/500 merged in by
 # `include_router`, the 401 an operator meets on their first call, the 503 a
-# deployment with the switch off answers to everyone, and the 502/504 that say
+# deployment with the switch off answers its operator, and the 502/504 that say
 # whether a credit moved were all absent — and a 504 that means "this may still
 # land, reconcile by hand, never retry" is the last thing to leave undeclared.
 #
@@ -768,8 +1004,8 @@ _ADJUDICATION_RESPONSES: dict[int | str, dict[str, object]] = {
     503: {
         "model": ErrorEnvelope,
         "description": (
-            "`dispute_refunds_disabled` — the deployment cannot adjudicate at all; or "
-            "`adjudication_not_configured` — the switch is on with no API_KEY behind it. "
+            "`adjudication_not_configured` — no API_KEY is configured, so nobody can adjudicate; or, "
+            "once the key has matched, `dispute_refunds_disabled` — the refund switch is off. "
             "Both are the operator's, never the caller's."
         ),
     },
@@ -878,7 +1114,9 @@ async def reject_dispute(
     rejection is terminal, so an open reject route would let anyone close
     every dispute raised against the platform before an adjudicator ever saw
     one. The refund switch gates it too, for the same reason — a deployment
-    that cannot pay a dispute out must not be able to dispose of one either.
+    that cannot pay a dispute out must not be able to dispose of one either —
+    but only once the key has matched, so the switch's state is the
+    operator's to read and nobody else's (D-052).
 
     The note is REQUIRED and it is the buyer's to read — it comes back as the
     dispute's `rejection_reason`. The body is required with it, so no body, no
@@ -891,16 +1129,16 @@ async def reject_dispute(
 
     ONE ANSWER HERE PRECEDES THE GUARD, deliberately. FastAPI decodes the body
     before it solves dependencies, so a body that is not JSON at all — `{not
-    json` — is a 422 rather than the 401 or 503 this pair otherwise gives an
-    anonymous caller. It was worth checking what that discloses, and the
-    answer is nothing:
+    json` — is a 422 rather than the 401 this pair otherwise gives an
+    anonymous caller (503 `adjudication_not_configured` on a keyless one). It
+    was worth checking what that discloses, and the answer is nothing:
 
       * the ROUTE'S EXISTENCE is already disclosed by the guarded answer. A
-        well-formed anonymous POST here gets 503 `dispute_refunds_disabled`,
-        where a path that does not exist gets 404. Whoever the 422 would tell
-        has already been told;
+        well-formed anonymous POST here gets 401 `invalid_api_key`, where a
+        path that does not exist gets 404. Whoever the 422 would tell has
+        already been told;
       * the SHAPE is not disclosed at all. A well-formed body with no `note`
-        is 503 too — the model is validated after the dependency like
+        is 401 too — the model is validated after the dependency like
         everything else, and only an undecodable body is answered earlier. So
         the 422 says "this endpoint parses JSON" and no more;
       * NOTHING RUNS. No store read, no signature, no money — the request dies

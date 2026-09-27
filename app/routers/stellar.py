@@ -14,14 +14,15 @@ import logging
 import re
 import secrets
 import time
+from collections import deque
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Security
 from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import require_api_key
+from ..security import _operator_key_scheme, check_operator_key, require_api_key
 from ..services import registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
@@ -74,6 +75,13 @@ class ReputationInfo(BaseModel):
     # reputation_svc.RepInfo has carried this flag since the degradation work;
     # this mirror model silently dropped it, so it never reached a client.
     degraded: bool = False
+    # Whether these numbers are the agent's LAST KNOWN on-chain read, served
+    # because a fresh read did not answer in time — real evidence the routing
+    # floor is still applied to, as opposed to a degraded prior. Never true
+    # together with `degraded`.
+    stale: bool = False
+    # Seconds since that read was taken from the ledger; null unless `stale`.
+    stale_age_seconds: float | None = None
 
 
 class ReputationBatch(BaseModel):
@@ -92,7 +100,10 @@ class ReputationParams(BaseModel):
     prior_bps: int  # Bayesian prior mean, bps of the 0-100 scale
     prior_weight_usdc: float  # evidence mass of the prior, USDC
     floor_bps: int  # routing floor on the Wilson lower bound
-    max_rating_weight_usdc: float  # per-rating weight cap
+    # The per-rating weight cap IN FORCE: min(ratio x prior weight, absolute
+    # cap) — 12 USDC with the shipped numbers, not the 100 USDC outer bound.
+    max_rating_weight_usdc: float
+    max_rating_to_prior_ratio: float  # that cap as a multiple of the prior's weight
     read_ttl_seconds: float  # cache TTL for on-chain rep_state reads
     wilson_z: float  # z of the one-sided lower confidence bound
     epoch_seconds: int  # on-chain decay epoch length
@@ -258,6 +269,23 @@ class AgentIdAvailability(BaseModel):
     owner: str | None = None
 
 
+# Ids that name a ROUTE rather than an agent. `/reputation/params` is declared
+# ahead of `/reputation/{agent_id}`, so an agent registered as `params` would be
+# unreachable there: its own reputation lookup answers with the system's config.
+# Reserved at registration, like the seeded `agt_` namespace, rather than by
+# moving the route — the frontend reads `/reputation/params` by that path.
+RESERVED_AGENT_IDS = frozenset({"params"})
+
+
+def _reserved_id_message(agent_id: str) -> str | None:
+    """Why an operator cannot register `agent_id`, or None if nothing reserves it."""
+    if agent_id.startswith("agt_"):
+        return "agt_ ids belong to the seeded catalog"
+    if agent_id in RESERVED_AGENT_IDS:
+        return f"{agent_id} is a reserved route name"
+    return None
+
+
 @router.get("/agent-id-available/{agent_id}", response_model=AgentIdAvailability)
 async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentIdAvailability:
     """Advisory pre-signature check for the registration form (id blur).
@@ -273,12 +301,9 @@ async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentI
             reason="id_malformed",
             message="allowed: letters, digits and underscore, 1-32 chars",
         )
-    if agent_id.startswith("agt_"):
-        return AgentIdAvailability(
-            available=False,
-            reason="id_reserved",
-            message="agt_ ids belong to the seeded catalog",
-        )
+    reserved = _reserved_id_message(agent_id)
+    if reserved is not None:
+        return AgentIdAvailability(available=False, reason="id_reserved", message=reserved)
 
     async def _resolve() -> AgentIdAvailability:
         # The same AgentRegistry.get read as read_agent, but under its own cache
@@ -323,7 +348,8 @@ async def read_reputations() -> ReputationBatch:
 
 # Declared BEFORE the dynamic /reputation/{agent_id} route — FastAPI matches
 # routes in declaration order, so this must come first or "params" would be
-# read as an agent id.
+# read as an agent id. That makes `params` unusable AS an agent id, so it is
+# reserved at registration (RESERVED_AGENT_IDS).
 @router.get("/reputation/params", response_model=ReputationParams)
 async def reputation_params() -> ReputationParams:
     """The reputation system's parameter set — pure config, no RPC call."""
@@ -332,7 +358,8 @@ async def reputation_params() -> ReputationParams:
         prior_bps=settings.reputation_prior_bps,
         prior_weight_usdc=settings.reputation_prior_weight_usdc,
         floor_bps=settings.reputation_floor_bps,
-        max_rating_weight_usdc=settings.reputation_max_rating_weight_usdc,
+        max_rating_weight_usdc=reputation_svc.max_rating_weight_usdc(),
+        max_rating_to_prior_ratio=settings.reputation_max_rating_to_prior_ratio,
         read_ttl_seconds=settings.reputation_read_ttl_seconds,
         wilson_z=reputation_svc.WILSON_Z,
         epoch_seconds=reputation_svc.EPOCH_SECONDS,
@@ -347,11 +374,119 @@ async def reputation_params() -> ReputationParams:
 async def read_reputation(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
 ) -> ReputationInfo:
-    """Smoothed reputation for one agent — cached ReputationLedger.rep_state
-    read with Bayesian prior smoothing; prior fallback on any failure.
+    """Smoothed reputation for one REGISTERED agent — cached
+    ReputationLedger.rep_state read with Bayesian prior smoothing; stale or
+    prior fallback on a failed read.
+
+    404 `unknown_agent` for an id the registry does not hold, answered before
+    any RPC. The route used to read the chain for any id matching the
+    pattern: every unregistered id was a cache miss, so each one cost a
+    Soroban round trip, and a stream of them queued enough reads to push the
+    real registry batch past its deadline (120 unknown ids degraded all 23
+    agents) — an unauthenticated way to switch the routing floor off for
+    everyone. 404 rather than the prior with no RPC: the prior would tell the
+    caller an id nobody registered is a routable newcomer, which is a claim,
+    not an absence; the frontend already treats 404 on this route as "no such
+    agent". An agent registered on-chain but not yet indexed by the registry
+    sync reads 404 until the next pass — it has no ratings to show yet anyway.
     """
+    if agent_id not in state.agents:
+        raise HTTPException(404, "unknown_agent")
     info = await reputation_svc.fetch_rep(agent_id)
     return ReputationInfo(**info.model_dump())
+
+
+# ── operator: drop one agent's cached score (D-066) ──────────────
+async def require_operator_key(
+    x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
+) -> None:
+    """The operator key, FAIL CLOSED: with API_KEY empty nobody is admitted.
+
+    `require_adjudicator`'s key half — `security.check_operator_key`, the
+    one both call — without its refund switch. That switch
+    says whether THIS process may pay a credit, and the operator script pays
+    credits in its own process precisely so the deployment can keep it off —
+    so a route the script calls afterwards must not be closed by it. The key
+    rules are the adjudicator's own: an empty API_KEY refuses everyone (503,
+    logged at ERROR, never a fall-through to "allow"), and a missing or wrong
+    key is one 401, so the route is no oracle for which of the two it was.
+    """
+    check_operator_key(
+        x_api_key,
+        unconfigured="operator_key_not_configured",
+        log_unconfigured="reputation invalidation refused: API_KEY is empty, so the operator route stays closed",
+    )
+
+
+class _InvalidationBudget:
+    """At most `limit` admitted invalidations per `window` seconds, process-wide.
+
+    An invalidation is cheap here and expensive one step later: it sends the
+    agent's next read to the ReputationLedger instead of the cache, so a leaked
+    key looping on this route would turn the read cache off and spend RPC on
+    every plan. One rating lands per upheld dispute, so an honest operator
+    needs a handful a minute. Counted AFTER the key check, so callers without
+    the key cannot spend the operator's budget; their guesses are bounded by
+    the service-wide RateLimitMiddleware instead.
+    """
+
+    def __init__(self, limit: int = 30, window: float = 60.0) -> None:
+        self.limit = limit
+        self.window = window
+        self._hits: deque[float] = deque()
+
+    def __call__(self) -> None:
+        now = time.monotonic()
+        while self._hits and self._hits[0] <= now - self.window:
+            self._hits.popleft()
+        if len(self._hits) >= self.limit:
+            raise HTTPException(status_code=429, detail="rate_limited")
+        self._hits.append(now)
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+invalidation_budget = _InvalidationBudget()
+
+
+class InvalidatedReputation(BaseModel):
+    agent_id: str
+    invalidated: bool  # always true: the entry is gone, whether or not one was cached
+    read_ttl_seconds: float  # how long a stale score could otherwise have been served
+
+
+@router.post(
+    "/reputation/{agent_id}/invalidate",
+    response_model=InvalidatedReputation,
+    summary="Drop one agent's cached reputation (operator only)",
+    dependencies=[Depends(require_operator_key), Depends(invalidation_budget)],
+)
+async def invalidate_reputation(
+    agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
+) -> InvalidatedReputation:
+    """Forget this process's cached rep_state for one agent, so its next read
+    — a plan's routing, its stamp, this router's GET — comes from the ledger.
+
+    For a rating that landed from OUTSIDE this process: the uphold script
+    rates in its own process, and `reputation_svc.invalidate_rep` there drops
+    only that process's cache, so without this the server kept serving the
+    pre-dispute score for up to `reputation_read_ttl_seconds` (D-066). The
+    adjudication route needs none of this — it invalidates in-process.
+
+    Per PROCESS, by construction: the cache is a module dict. The deployment
+    runs one uvicorn worker (render.yaml `--workers 1`), so this process is the
+    whole service. A multi-worker deployment would reach one worker per call
+    and must replace this with a shared invalidation (a shared cache, or a
+    broadcast) before it scales out.
+    """
+    reputation_svc.invalidate_rep(agent_id)
+    logger.info("reputation cache invalidated for %s by the operator", agent_id)
+    return InvalidatedReputation(
+        agent_id=agent_id,
+        invalidated=True,
+        read_ttl_seconds=settings.reputation_read_ttl_seconds,
+    )
 
 
 @router.get("/attestation/{job_id_hex}", response_model=AttestationRead)
@@ -413,9 +548,10 @@ async def build_register_agent(req: RegisterAgentReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.register. Owner signs via Freighter."""
     from stellar_sdk.exceptions import AccountNotFoundException
 
-    # The seeded catalog owns the agt_ namespace (seed.py) — refuse it before
-    # spending an RPC round-trip, and never silently rewrite an operator's id.
-    if req.agent_id.startswith("agt_"):
+    # The seeded catalog owns the agt_ namespace (seed.py), and a route name is
+    # not an agent — refuse both before spending an RPC round-trip, and never
+    # silently rewrite an operator's id.
+    if _reserved_id_message(req.agent_id) is not None:
         raise HTTPException(409, "id_reserved")
 
     # UX preflight: refuse a taken id BEFORE the wallet signs — a duplicate

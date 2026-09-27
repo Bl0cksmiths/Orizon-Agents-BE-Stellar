@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 
 MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
 
+# Every spelling of STELLAR_NETWORK that names the public network: ours, and
+# `public`/`pubnet` as Horizon and Stellar Expert say it. Read through
+# `label_names_mainnet`, which ignores case and padding, so no two readers of
+# the label can disagree about what it says. The label never decides whether
+# money is real — `Settings.is_mainnet` does, from the passphrase — it only
+# lets the boot refuse a label that promises mainnet over a testnet signer.
+MAINNET_LABELS = frozenset({"mainnet", "public", "pubnet"})
+
+
+def label_names_mainnet(label: str) -> bool:
+    """True when STELLAR_NETWORK spells the public network, in any case or padding."""
+    return label.strip().lower() in MAINNET_LABELS
+
+
 # The PDAX environments that resolve to a base URL, read from the shared table
 # in app/pdax_environments.py. That module is dependency-free and lives outside
 # the app.pdax package precisely so this one can import it while Settings() is
@@ -113,8 +127,14 @@ class Settings(BaseSettings):
     #
     # It still bounds abuse: 20 req/s is a coarse flood cut, and it is not the
     # cost control for the expensive routes — orchestrator_max_concurrent caps
-    # in-flight workflows (503 capacity_exhausted) and contract reads are
-    # TTL-cached, so a flood buys cheap cached JSON, not LLM calls or RPC.
+    # in-flight workflows (503 capacity_exhausted), every free-form /decompose
+    # is one LLM call with its own per-client budget, concurrency gate and
+    # bounded wait queue (the planner-spend block below), and contract reads are
+    # TTL-cached per key. A cache only absorbs a flood of the SAME key, though:
+    # a flood of distinct keys is a distinct upstream read each, so a read
+    # route whose key a caller chooses must bound the key space itself —
+    # /api/stellar/reputation/{agent_id} answers only registered ids, and 404s
+    # the rest before any RPC. This limit alone does not make a flood cheap.
     # Once trusted_proxy_hops is tuned this becomes per-visitor and can come
     # back down; the frontend backs off on 429 and honours Retry-After, so a
     # tightened limit degrades cadence rather than breaking the console.
@@ -143,8 +163,9 @@ class Settings(BaseSettings):
     orchestrator_max_concurrent: int = 8
     # Ceiling on concurrent free-form decompose planning calls (each is a
     # real LLM call; the demo-kit path makes none and is never gated).
-    # Overflow queues inside decompose_timeout_seconds, so a saturated gate
-    # degrades to 504 "decompose_timeout" rather than unbounded LLM spend.
+    # Up to decompose_max_queued more wait for a slot, inside
+    # decompose_timeout_seconds (504 "decompose_timeout" if the wait runs
+    # out); past that, a request is refused at once with 503 "planner_busy".
     decompose_max_concurrent: int = 8
     # Ceiling for a single PaymentEscrow.charge, in USDC.
     max_charge_usdc: float = 100.0
@@ -217,8 +238,10 @@ class Settings(BaseSettings):
     reputation_floor_bps: int = 5500
     # TTL for cached on-chain rep_state reads (per agent).
     reputation_read_ttl_seconds: float = 15.0
-    # Wall-clock bound on ONE batched reputation read — the asyncio.wait_for
-    # around fetch_reps' gather (services/reputation_svc.py). Lifted out of that
+    # Wall-clock bound on ONE batched reputation read — the deadline fetch_reps'
+    # per-agent reads share under asyncio.wait (services/reputation_svc.py);
+    # a read still pending at it is served stale or the prior, and keeps
+    # running to fill the cache. Lifted out of that
     # function's default argument so a deployment can tune it without a code
     # change and, more to the point, so the validators below that bound it can
     # see the number they are validating: a bound that exists only as a literal
@@ -230,8 +253,48 @@ class Settings(BaseSettings):
     # timeout path — and no production caller passes one, so the value validated
     # here is the bound every live read uses.
     reputation_batch_timeout_seconds: float = 2.5
-    # Per-rating weight cap in USDC — one whale job can't own the score.
+    # How long past its TTL an agent's last on-chain read may still be served
+    # when a fresh read does not answer in time (the batch deadline passed, or
+    # the read failed). Served marked `stale` with its age, and judged by the
+    # routing floor on that evidence — instead of the prior, which clears the
+    # floor for everyone. Past this, the agent degrades to the prior as before.
+    # 0 turns stale serving off.
+    reputation_stale_grace_seconds: float = 300.0
+    # What the batch deadline above has to cover, as three numbers the
+    # validator `_reputation_deadline_covers_the_batch` multiplies out. A batch
+    # reads every agent at once, but only `reputation_read_concurrency` reads
+    # run at a time (the worker threads reserved for them), so it takes
+    # ceil(agents / concurrency) waves of one read each. The live defect this
+    # exists for: 23 agents on the shared 8-thread pool is 3 waves, at two RPC
+    # hops a read, and 2.5 s broke at 0.83 s a read — 3 of 4 warm reads
+    # degraded on a healthy chain.
+    #   * concurrency — threads that ONLY reputation reads use, so a registry
+    #     sync, the ratings writer or a flood of other reads cannot queue ahead
+    #     of the batch a plan is waiting on.
+    #   * latency — the time one read is sized at: a single simulate round
+    #     trip (the load_account hop is gone), measured at 0.27–0.63 s against
+    #     SDF testnet, with room over it.
+    #   * agents — how many agents one batch is sized for. The live registry is
+    #     23. A batch larger than this still runs, and logs once that the
+    #     deadline was not sized for it.
+    reputation_read_concurrency: int = 16
+    reputation_read_latency_seconds: float = 0.75
+    reputation_batch_agents: int = 32
+    # Absolute per-rating weight cap in USDC. On its own it did NOT stop one
+    # job owning the score: 100 USDC of weight against the prior's 12 meant a
+    # single self-dealt run at the ceiling set an agent's reputation (one 95/100
+    # took the bound from 5677 to 8980). The ratio below is the cap that
+    # actually binds; this one remains as an outer bound.
     reputation_max_rating_weight_usdc: float = 100.0
+    # The cap on ONE rating's weight, as a multiple of the prior's weight
+    # (REPUTATION_PRIOR_WEIGHT_USDC). At 1.0 a single rating can at most EQUAL
+    # the prior — it moves an agent's score at most halfway to itself and never
+    # overrules the prior on its own — whatever the step was priced at. The
+    # effective cap is min(this x prior weight, REPUTATION_MAX_RATING_WEIGHT_USDC),
+    # 12 USDC with the shipped numbers. An OPEN PRODUCT DECISION: lower it to
+    # make one job count for less (0.25 = a quarter of the prior); it is one
+    # number so it can be changed without touching code. Finite and above zero.
+    reputation_max_rating_to_prior_ratio: float = 1.0
 
     # ── Disputes (story 4.02 — ADR 0002) ──────────────────────
     # How long after a paid workflow settles its buyer may dispute a step.
@@ -241,9 +304,11 @@ class Settings(BaseSettings):
     # Changing it therefore only affects workflows that settle afterwards.
     dispute_window_seconds: float = 86_400.0  # 24 hours
     # Share of the disputed step's settled charge credited back when a dispute
-    # is upheld (story 4.03 pays it; `refund_svc.credited_amount_usdc` clamps
-    # it to [0, 1]). 1.0 = the whole step, which is what ADR 0002 states as the
-    # policy buyer and operator are both told in advance.
+    # is upheld (story 4.03 pays it). 1.0 = the whole step, which is what ADR
+    # 0002 states as the policy buyer and operator are both told in advance.
+    # Anything but a finite number in [0, 1] refuses to boot
+    # (`_money_bounds_bound_something`); `refund_svc.credited_amount_usdc`
+    # still clamps it, for a value set outside `Settings()`.
     dispute_credited_fraction: float = 1.0
     # Hard ceiling on a SINGLE partial-credit refund, checked before anything
     # is signed (story 4.03). Deliberately NOT `max_charge_usdc`: that one
@@ -252,7 +317,11 @@ class Settings(BaseSettings):
     # so sharing a number between them would be a coincidence rather than a
     # control. A step settles for hundredths of a USDC on this deployment, so
     # 1.0 is far above anything legitimate and still keeps the blast radius of
-    # a leaked settler key, or a mistaken uphold, small.
+    # a mistaken uphold small. It bounds what the refund path will sign, and
+    # nothing else: a leaked settler key can transfer without asking it.
+    # A ceiling only while it is a finite number above zero — NaN and inf
+    # compare as "under the cap" for every amount — so anything else refuses to
+    # boot (`_money_bounds_bound_something`, QA D-054).
     max_refund_usdc: float = 1.0
     # The master switch on the refund path (story 4.03). OFF by default, so a
     # deployment only pays out once an operator has deliberately turned it on
@@ -261,6 +330,22 @@ class Settings(BaseSettings):
     # in every test run and on every developer's laptop, which is how an
     # anonymous payout route reaches production without anyone choosing it.
     dispute_refunds_enabled: bool = False
+    # The refund reconcile sweep (services/refund_reconcile.py): a background
+    # pass that settles refund claims parked in `crediting` by asking the chain
+    # what their in-flight transfer did — records `credited` when it landed,
+    # releases the claim when it provably never can. OFF by default, like the
+    # refund switch it depends on, and it only runs while that switch is ON
+    # too: a released claim makes a dispute payable again, which is a decision
+    # about the platform's wallet that belongs to a deployment paying credits.
+    # It never signs or submits anything.
+    refund_reconcile_enabled: bool = False
+    # Seconds between two passes. Bounded both ways (`_refund_reconcile_interval_is_usable`):
+    # at least 30, because a pass reads the chain once per held claim; at most
+    # 3600, because the RPC keeps only a window of transaction history (about
+    # seven days on SDF's testnet RPC, as little as a day on a default one) and
+    # a claim must be looked at well inside it — past it, NOT_FOUND no longer
+    # means anything and the claim falls back to a human.
+    refund_reconcile_interval_seconds: float = 120.0
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
@@ -307,6 +392,86 @@ class Settings(BaseSettings):
     pdax_ramp_min_php: float = 200
     pdax_ramp_quote_reference_php: str = "1000"
 
+    # ── Planner spend (/decompose) ────────────────────────────
+    # Every free-form decompose is one real LLM call; the demo-kit path makes
+    # none and is never limited here. decompose_max_concurrent bounds how
+    # many run at once, and this bounds how many may WAIT for a slot. Waiters
+    # used to queue without limit, each holding a connection for up to
+    # decompose_timeout_seconds; past this many, a request is refused at once
+    # with 503 "planner_busy" instead of joining the queue.
+    decompose_max_queued: int = 16
+    # Free-form (LLM) decompose calls one client may make per minute, on top
+    # of the global rate_limit_per_minute, keyed by the same client_key(). A
+    # breach is 429 "decompose_rate_limited" with Retry-After; kit intents
+    # make no LLM call and are not counted. 0 disables it. At
+    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this —
+    # and browser traffic arrives through the frontend's /api rewrite, most
+    # likely from one shared egress address, so until the hop count is
+    # confirmed from the deploy's forwarded_chain_samples this is probably one
+    # budget for every visitor. 30 keeps a demo or a QA run clear of it while
+    # still bounding spend; tune it down once the key is truly per-visitor.
+    decompose_rate_limit_per_minute: int = 30
+    # Dispute challenges one client may mint per minute (POST
+    # /api/disputes/challenge), keyed by the same client_key(). Every mint that
+    # takes a slot holds it for five minutes out of a 200-slot `dispute` budget,
+    # so an unbounded client could fill that budget alone; at 20 a minute one
+    # client holds at most 100. A buyer disputes one step at a time, and a
+    # re-mint of a live challenge returns the same nonce, so no honest flow
+    # comes near it. A breach is 429 "dispute_challenge_rate_limited" with
+    # Retry-After; 0 disables it. Same TRUSTED_PROXY_HOPS caveat as above.
+    dispute_challenge_rate_limit_per_minute: int = 20
+    # Most agents listed in the planning prompt. Prompt tokens per planner call
+    # grew with every bound agent; past this many that cleared the floor, the
+    # best-scored are listed. Never below the starvation backstop's minimum.
+    decompose_prompt_max_agents: int = 24
+
+    # ── Stored plans ──────────────────────────────────────────
+    # How long a built plan stays executable. The card the buyer authorises
+    # freezes prices, reputation stamps and floor notices at the moment the
+    # plan was built, so it must not outlive the marketplace it describes;
+    # the execute-time re-check covers listing and the floor, and this covers
+    # everything else on the card. It must still outlive decompose, a careful
+    # read, a wallet signature and /execute, with room for a buyer who tabs
+    # away: 15 minutes covers that several times over. An expired plan is
+    # refused with 410 "plan_expired" before any task is minted.
+    plan_ttl_seconds: float = 900.0
+
+    @model_validator(mode="after")
+    def _plan_ttl_is_usable(self) -> "Settings":
+        """Refuse a plan TTL that no buyer could execute inside, or never expires.
+
+        A NaN compares false with every age, so it would never expire a plan;
+        infinity does the same openly; anything under a minute expires the plan
+        before a buyer can read the card and sign. Names the variable, never
+        the value, per the boot-failure rule.
+        """
+        if not math.isfinite(self.plan_ttl_seconds) or self.plan_ttl_seconds < 60:
+            raise ValueError(
+                "PLAN_TTL_SECONDS must be finite and at least 60 — a plan has to outlive "
+                "reading the card, signing the authorisation and executing it"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refund_reconcile_interval_is_usable(self) -> "Settings":
+        """Refuse a sweep interval that could not keep up with the RPC's history.
+
+        A NaN or inf would make the loop's sleep raise or never end; under 30
+        seconds a pass is a chain read per claim on repeat; over an hour starts
+        eating into the RPC's history window, which is what makes NOT_FOUND
+        answerable at all. Checked whether or not the sweep is on, so turning
+        it on later is not the moment a typo is found. Names the variable,
+        never the value.
+        """
+        interval = self.refund_reconcile_interval_seconds
+        if not (math.isfinite(interval) and 30 <= interval <= 3600):
+            raise ValueError(
+                "REFUND_RECONCILE_INTERVAL_SECONDS must be a finite number of seconds from 30 to 3600 — the sweep "
+                "reads the chain once per held refund claim each pass, and has to look at every claim well inside "
+                "the RPC's transaction history window"
+            )
+        return self
+
     @model_validator(mode="after")
     def _mainnet_requires_mainnet_passphrase(self) -> "Settings":
         """Fail fast on a half-flipped mainnet config.
@@ -315,11 +480,15 @@ class Settings(BaseSettings):
         (testnet), so STELLAR_NETWORK=mainnet with a forgotten passphrase
         would silently sign transactions for the WRONG network. Signing key
         is deliberately not required — read-only deployments are legitimate.
+
+        The label is read through `label_names_mainnet` — any case, any
+        padding, `pubnet` included — so ` Mainnet` or `pubnet` over the
+        testnet passphrase is refused here rather than booting as a testnet
+        deployment that calls itself mainnet. The opposite mismatch, a testnet label over the mainnet passphrase, is
+        not refused: `is_mainnet` reads the passphrase, so the key rule and the
+        explorer links already treat that process as the mainnet it is.
         """
-        if (
-            self.stellar_network.lower() in {"mainnet", "public"}
-            and self.stellar_network_passphrase != MAINNET_PASSPHRASE
-        ):
+        if label_names_mainnet(self.stellar_network) and not self.is_mainnet():
             raise ValueError(
                 "STELLAR_NETWORK is set to mainnet/public but "
                 "STELLAR_NETWORK_PASSPHRASE is not the mainnet passphrase "
@@ -371,7 +540,8 @@ class Settings(BaseSettings):
         internet, with the backend signing on their behalf.
 
         "Can move real value" is scoped narrowly on purpose, so local dev and
-        CI keep booting: a signing key on mainnet, or PDAX credentials in the
+        CI keep booting: a signing key on mainnet (the mainnet PASSPHRASE,
+        whatever STELLAR_NETWORK says — see `is_mainnet`), or PDAX credentials in the
         production environment. Testnet signers and uat/stage PDAX move play
         money and stay open, as does a read-only mainnet deployment.
 
@@ -393,7 +563,9 @@ class Settings(BaseSettings):
         if self.api_key:
             return self
         exposures: list[str] = []
-        if self.stellar_network.strip().lower() in {"mainnet", "public"} and self.stellar_signing_key:
+        # The passphrase, not the label: see `is_mainnet`. A `testnet` label
+        # beside the mainnet passphrase still signs real transactions.
+        if self.is_mainnet() and self.stellar_signing_key:
             exposures.append(
                 "STELLAR_SIGNING_KEY is set on mainnet, so /api/stellar/server/charge "
                 "and /server/seal sign real transactions"
@@ -494,23 +666,161 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _money_bounds_bound_something(self) -> "Settings":
+        """Refuse a money bound that cannot bound anything (QA D-054).
+
+        Each setting checked here is read, at the point it guards, by a `<` or
+        a `>` — and every comparison against NaN is false, while nothing is
+        greater than inf. So a bound that is not a finite number does not fail
+        loudly: it FAILS OPEN, silently, on exactly the guard whose job is to
+        limit a loss. `MAX_REFUND_USDC=nan` was observed doing it: the 50 USDC
+        credit it exists to refuse came back creditable at 50.0. pydantic
+        accepts `nan`, `inf` and `-inf` for a float field by default, so
+        nothing upstream of this validator stands in the way.
+
+        The rules, one per bound:
+
+          * `MAX_REFUND_USDC` — finite and strictly above zero. The ceiling on
+            one credit the PLATFORM pays out of its own wallet on an
+            adjudicator's say-so; not a number is no ceiling at all, and zero
+            or below refuses every credit, which is a refund path switched off
+            by a typo rather than by `DISPUTE_REFUNDS_ENABLED`.
+          * `MAX_CHARGE_USDC` — finite and strictly above zero. The ceiling on
+            one `PaymentEscrow.charge`, which `execution_svc` and
+            `/api/stellar/server/charge` both compare against; not a number
+            lets every plan total through uncapped, and zero or below skips
+            the charge, the seal and the ratings of every paid run.
+          * `DISPUTE_CREDITED_FRACTION` — finite, within [0, 1]. The policy
+            share of a step that an upheld dispute credits.
+            `refund_svc.credited_amount_usdc` clamps it with `min(max(…))`,
+            which a NaN passes through untouched and freezes onto every
+            dispute opened as its promise; outside [0, 1] the clamp quietly
+            applies a policy nobody typed, so it is refused rather than bent.
+          * `DISPUTE_WINDOW_SECONDS` — finite and strictly above zero. Not an
+            amount, but the bound on how long a paid run stays refundable:
+            stamped onto each settlement as `window_closes_at`, it is then
+            read by `time.time() > window_closes_at`, which a NaN or inf
+            stamp never satisfies — a window that never closes on work that
+            is already paid for, and cannot be reopened once stamped.
+
+        Raised rather than logged, for the reason the reputation bounds are:
+        what it prevents is silent, and a refused deploy cannot be missed.
+        The message names the variable and the rule and NEVER the value, the
+        property `_boot_failure_message` depends on — `API_KEY`'s validator is
+        the model. These values are not secrets, but a message that quotes its
+        input is one edit away from a message that quotes a secret.
+        """
+        faults: list[str] = []
+        refund_cap = self.max_refund_usdc
+        if not (math.isfinite(refund_cap) and refund_cap > 0):
+            faults.append(
+                "MAX_REFUND_USDC is not a finite number of USDC above zero — it is the ceiling on ONE credit "
+                "the platform pays from its own wallet, a ceiling that is not a finite number compares false "
+                "against every amount and so bounds nothing, and one at or below zero refuses every credit"
+            )
+        charge_cap = self.max_charge_usdc
+        if not (math.isfinite(charge_cap) and charge_cap > 0):
+            faults.append(
+                "MAX_CHARGE_USDC is not a finite number of USDC above zero — it is the ceiling on ONE "
+                "PaymentEscrow.charge, a ceiling that is not a finite number lets every plan total through "
+                "uncapped, and one at or below zero skips the charge and the seal of every paid run"
+            )
+        fraction = self.dispute_credited_fraction
+        if not (math.isfinite(fraction) and 0 <= fraction <= 1):
+            faults.append(
+                "DISPUTE_CREDITED_FRACTION is not a finite fraction from 0 to 1 — it is the share of a disputed "
+                "step an upheld dispute credits, one that is not a finite number is frozen onto every dispute "
+                "opened as the credit it promises, and one outside 0 to 1 is not the policy the buyer was told"
+            )
+        window = self.dispute_window_seconds
+        if not (math.isfinite(window) and window > 0):
+            faults.append(
+                "DISPUTE_WINDOW_SECONDS is not a finite number of seconds above zero — it is stamped onto every "
+                "settlement as the time its disputes close, a window that is not a finite number never closes, "
+                "and one at or below zero is closed before the buyer can open a dispute"
+            )
+        if faults:
+            raise ValueError(
+                "A money bound cannot be used as configured: " + "; and ".join(faults) + ". Set each named "
+                "variable (in the Render dashboard for the deployed service) to a plain decimal number within "
+                "the rule stated, or unset it to take the default."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reputation_settings_are_in_range(self) -> "Settings":
+        """Refuse a reputation setting the scoring cannot use (audit 3, finding 5).
+
+        Only the batch timeout was ever checked. Every other reputation number
+        was taken as typed, and pydantic parses `nan`, `inf` and any sign for a
+        float field, so a typo did not fail — it changed the scoring, silently:
+
+          * `REPUTATION_PRIOR_BPS` — within 0..10000, the rating scale. Outside
+            it, a prior-only agent was served a smoothed score of 20000 or -100
+            (`_prior_info` does not clamp).
+          * `REPUTATION_FLOOR_BPS` — within 0..10000. A floor below 0 or above
+            the scale admits or refuses every agent without looking.
+          * `REPUTATION_PRIOR_WEIGHT_USDC` — finite and above zero. NaN made
+            every read raise and took lifespan down with an opaque "cannot
+            convert float NaN to integer"; zero or below leaves the prior no
+            mass, scores every newcomer's bound at 0, and excludes them all.
+          * `REPUTATION_MAX_RATING_WEIGHT_USDC` — finite and above zero. NaN
+            compares false, so it DISABLED the cap: a 50,000 USDC step weighed
+            50,000 USDC.
+          * `REPUTATION_MAX_RATING_TO_PRIOR_RATIO` — finite and above zero,
+            for the same reason: it is the cap that binds.
+          * `REPUTATION_READ_TTL_SECONDS` — finite and above zero. inf meant a
+            read was never repeated; zero or below meant nothing was cached.
+          * `REPUTATION_STALE_GRACE_SECONDS` — finite and not below zero (0
+            turns stale serving off). inf would serve a read of any age.
+
+        Raised, like the money bounds, because what it prevents is silent; and
+        the message names each variable and its rule and NEVER the value.
+        """
+        faults: list[str] = []
+        for name, bps in (
+            ("REPUTATION_PRIOR_BPS", self.reputation_prior_bps),
+            ("REPUTATION_FLOOR_BPS", self.reputation_floor_bps),
+        ):
+            if not 0 <= bps <= 10_000:
+                faults.append(f"{name} is not a whole number of basis points from 0 to 10000")
+        for name, value, unit in (
+            ("REPUTATION_PRIOR_WEIGHT_USDC", self.reputation_prior_weight_usdc, "USDC"),
+            ("REPUTATION_MAX_RATING_WEIGHT_USDC", self.reputation_max_rating_weight_usdc, "USDC"),
+            ("REPUTATION_MAX_RATING_TO_PRIOR_RATIO", self.reputation_max_rating_to_prior_ratio, "multiples"),
+            ("REPUTATION_READ_TTL_SECONDS", self.reputation_read_ttl_seconds, "seconds"),
+        ):
+            if not (math.isfinite(value) and value > 0):
+                faults.append(f"{name} is not a finite number of {unit} above zero")
+        grace = self.reputation_stale_grace_seconds
+        if not (math.isfinite(grace) and grace >= 0):
+            faults.append("REPUTATION_STALE_GRACE_SECONDS is not a finite number of seconds, zero or above")
+        if faults:
+            raise ValueError(
+                "A reputation setting cannot be used as configured: " + "; and ".join(faults) + ". Set each "
+                "named variable (in the Render dashboard for the deployed service) to a plain number within the "
+                "rule stated, or unset it to take the default."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _reputation_read_has_a_real_bound(self) -> "Settings":
         """Fail fast when the batched reputation read has no usable deadline.
 
         fetch_reps (services/reputation_svc.py) hands this number to
-        asyncio.wait_for as the deadline for the whole batch. The budget rule
+        asyncio.wait as the deadline its per-agent reads share. The budget rule
         below only ever looked UP — it caps the bound at a share of the
-        planning budget — so nothing stopped it from going down to nothing.
-        wait_for treats a deadline of 0, any negative value, or NaN as already
-        expired: the gather is cancelled before a single rep_state read can
-        answer, every agent falls back to the prior marked degraded, and every
-        plan goes out flagged reputation_degraded. Under the shipped config a
-        prior-only agent clears the floor, so the floor then fails OPEN for
-        the life of the process — an agent the ledger has already rated below
-        it is routable again, with the chain perfectly healthy. The degradation
-        policy accepts failing open because an outage is bounded by the read
-        TTL and by this timeout; a timeout that expires on arrival turns a
-        bounded outage into a permanent one that no RPC recovery can end.
+        planning budget — so nothing stopped it from going down to nothing. A
+        deadline of 0, any negative value, or NaN is treated as already
+        expired: no rep_state read that has to reach the chain can answer, so
+        every agent without a recent read falls back to the prior marked
+        degraded, and every plan goes out flagged reputation_degraded. Under
+        the shipped config a prior-only agent clears the floor, so the floor
+        then fails OPEN for the life of the process — an agent the ledger has
+        already rated below it is routable again, with the chain perfectly
+        healthy. The degradation policy accepts failing open while reads
+        genuinely cannot be had; a timeout that expires on arrival makes that
+        permanent, and no RPC recovery can end it.
 
         inf is the opposite failure: no bound at all, so a hung RPC holds every
         decompose for as long as the socket does — the exact incident this
@@ -625,6 +935,51 @@ class Settings(BaseSettings):
                 f"REPUTATION_BATCH_TIMEOUT_SECONDS to {_seconds(allowance)} or less, or raise "
                 "DECOMPOSE_TIMEOUT_SECONDS to at least "
                 f"{_seconds(self.reputation_batch_timeout_seconds / REPUTATION_READ_BUDGET_SHARE)}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reputation_deadline_covers_the_batch(self) -> "Settings":
+        """Refuse a batch deadline too short for the reads it has to wait on.
+
+        The budget rule above only ever asked whether the deadline fits the
+        PLANNING budget. Nothing asked whether it fits the WORK: a batch of
+        REPUTATION_BATCH_AGENTS reads, REPUTATION_READ_CONCURRENCY at a time,
+        each sized at REPUTATION_READ_LATENCY_SECONDS, needs
+        ceil(agents / concurrency) x latency to finish. A deadline under that
+        is not a bound on an outage; it is an outage on a healthy chain — every
+        batch cuts off its last wave, those agents fall back, and with no
+        recent read to serve they fall back to the prior and the floor fails
+        open for them. That is the configuration that shipped: 23 agents, 8
+        shared threads, two hops a read, 2.5 s.
+
+        Each number must also be a real one — a finite latency above zero, a
+        concurrency from 1 to 64 (they are threads), at least one agent — or
+        the product is meaningless. As with the money bounds, the message
+        names the variables and the rule and never a value.
+        """
+        faults: list[str] = []
+        latency = self.reputation_read_latency_seconds
+        if not (math.isfinite(latency) and latency > 0):
+            faults.append("REPUTATION_READ_LATENCY_SECONDS is not a finite number of seconds above zero")
+        if not 1 <= self.reputation_read_concurrency <= 64:
+            faults.append("REPUTATION_READ_CONCURRENCY is not a whole number of threads from 1 to 64")
+        if self.reputation_batch_agents < 1:
+            faults.append("REPUTATION_BATCH_AGENTS is not a whole number of agents of at least 1")
+        if not faults:
+            waves = math.ceil(self.reputation_batch_agents / self.reputation_read_concurrency)
+            if waves * latency > self.reputation_batch_timeout_seconds:
+                faults.append(
+                    "REPUTATION_BATCH_TIMEOUT_SECONDS is shorter than the batch it bounds: "
+                    "ceil(REPUTATION_BATCH_AGENTS / REPUTATION_READ_CONCURRENCY) x "
+                    "REPUTATION_READ_LATENCY_SECONDS must fit inside it, or every batch cuts off its last wave "
+                    "of reads on a healthy chain and those agents are routed on the prior"
+                )
+        if faults:
+            raise ValueError(
+                "The reputation batch cannot be sized as configured: " + "; and ".join(faults) + ". Raise "
+                "REPUTATION_BATCH_TIMEOUT_SECONDS (within the planning budget) or REPUTATION_READ_CONCURRENCY, "
+                "or unset the named variables to take the defaults."
             )
         return self
 
@@ -787,6 +1142,26 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    def is_mainnet(self) -> bool:
+        """True when this process signs for the Stellar PUBLIC network (D-074).
+
+        Keyed on the network PASSPHRASE, never on STELLAR_NETWORK. The
+        passphrase is hashed into every transaction this process signs, so it
+        is the fact that decides which chain a signature is valid on; the label
+        is only a name somebody typed. Asking the label let `pubnet`, a padded
+        or upper-cased `mainnet`, and even `testnet` beside the mainnet
+        passphrase boot a real-money signer with no API_KEY.
+
+        An exact comparison, deliberately: a passphrase that differs by one
+        byte — padding included — hashes to a network id no chain answers to,
+        so it signs for nothing and moves nothing.
+
+        Every place that asks "is this real money?" asks here: the two boot
+        validators below, `stellar.client.explorer_network`, and the operator
+        script's explorer links through it.
+        """
+        return self.stellar_network_passphrase == MAINNET_PASSPHRASE
 
 
 class ConfigurationError(RuntimeError):

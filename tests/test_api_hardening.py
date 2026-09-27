@@ -33,6 +33,11 @@ _CONTRACT_ID_FIELDS = (
 )
 
 
+# The refund reconcile sweep ships off, and the hermetic suite never runs a
+# pass through the app: off, not running, never run.
+_RECONCILE_OFF = {"enabled": False, "running": False, "last_run_at": None, "last_skipped": None, "last_outcomes": {}}
+
+
 def _configure_stellar(monkeypatch) -> None:
     for field in _CONTRACT_ID_FIELDS:
         monkeypatch.setattr(settings, field, "C" + "A" * 55)
@@ -72,6 +77,8 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         # A ledger but no key: paid runs cannot rate, and the probe says so
         # without a chain read and without leaving "ready".
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
+        # No DATABASE_URL in the hermetic suite: the in-memory fallback.
+        "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
     }
 
 
@@ -97,6 +104,8 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "pdax": "unconfigured",
         "cold_start": {"routable": False, "lower_bound_bps": 5677, "floor_bps": 6000, "margin_bps": -323},
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
+        # No DATABASE_URL in the hermetic suite: the in-memory fallback.
+        "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
     }
 
 

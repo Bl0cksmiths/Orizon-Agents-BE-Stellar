@@ -31,6 +31,7 @@ import time
 
 import pytest
 from stellar_sdk import Keypair
+from test_settlement_logging import _use_fake_signer
 
 from app.config import settings
 from app.schemas import Plan, PlanStep, StoredPlan, Task
@@ -42,6 +43,21 @@ from app.services.dispute_store import (
     SettlementStep,
 )
 from app.state import state
+from app.stellar import client as sc
+
+
+@pytest.fixture(autouse=True)
+def _execute_time_recheck_passes(monkeypatch):
+    """Every step here is cleared by the execute-time re-check.
+
+    These tests dispatch agent ids nobody put in the registry (`resolve_worker`
+    is their seam) and were written before `/execute` re-checked listing and
+    the floor. What they pin — charging, rating, settling, fencing — is
+    downstream of that gate, so the gate is held open here; its own behaviour
+    is pinned against the real registry in `tests/test_execute_recheck.py`.
+    """
+    monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
+
 
 AUTH_ID_HEX = "ab" * 16
 PAYER = Keypair.random().public_key
@@ -178,7 +194,7 @@ def _patch_settlement(
     """
     rating_calls: list[bytes] = []
 
-    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc):
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
         return (charge_tx, proof_tx, job_id)
 
     async def fake_ratings(
@@ -678,3 +694,108 @@ def test_a_summary_that_cannot_be_kept_never_fails_the_run(monkeypatch, store, c
     assert any("dispute window" in ln.msg for ln in state.traces[task_id])
     warnings = [r.getMessage() for r in caplog.records if r.name == "app.services.execution_svc"]
     assert sum(task_id in m and "summary could not be cleaned" in m for m in warnings) == 2, warnings
+
+
+# ── the settlement is recorded when the charge confirms, not after the seal ──
+# These run the REAL `_settle_onchain` over a stubbed stellar client, because
+# what they pin is its composition with `_record_settlement`: the charge, then
+# the record, then the seal, then the seal's hash.
+
+
+def _chain_answers(monkeypatch, seal: dict | BaseException) -> list[str]:
+    _use_fake_signer(monkeypatch)
+    invoked: list[str] = []
+
+    async def invoke(contract_id, function_name, args):
+        invoked.append(function_name)
+        if function_name == "charge":
+            return {"status": "SUCCESS", "hash": CHARGE_TX, "result": "11" * 16}
+        if isinstance(seal, BaseException):
+            raise seal
+        return seal
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", invoke)
+    return invoked
+
+
+def _settle_and_record(task_id: str) -> tuple[str | None, str | None, bytes | None]:
+    return asyncio.run(
+        execution_svc._settle_and_record(
+            task_id,
+            time.monotonic(),
+            _plan(),
+            payer=PAYER,
+            auth_id_hex=AUTH_ID_HEX,
+            total_usdc=0.05,
+            delivered_steps=frozenset({0}),
+            output_summaries={0: "did the thing"},
+        )
+    )
+
+
+def test_a_cancel_during_the_seal_keeps_the_confirmed_charges_settlement(monkeypatch, store, caplog):
+    """B2: a redeploy's drain lands during the seal's ~30s poll. The charge had
+    confirmed, so the buyer paid — and must still have a dispute window."""
+    invoked = _chain_answers(monkeypatch, asyncio.CancelledError())
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        with pytest.raises(asyncio.CancelledError):
+            _settle_and_record("tsk_capture_cancel_seal")
+
+    assert invoked == ["charge", "seal"]
+    [record] = store.recorded
+    assert (record.charge_tx, record.proof_tx, record.payer) == (CHARGE_TX, None, PAYER)
+    assert record.window_closes_at == record.settled_at + settings.dispute_window_seconds
+    assert asyncio.run(store.get_settlement(record.job_id_hex)) == record
+    cancelled = [r.getMessage() for r in caplog.records if "cancelled mid-flight" in r.getMessage()]
+    assert any(record.job_id_hex in m for m in cancelled), cancelled
+
+
+def test_the_seal_is_appended_to_the_settlement_recorded_at_charge_time(monkeypatch, store):
+    invoked = _chain_answers(monkeypatch, {"status": "SUCCESS", "hash": PROOF_TX})
+
+    charge_tx, proof_tx, job_id = _settle_and_record("tsk_capture_seal_after")
+
+    assert invoked == ["charge", "seal"]
+    assert (charge_tx, proof_tx) == (CHARGE_TX, PROOF_TX) and job_id is not None
+    first, second = store.recorded
+    assert first.proof_tx is None and second.proof_tx == PROOF_TX
+    # The same record twice, the seal's hash the only difference: in
+    # particular the window the buyer was told about does not move.
+    assert dataclasses.replace(second, proof_tx=None) == first
+    assert asyncio.run(store.get_settlement(job_id.hex())) == second
+
+
+class _FailsOnce(_RecordingStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures = 1
+
+    async def record_settlement(self, record: SettlementRecord) -> None:
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("database unreachable")
+        await super().record_settlement(record)
+
+
+def test_a_first_write_that_failed_is_tried_again_after_the_seal(monkeypatch):
+    flaky = _FailsOnce()
+    monkeypatch.setattr(dispute_store, "_store", flaky)
+    _chain_answers(monkeypatch, {"status": "SUCCESS", "hash": PROOF_TX})
+
+    _, _, job_id = _settle_and_record("tsk_capture_retry_record")
+
+    [record] = flaky.recorded
+    assert job_id is not None and record.job_id_hex == job_id.hex()
+    assert (record.charge_tx, record.proof_tx) == (CHARGE_TX, PROOF_TX)
+
+
+def test_a_charge_that_never_confirmed_records_nothing_before_or_after(monkeypatch, store):
+    _use_fake_signer(monkeypatch)
+
+    async def invoke(contract_id, function_name, args):
+        return {"status": "timeout", "hash": "tx_inflight"}
+
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", invoke)
+    assert _settle_and_record("tsk_capture_unconfirmed")[2] is None
+    assert store.recorded == []

@@ -325,7 +325,7 @@ def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, int]]:
     monkeypatch.setattr(sc, "sym", lambda s: s)
     chain: dict[str, dict[str, int]] = {}
 
-    def simulate_read(contract_id: str, method: str, args: list[str]) -> dict[str, int]:
+    def simulate_read(contract_id: str, method: str, args: list[str], **_kw: object) -> dict[str, int]:
         assert (contract_id, method) == ("CFAKELEDGER", "rep_state")
         return dict(chain.get(args[0], {}))
 

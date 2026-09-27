@@ -272,24 +272,28 @@ def test_a_read_that_hangs_times_out_to_unchecked(monkeypatch):
     configure(monkeypatch)
     monkeypatch.setattr(rw, "SCORER_READ_TIMEOUT_SECONDS", 0.05)
     release = threading.Event()
+    finished = threading.Event()
 
     def _hung(ledger: str) -> str | None:
         release.wait(5)
+        finished.set()
         return SIGNER
 
     monkeypatch.setattr(sc, "ledger_scorer", _hung)
 
     async def _ask():
-        started = time.monotonic()
         v = await rw.check()
-        elapsed = time.monotonic() - started
+        # Resolved while the worker is still parked: check() did not wait for
+        # the thread. Asserted on the thread's state, not on a wall-clock
+        # budget a slow runner could blow.
+        still_hung = not finished.is_set()
         release.set()  # let the abandoned worker finish before the loop closes
-        return v, elapsed
+        return v, still_hung
 
-    v, elapsed = asyncio.run(_ask())
+    v, still_hung = asyncio.run(_ask())
     assert (v.status, v.signer, v.scorer) == ("unchecked", SIGNER, None)
     assert v.read_error == "timed out after 0.05s"
-    assert elapsed < 2
+    assert still_hung
 
 
 def test_the_bound_sits_above_the_clients_own_http_timeout():

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,12 @@ from app.services.reputation_svc import STROOPS_PER_USDC, RepInfo
 from app.state import state
 from app.stellar import cache as rcache
 from app.stellar import client as sc
+
+
+def _smoothed(sum_w: int, weight: int) -> int:
+    from app.services.reputation_svc import smoothed_bps
+
+    return smoothed_bps(sum_w, weight)
 
 
 def _info(agent_id: str, *, smoothed: int, lower: int) -> RepInfo:
@@ -43,7 +50,31 @@ def _info(agent_id: str, *, smoothed: int, lower: int) -> RepInfo:
 # ── read endpoints ──────────────────────────────────────────────
 
 
-def test_reputation_batch_covers_every_seeded_agent(client):
+@pytest.fixture()
+def rated_ledger(monkeypatch):
+    """A configured ledger holding DISTINCT evidence per seeded agent, read
+    through the real cache. The read-endpoint tests used to pass only because
+    conftest blanks the ledger id — every agent was the prior, so a route that
+    never read the chain at all passed them. Returns agent → expected avg_bps.
+    """
+    monkeypatch.setattr(settings, "reputation_enabled", True)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
+    monkeypatch.setattr(sc, "contract_ids", lambda: SimpleNamespace(reputation_ledger="CFAKELEDGER"))
+    monkeypatch.setattr(sc, "sym", lambda s: s)
+    weight = 10 * STROOPS_PER_USDC
+    ids = sorted(a.id for a in state.list_agents())
+    expected = {agent_id: 6000 + 50 * i for i, agent_id in enumerate(ids)}
+
+    def simulate_read(_contract, _method, args, **_kw):
+        return {"sum_w": expected[args[0]] * weight, "weight": weight, "count": 3, "disputed": 0}
+
+    monkeypatch.setattr(sc, "simulate_read", simulate_read)
+    rcache.clear()
+    yield expected
+    rcache.clear()
+
+
+def test_reputation_batch_covers_every_seeded_agent(client, rated_ledger):
     r = client.get("/api/stellar/reputation")
     assert r.status_code == 200
     body = r.json()
@@ -53,29 +84,39 @@ def test_reputation_batch_covers_every_seeded_agent(client):
     assert set(body["reputations"]) == seeded
     assert body["floor_bps"] == settings.reputation_floor_bps
     assert body["prior_bps"] == settings.reputation_prior_bps
-    # Hermetic tests have no chain configured → every entry is the prior. A
-    # prior because nothing is deployed is a COLD START, not an outage, and the
-    # response has to carry the difference: a dashboard that read this state as
-    # degraded would raise an unreadable-ledger alarm on every poll of a
-    # perfectly healthy network, which is how operators learn to ignore it.
+    for agent_id, info in body["reputations"].items():
+        assert info["agent_id"] == agent_id
+        assert info["source"] == "onchain"
+        assert info["degraded"] is False
+        assert info["avg_bps"] == rated_ledger[agent_id]
+
+
+def test_an_undeployed_ledger_is_a_cold_start_not_an_outage(client, monkeypatch):
+    """No ledger configured — set here, not inherited from conftest — so every
+    entry is the prior. A prior because nothing is deployed is a COLD START,
+    not an outage, and the response has to carry the difference: a dashboard
+    that read this state as degraded would raise an unreadable-ledger alarm on
+    every poll of a perfectly healthy network, which is how operators learn to
+    ignore it."""
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "")
+    body = client.get("/api/stellar/reputation").json()
     for info in body["reputations"].values():
         assert info["source"] == "prior"
         assert info["degraded"] is False
         assert info["smoothed_bps"] == settings.reputation_prior_bps
 
 
-def test_reputation_single_agent_shape(client):
+def test_reputation_single_agent_shape(client, rated_ledger):
     r = client.get("/api/stellar/reputation/agt_01h8")
     assert r.status_code == 200
     body = r.json()
     assert body["agent_id"] == "agt_01h8"
-    assert body["source"] == "prior"
-    # Unconfigured ledger, so this prior is a cold start rather than a
-    # fallback — same distinction as on the batch, drawn by a separate handler.
+    assert body["source"] == "onchain"
     assert body["degraded"] is False
-    assert body["smoothed_bps"] == settings.reputation_prior_bps
-    assert body["count"] == 0
-    assert body["lower_bound_bps"] >= settings.reputation_floor_bps
+    assert body["stale"] is False
+    assert body["avg_bps"] == rated_ledger["agt_01h8"]
+    assert body["count"] == 3
+    assert body["lower_bound_bps"] <= body["smoothed_bps"]
 
 
 def test_reputation_params_returns_config(client):
@@ -86,6 +127,9 @@ def test_reputation_params_returns_config(client):
     assert body["prior_bps"] == settings.reputation_prior_bps
     assert body["floor_bps"] == settings.reputation_floor_bps
     assert body["prior_weight_usdc"] == settings.reputation_prior_weight_usdc
+    # The cap in force — the prior's weight — not the 100 USDC outer bound.
+    assert body["max_rating_weight_usdc"] == 12.0
+    assert body["max_rating_to_prior_ratio"] == 1.0
     assert body["wilson_z"] == 1.0
     # On-chain ReputationLedger v2 decay constants, surfaced read-only.
     assert body["epoch_seconds"] == 604_800
@@ -96,15 +140,30 @@ def test_reputation_params_returns_config(client):
     assert body["network"] == settings.stellar_network
 
 
-def test_reputation_params_not_shadowed_by_agent_route(client):
-    # /reputation/params is declared before /reputation/{agent_id}; if the
-    # dynamic route captured it, "params" would come back as an agent id.
-    r = client.get("/api/stellar/reputation/params")
-    assert r.status_code == 200
-    body = r.json()
-    assert "agent_id" not in body
-    assert "smoothed_bps" not in body
-    assert "prior_weight_usdc" in body
+def test_params_is_reserved_so_no_agent_is_shadowed_by_the_route(client):
+    """`/reputation/params` is matched before `/reputation/{agent_id}`, so an
+    agent registered as `params` could never read its own reputation there —
+    this used to be pinned as correct because it checked only the route's side.
+    The id is reserved instead: the builder refuses it before any RPC, and the
+    form's availability check says so."""
+    r = client.post(
+        "/api/stellar/build/register-agent",
+        json={
+            "owner": "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
+            "agent_id": "params",
+            "name": "shadowed",
+            "skills": [],
+            "price_usdc": 0.05,
+        },
+    )
+    assert r.status_code == 409
+    assert "id_reserved" in r.text
+    availability = client.get("/api/stellar/agent-id-available/params").json()
+    assert availability["available"] is False
+    assert availability["reason"] == "id_reserved"
+    # And the route itself still answers with the config.
+    body = client.get("/api/stellar/reputation/params").json()
+    assert "prior_weight_usdc" in body and "agent_id" not in body
 
 
 def test_routing_constants_are_read_per_request(client, monkeypatch):
@@ -128,8 +187,11 @@ def test_routing_constants_are_read_per_request(client, monkeypatch):
     assert batch["floor_bps"] == params["floor_bps"] == 6100
     assert batch["prior_bps"] == params["prior_bps"] == 7100
     # And the live prior has to reach the per-agent scores too, not just the
-    # header the client draws its floor line against.
+    # header the client draws its floor line against — the bound as well as
+    # the mean, since the bound is what the floor is applied to. Worked by
+    # hand: 0.71 - sqrt(0.71 x 0.29 / 12) = 0.5790.
     assert {info["smoothed_bps"] for info in batch["reputations"].values()} == {7100}
+    assert {info["lower_bound_bps"] for info in batch["reputations"].values()} == {5790}
 
 
 # ── degradation on the wire ─────────────────────────────────────
@@ -261,14 +323,16 @@ def test_router_mirror_declares_every_service_field():
 # ── decompose stamping ──────────────────────────────────────────
 
 
-def test_kit_decompose_stamps_reputation_fields(client):
+def test_kit_decompose_stamps_reputation_fields(client, rated_ledger):
     r = client.post("/api/orchestrator/decompose", json={"intent": "tetris game in html"})
     assert r.status_code == 200
     steps = r.json()["steps"]
     assert steps
     for step in steps:
-        assert step["rep_bps"] == settings.reputation_prior_bps
-        assert step["rep_source"] == "prior"
+        assert step["rep_source"] == "onchain"
+        weight = 10 * STROOPS_PER_USDC
+        info = _smoothed(rated_ledger[step["agent_id"]] * weight, weight)
+        assert step["rep_bps"] == info
 
 
 # ── routing floor ───────────────────────────────────────────────

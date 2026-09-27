@@ -106,6 +106,17 @@ def _open(
     )
 
 
+def _raw_nonce(job: str, step: int) -> str:
+    """A challenge minted straight from the table, past the service's own mint.
+
+    `issue_dispute_challenge` refuses a closed window, an undelivered step and a
+    free one before spending a slot; `open_dispute` asks the same rules again
+    behind the signature, and reaching those re-checks takes a nonce the
+    service's mint would not have handed out.
+    """
+    return eb.issue_dispute_challenge(job, step)[0]
+
+
 # ── the happy path ──────────────────────────────────────────────
 
 
@@ -249,10 +260,13 @@ def test_a_caller_claiming_someone_else_s_address_is_refused() -> None:
 
 
 def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
-    """The signature gate stands in front of every private fact. This job's
-    window has closed and its step was never delivered, and a caller who cannot
-    prove they are the buyer is told neither — the refusal is the same code,
-    status and message they would get against a perfectly healthy job."""
+    """Inside `open_dispute` the signature is asked before the window and the
+    step. Those two are public now (`SettlementView` serves them, and the mint
+    refuses on them), but a caller who cannot prove they are the buyer still
+    gets one answer here whatever state the job is in — the refusal is the same
+    code, status and message they would get against a perfectly healthy job.
+    The nonce is minted straight from the challenge table, since the service's
+    own mint refuses this job before any signature is asked."""
     payer = Keypair.random()
     impostor = Keypair.random()
     _seed(payer.public_key)
@@ -267,7 +281,7 @@ def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
     with pytest.raises(DisputeError) as healthy:
         _open(impostor, claimed_payer=payer.public_key)
     with pytest.raises(DisputeError) as damaged:
-        _open(impostor, job="dead" * 8, claimed_payer=payer.public_key)
+        _open(impostor, job="dead" * 8, nonce=_raw_nonce("dead" * 8, 0), claimed_payer=payer.public_key)
 
     assert (healthy.value.code, healthy.value.status_code) == ("not_the_payer", 403)
     assert (damaged.value.code, damaged.value.status_code) == ("not_the_payer", 403)
@@ -370,6 +384,53 @@ def test_no_challenge_is_minted_for_a_job_or_step_that_cannot_be_disputed() -> N
     assert len(eb._challenges) == 0
 
 
+@pytest.mark.parametrize(
+    ("seeded", "code"),
+    [
+        ({"window_seconds": -86_400.0}, "dispute_window_closed"),
+        (
+            {"steps": (SettlementStep(step_index=0, agent_id="a", agent_name=None, price_usdc=0.05, delivered=False),)},
+            "step_not_settled",
+        ),
+        (
+            {"steps": (SettlementStep(step_index=0, agent_id="a", agent_name=None, price_usdc=0.0, delivered=True),)},
+            "nothing_was_charged",
+        ),
+        ({"settled_usdc": 0.0}, "nothing_was_charged"),
+    ],
+    ids=["window-closed", "undelivered", "free-step", "nothing-settled"],
+)
+def test_no_challenge_slot_is_spent_on_a_step_that_can_never_be_disputed(seeded: dict, code: str) -> None:
+    """The mint used to refuse only an unknown job or step, so a stranger could
+    hold the whole `dispute` budget with (job, step) pairs whose windows closed
+    long ago — job ids are public on-chain — and every buyer still inside their
+    24 hours was told `challenge_capacity_dispute`. The window, the delivery
+    and the price are public in `SettlementView`, so the mint asks them too."""
+    _seed(Keypair.random().public_key, **seeded)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    assert (refused.value.code, refused.value.status_code) == (code, 409)
+    assert len(eb._challenges) == 0
+
+
+def test_closed_windows_cannot_crowd_out_a_buyer_inside_theirs() -> None:
+    """The audit's scenario, end to end: a full budget's worth of historical
+    settlements is minted against, and the buyer whose window is open still
+    gets a challenge."""
+    for i in range(eb.CHALLENGE_BUDGETS["dispute"]):
+        job = f"{i:032x}"
+        _seed(Keypair.random().public_key, job=job, task=f"tsk_old{i}", window_seconds=-86_400.0)
+        with pytest.raises(DisputeError):
+            asyncio.run(dispute_svc.issue_dispute_challenge(job, 0))
+    _seed(Keypair.random().public_key)
+
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    assert len(nonce) == dispute_svc.NONCE_HEX_CHARS
+
+
 # ── rule: the window is open ────────────────────────────────────
 
 
@@ -379,7 +440,7 @@ def test_a_dispute_after_the_window_closed_is_refused_and_says_when() -> None:
     closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "dispute_window_closed"
     assert refused.value.status_code == 409
@@ -397,7 +458,7 @@ def test_the_window_is_judged_on_the_stamped_value_not_the_setting(monkeypatch) 
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 365 * 86_400.0)
     with pytest.raises(DisputeError) as still_closed:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
     assert still_closed.value.code == "dispute_window_closed"
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 0.0)
@@ -432,7 +493,7 @@ def test_a_step_that_produced_no_output_cannot_be_disputed() -> None:
     )
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "step_not_settled"
     assert refused.value.status_code == 409
@@ -449,7 +510,7 @@ def test_a_workflow_that_charged_nothing_cannot_be_disputed() -> None:
     _seed(payer.public_key, settled_usdc=0.0)
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "nothing_was_charged"
     assert refused.value.status_code == 409
@@ -463,7 +524,7 @@ def test_a_free_step_cannot_be_disputed() -> None:
     )
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer)
+        _open(payer, nonce=_raw_nonce(JOB, 0))
 
     assert refused.value.code == "nothing_was_charged"
     assert "free" in refused.value.message
@@ -522,8 +583,10 @@ def test_a_dispute_must_say_what_was_wrong() -> None:
     with pytest.raises(DisputeError) as refused:
         _open(payer, reason="   \t  ")
 
-    assert refused.value.code == "reason_required"
+    assert refused.value.code == "reason_invalid"
     assert refused.value.status_code == 422
+    # The message names the bound, so a client can say what to fix.
+    assert str(dispute_svc.MAX_REASON_CHARS) in refused.value.message
     assert asyncio.run(dispute_svc.list_for_task(TASK)) == ()
 
 
@@ -552,7 +615,48 @@ def test_a_reason_of_control_characters_alone_is_no_reason() -> None:
     with pytest.raises(DisputeError) as refused:
         _open(payer, reason="\x00\x1b\x07")
 
-    assert refused.value.code == "reason_required"
+    assert refused.value.code == "reason_invalid"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "\u200b",  # zero-width space
+        "\u200c\u2060",  # zero-width non-joiner, word joiner
+        "\ufeff",  # byte-order mark
+        "\u00ad",  # soft hyphen
+        "\u202e",  # right-to-left override
+        "\u3164",  # Hangul filler
+        "\u2800",  # braille blank
+        "\x85\x9b",  # C1 controls
+        "\u2066\u00a0\u2069",  # an isolate around a no-break space
+    ],
+    ids=["zwsp", "zwnj-wj", "bom", "soft-hyphen", "rlo", "hangul-filler", "braille-blank", "c1", "isolate-nbsp"],
+)
+def test_a_reason_nobody_can_see_is_no_reason(reason: str) -> None:
+    """D-059: each of these displays as nothing, and each used to open a
+    dispute an adjudicator would have to rule on with nothing to read."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason=reason)
+
+    assert (refused.value.code, refused.value.status_code) == ("reason_invalid", 422)
+    assert asyncio.run(dispute_svc.list_for_task(TASK)) == ()
+
+
+def test_c1_controls_and_bidi_overrides_are_stripped_from_a_stored_reason() -> None:
+    """D-059: the docstring promised C1 was stripped and it was not — `\\x9b`
+    is a one-byte CSI to a terminal. A bidi override reorders how the rest of
+    the reason displays, so an adjudicator could read something else."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+
+    record = _open(payer, reason="late\x9b31m and \x85wrong \u202eeht\u202c done")
+
+    assert not any(ch in record.reason for ch in "\x9b\x85\u202e\u202c")
+    assert record.reason == "late 31m and  wrong eht done"
 
 
 def test_control_characters_are_stripped_from_a_stored_reason() -> None:
@@ -569,14 +673,43 @@ def test_control_characters_are_stripped_from_a_stored_reason() -> None:
     assert record.reason.startswith("step one")
 
 
-def test_a_very_long_reason_is_clamped() -> None:
+def test_a_reason_past_the_limit_is_refused_and_never_cut() -> None:
+    """D-062: it used to be trimmed to the limit and marked `…[truncated]`,
+    storing words the buyer did not write in place of ones they did. Refused
+    before the proof, so the buyer can shorten it and resend the same nonce."""
     payer = Keypair.random()
     _seed(payer.public_key)
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+    signature = _sign(payer, dispute_message(JOB, 0, nonce))
 
-    record = _open(payer, reason="x" * 5_000)
+    with pytest.raises(DisputeError) as refused:
+        _open(payer, reason="x" * (dispute_svc.MAX_REASON_CHARS + 1), nonce=nonce, signature=signature)
 
-    assert len(record.reason) <= dispute_svc.MAX_REASON_CHARS + len(" …[truncated]")
-    assert record.reason.endswith("[truncated]")
+    assert (refused.value.code, refused.value.status_code) == ("reason_invalid", 422)
+    assert str(dispute_svc.MAX_REASON_CHARS) in refused.value.message
+    assert eb.dispute_challenge_is_live(JOB, 0, nonce) is True
+
+
+def test_a_reason_at_the_limit_is_stored_whole() -> None:
+    """D-062: `"x"*490 + " END ABCD"` is 499 characters; the prompt-fence
+    redaction rewrote it to 513 and then cut it. Nothing is rewritten now."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    reason = "x" * 490 + " END ABCD"
+
+    assert len(_open(payer, reason=reason).reason) == 499
+    assert _open(payer, step=1, reason="y" * dispute_svc.MAX_REASON_CHARS).reason == "y" * dispute_svc.MAX_REASON_CHARS
+
+
+def test_ordinary_upper_case_words_are_stored_as_written() -> None:
+    """D-062: `THE END RESULT` was stored as `THE [redacted marker]` — the
+    prompt-fence defence redacting a marker that no prompt ever reads, since
+    a reason never reaches a model."""
+    payer = Keypair.random()
+    _seed(payer.public_key)
+    reason = "THE END RESULT WAS WRONG and BEGIN SECTION was missing ==== entirely"
+
+    assert _open(payer, reason=reason).reason == reason
 
 
 # ── the refusal type itself ─────────────────────────────────────

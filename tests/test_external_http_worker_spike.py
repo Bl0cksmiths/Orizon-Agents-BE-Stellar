@@ -23,6 +23,20 @@ from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
 from app.state import state
 
+
+@pytest.fixture(autouse=True)
+def _execute_time_recheck_passes(monkeypatch):
+    """Every step here is cleared by the execute-time re-check.
+
+    These tests dispatch agent ids nobody put in the registry (`resolve_worker`
+    is their seam) and were written before `/execute` re-checked listing and
+    the floor. What they pin — charging, rating, settling, fencing — is
+    downstream of that gate, so the gate is held open here; its own behaviour
+    is pinned against the real registry in `tests/test_execute_recheck.py`.
+    """
+    monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
+
+
 # A public https URL: the worker validates its endpoint before every dispatch
 # (SSRF guard), and the injected ASGI/Mock transports below never open a
 # socket, so the URL is only a label for the in-process endpoint.

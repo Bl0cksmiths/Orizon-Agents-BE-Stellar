@@ -2,28 +2,36 @@
 
 from __future__ import annotations
 
-from app.config import settings
+import pytest
+
+from app.config import MAINNET_PASSPHRASE, settings
 from app.stellar import client as sc
 
-
-def test_explorer_network_is_testnet_by_default():
-    saved = settings.stellar_network
-    settings.stellar_network = "testnet"
-    try:
-        assert sc.explorer_network() == "testnet"
-    finally:
-        settings.stellar_network = saved
+TESTNET_PASSPHRASE = "Test SDF Network ; September 2015"
 
 
-def test_explorer_network_maps_mainnet_to_public():
-    saved = settings.stellar_network
-    try:
-        settings.stellar_network = "mainnet"
-        assert sc.explorer_network() == "public"
-        settings.stellar_network = "public"
-        assert sc.explorer_network() == "public"
-    finally:
-        settings.stellar_network = saved
+def test_explorer_network_is_testnet_by_default(monkeypatch):
+    monkeypatch.setattr(settings, "stellar_network", "testnet")
+    monkeypatch.setattr(settings, "stellar_network_passphrase", TESTNET_PASSPHRASE)
+    assert sc.explorer_network() == "testnet"
+
+
+@pytest.mark.parametrize("label", ["mainnet", "public", "pubnet", " Mainnet", "testnet"])
+def test_the_mainnet_passphrase_is_the_public_explorer_whatever_the_label(monkeypatch, label):
+    """D-074: the passphrase decides which chain a transaction landed on, so it
+    decides which explorer can show it. `pubnet` used to yield `/explorer/pubnet/`
+    and `testnet` over the mainnet passphrase the testnet explorer."""
+    monkeypatch.setattr(settings, "stellar_network", label)
+    monkeypatch.setattr(settings, "stellar_network_passphrase", MAINNET_PASSPHRASE)
+    assert sc.explorer_network() == "public"
+
+
+def test_a_mainnet_label_over_a_testnet_passphrase_links_testnet(monkeypatch):
+    # Unbootable (the passphrase validator refuses it), but settings are mutable
+    # afterwards: the link must still follow where the signature is valid.
+    monkeypatch.setattr(settings, "stellar_network", "mainnet")
+    monkeypatch.setattr(settings, "stellar_network_passphrase", TESTNET_PASSPHRASE)
+    assert sc.explorer_network() == "testnet"
 
 
 def test_to_jsonable_converts_scval_natives():

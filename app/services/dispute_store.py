@@ -67,7 +67,25 @@ DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
 # everything; this cap exists so a long-lived local process cannot grow without
 # bound, and it is logged when it bites so nobody mistakes a dropped record for
 # a bug in the window arithmetic.
+#
+# It counts SETTLEMENTS, and there is deliberately no cap of its own on
+# disputes. A dispute is the record that a step was already contested — and
+# perhaps already paid back — so forgetting one while its settlement is still
+# held would leave that step looking undisputed. A settlement and the disputes
+# filed under it therefore leave together or not at all. Disputes are bounded
+# through their settlement instead: one per step (the duplicate rule), and only
+# for a step the settlement actually has (`dispute_svc` refuses any other).
+# Disputes filed against a job with no settlement held — which the service
+# never does — are bounded by the same number of jobs.
+#
+# The cap is soft in one direction only: a job with an unfinished dispute is
+# never shed, and if every job over the cap has one the store grows and logs
+# at ERROR rather than forget what is still owed.
 _MAX_IN_MEMORY = 500
+
+# The dispute states that still owe something, and so pin their settlement in
+# the in-memory store past its cap (see `InMemoryDisputeStore._is_pinned`).
+_UNFINISHED: frozenset[DisputeStatus] = frozenset({"open", "upheld", "crediting"})
 
 
 # Pool sizing for the Postgres store, taken from binding_store for the reasons
@@ -239,6 +257,17 @@ CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
 # exactly what DisputeRecord promises a reader for a row from before 4.06:
 # "not known", never a zero credit or a 1970 timestamp.
 #
+# `inflight_usdc` arrives with the reconcile sweep, by the same road and for
+# the same reason. It is the amount of the transfer named by `refund_tx`
+# WHILE that transfer's outcome is unknown: written beside the in-flight hash
+# when a submission times out, and never read as money that landed. That is
+# `credited_usdc`'s job, and the receipt reads that one alone — a buyer shown
+# an amount that may never arrive would be shown a promise dressed as a
+# payment. It exists because a timed-out row otherwise records a hash and no
+# amount, so a sweep that later finds the transfer landed would have to
+# re-derive what it was for. NULLABLE, like the receipt's three: every row
+# written before it, and every row with no transfer in flight, says "none".
+#
 # The three read indexes carry (key..., id DESC) so "the newest row for this
 # dispute / this step / this task" is served from the index without a sort.
 _CREATE_DISPUTES_SQL = """
@@ -262,12 +291,14 @@ CREATE TABLE IF NOT EXISTS dispute_events (
     credited_usdc   DOUBLE PRECISION,
     updated_at      DOUBLE PRECISION,
     rating_confirmed BOOLEAN,
+    inflight_usdc   DOUBLE PRECISION,
     opening         BOOLEAN NOT NULL DEFAULT FALSE
 );
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS note TEXT;
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS credited_usdc DOUBLE PRECISION;
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS updated_at DOUBLE PRECISION;
 ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS rating_confirmed BOOLEAN;
+ALTER TABLE dispute_events ADD COLUMN IF NOT EXISTS inflight_usdc DOUBLE PRECISION;
 CREATE UNIQUE INDEX IF NOT EXISTS dispute_events_one_per_step_idx
     ON dispute_events (job_id_hex, step_index) WHERE opening;
 CREATE INDEX IF NOT EXISTS dispute_events_dispute_idx
@@ -381,7 +412,7 @@ INSERT INTO workflow_settlements (
 _SELECT_DISPUTE_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
        charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-       credited_usdc, updated_at, rating_confirmed
+       credited_usdc, updated_at, rating_confirmed, inflight_usdc
 FROM dispute_events
 WHERE dispute_id = $1
 ORDER BY id DESC
@@ -396,7 +427,7 @@ LIMIT 1
 _SELECT_DISPUTE_BY_STEP_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
        charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-       credited_usdc, updated_at, rating_confirmed
+       credited_usdc, updated_at, rating_confirmed, inflight_usdc
 FROM dispute_events
 WHERE job_id_hex = $1 AND step_index = $2
 ORDER BY id DESC
@@ -413,7 +444,7 @@ LIMIT 1
 _SELECT_DISPUTES_FOR_TASK_SQL = """
 SELECT dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
        charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-       credited_usdc, updated_at, rating_confirmed
+       credited_usdc, updated_at, rating_confirmed, inflight_usdc
 FROM (
     SELECT DISTINCT ON (dispute_id) *
     FROM dispute_events
@@ -453,8 +484,8 @@ _INSERT_DISPUTE_SQL = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
     charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-    credited_usdc, updated_at, rating_confirmed, opening
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, TRUE)
+    credited_usdc, updated_at, rating_confirmed, inflight_usdc, opening
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, TRUE)
 ON CONFLICT (job_id_hex, step_index) WHERE opening DO NOTHING
 RETURNING dispute_id
 """
@@ -553,6 +584,12 @@ FOR UPDATE
 # submitted stays NULL rather than becoming FALSE — which is the distinction
 # DisputeRecord promises a reader of a receipt.
 #
+# `inflight_usdc` ($11) is COALESCEd like the hash it describes: the row that
+# records a timed-out submission names both, and a later transition that
+# names neither keeps them. It is never cleared here, because nothing written
+# by this statement proves a transfer did not land; the two statements that
+# DO say "nothing landed" (the claim and the release) clear it with the hash.
+#
 # `updated_at` is $7 outright and never COALESCEd, because it is the one column
 # every transition exists to move. It is the same reading of the clock as the
 # `resolved_at` fallback, so the transition that first resolves a dispute
@@ -573,6 +610,17 @@ FOR UPDATE
 # against the buyer's claim. Naming the status the decision was made from
 # refuses the write instead: the INSERT selects from `latest` only while its
 # status still matches, so nothing is written and RETURNING comes back empty.
+#
+# `expected_refund_tx` ($12) narrows the same precondition to ONE transfer,
+# and it exists for the reconcile sweep. A sweep decides from the chain's
+# answer about the hash it read; between that read and this write the dispute
+# can be released and claimed again, and it is then `crediting` over a NEW
+# transfer the sweep knows nothing about. The status alone would match, and a
+# verdict about the old transfer would close the dispute over the new one.
+# Naming the hash refuses that: the write lands only while the dispute is
+# still waiting on the transaction the decision was made about. A NULL hash on
+# record never equals anything, so a claim that has not yet been handed a
+# transfer is refused too.
 #
 # NULL means unconditional, and that is a decision rather than a default nobody
 # made. The reconciliation writes in docs/disputes.md are made by a person who
@@ -617,14 +665,15 @@ finished AS (
       AND EXISTS (
           SELECT 1
           FROM latest
-          WHERE $10::text IS NULL OR latest.status = $10::text
+          WHERE ($10::text IS NULL OR latest.status = $10::text)
+            AND ($12::text IS NULL OR latest.refund_tx = $12::text)
       )
     RETURNING dispute_id
 )
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
     charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-    credited_usdc, updated_at, rating_confirmed, opening
+    credited_usdc, updated_at, rating_confirmed, inflight_usdc, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, $2,
@@ -639,12 +688,14 @@ SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
            WHEN latest.rating_confirmed THEN TRUE
            ELSE COALESCE($9::boolean, latest.rating_confirmed)
        END,
+       COALESCE($11::double precision, latest.inflight_usdc),
        FALSE
 FROM latest
-WHERE $10::text IS NULL OR latest.status = $10::text
+WHERE ($10::text IS NULL OR latest.status = $10::text)
+  AND ($12::text IS NULL OR latest.refund_tx = $12::text)
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-          credited_usdc, updated_at, rating_confirmed
+          credited_usdc, updated_at, rating_confirmed, inflight_usdc
 """
 
 
@@ -679,23 +730,26 @@ RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, 
 # Copying the last hash forward put a transaction that FAILED on the buyer's
 # receipt as the refund "in flight" for the whole of the next attempt (found
 # in story 4.06). The dead hash is not lost: the append-only trail still holds
-# it on the row that recorded it.
+# it on the row that recorded it. `inflight_usdc` goes with it, because it is
+# the amount of the transfer that hash names: an amount left behind would
+# describe a transfer the dispute no longer has.
 _APPEND_UNRESOLVED_ROW = """
 INSERT INTO dispute_events (
     dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
     charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-    credited_usdc, updated_at, rating_confirmed, opening
+    credited_usdc, updated_at, rating_confirmed, inflight_usdc, opening
 )
 SELECT latest.dispute_id, latest.job_id_hex, latest.task_id, latest.step_index,
        latest.agent_id, latest.payer, latest.reason, '{status}',
        latest.charged_usdc, latest.creditable_usdc, latest.opened_at,
        latest.resolved_at, NULL::text, latest.rating_tx, latest.note,
        latest.credited_usdc, $2::double precision, latest.rating_confirmed,
+       NULL::double precision,
        FALSE
 FROM latest {gate}
 RETURNING dispute_id, job_id_hex, task_id, step_index, agent_id, payer, reason, status,
           charged_usdc, creditable_usdc, opened_at, resolved_at, refund_tx, rating_tx, note,
-          credited_usdc, updated_at, rating_confirmed
+          credited_usdc, updated_at, rating_confirmed, inflight_usdc
 """
 
 
@@ -755,6 +809,11 @@ _CLAIM_REFUND_SQL = _CLAIM_REFUND_CTES + _APPEND_UNRESOLVED_ROW.format(
 # that "somehow" is not hypothetical. Gating on the status makes this call
 # REPAIR that state instead of preserving it: the dispute goes back to `upheld`
 # where it can be claimed again, and the DELETE is a no-op.
+#
+# $3 is the reconcile sweep's hash precondition, `_APPEND_STATUS_SQL`'s $12
+# and for its reason: a release decided from the chain's answer about one
+# transfer must not release a claim that has since been taken again over
+# another. NULL, which every other caller passes, leaves the gate as it was.
 _RELEASE_REFUND_CLAIM_CTES = """
 WITH latest AS (
     SELECT *
@@ -765,13 +824,17 @@ WITH latest AS (
 ),
 released AS (
     DELETE FROM refund_claims
-    WHERE dispute_id = $1 AND EXISTS (SELECT 1 FROM latest WHERE latest.status = 'crediting')
+    WHERE dispute_id = $1 AND EXISTS (
+        SELECT 1
+        FROM latest
+        WHERE latest.status = 'crediting' AND ($3::text IS NULL OR latest.refund_tx = $3::text)
+    )
     RETURNING dispute_id
 )"""
 
 _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.format(
     status="upheld",
-    gate="WHERE latest.status = 'crediting'",
+    gate="WHERE latest.status = 'crediting' AND ($3::text IS NULL OR latest.refund_tx = $3::text)",
 )
 
 
@@ -784,9 +847,10 @@ _RELEASE_REFUND_CLAIM_SQL = _RELEASE_REFUND_CLAIM_CTES + _APPEND_UNRESOLVED_ROW.
 #
 # It bounds the CONTENT, not the stored length: `sanitize_untrusted` cuts at
 # this many characters and then appends its ` …[truncated]` marker, so a cut
-# summary is stored a few characters longer — the same trade the dispute
-# reason makes, and deliberately so, because a reader must be able to tell a
-# summary that was cut from one that simply ended.
+# summary is stored a few characters longer, deliberately, because a reader
+# must be able to tell a summary that was cut from one that simply ended.
+# The dispute reason no longer makes this trade: a reason past its limit is
+# refused, never cut, because the buyer's own words are the record.
 OUTPUT_SUMMARY_MAX_CHARS = 280
 
 
@@ -905,6 +969,13 @@ class DisputeRecord:
     # replay confirming an earlier attempt); False while it is only in flight;
     # None when no rating was ever submitted, or for records from before 4.06.
     rating_confirmed: bool | None = None
+    # The amount of the transfer `refund_tx` names while that transfer's fate
+    # is UNKNOWN — recorded beside the in-flight hash when a submission times
+    # out, so the reconcile sweep can check what it finds on the chain against
+    # what was sent. Never money that landed: that is `credited_usdc`, and it
+    # is the only one of the two a receipt reads. None whenever no transfer is
+    # in flight, and on every row written before the sweep existed.
+    inflight_usdc: float | None = None
 
 
 @dataclass(frozen=True)
@@ -988,12 +1059,16 @@ class DisputeStore(Protocol):
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
+        inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
+        expected_refund_tx: str | None = None,
     ) -> DisputeRecord | None: ...
 
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None: ...
 
-    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None: ...
+    async def release_refund_claim(
+        self, dispute_id: str, *, expected_refund_tx: str | None = None
+    ) -> DisputeRecord | None: ...
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]: ...
 
@@ -1007,11 +1082,21 @@ class InMemoryDisputeStore:
     moment that matters — when a record it was given is dropped — because a
     dispute that silently evaporates is worse than a feature that was never
     offered.
+
+    What it drops is a whole job: a settlement and every dispute filed under
+    it, in one operation. A dispute is never dropped on its own while its
+    settlement is kept, so a step that was disputed stays disputed for as long
+    as it can be disputed at all. And a job is never dropped while one of its
+    disputes is unfinished (`_is_pinned`).
     """
 
     def __init__(self) -> None:
         self._settlements: OrderedDict[str, SettlementRecord] = OrderedDict()
-        self._disputes: OrderedDict[str, DisputeRecord] = OrderedDict()
+        self._disputes: dict[str, DisputeRecord] = {}
+        # Every dispute id, filed by job and then by step: the index the
+        # duplicate rule is read from, and the unit a job is dropped as. In the
+        # order each job was first disputed.
+        self._disputes_by_job: OrderedDict[str, dict[int, str]] = OrderedDict()
         # `refund_claims`, modelled rather than inferred from the status. The
         # status alone would be enough to make this store behave correctly, and
         # that is the trap: the two implementations would then differ in what
@@ -1020,17 +1105,81 @@ class InMemoryDisputeStore:
         # the order a reconciliation queue is read in.
         self._refund_claims: dict[str, float] = {}
 
+    def _drop_job(self, job_id_hex: str, what: str) -> None:
+        """Forget a job's disputes — and the refund claims over them — at once.
+
+        The one place a dispute is ever removed. A claim goes with its dispute:
+        a claim over a dispute that no longer exists would sit in the queue as
+        a payout nobody can look up.
+        """
+        dropped = sorted(self._disputes_by_job.pop(job_id_hex, {}).values())
+        for dispute_id in dropped:
+            self._disputes.pop(dispute_id, None)
+            self._refund_claims.pop(dispute_id, None)
+        logger.warning(
+            "in-memory dispute store full (%d): dropped %s %s with its disputes %s —"
+            " its window can no longer be honoured; set DATABASE_URL to persist settlements and disputes",
+            _MAX_IN_MEMORY,
+            what,
+            job_id_hex,
+            dropped,
+        )
+
+    def _is_pinned(self, job_id_hex: str) -> bool:
+        """Whether this job still carries something the platform owes.
+
+        An `open` dispute is owed an adjudication, an `upheld` one a payment,
+        and a `crediting` one a reconciliation — a transfer whose outcome may
+        not be known yet. Dropping any of them would lose an obligation, not
+        just history, so a job holding one is never shed. `credited` and
+        `rejected` are finished and pin nothing.
+        """
+        return any(
+            (dispute := self._disputes.get(dispute_id)) is not None and dispute.status in _UNFINISHED
+            for dispute_id in self._disputes_by_job.get(job_id_hex, {}).values()
+        )
+
+    def _shed_from(self, jobs: list[str], what: str, spare: str | None) -> int:
+        """Drop the oldest unpinned of `jobs` until at most the cap remain.
+
+        `spare` is the job whose insertion called this, and it is never the
+        one dropped for it: a settlement recorded while everything older is
+        pinned would otherwise be forgotten the moment it arrived, and the
+        store would claim to be within its cap by discarding a charge that
+        just moved money. It can still be shed by a later insertion.
+
+        Returns how far over the cap `jobs` still are: nonzero only when every
+        job that could have gone is pinned, and the store grows rather than
+        forget an obligation.
+        """
+        over = len(jobs) - _MAX_IN_MEMORY
+        if over <= 0:
+            return 0
+        for job_id_hex in [job for job in jobs if job != spare and not self._is_pinned(job)][:over]:
+            self._settlements.pop(job_id_hex, None)
+            self._drop_job(job_id_hex, what)
+            over -= 1
+        return over
+
+    def _shed(self, spare: str) -> None:
+        """Bring the store back within its cap, oldest unpinned job first."""
+        still_over = self._shed_from(list(self._settlements), "settlement", spare)
+        still_over += self._shed_from(
+            [job for job in self._disputes_by_job if job not in self._settlements], "unsettled job", spare
+        )
+        if still_over:
+            logger.error(
+                "in-memory dispute store is %d over its cap of %d: every job it could drop has an unfinished"
+                " dispute (open, upheld or crediting) — an adjudication, payment or reconciliation still owed —"
+                " so it is growing rather than forget one; resolve them, and set DATABASE_URL to persist disputes",
+                still_over,
+                _MAX_IN_MEMORY,
+            )
+
     async def record_settlement(self, record: SettlementRecord) -> None:
         self._settlements[record.job_id_hex] = record
         self._settlements.move_to_end(record.job_id_hex)
-        while len(self._settlements) > _MAX_IN_MEMORY:
-            dropped, _ = self._settlements.popitem(last=False)
-            logger.warning(
-                "in-memory dispute store full (%d): dropped settlement %s — its window can no longer be honoured;"
-                " set DATABASE_URL to persist settlements",
-                _MAX_IN_MEMORY,
-                dropped,
-            )
+        self._shed(spare=record.job_id_hex)
 
     async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
         return self._settlements.get(job_id_hex)
@@ -1048,27 +1197,17 @@ class InMemoryDisputeStore:
         # Opening is the dispute's first change of state, so it is stamped with
         # the moment it was opened — the rule _INSERT_DISPUTE_SQL writes.
         record = replace(record, updated_at=record.opened_at)
+        self._disputes_by_job.setdefault(record.job_id_hex, {})[record.step_index] = record.id
         self._disputes[record.id] = record
-        while len(self._disputes) > _MAX_IN_MEMORY:
-            dropped, _ = self._disputes.popitem(last=False)
-            # Its mutex goes with it: a claim over a dispute that no longer
-            # exists would sit in the queue as a payout nobody can look up.
-            self._refund_claims.pop(dropped, None)
-            logger.warning(
-                "in-memory dispute store full (%d): dropped dispute %s — set DATABASE_URL to persist disputes",
-                _MAX_IN_MEMORY,
-                dropped,
-            )
+        self._shed(spare=record.job_id_hex)
         return record
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
         return self._disputes.get(dispute_id)
 
     async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
-        return next(
-            (d for d in self._disputes.values() if d.job_id_hex == job_id_hex and d.step_index == step_index),
-            None,
-        )
+        dispute_id = self._disputes_by_job.get(job_id_hex, {}).get(step_index)
+        return self._disputes.get(dispute_id) if dispute_id is not None else None
 
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
         # Ordered the way _SELECT_DISPUTES_FOR_TASK_SQL orders: oldest dispute
@@ -1099,7 +1238,9 @@ class InMemoryDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
+        inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
+        expected_refund_tx: str | None = None,
     ) -> DisputeRecord | None:
         """Append the transition and return the dispute, or None if refused.
 
@@ -1120,6 +1261,11 @@ class InMemoryDisputeStore:
             # The decision was made against a dispute that no longer reads that
             # way. Refusing is the whole point: what the caller was about to
             # record is a verdict on a state somebody else has already left.
+            return None
+        if expected_refund_tx is not None and current.refund_tx != expected_refund_tx:
+            # The same refusal narrowed to one transfer: the dispute has moved
+            # on to another (or to none), and a verdict about this one is not
+            # a verdict about that.
             return None
         # One reading of the clock for both timestamps, as _APPEND_STATUS_SQL
         # reads $7 once: the transition that first resolves a dispute must
@@ -1143,6 +1289,7 @@ class InMemoryDisputeStore:
                 else (current.resolved_at if current.resolved_at is not None else now)
             ),
             credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
+            inflight_usdc=inflight_usdc if inflight_usdc is not None else current.inflight_usdc,
             updated_at=now,
             # Monotonic, as the CASE in _APPEND_STATUS_SQL is: a rating the
             # ledger has vouched for cannot be taken back by a later attempt
@@ -1195,11 +1342,13 @@ class InMemoryDisputeStore:
         self._refund_claims[dispute_id] = now
         # No refund hash on a claim: this payout has no transaction yet, and the
         # Postgres statement clears it the same way (see _APPEND_UNRESOLVED_ROW).
-        claimed = replace(current, status="crediting", updated_at=now, refund_tx=None)
+        claimed = replace(current, status="crediting", updated_at=now, refund_tx=None, inflight_usdc=None)
         self._disputes[dispute_id] = claimed
         return claimed
 
-    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+    async def release_refund_claim(
+        self, dispute_id: str, *, expected_refund_tx: str | None = None
+    ) -> DisputeRecord | None:
         """Hand the claim back, so an unpaid dispute can be paid later.
 
         Released ONLY when the caller knows with certainty that nothing was
@@ -1212,9 +1361,18 @@ class InMemoryDisputeStore:
         transaction may still settle, so the claim stays held and the dispute
         stays in `crediting` until a human reconciles it. Paying that buyer
         twice is a worse failure than paying them late.
+
+        `expected_refund_tx` is for the reconcile sweep, which releases only
+        what the chain has shown moved nothing: named, the release lands only
+        while the dispute still waits on that very transfer, and None comes
+        back when it has since been claimed again over another.
         """
         current = self._disputes.get(dispute_id)
         if current is None or current.status != "crediting":
+            return None
+        if expected_refund_tx is not None and current.refund_tx != expected_refund_tx:
+            # The claim is over another transfer now — see
+            # _RELEASE_REFUND_CLAIM_SQL's $3.
             return None
         # Gated on the STATUS and never on the claim, so a dispute somehow left
         # in `crediting` without one is repaired rather than stranded — the
@@ -1222,7 +1380,7 @@ class InMemoryDisputeStore:
         self._refund_claims.pop(dispute_id, None)
         # Released only when nothing landed, so the hash of the attempt that
         # failed must not follow the dispute into its next one.
-        released = replace(current, status="upheld", updated_at=time.time(), refund_tx=None)
+        released = replace(current, status="upheld", updated_at=time.time(), refund_tx=None, inflight_usdc=None)
         self._disputes[dispute_id] = released
         return released
 
@@ -1500,6 +1658,7 @@ class PostgresDisputeStore:
             credited_usdc=None if row["credited_usdc"] is None else float(row["credited_usdc"]),
             updated_at=None if row["updated_at"] is None else float(row["updated_at"]),
             rating_confirmed=None if row["rating_confirmed"] is None else bool(row["rating_confirmed"]),
+            inflight_usdc=None if row["inflight_usdc"] is None else float(row["inflight_usdc"]),
         )
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
@@ -1535,6 +1694,7 @@ class PostgresDisputeStore:
             record.credited_usdc,
             record.updated_at,
             record.rating_confirmed,
+            record.inflight_usdc,
             timeout=_POOL_COMMAND_TIMEOUT,
         )
         if won is not None:
@@ -1562,7 +1722,9 @@ class PostgresDisputeStore:
         resolved_at: float | None = None,
         credited_usdc: float | None = None,
         rating_confirmed: bool | None = None,
+        inflight_usdc: float | None = None,
         expected_status: DisputeStatus | None = None,
+        expected_refund_tx: str | None = None,
     ) -> DisputeRecord | None:
         """Append the transition and return the dispute as it now stands.
 
@@ -1630,6 +1792,8 @@ class PostgresDisputeStore:
                 credited_usdc,
                 rating_confirmed,
                 expected_status,
+                inflight_usdc,
+                expected_refund_tx,
                 timeout=_POOL_COMMAND_TIMEOUT,
             )
         # Empty RETURNING with the dispute known to exist means one thing: the
@@ -1653,7 +1817,9 @@ class PostgresDisputeStore:
         row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
-    async def release_refund_claim(self, dispute_id: str) -> DisputeRecord | None:
+    async def release_refund_claim(
+        self, dispute_id: str, *, expected_refund_tx: str | None = None
+    ) -> DisputeRecord | None:
         """Put a still-unpaid dispute back where another attempt can find it.
 
         One statement drops the mutex and restores `upheld` together, so no
@@ -1671,10 +1837,17 @@ class PostgresDisputeStore:
         transaction may still settle, so the claim stays held and the dispute
         stays in `crediting` until a human reconciles it. Paying that buyer
         twice is a worse failure than paying them late.
+
+        `expected_refund_tx` is for the reconcile sweep, which releases only
+        what the chain has shown moved nothing: named, the release lands only
+        while the dispute still waits on that very transfer, and None comes
+        back when it has since been claimed again over another.
         """
         pool = await self._ready_pool()
         # Our own clock for the row's `updated_at`, never the database's.
-        row = await pool.fetchrow(_RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
+        row = await pool.fetchrow(
+            _RELEASE_REFUND_CLAIM_SQL, dispute_id, time.time(), expected_refund_tx, timeout=_POOL_COMMAND_TIMEOUT
+        )
         return None if row is None else self._to_dispute(row)
 
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
@@ -1736,10 +1909,14 @@ def get_dispute_store() -> DisputeStore:
             _store = InMemoryDisputeStore()
             # The in-memory path cannot honour a window that outlives the
             # process, so a deployment running it has to be able to find that
-            # out from its own startup log rather than from a lost dispute.
-            logger.info(
-                "dispute store: in-memory (DATABASE_URL is unset) — settlements and disputes are LOST on restart;"
-                " set DATABASE_URL to persist them"
+            # out from its own log rather than from a lost dispute — at
+            # WARNING, because on this path records of money that moved are
+            # not kept.
+            logger.warning(
+                "dispute store: in-memory (DATABASE_URL is unset) — dispute and settlement records are held in"
+                " memory only and are LOST on restart and at the cap of %d settlements;"
+                " set DATABASE_URL to persist them",
+                _MAX_IN_MEMORY,
             )
     return _store
 
