@@ -954,6 +954,9 @@ async def _settle_onchain(
     charge_tx: str | None = None
     proof_tx: str | None = None
     settled_job_id: bytes | None = None
+    # The id the charge is submitted under, for the reconstruction lines below:
+    # a settlement is keyed by it, so a line without it cannot be reconciled.
+    job_hex = "-"
 
     if not settings.stellar_signing_key:
         logger.error(
@@ -998,6 +1001,7 @@ async def _settle_onchain(
         settler = sc._signer_keypair().public_key
         auth_id = bytes.fromhex(auth_id_hex)
         job_id = secrets.token_bytes(16)
+        job_hex = job_id.hex()
 
         total_i128 = sc.usdc_to_i128(max(total_usdc, 0.000001))
 
@@ -1184,8 +1188,9 @@ async def _settle_onchain(
         # re-raising.
         logger.error(
             "task %s: on-chain settlement cancelled mid-flight "
-            "(auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
+            "(job %s, auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
             task_id,
+            job_hex,
             auth_id_hex,
             payer,
             total_usdc,
@@ -1195,9 +1200,10 @@ async def _settle_onchain(
         raise
     except Exception as e:
         logger.error(
-            "task %s: on-chain settlement failed: %s (auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
+            "task %s: on-chain settlement failed: %s (job %s, auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
             task_id,
             e,
+            job_hex,
             auth_id_hex,
             payer,
             total_usdc,
