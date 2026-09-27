@@ -131,3 +131,43 @@ def test_an_intent_is_planned_stripped_and_up_to_500_characters(
     assert _post(client, "  " + "a" * 500 + "\n")[0] == 200
     assert _post(client, "  write a haiku  ")[0] == 200
     assert calls == ["a" * 500, "write a haiku"]
+
+
+# ── what each failure answers, and what it logs ─────────────────
+
+SECRET_INTENT = "draft a takeover offer for Acme Corp at 41 dollars a share"
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (TimeoutError(), (504, "decompose_timeout")),
+        (orchestrator_svc.NoRoutableAgentsError("nothing listed"), (503, "no_routable_agents")),
+        (RuntimeError("something nobody anticipated"), (502, "decompose_failed")),
+    ],
+)
+def test_each_planning_failure_maps_to_its_status_and_never_logs_the_intent(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    exc: BaseException,
+    expected: tuple[int, str],
+) -> None:
+    # The buyer's intent used to be logged verbatim on every refusal and fault.
+    # The line names it by length and hash instead, so repeats still correlate.
+    monkeypatch.setattr(router, "decompose", _raising(exc))
+    caplog.set_level("WARNING", logger="app.routers.orchestrator")
+
+    assert _post(client, SECRET_INTENT) == expected
+
+    logged = [r.getMessage() for r in caplog.records if r.name == "app.routers.orchestrator"]
+    assert logged, "the failure was not logged at all"
+    assert not any("Acme" in line or "takeover" in line for line in logged)
+    assert any(router._intent_ref(SECRET_INTENT) in line for line in logged)
+    assert router._intent_ref(SECRET_INTENT).startswith(f"len={len(SECRET_INTENT)} sha256=")
+
+
+def test_an_unknown_plan_is_a_404(client: TestClient) -> None:
+    r = client.post("/api/orchestrator/execute", json={"plan_id": "pln_nowhere"})
+
+    assert r.status_code == 404
