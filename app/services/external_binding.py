@@ -122,6 +122,25 @@ UNBIND_SUBJECT = UNBINDING_MESSAGE_PREFIX
 # enforce rather than a check a later change could forget.
 DISPUTE_MESSAGE_PREFIX = "orizon-dispute:v1"
 
+# The FOURTH purpose (D-067): the payer proving who they are in order to READ
+# the free text on their own disputes — their reason, and the platform's reason
+# for rejecting it — from a tab that never held the task's read token. Same
+# signer as a dispute (the settlement's payer), same wallet `signMessage` path,
+# and deliberately a different domain, for the reasons above applied once more:
+# a read signature must never open a dispute, and a dispute signature must
+# never be spent as a read. `orizon-dispute-read:v1` and `orizon-dispute:v1`
+# part company at their fifteenth character (`-` against `:`), so neither
+# prefix is a prefix of the other and no message of one purpose is ever a
+# message of the other.
+#
+# It is also the SUBJECT the read challenge occupies in the shared table, with
+# the TASK id as its scope: one outstanding read challenge per settled task.
+# Per task rather than per step or per dispute, because what it unlocks — every
+# dispute on the task — is per task, and because a read is a thing to do again
+# at will rather than a one-shot decision the key has to pin.
+DISPUTE_READ_MESSAGE_PREFIX = "orizon-dispute-read:v1"
+DISPUTE_READ_SUBJECT = DISPUTE_READ_MESSAGE_PREFIX
+
 # Retention budget for outstanding challenges, PER PURPOSE. The three public
 # mint routes share one table but not one allowance, because a shared allowance
 # is a shared weapon: any caller who could fill the table displaced whatever was
@@ -136,12 +155,29 @@ DISPUTE_MESSAGE_PREFIX = "orizon-dispute:v1"
 # both routes refuse to mint for anything else. So bind gets the smallest share
 # it can work in, and the two that cannot be conjured get the room.
 #
-# They sum to MAX_CHALLENGES, which is unchanged: the memory argument below is
-# about the whole table and is not being relaxed, only divided.
-CHALLENGE_BUDGETS: dict[str, int] = {"bind": 150, "unbind": 150, "dispute": 200}
+# `dispute_read` (D-067) is the fourth budget and cannot be conjured either:
+# its key is (task_id, DISPUTE_READ_SUBJECT) and the route mints only for a task
+# the settlement store already holds, so a flood needs as many settled tasks as
+# it wants slots. It gets its OWN allowance rather than a share of `dispute`'s,
+# because reading must never cost a buyer the ability to dispute: with one
+# budget between them, a flood of read challenges — or just a busy afternoon of
+# payers re-opening receipts — would refuse the dispute mint inside a window
+# that does not come back. 100, half the dispute budget, because a read is one
+# key per task where a dispute is one per (job, step), and a refused read is
+# retried in five minutes at no cost to anybody.
+#
+# It is ADDED to the total rather than carved out of the others, which puts the
+# cap at 600 where it was 500. That is the defensible way round: bind's 150 was
+# already the smallest share it could work in, and taking from unbind or
+# dispute would shrink a purpose that cannot be conjured to pay for another
+# that cannot be conjured either. The memory argument is about boundedness, not
+# about the number: an entry is two short strings and a float, a few hundred
+# bytes with the dict's overhead, so 600 of them is well under a megabyte on a
+# 512 MB instance — and the bound is still a hard one.
+CHALLENGE_BUDGETS: dict[str, int] = {"bind": 150, "unbind": 150, "dispute": 200, "dispute_read": 100}
 
-# Retention cap for outstanding challenges across all three purposes. Matches
-# ramp_store._MAX_RAMPS, and for the same reason with sharper teeth: the
+# Retention cap for outstanding challenges across all four purposes. Matches
+# ramp_store._MAX_RAMPS in spirit, and for the same reason with sharper teeth: the
 # challenge route is a PUBLIC, unauthenticated POST whose key is entirely
 # caller-supplied, and the prototype's plain dict was swept only when a verify
 # happened to hit that exact key — i.e. never, for keys an attacker never
@@ -349,7 +385,7 @@ def issue_dispute_challenge(
 
 
 def _purpose_of(subject: str) -> str:
-    """Which budget a (scope, subject) key spends: bind, unbind or dispute.
+    """Which budget a (scope, subject) key spends: bind, unbind, dispute or dispute_read.
 
     Read off the SUBJECT, because the subject is what the three key spaces are
     already separated by and `dispute_subject` documents why they cannot
@@ -361,6 +397,12 @@ def _purpose_of(subject: str) -> str:
     """
     if subject == UNBIND_SUBJECT:
         return "unbind"
+    # Exact equality, and asked BEFORE the dispute prefix. The two prefixes
+    # cannot be confused (see DISPUTE_READ_MESSAGE_PREFIX), so the order is not
+    # what keeps them apart — it is what keeps the next reader from having to
+    # check that.
+    if subject == DISPUTE_READ_SUBJECT:
+        return "dispute_read"
     if subject.startswith(DISPUTE_MESSAGE_PREFIX):
         return "dispute"
     return "bind"
@@ -704,4 +746,88 @@ def verify_dispute_challenge(job_id_hex: str, step_index: int, payer: str, signa
         payer,
         signature_b64,
         lambda nonce: dispute_message(job_id_hex, step_index, nonce),
+    )
+
+
+def dispute_read_message(task_id: str, nonce: str) -> str:
+    """The exact UTF-8 string the PAYER signs to read their own disputes' free text:
+
+        orizon-dispute-read:v1:{task_id}:{nonce}
+
+    The TASK is in the signed bytes, because the task is what the proof buys
+    access to: every dispute raised on it. A signature that named only the
+    nonce could be carried to another task this payer also paid for — harmless
+    as it happens, since it would be their own text, but a proof that says less
+    than it authorises is the D3 shape this module exists to refuse.
+
+    No job id and no step: the reader is proving who they are, not selecting a
+    step, and the task id is what both read routes are scoped by.
+    """
+    return f"{DISPUTE_READ_MESSAGE_PREFIX}:{task_id}:{nonce}"
+
+
+def issue_dispute_read_challenge(task_id: str, ttl_seconds: int = CHALLENGE_TTL_SECONDS) -> tuple[str, float]:
+    """Mint and store a challenge the payer signs to READ `task_id`'s disputes.
+
+    `issue_dispute_challenge`'s reasoning a fourth time: one issuer, so the
+    bounded table, the sweep, the idempotency inside the window and the
+    single-use nonce exist once. It spends the `dispute_read` budget — never the
+    `dispute` one — which is what keeps reading from crowding out disputing.
+
+    The caller must have established that `task_id` has a settlement first; the
+    table may only hold keys that could really be proved against.
+    """
+    return issue_challenge(task_id, DISPUTE_READ_SUBJECT, ttl_seconds)
+
+
+def dispute_read_challenge_state(task_id: str, nonce: str) -> str:
+    """Where `nonce` stands as the read challenge for `task_id`, WITHOUT consuming it.
+
+    One of three answers, because the read-grant route answers two of them with
+    different codes and the third with a signature check:
+
+      - "live": it is the outstanding, unexpired challenge for this task;
+      - "expired": it was that challenge, and its time is up — ask for another;
+      - "unknown": it is not, and never was as far as the table knows. A nonce
+        already spent by a proof lands here, which is what makes a replay a
+        409 rather than a second grant.
+
+    `dispute_challenge_is_live`'s rules for the comparison: constant-time, and a
+    non-ASCII nonce is simply not ours rather than a TypeError out of
+    `compare_digest`.
+    """
+    entry = _challenges.get((task_id, DISPUTE_READ_SUBJECT))
+    if entry is None or not nonce.isascii():
+        return "unknown"
+    stored, expires_at = entry
+    if not secrets.compare_digest(stored, nonce):
+        return "unknown"
+    return "expired" if time.time() > expires_at else "live"
+
+
+def verify_dispute_read_challenge(task_id: str, payer: str, signature_b64: str) -> bool:
+    """Verify a base64 ed25519 signature over `dispute_read_message(...)` — the
+    proof that `payer` is asking to read `task_id`'s disputes. Consumes the
+    READ nonce on success, and only that one.
+
+    It cannot touch a dispute challenge: the key it looks up is (task_id,
+    DISPUTE_READ_SUBJECT), which no dispute key can equal, so opening a dispute
+    and reading one never spend each other's nonces. And the signature schemes
+    are the dispute flow's exactly — raw bytes or SEP-53, through
+    `_signature_matches` — so the frontend signs with the `signMessage` path it
+    already has.
+
+    A DISPUTE SIGNATURE CANNOT REACH THIS, nor a read signature a dispute, for
+    `verify_dispute_challenge`'s reasons: different prefixes, so different bytes
+    for ed25519 to refuse; different keys, so different nonces.
+
+    `payer` is the settlement's, read by the caller from the store — never the
+    request's.
+    """
+    return _verify(
+        task_id,
+        DISPUTE_READ_SUBJECT,
+        payer,
+        signature_b64,
+        lambda nonce: dispute_read_message(task_id, nonce),
     )
