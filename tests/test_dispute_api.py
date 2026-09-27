@@ -35,6 +35,8 @@ from typing import get_args
 import pytest
 
 from app.config import settings
+from app.routers import disputes as disputes_router
+from app.security import KeyedRateLimiter
 from app.services import dispute_svc, refund_svc
 from app.services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep, steps_from_json
 from app.state import state
@@ -105,6 +107,21 @@ def never_called(name: str):
         raise AssertionError(f"{name} was called; the request should have been refused before it")
 
     return _fail
+
+
+@pytest.fixture(autouse=True)
+def fresh_challenge_limiter(monkeypatch):
+    """Every test starts with an empty per-client dispute-mint budget.
+
+    Module-global, and every TestClient shares one client key, so without this
+    the mints below would accumulate across tests — `conftest`'s planner-limiter
+    fixture, for this route's limiter.
+    """
+    monkeypatch.setattr(
+        disputes_router,
+        "_challenge_limiter",
+        KeyedRateLimiter(lambda: settings.dispute_challenge_rate_limit_per_minute),
+    )
 
 
 @pytest.fixture()
@@ -985,6 +1002,40 @@ def test_two_reads_of_the_same_live_challenge_report_the_same_expiry(client, mon
     second = client.post("/api/disputes/challenge", json=body).json()["expires_at"]
 
     assert first == second
+
+
+def test_one_client_cannot_mint_past_its_share_of_the_dispute_budget(client, monkeypatch, challenge_stub):
+    """Each mint that takes a slot holds it for five minutes out of 200, so one
+    client alone could fill the budget and refuse every other buyer. Past the
+    per-client limit the answer is 429 with Retry-After, and the service — the
+    settlement read and the slot — is never reached."""
+    monkeypatch.setattr(settings, "dispute_challenge_rate_limit_per_minute", 3)
+    body = {"job_id_hex": JOB_ID, "step_index": 1}
+
+    admitted = [client.post("/api/disputes/challenge", json=body).status_code for _ in range(3)]
+    refused = client.post("/api/disputes/challenge", json=body)
+
+    assert admitted == [200, 200, 200]
+    assert refused.status_code == 429
+    assert refused.json()["error"]["code"] == "dispute_challenge_rate_limited"
+    assert int(refused.headers["retry-after"]) >= 1
+    assert len(challenge_stub) == 3
+
+
+def test_a_refused_mint_still_spends_the_callers_budget(client, monkeypatch):
+    """Counted before the service answers, so probing for mintable steps costs
+    the prober exactly what minting does."""
+    monkeypatch.setattr(settings, "dispute_challenge_rate_limit_per_minute", 2)
+
+    async def _unknown(job_id_hex: str, step_index: int) -> tuple[str, float]:
+        raise dispute_error("unknown_job", 404)
+
+    monkeypatch.setattr(dispute_svc, "issue_dispute_challenge", _unknown)
+    body = {"job_id_hex": JOB_ID, "step_index": 1}
+
+    codes = [client.post("/api/disputes/challenge", json=body).status_code for _ in range(3)]
+
+    assert codes == [404, 404, 429]
 
 
 # ── what a refusal SAYS, not just what it is called ─────────────
