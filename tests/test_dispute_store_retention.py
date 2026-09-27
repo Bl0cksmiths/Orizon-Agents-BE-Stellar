@@ -19,6 +19,7 @@ import pytest
 from app.services import dispute_store
 from app.services.dispute_store import (
     DisputeRecord,
+    DisputeStatus,
     DuplicateDisputeError,
     InMemoryDisputeStore,
     SettlementRecord,
@@ -27,6 +28,7 @@ from app.services.dispute_store import (
 
 PAYER = "G" + "B" * 55
 STORE_LOGGER = "app.services.dispute_store"
+UNFINISHED = ("open", "upheld", "crediting")
 STEPS = tuple(
     SettlementStep(step_index=i, agent_id=f"agt_{i}", agent_name=None, price_usdc=1.0, delivered=True) for i in range(3)
 )
@@ -145,13 +147,17 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
 ) -> None:
     """The invariant as a property: after any sequence of settlements, disputes
     and transitions pushed well past the caps, no retained settlement is missing
-    a dispute that was ever opened on it — and memory stays bounded by what is
-    still owed."""
+    a dispute that was ever opened on it, no dispute that is still owed
+    something (open, upheld or crediting) is ever dropped, and memory stays
+    bounded by what is still owed."""
     cap = 4
     monkeypatch.setattr(dispute_store, "_MAX_IN_MEMORY", cap)
     rng = random.Random(seed)
     store = InMemoryDisputeStore()
     ledger: dict[str, DisputeRecord] = {}
+    # The status each dispute was last moved to, kept by the test itself so a
+    # dispute the store forgets is still known to have been owed.
+    status: dict[str, DisputeStatus] = {}
     settled: list[int] = []
 
     async def run() -> None:
@@ -170,16 +176,45 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
                 dispute = _dispute(f"dsp_{op}", n, step)
                 try:
                     ledger[dispute.id] = await store.open_dispute(dispute)
+                    status[dispute.id] = "open"
                     inserted = _job(n)
                 except DuplicateDisputeError as dup:
                     assert dup.existing.id in ledger
             else:
-                held = [d for d in ledger.values() if d.id in store._disputes]
-                if held:
-                    target = rng.choice(held)
-                    await store.append_status(target.id, "credited", refund_tx=f"tx_{op}", credited_usdc=1.0)
+                # Walk one held, unfinished dispute a step along the path the
+                # service takes it: adjudicated, claimed, then paid — or
+                # rejected, or a failed transfer handing the claim back.
+                owed = [d for d in ledger.values() if d.id in store._disputes and status[d.id] in UNFINISHED]
+                if owed:
+                    target = rng.choice(owed).id
+                    now = status[target]
+                    if now == "open":
+                        status[target] = rng.choice(["upheld", "rejected"])
+                        note = "delivered as asked" if status[target] == "rejected" else None
+                        await store.append_status(target, status[target], note=note, expected_status="open")
+                    elif now == "upheld":
+                        assert await store.claim_refund(target) is not None
+                        status[target] = "crediting"
+                    elif rng.random() < 0.8:
+                        await store.append_status(
+                            target, "credited", refund_tx=f"tx_{op}", credited_usdc=1.0, expected_status="crediting"
+                        )
+                        status[target] = "credited"
+                    else:
+                        assert await store.release_refund_claim(target) is not None
+                        status[target] = "upheld"
 
             await _assert_retained_settlements_keep_their_disputes(store, ledger)
+            # Nothing still owed is ever forgotten: a dispute the store has let
+            # go of had finished, and one still in flight still has its claim.
+            for dispute_id, last in status.items():
+                held = store._disputes.get(dispute_id)
+                if last in UNFINISHED:
+                    assert held is not None and held.status == last, (dispute_id, last)
+                else:
+                    assert held is None or held.status == last, (dispute_id, last)
+            claimed = {c.dispute_id for c in await store.list_refund_claims()}
+            assert claimed == {d for d, last in status.items() if last == "crediting"}
             if inserted is not None:
                 # Straight after an insertion the store is within its cap,
                 # unless everything it could have dropped still owes something
