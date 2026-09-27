@@ -530,6 +530,12 @@ class Settings(BaseSettings):
             which a NaN passes through untouched and freezes onto every
             dispute opened as its promise; outside [0, 1] the clamp quietly
             applies a policy nobody typed, so it is refused rather than bent.
+          * `DISPUTE_WINDOW_SECONDS` — finite and strictly above zero. Not an
+            amount, but the bound on how long a paid run stays refundable:
+            stamped onto each settlement as `window_closes_at`, it is then
+            read by `time.time() > window_closes_at`, which a NaN or inf
+            stamp never satisfies — a window that never closes on work that
+            is already paid for, and cannot be reopened once stamped.
 
         Raised rather than logged, for the reason the reputation bounds are:
         what it prevents is silent, and a refused deploy cannot be missed.
@@ -559,6 +565,13 @@ class Settings(BaseSettings):
                 "DISPUTE_CREDITED_FRACTION is not a finite fraction from 0 to 1 — it is the share of a disputed "
                 "step an upheld dispute credits, one that is not a finite number is frozen onto every dispute "
                 "opened as the credit it promises, and one outside 0 to 1 is not the policy the buyer was told"
+            )
+        window = self.dispute_window_seconds
+        if not (math.isfinite(window) and window > 0):
+            faults.append(
+                "DISPUTE_WINDOW_SECONDS is not a finite number of seconds above zero — it is stamped onto every "
+                "settlement as the time its disputes close, a window that is not a finite number never closes, "
+                "and one at or below zero is closed before the buyer can open a dispute"
             )
         if faults:
             raise ValueError(
