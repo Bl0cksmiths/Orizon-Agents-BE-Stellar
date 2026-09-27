@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -81,3 +82,25 @@ def test_a_reputation_read_is_one_round_trip(chain):
     asyncio.run(rep.fetch_reps(["agt_01h8"]))
 
     assert chain.kwargs == [{"load_source": False}]
+
+
+# ── a malformed answer is a failure, not a cached success ───────
+
+
+def test_a_non_map_answer_is_negatively_cached_not_stored_for_the_ttl(chain):
+    """`simulate_read` returns None for an empty result set. Stored as a
+    success, that None was read back as degraded on every hit for the whole
+    15 s TTL; raised inside the producer it is a failure, held only for the
+    cache's short negative window and then retried."""
+    chain.state["agt_01h8"] = None
+    key = rep._rep_cache_key("agt_01h8")
+
+    infos = asyncio.run(rep.fetch_reps(["agt_01h8"]))
+
+    assert infos["agt_01h8"].degraded is True
+    assert key not in rcache._store
+    assert key in rcache._failures
+    expiry, exc_type, message = rcache._failures[key]
+    assert exc_type is TypeError
+    assert "expected a map" in message
+    assert expiry - time.monotonic() <= rcache._NEGATIVE_TTL_SECONDS

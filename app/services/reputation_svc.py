@@ -447,13 +447,21 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
         # load_account hop is skipped and each read is ONE round trip, not two
         # (client.simulate_read). That halves the per-read latency the batch
         # deadline has to cover.
-        return await asyncio.to_thread(
+        raw = await asyncio.to_thread(
             sc.simulate_read,
             sc.contract_ids().reputation_ledger,
             "rep_state",
             [sc.sym(agent_id)],
             load_source=False,
         )
+        # Refused HERE, inside the producer, so the cache records a failure —
+        # negatively cached for its short window and retried after it — rather
+        # than storing the bad payload as a success that every hit then reads
+        # as degraded for the full TTL. `simulate_read` returns None for an
+        # empty result set, which is the reachable case.
+        if not isinstance(raw, dict):
+            raise TypeError(f"rep_state returned {type(raw).__name__}, expected a map")
+        return raw
 
     try:
         state = await rcache.get_or_set(_rep_cache_key(agent_id), settings.reputation_read_ttl_seconds, _read)
