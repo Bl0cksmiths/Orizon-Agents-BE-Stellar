@@ -1387,7 +1387,9 @@ def _credited_elsewhere(claimed: DisputeRecord, disputes: tuple[DisputeRecord, .
     )
 
 
-async def _hand_back(claimed: DisputeRecord, why: str, *, failed_tx: str | None = None) -> bool:
+async def _hand_back(
+    claimed: DisputeRecord, why: str, *, failed_tx: str | None = None, failed_usdc: float | None = None
+) -> bool:
     """Release the refund claim on a path where NOTHING WAS PAID; never raises.
 
     Only for the paths that know that: a refusal before anything was signed,
@@ -1400,7 +1402,9 @@ async def _hand_back(claimed: DisputeRecord, why: str, *, failed_tx: str | None 
     transfer still on the network. So it is logged at ERROR as the opposite,
     and when the ledger's FAILED answer came with a hash that hash is written
     onto the dispute itself: positive evidence, on the record rather than in
-    a log line, that the transfer it names moved nothing.
+    a log line, that the transfer it names moved nothing — beside the amount
+    it was for (`failed_usdc`), so the reconcile sweep that later reads the
+    same FAILED off the chain can check it is the transfer on record.
 
     Returns whether the claim was handed back.
     """
@@ -1421,7 +1425,13 @@ async def _hand_back(claimed: DisputeRecord, why: str, *, failed_tx: str | None 
         )
     if failed_tx is not None:
         try:
-            await store.append_status(claimed.id, "crediting", refund_tx=failed_tx, expected_status="crediting")
+            await store.append_status(
+                claimed.id,
+                "crediting",
+                refund_tx=failed_tx,
+                inflight_usdc=failed_usdc,
+                expected_status="crediting",
+            )
         except Exception:
             logger.error(
                 "dispute %s: the FAILED refund tx %s could not be recorded either — it is in this line only",
@@ -1738,7 +1748,9 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # moved. The buyer is still owed, so the claim goes back and the
         # dispute is left `upheld` — a second uphold will claim it and try
         # again, which is the whole reason this release exists.
-        released = await _hand_back(claimed, "refund_failed", failed_tx=outcome.tx_hash)
+        released = await _hand_back(
+            claimed, "refund_failed", failed_tx=outcome.tx_hash, failed_usdc=outcome.amount_usdc
+        )
         raise _refuse_credit(
             claimed,
             "refund_failed",
@@ -1759,14 +1771,23 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # it would unlock a retry that credits the buyer a second time the moment
     # the first submission settles. The in-flight hash is recorded on the
     # dispute so the reconciliation starts from the record rather than from a
-    # log search.
+    # log search — and so is the amount it was FOR, as `inflight_usdc` and
+    # never as `credited_usdc`: the reconcile sweep that later finds it landed
+    # checks the chain's figure against this one, and a receipt must not show
+    # a payment that may never arrive.
     try:
         # Conditional on `crediting`, as the credited write above is. Losing it
         # means somebody moved the dispute while the transfer was out; that
         # record is theirs and is not overwritten, and this line is what says
         # a transfer that may still land was sent against it.
         if (
-            await store.append_status(dispute_id, "crediting", refund_tx=outcome.tx_hash, expected_status="crediting")
+            await store.append_status(
+                dispute_id,
+                "crediting",
+                refund_tx=outcome.tx_hash,
+                inflight_usdc=outcome.amount_usdc,
+                expected_status="crediting",
+            )
             is None
         ):
             moved = await store.get_dispute(dispute_id)

@@ -97,7 +97,7 @@ def test_readiness_reports_memory_with_no_database_url() -> None:
     with TestClient(app) as client:
         body = client.get("/readiness").json()
 
-    assert body["disputes"] == {"store": "memory"}
+    assert body["disputes"]["store"] == "memory"
 
 
 def test_readiness_reports_postgres_with_a_database_url_and_never_the_dsn(
@@ -112,6 +112,6 @@ def test_readiness_reports_postgres_with_a_database_url_and_never_the_dsn(
     with TestClient(app) as client:
         response = client.get("/readiness")
 
-    assert response.json()["disputes"] == {"store": "postgres"}
+    assert response.json()["disputes"]["store"] == "postgres"
     for fragment in ("dsn-password-7c1e", "db.internal.example", "orizon:", "postgresql://", "5432"):
         assert fragment not in response.text

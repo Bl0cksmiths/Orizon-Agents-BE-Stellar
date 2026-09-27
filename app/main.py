@@ -46,7 +46,7 @@ from .security import (
     request_id_var,
 )
 from .seed import seed_registry
-from .services import execution_svc, rating_writer, registry_sync, reputation_svc
+from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
@@ -199,6 +199,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # loop no-ops while STELLAR_AGENT_REGISTRY is blank, which keeps the
     # hermetic test suite offline.
     registry_sync.start()
+    # Settle refund claims parked in `crediting` from the chain (see
+    # services/refund_reconcile.py). Off unless REFUND_RECONCILE_ENABLED and
+    # DISPUTE_REFUNDS_ENABLED are both on; its chain reads go through the
+    # bounded pool bound above, and it signs nothing.
+    refund_reconcile.start()
     # Seed the planner's routability set from the binding store. Without this a
     # binding made before this process started would stay unroutable until the
     # operator bound it again — which is precisely the restart AC-5 is about.
@@ -226,6 +231,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
     await registry_sync.stop()
+    # Before the drain below: a pass must not start writing dispute records
+    # while the store it writes to is about to be closed.
+    await refund_reconcile.stop()
     # Drain in-flight background executions: a bounded grace window to let
     # them finish, then cancel stragglers and reap the cancellations so the
     # process exits without "task was destroyed but it is pending" noise.
@@ -595,6 +603,26 @@ class RatingsReadiness(BaseModel):
     scorer: str | None  # the ledger's stored Scorer as last read; null unless a read found one
 
 
+class RefundReconcileReadiness(BaseModel):
+    """The refund reconcile sweep (services/refund_reconcile.py) and its last pass.
+
+    `enabled` is both switches together — REFUND_RECONCILE_ENABLED and the
+    DISPUTE_REFUNDS_ENABLED it depends on — and `running` whether the loop is
+    alive in this process. The last pass is counts by action and nothing
+    else: no dispute ids and no hashes reach this unauthenticated route. A
+    nonzero `history_gap`, `no_hash`, `not_this_refund`, `amount_mismatch`,
+    `not_crediting`, `missing` or `lost_race` is a claim waiting on a human,
+    and the log names it. `last_skipped` says why a pass read nothing, such
+    as a deployment that cannot pay credits. Informational, like the rest.
+    """
+
+    enabled: bool
+    running: bool
+    last_run_at: float | None  # epoch seconds, this process's clock
+    last_skipped: str | None
+    last_outcomes: dict[str, int]
+
+
 class DisputesReadiness(BaseModel):
     """Which store holds settlements and disputes in this process (D-063).
 
@@ -613,6 +641,7 @@ class DisputesReadiness(BaseModel):
     """
 
     store: Literal["postgres", "memory"]
+    reconcile: RefundReconcileReadiness
 
 
 class ReadinessResponse(BaseModel):
@@ -686,5 +715,6 @@ async def readiness(response: Response) -> ReadinessResponse:
         ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
         disputes=DisputesReadiness(
             store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
+            reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
         ),
     )

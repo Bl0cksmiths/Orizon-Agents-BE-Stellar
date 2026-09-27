@@ -220,12 +220,15 @@ again. A buyer who was not paid stays payable.
 
 **When the transfer times out, nothing is retried.** A submission that timed
 out may still settle, so the dispute stays in `crediting` with the in-flight
-transaction hash recorded, and an operator reconciles it against the chain.
-This is a deliberate trade: **paying late rather than ever paying twice.** A
-late credit is a support question; a double credit comes out of the platform's
-own wallet and cannot be reversed, because the asset contract has no more of an
-undo than the escrow does. If a buyer's dispute sits in `crediting`, it has not
-been forgotten — it is waiting on a person with a block explorer.
+transaction hash recorded — and the amount it was for, kept apart from the
+credited amount — and it is reconciled against the chain: by the reconcile
+sweep when it is switched on, by an operator otherwise, and always by an
+operator when the chain cannot answer. This is a deliberate trade: **paying
+late rather than ever paying twice.** A late credit is a support question; a
+double credit comes out of the platform's own wallet and cannot be reversed,
+because the asset contract has no more of an undo than the escrow does. If a
+buyer's dispute sits in `crediting`, it has not been forgotten — it is waiting
+on the chain to say what happened, or on a person with a block explorer.
 
 ## After `credited`: the dispute rating
 
@@ -407,7 +410,7 @@ stay as they were.
 | --- | --- | --- | --- |
 | `open` | raised inside the window by the payer, not yet adjudicated | the reason, the step's charge, the creditable amount, the opening time | story 4.02 — the only status it ever writes |
 | `upheld` | adjudicated in the buyer's favour | nothing on-chain yet | adjudication (4.03) |
-| `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx, once one has been submitted | the refund path (4.03) |
+| `crediting` | the credit is being paid — a claim is held on this dispute | the in-flight refund tx once one has been submitted, and on a timeout the amount it was for (`inflight_usdc`, never shown as paid) | the refund path (4.03) |
 | `credited` | the credit has landed in the buyer's wallet | the refund tx, and the dispute rating's tx once it is written | the refund path (4.03); the rating (4.04) adds its tx to the same status |
 | `rejected` | adjudicated against the claim | the resolution time and the adjudicator's reason, which the buyer is shown; nothing on-chain | adjudication (4.03); the reason is required and buyer-facing since 4.06 |
 
@@ -440,8 +443,9 @@ paid twice. A buyer who sees it should read "your credit is being paid", not
 A dispute leaves `crediting` in one of three ways: the transfer lands and it
 becomes `credited`; the transfer definitively fails, the claim is released and
 it returns to `upheld` to be paid again; or the transfer times out, in which
-case it **stays** in `crediting` until an operator has checked the chain. The
-last of those is the reconciliation case below.
+case it **stays** in `crediting` until the chain has been checked — by the
+reconcile sweep or by an operator. The last of those is the reconciliation
+case below.
 
 `open` is the only status story 4.02 writes. Everything past it belongs to the
 stories that pay the credit and write the rating, which is why a freshly opened
@@ -923,6 +927,82 @@ or the process was cancelled between sending and confirming — in each of those
 cases the transaction may be on the network, and whether it settled is knowable
 only from the chain.
 
+### What the reconcile sweep does on its own
+
+With `REFUND_RECONCILE_ENABLED=true` **and** `DISPUTE_REFUNDS_ENABLED=true`, a
+background sweep (`app/services/refund_reconcile.py`) does the first step of
+the procedure below for every claim that has a hash to look up. Both are off
+by default; with the refund switch off the sweep does not start, and says so
+at boot. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 120, from
+30 to 3600 — anything else refuses to boot), one pass at a time, and it
+**signs and submits nothing**: it reads the chain with `getTransaction` and
+writes the dispute record, and that is all.
+
+It only looks at claims older than five minutes, so it never second-guesses a
+payout that is still running. For each one it asks the RPC about the dispute's
+in-flight hash and acts on the answer:
+
+| the chain says | the sweep does |
+| --- | --- |
+| `SUCCESS`, and the transaction is this dispute's refund | records `credited` with the hash and the amount **the transaction moved**, read off its envelope. The claim is dropped by the same write. |
+| `FAILED`, and the transaction is this dispute's refund | releases the claim: the dispute is `upheld` and payable again |
+| `NOT_FOUND`, and the ledger's close time is past the transaction's last valid moment plus two minutes | releases the claim: the transaction can never land |
+| `NOT_FOUND` before that | nothing — it may still land. The next pass asks again. |
+
+"This dispute's refund" means the envelope the chain holds hashes to the hash
+on record and is a single `transfer` over the asset SAC, from the settler, to
+this dispute's payer — and, when the record carries the amount the transfer was
+for (`inflight_usdc`, written on a timeout since this sweep), for that amount.
+
+**The last valid moment** is read, not guessed. A refund is built with a
+30-second time bound, so it can be valid until 30 seconds after it was built
+at the latest. It was built before the row that recorded its hash was written,
+so that row's `updated_at` plus 30 seconds is at or past its real deadline.
+That number is compared with the **ledger's** close time, taken from the same
+RPC answer that said NOT_FOUND — never with this server's clock — which is what
+the network itself compares it with.
+
+**The RPC forgets.** It keeps a limited window of transaction history (about
+seven days on SDF's testnet RPC; the proof refund in ADR 0002 already answers
+NOT_FOUND there, although it landed). So NOT_FOUND counts only when the RPC's
+oldest retained ledger closed before the claim was taken. When it did not, the
+sweep logs `history_gap` and leaves the claim for you: *forgotten* is not
+*never landed*.
+
+Every write is a compare-and-set on `crediting` **and on the hash that was
+looked up**. Two sweeps, or a sweep and an operator, record a landed credit
+once; and a verdict about one transfer can never close or release a claim that
+has since been taken again over another.
+
+**It does not write the rating.** A credit the sweep records carries its refund
+hash and no `rating_tx` — the same state a hand-written credit is in — and
+upholding it once more writes the rating alone, signing no transfer. Rating
+signs a transaction with the server key, and the sweep signs nothing.
+
+Every decision is one log line, `refund reconcile: dispute=… claim_age_s=…
+tx=… chain=… action=…`, at INFO when nothing needs doing and at WARNING or
+above when a person does. `GET /readiness` reports the sweep under
+`disputes.reconcile`: whether it is enabled and running, when its last pass
+ran, and that pass's counts by action — never a dispute id or a hash.
+
+**What still needs you** — the claims the sweep leaves exactly as it found
+them, each with its own `action`:
+
+- `no_hash` — the submission returned no hash, so there is nothing to look up.
+  Step 2 below (the settler's history) is yours.
+- `history_gap` — the hash is older than the RPC's history.
+- `rpc_error` — the RPC could not be asked, or gave an answer the sweep does
+  not know. The next pass asks again; a claim that stays here needs you.
+- `not_this_refund`, `amount_mismatch` — the chain's transaction under that
+  hash is not this dispute's refund, or not for the amount on record.
+- `not_crediting`, `missing`, `no_expiry_bound` — the record itself is not in
+  a state the sweep can reason about.
+- `lost_race` (CRITICAL) — the dispute moved while the chain was being read;
+  nothing was overwritten.
+- and every claim at all while the sweep is switched off.
+
+### Doing it by hand
+
 **Do not simply retry the payout.** An unconfirmed transaction may still land,
 and a second transfer would credit the buyer twice out of the platform's own
 wallet, with nothing that can reverse it. The claim is deliberately left in
@@ -989,9 +1069,9 @@ and the amount. Search it for the dispute id before touching anything.
   dispute to `upheld`, and only then may the payout be ordered again.
 - **You cannot tell.** Leave it. Late is recoverable; twice is not.
 
-Both writes are deliberate and manual, because the decision is the part that
-matters and it is one a person has to make by reading the chain. The tooling
-will not make it for you: `scripts/uphold_dispute.py` refuses a dispute in
+Where the sweep could not decide, both writes are deliberate and manual,
+because the decision is the part that matters and it is one a person has to
+make by reading the chain. The tooling will not make it for you: `scripts/uphold_dispute.py` refuses a dispute in
 `crediting` and prints this same block with the explorer links filled in, and
 so does the API, with `refund_in_flight`.
 

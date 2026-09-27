@@ -737,3 +737,28 @@ def test_the_money_bound_defaults_boot():
     assert s.max_charge_usdc == 100.0
     assert s.dispute_credited_fraction == 1.0
     assert s.dispute_window_seconds == 86_400.0
+
+
+# ── the refund reconcile sweep ────────────────────────────────────────────
+
+
+def test_the_refund_reconcile_sweep_ships_off_like_the_refund_switch():
+    s = _settings()
+    assert s.refund_reconcile_enabled is False
+    assert s.dispute_refunds_enabled is False
+    assert s.refund_reconcile_interval_seconds == 120.0
+
+
+@pytest.mark.parametrize("interval", [30, 120.0, 3600])
+def test_a_refund_reconcile_interval_inside_the_bounds_boots(interval):
+    assert _settings(refund_reconcile_interval_seconds=interval).refund_reconcile_interval_seconds == interval
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), -1, 0, 29.9, 3600.5, 86_400])
+def test_a_refund_reconcile_interval_outside_the_bounds_refuses_to_boot(interval):
+    with pytest.raises(ConfigurationError) as refused:
+        _load_settings(_env_file=None, refund_reconcile_interval_seconds=interval)
+    message = str(refused.value)
+    assert "REFUND_RECONCILE_INTERVAL_SECONDS" in message
+    # The boot-failure rule: the variable is named, the value never is.
+    assert str(interval) not in message.replace("30 to 3600", "")
