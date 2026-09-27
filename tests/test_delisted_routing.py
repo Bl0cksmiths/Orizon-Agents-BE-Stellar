@@ -414,3 +414,23 @@ def test_kit_path_honours_delisting_without_calling_the_llm(seeded: object, monk
 
     assert "agt_11c0" not in [s.agent_id for s in resp.steps]
     assert resp.notices == []
+
+
+def test_a_kit_agent_delisted_during_the_kit_pause_is_not_planned(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The kit path snapshots the registry and then pauses before it plans. An
+    # operator delisting an agent in that pause must still be honoured: the
+    # snapshot only says who could be planned, the live registry has the last
+    # word on who still can — for a pipeline role and for a substitute alike.
+    async def _delist_during_the_pause(*_a: object, **_k: object) -> None:
+        _delist("agt_02k2", "agt_01h8")
+
+    monkeypatch.setattr(orchestrator_svc, "_kit_thinking", _delist_during_the_pause)
+
+    resp = _run_kit({"agt_05x7": _sub_floor("agt_05x7")})
+
+    ids = [s.agent_id for s in resp.steps]
+    assert "agt_02k2" not in ids
+    assert "agt_01h8" not in ids  # the brief role's only stand-in went too
+    assert [(n.kind, n.agent_id) for n in resp.notices] == [("excluded", "agt_05x7")]

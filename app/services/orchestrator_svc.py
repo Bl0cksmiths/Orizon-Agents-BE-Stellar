@@ -214,6 +214,19 @@ def _snapshot_registry() -> _RegistrySnapshot:
     return _RegistrySnapshot(agents, tuple(a for a in agents if _is_listed(a) and is_dispatchable(a.id)))
 
 
+def _still_routable(agent_id: str) -> bool:
+    """Point-of-use check against the LIVE registry: still listed and dispatchable.
+
+    Only ever narrows the snapshot. The kit path pauses before it plans, and
+    an operator can delist or unbind an agent in that pause; the snapshot
+    would still say it was routable, so a step is placed only if the live
+    registry agrees — the same question the free-form clamp asks after the
+    planning call.
+    """
+    agent = state.agents.get(agent_id)
+    return agent is not None and _is_listed(agent) and is_dispatchable(agent_id)
+
+
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
     """PlanStep reputation stamp — empty when the agent has no rep entry.
 
@@ -379,6 +392,7 @@ def _floor_substitute(
         and a.id not in _KIT_AGENT_IDS
         and reputation_svc.passes_floor(reps.get(a.id))
         and wanted.intersection(a.skills)
+        and _still_routable(a.id)
     ]
     if not candidates:
         return None
@@ -726,10 +740,10 @@ async def _build_kit_plan(
             # would be the silently reshuffled pipeline story 3.02 forbids.
             continue
 
-        if agent.id not in routable:
+        if agent.id not in routable or not _still_routable(agent.id):
             # Listed but with nothing to execute it — a seeded worker missing
-            # from this deployment. No step can run it, and the reputation read
-            # was never taken for it, so it is dropped the same silent way.
+            # from this deployment — or delisted or unbound during the pause.
+            # No step can run it, so it is dropped the same silent way.
             continue
 
         info = reps.get(agent.id)
