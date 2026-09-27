@@ -438,9 +438,8 @@ class Settings(BaseSettings):
 
         The label is read through `label_names_mainnet` — any case, any
         padding, `pubnet` included — so ` Mainnet` or `pubnet` over the
-        testnet passphrase is refused here
-        rather than booting as a testnet deployment that calls itself mainnet.
-        The opposite mismatch, a testnet label over the mainnet passphrase, is
+        testnet passphrase is refused here rather than booting as a testnet
+        deployment that calls itself mainnet. The opposite mismatch, a testnet label over the mainnet passphrase, is
         not refused: `is_mainnet` reads the passphrase, so the key rule and the
         explorer links already treat that process as the mainnet it is.
         """
