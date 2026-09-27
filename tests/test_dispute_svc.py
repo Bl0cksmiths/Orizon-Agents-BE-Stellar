@@ -384,6 +384,53 @@ def test_no_challenge_is_minted_for_a_job_or_step_that_cannot_be_disputed() -> N
     assert len(eb._challenges) == 0
 
 
+@pytest.mark.parametrize(
+    ("seeded", "code"),
+    [
+        ({"window_seconds": -86_400.0}, "dispute_window_closed"),
+        (
+            {"steps": (SettlementStep(step_index=0, agent_id="a", agent_name=None, price_usdc=0.05, delivered=False),)},
+            "step_not_settled",
+        ),
+        (
+            {"steps": (SettlementStep(step_index=0, agent_id="a", agent_name=None, price_usdc=0.0, delivered=True),)},
+            "nothing_was_charged",
+        ),
+        ({"settled_usdc": 0.0}, "nothing_was_charged"),
+    ],
+    ids=["window-closed", "undelivered", "free-step", "nothing-settled"],
+)
+def test_no_challenge_slot_is_spent_on_a_step_that_can_never_be_disputed(seeded: dict, code: str) -> None:
+    """The mint used to refuse only an unknown job or step, so a stranger could
+    hold the whole `dispute` budget with (job, step) pairs whose windows closed
+    long ago — job ids are public on-chain — and every buyer still inside their
+    24 hours was told `challenge_capacity_dispute`. The window, the delivery
+    and the price are public in `SettlementView`, so the mint asks them too."""
+    _seed(Keypair.random().public_key, **seeded)
+
+    with pytest.raises(DisputeError) as refused:
+        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    assert (refused.value.code, refused.value.status_code) == (code, 409)
+    assert len(eb._challenges) == 0
+
+
+def test_closed_windows_cannot_crowd_out_a_buyer_inside_theirs() -> None:
+    """The audit's scenario, end to end: a full budget's worth of historical
+    settlements is minted against, and the buyer whose window is open still
+    gets a challenge."""
+    for i in range(eb.CHALLENGE_BUDGETS["dispute"]):
+        job = f"{i:032x}"
+        _seed(Keypair.random().public_key, job=job, task=f"tsk_old{i}", window_seconds=-86_400.0)
+        with pytest.raises(DisputeError):
+            asyncio.run(dispute_svc.issue_dispute_challenge(job, 0))
+    _seed(Keypair.random().public_key)
+
+    nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+
+    assert len(nonce) == dispute_svc.NONCE_HEX_CHARS
+
+
 # ── rule: the window is open ────────────────────────────────────
 
 
