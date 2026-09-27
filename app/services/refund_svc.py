@@ -390,6 +390,8 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         the signature — or for a send the RPC refused outright. No transaction
         exists anywhere after one of these, so nothing can land later.
       - any other exception → TIMEOUT. It may have been raised after the send.
+        When it is the client's `sc.InFlightError`, its `tx_hash` — the signed
+        transaction's hash — is the outcome's hash.
       - `status == "SUCCESS"` with a hash → SUCCESS. The credit landed.
       - `status == "FAILED"` → FAILED. The ledger rejected it, so no funds
         moved; of the dict's answers this is the ONLY one that says that.
@@ -470,16 +472,22 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         )
         return RefundOutcome("FAILED", None, amount_usdc)
     except Exception as e:
+        # The client raises `InFlightError` for a failure after the transfer
+        # was signed and sent, carrying the signed transaction's hash; keep it,
+        # so the dispute records what a reconciliation asks the ledger about.
+        in_flight = e.tx_hash if isinstance(e, sc.InFlightError) else None
         logger.error(
-            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s (job %s, payer %s, %.7f USDC)",
+            "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s "
+            "(hash %s, job %s, payer %s, %.7f USDC)",
             dispute.id,
             e,
+            in_flight,
             dispute.job_id_hex,
             dispute.payer,
             amount_usdc,
             exc_info=True,
         )
-        return RefundOutcome("TIMEOUT", None, amount_usdc)
+        return RefundOutcome("TIMEOUT", in_flight, amount_usdc)
 
     raw_hash = raw.get("hash")
     tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None

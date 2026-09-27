@@ -130,3 +130,32 @@ def test_not_submitted_is_the_only_raise_read_as_failed(monkeypatch) -> None:
 
     assert (first.status, first.tx_hash) == ("FAILED", None)
     assert (second.status, second.tx_hash) == ("TIMEOUT", None)
+
+
+# ── B4: a failure after the send keeps the hash of what was signed ──
+
+
+def test_a_transfer_lost_after_the_send_records_its_signed_hash(monkeypatch) -> None:
+    signed = "5e" * 32
+    calls = _chain(monkeypatch, sc.InFlightError("send failed: connection reset", signed))
+    dispute = a_dispute()
+
+    with pytest.raises(DisputeError) as unconfirmed:
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert unconfirmed.value.code == "refund_unconfirmed"
+    current, queue = _stored(dispute.id)
+    # Still held, never released — and now the record names the transaction.
+    assert (current.status, current.refund_tx, queue) == ("crediting", signed, [dispute.id])
+    assert len(calls) == 1
+
+
+def test_a_raise_that_is_not_in_flight_still_has_no_hash(monkeypatch) -> None:
+    """Only the client's own type vouches for a hash; anything else has none."""
+    _chain(monkeypatch, sc.InFlightError("poll failed: x", "7a" * 32), ConnectionError("dropped"))
+
+    first = asyncio.run(refund_svc.credit_refund(_upheld_dispute(), 0.05))
+    second = asyncio.run(refund_svc.credit_refund(_upheld_dispute(), 0.05))
+
+    assert (first.status, first.tx_hash) == ("TIMEOUT", "7a" * 32)
+    assert (second.status, second.tx_hash) == ("TIMEOUT", None)
