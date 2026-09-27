@@ -10,6 +10,9 @@ test_dispute_rating_submit.py.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 
 import app.stellar.client as sc
 from app.services import refund_svc
@@ -34,11 +37,32 @@ def test_execute_refund_transfers_from_settler_to_buyer(monkeypatch) -> None:
     monkeypatch.setattr(sc, "invoke_with_server_key_async", _fake_invoke)
     monkeypatch.setattr(sc, "addr", lambda a: ("addr", a))
     monkeypatch.setattr(sc, "i128", lambda v: ("i128", v))  # usdc_to_i128 stays real
+    # Every contract id is "" in a hermetic run, so asserting "the SAC's id"
+    # against real settings compared "" with "" and held for ANY contract.
+    # Distinct fakes make the escrow — the other contract a transfer could be
+    # sent to by mistake — distinguishable from the asset.
+    monkeypatch.setattr(
+        sc,
+        "contract_ids",
+        lambda: SimpleNamespace(asset_sac="CSAC_ASSET", payment_escrow="CESCROW", attestation_registry="CATTEST"),
+    )
 
     result = asyncio.run(refund_svc.execute_refund("GBUYER", 0.08))
 
     assert result["hash"] == "refund_tx"
     assert calls["fn"] == "transfer"  # a SAC transfer, not a contract refund
-    assert calls["contract"] == sc.contract_ids().asset_sac
+    assert calls["contract"] == "CSAC_ASSET"
     # settler → buyer, amount in stroops (0.08 USDC = 800_000)
     assert calls["args"] == [("addr", "GSETTLER"), ("addr", "GBUYER"), ("i128", 800_000)]
+
+
+@pytest.mark.parametrize(
+    ("usdc", "stroops"),
+    [(0.0000021, 21), (0.0000057, 57), (0.0000107, 107), (0.1234567, 1_234_567), (1.00000004, 10_000_000)],
+)
+def test_usdc_converts_to_the_nearest_stroop(usdc: float, stroops: int) -> None:
+    """Rounded, never truncated: 2.1e-6 × 1e7 is 20.999999999999996 in floating
+    point, and `int()` would under-credit the buyer (and under-bill a charge)
+    by a stroop. Every other amount in the suite lands on or just above an
+    integer, which is why truncation went unnoticed."""
+    assert sc.usdc_to_i128(usdc) == stroops
