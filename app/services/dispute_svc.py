@@ -448,9 +448,11 @@ async def open_dispute(
         # The cleaned text, which is what every reader of this record gets.
         reason=reason,
         status="open",
-        # The step's own price as it settled, never the plan's estimate: the
-        # credit is computed from this, and a credit larger than what was
-        # charged would be the platform paying for work it never billed.
+        # The step's price as the settlement recorded it — which is the
+        # PLAN'S ESTIMATE (`est_price_usdc`), not a per-step charge: the charge
+        # moves one total for the whole workflow. The credit is therefore
+        # never paid from this alone; `refund_svc.creditable_for` bounds it by
+        # what the charge actually settled, net of the job's other credits.
         charged_usdc=step.price_usdc,
         creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, settings.dispute_credited_fraction),
         opened_at=time.time(),
@@ -505,10 +507,10 @@ async def settlement_for_task(task_id: str) -> SettlementRecord | None:
 # Two facts shape all of it. `store.claim_refund` is the lock, taken before
 # anything is signed and never a read-then-write (D2) — and neither is the
 # adjudication that makes a dispute claimable in the first place, because a
-# lock a stale read can re-open is not a lock. And the Stellar client
-# does not raise on failure — it returns a status, one of whose values means
-# "submitted, may still land" (D3), which is the only way this service can pay
-# a buyer twice.
+# lock a stale read can re-open is not a lock. And a transfer can end in
+# "submitted, may still land" (D3) — a `timeout` status, or any raise after the
+# send — which is the only way this service can pay a buyer twice. Only the
+# client's `NotSubmittedError` proves the opposite before anything was sent.
 
 
 def _refuse_credit(

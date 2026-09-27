@@ -1305,6 +1305,9 @@ async def _record_settlement(
                     step_index=index,
                     agent_id=step.agent_id,
                     agent_name=step.agent_name,
+                    # The plan's estimate: the charge moves one total for the
+                    # run, never a price per step. `settled_usdc` below is what
+                    # it moved, and every credit is bounded by that.
                     price_usdc=step.est_price_usdc,
                     # A step that failed, or that no worker ever resolved
                     # for, delivered nothing and was never billed — 4.02
