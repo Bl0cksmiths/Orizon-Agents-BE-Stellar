@@ -700,3 +700,29 @@ def test_both_backstops_re_admit_by_one_rule(seeded: object, monkeypatch: pytest
 
     assert [n.agent_id for n in kit.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
     assert [n.agent_id for n in free_form.notices if n.reason_code == "floor_relaxed"] == ["agt_02k2"]
+
+
+def test_the_floor_boundary_holds_through_decompose_on_both_paths(
+    seeded: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lower bound exactly AT the floor clears it; one bps under does not.
+
+    Pinned at the function level elsewhere; this is the plan a buyer actually
+    gets, on both paths, so an off-by-one in any stage between the predicate
+    and the response shows up here.
+    """
+    floor = settings.reputation_floor_bps
+    at = _scored({UNSUBSTITUTABLE_KIT_AGENT: _rep(UNSUBSTITUTABLE_KIT_AGENT, smoothed=7000, lower=floor)})
+    under = _scored({UNSUBSTITUTABLE_KIT_AGENT: _rep(UNSUBSTITUTABLE_KIT_AGENT, smoothed=7000, lower=floor - 1)})
+
+    kit = _run_kit(monkeypatch, at)
+    free_form = _run_free_form(monkeypatch, at, [UNSUBSTITUTABLE_KIT_AGENT])
+    for resp in (kit, free_form):
+        assert UNSUBSTITUTABLE_KIT_AGENT in [s.agent_id for s in resp.steps]
+        assert resp.notices == []
+
+    kit = _run_kit(monkeypatch, under)
+    free_form = _run_free_form(monkeypatch, under, [UNSUBSTITUTABLE_KIT_AGENT, "agt_11c0"])
+    for resp in (kit, free_form):
+        assert UNSUBSTITUTABLE_KIT_AGENT not in [s.agent_id for s in resp.steps]
+        assert _reported(resp) == [("excluded", UNSUBSTITUTABLE_KIT_AGENT, "below_floor", floor - 1, floor)]
