@@ -285,6 +285,7 @@ def _fake_transfer(monkeypatch, outcome: dict | BaseException) -> list[dict]:
     monkeypatch.setattr(sc, "signer_public_key", lambda: "GSETTLER")
     monkeypatch.setattr(sc, "invoke_with_server_key_async", _invoke)
     monkeypatch.setattr(sc, "addr", lambda a: ("addr", a))
+    monkeypatch.setattr(sc, "muxed_addr", lambda a, muxed_id: ("muxed", a, muxed_id))
     monkeypatch.setattr(sc, "i128", lambda v: ("i128", v))  # usdc_to_i128 stays real
     return calls
 
@@ -296,8 +297,10 @@ def test_a_settled_transfer_is_a_success_outcome(monkeypatch) -> None:
 
     assert (outcome.status, outcome.tx_hash, outcome.amount_usdc) == ("SUCCESS", "refund_tx", 0.05)
     # settler -> the disputing payer, in stroops: the credit, not a clawback.
+    # The payer's own G address, muxed with the id derived from this dispute.
+    tag = refund_svc.refund_muxed_id("dsp_deadbeefdeadbeef")
     assert calls[0]["fn"] == "transfer"
-    assert calls[0]["args"] == [("addr", "GSETTLER"), ("addr", PAYER), ("i128", 500_000)]
+    assert calls[0]["args"] == [("addr", "GSETTLER"), ("muxed", PAYER, tag), ("i128", 500_000)]
 
 
 def test_a_rejected_transfer_is_a_failed_outcome(monkeypatch, caplog) -> None:

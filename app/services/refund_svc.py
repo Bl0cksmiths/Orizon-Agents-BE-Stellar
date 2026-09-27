@@ -570,7 +570,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
     _refuse_above_cap(dispute, amount_usdc)
 
     try:
-        raw = await execute_refund(dispute.payer, amount_usdc)
+        raw = await execute_refund(dispute.payer, amount_usdc, dispute_id=dispute.id)
     except asyncio.CancelledError:
         # A shutdown cancel (main.py's drain window) can land between the submit
         # and its confirmation, exactly like `_settle_onchain`'s — and
