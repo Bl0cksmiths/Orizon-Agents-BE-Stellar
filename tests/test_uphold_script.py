@@ -1854,6 +1854,49 @@ def test_a_live_run_given_the_service_url_invalidates_its_cached_score_after_the
     assert configured["api_key"] not in out
 
 
+@pytest.mark.parametrize(
+    "url",
+    ["http://api.orizon.test", "http://10.0.0.5:8000", "ftp://api.orizon.test", "api.orizon.test"],
+    ids=["http-remote", "http-private-ip", "ftp", "no-scheme"],
+)
+def test_the_operator_key_is_never_sent_in_the_clear(
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
+    service: ServiceSeam,
+    url: str,
+) -> None:
+    """The invalidation carries API_KEY. Over plain http to a real host that is
+    the deployment's operator key on the network in the clear, so it is refused
+    before any request — a warning, and the run's exit code is unchanged."""
+    seed()
+
+    code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", url)
+
+    assert code == uphold_dispute.EXIT_OK
+    assert service.requests == []
+    assert "NOT TOLD — refused to send the operator key" in out
+    assert configured["api_key"] not in out
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_plain_http_to_this_machine_is_allowed(
+    capsys: pytest.CaptureFixture[str],
+    paying: list[str],
+    ledger: RatingSeam,
+    configured: dict[str, str],
+    service: ServiceSeam,
+    host: str,
+) -> None:
+    seed()
+
+    code, _ = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", f"http://{host}:8000")
+
+    assert code == uphold_dispute.EXIT_OK
+    assert [str(r.url) for r in service.requests] == [f"http://{host}:8000/api/stellar/reputation/{AGENT}/invalidate"]
+
+
 def test_the_service_url_can_come_from_the_environment(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
