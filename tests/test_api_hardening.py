@@ -72,6 +72,8 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         # A ledger but no key: paid runs cannot rate, and the probe says so
         # without a chain read and without leaving "ready".
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
+        # No DATABASE_URL in the hermetic suite: the in-memory fallback.
+        "disputes": {"store": "memory"},
     }
 
 
@@ -97,6 +99,8 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "pdax": "unconfigured",
         "cold_start": {"routable": False, "lower_bound_bps": 5677, "floor_bps": 6000, "margin_bps": -323},
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
+        # No DATABASE_URL in the hermetic suite: the in-memory fallback.
+        "disputes": {"store": "memory"},
     }
 
 
