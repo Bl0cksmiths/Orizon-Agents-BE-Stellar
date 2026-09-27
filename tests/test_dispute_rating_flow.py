@@ -871,7 +871,9 @@ def test_an_observer_that_raises_cannot_turn_a_paid_dispute_into_a_failure(
     assert rated.status == "credited"
     assert rated.rating_tx == "tx_rating_1"
     assert settler.transfers == [(dispute.payer, 0.05)]
-    assert any("observer raised" in message for message in svc_errors(caplog))
+    (logged,) = [m for m in svc_errors(caplog) if "observer raised" in m]
+    for fact in (dispute.id, JOB, AGENT, "credited_usdc=0.0500000", "tx_rating_1"):
+        assert fact in logged, (fact, logged)
 
 
 # ── the real client under uphold: refused before the send, or lost after it (D-076) ─
@@ -982,6 +984,7 @@ def test_a_rating_refused_before_the_send_is_failed_and_nothing_is_in_flight(
     for fact in ("outcome=FAILED", "credited_usdc=0.0500000", dispute.id, JOB, AGENT, cause):
         assert fact in logged, (fact, logged)
     assert "may still land" not in logged
+    assert "fix what reason= names" in logged
 
 
 def test_a_rating_lost_after_the_send_is_still_a_timeout_with_its_hash_in_flight(
