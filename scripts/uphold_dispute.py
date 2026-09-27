@@ -871,8 +871,38 @@ def _stale_score_note(agent_id: str) -> None:
     say("    on GET /api/stellar/reputation/params).")
 
 
+# Hosts the operator key may be sent to over plain http: this machine only. A
+# service on the operator's own loopback is the one place a key in the clear
+# crosses no network.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _plaintext_refusal(url: str) -> str | None:
+    """Why `url` must not be sent the operator key, or None when it may.
+
+    https anywhere, and http to loopback only. Anything else — plain http to a
+    real host, or a scheme that is not http at all — would put API_KEY, the
+    deployment's operator credential, on the wire in the clear.
+    """
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError, ValueError):
+        return "it is not a URL"
+    if parsed.scheme == "https":
+        return None
+    if parsed.scheme == "http" and parsed.host in _LOOPBACK_HOSTS:
+        return None
+    return "it is not https, and API_KEY is never sent in the clear to anything but this machine"
+
+
 async def tell_the_service(agent_id: str, service_url: str | None) -> None:
     """Ask the running service to drop its cached score for this agent (D-066).
+
+    Only over https, or plain http to this machine (`_plaintext_refusal`):
+    the request carries API_KEY, and a `--service-url` typed as `http://` to a
+    real host would send the deployment's operator key across the network in
+    the clear. That is refused like any other failure here — a warning, with
+    the key never sent.
 
     Never raises and never changes the exit code: by the time this runs the
     credit and the rating have both happened, and a cache that could not be
@@ -887,6 +917,13 @@ async def tell_the_service(agent_id: str, service_url: str | None) -> None:
         say(f"    NOT TOLD ({missing}),")
         _stale_score_note(agent_id)
         say("    Pass --service-url with API_KEY set to the deployment's key to drop it at once.")
+        say()
+        return
+    refusal = _plaintext_refusal(url)
+    if refusal is not None:
+        say(f"    NOT TOLD — refused to send the operator key to {url}: {refusal},")
+        _stale_score_note(agent_id)
+        say("    Pass an https:// --service-url (http:// is allowed for localhost only).")
         say()
         return
     endpoint = f"{url}/api/stellar/reputation/{agent_id}/invalidate"
