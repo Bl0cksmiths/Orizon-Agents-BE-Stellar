@@ -17,7 +17,7 @@ from ..schemas import PlanStep, StoredPlan, Task, TaskStatus, TraceLevel, TraceL
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer
+from . import failure_tracker, rating_writer, reputation_svc
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 from .orchestrator_svc import _is_listed
@@ -295,7 +295,7 @@ def _stored_summary(task_id: str, step_index: int, summary: str) -> str | None:
     return cleaned or None
 
 
-def _execute_refusal(step: PlanStep) -> str | None:
+def _execute_refusal(step: PlanStep, info: reputation_svc.RepInfo | None) -> str | None:
     """Why `step` must not be dispatched NOW, or None to dispatch it.
 
     The routing floor and the listing filter are applied when a plan is BUILT
@@ -309,6 +309,25 @@ def _execute_refusal(step: PlanStep) -> str | None:
     The returned sentence is buyer-facing (trace lines are world-readable when
     TASK_AUTH_REQUIRED is off): it names the agent and the reason, never the
     operator's own data.
+
+    `info` is the agent's reputation as read at the START of this run, and the
+    routing floor is re-applied to it by three rules:
+
+      * A read that FAILED (`degraded`, the prior served in its place) proves
+        nothing about the agent, so it cannot overturn the verdict the buyer
+        authorised: the step runs on its plan-time stamps. Refusing here would
+        strip a plan the buyer already signed for because the chain was slow —
+        and on a warm host the batch read degrades routinely, so that would be
+        most plans.
+      * A read that succeeded and clears the floor dispatches.
+      * A read that succeeded and does NOT clear it refuses — the agent is now
+        provably below the floor — with one exception: a step the starvation
+        backstop re-admitted below the floor at plan time (`step.degraded`).
+        The buyer authorised that step knowing it was below the floor, flagged
+        inline and with a `floor_relaxed` notice, so it still runs as long as
+        its bound is no worse than the one the card showed. Worse than that,
+        it is refused like any other: the buyer consented to the evidence
+        they saw, not to whatever arrives after.
     """
     agent = state.agents.get(step.agent_id)
     if agent is None:
@@ -318,7 +337,20 @@ def _execute_refusal(step: PlanStep) -> str | None:
         return f"{step.agent_id} is no longer in the agent registry"
     if not _is_listed(agent):
         return f"{step.agent_id} was delisted by its operator after this plan was built"
-    return None
+    if info is None or info.degraded or reputation_svc.passes_floor(info):
+        return None
+    floor = settings.reputation_floor_bps
+    if step.degraded:
+        shown = step.rep_lower_bound_bps
+        if shown is not None and info.lower_bound_bps >= shown:
+            return None
+        return (
+            f"{step.agent_id} fell further below the routing floor than this plan showed "
+            f"({info.lower_bound_bps} < {shown if shown is not None else floor} bps)"
+        )
+    return (
+        f"{step.agent_id} fell below the routing floor after this plan was built ({info.lower_bound_bps} < {floor} bps)"
+    )
 
 
 async def execute_plan(
@@ -456,6 +488,27 @@ async def _run(
                 f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
             )
 
+        # The routing floor, re-applied at execute (see `_execute_refusal`): one
+        # bounded batch read for every agent the plan names, taken now rather
+        # than trusted from the stamps on the plan. One read for the run, not
+        # one per step — `fetch_reps` caps it at the configured batch deadline,
+        # so the worst case delays the first step by that bound once, and the
+        # buyer's /execute has already been answered. Listing, which costs
+        # nothing to read, is still checked per step at the moment of dispatch.
+        agent_ids = sorted({s.agent_id for s in plan.plan.steps})
+        fresh = await reputation_svc.fetch_reps(agent_ids) if agent_ids else {}
+        unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded]
+        if unread:
+            # Said out loud, because it is the one case where a step runs on
+            # evidence older than this run: the buyer should know which.
+            await _emit(
+                task_id,
+                start,
+                "exec",
+                f"reputation re-check unavailable for [{', '.join(unread)}] — "
+                "those steps run on the scores this plan was authorised with",
+            )
+
         for step_index, step in enumerate(plan.plan.steps):
             # Resolution deliberately stays OUTSIDE the per-step try/except
             # below. It is a lookup, not the step's work: resolve_worker fails
@@ -464,7 +517,7 @@ async def _run(
             # itself, which would repeat on every step anyway. Letting that
             # reach the run-level handler (status "failed", stream closed) is
             # therefore the honest outcome, and is what the suite pins.
-            refusal = _execute_refusal(step)
+            refusal = _execute_refusal(step, fresh.get(step.agent_id))
             if refusal is not None:
                 # Story 2.03's rule for a step that fails, applied to a step
                 # that is refused: it is skipped, nothing is added to `spent`
