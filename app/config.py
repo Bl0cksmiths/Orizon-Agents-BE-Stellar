@@ -477,7 +477,8 @@ class Settings(BaseSettings):
         internet, with the backend signing on their behalf.
 
         "Can move real value" is scoped narrowly on purpose, so local dev and
-        CI keep booting: a signing key on mainnet, or PDAX credentials in the
+        CI keep booting: a signing key on mainnet (the mainnet PASSPHRASE,
+        whatever STELLAR_NETWORK says — see `is_mainnet`), or PDAX credentials in the
         production environment. Testnet signers and uat/stage PDAX move play
         money and stay open, as does a read-only mainnet deployment.
 
@@ -499,7 +500,9 @@ class Settings(BaseSettings):
         if self.api_key:
             return self
         exposures: list[str] = []
-        if self.stellar_network.strip().lower() in {"mainnet", "public"} and self.stellar_signing_key:
+        # The passphrase, not the label: see `is_mainnet`. A `testnet` label
+        # beside the mainnet passphrase still signs real transactions.
+        if self.is_mainnet() and self.stellar_signing_key:
             exposures.append(
                 "STELLAR_SIGNING_KEY is set on mainnet, so /api/stellar/server/charge "
                 "and /server/seal sign real transactions"
@@ -1076,6 +1079,26 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    def is_mainnet(self) -> bool:
+        """True when this process signs for the Stellar PUBLIC network (D-074).
+
+        Keyed on the network PASSPHRASE, never on STELLAR_NETWORK. The
+        passphrase is hashed into every transaction this process signs, so it
+        is the fact that decides which chain a signature is valid on; the label
+        is only a name somebody typed. Asking the label let `pubnet`, a padded
+        or upper-cased `mainnet`, and even `testnet` beside the mainnet
+        passphrase boot a real-money signer with no API_KEY.
+
+        An exact comparison, deliberately: a passphrase that differs by one
+        byte — padding included — hashes to a network id no chain answers to,
+        so it signs for nothing and moves nothing.
+
+        Every place that asks "is this real money?" asks here: the two boot
+        validators below, `stellar.client.explorer_network`, and the operator
+        script's explorer links through it.
+        """
+        return self.stellar_network_passphrase == MAINNET_PASSPHRASE
 
 
 class ConfigurationError(RuntimeError):
