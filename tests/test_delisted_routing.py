@@ -110,16 +110,29 @@ def _clearing_reps() -> dict[str, RepInfo]:
     return {a.id: _info(a.id, smoothed=8000, lower=8000) for a in state.list_agents()}
 
 
+def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
+    """A snapshot that scores EVERY registry agent: `overrides` over clearing entries.
+
+    Never a partial map: an omitted agent used to pass the floor on "no entry"
+    without the floor being consulted, so a kit test could route or substitute
+    an agent it never scored and still pass.
+    """
+    reps = _clearing_reps()
+    reps.update(overrides)
+    return reps
+
+
 def _offered_ids(reps: dict[str, RepInfo]) -> list[str]:
     """The agent ids in the AVAILABLE_AGENTS block, in the order shown."""
     block = orchestrator_svc._registry_prompt_fragment(reps)
     return [ln.split(" ")[1].removeprefix("id=") for ln in block.splitlines() if ln.startswith("- id=")]
 
 
-def _run_kit(reps: dict[str, RepInfo]) -> DecomposeResponse:
+def _run_kit(overrides: dict[str, RepInfo]) -> DecomposeResponse:
+    """The kit plan for a FULL snapshot: every agent scored, `overrides` on top."""
     kit = detect_kit(KIT_INTENT)
     assert kit is not None
-    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, reps))
+    return asyncio.run(orchestrator_svc._build_kit_plan(KIT_INTENT, kit, _scored(overrides)))
 
 
 def _plan_naming(*agent_ids: str) -> object:
@@ -390,7 +403,7 @@ def test_kit_path_honours_delisting_without_calling_the_llm(seeded: object, monk
         return None
 
     async def _fake_reps(_ids: object, *_a: object, **_k: object) -> dict[str, RepInfo]:
-        return {}
+        return _clearing_reps()
 
     monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _record)
     monkeypatch.setattr(orchestrator_svc.reputation_svc, "fetch_reps", _fake_reps)
