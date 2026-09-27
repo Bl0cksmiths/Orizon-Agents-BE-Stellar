@@ -443,11 +443,16 @@ async def _read_rep(agent_id: str) -> tuple[RepInfo, str | None]:
     from ..stellar import client as sc
 
     async def _read() -> dict[str, Any]:
+        # load_source=False: a view read needs no sequence number, so the
+        # load_account hop is skipped and each read is ONE round trip, not two
+        # (client.simulate_read). That halves the per-read latency the batch
+        # deadline has to cover.
         return await asyncio.to_thread(
             sc.simulate_read,
             sc.contract_ids().reputation_ledger,
             "rep_state",
             [sc.sym(agent_id)],
+            load_source=False,
         )
 
     try:

@@ -42,7 +42,7 @@ def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     chain: dict[str, Any] = {"state": dict(BEFORE), "reads": 0}
 
-    def _simulate_read(_contract: str, method: str, _args: list[Any]) -> dict[str, Any]:
+    def _simulate_read(_contract: str, method: str, _args: list[Any], **_kw: Any) -> dict[str, Any]:
         assert method == "rep_state", method
         chain["reads"] += 1
         return dict(chain["state"])
