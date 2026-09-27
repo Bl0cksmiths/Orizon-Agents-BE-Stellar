@@ -655,6 +655,11 @@ MONEY_BOUND_REFUSALS = [
     ("DISPUTE_CREDITED_FRACTION", "-inf", _UNBOUNDED),
     ("DISPUTE_CREDITED_FRACTION", "1.5", r"1\.5"),
     ("DISPUTE_CREDITED_FRACTION", "-0.25", r"0\.25"),
+    ("DISPUTE_WINDOW_SECONDS", "nan", _NOT_A_NUMBER),
+    ("DISPUTE_WINDOW_SECONDS", "inf", _UNBOUNDED),
+    ("DISPUTE_WINDOW_SECONDS", "-inf", _UNBOUNDED),
+    ("DISPUTE_WINDOW_SECONDS", "0", _ZERO),
+    ("DISPUTE_WINDOW_SECONDS", "-3607", r"3607"),
 ]
 
 
@@ -685,6 +690,7 @@ MONEY_BOUNDS_THAT_BOOT = [
     ("DISPUTE_CREDITED_FRACTION", "0", "dispute_credited_fraction", 0.0),
     ("DISPUTE_CREDITED_FRACTION", "0.5", "dispute_credited_fraction", 0.5),
     ("DISPUTE_CREDITED_FRACTION", "1", "dispute_credited_fraction", 1.0),
+    ("DISPUTE_WINDOW_SECONDS", "3600", "dispute_window_seconds", 3600.0),
 ]
 
 
@@ -704,3 +710,4 @@ def test_the_money_bound_defaults_boot():
     assert s.max_refund_usdc == 1.0
     assert s.max_charge_usdc == 100.0
     assert s.dispute_credited_fraction == 1.0
+    assert s.dispute_window_seconds == 86_400.0
