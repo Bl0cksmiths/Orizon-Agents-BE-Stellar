@@ -49,7 +49,7 @@ from .seed import seed_registry
 from .services import execution_svc, rating_writer, registry_sync, reputation_svc
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
-from .services.dispute_store import close_dispute_store
+from .services.dispute_store import close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
 
 
@@ -174,6 +174,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # line and /readiness's `cold_start`, which has to be asked — so it is
     # stated before anything else can bury it.
     _report_cold_start_routability()
+    # Resolve the dispute store now, so its line (postgres, or the in-memory
+    # fallback at WARNING) is in the boot log rather than inside whichever
+    # request first touches a settlement or a dispute — on a quiet instance
+    # that request may never come, and the line with it (D-063). Constructing
+    # the store dials nothing: a Postgres that is unreachable at boot still
+    # fails its first real use loudly, and never falls back to memory.
+    get_dispute_store()
     seed_registry()
     # Bound the default executor: asyncio.to_thread otherwise sizes it to
     # min(32, cpu_count + 4) from the HOST's core count, while Render grants
