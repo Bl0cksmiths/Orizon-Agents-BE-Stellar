@@ -58,7 +58,7 @@ from ..security import (
 from ..services import dispute_read, dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
-from ..task_auth import TaskReadProof, require_task_read, task_read_proof
+from ..task_auth import TaskReadProof, task_read_proof
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ _PAYER_PATTERN = r"^G[A-Z2-7]{55}$"
 # spells one. Bounded to the path parameter's 128 and to characters that cannot
 # carry a `:` or a newline into a message a wallet is about to show and sign.
 _TASK_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
+_MAX_TASK_ID_CHARS = 128
 
 # Twice the 32-entry cap `POST /api/stellar/server/seal` puts on a workflow's
 # agents and receipts, so a plan that grows is not refused *here* first. The
@@ -865,14 +866,44 @@ async def get_dispute(
     return DisputeResponse.of(record, free_text=proof.proves_free_text(record.task_id, record.payer))
 
 
+async def _require_listing_read(
+    task_id: str,
+    proof: Annotated[TaskReadProof, Depends(task_read_proof)],
+) -> None:
+    """`GET /tasks/{id}/disputes`'s gate while TASK_AUTH_REQUIRED is on (D-067).
+
+    Admits exactly what buys the listing's free text,
+    `TaskReadProof.proves_free_text`: a task token or the operator key — what
+    `require_task_read` admits — or a live dispute read grant for THIS task and
+    ITS settlement's payer. `require_task_read` took the first two only, so a
+    payer whose token was gone could not reach the one route their receipt
+    reads, grant in hand.
+
+    A dependency rather than a check in the handler, for `require_task_read`'s
+    reason: it runs before the route's own path bound, so an over-long id is
+    this 404 rather than a 422 that quotes the id back. The settlement is read
+    only for a caller who sent a grant and was not admitted on a token or the
+    key, and never for an id past the path's bound. Every refusal is the same
+    bare `unknown_task` 404, so a refused caller cannot tell a task that exists
+    from one that does not.
+    """
+    if not settings.task_auth_required or proof.proves(task_id):
+        return
+    if proof.read_grant and len(task_id) <= _MAX_TASK_ID_CHARS:
+        settlement = await dispute_svc.settlement_for_task(task_id)
+        if settlement is not None and proof.proves_free_text(task_id, settlement.payer):
+            return
+    raise HTTPException(404, "unknown_task")
+
+
 @router.get(
     "/tasks/{task_id}/disputes",
     response_model=TaskDisputesResponse,
     summary="A task's dispute window and the disputes raised on it",
-    dependencies=[Depends(require_task_read)],
+    dependencies=[Depends(_require_listing_read)],
 )
 async def list_task_disputes(
-    task_id: Annotated[str, Path(min_length=1, max_length=128)],
+    task_id: Annotated[str, Path(min_length=1, max_length=_MAX_TASK_ID_CHARS)],
     proof: Annotated[TaskReadProof, Depends(task_read_proof)],
 ) -> TaskDisputesResponse:
     """The settlement, the window and what has been raised, in one read.
@@ -888,12 +919,23 @@ async def list_task_disputes(
     special-case into the same view.
 
     THE TASK ID IS NOT A CAPABILITY, and this route is built on the assumption
-    that it is not. `require_task_read` gates it like every other
-    `/tasks/{task_id}/...` read, but that dependency is a no-op while
-    TASK_AUTH_REQUIRED is off — the shipped default, and how production runs
-    — and `GET /api/tasks?limit=200` hands out two hundred task ids for the
+    that it is not. While TASK_AUTH_REQUIRED is off — the shipped default, and
+    how production runs — it is open like every other `/tasks/{task_id}/...`
+    read, and `GET /api/tasks?limit=200` hands out two hundred task ids for the
     asking. So in production this read is open, and what it may carry is
     decided on that basis rather than on the gate.
+
+    With TASK_AUTH_REQUIRED ON it is gated, but NOT by `require_task_read`
+    (D-067). That dependency admits a task token or the operator key and
+    nothing else, and it ran before the handler — so a payer holding a dispute
+    read grant, whose token died with the tab or the process, was answered 404
+    `unknown_task` before the grant was ever looked at, from the one route that
+    feeds their receipt. It is gated here instead, on exactly what buys the
+    free text: `proof.proves_free_text` — the token or the key, which
+    `require_task_read` would take, or a live grant for this task and its
+    settlement's payer. Nothing wider: a grant for another task, another payer
+    or no settlement at all still reads as `unknown_task`. See
+    `_require_listing_read`.
 
     What it carries openly is held to what is already public. The settlement's
     job id and payer are on-chain (see `SettlementView`), each output summary
@@ -914,7 +956,6 @@ async def list_task_disputes(
     words attached.
     """
     settlement = await dispute_svc.settlement_for_task(task_id)
-    disputes = await dispute_svc.list_for_task(task_id)
     # Resolved ONCE for the whole listing, not per dispute: every row here
     # belongs to this one task, so one proof answers for all of them, and a
     # per-row answer would invite a future row that disagreed with its
@@ -924,6 +965,7 @@ async def list_task_disputes(
     # grant route proved the signature against; with no settlement there is
     # no payer, and a grant buys nothing.
     free_text = proof.proves_free_text(task_id, settlement.payer if settlement is not None else None)
+    disputes = await dispute_svc.list_for_task(task_id)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
