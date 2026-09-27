@@ -522,18 +522,25 @@ def test_both_paths_report_a_degraded_reputation_snapshot(seeded: object, monkey
     assert _run_kit(monkeypatch, healthy).reputation_degraded is False
     assert _run_free_form(monkeypatch, healthy, ["agt_11c0"]).reputation_degraded is False
 
-    # Same scores, but every one of them is a prior standing in for a read
-    # that failed — the shape fetch_reps returns during a Soroban outage.
+    # A partial outage: every read failed and was served the prior — except
+    # the one agent whose read DID land, with evidence that sinks it. The prior
+    # clears the floor, so the degraded agents fail open; the evidence that
+    # arrived must still decide its agent's verdict, on both paths, even when
+    # the planner names that agent.
+    known_bad = UNSUBSTITUTABLE_KIT_AGENT
     outage = {a.id: _rep(a.id, smoothed=7000, lower=5677, degraded=True) for a in state.list_agents()}
+    outage[known_bad] = _sub_floor(known_bad)
     kit = _run_kit(monkeypatch, outage)
-    free_form = _run_free_form(monkeypatch, outage, ["agt_11c0"])
+    free_form = _run_free_form(monkeypatch, outage, [known_bad, "agt_11c0"])
 
-    assert kit.reputation_degraded is True
-    assert free_form.reputation_degraded is True
-
-    # Fail-open, not fail-empty: the outage must not cost the buyer a plan.
-    assert kit.steps
-    assert free_form.steps
+    for resp in (kit, free_form):
+        assert resp.reputation_degraded is True
+        # Fail-open for the agents nothing is known about — the outage must not
+        # cost the buyer a plan — and never for the one something is known about.
+        assert resp.steps
+        assert known_bad not in [s.agent_id for s in resp.steps]
+        assert _reported(resp) == [("excluded", known_bad, "below_floor", SUB_FLOOR_LOWER_BPS, resp.floor_bps)]
+        assert all(s.rep_degraded for s in resp.steps)
 
 
 def test_both_paths_report_unbound_agents_the_same_way(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
