@@ -236,7 +236,8 @@ class Runner:
     def stopped(self, exc: Stop) -> int:
         self.say(f"STOPPED (exit {exc.code}): {exc.message}")
         if self.state.run_id and not self.cfg.dry_run and self.log.directory.exists():
-            self.state.stopped = {"code": exc.code, "message": exc.message, "utc": utc_now()}
+            message = self.console.redactor.scrub(exc.message)
+            self.state.stopped = {"code": exc.code, "message": message, "utc": utc_now()}
             self.save()
             self.note("run", "run_stopped", exc.message, exit_code=exc.code)
         return exc.code
