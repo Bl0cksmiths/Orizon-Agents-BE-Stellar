@@ -187,6 +187,7 @@ def substitution(designated: Agent, replacement: Agent, info: RepInfo | None) ->
         floor_bps=settings.reputation_floor_bps,
         count=_count(info),
         dispute_rate_bps=_dispute_rate(info),
+        awaiting_fresh_read=_awaiting_fresh_read(info),
     )
 
 
