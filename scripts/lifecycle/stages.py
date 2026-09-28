@@ -387,7 +387,10 @@ class Runner:
         sac = self.network.get("asset_sac")
         if sac:
             balance = chain.sac_balance(str(sac), buyer, buyer)
-            self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
+            if balance is None:
+                self.say(f"buyer {buyer} does not exist on testnet: fund it (friendbot) before a real run")
+            else:
+                self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
         self.say("")
         self.say("DRY RUN — nothing was built, signed or submitted. The plan:")
         steps = {
@@ -504,7 +507,10 @@ class Runner:
         chain, buyer = self.need_chain(), self.need_buyer().public_key
         owners = self.owners_for(agent_ids)
         sac = str(self.network.get("asset_sac") or "")
-        balances = {addr: chain.sac_balance(sac, addr, buyer) for addr in dict.fromkeys([buyer, *owners.values()])}
+        read = {addr: chain.sac_balance(sac, addr, buyer) for addr in dict.fromkeys([buyer, *owners.values()])}
+        if read.get(buyer) is None:
+            raise Stop(EXIT_REFUSED, f"the buyer {buyer} does not exist on testnet; fund it (friendbot) first")
+        balances = {addr: value for addr, value in read.items() if value is not None}
         self.state.owners = owners
         self.state.balances_before = balances
         self.save()
@@ -869,7 +875,8 @@ class Runner:
         owners = self.state.owners or {}
         sac = str(self.network.get("asset_sac") or "")
         addresses = list(dict.fromkeys([buyer, *owners.values()]))
-        after = {a: chain.sac_balance(sac, a, buyer) for a in addresses} if before else {}
+        read = {a: chain.sac_balance(sac, a, buyer) for a in addresses} if before else {}
+        after = {a: value for a, value in read.items() if value is not None}
         auth = self.state.authorize or {}
         fee = chain.fee_charged(str(auth["tx_hash"])) if auth.get("tx_hash") and before else None
         settler = ((self.api.readiness() or {}).get("ratings") or {}).get("signer")
