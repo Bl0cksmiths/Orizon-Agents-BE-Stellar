@@ -23,6 +23,7 @@ runs. That is logged on every paid execute, so it is never silent.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import re
@@ -456,3 +457,76 @@ def claim(auth_id_hex: str, task_id: str) -> None:
 def forget_claims() -> None:
     """Drop every claim (tests; a process never needs it)."""
     _claims.clear()
+
+
+# ── custody release on a refusal ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Release:
+    """A release was attempted. `tx_hash` is set only when it CONFIRMED."""
+
+    tx_hash: str | None
+
+
+async def release(auth_id_hex: str, *, reason: str) -> str | None:
+    """Hand the authorization's whole custody back to its payer. Never raises.
+
+    Delegates to `execution_svc.release_authorization` (the settle lane's
+    full-release `settle` with no payouts; a no-op on v1), looked up at call
+    time: it is that lane's to write, and a deployment without it releases
+    nothing rather than failing the request. Returns the tx hash when the
+    release confirmed, else None.
+    """
+    from . import execution_svc
+
+    release_authorization = getattr(execution_svc, "release_authorization", None)
+    if release_authorization is None:
+        logger.warning(
+            "authorization %s not released (%s): no release_authorization in this build", auth_id_hex, reason
+        )
+        return None
+    try:
+        result = release_authorization(auth_id_hex, reason=reason)
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception:
+        logger.exception(
+            "authorization %s release (%s) raised; custody stays reclaimable after expiry", auth_id_hex, reason
+        )
+        return None
+    return result if isinstance(result, str) and result else None
+
+
+async def release_if_owned(auth_id_hex: str, payer: str, plan_id: str, *, reason: str) -> Release | None:
+    """Release the authorization only if it is live and is `payer`'s, for `plan_id`.
+
+    For a refusal that means this authorization can never pay for a run: its
+    plan expired or is gone (its label can never match another plan), or the
+    service refused it for capacity. None when nothing was attempted — v1, an
+    unreadable chain, or an authorization that failed ownership. Never release
+    what failed ownership: that custody may be someone else's, and whoever
+    sent its public id has no say over it. Call with `exclusive` held and after
+    `refuse_if_claimed`, so a claimed authorization — one funding a run — is
+    never released under it.
+    """
+    try:
+        verified = await verify_ownership(auth_id_hex, payer, plan_id)
+    except AuthorizationRefused as e:
+        logger.info("authorization %s not released (%s): %s", auth_id_hex.lower(), reason, e.code)
+        return None
+    return await release_verified(verified, reason=reason)
+
+
+async def release_verified(verified: Verified, *, reason: str) -> Release | None:
+    """Release an authorization `verify` already passed; None (nothing attempted) on v1."""
+    if not verified.enforced:
+        return None
+    tx_hash = await release(verified.auth_id_hex, reason=reason)
+    logger.warning(
+        "authorization %s released after a refused execute (%s): %s",
+        verified.auth_id_hex,
+        reason,
+        f"tx {tx_hash}" if tx_hash else "did not confirm; reclaimable after expiry",
+    )
+    return Release(tx_hash=tx_hash)
