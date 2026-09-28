@@ -167,13 +167,44 @@ def test_team_wallet_claimed_as_external_fails(tmp_path: Path) -> None:
     assert "- **Unique operator wallets: 1 of 2 — NOT MET**" in out.out
 
 
-def test_register_is_read_in_any_shape(tmp_path: Path) -> None:
-    register = tmp_path / "flat.json"
-    register.write_text(json.dumps({TEAM: {"who": "lead"}, "nested": [[{"k": OP1}]]}))
+def test_an_account_the_register_only_cites_as_evidence_is_not_ours(tmp_path: Path) -> None:
+    """An entry's `evidence` may name other accounts — the friendbot that
+    funded a key, say. Only declared `address`es are team accounts, so an
+    operator the evidence happens to mention still verifies as external."""
+    register = tmp_path / "cited.json"
+    register.write_text(
+        json.dumps({"wallets": [{"address": TEAM, "role": "team", "evidence": f"funded by {OP1} via friendbot"}]})
+    )
     out = run(healthy_world(), tmp_path, register=register)
-    assert out.code == EXIT_CLAIM_FAILED
-    assert any(f.startswith(f"FAIL: owner {OP1} — not_team_wallet") for f in out.fails())
-    assert out.report()["team_register"]["accounts"] == 2  # TEAM, named only as a key
+    assert out.code == EXIT_OK
+    assert out.report()["team_register"]["accounts"] == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"team": [TEAM]},
+        {"wallets": {"address": TEAM}},
+        {"wallets": [{"role": "team"}]},
+        {"wallets": [{"address": "GNOTAKEY"}]},
+        {"wallets": [TEAM]},
+    ],
+    ids=["no-wallets-list", "wallets-not-a-list", "entry-without-address", "invalid-address", "bare-string-entry"],
+)
+def test_a_register_outside_the_committed_layout_is_refused(tmp_path: Path, body: dict) -> None:
+    register = tmp_path / "odd.json"
+    register.write_text(json.dumps(body))
+    out = run(healthy_world(), tmp_path, register=register)
+    assert out.code == EXIT_REFUSED
+
+
+def test_the_committed_register_loads_with_every_declared_wallet() -> None:
+    from scripts.adoption_report.register import load
+
+    committed = Path(__file__).resolve().parents[1] / "app" / "data" / "team_wallets.json"
+    declared = {entry["address"] for entry in json.loads(committed.read_text())["wallets"]}
+    assert load(committed).accounts == frozenset(declared)
+    assert len(declared) == 8
 
 
 def test_empty_or_missing_register_is_refused(tmp_path: Path) -> None:
