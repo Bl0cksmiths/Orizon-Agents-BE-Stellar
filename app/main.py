@@ -216,9 +216,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # lifetime, with nothing but a redeploy to fix it. A no-op on the healthy
     # path: the load above has already set `_loaded` and no task is created.
     start_refresh_retry()
+    # Wait, bounded, for the registry sync's first pass — started above, so it
+    # has been running alongside the binding load — before the pre-warm reads
+    # the registry. Without this the pre-warm read the seeded catalog alone,
+    # and the first plans after a restart had no on-chain agent in them (S13).
+    # A pass slower than REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS is not cancelled:
+    # boot stops waiting with a WARNING and the loop finishes it. Nothing is
+    # served until this returns — /health included — which is why it is
+    # bounded well inside Render's health-check grace.
+    await registry_sync.wait_first_pass(settings.registry_boot_sync_timeout_seconds)
     # Read every agent's reputation once, in the background, so the first plan
     # after a deploy is routed on the ledger rather than on priors. Last, so
-    # the reads it queues cannot delay anything above.
+    # the reads it queues cannot delay anything above; after the registry
+    # wait, so the on-chain agents that pass indexed are read too.
     reputation_svc.start_prewarm()
     yield
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep

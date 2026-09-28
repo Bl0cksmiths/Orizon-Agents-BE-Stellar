@@ -61,8 +61,10 @@ three reasons:
     that read, stale, which the floor still judges; and a read cut off by the
     deadline keeps running and fills the cache for the next batch. What is
     left failing open is an agent with no read that recent: never read yet
-    (the boot pre-warm covers the registry as it stands at boot), or a chain
-    unreachable for longer than the grace.
+    (the boot pre-warm covers the registry once the sync's first pass is in,
+    or its boot bound has passed), or a chain unreachable for longer than the
+    grace. An agent a rating has just landed on is never among them: its last
+    read is kept, superseded, and refused (`invalidate_rep`).
 
 It is NOT bounded in time. Earlier notes here claimed the window was bounded
 by the read TTL and the batch timeout; both audits disproved that. The TTL
@@ -844,9 +846,10 @@ def start_prewarm() -> None:
     it is routed on the prior. Started in the background so the request that
     woke the instance is not held behind the chain; a plan that arrives while
     it runs joins its in-flight reads instead of issuing its own. Reads the
-    registry as it stands at boot — agents the first registry sync indexes
-    later are read on first use. A no-op while reputation is off or no ledger
-    is configured.
+    registry as it stands once boot has waited, bounded, for the registry
+    sync's first pass (`registry_sync.wait_first_pass`), so on-chain agents
+    are read too; only agents a pass indexes after that bound are read on
+    first use. A no-op while reputation is off or no ledger is configured.
     """
     global _prewarm_task
     if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
