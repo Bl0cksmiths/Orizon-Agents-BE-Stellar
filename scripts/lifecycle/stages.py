@@ -33,7 +33,7 @@ from stellar_sdk import Keypair
 
 from . import verify
 from .api import ApiError, OrizonApi, UnknownOutcome
-from .chain import ChainEvent, ChainReader, Observation
+from .chain import ChainEvent, ChainReader, Observation, RpcError, SimulationError
 from .config import (
     EXIT_OK,
     EXIT_PLAN_MISSING_AGENT,
@@ -221,6 +221,10 @@ class Runner:
             return self.stopped(Stop(EXIT_STAGE_FAILED if self.state.run_id else EXIT_REFUSED, str(exc)))
         except Stop as exc:
             return self.stopped(exc)
+        except KeyboardInterrupt:
+            if self.state.run_id and not self.cfg.dry_run:
+                self.note("run", "run_interrupted", "interrupted by the operator; state saved")
+            raise
         except Exception as exc:
             # Evidence already on disk stays; say where it stopped, then crash
             # loudly. The exception text goes through the redactor like
@@ -271,6 +275,14 @@ class Runner:
 
         start = self.resume_point()
         version, how = self.chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
+        run_escrow = (self.state.authorize or {}).get("escrow")
+        if run_escrow and run_escrow != self.contracts["payment_escrow"]:
+            # A resume across the escrow switch: this run's money went through
+            # the escrow it authorized against, so that is what gets verified.
+            self.say(
+                f"NOTE: this run authorized against {run_escrow}; the API now names {self.contracts['payment_escrow']}"
+            )
+            version, how = self.chain.escrow_version(run_escrow, self.need_buyer().public_key)
         self.state.escrow_version = version
         self.state.network = str(self.network.get("network") or "testnet")
         self.state.agent = self.cfg.agent
@@ -565,6 +577,7 @@ class Runner:
             "expires_at": signed.expires_at,
             "label": label,
             "ttl_seconds": ttl,
+            "escrow": expect.escrow,
         }
         self.save()
         self.say(f"  signed authorize {signed.tx_hash} for {max_amount} (expires {signed.expires_at})")
@@ -729,7 +742,12 @@ class Runner:
         # A resumed run that never recorded where it started scans the last
         # day of ledgers (~5 s each), well inside the RPC's retention window.
         start = self.state.start_ledger or max(1, chain.latest_ledger() - RESUME_SCAN_LEDGERS)
-        events = [e for e in chain.events(self.contracts["reputation_ledger"], start) if e.topics[:1] == ["rated"]]
+        try:
+            events = [e for e in chain.events(self.contracts["reputation_ledger"], start) if e.topics[:1] == ["rated"]]
+        except RpcError as exc:
+            # Each rating below is then recorded as unresolved, with its prefix.
+            self.note("poll", "events_unavailable", f"getEvents refused: {exc}", ledger=start)
+            events = []
         for prefix, agent_id, rating, landed in wanted:
             match = next((e for e in events if e.tx_hash.startswith(prefix) and e.topics[1:2] == [agent_id]), None)
             if match is None:
@@ -776,7 +794,7 @@ class Runner:
     def stage_verify(self) -> None:
         chain, buyer = self.need_chain(), self.need_buyer().public_key
         settlement = self.read_settlement()
-        escrow = self.contracts["payment_escrow"]
+        escrow = (self.state.authorize or {}).get("escrow") or self.contracts["payment_escrow"]
         version = self.state.escrow_version or 1
         if not settlement:
             why = (
@@ -810,7 +828,12 @@ class Runner:
                 job_id_hex=settlement.get("job_id_hex"),
             )
             if charge_seen.ledger:
-                events = chain.events(escrow, charge_seen.ledger, tx_hash=charge_seen.tx_hash)
+                try:
+                    events = chain.events(escrow, charge_seen.ledger, tx_hash=charge_seen.tx_hash)
+                except RpcError as exc:
+                    # A settle older than the RPC's event retention: the
+                    # checks below then fail on missing events, and say why.
+                    self.note("verify", "events_unavailable", f"getEvents refused: {exc}", ledger=charge_seen.ledger)
 
         receipts: list[str] | None = None
         if version >= 2:
@@ -826,7 +849,7 @@ class Runner:
                 checks.append(
                     verify.check_authorization_view(chain.escrow_authorization(escrow, auth_id, buyer), paid, buyer)
                 )
-            checks += self.balance_checks(events, paid)
+            checks += self.balance_checks(events, paid, escrow)
             receipts = verify.charged_receipts(events)
             for e in events:
                 if e.topics[:1] == ["charged"]:
@@ -869,7 +892,7 @@ class Runner:
                 EXIT_VERIFY_FAILED, "the ledger does not show the settlement the API reports; see the checks above"
             )
 
-    def balance_checks(self, events: list[ChainEvent], paid: int) -> list[verify.Check]:
+    def balance_checks(self, events: list[ChainEvent], paid: int, escrow: str) -> list[verify.Check]:
         chain, buyer = self.need_chain(), self.need_buyer().public_key
         before = self.state.balances_before or {}
         owners = self.state.owners or {}
@@ -879,7 +902,7 @@ class Runner:
         after = {a: value for a, value in read.items() if value is not None}
         auth = self.state.authorize or {}
         fee = chain.fee_charged(str(auth["tx_hash"])) if auth.get("tx_hash") and before else None
-        settler = ((self.api.readiness() or {}).get("ratings") or {}).get("signer")
+        settler = self.settler(escrow)
         not_isolatable = {buyer, str(settler)} if settler else {buyer}
         self.note(
             "verify", "balances_after", f"{len(after)} balance(s) read after settle", balances=after, authorize_fee=fee
@@ -889,6 +912,15 @@ class Runner:
             verify.check_buyer_delta(before.get(buyer), after.get(buyer), paid, fee, fee_in_asset),
             *verify.check_operator_deltas(before, after, owners, events, not_isolatable),
         ]
+
+    def settler(self, escrow: str) -> str | None:
+        """The settler, who pays the settle's fee and every refund: v2's own
+        `settler()` view, else `/readiness` — which the frontend's proxy does
+        not forward, so it is None through https://orizons.xyz."""
+        try:
+            return str(self.need_chain().simulate(escrow, "settler", [], self.need_buyer().public_key))
+        except (SimulationError, RpcError):
+            return ((self.api.readiness() or {}).get("ratings") or {}).get("signer")
 
     # ── 6. dispute ──────────────────────────────────────────────
     def stage_dispute(self) -> None:
