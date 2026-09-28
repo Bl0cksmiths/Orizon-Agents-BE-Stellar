@@ -291,6 +291,32 @@ def test_a_degraded_read_at_execute_does_not_strip_an_authorised_step(monkeypatc
     assert not any(m.startswith("step refused") for m in trace)
 
 
+def test_a_read_superseded_by_a_new_rating_does_not_refuse_an_authorised_step(monkeypatch):
+    """A rating landed since the plan was built, and the fresh read is still
+    out, so the batch serves the last on-chain value marked superseded. The
+    floor refuses to judge such a row — and a bound of 7042 is not below a
+    5500 floor, so refusing on it would tell the buyer a falsehood. It is
+    treated like a failed read: the step runs on the scores the buyer
+    authorised, and the trace says so."""
+    monkeypatch.setattr(settings, "reputation_floor_bps", 5500)
+    superseded = _onchain("agt_rated", 7042)
+    superseded._superseded = True
+    assert not reputation_svc.passes_floor(superseded), "precondition: the floor will not judge it"
+    _register(monkeypatch, "agt_rated")
+    _reads(monkeypatch, {"agt_rated": superseded})
+    resolved = _dispatches(monkeypatch, "agt_rated")
+    seen = _settles(monkeypatch)
+
+    trace = _run("tsk_rc_rated", _plan("pln_rc_rated", _step("agt_rated", rep_lower_bound_bps=7042)))
+
+    assert resolved == ["agt_rated"]
+    assert seen["totals"] == [pytest.approx(PRICE)]
+    assert (
+        "reputation re-check unavailable for [agt_rated] — those steps run on the scores this plan was authorised with"
+    ) in trace
+    assert not any(m.startswith("step refused") for m in trace)
+
+
 def test_a_step_the_buyer_authorised_below_the_floor_runs_while_no_worse(monkeypatch):
     """A starvation re-admission: the card flagged it below the floor at 5000
     and the buyer authorised it anyway. A fresh 5000 is exactly what they
