@@ -259,6 +259,9 @@ class RunState:
     read_token: str | None = None
     start_ledger: int | None = None
     balances_before: dict[str, int] | None = None
+    # agent id -> the owner account its payouts land in, read from the live
+    # registry before the money moved.
+    owners: dict[str, str] | None = None
     settlement: dict[str, Any] | None = None
     dispute: dict[str, Any] | None = None
     completed: list[str] = field(default_factory=list)
