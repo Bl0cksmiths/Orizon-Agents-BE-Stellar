@@ -4,11 +4,13 @@ Story 5.02's metric rule is that external means wallets the team does NOT
 control, so an external owner that appears in this register is a failed claim,
 however the API framed it.
 
-The register's exact layout belongs to the backend lane that commits it, so it
-is read by the one rule that cannot drift with that layout: EVERY Stellar
-account strkey (`G...`, checksum-valid) named anywhere in the file, at any
-depth, as a key or a value, is a team account. A register that names none is
-refused, because a check against an empty register proves nothing.
+It is read in the one layout the backend commits and validates at boot,
+`{"wallets": [{"address": "G...", "role": ..., "evidence": ...}]}`, and only
+each entry's `address` is a team account. Scanning the whole file for anything
+key-shaped would count the accounts an entry's `evidence` merely cites — the
+friendbot that funded a key, a contract's admin — as ours. Any other layout,
+or an entry without a checksum-valid `address`, is refused; so is a register
+that declares none, because a check against an empty register proves nothing.
 """
 
 from __future__ import annotations
