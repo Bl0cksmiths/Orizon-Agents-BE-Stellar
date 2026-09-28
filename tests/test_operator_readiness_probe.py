@@ -16,6 +16,7 @@ request, so these tests pin it from three sides:
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from collections.abc import Callable
 from typing import Any
@@ -113,26 +114,30 @@ def test_probe_reuses_the_dispatch_ssrf_guard_and_never_dials_a_blocked_address(
     _assert_coarse(result)
 
 
-def test_the_probe_client_is_built_on_the_pinned_transport():
-    client = readiness._probe_client()
+def test_the_probe_goes_through_the_pinned_transport_with_the_dispatch_connect_bound(monkeypatch):
+    monkeypatch.setattr(readiness, "PROBE_TIMEOUT_SECONDS", 9.0)  # apart from the connect bound
+    transport = readiness._probe_transport()
     try:
-        assert isinstance(client._transport, external_http._PinnedAddressTransport)
-        assert client.follow_redirects is False
-        assert client.timeout.connect == external_http.CONNECT_TIMEOUT_SECONDS
+        assert isinstance(transport, external_http._PinnedAddressTransport)
     finally:
-        asyncio.run(client.aclose())
+        asyncio.run(transport.aclose())
+    timeout = readiness._probe_request(BOUND).extensions["timeout"]
+    assert timeout["connect"] == external_http.CONNECT_TIMEOUT_SECONDS
+    assert timeout["read"] == 9.0
 
 
-def test_an_environment_proxy_cannot_route_the_probe_around_the_pin(monkeypatch):
-    """An HTTPS_PROXY would resolve the name itself, past the guard. httpx
-    mounts env proxies only when no transport is supplied; this pins that."""
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
-    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+def test_the_probe_logs_nothing_that_names_the_endpoint(monkeypatch, caplog):
+    """httpx.AsyncClient logs "HTTP Request: GET <full URL>" at INFO on every
+    request; the probe must not be the thing that writes a bound URL's
+    query-string credential into our log."""
+    caplog.set_level(logging.DEBUG)
     _pin_to(monkeypatch, PUBLIC_V4)
-    seen = _respond_with(monkeypatch, lambda _r: httpx.Response(200))
+    _respond_with(monkeypatch, lambda _r: httpx.Response(200))
 
     assert _probe().outcome == "ok"
-    assert [r.url.host for r in seen] == [PUBLIC_V4]
+    assert SECRET not in caplog.text
+    assert "agent.example" not in caplog.text
+    assert PUBLIC_V4 not in caplog.text
 
 
 @pytest.mark.parametrize(
