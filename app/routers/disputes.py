@@ -469,6 +469,9 @@ class SettlementStepView(BaseModel):
     # settlement, which paid one total for the run (ADR 0010).
     paid_usdc: float | None = None
     receipt_id_hex: str | None = None
+    # Why a delivered v2 step was paid nothing ("free", "no_onchain_owner",
+    # "owner_unreadable", "over_authorized_cap"); null otherwise.
+    unpaid_reason: str | None = None
 
     @classmethod
     def of(cls, step: SettlementStep, fraction: float) -> SettlementStepView:
@@ -487,6 +490,7 @@ class SettlementStepView(BaseModel):
             output_summary=step.output_summary,
             paid_usdc=step.paid_usdc,
             receipt_id_hex=step.receipt_id_hex,
+            unpaid_reason=step.unpaid_reason,
         )
 
 

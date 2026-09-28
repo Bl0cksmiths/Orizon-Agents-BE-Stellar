@@ -853,6 +853,7 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "output_summary": None,
                 "paid_usdc": None,
                 "receipt_id_hex": None,
+                "unpaid_reason": None,
             },
             {
                 "step_index": 1,
@@ -864,6 +865,7 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "output_summary": "Built a landing page with a signup form",
                 "paid_usdc": None,
                 "receipt_id_hex": None,
+                "unpaid_reason": None,
             },
         ],
         "policy": {"credited_fraction": 1.0, "funded_by": "platform", "adjudicated_by": "platform"},
