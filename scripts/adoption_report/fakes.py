@@ -241,7 +241,7 @@ class FakeWorld:
         assert invoke is not None
         contract = Address.from_xdr_sc_address(invoke.contract_address).address
         fn = invoke.function_name.sc_symbol.decode()
-        args = [scval.to_native(a) for a in invoke.args]
+        args: list[Any] = [scval.to_native(a) for a in invoke.args]
 
         def value(v: stellar_xdr.SCVal) -> dict[str, Any]:
             return {"results": [{"xdr": _b64(v), "auth": []}], "latestLedger": self.ledger}
