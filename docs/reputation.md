@@ -404,14 +404,37 @@ three times as far.
 **The next plan sees it.** Reputation reads are cached for
 `REPUTATION_READ_TTL_SECONDS` (15 s), and a plan decomposed inside that window
 would otherwise be routed on the pre-dispute score. So the moment the rating is
-known to be on-chain, that agent's cached entry is dropped, and the next read —
-the next decompose, the next dashboard poll — goes back to the ledger. A read
-that was already in flight when the rating landed is not allowed to write its
-older answer back over it, and a caller arriving afterwards does not join it;
-ADR 0009 D5 has the mechanism. A plan decomposed **before** the rating landed
-keeps the score it was judged on, because that is what it was judged on.
+known to be on-chain, that agent's cached entry is retired (`invalidate_rep`):
+it is never served as a fresh answer again, and the next read goes back to the
+ledger. A read that was already in flight when the rating landed is not allowed
+to write its older answer back over it, and a caller arriving afterwards does
+not join it; ADR 0009 D5 has the mechanism. A plan decomposed **before** the
+rating landed keeps the score it was judged on, because that is what it was
+judged on.
 
-If the dispute rating's submission is unconfirmed, the entry is dropped when a
+**The read is started at once.** `invalidate_rep` also starts that ledger read
+itself, in the background: one per agent (a second rating landing meanwhile
+sends it round once more), at most 64 at a time, and never holding up the
+rating path that called it. A plan or a dashboard poll that arrives while it
+runs joins it; one that arrives after finds the post-dispute score already
+cached. The agents page and the planner see the new score as soon as one ledger
+read allows, not at the next TTL.
+
+**Slow chain: the last score, held off routing — never the prior.** If the next
+read misses the batch deadline before that background read lands, the agent is
+served its last on-chain read, `stale` with its age, and the planner refuses it
+(the row is *superseded*: it predates a rating the ledger now holds). The
+retired entry used to be dropped outright, and that read then fell back to the
+prior: 6983 became 7000, `source: "prior"`, `degraded: true`, `disputed: 0`. The
+agents page showed the disputed agent's score going **up**, and the prior
+clears the floor, so the planner failed open for exactly the agent the dispute
+had landed on. A superseded row is served whatever its age — the stale grace
+bounds what the floor may judge, and the floor judges none of this — and a plan
+that refuses one says why: "rated since its last reputation read (… bps), so
+held off routing until a fresh read answers". An agent that was never read
+before the rating has nothing to keep, and is still the degraded prior.
+
+If the dispute rating's submission is unconfirmed, the entry is retired when a
 later uphold confirms it. Until then the ordinary TTL applies: once it lands,
 it is on every read within 15 seconds regardless.
 
@@ -437,9 +460,16 @@ A stale read is real evidence, only older than the 15 s TTL: the numbers are the
 last on-chain read, scored exactly as they were, and the routing floor is
 applied to them — a sub-floor agent stays sub-floor. It is served only while
 that read is younger than the TTL plus `REPUTATION_STALE_GRACE_SECONDS` (300 s),
-never after `invalidate_rep` has dropped it (a landed dispute rating), and never
-together with `degraded`. Every batch that serves one logs a single WARNING
-naming the agents and the oldest read's age.
+and never together with `degraded`. Every batch that serves one logs a single
+WARNING naming the agents and the oldest read's age.
+
+One kind of stale read is not judged but refused: a *superseded* one, whose
+read predates a rating that has since landed (`invalidate_rep` ran after it).
+Its numbers are shown — on the wire it is an ordinary stale row, and it is
+served at any age — but `passes_floor` fails it until a read taken after the
+rating answers, which `invalidate_rep` has already started. The flag is the
+planner's, not the client's: `RepInfo.superseded` is a read-only property, not
+a field, so the read routes' mirror model is unchanged.
 
 They are different facts. A cold start is a true statement about one agent. A
 degraded read is a statement about the chain, and it makes *every* agent in the
@@ -482,7 +512,18 @@ came back all-degraded. What holds now:
   served that read, stale, and the floor still judges it. Only an agent with no
   read that recent falls to the prior.
 - **Pre-warmed.** Every agent in the registry at boot is read once in the
-  background, so the first plan after a deploy is not routed on priors.
+  background, so the first plan after a deploy is not routed on priors. Boot
+  first waits for the registry sync's first pass, up to
+  `REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS` (5 s), so on-chain agents are in the
+  registry the pre-warm reads and in the first plans after a restart. A pass
+  slower than that is not cancelled: boot goes ahead with a WARNING, the sync
+  loop finishes it, and the agents it indexes are read on first use. Nothing is
+  served until boot finishes — `/health` included — which is why the wait is
+  bounded (at most 60 s, refused at boot otherwise) and kept well inside
+  Render's health-check grace.
+- **Just rated, never the prior.** An agent a rating has just landed on keeps
+  its last read, superseded and refused, while the post-rating read it
+  triggered is in flight — see "What an upheld dispute does to an agent".
 - **Sized.** A read is one RPC round trip (the `load_account` hop is gone), on
   `REPUTATION_READ_CONCURRENCY` threads reserved for reputation, and the
   service refuses to boot unless the deadline covers
