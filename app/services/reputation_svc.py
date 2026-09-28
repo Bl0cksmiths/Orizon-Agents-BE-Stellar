@@ -35,7 +35,11 @@ evidence: if a fresh read does not answer — the chain is unreachable, or the
 batch deadline passes first — the caller gets the agent's last known on-chain
 read, marked `stale=True` with its age, while one younger than the read TTL
 plus REPUTATION_STALE_GRACE_SECONDS exists; otherwise the prior, marked
-`source="prior"` and `degraded=True`.
+`source="prior"` and `degraded=True`. A read a landed rating has made obsolete
+(`invalidate_rep`) is the exception on both counts: it is served at any age,
+marked `superseded` as well, and the routing floor refuses it until a read
+taken after the rating answers — so a just-disputed agent is shown its last
+real score and routed on nothing, never on the prior.
 
 Degradation policy (deliberate, not accidental) — when an agent's ledger
 read cannot be had and there is no recent read to serve stale, that agent
@@ -83,7 +87,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from ..config import settings
 
@@ -139,8 +143,28 @@ class RepInfo(BaseModel):
     stale: bool = False
     # Seconds since the served evidence was read from the ledger. Set only
     # when `stale`, else None. Never above the read TTL plus
-    # REPUTATION_STALE_GRACE_SECONDS: an older entry is not served.
+    # REPUTATION_STALE_GRACE_SECONDS on a row the floor judges; a superseded
+    # row (below) is served at any age, because the floor refuses it whatever
+    # its age.
     stale_age_seconds: float | None = None
+    # True on a stale row whose read PREDATES a rating that has since landed:
+    # `invalidate_rep` ran after it was read, so the ledger now holds evidence
+    # these numbers do not include. Shown rather than dropped, so a score never
+    # jumps to the prior the moment a dispute lands (6983 → 7000 was the S8
+    # defect), but never routed on: `passes_floor` refuses it until a read
+    # taken after the rating answers. Only ever set together with `stale`.
+    #
+    # A private attribute behind a read-only property, not a field: the read
+    # routes answer through a mirror model (routers/stellar.py ReputationInfo)
+    # that has to declare every field, and the flag is the planner's business.
+    # On the wire the row reads as what it is to a viewer — `stale`, with its
+    # age. Private attributes survive `model_copy`, so a row keeps the flag
+    # through any copy the planner makes of it.
+    _superseded: bool = PrivateAttr(default=False)
+
+    @property
+    def superseded(self) -> bool:
+        return self._superseded
 
 
 def prior_weight_stroops() -> int:
@@ -263,9 +287,18 @@ def passes_floor(info: RepInfo | None) -> bool:
     the single authority on what is routable. With the default config that
     means an outage fails open — deliberately, and now loudly logged by
     `_log_degraded`; see the module docstring for why.
+
+    A `superseded` row IS special-cased, and fails closed: its numbers predate
+    a rating that has landed since, so its lower bound is a claim about an
+    agent the ledger has already moved — downward, after a dispute. Judging it
+    would route a just-disputed agent on its pre-dispute score; failing it
+    means that agent waits for one fresh read, which `invalidate_rep` has
+    already started. The window is the time a read takes, not a TTL.
     """
     if info is None:
         return True
+    if info.superseded:
+        return False
     return info.lower_bound_bps >= settings.reputation_floor_bps
 
 
@@ -525,14 +558,21 @@ def _log_stale(infos: list[RepInfo], total: int, reason: str) -> None:
     if len(ids) > _DEGRADED_LOG_AGENT_LIMIT:
         shown = f"{shown}, +{len(ids) - _DEGRADED_LOG_AGENT_LIMIT} more"
     oldest = max(info.stale_age_seconds or 0.0 for info in infos)
+    superseded = sum(1 for info in infos if info.superseded)
+    held = (
+        f"; {superseded} of them rated since that read and held off routing until a fresh read answers"
+        if superseded
+        else ""
+    )
     logger.warning(
         "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — the routing "
-        "floor is still applied to that evidence (oldest read %.1f s ago)",
+        "floor is still applied to that evidence (oldest read %.1f s ago)%s",
         len(ids),
         total,
         shown,
         reason,
         oldest,
+        held,
     )
 
 
@@ -558,22 +598,30 @@ def _stale_info(agent_id: str) -> RepInfo | None:
     REPUTATION_STALE_GRACE_SECONDS ago, or when it does not score (it was
     stored before a check that now refuses it). The age is measured from
     when the read was stored: its expiry minus the read TTL.
+
+    A read `invalidate_rep` has superseded is served whatever its age, marked
+    `superseded`. The grace bounds how old evidence the floor may JUDGE, and
+    the floor judges none of this — it refuses it (`passes_floor`) — so the
+    grace has nothing to protect here. What it would do is swap the agent's
+    real, older score for the prior, which clears the floor: the one agent a
+    dispute just landed on would become routable because of it.
     """
     from ..stellar import cache as rcache
 
     last = rcache.last_stored(_rep_cache_key(agent_id))
     if last is None:
         return None
-    state, expiry = last
-    past_expiry = time.monotonic() - expiry
-    if past_expiry > settings.reputation_stale_grace_seconds:
+    past_expiry = time.monotonic() - last.expiry
+    if not last.superseded and past_expiry > settings.reputation_stale_grace_seconds:
         return None
     try:
-        info = _info_from_state(agent_id, state)
+        info = _info_from_state(agent_id, last.value)
     except Exception:
         return None
     age = max(0.0, settings.reputation_read_ttl_seconds + past_expiry)
-    return info.model_copy(update={"stale": True, "stale_age_seconds": round(age, 1)})
+    served = info.model_copy(update={"stale": True, "stale_age_seconds": round(age, 1)})
+    served._superseded = last.superseded
+    return served
 
 
 def _fallback(agent_id: str) -> RepInfo:
@@ -819,7 +867,7 @@ async def stop_prewarm() -> None:
 
 
 def invalidate_rep(agent_id: str) -> None:
-    """Forget the cached rep_state for one agent, so the next read goes back
+    """Retire the cached rep_state for one agent, so the next read goes back
     to the ledger.
 
     Call it once a rating for the agent has LANDED — a dispute rating above
@@ -829,10 +877,16 @@ def invalidate_rep(agent_id: str) -> None:
     read already in flight when this runs is detached rather than cancelled,
     and cannot write its pre-rating result back (`app.stellar.cache.invalidate`).
 
-    Dropping the key also drops the read that would otherwise be served
-    STALE past its TTL (`_stale_info`): a value the caller has just declared
-    wrong must not come back as the "last known" one while a slow fresh read
-    is in flight.
+    The stored read is KEPT, marked superseded, not dropped. Dropping it was
+    the S8 defect: a next read that missed the batch deadline then had no last
+    known value to fall back on and served the prior — 6983 became 7000,
+    `source=prior`, `degraded=true` — so the agent a dispute had just landed on
+    cleared the floor and its score went UP on the agents page. Kept, it is
+    what that slow read serves instead (`_stale_info`): the last on-chain
+    numbers, `stale` with their age and `superseded`, which `passes_floor`
+    refuses. The page shows a real, older score; the planner routes nothing
+    on it. A read that answers — this one's own refresh below, or any other —
+    replaces it, and the flag with it.
 
     This one key is enough because it is the only cache in front of
     reputation: `fetch_rep`, `fetch_reps`, both /api/stellar/reputation routes,
