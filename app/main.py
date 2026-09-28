@@ -92,6 +92,13 @@ _log_handler.addFilter(RequestIdLogFilter())
 _log_handler.addFilter(SecretRedactionLogFilter())
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 
+# httpx logs "HTTP Request: POST <full URL>" at INFO for every request an
+# AsyncClient sends. External dispatch posts to an operator's bound endpoint,
+# whose URL can carry a query-string token, so at INFO every dispatch wrote that
+# URL into our logs — against ADR 0003's rule to log the host, never the URL.
+# Held at WARNING: the app logs what it dispatched itself, without the URL.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # agno gives its loggers a Rich console handler of their own and switches
 # propagation off, so its lines bypassed everything above: no JSON, no request
 # id, and no redaction — while it logs a provider's error text verbatim at
