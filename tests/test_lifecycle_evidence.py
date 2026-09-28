@@ -89,6 +89,7 @@ def test_state_is_written_owner_only_and_round_trips(tmp_path: Path) -> None:
     state.done("decompose")
     store.save(state)
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+    assert "state.json" in (tmp_path / ".gitignore").read_text().splitlines()
     loaded = store.load()
     assert loaded == state and loaded.completed == ["decompose"]
 
