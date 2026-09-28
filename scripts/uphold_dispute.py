@@ -971,7 +971,11 @@ async def read_standing(agent_id: str) -> reputation_svc.RepInfo | None:
     unreadable ledger with the cold-start prior marked `degraded`, and that
     prior printed as a dispute rate would give the agent a clean record the
     ledger may well contradict. With reads switched off it answers the prior
-    too, undegraded, for the same non-reason, so that is None as well.
+    too, undegraded, for the same non-reason, so that is None as well. And a
+    `superseded` answer is None too: it is the agent's read from BEFORE the
+    invalidation above, served because the fresh one did not answer, and
+    printed as "after this run" it would put the pre-rating rate beside the
+    rating that moved it.
     """
     if not settings.reputation_enabled:
         return None
@@ -981,7 +985,7 @@ async def read_standing(agent_id: str) -> reputation_svc.RepInfo | None:
     except Exception as exc:
         logger.warning("could not read agent %s's reputation: %s: %s", agent_id, type(exc).__name__, exc)
         return None
-    return None if info.degraded else info
+    return None if info.degraded or info.superseded else info
 
 
 def report_standing(agent_id: str, before: reputation_svc.RepInfo | None, after: reputation_svc.RepInfo | None) -> None:
