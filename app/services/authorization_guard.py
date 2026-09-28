@@ -280,8 +280,11 @@ async def verify_ownership(auth_id_hex: str, payer: str, plan_id: str) -> Verifi
 
 
 def forget_versions() -> None:
-    """Drop every cached escrow version (tests; a process never needs it)."""
+    """Drop every cached escrow version, the client's shared cache included (tests; a process never needs it)."""
     _versions.clear()
+    forget_shared = getattr(sc, "forget_escrow_versions", None)
+    if callable(forget_shared):
+        forget_shared()
 
 
 # ── reclaim pre-check ───────────────────────────────────────────────────

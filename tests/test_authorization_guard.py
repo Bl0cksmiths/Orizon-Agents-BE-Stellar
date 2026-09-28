@@ -175,9 +175,9 @@ class SharedVersion:
 
 
 def test_the_clients_shared_version_read_is_used_when_it_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    escrow = install(monkeypatch, FakeEscrow(version=RuntimeError("the fallback must not run")))
     shared = SharedVersion(2)
     monkeypatch.setattr(sc, "escrow_version", shared, raising=False)
-    escrow = install(monkeypatch, FakeEscrow(version=RuntimeError("the fallback must not run")))
     assert asyncio.run(guard.escrow_version()) == 2
     assert shared.calls == [ESCROW] and escrow.calls == []
 

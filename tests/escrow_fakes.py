@@ -79,4 +79,29 @@ def use_escrow(monkeypatch: pytest.MonkeyPatch, escrow: str) -> None:
 
 def install(monkeypatch: pytest.MonkeyPatch, escrow: FakeEscrow) -> FakeEscrow:
     monkeypatch.setattr(sc, "simulate_read", escrow)
+    if hasattr(sc, "escrow_version"):
+        # A build with the settle lane's client helper reads the version through
+        # it, and it simulates below `simulate_read`. Answer it from the same
+        # fake, with its contract: a missing function is 1, a definite answer
+        # is cached, anything else raises and is not.
+        monkeypatch.setattr(sc, "escrow_version", SharedVersionShim(escrow))
     return escrow
+
+
+class SharedVersionShim:
+    def __init__(self, escrow: FakeEscrow) -> None:
+        self.escrow = escrow
+        self.cache: dict[str, int] = {}
+
+    def __call__(self, contract_id: str) -> int:
+        if contract_id in self.cache:
+            return self.cache[contract_id]
+        try:
+            value = self.escrow(contract_id, "version")
+        except RuntimeError as e:
+            if "non-existent contract function" not in str(e):
+                raise
+            value = 1
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            self.cache[contract_id] = value
+        return value
