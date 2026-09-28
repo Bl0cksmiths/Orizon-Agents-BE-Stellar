@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import EXPLORER_TX
+from .redact import Redactor
 
 JSONL_NAME = "lifecycle.jsonl"
 MARKDOWN_NAME = "lifecycle.md"
@@ -97,10 +98,16 @@ def tx_row(
 
 
 class EvidenceLog:
-    """Append-only JSONL plus its Markdown rendering, in one directory."""
+    """Append-only JSONL plus its Markdown rendering, in one directory.
 
-    def __init__(self, directory: Path) -> None:
+    Every row is written through the run's redactor, like every printed line:
+    a row quoting a server's error message may quote whatever the server
+    echoed back, and a FastAPI validation error echoes its input.
+    """
+
+    def __init__(self, directory: Path, redactor: Redactor | None = None) -> None:
         self.directory = directory
+        self.redactor = redactor
         self.jsonl = directory / JSONL_NAME
         self.markdown = directory / MARKDOWN_NAME
 
@@ -124,6 +131,8 @@ class EvidenceLog:
         self.directory.mkdir(parents=True, exist_ok=True)
         row.seq = len(self.rows()) + 1
         line = json.dumps(asdict(row), sort_keys=True, ensure_ascii=False)
+        if self.redactor is not None:
+            line = self.redactor.scrub(line)
         # A torn last line (a crash mid-write) has no newline; without one here
         # this row would be glued onto it and lost with it.
         torn = self.jsonl.exists() and self.jsonl.stat().st_size > 0 and not self.jsonl.read_bytes().endswith(b"\n")
