@@ -325,6 +325,20 @@ def test_never_prints_or_records_a_secret(world: FakeWorld, buyer: Keypair, tmp_
     assert stat.S_IMODE((tmp_path / "state.json").stat().st_mode) == 0o600
 
 
+def test_a_server_that_echoes_the_signed_envelope_is_redacted(buyer: Keypair, tmp_path: Path) -> None:
+    """The output path redacts, not just the happy path's choice of words: a
+    422 that quotes the signed envelope back reaches the terminal masked."""
+    world = FakeWorld(buyer=buyer.public_key, submit_mode="echo_422", submit_lands=False)
+    result = run(world, buyer, tmp_path)
+    assert result.code == EXIT_STAGE_FAILED
+    signed = world.call_log("/api/stellar/submit")[0]["json"]["signed_xdr"]
+    assert "validation_error" in result.out and "[redacted]" in result.out
+    assert signed not in result.out
+    assert signed not in (tmp_path / "lifecycle.jsonl").read_text()
+    assert signed not in (tmp_path / "lifecycle.md").read_text()
+    assert signed not in (tmp_path / "state.json").read_text()
+
+
 # ── crash and unknown outcomes ──────────────────────────────────
 def test_evidence_survives_a_crash_mid_run(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     world.crash_on = "/api/disputes/challenge"
