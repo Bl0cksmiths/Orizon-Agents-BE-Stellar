@@ -866,6 +866,90 @@ async def stop_prewarm() -> None:
         await asyncio.wait({task})
 
 
+# Post-rating refreshes in progress, one per agent. Bounded, so a burst of
+# ratings (a whole plan's steps settling at once is the common case) cannot
+# become an unbounded number of tasks; past the bound a refresh is skipped,
+# which only means the agent's next reader goes to the ledger itself — the
+# superseded entry already forces that.
+_MAX_REFRESHES = 64
+_refreshes: dict[str, asyncio.Task[None]] = {}
+# Agents invalidated AGAIN while their refresh was running. That refresh is
+# awaiting a read the second invalidation detached — one from before the
+# second rating — so it goes round once more instead of stopping on it.
+_refresh_again: set[str] = set()
+
+
+async def _refresh(agent_id: str) -> None:
+    """Read one agent back from the ledger after a rating landed, no deadline.
+
+    Through `_read_rep`, so the read is the cache's single flight for the key:
+    a plan or a page that asks meanwhile joins it rather than issuing its own,
+    and whoever it answers, its result is what the cache holds next. Bounded
+    by the read client's own RPC timeout, like the boot pre-warm's reads.
+    """
+    while True:
+        _refresh_again.discard(agent_id)
+        _info, failure = await _read_rep(agent_id)
+        if failure is not None:
+            # Nobody is waiting on this read, so it is not a batch to warn
+            # about: the next reader retries it and reports it if it still fails.
+            logger.debug("post-rating reputation refresh for %s failed: %s", agent_id, failure)
+        if agent_id not in _refresh_again:
+            return
+
+
+def _on_refresh_done(agent_id: str, task: asyncio.Task[None]) -> None:
+    if _refreshes.get(agent_id) is task:
+        del _refreshes[agent_id]
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("post-rating reputation refresh for %s died: %s", agent_id, _describe(task.exception()))  # type: ignore[arg-type]
+
+
+def _schedule_refresh(agent_id: str) -> None:
+    """Start reading `agent_id` back from the ledger now, in the background.
+
+    Never blocks and never raises: `invalidate_rep` runs on rating paths that
+    must not wait on, or fail because of, a read. Single-flight per agent — an
+    agent already being refreshed is marked to go round again rather than
+    given a second task — and bounded by `_MAX_REFRESHES`. Nothing to do
+    without a running event loop (a synchronous caller): the superseded entry
+    already sends the next reader to the ledger.
+    """
+    if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    running = _refreshes.get(agent_id)
+    # Same loop too: a task left pending on a loop that has since closed will
+    # never run again, and must not stand in for a refresh on this one.
+    if running is not None and not running.done() and running.get_loop() is loop:
+        _refresh_again.add(agent_id)
+        return
+    if len(_refreshes) >= _MAX_REFRESHES:
+        logger.debug("post-rating reputation refresh for %s skipped: %d already running", agent_id, len(_refreshes))
+        return
+    task = loop.create_task(_refresh(agent_id))
+    _refreshes[agent_id] = task
+    task.add_done_callback(partial(_on_refresh_done, agent_id))
+
+
+async def stop_refreshes() -> None:
+    """Cancel the post-rating refreshes still running (shutdown path).
+
+    Cancelling a refresh abandons only its wait: the read under it runs in the
+    reputation read pool, which `shutdown_read_pool` releases after this.
+    """
+    tasks = [task for task in _refreshes.values() if not task.done()]
+    _refreshes.clear()
+    _refresh_again.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks)
+
+
 def invalidate_rep(agent_id: str) -> None:
     """Retire the cached rep_state for one agent, so the next read goes back
     to the ledger.
@@ -888,6 +972,15 @@ def invalidate_rep(agent_id: str) -> None:
     on it. A read that answers — this one's own refresh below, or any other —
     replaces it, and the flag with it.
 
+    And the read is started HERE, not left to the next reader
+    (`_schedule_refresh`): in the background, single-flight, bounded, never
+    blocking the rating path that called this. A plan or a page load that
+    arrives while it runs joins it; one that arrives after it finds the
+    post-rating value already cached. So the window in which a just-rated
+    agent is held off routing is one ledger read, started at the moment the
+    rating landed, rather than whenever somebody next asked and then the
+    batch deadline on top.
+
     This one key is enough because it is the only cache in front of
     reputation: `fetch_rep`, `fetch_reps`, both /api/stellar/reputation routes,
     the decompose snapshot and the dashboard's trust average all read through
@@ -898,3 +991,4 @@ def invalidate_rep(agent_id: str) -> None:
     from ..stellar import cache as rcache
 
     rcache.invalidate(_rep_cache_key(agent_id))
+    _schedule_refresh(agent_id)
