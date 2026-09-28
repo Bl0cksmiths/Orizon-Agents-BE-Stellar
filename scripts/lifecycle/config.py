@@ -15,13 +15,29 @@ TESTNET_PASSPHRASE = "Test SDF Network ; September 2015"
 EXPLORER_TX = "https://stellar.expert/explorer/testnet/tx/{}"
 TESTNET_HORIZON = "https://horizon-testnet.stellar.org"
 
-# The console authorizes a whole plan under this label (execution-plan.tsx:126),
-# and the escrow v2 interface keeps it as the authorization's label.
+# The authorization's label. v1: the console authorizes a whole plan as
+# `orizon_batch` (execution-plan.tsx on FE main). v2: the frozen interface
+# (contracts repo docs/escrow-v2-interface.md, amended cfa2ca4 "bound the
+# authorization label to the plan id") makes the label the PLAN ID, and the
+# backend refuses to execute a plan against an authorization labelled for
+# another (finding S2). `authorize_label` picks by the escrow's version.
 BATCH_AGENT_ID = "orizon_batch"
-# execution-plan.tsx:127-128: `max_amount_usdc: plan.total_usdc || 0.001`,
-# `ttl_seconds: 600`. Mirrored so the harness authorizes what the dApp would.
+# `plan.total_usdc > 0 ? plan.total_usdc : MIN_CAP` (execution-plan.tsx).
 MIN_AUTHORIZE_AMOUNT = 0.001
+# v1: `ttl_seconds: 600` (FE main). v2: 1800 (FE lib/escrow.ts
+# AUTHORIZE_TTL_SECONDS on feat/5.01-escrow-v2-ui) — a v2 execute is refused
+# when the authorization would expire before a worst-case run could settle.
 AUTHORIZE_TTL_SECONDS = 600
+AUTHORIZE_TTL_SECONDS_V2 = 1800
+
+
+def authorize_label(escrow_version: int, plan_id: str) -> str:
+    return plan_id if escrow_version >= 2 else BATCH_AGENT_ID
+
+
+def authorize_ttl(escrow_version: int) -> int:
+    return AUTHORIZE_TTL_SECONDS_V2 if escrow_version >= 2 else AUTHORIZE_TTL_SECONDS
+
 
 # The nine stages, in order. The name is what `--until` takes and what every
 # evidence row is filed under.
