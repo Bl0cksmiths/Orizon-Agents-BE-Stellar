@@ -374,6 +374,10 @@ async def execute_plan(
     older than `settings.plan_ttl_seconds`. Checked first: a stale plan is refused for
     what it is, whatever the load.
 
+    Raises AuthorizationRefusedError, before any task is minted, when the escrow
+    is v2 and the authorization cannot pay for this run: not the caller's,
+    already spent, smaller than the plan, or expiring before a worst-case run
+    of it could settle (`worst_case_run_seconds`). Against v1 nothing is read.
     """
     if plan_expired(plan):
         logger.warning(
@@ -383,6 +387,10 @@ async def execute_plan(
             settings.plan_ttl_seconds,
         )
         raise PlanExpiredError(plan.id)
+    # Against a v2 escrow, the authorization must be able to pay for this run
+    # (ADR 0010). Read before the capacity check, not after, so nothing awaits
+    # between counting the slots and taking one.
+    authorized_max = await _authorize_for_execute(plan, auth_id_hex, payer) if auth_id_hex and payer else None
     active = sum(1 for t in _background_tasks if not t.done())
     if active >= settings.orchestrator_max_concurrent:
         raise CapacityExhaustedError(f"{active} workflows in flight (limit {settings.orchestrator_max_concurrent})")
@@ -403,7 +411,9 @@ async def execute_plan(
     state.add_task(task)
     state.task_tokens[task_id] = read_token
 
-    _track_background_task(asyncio.create_task(_run(plan, task_id, auth_id_hex=auth_id_hex, payer=payer)))
+    _track_background_task(
+        asyncio.create_task(_run(plan, task_id, auth_id_hex=auth_id_hex, payer=payer, authorized_max=authorized_max))
+    )
     return task_id
 
 
@@ -1295,6 +1305,28 @@ async def _settle_onchain(
 # path, byte for byte, and `_settle_and_record` picks between the two by the
 # escrow's own `version()`.
 
+# The run-time budget an authorization must still have left at `/execute`.
+# Everything below is a ceiling this module or the client already enforces,
+# not a measurement: the re-check's batch read (`reputation_batch_timeout_seconds`,
+# once), then per step the outer deadline (`STEP_TIMEOUT_SECONDS`) plus the
+# lookups and trace writes around it, then the settle itself. The settle's
+# allowance is the submit profile in `client._server` — load_account, prepare
+# and send, each up to 15 s with one retry — plus the transaction's own 30 s
+# validity window for it to close in a ledger, with slack for the owner reads
+# before it. v2 refuses a settle once the ledger's clock passes `expires_at`,
+# so a run that outlives its authorization is work nobody can be paid for.
+STEP_OVERHEAD_SECONDS = 5.0
+SETTLE_ALLOWANCE_SECONDS = 150.0
+
+
+def worst_case_run_seconds(step_count: int) -> float:
+    """The longest a paid run of `step_count` steps can take before its settle lands."""
+    return (
+        settings.reputation_batch_timeout_seconds
+        + step_count * (STEP_TIMEOUT_SECONDS + STEP_OVERHEAD_SECONDS)
+        + SETTLE_ALLOWANCE_SECONDS
+    )
+
 
 async def _escrow_version() -> int:
     """The configured escrow's version: 2 settles, 1 charges.
@@ -1322,6 +1354,79 @@ async def _escrow_version() -> int:
     except Exception as e:
         logger.warning("PaymentEscrow %s version unreadable — settling as v1 this time: %s", escrow, e)
         return 1
+
+
+class AuthorizationRefusedError(CodedHTTPException):
+    """`/execute` refused a v2 authorization before anything ran.
+
+    Raised only against a v2 escrow, where the authorization is custody the
+    settle must be able to spend: one that is not the caller's, already spent,
+    too small for the plan, or too close to expiry to outlive a worst-case run
+    would buy work nobody can be paid for. Before any task is minted, like
+    `PlanExpiredError`, and an HTTP exception for the same reason. Messages
+    say what to do, never a configured limit.
+    """
+
+
+_REAUTHORIZE = "authorize this plan again and execute with the new authorization"
+
+
+async def _authorize_for_execute(plan: StoredPlan, auth_id_hex: str, payer: str) -> int | None:
+    """Check a v2 authorization can pay for `plan`; its max in stroops, or None on v1.
+
+    v1 is left exactly as it was — nothing is read and nothing refused — for
+    the reason `_escrow_version` gives: its charge cannot settle anyway, so a
+    refusal there would only cost the live demo its runs.
+    """
+    from ..stellar import client as sc
+
+    if await _escrow_version() < 2:
+        return None
+    escrow = sc.contract_ids().payment_escrow
+    try:
+        auth = await asyncio.to_thread(sc.escrow_authorization, escrow, bytes.fromhex(auth_id_hex))
+    except Exception as e:
+        logger.warning("execute refused: authorization %s unreadable on %s: %s", auth_id_hex, escrow, e)
+        raise AuthorizationRefusedError(
+            503, "authorization_unreadable", "the authorization could not be read on-chain — try again shortly"
+        ) from e
+    if auth is None:
+        raise AuthorizationRefusedError(404, "authorization_not_found", f"no such authorization — {_REAUTHORIZE}")
+    if auth.payer != payer:
+        # The payer is who a dispute credit is paid to, so a run must never
+        # settle one wallet's custody under another wallet's name.
+        logger.warning("execute refused: authorization %s belongs to %s, not %s", auth_id_hex, auth.payer, payer)
+        raise AuthorizationRefusedError(
+            403, "authorization_payer_mismatch", "this authorization was made by a different wallet"
+        )
+    if auth.settled or auth.revoked:
+        raise AuthorizationRefusedError(
+            409, "authorization_spent", f"this authorization is already spent — {_REAUTHORIZE}"
+        )
+    try:
+        plan_total = sum(_stroops(step.est_price_usdc) for step in plan.plan.steps)
+    except _PayoutRefused:
+        plan_total = auth.max_amount + 1  # a price the ledger cannot hold is one no authorization covers
+    if plan_total > auth.max_amount:
+        raise AuthorizationRefusedError(
+            409, "authorization_insufficient", f"this authorization does not cover the plan — {_REAUTHORIZE}"
+        )
+    remaining = auth.expires_at - _wall_clock()
+    needed = worst_case_run_seconds(len(plan.plan.steps))
+    if remaining < needed:
+        logger.warning(
+            "execute refused: authorization %s has %.0fs left, a %d-step run can need %.0fs",
+            auth_id_hex,
+            remaining,
+            len(plan.plan.steps),
+            needed,
+        )
+        raise AuthorizationRefusedError(
+            409,
+            "authorization_expiring",
+            f"this authorization expires before a run of this plan could be paid for — {_REAUTHORIZE}",
+        )
+    return auth.max_amount
 
 
 def _stroops(amount_usdc: float) -> int:
