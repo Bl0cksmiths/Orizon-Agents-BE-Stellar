@@ -452,11 +452,16 @@ def test_a_release_that_raises_never_reaches_the_route(client: TestClient, monke
     assert (r.status_code, r.json()["release_tx_hash"]) == (503, None)
 
 
-def test_a_build_without_release_authorization_still_answers(client: TestClient, monkeypatch) -> None:
+def test_a_build_without_release_authorization_still_answers(
+    client: TestClient, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.delattr(execution_svc, "release_authorization", raising=False)
     install(monkeypatch, FakeEscrow(auth=live_record(agent_id="pln_9e5a11ed")))
-    r = paid(client, plan_id="pln_9e5a11ed")
+    with caplog.at_level("WARNING", logger="app.services.authorization_guard"):
+        r = paid(client, plan_id="pln_9e5a11ed")
     assert (r.status_code, r.json()["release_tx_hash"]) == (404, None)
+    # Said as what it is — a build without the release — not as a release that raised.
+    assert "no release_authorization in this build" in caplog.text
 
 
 def test_a_synchronous_release_is_accepted(monkeypatch) -> None:
