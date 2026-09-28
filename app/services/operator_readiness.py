@@ -191,19 +191,19 @@ def _inner_transport() -> httpx.AsyncBaseTransport:
     return httpx.AsyncHTTPTransport()
 
 
-def _probe_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(PROBE_TIMEOUT_SECONDS, connect=PROBE_CONNECT_TIMEOUT_SECONDS),
-        # A followed 30x would fetch a URL nobody validated. Dispatch never
-        # follows one either, so a redirect is reported as what it is.
-        follow_redirects=False,
-        # The dispatch path's own SSRF guard: resolves the host, refuses it
-        # unless EVERY address is public, then dials the address it checked,
-        # with SNI and certificate verification still against the name.
-        # Supplying `transport=` is also what keeps an HTTPS_PROXY in the
-        # environment out: httpx mounts env proxies only when none is given.
-        transport=_PinnedAddressTransport(_inner_transport()),
-    )
+def _probe_transport() -> httpx.AsyncBaseTransport:
+    """The dispatch path's own SSRF guard over the socket transport: resolves
+    the host, refuses it unless EVERY address is public, then dials the
+    address it checked, with SNI and certificate verification still against
+    the name."""
+    return _PinnedAddressTransport(_inner_transport())
+
+
+def _probe_request(endpoint_url: str) -> httpx.Request:
+    """The one request the probe sends. The timeouts ride on the request, as
+    httpx.AsyncClient would have put them there."""
+    timeout = httpx.Timeout(PROBE_TIMEOUT_SECONDS, connect=PROBE_CONNECT_TIMEOUT_SECONDS)
+    return httpx.Request("GET", endpoint_url, headers=_PROBE_HEADERS, extensions={"timeout": timeout.as_dict()})
 
 
 def _caused_by(error: BaseException, kind: type[BaseException]) -> bool:
@@ -225,11 +225,19 @@ def _caused_by(error: BaseException, kind: type[BaseException]) -> bool:
     return False
 
 
-async def _get_status(client: httpx.AsyncClient, endpoint_url: str) -> ProbeResult:
-    # stream(), and the body is never read: the status line is the whole
-    # answer, and leaving the context closes the connection.
-    async with client.stream("GET", endpoint_url, headers=_PROBE_HEADERS) as response:
+async def _get_status(transport: httpx.AsyncBaseTransport, endpoint_url: str) -> ProbeResult:
+    # The transport, not an httpx.AsyncClient, and deliberately. The client
+    # logs every request at INFO as "HTTP Request: GET <full URL>", which would
+    # put the bound URL — query-string credentials and all — into our log on
+    # every probe. A bare transport also cannot follow a redirect (a followed
+    # 30x would fetch a URL nobody validated) or pick up an HTTPS_PROXY from
+    # the environment (a proxy would resolve the name past the pin).
+    response = await transport.handle_async_request(_probe_request(endpoint_url))
+    try:
+        # The body is never read: the status line is the whole answer.
         code = response.status_code
+    finally:
+        await response.aclose()
     return ProbeResult("ok" if 200 <= code < 300 else "http_status", status_code=code)
 
 
@@ -246,9 +254,10 @@ async def probe_bound_endpoint(endpoint_url: str) -> ProbeResult:
         validate_endpoint_url(endpoint_url)
     except EndpointPolicyError as e:
         return ProbeResult("endpoint_refused", rule=e.rule)
-    async with _probe_client() as client:
+    transport = _probe_transport()
+    try:
         try:
-            return await asyncio.wait_for(_get_status(client, endpoint_url), timeout=PROBE_TIMEOUT_SECONDS)
+            return await asyncio.wait_for(_get_status(transport, endpoint_url), timeout=PROBE_TIMEOUT_SECONDS)
         except EndpointPolicyError as e:
             outcome: ProbeOutcome = "unresolvable" if e.rule == "unresolvable_host" else "endpoint_refused"
             return ProbeResult(outcome, rule=e.rule)
@@ -262,6 +271,8 @@ async def probe_bound_endpoint(endpoint_url: str) -> ProbeResult:
             return ProbeResult("connection_failed")
         except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as e:
             return ProbeResult("tls_error" if _caused_by(e, ssl.SSLError) else "transport_error")
+    finally:
+        await transport.aclose()
 
 
 def is_quick_tunnel(endpoint_url: str) -> bool:
