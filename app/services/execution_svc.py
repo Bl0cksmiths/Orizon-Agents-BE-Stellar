@@ -1948,6 +1948,10 @@ async def _settle_v2(
                 job_hex,
             )
             await _emit(task_id, start, "error", f"settle status={settle_status} hash={tx}", settlement="failed")
+            if not release:
+                # The ledger rejected it: definitive, nothing moved, so the
+                # custody would sit until the payer reclaims it (S4).
+                await release_authorization(auth_id_hex, reason="settle_rejected")
             return (None, None, None)
         else:
             # `_settle_onchain`'s unconfirmed branch, for the same reasons: it

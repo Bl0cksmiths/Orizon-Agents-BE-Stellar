@@ -466,7 +466,8 @@ def test_a_rejected_settle_is_failed_and_keeps_no_hash(monkeypatch, store):
 
     _run(_plan((0.01,)), "tsk_v2_rejected")
 
-    assert [name for name, _ in chain.calls] == ["settle"]
+    # The rejected settle, then the release of the custody it left behind.
+    assert [_payouts(args) for _, args in chain.calls] == [[{"agent_id": "agt_0", "amount": 100_000}], []]
     task = state.tasks["tsk_v2_rejected"]
     assert (task.settlement, task.charge_tx) == ("failed", None)
 
