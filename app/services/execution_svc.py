@@ -1359,6 +1359,48 @@ async def _escrow_version() -> int:
         return 1
 
 
+# The contract errors a settle of someone's authorization can be refused with
+# that mean "not ours to settle any more": no such authorization, the payer
+# reclaimed it, or it was already settled. None of them moved money.
+_NOT_SETTLED_BY_US = {2: "not_found", 6: "reclaimed", 7: "already_settled"}
+
+
+async def _submit_release(auth_id_hex: str, job_id: bytes) -> tuple[SettlementState, str | None, str]:
+    """Submit an empty v2 `settle`: the whole custody back to the payer.
+
+    Returns (state, tx_hash, detail). Never raises. `state` is `released` only
+    when the transaction CONFIRMED; `unconfirmed` whenever it may still land;
+    `failed` when it definitely moved nothing. The caller has already checked
+    the escrow is v2 and a signing key is set.
+    """
+    from ..stellar import client as sc
+
+    try:
+        result = await sc.invoke_with_server_key_async(
+            sc.contract_ids().payment_escrow,
+            "settle",
+            [
+                sc.addr(sc._signer_keypair().public_key),
+                sc.bytes16(bytes.fromhex(auth_id_hex)),
+                sc.bytes16(job_id),
+                sc.payouts_vec([]),
+            ],
+        )
+    except sc.ContractError as e:
+        return "failed", None, f"refused: {_NOT_SETTLED_BY_US.get(e.code, f'contract error #{e.code}')}"
+    except sc.InFlightError as e:
+        return "unconfirmed", e.tx_hash, f"in flight: {e}"
+    except Exception as e:
+        return "failed", None, f"not submitted: {e}"
+    tx = result.get("hash")
+    status = str(result.get("status") or "")
+    if status == "SUCCESS" and tx:
+        return "released", tx, "confirmed"
+    if status == "FAILED":
+        return "failed", None, f"ledger rejected tx {tx}"
+    return "unconfirmed", tx, f"status={status or 'missing'} tx {tx}"
+
+
 async def release_authorization(auth_id_hex: str, *, reason: str) -> str | None:
     """Return a v2 authorization's whole custody to its payer. Never raises.
 
@@ -1382,6 +1424,38 @@ async def release_authorization(auth_id_hex: str, *, reason: str) -> str | None:
     retried, for `_settle_onchain`'s reason: a second settle of the same
     authorization is a replay at best and a race at worst.
     """
+    try:
+        if await _escrow_version() < 2:
+            logger.info(
+                "release of authorization %s (%s) skipped: escrow is v1, nothing is in custody", auth_id_hex, reason
+            )
+            return None
+        if not settings.stellar_signing_key:
+            logger.error(
+                "release of authorization %s (%s) NOT submitted: STELLAR_SIGNING_KEY not set — the payer can "
+                "reclaim it after expiry",
+                auth_id_hex,
+                reason,
+            )
+            return None
+        if len(bytes.fromhex(auth_id_hex)) != 16:
+            raise ValueError("an authorization id is 16 bytes")
+        outcome, tx, detail = await _submit_release(auth_id_hex, secrets.token_bytes(16))
+    except Exception as e:
+        logger.error("release of authorization %s (%s) NOT submitted: %s", auth_id_hex, reason, e, exc_info=True)
+        return None
+    if outcome == "released":
+        logger.info("released authorization %s to its payer (%s): tx %s", auth_id_hex, reason, tx)
+        return tx
+    if outcome == "unconfirmed":
+        logger.error(
+            "release of authorization %s (%s) is UNCONFIRMED and MAY STILL LAND — never retried: %s",
+            auth_id_hex,
+            reason,
+            detail,
+        )
+    else:
+        logger.error("release of authorization %s (%s) did not happen: %s", auth_id_hex, reason, detail)
     return None
 
 
