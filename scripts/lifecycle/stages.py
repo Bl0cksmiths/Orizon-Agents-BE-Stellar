@@ -502,14 +502,7 @@ class Runner:
     def balances_before(self, agent_ids: list[str]) -> None:
         """Owners and SAC balances before any money moves, for the v2 deltas."""
         chain, buyer = self.need_chain(), self.need_buyer().public_key
-        owners: dict[str, str] = {}
-        for agent_id in dict.fromkeys(agent_ids):
-            try:
-                owner = (self.api.registry_agent(agent_id).get("agent") or {}).get("owner")
-            except ApiError:
-                owner = None  # a seeded agent has no registry record
-            if owner:
-                owners[agent_id] = str(owner)
+        owners = self.owners_for(agent_ids)
         sac = str(self.network.get("asset_sac") or "")
         balances = {addr: chain.sac_balance(sac, addr, buyer) for addr in dict.fromkeys([buyer, *owners.values()])}
         self.state.owners = owners
@@ -522,6 +515,19 @@ class Runner:
             balances=balances,
             owners=owners,
         )
+
+    def owners_for(self, agent_ids: list[str]) -> dict[str, str]:
+        """agent id -> owner, from the LIVE registry (GET /api/stellar/agent/{id}).
+        A seeded agent has no registry record and no owner, and is left out."""
+        owners: dict[str, str] = {}
+        for agent_id in dict.fromkeys(agent_ids):
+            try:
+                owner = (self.api.registry_agent(agent_id).get("agent") or {}).get("owner")
+            except ApiError:
+                owner = None
+            if owner:
+                owners[agent_id] = str(owner)
+        return owners
 
     # ── 2. authorize ────────────────────────────────────────────
     def stage_authorize(self) -> None:
@@ -803,9 +809,12 @@ class Runner:
         receipts: list[str] | None = None
         if version >= 2:
             checks.append(verify.check_tx("v2_settle_tx", charge_seen))
-            charged, paid = verify.check_charged_events(events, settlement)
+            if self.state.owners is None:
+                self.state.owners = self.owners_for([str(s.get("agent_id")) for s in settlement.get("steps") or []])
+                self.save()
+            charged, paid = verify.check_charged_events(events, settlement, self.state.owners)
             max_stroops = (self.state.authorize or {}).get("max_stroops")
-            checks += [charged, verify.check_settled_event(events, settlement, paid, max_stroops)]
+            checks += [*charged, verify.check_settled_event(events, settlement, paid, max_stroops)]
             auth_id = (self.state.authorize or {}).get("auth_id_hex") or verify.settled_auth_id(events)
             if auth_id:
                 checks.append(
