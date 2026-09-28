@@ -2122,6 +2122,7 @@ def _v2_settlement_record(
             output_summary=output_summaries.get(index),
             paid_usdc=amount,
             receipt_id_hex=receipt,
+            unpaid_reason=payout.unpaid_reason,
         )
 
     return SettlementRecord(
