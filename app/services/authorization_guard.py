@@ -27,12 +27,16 @@ import logging
 import math
 import re
 import time
+from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from ..config import settings
 from ..schemas import StoredPlan
 from ..security import CodedHTTPException
+from ..state import state
 from ..stellar import client as sc
 
 logger = logging.getLogger(__name__)
@@ -358,3 +362,97 @@ async def verify(auth_id_hex: str, payer: str, plan: StoredPlan) -> Verified:
 def forget_versions() -> None:
     """Drop every cached escrow version (tests; a process never needs it)."""
     _versions.clear()
+
+
+# ── one authorization, one task ─────────────────────────────────────────
+# A v2 authorization is custody for ONE run: the first `settle` spends it and
+# every later one is a `Replay`. A second execute against it would run a whole
+# plan — every step dispatched, every operator's work done — that nobody can
+# pay for, and while the first run is still going it would race the first
+# run's settle. So each authorization may start one task in this process.
+#
+# The durable half is the chain itself. A run that settled left the
+# authorization `settled`, and one the payer reclaimed left it `revoked`, and
+# `check_ownership` refuses both on every execute, after a restart included.
+# What only this process knows is the window before that: a task that is
+# still running, or one that finished without a settle landing. That is what
+# the claims below hold. One worker (render.yaml `--workers 1`) makes this
+# process the whole service; a second worker would have its own claims and
+# could start a second run, so scaling out needs a shared claim (ADR 0011).
+
+# The most claims kept. A claim is only ever made for an authorization the
+# chain verified — real custody the payer locked — so the map is bounded by
+# what callers have actually paid into the escrow; the cap is hygiene on top.
+# A running task's claim is never the one evicted.
+MAX_CLAIMS = 4096
+
+# auth id (lowercase hex) -> the task it started, oldest first.
+_claims: OrderedDict[str, str] = OrderedDict()
+# One lock per authorization under check, and how many requests hold or await
+# it, so the entry goes when the last of them leaves and the map stays bounded
+# by the requests in flight.
+_locks: dict[str, asyncio.Lock] = {}
+_lock_users: dict[str, int] = {}
+
+
+@asynccontextmanager
+async def exclusive(auth_id_hex: str) -> AsyncIterator[None]:
+    """Serialise every execute against one authorization, in this process.
+
+    Held across the claim check, the on-chain read, the task mint and the
+    claim, so two concurrent executes against one authorization cannot both
+    pass the check before either records its claim — the read in between is
+    an await, which is exactly where the event loop would interleave them.
+    Executes against DIFFERENT authorizations never wait on each other.
+    """
+    key = auth_id_hex.lower()
+    lock = _locks.setdefault(key, asyncio.Lock())
+    _lock_users[key] = _lock_users.get(key, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        _lock_users[key] -= 1
+        if _lock_users[key] == 0:
+            del _lock_users[key]
+            _locks.pop(key, None)
+
+
+def claimed_by(auth_id_hex: str) -> str | None:
+    """The task this authorization already started in this process, if any."""
+    return _claims.get(auth_id_hex.lower())
+
+
+def refuse_if_claimed(auth_id_hex: str) -> None:
+    """409 `authorization_used` when the authorization already started a task."""
+    task_id = claimed_by(auth_id_hex)
+    if task_id is None:
+        return
+    task = state.tasks.get(task_id)
+    logger.warning(
+        "execute refused: authorization %s already started task %s (%s)",
+        auth_id_hex.lower(),
+        task_id,
+        task.status if task is not None else "evicted",
+    )
+    raise AuthorizationRefused(
+        409, "authorization_used", f"this authorization has already paid for a run — {_REAUTHORIZE}"
+    )
+
+
+def _running(task_id: str) -> bool:
+    task = state.tasks.get(task_id)
+    return task is not None and task.status == "running"
+
+
+def claim(auth_id_hex: str, task_id: str) -> None:
+    """Record that `auth_id_hex` started `task_id`. Call with `exclusive` held."""
+    _claims[auth_id_hex.lower()] = task_id
+    while len(_claims) > MAX_CLAIMS:
+        evict = next((a for a, t in _claims.items() if not _running(t)), next(iter(_claims)))
+        del _claims[evict]
+
+
+def forget_claims() -> None:
+    """Drop every claim (tests; a process never needs it)."""
+    _claims.clear()
