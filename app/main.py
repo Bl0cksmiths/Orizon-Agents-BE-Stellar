@@ -51,6 +51,7 @@ from .services.binding_registry import refresh_bound_ids, start_refresh_retry, s
 from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
+from .stellar import client as sc
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -644,6 +645,40 @@ class DisputesReadiness(BaseModel):
     reconcile: RefundReconcileReadiness
 
 
+class EscrowReadiness(BaseModel):
+    """Which PaymentEscrow this process settles through, and its version (ADR 0010).
+
+    `version` is 2 when runs are settled per delivered step through custody,
+    1 when they go through v1's `charge`, and null until this process has read
+    it. Never read on the probe's path: the answer is the client's cache, and a
+    probe that finds none starts one background read for the next probe to
+    see, the way `ratings` refreshes. Informational, like the rest.
+    """
+
+    contract: str  # the configured escrow id, public chain data
+    version: int | None
+
+
+_escrow_version_probe: asyncio.Task | None = None
+
+
+def _escrow_readiness() -> EscrowReadiness:
+    """The configured escrow's cached version, kicking one background read if none."""
+    global _escrow_version_probe
+    escrow = settings.stellar_payment_escrow
+    version = sc.cached_escrow_version(escrow) if escrow else None
+    if escrow and version is None and (_escrow_version_probe is None or _escrow_version_probe.done()):
+
+        async def _probe() -> None:
+            try:
+                await asyncio.to_thread(sc.escrow_version, escrow)
+            except Exception as e:
+                logger.warning("readiness: escrow %s version unreadable: %s", escrow, e)
+
+        _escrow_version_probe = asyncio.create_task(_probe())
+    return EscrowReadiness(contract=escrow, version=version)
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. No live network calls, so the probe
     stays cheap and deterministic: everything is config-derived except
@@ -657,6 +692,7 @@ class ReadinessResponse(BaseModel):
     cold_start: ColdStartReadiness  # informational, never gates readiness
     ratings: RatingsReadiness  # informational, never gates readiness
     disputes: DisputesReadiness  # informational, never gates readiness
+    escrow: EscrowReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -717,4 +753,5 @@ async def readiness(response: Response) -> ReadinessResponse:
             store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
             reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
         ),
+        escrow=_escrow_readiness(),
     )
