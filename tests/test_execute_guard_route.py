@@ -19,9 +19,10 @@ from app.config import settings
 from app.routers import orchestrator as orchestrator_router
 from app.schemas import ExecuteRequest, StoredPlan, Task
 from app.services import authorization_guard as guard
-from app.services import execution_svc
+from app.services import execution_svc, orchestrator_svc
 from app.services.execution_svc import CapacityExhaustedError
 from app.state import state
+from app.stellar import client as sc
 
 PLAN_ID = "pln_0a1b2c3d"
 RELEASE_TX = "f" * 64
@@ -416,3 +417,65 @@ def test_a_build_without_release_authorization_still_answers(client: TestClient,
 def test_a_synchronous_release_is_accepted(monkeypatch) -> None:
     monkeypatch.setattr(execution_svc, "release_authorization", lambda a, *, reason: "a" * 64, raising=False)
     assert asyncio.run(guard.release(AUTH, reason="x")) == "a" * 64
+
+
+# ── the simulated path writes nothing on-chain ──────────────────────────
+
+
+async def _no_thinking() -> None:
+    return None
+
+
+async def _drain_workflows() -> None:
+    while pending := [t for t in execution_svc._background_tasks if not t.done()]:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+class ChainSpy:
+    """Records every on-chain write a run attempts, and lets none of them out."""
+
+    def __init__(self) -> None:
+        self.ratings: list[tuple[Any, ...]] = []
+        self.invokes: list[tuple[Any, ...]] = []
+
+    async def submit_rating(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.ratings.append(args)
+        return {"status": "SUCCESS", "hash": "0" * 64}
+
+    async def invoke(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.invokes.append(args)
+        return {"status": "FAILED", "hash": "1" * 64}
+
+
+@pytest.fixture()
+def chain(monkeypatch: pytest.MonkeyPatch) -> ChainSpy:
+    """A deployment that COULD rate: a signing key and a ledger are configured."""
+    spy = ChainSpy()
+    monkeypatch.setattr(orchestrator_svc, "_kit_thinking", _no_thinking)
+    monkeypatch.setattr(settings, "stellar_signing_key", "S" + "A" * 55)
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "C" + "L" * 55)
+    monkeypatch.setattr(execution_svc.rating_writer, "config_gap", lambda: None)
+    monkeypatch.setattr(sc, "submit_rating_async", spy.submit_rating)
+    monkeypatch.setattr(sc, "invoke_with_server_key_async", spy.invoke)
+    return spy
+
+
+def test_a_simulated_run_writes_no_rating_and_nothing_else_on_chain(client: TestClient, chain: ChainSpy) -> None:
+    """The audit's rating farm needs no payment at all if a SIMULATED run rates. It does not."""
+    plan = client.post("/api/orchestrator/decompose", json={"intent": "calculator web app"}).json()
+    task = client.post("/api/orchestrator/execute", json={"plan_id": plan["plan_id"]}).json()
+    assert client.portal is not None
+    client.portal.call(_drain_workflows)
+    assert state.tasks[task["task_id"]].status == "complete"  # the run delivered, so it had something to rate
+    assert chain.ratings == [] and chain.invokes == []
+
+
+def test_the_spy_does_see_a_paid_runs_ratings(client: TestClient, monkeypatch, chain: ChainSpy) -> None:
+    """The contrast that gives the test above its teeth: the same run, paid, on v1, rates every step."""
+    install(monkeypatch, FakeEscrow(version=None))
+    plan = client.post("/api/orchestrator/decompose", json={"intent": "calculator web app"}).json()
+    r = paid(client, plan_id=plan["plan_id"])
+    assert r.status_code == 200
+    assert client.portal is not None
+    client.portal.call(_drain_workflows)
+    assert len(chain.ratings) == len(plan["steps"])
