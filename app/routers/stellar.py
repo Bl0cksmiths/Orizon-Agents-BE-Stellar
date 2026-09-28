@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import _operator_key_scheme, check_operator_key, require_api_key
+from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key
 from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
@@ -816,13 +816,40 @@ class ChargeReq(BaseModel):
     job_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
 
 
+async def _refuse_charge_on_v2() -> None:
+    """409 `charge_unsupported_on_v2` against a v2 escrow.
+
+    An unreadable version is let through to the contract, unlike `/execute`:
+    nothing here is refused on the strength of the answer, and a v2 escrow has
+    no `charge` for the simulation to find, so it fails before anything is
+    signed or sent — exactly as every charge against v2 did before this check.
+    """
+    try:
+        version = await authorization_guard.escrow_version()
+    except authorization_guard.AuthorizationRefused:
+        return
+    if version >= 2:
+        raise CodedHTTPException(
+            409,
+            "charge_unsupported_on_v2",
+            "this escrow is v2, which has no charge — a v2 run is paid by settle, per delivered step, at its end",
+        )
+
+
 @router.post("/server/charge", dependencies=[Depends(require_api_key)])
 async def server_charge(req: ChargeReq) -> dict:
-    """Backend-signed PaymentEscrow.charge (the backend is the `settler` role)."""
+    """Backend-signed PaymentEscrow.charge (the backend is the `settler` role). v1 only.
+
+    PaymentEscrow v2 has no `charge`: a v2 run is paid by `settle`, per
+    delivered step, at the end of the run (ADR 0010). Against a v2 escrow this
+    answers 409 `charge_unsupported_on_v2` rather than a simulation failure
+    that reads like a transient fault.
+    """
     if not settings.stellar_signing_key:
         raise HTTPException(503, "backend signing key not configured")
     if not (0 < req.amount_usdc <= settings.max_charge_usdc):
         raise HTTPException(400, "amount_exceeds_charge_cap")
+    await _refuse_charge_on_v2()
     try:
         aid = bytes.fromhex(req.auth_id_hex)
         jid = bytes.fromhex(req.job_id_hex)
