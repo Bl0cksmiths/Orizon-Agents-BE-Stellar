@@ -111,6 +111,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-028 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#step-1-install-a-wallet`
 - 2026-09-29 · F-029 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
 - 2026-09-29 · F-030 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
+- 2026-09-29 · F-015 · correction to the Workaround cell, which the rules keep as written: the operator dashboard cannot show the full bound URL, because it reads the binding anonymously and gets the host only. The full URL appears once, in the bind response, and afterwards in the agent's own `GET /`. The 5.03 guide says this at `#read-the-binding-back`.
 
 ## Template
 
