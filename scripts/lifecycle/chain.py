@@ -219,7 +219,9 @@ class ChainReader:
         )
         result = self._rpc("simulateTransaction", {"transaction": tx.to_xdr()})
         if result.get("error"):
-            raise SimulationError(str(result["error"])[:300])
+            # The first line names the failure; the rest is the diagnostic
+            # event log, which runs to kilobytes.
+            raise SimulationError(str(result["error"]).strip().splitlines()[0][:300])
         results = result.get("results") or []
         if not results or not results[0].get("xdr"):
             raise SimulationError(f"{function}: simulation returned no value")
@@ -236,9 +238,17 @@ class ChainReader:
             return 1, f"version() absent: {exc}"
         return int(value), "version() view"
 
-    def sac_balance(self, sac_id: str, address: str, source: str) -> int:
-        """`balance(address)` on the asset's SAC, in stroops."""
-        return int(self.simulate(sac_id, "balance", [scval.to_address(address)], source))
+    def sac_balance(self, sac_id: str, address: str, source: str) -> int | None:
+        """`balance(address)` on the asset's SAC, in stroops; None for an account
+        that does not exist. The native SAC traps on a missing account entry
+        (`Error(Contract, #6)`, "account entry is missing") rather than
+        answering 0, and an unfunded account is an answer, not an outage."""
+        try:
+            return int(self.simulate(sac_id, "balance", [scval.to_address(address)], source))
+        except SimulationError as exc:
+            if "Error(Contract, #6)" in str(exc):
+                return None
+            raise
 
     def attestation(self, registry_id: str, job_id_hex: str, source: str) -> dict[str, Any] | None:
         """AttestationRegistry.get(job_id), or None when nothing is sealed under it."""
