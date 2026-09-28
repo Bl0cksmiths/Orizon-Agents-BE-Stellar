@@ -715,7 +715,25 @@ class AuthorizeReq(BaseModel):
 
 @router.post("/build/authorize", response_model=AuthorizeXdrResponse)
 async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
-    """Build unsigned XDR for PaymentEscrow.authorize (x402 pre-auth)."""
+    """Build unsigned XDR for PaymentEscrow.authorize (x402 pre-auth).
+
+    The signature is the same on both escrow versions, so this builder serves
+    both; what the payer's signature DOES differs (ADR 0010). On v1 it records
+    an allowance that `charge` was meant to spend. On v2 it also moves
+    `max_amount` into the escrow's custody in the same invocation — the payer's
+    one signature covers both — and that custody is paid out per delivered step
+    by the settler's `settle`, the rest returned, or reclaimed by the payer
+    once `expires_at` has passed.
+
+    `ttl_seconds` sets `expires_at`, and on v2 it is a hard deadline: `settle`
+    is refused once the ledger's clock passes it, and `/execute` refuses an
+    authorization whose remaining life cannot cover a worst-case run of the
+    plan (`execution_svc.worst_case_run_seconds`: the re-check's batch read,
+    125 s per step, 150 s for the settle — 902.5 s for the planner's six-step
+    maximum). A client should ask for 1200 s: that covers a six-step run with
+    about five minutes left for the wallet signature and the authorize to
+    confirm. The default below predates v2 and covers only a one-step plan.
+    """
     try:
         expires_at = int(time.time()) + req.ttl_seconds
         args = [
