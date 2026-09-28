@@ -85,7 +85,7 @@ class FakeWorld:
 
     # failure knobs
     health_failures: int = 0
-    submit_mode: str = "ok"  # ok | transport | submit_failed | timeout_status | api_failed_status
+    submit_mode: str = "ok"  # ok | transport | submit_failed | timeout_status | api_failed_status | echo_422
     submit_lands: bool = True  # whether a lost submit reached the ledger anyway
     execute_mode: str = "ok"  # ok | transport | capacity
     open_dispute_mode: str = "ok"  # ok | transport | expired_once | duplicate
@@ -341,6 +341,9 @@ class FakeWorld:
                 "revoked": False,
                 "settled": False,
             }
+        if self.submit_mode == "echo_422":
+            # FastAPI's validation errors quote the offending input back.
+            return _err(422, "validation_error", f"signed_xdr: bad value {body['signed_xdr']!r}")
         if self.submit_mode == "transport":
             raise httpx.ReadTimeout("fake: the submit's answer was lost")
         if self.submit_mode == "submit_failed":
