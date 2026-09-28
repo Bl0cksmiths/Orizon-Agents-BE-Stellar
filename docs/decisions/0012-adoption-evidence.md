@@ -156,9 +156,9 @@ reads both.
   asset (`settlement_svc` reads it as `native`), so the value moved is XLM.
 - **Bindings follow the store.** `bound` is `get_binding_store().get(id) is not
   None`. The endpoint URL is never read into the response, in any form.
-- **v1's missing escrow `admin()` is harmless.** The call answers
-  `MissingValue` and is ignored. It costs one simulate per report computation,
-  at most one every 30 s.
+- **v1 is never asked for `admin()`.** The escrow's version is read first
+  (`sc.escrow_version`, cached per contract), and only v2 is asked for a view
+  it has. Asking v1 would log an RPC error on every report computation.
 
 ## Rejected
 
