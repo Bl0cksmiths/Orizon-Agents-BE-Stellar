@@ -710,7 +710,17 @@ class AuthorizeReq(BaseModel):
     # fails on-chain, after the payer signed the authorization envelope.
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
     max_amount_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
-    ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    # 1800 s by default. On escrow v2, `/execute` refuses an authorization whose
+    # remaining life cannot cover a worst-case run of its plan: the reputation
+    # re-check (2.5 s), 125 s per step and 150 s for the settle — 902.5 s for
+    # the planner's six-step maximum. The TTL starts counting HERE, before the
+    # wallet prompt, the authorize's confirmation and the execute call, so the
+    # old 300 s covered only a one-step plan signed at once. 1800 s leaves
+    # about 15 minutes for all of that on the longest plan. The cost of longer
+    # is the other side: a payer can `reclaim` only after expiry, so custody no
+    # run ever used stays locked for up to this long (a refused execute hands
+    # it back at once; ADR 0011).
+    ttl_seconds: int = Field(default=1800, ge=30, le=3600)
 
 
 @router.post("/build/authorize", response_model=AuthorizeXdrResponse)
