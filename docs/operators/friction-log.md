@@ -100,6 +100,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-019 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
 - 2026-09-29 · F-020 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
 - 2026-09-29 · F-021 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
+- 2026-09-29 · F-022 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#choose-skills-and-a-price`
 
 ## Template
 
