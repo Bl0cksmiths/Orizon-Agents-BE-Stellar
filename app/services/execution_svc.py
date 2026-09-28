@@ -746,7 +746,32 @@ async def _run(
         status = _terminal_status(total_steps, succeeded, last_artifact)
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
-            if succeeded == 0:
+            if succeeded == 0 and await _escrow_version() >= 2:
+                # v2 holds the buyer's funds in custody from `authorize`, so
+                # "bill nothing" is not the same as "do nothing": an empty
+                # `settle` releases every stroop back to them now, instead of
+                # leaving it locked until they reclaim it after expiry. Nothing
+                # is recorded or sealed — there is no delivered work.
+                charge_tx, _, _ = await _settle_v2(
+                    task_id,
+                    start,
+                    plan,
+                    payer=payer,
+                    auth_id_hex=auth_id_hex,
+                    delivered_steps=frozenset(),
+                    authorized_max=authorized_max,
+                )
+                await _submit_ratings(
+                    task_id,
+                    start,
+                    plan,
+                    delivered,
+                    payer=payer,
+                    job_id=unsettled_job_id(task_id),
+                    undispatched=frozenset(undispatched),
+                    first_party_ids=frozenset(first_party_ids),
+                )
+            elif succeeded == 0:
                 # Same rule as the simulated branch below — a workflow that
                 # produced nothing has nothing to attest to, and nothing to
                 # bill: charging here would consume the payer's escrow
