@@ -79,6 +79,8 @@ proposed section with the prefix `proposed:`.
 Append dated notes here when a row's status, 5.03 section or fix changes, for example:
 `2026-10-01 · F-008 · open → documented · 5.03 "Binding your endpoint" covers the exact-URL rule`.
 
+- 2026-09-29 · F-001 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
+
 ## Template
 
 Copy this row into the bottom of the [log](#log) during the session, the moment the friction happens:
