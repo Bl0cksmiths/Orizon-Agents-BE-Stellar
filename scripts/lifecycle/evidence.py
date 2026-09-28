@@ -288,3 +288,8 @@ class StateStore:
 
     def save(self, state: RunState) -> None:
         _atomic_write(self.path, json.dumps(asdict(state), indent=2, sort_keys=True), mode=0o600)
+        # The evidence dir is meant to be committed (docs/evidence/...); the
+        # state file is not, so the directory says so itself.
+        ignore = self.path.parent / ".gitignore"
+        if not ignore.exists():
+            ignore.write_text(f"# the harness's working state holds a task read token; not evidence\n{STATE_NAME}\n")
