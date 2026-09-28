@@ -461,6 +461,26 @@ def test_a_payout_that_does_not_match_its_event_fails_verification(buyer: Keypai
     assert posts(world, "/api/disputes/challenge") == 0
 
 
+def test_an_operator_who_is_the_settler_is_not_isolatable_even_behind_the_proxy(buyer: Keypair, tmp_path: Path) -> None:
+    """Through https://orizons.xyz `/readiness` is unreachable, so the settler
+    comes from escrow v2's own `settler()` view."""
+    world = FakeWorld(buyer=buyer.public_key, readiness_reachable=False, tamper_payout=True)
+    world.owner = world.settler
+    world.balances[world.owner] = 50 * 10_000_000
+    result = run(world, buyer, tmp_path, "--until", "verify")
+    assert result.code == EXIT_OK, result.out
+    (delta,) = [c for c in result.row("settlement_checks")["detail"]["checks"] if c["name"].startswith("v2_operator")]
+    assert delta["ok"] is None and "not isolatable" in delta["detail"]
+
+
+def test_a_settle_past_the_rpcs_event_window_fails_verification_and_says_why(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, events_forgotten=True)
+    result = run(world, buyer, tmp_path, "--until", "verify")
+    assert result.code == EXIT_VERIFY_FAILED
+    assert result.events().count("events_unavailable") == 2  # the ratings' scan and the settle's
+    assert "rating_unresolved" in result.events()
+
+
 def test_a_step_that_did_not_deliver_is_not_charged_and_not_disputable(buyer: Keypair, tmp_path: Path) -> None:
     """AC5: the external agent stopped answering. The run seals, pays nothing
     for the dead step, and the harness will not dispute a step nobody paid for."""
