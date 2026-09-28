@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..agents.registry import get_worker
@@ -372,6 +373,7 @@ async def execute_plan(
     Raises PlanExpiredError — also before any task is minted — when the plan is
     older than `settings.plan_ttl_seconds`. Checked first: a stale plan is refused for
     what it is, whatever the load.
+
     """
     if plan_expired(plan):
         logger.warning(
@@ -411,6 +413,7 @@ async def _run(
     *,
     auth_id_hex: str | None = None,
     payer: str | None = None,
+    authorized_max: int | None = None,
 ) -> None:
     start = time.monotonic()
     spent = 0.0
@@ -797,6 +800,7 @@ async def _run(
                     total_usdc=spent,
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
+                    authorized_max=authorized_max,
                 )
                 # Rated whether or not the money moved, exactly as the
                 # no-success branch above is (ADR 0005 D2). This used to sit
@@ -1259,6 +1263,468 @@ async def _settle_onchain(
     return (charge_tx, proof_tx, settled_job_id)
 
 
+# ── PaymentEscrow v2: custody at authorize, one settle that pays each step ──
+# ADR 0010. v1's `charge` could never move the payer's funds (D-039); v2 holds
+# them from `authorize` and pays each delivered step's operator its own amount
+# in one `settle`, returning the rest. `_settle_onchain` above stays the v1
+# path, byte for byte, and `_settle_and_record` picks between the two by the
+# escrow's own `version()`.
+
+
+async def _escrow_version() -> int:
+    """The configured escrow's version: 2 settles, 1 charges.
+
+    Cached per contract id by the client once it has a definite answer. An
+    UNREADABLE version is read as 1, and is not cached, so the next run asks
+    again. That is the safe reading on both deployments: against v1 it is
+    today's path exactly, and against v2 the v1 `charge` does not exist, so
+    its simulation is refused before anything is signed or sent — the run is
+    marked `failed`, no money moves, and the buyer's custody stays reclaimable
+    after `expires_at`. It never lets a v2 settle go out unchecked, because
+    the v2 checks (`_authorize_for_execute`, the cap re-check) only ever run on
+    a definite 2.
+    """
+    from ..stellar import client as sc
+
+    escrow = sc.contract_ids().payment_escrow
+    if not escrow:
+        return 1
+    cached = sc.cached_escrow_version(escrow)
+    if cached is not None:
+        return cached
+    try:
+        return await asyncio.to_thread(sc.escrow_version, escrow)
+    except Exception as e:
+        logger.warning("PaymentEscrow %s version unreadable — settling as v1 this time: %s", escrow, e)
+        return 1
+
+
+def _stroops(amount_usdc: float) -> int:
+    """`amount_usdc` in stroops, refusing what the ledger cannot hold."""
+    from ..stellar import client as sc
+
+    if not math.isfinite(amount_usdc) or amount_usdc < 0:
+        raise _PayoutRefused(f"price {amount_usdc!r} is not a finite, non-negative amount")
+    return sc.usdc_to_i128(amount_usdc)
+
+
+class _PayoutRefused(Exception):
+    """The payouts for a run cannot be built, so no settle is submitted."""
+
+
+@dataclass(frozen=True)
+class _StepPayout:
+    """What one delivered step is paid, and which `payouts` entry pays it."""
+
+    step_index: int
+    agent_id: str
+    amount: int  # stroops; 0 when the step is not paid
+    payout_index: int | None  # None when the step is not paid
+
+
+@dataclass(frozen=True)
+class _PayoutPlan:
+    """The `payouts` a settle sends, and how every delivered step maps onto them."""
+
+    payouts: tuple[Any, ...]  # client.Payout, kept Any so this module imports the client lazily
+    steps: tuple[_StepPayout, ...]
+
+    @property
+    def total(self) -> int:
+        return sum(p.amount for p in self.payouts)
+
+
+def _payout_plan(plan: StoredPlan, delivered_steps: frozenset[int], unpayable: frozenset[str]) -> _PayoutPlan:
+    """Build `settle`'s payouts from the steps that DELIVERED, and nothing else.
+
+    `delivered_steps` is the run loop's own set — the steps that produced
+    usable output and moved `spent` — so a step that timed out, raised,
+    returned the wrong shape or was never dispatched is not in it and is not
+    paid (5.01 AC5). Each amount is that step's price in stroops.
+
+    Two delivered steps are still not paid: a free one (the contract refuses a
+    zero payout) and one whose agent has no on-chain owner (`unpayable`):
+    `settle` pays `owner_of(agent_id)`, and one missing owner reverts the
+    whole transaction, which would leave every other operator unpaid. Their
+    share stays in custody and goes back to the buyer.
+
+    At most `MAX_SETTLE_PAYOUTS` entries. One entry per step keeps a receipt
+    per step. Past the limit, entries are merged per agent, in first-seen
+    order — every step still paid its own amount, sharing its agent's receipt
+    — and a run with more distinct agents than that is refused whole rather
+    than paid in part. The planner caps a plan at six steps, so neither is
+    reachable from a planned run today; they bound what a stored plan could
+    carry.
+    """
+    from ..stellar import client as sc
+
+    paid: list[tuple[int, str, int]] = []
+    unpaid: list[_StepPayout] = []
+    for index in sorted(delivered_steps):
+        step = plan.plan.steps[index]
+        amount = _stroops(step.est_price_usdc)
+        if amount <= 0 or step.agent_id in unpayable:
+            unpaid.append(_StepPayout(index, step.agent_id, 0, None))
+        else:
+            paid.append((index, step.agent_id, amount))
+
+    payouts: list[Any] = []
+    steps: list[_StepPayout] = list(unpaid)
+    if len(paid) <= sc.MAX_SETTLE_PAYOUTS:
+        for index, agent_id, amount in paid:
+            steps.append(_StepPayout(index, agent_id, amount, len(payouts)))
+            payouts.append(sc.Payout(agent_id, amount))
+    else:
+        slot: dict[str, int] = {}
+        totals: list[int] = []
+        for index, agent_id, amount in paid:
+            if agent_id not in slot:
+                slot[agent_id] = len(totals)
+                totals.append(0)
+            totals[slot[agent_id]] += amount
+            steps.append(_StepPayout(index, agent_id, amount, slot[agent_id]))
+        if len(totals) > sc.MAX_SETTLE_PAYOUTS:
+            raise _PayoutRefused(
+                f"{len(totals)} distinct agents delivered, "
+                f"more than the {sc.MAX_SETTLE_PAYOUTS} payouts one settle accepts"
+            )
+        payouts = [sc.Payout(agent_id, totals[i]) for agent_id, i in slot.items()]
+    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)))
+
+
+async def _unpayable_agents(agent_ids: set[str]) -> frozenset[str]:
+    """The agents among `agent_ids` the registry says have NO owner to pay.
+
+    A read that fails is not "no owner": the agent stays in the payouts and the
+    settle's own simulation decides, so an RPC blip can fail the settle before
+    it is sent but can never quietly drop an operator's pay.
+    """
+    from . import external_binding
+
+    async def _owner(agent_id: str) -> tuple[str, bool]:
+        try:
+            return agent_id, await external_binding.resolve_owner(agent_id) is None
+        except external_binding.OwnerLookupError as e:
+            logger.warning("owner of %s unreadable before settle — keeping it in the payouts: %s", agent_id, e)
+            return agent_id, False
+
+    results = await asyncio.gather(*(_owner(a) for a in sorted(agent_ids)))
+    return frozenset(agent_id for agent_id, missing in results if missing)
+
+
+async def _settle_refused(task_id: str, start: float, auth_id_hex: str, payer: str, reason: str, trace: str) -> None:
+    """Log and trace a settle refused before it was built. Nothing was sent."""
+    logger.error(
+        "task %s: PaymentEscrow.settle NOT submitted — %s (auth %s, payer %s); the buyer's custody stays "
+        "reclaimable after the authorization expires",
+        task_id,
+        reason,
+        auth_id_hex,
+        payer,
+    )
+    await _emit(task_id, start, "error", f"settlement refused before submitting — {trace}", settlement="failed")
+
+
+async def _settle_v2(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    *,
+    payer: str,
+    auth_id_hex: str,
+    delivered_steps: frozenset[int],
+    authorized_max: int | None = None,
+    on_settled: Callable[[str, bytes, _PayoutPlan, list[bytes] | None], Awaitable[None]] | None = None,
+) -> tuple[str | None, str | None, bytes | None]:
+    """PaymentEscrow v2 `settle`, then the attestation seal.
+
+    The v2 twin of `_settle_onchain`, and deliberately the same contract with
+    its caller: returns (settle_tx, proof_tx, job_id), and `on_settled` is
+    awaited the moment the settle CONFIRMS, before the seal, for the reason
+    `_settle_onchain` gives. The outcome lands on the task and its trace as
+    `settlement` (ADR 0010).
+
+    With no delivered steps it is a release: an empty `payouts` returns the
+    buyer's whole custody and pays nobody, and there is nothing to record or
+    seal. The job id is then `unsettled_job_id`, the one the run's ratings are
+    written under anyway.
+
+    Before anything is signed the payouts are built from the delivered steps
+    and their sum is checked against `MAX_CHARGE_USDC` and against the
+    authorization's own max — the contract refuses a sum past the max too
+    (`Insufficient`), but a run that would be refused is said so here, loudly,
+    not discovered in a simulation error.
+
+    An UNCONFIRMED settle is handled exactly as an unconfirmed charge: it may
+    still land, so it is reported `unconfirmed`, no settlement is recorded, and
+    it is NEVER retried — a second settle of one authorization is refused as a
+    replay at best, and at worst would race the first.
+    """
+    from stellar_sdk import scval as _sv
+
+    from ..stellar import client as sc
+
+    settle_tx: str | None = None
+    proof_tx: str | None = None
+    settled_job_id: bytes | None = None
+    job_hex = "-"
+    total = 0
+
+    if not settings.stellar_signing_key:
+        logger.error(
+            "task %s: STELLAR_SIGNING_KEY not set — skipping on-chain settle/seal "
+            "(auth %s, payer %s, %d steps delivered)",
+            task_id,
+            auth_id_hex,
+            payer,
+            len(delivered_steps),
+        )
+        await _emit(
+            task_id, start, "error", "STELLAR_SIGNING_KEY not set — skipping on-chain settle/seal", settlement="failed"
+        )
+        return (None, None, None)
+
+    escrow = sc.contract_ids().payment_escrow
+    try:
+        unpayable = (
+            await _unpayable_agents({plan.plan.steps[i].agent_id for i in delivered_steps})
+            if delivered_steps
+            else frozenset()
+        )
+        payout_plan = _payout_plan(plan, delivered_steps, unpayable)
+    except _PayoutRefused as e:
+        await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
+        return (None, None, None)
+    total = payout_plan.total
+    for unpaid in (s for s in payout_plan.steps if s.payout_index is None and s.agent_id in unpayable):
+        logger.error(
+            "task %s: step %d (%s) delivered but its agent has no on-chain owner — not paid, its share "
+            "returns to the buyer (auth %s)",
+            task_id,
+            unpaid.step_index,
+            unpaid.agent_id,
+            auth_id_hex,
+        )
+        await _emit(task_id, start, "error", f"{unpaid.agent_id} has no on-chain owner — its step is not paid")
+
+    if total > sc.usdc_to_i128(settings.max_charge_usdc):
+        await _settle_refused(
+            task_id,
+            start,
+            auth_id_hex,
+            payer,
+            f"payouts total {total} stroops exceed MAX_CHARGE_USDC={settings.max_charge_usdc}",
+            "the payouts exceed the charge cap",
+        )
+        return (None, None, None)
+    if authorized_max is None and total > 0:
+        try:
+            auth = await asyncio.to_thread(sc.escrow_authorization, escrow, bytes.fromhex(auth_id_hex))
+        except Exception as e:
+            await _settle_refused(
+                task_id, start, auth_id_hex, payer, f"authorization unreadable: {e}", "the authorization is unreadable"
+            )
+            return (None, None, None)
+        if auth is None:
+            await _settle_refused(
+                task_id, start, auth_id_hex, payer, "authorization not found", "the authorization was not found"
+            )
+            return (None, None, None)
+        authorized_max = auth.max_amount
+    if authorized_max is not None and total > authorized_max:
+        await _settle_refused(
+            task_id,
+            start,
+            auth_id_hex,
+            payer,
+            f"payouts total {total} stroops exceed the authorized max {authorized_max}",
+            "the payouts exceed what was authorized",
+        )
+        return (None, None, None)
+
+    release = not payout_plan.payouts
+    total_usdc = total / reputation_svc.STROOPS_PER_USDC
+    try:
+        settler = sc._signer_keypair().public_key
+        auth_id = bytes.fromhex(auth_id_hex)
+        job_id = secrets.token_bytes(16) if delivered_steps else unsettled_job_id(task_id)
+        job_hex = job_id.hex()
+
+        settle = await sc.invoke_with_server_key_async(
+            escrow,
+            "settle",
+            [
+                sc.addr(settler),
+                sc.bytes16(auth_id),
+                sc.bytes16(job_id),
+                sc.payouts_vec(list(payout_plan.payouts)),
+            ],
+        )
+        settle_tx = settle.get("hash")
+        settle_status = str(settle.get("status") or "")
+        if settle_status == "SUCCESS" and settle_tx:
+            settled_job_id = job_id
+            receipts = sc.receipt_ids(settle.get("result"))
+            if receipts is not None and len(receipts) != len(payout_plan.payouts):
+                receipts = None
+            if release:
+                await _emit(
+                    task_id,
+                    start,
+                    "cost",
+                    f"x402 settle → nothing paid, custody released to the buyer · tx {settle_tx[:10]}…",
+                    settlement="released",
+                )
+            else:
+                await _emit(
+                    task_id,
+                    start,
+                    "cost",
+                    f"x402 settle → {total_usdc:.3f} USDC paid to {len(payout_plan.payouts)} "
+                    f"operator payout(s), the rest released · tx {settle_tx[:10]}…",
+                    settlement="settled",
+                )
+            if on_settled is not None and delivered_steps:
+                await on_settled(settle_tx, job_id, payout_plan, receipts)
+        elif settle_status == "FAILED":
+            logger.error(
+                "task %s: PaymentEscrow.settle did not settle — status=%s hash=%s "
+                "(auth %s, payer %s, %d stroops, job %s)",
+                task_id,
+                settle_status,
+                settle_tx,
+                auth_id_hex,
+                payer,
+                total,
+                job_hex,
+            )
+            await _emit(task_id, start, "error", f"settle status={settle_status} hash={settle_tx}", settlement="failed")
+            return (settle_tx, None, None)
+        else:
+            # `_settle_onchain`'s unconfirmed branch, for the same reasons: it
+            # may still land, nothing is recorded, and it is never retried.
+            logger.error(
+                "task %s: PaymentEscrow.settle is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+                "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=%s hash=%s "
+                "(auth %s, payer %s, %d stroops, job %s)",
+                task_id,
+                settle_status or "missing",
+                settle_tx,
+                auth_id_hex,
+                payer,
+                total,
+                job_hex,
+            )
+            await _emit(
+                task_id,
+                start,
+                "error",
+                f"settle unconfirmed status={settle_status or 'missing'} hash={settle_tx} — it may still "
+                "settle, and this run cannot be disputed",
+                settlement="unconfirmed",
+            )
+            return (settle_tx, None, None)
+
+        if not delivered_steps:
+            return (settle_tx, None, settled_job_id)
+
+        # Seal, exactly as v1 does, with one receipt per payout rather than one
+        # for the run: the attestation's link to every payment that funded it.
+        if receipts is None and payout_plan.payouts:
+            logger.error(
+                "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
+                "(result=%r, job %s, settle_tx %s, auth %s, payer %s)",
+                task_id,
+                len(payout_plan.payouts),
+                settle.get("result"),
+                job_hex,
+                settle_tx,
+                auth_id_hex,
+                payer,
+            )
+            await _emit(
+                task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links"
+            )
+        intent_hash = hashlib.sha256(plan.intent.encode("utf-8")).digest()
+        seal = await sc.invoke_with_server_key_async(
+            sc.contract_ids().attestation_registry,
+            "seal",
+            [
+                sc.addr(settler),
+                sc.bytes16(job_id),
+                sc.addr(payer),
+                sc.bytes32(intent_hash),
+                _sv.to_vec([sc.sym(s.agent_id) for s in plan.plan.steps]),
+                _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
+                sc.i128(total),
+            ],
+        )
+        proof_tx = seal.get("hash")
+        if seal.get("status") == "SUCCESS" and proof_tx:
+            await _emit(task_id, start, "proof", f"ERC-8004 attestation sealed · tx {proof_tx[:10]}…")
+            await _emit(
+                task_id,
+                start,
+                "proof",
+                f"workflow sealed — {len(plan.plan.steps)} agents · {total_usdc:.3f} USDC · "
+                f"{time.monotonic() - start:.2f}s",
+            )
+        else:
+            logger.error(
+                "task %s: AttestationRegistry.seal did not settle — status=%s hash=%s "
+                "(job %s settled %d stroops via tx %s, auth %s, payer %s)",
+                task_id,
+                seal.get("status"),
+                proof_tx,
+                job_hex,
+                total,
+                settle_tx,
+                auth_id_hex,
+                payer,
+            )
+            await _emit(task_id, start, "error", f"seal status={seal.get('status')} hash={proof_tx}")
+    except asyncio.CancelledError:
+        logger.error(
+            "task %s: on-chain settle cancelled mid-flight (job %s, auth %s, payer %s, %d stroops, "
+            "settle_tx=%s, proof_tx=%s)",
+            task_id,
+            job_hex,
+            auth_id_hex,
+            payer,
+            total,
+            settle_tx,
+            proof_tx,
+        )
+        raise
+    except Exception as e:
+        logger.error(
+            "task %s: on-chain settle failed: %s (job %s, auth %s, payer %s, %d stroops, settle_tx=%s, proof_tx=%s)",
+            task_id,
+            e,
+            job_hex,
+            auth_id_hex,
+            payer,
+            total,
+            settle_tx,
+            proof_tx,
+            exc_info=True,
+        )
+        if settled_job_id is not None:
+            await _emit(task_id, start, "error", "on-chain settlement failed")
+        elif isinstance(e, sc.InFlightError):
+            await _emit(
+                task_id,
+                start,
+                "error",
+                "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
+                settlement="unconfirmed",
+            )
+        else:
+            await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+
+    return (settle_tx, proof_tx, settled_job_id)
+
+
 def _settled_usdc(total_usdc: float) -> float:
     """What the charge actually moved, back in USDC.
 
@@ -1275,6 +1741,74 @@ def _settled_usdc(total_usdc: float) -> float:
     return sc.usdc_to_i128(max(total_usdc, 0.000001)) / STROOPS_PER_USDC
 
 
+def _v2_settlement_record(
+    task_id: str,
+    plan: StoredPlan,
+    *,
+    payer: str,
+    auth_id_hex: str,
+    job_id: bytes,
+    charge_tx: str | None,
+    proof_tx: str | None,
+    delivered_steps: frozenset[int],
+    output_summaries: Mapping[int, str | None],
+    payout_plan: _PayoutPlan,
+    receipts: list[bytes] | None,
+    settled_at: float,
+    window_closes_at: float,
+) -> SettlementRecord:
+    """The settlement a v2 `settle` leaves: each step as it was actually paid.
+
+    A delivered step's `price_usdc` is what its payout moved (see
+    `SettlementStep.paid_usdc`), so a credit for it can never exceed it. An
+    undelivered step keeps the plan's quote for display, is paid 0.0, and
+    stays undisputable as before. `receipts` is in `payouts` order; a step
+    shares its payout's receipt, and has none when the ids did not decode.
+    """
+    paid = {s.step_index: s for s in payout_plan.steps}
+    stroops = reputation_svc.STROOPS_PER_USDC
+
+    def _step(index: int, step: PlanStep) -> SettlementStep:
+        payout = paid.get(index) if index in delivered_steps else None
+        if payout is None:
+            return SettlementStep(
+                step_index=index,
+                agent_id=step.agent_id,
+                agent_name=step.agent_name,
+                price_usdc=step.est_price_usdc,
+                delivered=False,
+                output_summary=None,
+                paid_usdc=0.0,
+            )
+        amount = payout.amount / stroops
+        receipt = (
+            receipts[payout.payout_index].hex() if receipts is not None and payout.payout_index is not None else None
+        )
+        return SettlementStep(
+            step_index=index,
+            agent_id=step.agent_id,
+            agent_name=step.agent_name,
+            price_usdc=amount,
+            delivered=True,
+            output_summary=output_summaries.get(index),
+            paid_usdc=amount,
+            receipt_id_hex=receipt,
+        )
+
+    return SettlementRecord(
+        task_id=task_id,
+        payer=payer,
+        auth_id_hex=auth_id_hex,
+        job_id_hex=job_id.hex(),
+        charge_tx=charge_tx,
+        proof_tx=proof_tx,
+        settled_usdc=payout_plan.total / stroops,
+        steps=tuple(_step(index, step) for index, step in enumerate(plan.plan.steps)),
+        settled_at=settled_at,
+        window_closes_at=window_closes_at,
+    )
+
+
 async def _record_settlement(
     task_id: str,
     start: float,
@@ -1288,8 +1822,18 @@ async def _record_settlement(
     total_usdc: float,
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
+    payout_plan: _PayoutPlan | None = None,
+    receipts: list[bytes] | None = None,
 ) -> SettlementRecord | None:
     """Write the one record a dispute is later judged against (story 4.02).
+
+    `payout_plan` is given for a v2 settle (ADR 0010), and then the record
+    keeps what each step was ACTUALLY paid: `paid_usdc`, the receipt its
+    payout minted, and — because v2 charges per step — the same amount as the
+    step's `price_usdc`, the number every credit is computed from. A step
+    that delivered and was not paid (free, or an agent with no on-chain owner)
+    is recorded at 0.0 and so cannot be credited. `settled_usdc` is the sum
+    of the payouts, never the plan's estimate.
 
     Nothing else keeps these facts. The job id is minted inside the charge and
     dies with `_settle_onchain`'s frame, the payer is a parameter of `_run`,
@@ -1330,39 +1874,56 @@ async def _record_settlement(
     window_closes_at = settled_at + settings.dispute_window_seconds
 
     try:
-        record = SettlementRecord(
-            task_id=task_id,
-            payer=payer,
-            auth_id_hex=auth_id_hex,
-            job_id_hex=job_id.hex(),
-            charge_tx=charge_tx,
-            proof_tx=proof_tx,
-            settled_usdc=_settled_usdc(total_usdc),
-            steps=tuple(
-                SettlementStep(
-                    step_index=index,
-                    agent_id=step.agent_id,
-                    agent_name=step.agent_name,
-                    # The plan's estimate: the charge moves one total for the
-                    # run, never a price per step. `settled_usdc` below is what
-                    # it moved, and every credit is bounded by that.
-                    price_usdc=step.est_price_usdc,
-                    # A step that failed, or that no worker ever resolved
-                    # for, delivered nothing and was never billed — 4.02
-                    # refuses to dispute it. Same condition that moved
-                    # `succeeded` and `spent` in the run loop.
-                    delivered=index in delivered_steps,
-                    # Already cleaned and bounded by `_stored_summary` in
-                    # the run loop. Gated on delivery here as well, so "an
-                    # undelivered step has no summary" holds where the
-                    # record is built rather than only where it was fed.
-                    output_summary=output_summaries.get(index) if index in delivered_steps else None,
-                )
-                for index, step in enumerate(plan.plan.steps)
-            ),
-            settled_at=settled_at,
-            window_closes_at=window_closes_at,
-        )
+        if payout_plan is not None:
+            record = _v2_settlement_record(
+                task_id,
+                plan,
+                payer=payer,
+                auth_id_hex=auth_id_hex,
+                job_id=job_id,
+                charge_tx=charge_tx,
+                proof_tx=proof_tx,
+                delivered_steps=delivered_steps,
+                output_summaries=output_summaries,
+                payout_plan=payout_plan,
+                receipts=receipts,
+                settled_at=settled_at,
+                window_closes_at=window_closes_at,
+            )
+        else:
+            record = SettlementRecord(
+                task_id=task_id,
+                payer=payer,
+                auth_id_hex=auth_id_hex,
+                job_id_hex=job_id.hex(),
+                charge_tx=charge_tx,
+                proof_tx=proof_tx,
+                settled_usdc=_settled_usdc(total_usdc),
+                steps=tuple(
+                    SettlementStep(
+                        step_index=index,
+                        agent_id=step.agent_id,
+                        agent_name=step.agent_name,
+                        # The plan's estimate: the charge moves one total for the
+                        # run, never a price per step. `settled_usdc` below is what
+                        # it moved, and every credit is bounded by that.
+                        price_usdc=step.est_price_usdc,
+                        # A step that failed, or that no worker ever resolved
+                        # for, delivered nothing and was never billed — 4.02
+                        # refuses to dispute it. Same condition that moved
+                        # `succeeded` and `spent` in the run loop.
+                        delivered=index in delivered_steps,
+                        # Already cleaned and bounded by `_stored_summary` in
+                        # the run loop. Gated on delivery here as well, so "an
+                        # undelivered step has no summary" holds where the
+                        # record is built rather than only where it was fed.
+                        output_summary=output_summaries.get(index) if index in delivered_steps else None,
+                    )
+                    for index, step in enumerate(plan.plan.steps)
+                ),
+                settled_at=settled_at,
+                window_closes_at=window_closes_at,
+            )
         await get_dispute_store().record_settlement(record)
     except Exception as e:
         logger.error(
@@ -1431,8 +1992,14 @@ async def _settle_and_record(
     total_usdc: float,
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
+    authorized_max: int | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Charge, record the settlement, seal, then record the seal — in that order.
+
+    Against a v2 escrow the charge is `_settle_v2`'s one `settle`, paying each
+    delivered step its own amount, and the record keeps those per-step
+    payments and receipts; everything below holds for it unchanged. Which
+    path runs is the escrow's own `version()` (`_escrow_version`).
 
     The order is the point. The record used to be written after
     `_settle_onchain` returned, which is after the seal's ~30s poll; a
@@ -1445,6 +2012,18 @@ async def _settle_and_record(
     asked — it is attempted once more after the seal, with everything then
     known. Returns what `_settle_onchain` returns.
     """
+    if await _escrow_version() >= 2:
+        return await _settle_and_record_v2(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+            authorized_max=authorized_max,
+        )
+
     recorded: list[SettlementRecord] = []
 
     async def _on_charged(charge_tx: str, job_id: bytes) -> None:
@@ -1485,6 +2064,76 @@ async def _settle_and_record(
             output_summaries=output_summaries,
         )
     return charge_tx, proof_tx, job_id
+
+
+async def _settle_and_record_v2(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    *,
+    payer: str,
+    auth_id_hex: str,
+    delivered_steps: frozenset[int],
+    output_summaries: Mapping[int, str | None],
+    authorized_max: int | None,
+) -> tuple[str | None, str | None, bytes | None]:
+    """`_settle_and_record`'s order over `_settle_v2`: settle, record, seal, record the seal."""
+    recorded: list[SettlementRecord] = []
+    settled: list[tuple[str, bytes, _PayoutPlan, list[bytes] | None]] = []
+
+    async def _on_settled(
+        settle_tx: str, job_id: bytes, payout_plan: _PayoutPlan, receipts: list[bytes] | None
+    ) -> None:
+        settled.append((settle_tx, job_id, payout_plan, receipts))
+        record = await _record_settlement(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id=job_id,
+            charge_tx=settle_tx,
+            proof_tx=None,
+            total_usdc=0.0,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+            payout_plan=payout_plan,
+            receipts=receipts,
+        )
+        if record is not None:
+            recorded.append(record)
+
+    settle_tx, proof_tx, job_id = await _settle_v2(
+        task_id,
+        start,
+        plan,
+        payer=payer,
+        auth_id_hex=auth_id_hex,
+        delivered_steps=delivered_steps,
+        authorized_max=authorized_max,
+        on_settled=_on_settled,
+    )
+    if recorded:
+        if proof_tx is not None:
+            await _record_proof(task_id, recorded[0], proof_tx)
+    elif settled:
+        tx, settled_job_id, payout_plan, receipts = settled[0]
+        await _record_settlement(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            job_id=settled_job_id,
+            charge_tx=tx,
+            proof_tx=proof_tx,
+            total_usdc=0.0,
+            delivered_steps=delivered_steps,
+            output_summaries=output_summaries,
+            payout_plan=payout_plan,
+            receipts=receipts,
+        )
+    return settle_tx, proof_tx, job_id
 
 
 # A failure class is a token, never free text. Validated by SHAPE rather than
