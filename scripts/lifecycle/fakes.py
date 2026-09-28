@@ -91,6 +91,7 @@ class FakeWorld:
     open_dispute_mode: str = "ok"  # ok | transport | expired_once | duplicate
     uphold_mode: str = "ok"  # ok | transport | unconfirmed | refused
     refund_lags: int = 0  # dispute reads before the credit shows
+    credit_stuck: bool = False  # a `crediting` dispute never resolves (an in-flight transfer)
     restarted: bool = False  # the backend forgot every task (AC4)
     charge_succeeds: bool = True  # v1 only
     plan_routes_agent: bool = True
@@ -517,7 +518,8 @@ class FakeWorld:
             self.attestations[job] = {
                 "orchestrator": payer,
                 "intent_hash": hashlib.sha256(b"intent").hexdigest(),
-                "agents": [s["agent_id"] for s in delivered],
+                # every plan step's agent, as `_settle_onchain` seals them
+                "agents": [s["agent_id"] for s in steps],
                 "receipts": [r for _, _, _, r in paid_steps],
                 "total_spent": usdc_to_stroops(settled_usdc),
                 "sealed_at": 1_900_000_100,
@@ -659,7 +661,7 @@ class FakeWorld:
         if d is None:
             return _err(404, "unknown_dispute")
         d["_reads"] += 1
-        if d["status"] == "crediting" and d["_reads"] > self.refund_lags:
+        if d["status"] == "crediting" and d["_reads"] > self.refund_lags and not self.credit_stuck:
             self._credit(d)
         return _json(200, {k: v for k, v in d.items() if not k.startswith("_")})
 
