@@ -34,17 +34,15 @@ class TeamRegister:
 
 
 def _accounts(node: Any) -> set[str]:
+    wallets = node.get("wallets") if isinstance(node, dict) else None
+    if not isinstance(wallets, list):
+        raise RegisterError("team register has no `wallets` list, the layout the backend commits")
     found: set[str] = set()
-    if isinstance(node, str):
-        if StrKey.is_valid_ed25519_public_key(node):
-            found.add(node)
-    elif isinstance(node, dict):
-        for key, value in node.items():
-            found |= _accounts(key)
-            found |= _accounts(value)
-    elif isinstance(node, list):
-        for value in node:
-            found |= _accounts(value)
+    for index, entry in enumerate(wallets):
+        address = entry.get("address") if isinstance(entry, dict) else None
+        if not isinstance(address, str) or not StrKey.is_valid_ed25519_public_key(address):
+            raise RegisterError(f"team register entry {index} has no valid Stellar account `address`")
+        found.add(address)
     return found
 
 
