@@ -49,6 +49,21 @@ class Agent(BaseModel):
 # ───── Tasks ───────────────────────────────────────────────
 TaskStatus = Literal["pending", "running", "complete", "failed"]
 
+# What happened to a paid run's money, as a field a client can branch on rather
+# than a trace sentence it has to parse. `status` cannot say it: a run whose
+# settlement failed still finalizes `complete` when it delivered (ADR 0010).
+#   settled      the escrow paid out and the transaction CONFIRMED
+#   released     v2 only: nothing was delivered, so an empty `settle` returned
+#                the buyer's whole custody and paid nobody
+#   skipped      v1 only: nothing was delivered, so nothing was charged and
+#                the authorization was left as it was
+#   unconfirmed  submitted and then lost track of: it MAY still land, and it is
+#                never retried (see `execution_svc._settle_onchain`)
+#   failed       definitely did not move money: refused before it was sent, or
+#                rejected by the ledger
+# None on a task that asked for no on-chain settlement (a simulated run).
+SettlementState = Literal["settled", "released", "skipped", "unconfirmed", "failed"]
+
 
 def humanize_age(seconds: float) -> str:
     """Coarse relative age, e.g. 125.0 → "2m ago". Clock skew reads "just now"."""
@@ -88,6 +103,7 @@ class TaskSummary(BaseModel):
     started_at: float = Field(default_factory=time.time)
     charge_tx: str | None = None
     proof_tx: str | None = None
+    settlement: SettlementState | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -250,6 +266,9 @@ class TraceLine(BaseModel):
     t: str
     level: TraceLevel
     msg: str
+    # Set on the one line that reports a paid run's settlement outcome, and on
+    # no other, so a trace reader finds it without parsing `msg`.
+    settlement: SettlementState | None = None
 
 
 # ───── Flow ────────────────────────────────────────────────
