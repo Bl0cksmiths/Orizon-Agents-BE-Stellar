@@ -365,6 +365,53 @@ def forget_versions() -> None:
     _versions.clear()
 
 
+# ── reclaim pre-check ───────────────────────────────────────────────────
+
+# `reclaim` compares against the LEDGER's clock, which runs up to a close
+# behind the wall clock. A build in that gap would be prepared, signed, and
+# then refused on-chain as `Locked`; waiting this long past `expires_at` first
+# keeps the answer honest.
+LEDGER_CLOCK_ALLOWANCE_SECONDS = 10.0
+
+
+async def check_reclaimable(auth_id_hex: str, payer: str) -> OnChainAuthorization:
+    """Refuse, with the reason, a reclaim the contract would refuse; else the authorization.
+
+    Mirrors `reclaim`'s own checks in its order — the payer (`Unauthorized`),
+    settled (`Replay`), reclaimed (`Revoked`), not yet expired (`Locked`) — so
+    the buyer learns why BEFORE signing, not from a failed transaction after.
+    """
+    version = await escrow_version()
+    if version == 1:
+        raise AuthorizationRefused(
+            409, "reclaim_unsupported", "this escrow holds no custody, so there is nothing to reclaim"
+        )
+    if version != 2:
+        raise _unverifiable(f"PaymentEscrow version {version} is not one this guard knows")
+    key = auth_id_hex.lower()
+    auth = await read_authorization(key)
+    if auth is None:
+        raise AuthorizationRefused(404, "authorization_not_found", "no such authorization")
+    if auth.payer != payer:
+        raise AuthorizationRefused(
+            403, "authorization_payer_mismatch", "only the wallet that made this authorization can reclaim it"
+        )
+    if auth.settled:
+        raise AuthorizationRefused(
+            409, "authorization_settled", "this authorization was already settled — anything unspent was returned"
+        )
+    if auth.revoked:
+        raise AuthorizationRefused(409, "authorization_revoked", "this authorization was already reclaimed")
+    if _wall_clock() <= auth.expires_at + LEDGER_CLOCK_ALLOWANCE_SECONDS:
+        # The instant is public on-chain, so saying it discloses nothing.
+        raise AuthorizationRefused(
+            409,
+            "authorization_locked",
+            f"this authorization can be reclaimed once it expires at {auth.expires_at} (unix time)",
+        )
+    return auth
+
+
 # ── one authorization, one task ─────────────────────────────────────────
 # A v2 authorization is custody for ONE run: the first `settle` spends it and
 # every later one is a `Replay`. A second execute against it would run a whole
