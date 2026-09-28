@@ -108,6 +108,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-027 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
 - 2026-09-29 · F-028 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#step-1-install-a-wallet`
 - 2026-09-29 · F-029 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
+- 2026-09-29 · F-030 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
 
 ## Template
 
