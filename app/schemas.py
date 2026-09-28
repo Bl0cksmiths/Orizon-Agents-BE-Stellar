@@ -256,6 +256,13 @@ class PlanFloorNotice(BaseModel):
     # product decision. None when there is no rep entry (unbound, or absent).
     count: int | None = None
     dispute_rate_bps: int | None = None
+    # True when the floor acted because a rating landed since this agent's last
+    # reputation read and the fresh read has not answered yet. `lower_bound_bps`
+    # is then the PRE-rating value and can sit above `floor_bps`, so a renderer
+    # must show `reason` rather than "lower bound against the floor".
+    # `reason_code` stays `below_floor` (the floor's verdict), which is why this
+    # is a separate flag and not a new code a client's closed union would lack.
+    awaiting_fresh_read: bool = False
 
 
 # ───── Trace ───────────────────────────────────────────────
