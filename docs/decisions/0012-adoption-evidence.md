@@ -57,6 +57,21 @@ wallets being recognised, and our own agent would count as someone else's.
 created, spike keys and throwaway QA keys included. A key we generated and
 forgot is counted as external until it is declared.
 
+**Disclosure: two entries rest on our own records.** `GA5LEGIR…MQ2M`, which
+owns `spike_97437`, and `GDWE6IDZ…IWRX` are the two random keys of the team's
+x402 escrow spike on 2026-09-15. Each entry cites what the chain shows:
+
+- friendbot created both accounts, five seconds apart;
+- `GA5LEGIR…` registered `spike_97437`;
+- `GDWE6IDZ…` then authorized a payment against `spike_97437`.
+
+No transaction links either key to a team key. The spike's charge, which our
+admin would have signed, failed in simulation and was never submitted. The
+authorization still reads `spent 0`. That these keys are ours comes from the
+team's own spike records and **cannot be verified independently**. They are
+declared anyway, because counting a key we know is ours as external would be
+the worse error. Both entries say so in their `evidence`.
+
 ### D3. Runtime platform keys are excluded without being declared
 
 These keys are ours by construction, so the report excludes them as well:
