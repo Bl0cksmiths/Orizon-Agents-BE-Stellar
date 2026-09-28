@@ -516,7 +516,7 @@ async def _run(
         # nothing to read, is still checked per step at the moment of dispatch.
         agent_ids = sorted({s.agent_id for s in plan.plan.steps})
         fresh = await reputation_svc.fetch_reps(agent_ids) if agent_ids else {}
-        unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded]
+        unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded or i.superseded]
         if unread:
             # Said out loud, because it is the one case where a step runs on
             # evidence older than this run: the buyer should know which.
