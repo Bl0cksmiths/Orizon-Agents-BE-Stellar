@@ -98,6 +98,8 @@ class FakeWorld:
     wrong_escrow_in_xdr: bool = False
     tamper_payout: bool = False  # v2 settle pays the operator one stroop short
     crash_on: str | None = None  # a route that raises inside the transport
+    readiness_reachable: bool = True  # False: the frontend proxy, which forwards /api/* only
+    events_forgotten: bool = False  # getEvents refuses: the settle is past the RPC's retention
 
     # ledger
     ledger: int = 1000
@@ -191,6 +193,8 @@ class FakeWorld:
                 return httpx.Response(503, text="<html>waking</html>")
             return _json(200, {"status": "ok", "version": "t", "uptime_seconds": 1.0})
         if path == "/readiness":
+            if not self.readiness_reachable:
+                return httpx.Response(404, text="<html>not found</html>")
             return _json(
                 200,
                 {"status": "ready", "ratings": {"writer": "scorer", "signer": self.settler, "scorer": self.settler}},
@@ -732,6 +736,11 @@ class FakeWorld:
                 return ok({"status": "NOT_FOUND", "latestLedger": self.ledger})
             return ok({"status": tx["status"], "ledger": tx["ledger"], "latestLedger": self.ledger})
         if method == "getEvents":
+            if self.events_forgotten:
+                return _json(
+                    200,
+                    {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32600, "message": "startLedger"}},
+                )
             ids = params["filters"][0]["contractIds"]
             start = params.get("startLedger", 0)
             events = [e for e in self.events if e["contractId"] in ids and e["ledger"] >= start]
@@ -785,6 +794,10 @@ class FakeWorld:
                     }
                 )
             )
+        if contract == ESCROW and fn == "settler":
+            if self.escrow_version < 2:
+                return fail("HostError: Error(WasmVm, MissingValue)")
+            return value(scval.to_address(self.settler))
         if contract == ESCROW and fn == "authorization":
             a = self.authorizations.get(bytes(args[0]).hex())
             if a is None:
