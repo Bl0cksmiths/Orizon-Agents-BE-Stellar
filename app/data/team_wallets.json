@@ -1,0 +1,45 @@
+{
+  "description": "Every Stellar account the Blocksmiths control. Public keys, not secrets. An agent owned by any of these is NEVER counted as externally operated (SOW 6.3), and GET /api/ecosystem/adoption lists it under `excluded` with the role below. Add a wallet here the moment the team creates one; leaving it out would count our own agent as someone else's. Validated at boot: every address must be a valid G-strkey, with no duplicates.",
+  "wallets": [
+    {
+      "address": "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
+      "role": "contract admin and v1 escrow settler",
+      "evidence": "contracts repo addresses.json `admin`; GET /api/stellar/network `admin`; PaymentEscrow CBJPTMAP…25PI settler()"
+    },
+    {
+      "address": "GDB4N25UYM3YNTTAWX7LSGI2P7OR62QZQXRNQWAGF5TFVENDKCTTCDHP",
+      "role": "production signing key (scorer, sealer, v2 settler)",
+      "evidence": "GET /readiness `ratings.signer` and `ratings.scorer`"
+    },
+    {
+      "address": "GB5MKHDFLJZ6OFPAHM7R4HGBUPFV5PZYL3W27VTIUZZ25JMQSDZBKCMR",
+      "role": "dispatch signer",
+      "evidence": "GET /api/stellar/network `dispatch_signer`; UAT repo docs/uat/evidence/6.05-external-dispatch.md:20"
+    },
+    {
+      "address": "GBWMD26IB6CMG3JO3HU7SD7ZJSTF4BIJ5JS77ANMLJ52M6FV6K3J7BQJ",
+      "role": "QA throwaway operator key",
+      "evidence": "UAT repo docs/uat/evidence/6.05-external-dispatch.md:17 (owner of uat605_ext_op and uat624_ext_op)"
+    },
+    {
+      "address": "GBI2I3WLMP2Q6L26G7CBKRPP5WJ6G3GGYJHWALOJ7D6EBRGL5OZAADBH",
+      "role": "team audit and registration probe key",
+      "evidence": "UAT repo docs/uat/defects.md:1908 (owner of w1_audit_a7x and sign_probe_bb5c12); docs/decisions/0002-partial-credit-refund.md:73 (the 1.05 registrant)"
+    },
+    {
+      "address": "GDJHP2I6NRCWYZTB3ZOXRE74V4M4EGXRYORGNPTGQ6BVNJNSSJO4PKXJ",
+      "role": "QA throwaway buyer key (the 6.05 payer)",
+      "evidence": "UAT repo docs/uat/evidence/6.05-external-dispatch.md:18; docs/uat/test-plan.md:802"
+    },
+    {
+      "address": "GA5LEGIRHKZGDKGQ4XHBEMU2Z7BGDX7AE2XUWDXB3V6TCOVTD2LZMQ2M",
+      "role": "x402 escrow spike key (2026-09-15), random throwaway",
+      "evidence": "On-chain (testnet): created with 10000 XLM by friendbot GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR at 2026-09-15T18:37:22Z in tx 3bb4d2d3809db18797a8210df5c7cd1d453a13a500aff004d7ee4c7e7b12b65c (https://stellar.expert/explorer/testnet/tx/3bb4d2d3809db18797a8210df5c7cd1d453a13a500aff004d7ee4c7e7b12b65c); then, as its only other operation, registered spike_97437 ('Spike Agent', price 100000) on AgentRegistry CAPHXWU53UZUZJGV7IAE57NNMH3YYB5MTWO6YA53KKMXSFVLOITBJ3GQ at 18:37:32Z in tx 3ca237c00bb1fd78fbf8b95fccdd7e46de61fe82bf4ce8558b8231b9c4a705c4 (https://stellar.expert/explorer/testnet/tx/3ca237c00bb1fd78fbf8b95fccdd7e46de61fe82bf4ce8558b8231b9c4a705c4). No transaction on-chain links this key to a team key: the spike's charge, to be signed by admin GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV, failed in simulation and was never submitted (that admin's Horizon history has no transaction between 18:00 and 20:00 UTC on 2026-09-15), and PaymentEscrow CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI authorization 00000000000000000000000000000010 still reads spent 0. That this key is ours comes from the team's own spike records and is NOT independently verifiable."
+    },
+    {
+      "address": "GDWE6IDZ73VSMH6F75IDVA5BDAC7UJI3TOZC23VGAOXNYYHC6NDCIWRX",
+      "role": "x402 escrow spike key (2026-09-15), random throwaway",
+      "evidence": "On-chain (testnet): created with 10000 XLM by friendbot GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR at 2026-09-15T18:37:27Z in tx 7409e73926436a9d278f8e5e5f189a6f3c66d49e9d41e81bb2805e1864ed1f31 (https://stellar.expert/explorer/testnet/tx/7409e73926436a9d278f8e5e5f189a6f3c66d49e9d41e81bb2805e1864ed1f31); then, as its only other operation, called authorize(payer=this key, agent_id=spike_97437, max_amount=500000) on PaymentEscrow CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI at 18:37:37Z in tx b603fdeaf08bd5a3e0cec4068b0d476bd6b1af65b9e46d8aeec941e59fdd51d5 (https://stellar.expert/explorer/testnet/tx/b603fdeaf08bd5a3e0cec4068b0d476bd6b1af65b9e46d8aeec941e59fdd51d5), five seconds after spike_97437 was registered. No transaction on-chain links this key to a team key: the spike's charge, to be signed by admin GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV, failed in simulation and was never submitted (that admin's Horizon history has no transaction between 18:00 and 20:00 UTC on 2026-09-15), and PaymentEscrow CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI authorization 00000000000000000000000000000010 still reads spent 0. That this key is ours comes from the team's own spike records and is NOT independently verifiable."
+    }
+  ]
+}

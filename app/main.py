@@ -24,7 +24,20 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import SERVICE_VERSION, settings
 from .pdax.client import aclose_pdax_client
-from .routers import agents, binding, disputes, flow, metrics, orchestrator, payments, pdax, stellar, tasks, trace
+from .routers import (
+    agents,
+    binding,
+    disputes,
+    ecosystem,
+    flow,
+    metrics,
+    orchestrator,
+    payments,
+    pdax,
+    stellar,
+    tasks,
+    trace,
+)
 
 # Imported by symbol, not as a module: the root `/health` handler defined
 # below rebinds the name `health` at module scope, which would shadow a
@@ -546,6 +559,7 @@ app.include_router(metrics.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(flow.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(payments.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(stellar.router, prefix="/api", responses=_ERROR_RESPONSES)
+app.include_router(ecosystem.router, prefix="/api", responses=_ERROR_RESPONSES)
 app.include_router(pdax.router, prefix="/api", responses=_ERROR_RESPONSES)
 # No _ERROR_RESPONSES: the probe takes no input and is exempt from the rate
 # limiter, so the 422/429 rows documented on the other routers cannot occur.
