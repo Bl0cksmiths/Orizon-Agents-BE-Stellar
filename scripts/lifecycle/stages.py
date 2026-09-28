@@ -35,8 +35,6 @@ from . import verify
 from .api import ApiError, OrizonApi, UnknownOutcome
 from .chain import ChainEvent, ChainReader, Observation
 from .config import (
-    AUTHORIZE_TTL_SECONDS,
-    BATCH_AGENT_ID,
     EXIT_OK,
     EXIT_PLAN_MISSING_AGENT,
     EXIT_REFUSED,
@@ -50,6 +48,8 @@ from .config import (
     TESTNET_PASSPHRASE,
     Budgets,
     RunConfig,
+    authorize_label,
+    authorize_ttl,
     stage_index,
 )
 from .evidence import EvidenceLog, EvidenceRow, RunState, StateStore, tx_row, utc_now
@@ -394,8 +394,10 @@ class Runner:
             "decompose": f"POST /api/orchestrator/decompose {{intent}}; "
             f"refuse unless the plan routes to {self.cfg.agent}",
             "authorize": (
-                f"POST /api/stellar/build/authorize {{payer: {buyer}, agent_id: {BATCH_AGENT_ID}, "
-                f"max_amount_usdc: plan.total_usdc || {MIN_AUTHORIZE_AMOUNT}, ttl_seconds: {AUTHORIZE_TTL_SECONDS}}}; "
+                f"POST /api/stellar/build/authorize {{payer: {buyer}, "
+                f"agent_id: {authorize_label(self.state.escrow_version or 1, '<plan_id>')}, "
+                f"max_amount_usdc: plan.total_usdc or {MIN_AUTHORIZE_AMOUNT}, "
+                f"ttl_seconds: {authorize_ttl(self.state.escrow_version or 1)}}}; "
                 f"check it is PaymentEscrow({self.contracts.get('payment_escrow')}).authorize; sign with "
                 f"${self.cfg.buyer_secret_env}; POST /api/stellar/submit {{signed_xdr}} ONCE"
             ),
@@ -525,13 +527,16 @@ class Runner:
     def stage_authorize(self) -> None:
         chain, kp = self.need_chain(), self.need_buyer()
         plan = self.state.plan or {}
-        # `plan.total_usdc || 0.001` — a zero total still authorizes the floor.
+        # `plan.total_usdc > 0 ? plan.total_usdc : MIN_CAP`
         max_amount = float(plan.get("total_usdc") or 0) or MIN_AUTHORIZE_AMOUNT
-        built = self.api.build_authorize(kp.public_key, max_amount, AUTHORIZE_TTL_SECONDS, BATCH_AGENT_ID)
+        version = self.state.escrow_version or 1
+        label = authorize_label(version, str(plan.get("plan_id")))
+        ttl = authorize_ttl(version)
+        built = self.api.build_authorize(kp.public_key, max_amount, ttl, label)
         expect = AuthorizeCall(
             escrow=self.contracts["payment_escrow"],
             payer=kp.public_key,
-            agent_id=BATCH_AGENT_ID,
+            agent_id=label,
             max_stroops=usdc_to_stroops(max_amount),
         )
         signed = sign_authorize(str(built["xdr"]), kp, TESTNET_PASSPHRASE, expect)
@@ -546,6 +551,8 @@ class Runner:
             "max_amount_usdc": max_amount,
             "max_stroops": expect.max_stroops,
             "expires_at": signed.expires_at,
+            "label": label,
+            "ttl_seconds": ttl,
         }
         self.save()
         self.say(f"  signed authorize {signed.tx_hash} for {max_amount} (expires {signed.expires_at})")
@@ -570,7 +577,7 @@ class Runner:
             seen,
             contract=self.contracts["payment_escrow"],
             amount=max_amount,
-            summary=f"PaymentEscrow.authorize under {BATCH_AGENT_ID}; API said {result.get('status')}",
+            summary=f"PaymentEscrow.authorize labelled {label}; API said {result.get('status')}",
             api_status=result.get("status"),
             expires_at=signed.expires_at,
         )
