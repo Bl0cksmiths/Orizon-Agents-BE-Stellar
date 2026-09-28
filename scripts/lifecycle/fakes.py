@@ -763,7 +763,10 @@ class FakeWorld:
                 else fail("HostError: Error(WasmVm, MissingValue)")
             )
         if contract == SAC and fn == "balance":
-            return value(scval.to_int128(self.balances.get(args[0].address, 0)))
+            if args[0].address not in self.balances:
+                # testnet's native SAC traps on a missing account (seen live)
+                return fail("HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing")
+            return value(scval.to_int128(self.balances[args[0].address]))
         if contract == ATTEST and fn == "get":
             a = self.attestations.get(bytes(args[0]).hex())
             if a is None:
