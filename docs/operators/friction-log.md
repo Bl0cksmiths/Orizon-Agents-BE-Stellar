@@ -84,6 +84,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-003 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#step-2-fund-from-friendbot`
 - 2026-09-29 · F-004 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#step-2-fund-from-friendbot`
 - 2026-09-29 · F-005 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#fault-injection-is-for-testing-only`
+- 2026-09-29 · F-006 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#choose-where-to-host-it`
 
 ## Template
 
