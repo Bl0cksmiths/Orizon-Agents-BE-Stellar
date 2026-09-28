@@ -987,6 +987,9 @@ async def _settle_onchain(
 ) -> tuple[str | None, str | None, bytes | None]:
     """Perform the real PaymentEscrow.charge + AttestationRegistry.seal calls.
 
+    The v1 path, unchanged by ADR 0010: against a v2 escrow `_settle_and_record`
+    runs `_settle_v2` instead, and this is never reached.
+
     `on_charged(charge_tx, job_id)` is awaited the moment the charge CONFIRMS,
     before the seal is submitted. The seal is another ~30s poll, and a
     cancellation during it (main.py's shutdown drain, a Render redeploy)
@@ -2224,7 +2227,9 @@ async def _settle_and_record_v2(
             job_id=job_id,
             charge_tx=settle_tx,
             proof_tx=None,
-            total_usdc=0.0,
+            # Only the NOT-recorded log line reads it on this path: the record
+            # itself is built from the payouts.
+            total_usdc=payout_plan.total / reputation_svc.STROOPS_PER_USDC,
             delivered_steps=delivered_steps,
             output_summaries=output_summaries,
             payout_plan=payout_plan,
@@ -2257,7 +2262,9 @@ async def _settle_and_record_v2(
             job_id=settled_job_id,
             charge_tx=tx,
             proof_tx=proof_tx,
-            total_usdc=0.0,
+            # Only the NOT-recorded log line reads it on this path: the record
+            # itself is built from the payouts.
+            total_usdc=payout_plan.total / reputation_svc.STROOPS_PER_USDC,
             delivered_steps=delivered_steps,
             output_summaries=output_summaries,
             payout_plan=payout_plan,
