@@ -2074,6 +2074,12 @@ async def _settle_v2(
             )
         else:
             await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+            if isinstance(e, sc.NotSubmittedError) and not release:
+                # Refused before it was sent — by the simulation, the signer or
+                # the RPC — so nothing is in flight, and the custody would sit
+                # until the payer reclaims it. Hand it back instead (S4). Not
+                # for a release: that IS the call that was just refused.
+                await release_authorization(auth_id_hex, reason="settle_not_submitted")
 
     return (settle_tx, proof_tx, settled_job_id)
 
