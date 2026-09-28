@@ -79,6 +79,8 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
         # No DATABASE_URL in the hermetic suite: the in-memory fallback.
         "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
+        # Never read on the probe's path, so null until a background read lands.
+        "escrow": {"contract": "C" + "A" * 55, "version": None},
     }
 
 
@@ -106,6 +108,8 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
         # No DATABASE_URL in the hermetic suite: the in-memory fallback.
         "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
+        # Never read on the probe's path, so null until a background read lands.
+        "escrow": {"contract": "C" + "A" * 55, "version": None},
     }
 
 

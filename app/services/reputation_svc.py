@@ -35,7 +35,11 @@ evidence: if a fresh read does not answer — the chain is unreachable, or the
 batch deadline passes first — the caller gets the agent's last known on-chain
 read, marked `stale=True` with its age, while one younger than the read TTL
 plus REPUTATION_STALE_GRACE_SECONDS exists; otherwise the prior, marked
-`source="prior"` and `degraded=True`.
+`source="prior"` and `degraded=True`. A read a landed rating has made obsolete
+(`invalidate_rep`) is the exception on both counts: it is served at any age,
+marked `superseded` as well, and the routing floor refuses it until a read
+taken after the rating answers — so a just-disputed agent is shown its last
+real score and routed on nothing, never on the prior.
 
 Degradation policy (deliberate, not accidental) — when an agent's ledger
 read cannot be had and there is no recent read to serve stale, that agent
@@ -57,8 +61,10 @@ three reasons:
     that read, stale, which the floor still judges; and a read cut off by the
     deadline keeps running and fills the cache for the next batch. What is
     left failing open is an agent with no read that recent: never read yet
-    (the boot pre-warm covers the registry as it stands at boot), or a chain
-    unreachable for longer than the grace.
+    (the boot pre-warm covers the registry once the sync's first pass is in,
+    or its boot bound has passed), or a chain unreachable for longer than the
+    grace. An agent a rating has just landed on is never among them: its last
+    read is kept, superseded, and refused (`invalidate_rep`).
 
 It is NOT bounded in time. Earlier notes here claimed the window was bounded
 by the read TTL and the batch timeout; both audits disproved that. The TTL
@@ -83,7 +89,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from ..config import settings
 
@@ -139,8 +145,28 @@ class RepInfo(BaseModel):
     stale: bool = False
     # Seconds since the served evidence was read from the ledger. Set only
     # when `stale`, else None. Never above the read TTL plus
-    # REPUTATION_STALE_GRACE_SECONDS: an older entry is not served.
+    # REPUTATION_STALE_GRACE_SECONDS on a row the floor judges; a superseded
+    # row (below) is served at any age, because the floor refuses it whatever
+    # its age.
     stale_age_seconds: float | None = None
+    # True on a stale row whose read PREDATES a rating that has since landed:
+    # `invalidate_rep` ran after it was read, so the ledger now holds evidence
+    # these numbers do not include. Shown rather than dropped, so a score never
+    # jumps to the prior the moment a dispute lands (6983 → 7000 was the S8
+    # defect), but never routed on: `passes_floor` refuses it until a read
+    # taken after the rating answers. Only ever set together with `stale`.
+    #
+    # A private attribute behind a read-only property, not a field: the read
+    # routes answer through a mirror model (routers/stellar.py ReputationInfo)
+    # that has to declare every field, and the flag is the planner's business.
+    # On the wire the row reads as what it is to a viewer — `stale`, with its
+    # age. Private attributes survive `model_copy`, so a row keeps the flag
+    # through any copy the planner makes of it.
+    _superseded: bool = PrivateAttr(default=False)
+
+    @property
+    def superseded(self) -> bool:
+        return self._superseded
 
 
 def prior_weight_stroops() -> int:
@@ -263,9 +289,18 @@ def passes_floor(info: RepInfo | None) -> bool:
     the single authority on what is routable. With the default config that
     means an outage fails open — deliberately, and now loudly logged by
     `_log_degraded`; see the module docstring for why.
+
+    A `superseded` row IS special-cased, and fails closed: its numbers predate
+    a rating that has landed since, so its lower bound is a claim about an
+    agent the ledger has already moved — downward, after a dispute. Judging it
+    would route a just-disputed agent on its pre-dispute score; failing it
+    means that agent waits for one fresh read, which `invalidate_rep` has
+    already started. The window is the time a read takes, not a TTL.
     """
     if info is None:
         return True
+    if info.superseded:
+        return False
     return info.lower_bound_bps >= settings.reputation_floor_bps
 
 
@@ -519,19 +554,31 @@ def _log_stale(infos: list[RepInfo], total: int, reason: str) -> None:
     Not `_log_degraded`: nothing here fails open. These agents are still
     judged on real evidence, only older than the TTL, so the line says how
     old — the oldest of them — rather than which way the floor is failing.
+    Superseded ones are not judged at all but refused (`passes_floor`), and
+    the line says so rather than claiming the floor weighed their evidence.
     """
     ids = [info.agent_id for info in infos]
     shown = ", ".join(ids[:_DEGRADED_LOG_AGENT_LIMIT])
     if len(ids) > _DEGRADED_LOG_AGENT_LIMIT:
         shown = f"{shown}, +{len(ids) - _DEGRADED_LOG_AGENT_LIMIT} more"
     oldest = max(info.stale_age_seconds or 0.0 for info in infos)
+    superseded = sum(1 for info in infos if info.superseded)
+    if not superseded:
+        verdict = "the routing floor is still applied to that evidence"
+    elif superseded == len(infos):
+        verdict = "each was rated since that read, so the routing floor refuses it until a fresh read answers"
+    else:
+        verdict = (
+            f"the routing floor is still applied to that evidence, except for the {superseded} rated since "
+            "that read, which it refuses until a fresh read answers"
+        )
     logger.warning(
-        "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — the routing "
-        "floor is still applied to that evidence (oldest read %.1f s ago)",
+        "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — %s (oldest read %.1f s ago)",
         len(ids),
         total,
         shown,
         reason,
+        verdict,
         oldest,
     )
 
@@ -558,22 +605,30 @@ def _stale_info(agent_id: str) -> RepInfo | None:
     REPUTATION_STALE_GRACE_SECONDS ago, or when it does not score (it was
     stored before a check that now refuses it). The age is measured from
     when the read was stored: its expiry minus the read TTL.
+
+    A read `invalidate_rep` has superseded is served whatever its age, marked
+    `superseded`. The grace bounds how old evidence the floor may JUDGE, and
+    the floor judges none of this — it refuses it (`passes_floor`) — so the
+    grace has nothing to protect here. What it would do is swap the agent's
+    real, older score for the prior, which clears the floor: the one agent a
+    dispute just landed on would become routable because of it.
     """
     from ..stellar import cache as rcache
 
     last = rcache.last_stored(_rep_cache_key(agent_id))
     if last is None:
         return None
-    state, expiry = last
-    past_expiry = time.monotonic() - expiry
-    if past_expiry > settings.reputation_stale_grace_seconds:
+    past_expiry = time.monotonic() - last.expiry
+    if not last.superseded and past_expiry > settings.reputation_stale_grace_seconds:
         return None
     try:
-        info = _info_from_state(agent_id, state)
+        info = _info_from_state(agent_id, last.value)
     except Exception:
         return None
     age = max(0.0, settings.reputation_read_ttl_seconds + past_expiry)
-    return info.model_copy(update={"stale": True, "stale_age_seconds": round(age, 1)})
+    served = info.model_copy(update={"stale": True, "stale_age_seconds": round(age, 1)})
+    served._superseded = last.superseded
+    return served
 
 
 def _fallback(agent_id: str) -> RepInfo:
@@ -791,9 +846,10 @@ def start_prewarm() -> None:
     it is routed on the prior. Started in the background so the request that
     woke the instance is not held behind the chain; a plan that arrives while
     it runs joins its in-flight reads instead of issuing its own. Reads the
-    registry as it stands at boot — agents the first registry sync indexes
-    later are read on first use. A no-op while reputation is off or no ledger
-    is configured.
+    registry as it stands once boot has waited, bounded, for the registry
+    sync's first pass (`registry_sync.wait_first_pass`), so on-chain agents
+    are read too; only agents a pass indexes after that bound are read on
+    first use. A no-op while reputation is off or no ledger is configured.
     """
     global _prewarm_task
     if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
@@ -818,8 +874,92 @@ async def stop_prewarm() -> None:
         await asyncio.wait({task})
 
 
+# Post-rating refreshes in progress, one per agent. Bounded, so a burst of
+# ratings (a whole plan's steps settling at once is the common case) cannot
+# become an unbounded number of tasks; past the bound a refresh is skipped,
+# which only means the agent's next reader goes to the ledger itself — the
+# superseded entry already forces that.
+_MAX_REFRESHES = 64
+_refreshes: dict[str, asyncio.Task[None]] = {}
+# Agents invalidated AGAIN while their refresh was running. That refresh is
+# awaiting a read the second invalidation detached — one from before the
+# second rating — so it goes round once more instead of stopping on it.
+_refresh_again: set[str] = set()
+
+
+async def _refresh(agent_id: str) -> None:
+    """Read one agent back from the ledger after a rating landed, no deadline.
+
+    Through `_read_rep`, so the read is the cache's single flight for the key:
+    a plan or a page that asks meanwhile joins it rather than issuing its own,
+    and whoever it answers, its result is what the cache holds next. Bounded
+    by the read client's own RPC timeout, like the boot pre-warm's reads.
+    """
+    while True:
+        _refresh_again.discard(agent_id)
+        _info, failure = await _read_rep(agent_id)
+        if failure is not None:
+            # Nobody is waiting on this read, so it is not a batch to warn
+            # about: the next reader retries it and reports it if it still fails.
+            logger.debug("post-rating reputation refresh for %s failed: %s", agent_id, failure)
+        if agent_id not in _refresh_again:
+            return
+
+
+def _on_refresh_done(agent_id: str, task: asyncio.Task[None]) -> None:
+    if _refreshes.get(agent_id) is task:
+        del _refreshes[agent_id]
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("post-rating reputation refresh for %s died: %s", agent_id, _describe(task.exception()))  # type: ignore[arg-type]
+
+
+def _schedule_refresh(agent_id: str) -> None:
+    """Start reading `agent_id` back from the ledger now, in the background.
+
+    Never blocks and never raises: `invalidate_rep` runs on rating paths that
+    must not wait on, or fail because of, a read. Single-flight per agent — an
+    agent already being refreshed is marked to go round again rather than
+    given a second task — and bounded by `_MAX_REFRESHES`. Nothing to do
+    without a running event loop (a synchronous caller): the superseded entry
+    already sends the next reader to the ledger.
+    """
+    if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    running = _refreshes.get(agent_id)
+    # Same loop too: a task left pending on a loop that has since closed will
+    # never run again, and must not stand in for a refresh on this one.
+    if running is not None and not running.done() and running.get_loop() is loop:
+        _refresh_again.add(agent_id)
+        return
+    if len(_refreshes) >= _MAX_REFRESHES:
+        logger.debug("post-rating reputation refresh for %s skipped: %d already running", agent_id, len(_refreshes))
+        return
+    task = loop.create_task(_refresh(agent_id))
+    _refreshes[agent_id] = task
+    task.add_done_callback(partial(_on_refresh_done, agent_id))
+
+
+async def stop_refreshes() -> None:
+    """Cancel the post-rating refreshes still running (shutdown path).
+
+    Cancelling a refresh abandons only its wait: the read under it runs in the
+    reputation read pool, which `shutdown_read_pool` releases after this.
+    """
+    tasks = [task for task in _refreshes.values() if not task.done()]
+    _refreshes.clear()
+    _refresh_again.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks)
+
+
 def invalidate_rep(agent_id: str) -> None:
-    """Forget the cached rep_state for one agent, so the next read goes back
+    """Retire the cached rep_state for one agent, so the next read goes back
     to the ledger.
 
     Call it once a rating for the agent has LANDED — a dispute rating above
@@ -829,10 +969,25 @@ def invalidate_rep(agent_id: str) -> None:
     read already in flight when this runs is detached rather than cancelled,
     and cannot write its pre-rating result back (`app.stellar.cache.invalidate`).
 
-    Dropping the key also drops the read that would otherwise be served
-    STALE past its TTL (`_stale_info`): a value the caller has just declared
-    wrong must not come back as the "last known" one while a slow fresh read
-    is in flight.
+    The stored read is KEPT, marked superseded, not dropped. Dropping it was
+    the S8 defect: a next read that missed the batch deadline then had no last
+    known value to fall back on and served the prior — 6983 became 7000,
+    `source=prior`, `degraded=true` — so the agent a dispute had just landed on
+    cleared the floor and its score went UP on the agents page. Kept, it is
+    what that slow read serves instead (`_stale_info`): the last on-chain
+    numbers, `stale` with their age and `superseded`, which `passes_floor`
+    refuses. The page shows a real, older score; the planner routes nothing
+    on it. A read that answers — this one's own refresh below, or any other —
+    replaces it, and the flag with it.
+
+    And the read is started HERE, not left to the next reader
+    (`_schedule_refresh`): in the background, single-flight, bounded, never
+    blocking the rating path that called this. A plan or a page load that
+    arrives while it runs joins it; one that arrives after it finds the
+    post-rating value already cached. So the window in which a just-rated
+    agent is held off routing is one ledger read, started at the moment the
+    rating landed, rather than whenever somebody next asked and then the
+    batch deadline on top.
 
     This one key is enough because it is the only cache in front of
     reputation: `fetch_rep`, `fetch_reps`, both /api/stellar/reputation routes,
@@ -844,3 +999,4 @@ def invalidate_rep(agent_id: str) -> None:
     from ..stellar import cache as rcache
 
     rcache.invalidate(_rep_cache_key(agent_id))
+    _schedule_refresh(agent_id)

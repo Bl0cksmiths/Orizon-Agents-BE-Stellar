@@ -876,6 +876,23 @@ class SettlementStep:
     # about. None for a step that delivered nothing, and for every settlement
     # recorded before this field existed.
     output_summary: str | None = None
+    # What PaymentEscrow v2's `settle` paid this step's operator, and the
+    # receipt that payout minted (ADR 0010). v2 pays per step, so on a v2
+    # record a DELIVERED step's `price_usdc` IS this amount — the credit basis
+    # the docstring promises — and 0.0 for a delivered step nobody could be
+    # paid for (free, or an agent with no on-chain owner), which no dispute can
+    # then credit. An undelivered v2 step keeps the plan's quote and 0.0. None on
+    # every v1 record: v1 moved one total for the run and minted one receipt,
+    # so no step had an amount or a receipt of its own. Kept inside the JSONB
+    # `steps` column, so the table's shape does not change.
+    paid_usdc: float | None = None
+    receipt_id_hex: str | None = None
+    # Why a DELIVERED v2 step was paid nothing, so the receipt can say so:
+    # "free", "no_onchain_owner" (the seeded catalogue has no on-chain owner,
+    # and a payout naming one reverts the whole settle), "owner_unreadable",
+    # or "over_authorized_cap". None for a paid step, an undelivered one, and
+    # every v1 record.
+    unpaid_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1461,6 +1478,9 @@ def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
                 "price_usdc": s.price_usdc,
                 "delivered": s.delivered,
                 "output_summary": _storable(s.output_summary),
+                "paid_usdc": s.paid_usdc,
+                "receipt_id_hex": s.receipt_id_hex,
+                "unpaid_reason": s.unpaid_reason,
             }
             for s in steps
         ],
@@ -1484,6 +1504,11 @@ def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
             # `.get`, not `[...]`: every row written before story 4.05 lacks the
             # key, and those settlements are still inside their windows.
             output_summary=s.get("output_summary"),
+            # `.get` for the same reason: every row written before ADR 0010,
+            # and every v1 row after it, has no per-step payment.
+            paid_usdc=None if s.get("paid_usdc") is None else float(s["paid_usdc"]),
+            receipt_id_hex=s.get("receipt_id_hex"),
+            unpaid_reason=s.get("unpaid_reason"),
         )
         for s in json.loads(raw)
     )

@@ -51,6 +51,7 @@ from .services.binding_registry import refresh_bound_ids, start_refresh_retry, s
 from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
+from .stellar import client as sc
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -216,9 +217,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # lifetime, with nothing but a redeploy to fix it. A no-op on the healthy
     # path: the load above has already set `_loaded` and no task is created.
     start_refresh_retry()
+    # Wait, bounded, for the registry sync's first pass — started above, so it
+    # has been running alongside the binding load — before the pre-warm reads
+    # the registry. Without this the pre-warm read the seeded catalog alone,
+    # and the first plans after a restart had no on-chain agent in them (S13).
+    # A pass slower than REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS is not cancelled:
+    # boot stops waiting with a WARNING and the loop finishes it. Nothing is
+    # served until this returns — /health included — which is why it is
+    # bounded well inside Render's health-check grace.
+    await registry_sync.wait_first_pass(settings.registry_boot_sync_timeout_seconds)
     # Read every agent's reputation once, in the background, so the first plan
     # after a deploy is routed on the ledger rather than on priors. Last, so
-    # the reads it queues cannot delay anything above.
+    # the reads it queues cannot delay anything above; after the registry
+    # wait, so the on-chain agents that pass indexed are read too.
     reputation_svc.start_prewarm()
     yield
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
@@ -227,6 +238,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Same reason: a scorer read still in flight must not outlive the loop.
     await rating_writer.stop()
     await reputation_svc.stop_prewarm()
+    await reputation_svc.stop_refreshes()
     reputation_svc.shutdown_read_pool()
     # Stop the sync loop first — it must not fire a fresh RPC pass while the
     # shutdown below is draining execution tasks.
@@ -644,6 +656,40 @@ class DisputesReadiness(BaseModel):
     reconcile: RefundReconcileReadiness
 
 
+class EscrowReadiness(BaseModel):
+    """Which PaymentEscrow this process settles through, and its version (ADR 0010).
+
+    `version` is 2 when runs are settled per delivered step through custody,
+    1 when they go through v1's `charge`, and null until this process has read
+    it. Never read on the probe's path: the answer is the client's cache, and a
+    probe that finds none starts one background read for the next probe to
+    see, the way `ratings` refreshes. Informational, like the rest.
+    """
+
+    contract: str  # the configured escrow id, public chain data
+    version: int | None
+
+
+_escrow_version_probe: asyncio.Task | None = None
+
+
+def _escrow_readiness() -> EscrowReadiness:
+    """The configured escrow's cached version, kicking one background read if none."""
+    global _escrow_version_probe
+    escrow = settings.stellar_payment_escrow
+    version = sc.cached_escrow_version(escrow) if escrow else None
+    if escrow and version is None and (_escrow_version_probe is None or _escrow_version_probe.done()):
+
+        async def _probe() -> None:
+            try:
+                await asyncio.to_thread(sc.escrow_version, escrow)
+            except Exception as e:
+                logger.warning("readiness: escrow %s version unreadable: %s", escrow, e)
+
+        _escrow_version_probe = asyncio.create_task(_probe())
+    return EscrowReadiness(contract=escrow, version=version)
+
+
 class ReadinessResponse(BaseModel):
     """Per-dependency readiness report. No live network calls, so the probe
     stays cheap and deterministic: everything is config-derived except
@@ -657,6 +703,7 @@ class ReadinessResponse(BaseModel):
     cold_start: ColdStartReadiness  # informational, never gates readiness
     ratings: RatingsReadiness  # informational, never gates readiness
     disputes: DisputesReadiness  # informational, never gates readiness
+    escrow: EscrowReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -717,4 +764,5 @@ async def readiness(response: Response) -> ReadinessResponse:
             store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
             reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
         ),
+        escrow=_escrow_readiness(),
     )

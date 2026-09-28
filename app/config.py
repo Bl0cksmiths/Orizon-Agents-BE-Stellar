@@ -367,6 +367,16 @@ class Settings(BaseSettings):
     # registrations into the marketplace every N seconds; values under 5 are
     # clamped by the service, and a blank STELLAR_AGENT_REGISTRY disables it.
     registry_sync_seconds: int = 15
+    # How long boot waits for the registry sync's FIRST pass before the
+    # reputation pre-warm reads the registry (app/main.py lifespan). Without
+    # the wait the pre-warm read only the seeded catalog and the first plans
+    # after a restart were built without any on-chain agent — Render's free
+    # tier restarts often. A pass slower than this does not hold boot: it
+    # carries on in the background loop and boot goes ahead with a WARNING.
+    # Kept well inside Render's health-check grace, since the service answers
+    # nothing — /health included — until lifespan startup returns. 0 skips
+    # the wait.
+    registry_boot_sync_timeout_seconds: float = 5.0
 
     # ── PDAX (PHP ↔ crypto on/off-ramp, institutions API) ─────
     # Env: "production" | "stage" | "uat". Base URL is resolved per
@@ -469,6 +479,24 @@ class Settings(BaseSettings):
                 "REFUND_RECONCILE_INTERVAL_SECONDS must be a finite number of seconds from 30 to 3600 — the sweep "
                 "reads the chain once per held refund claim each pass, and has to look at every claim well inside "
                 "the RPC's transaction history window"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _registry_boot_sync_timeout_is_a_bound(self) -> "Settings":
+        """Refuse a boot wait that is not a bound.
+
+        NaN would make the wait expire on arrival and inf would let a hung RPC
+        hold boot forever — no request, /health included, is answered until
+        lifespan startup returns. Past 60 s the wait eats into the time Render
+        gives a deploy to answer its health check. Names the variable, never
+        the value.
+        """
+        bound = self.registry_boot_sync_timeout_seconds
+        if not (math.isfinite(bound) and 0 <= bound <= 60):
+            raise ValueError(
+                "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — boot waits "
+                "this long for the first registry sync pass, and answers no request until it is done"
             )
         return self
 

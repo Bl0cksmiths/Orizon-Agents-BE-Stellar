@@ -851,6 +851,9 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "delivered": False,
                 "creditable_usdc": 0.0,
                 "output_summary": None,
+                "paid_usdc": None,
+                "receipt_id_hex": None,
+                "unpaid_reason": None,
             },
             {
                 "step_index": 1,
@@ -860,6 +863,9 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "delivered": True,
                 "creditable_usdc": 0.25,
                 "output_summary": "Built a landing page with a signup form",
+                "paid_usdc": None,
+                "receipt_id_hex": None,
+                "unpaid_reason": None,
             },
         ],
         "policy": {"credited_fraction": 1.0, "funded_by": "platform", "adjudicated_by": "platform"},
@@ -965,7 +971,13 @@ def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypat
     # The clock is present even with nothing to count down to, so the console
     # can take its skew from any read rather than only a settled one.
     assert isinstance(body.pop("now"), float)
-    assert body == {"task_id": task_id, "window_closes_at": None, "settlement": None, "disputes": []}
+    assert body == {
+        "task_id": task_id,
+        "window_closes_at": None,
+        "settlement": None,
+        "disputes": [],
+        "settlement_state": None,
+    }
 
 
 def test_the_task_read_refusal_never_echoes_the_id_it_refused(client, monkeypatch):

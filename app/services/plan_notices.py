@@ -74,6 +74,16 @@ def _floor_reason(info: RepInfo | None) -> str:
     the callers hold `dict.get` results and should not have to narrow them.
     """
     lb = info.lower_bound_bps if info is not None else 0
+    if info is not None and info.superseded:
+        # Not below the floor on these numbers — refused because they predate
+        # a rating that has since landed (`reputation_svc.passes_floor`), so
+        # "below routing floor (7042 < 5500 bps)" would state a false
+        # inequality. A new sentence for a new case: every sentence above is
+        # unchanged, and `reason_code` stays `below_floor`, the floor's verdict.
+        return (
+            f"rated since its last reputation read ({lb} bps), so held off routing until a fresh read answers "
+            f"(floor {settings.reputation_floor_bps} bps)"
+        )
     return f"below routing floor ({lb} < {settings.reputation_floor_bps} bps)"
 
 
@@ -110,6 +120,11 @@ def _dispute_rate(info: RepInfo | None) -> int | None:
     return None if info is None else info.dispute_rate_bps
 
 
+def _awaiting_fresh_read(info: RepInfo | None) -> bool:
+    """Whether the floor acted on numbers a newer rating has superseded."""
+    return info is not None and info.superseded
+
+
 def below_floor_exclusion(agent: Agent, info: RepInfo | None) -> PlanFloorNotice:
     """A sub-floor agent dropped from the plan outright, with no stand-in."""
     return PlanFloorNotice(
@@ -122,6 +137,7 @@ def below_floor_exclusion(agent: Agent, info: RepInfo | None) -> PlanFloorNotice
         floor_bps=settings.reputation_floor_bps,
         count=_count(info),
         dispute_rate_bps=_dispute_rate(info),
+        awaiting_fresh_read=_awaiting_fresh_read(info),
     )
 
 
@@ -171,6 +187,7 @@ def substitution(designated: Agent, replacement: Agent, info: RepInfo | None) ->
         floor_bps=settings.reputation_floor_bps,
         count=_count(info),
         dispute_rate_bps=_dispute_rate(info),
+        awaiting_fresh_read=_awaiting_fresh_read(info),
     )
 
 

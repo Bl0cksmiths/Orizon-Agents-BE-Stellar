@@ -98,6 +98,8 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
                 "last_outcomes": {},
             },
         },
+        # Never read on the probe's path, so null until a background read lands.
+        "escrow": {"contract": "C" + "A" * 55, "version": None},
     }
 
 

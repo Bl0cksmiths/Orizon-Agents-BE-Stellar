@@ -281,3 +281,33 @@ def test_a_notice_without_a_reputation_entry_has_no_evidence_fields():
 
     for n in (unbound, unscored):
         assert (n.count, n.dispute_rate_bps) == (None, None)
+
+
+def test_a_verdict_on_superseded_numbers_is_flagged_and_says_why():
+    """A rating landed since the last read, so the floor refused to judge the
+    stored bound — 7042 here, ABOVE the 5500 floor. The notice must not read
+    as "7042 < 5500": it carries the flag a renderer switches on, and a
+    sentence that says what actually happened. `reason_code` is unchanged."""
+    info = _info("agt_05x7", lower=7042)
+    info._superseded = True
+
+    excluded = plan_notices.below_floor_exclusion(_agent("agt_05x7"), info)
+    substituted = plan_notices.substitution(_agent("agt_05x7"), _agent("agt_01h8"), info)
+
+    for n in (excluded, substituted):
+        assert n.awaiting_fresh_read is True
+        assert n.reason_code == "below_floor"
+        assert n.lower_bound_bps == 7042
+        assert n.reason == (
+            "rated since its last reputation read (7042 bps), so held off routing until a fresh read answers "
+            "(floor 5500 bps)"
+        )
+
+
+def test_an_ordinary_verdict_is_not_flagged():
+    info = _info("agt_02k2", lower=4200)
+
+    assert plan_notices.below_floor_exclusion(_agent("agt_02k2"), info).awaiting_fresh_read is False
+    assert plan_notices.substitution(_agent("agt_02k2"), _agent("agt_01h8"), info).awaiting_fresh_read is False
+    assert plan_notices.below_floor_exclusion(_agent("agt_02k2"), None).awaiting_fresh_read is False
+    assert plan_notices.unbound_exclusion(_agent("ext_9")).awaiting_fresh_read is False

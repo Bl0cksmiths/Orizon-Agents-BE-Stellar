@@ -9,11 +9,22 @@ matching HTTP route on this backend.
 | contract | role | signer | backend route |
 | --- | --- | --- | --- |
 | **AgentRegistry** | identity + price catalog | agent owner (user) | `POST /api/stellar/build/register-agent` (user signs) |
-| **PaymentEscrow** | x402-style authorize → charge | payer (user) + settler (backend) | `POST /api/stellar/build/authorize` + `POST /api/stellar/server/charge` |
+| **PaymentEscrow** | x402-style authorize → settle (v2) / charge (v1) | payer (user) + settler (backend) | `POST /api/stellar/build/authorize`; the run settles itself (v2), `POST /api/stellar/server/charge` is v1-only |
 | **AttestationRegistry** | write-once job proof | sealer (backend) | `POST /api/stellar/server/seal` |
 | **ReputationLedger** | rating aggregates | scorer (backend) | (backend-only; rating submission route TBD) |
 
 Current deploy (testnet): see `/api/stellar/network` or `addresses.json`.
+
+> **Escrow v2 (ADR 0010).** v1's `charge` can never settle (D-039). v2 takes
+> the payer's `max_amount` into custody at `authorize` (same signature — the
+> label is the plan id) and, at the end of a paid run, the backend submits ONE
+> `settle(settler, auth_id, job_id, payouts)` paying each **delivered** step's
+> operator its own price, returning the rest; nothing delivered is an empty
+> `settle`, a full release. Only agents with an on-chain owner are paid — the
+> seeded `agt_*` catalogue is not registered, so its steps go unpaid and the
+> buyer keeps that share. The backend reads `version()` (missing = v1) and
+> picks the path itself; `/readiness` shows which. The flow diagram and
+> sections D and "charge wiring" below describe v1.
 
 ## The full job lifecycle
 
@@ -217,7 +228,7 @@ const res = await fetch("/api/stellar/submit", {
 | --- | --- | --- | --- |
 | `admin` | `__constructor(admin, …)` on each contract | yes (via `set_*` methods) | emergency / config |
 | `scorer` (ReputationLedger) | deploy arg | `set_scorer(admin-sig)` | write ratings |
-| `settler` (PaymentEscrow) | deploy arg | re-deploy | call `charge` |
+| `settler` (PaymentEscrow) | deploy arg | v1: re-deploy · v2: `set_settler(admin-sig)` | call `charge` (v1) / `settle` (v2) |
 | `sealer` (AttestationRegistry) | deploy arg | `set_sealer(admin-sig)` | call `seal` |
 
 Today all four roles are the single `admin` keypair for simplicity. In prod
@@ -234,7 +245,7 @@ Every contract uses a shared error enum (see `crates/shared/src/lib.rs::codes`):
 | 2 | NotFound (missing row) |
 | 3 | AlreadyExists (write-once violated) |
 | 4 | Expired (authorization TTL passed) |
-| 5 | Insufficient (charge would exceed max) |
+| 5 | Insufficient (charge, or v2 settle's payouts, would exceed max) |
 | 6 | Revoked |
 | 7 | Replay (rating already submitted for this job) |
 | 8 | Inactive (agent deactivated) |

@@ -826,7 +826,7 @@ async def _build_kit_plan(
         plan_id=plan_id,
         intent=intent,
         steps=steps,
-        total_usdc=round(total_price, 4),
+        total_usdc=authorizable_total_usdc(steps),
         total_eta=round(total_eta, 2),
         notices=notices,
         # Both paths answer the same two questions, because a buyer cannot tell
@@ -879,6 +879,32 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
 # is a paid dispatch and `/execute` runs them all, so the count is the buyer's
 # bill: the model is asked for six, and the clamp is what makes six a limit
 # rather than a request. A 200-step plan was storable before this.
+# The ledger's unit: 7 decimals.
+_STROOPS_PER_USDC = 10_000_000
+
+
+def authorizable_total_usdc(steps: list[PlanStep]) -> float:
+    """The plan's total as the buyer should authorize it: EXACTLY what paying
+    every step would move, not a rounded estimate of it.
+
+    The console signs this number as the escrow authorization's `max_amount`,
+    and escrow v2 pays each delivered step its own price in stroops, refusing
+    the whole settle when their sum passes the max. Rounded to four decimals it
+    could land below that sum — a 0.037002 plan authorized as 0.037 (370000
+    stroops against 370020) — and every fully delivered run of it would fail to
+    pay anyone (S6). So it is the sum of the per-step stroop amounts, in the
+    same rounding the settle uses, back in USDC: a float the authorize route
+    turns into exactly that many stroops again.
+    """
+    try:
+        stroops = sum(round(s.est_price_usdc * _STROOPS_PER_USDC) for s in steps)
+    except (OverflowError, ValueError):
+        # A price the ledger cannot hold. Nothing can authorize it, and the
+        # v2 execute check refuses it; the card shows the raw sum.
+        return sum(s.est_price_usdc for s in steps)
+    return stroops / _STROOPS_PER_USDC
+
+
 _MAX_PLAN_STEPS = 6
 
 
@@ -1126,7 +1152,7 @@ async def decompose(intent: str) -> DecomposeResponse:
         plan_id=plan_id,
         intent=intent,
         steps=cleaned,
-        total_usdc=round(total_price, 4),
+        total_usdc=authorizable_total_usdc(cleaned),
         total_eta=round(total_eta, 2),
         # The floor acted BEFORE the planner was asked anything, so these
         # describe the shortlist the model chose from, not the model's choice.

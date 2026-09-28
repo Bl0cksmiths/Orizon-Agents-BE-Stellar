@@ -32,6 +32,28 @@ from `authorization(auth_id)` and compared against the agent's owner and the
 escrow's settler. Anything that resolves to one of our own keys — or that
 cannot be resolved at all — is still reported, but never counted.
 
+What PaymentEscrow v2 changes (ADR 0010)
+----------------------------------------
+v2 takes the payer's funds into custody at `authorize` and pays each delivered
+step's operator at `settle`, emitting one `charged` event per payout in v1's
+exact shape — `(("charged", agent_id), (receipt_id, auth_id, amount, job_id))` —
+except that the topic is now the agent ACTUALLY paid, where v1's was the
+authorization's label (`orizon_batch`). So per-agent earnings become real, and
+this module reads them unchanged: the payer is still `authorization(auth_id)
+.payer`, which v2 keeps, and it is now the buyer whose custody funded the
+payout, so a third-party buyer's charge counts as revenue as it always should
+have.
+
+Two premises move, and both are answered here. v2's settler can be ROTATED by
+the admin (`set_settler`), so "the settler" is no longer one address for the
+life of the contract: besides the settler the escrow names now, a charge whose
+payer is this deployment's own signing key or its admin is the platform paying
+and is excluded as `settler` too. And the escrow id changes with the switch:
+the scan reads the CONFIGURED escrow only, so v1's history drops out of it.
+Nothing is lost by that — every `charged` event v1 ever emitted was the
+platform paying itself, excluded from revenue here — and the v1 ids stay in the
+evidence docs as history.
+
 Why "no entries" is not "never paid"
 ------------------------------------
 Soroban RPC keeps events for about seven days and then drops them, so a scan
@@ -488,8 +510,10 @@ async def _read_settler(escrow_id: str) -> str | None:
 
     Needed because "the platform paid itself" is not only `payer == owner`. The
     settler is the one account whose funds `charge` can actually move, so a
-    charge it paid is the platform's money either way — and the settler is a
-    deploy argument with no setter on this contract, hence the long TTL.
+    charge it paid is the platform's money either way. On v1 the settler is a
+    deploy argument with no setter; v2's admin can rotate it, so this is the
+    CURRENT settler only, up to the TTL stale — which is why `_platform_keys`
+    also names the keys this deployment itself signs and administers with.
     """
 
     async def _fetch() -> str | None:
@@ -507,7 +531,26 @@ async def _read_settler(escrow_id: str) -> str | None:
     return result if isinstance(result, str) else None
 
 
-def _exclusion(payer: str | None, owner: str, settler: str | None) -> Exclusion | None:
+def _platform_keys() -> frozenset[str]:
+    """The accounts this deployment itself holds, besides the escrow's settler.
+
+    Its signing key (the settler it settles as, whatever the chain's `settler()`
+    said at the last read) and its admin. A charge any of them funded is the
+    platform paying, not revenue — the same rule as `settler`, closed against
+    a v2 settler rotation the cached read has not seen yet.
+    """
+    keys = {settings.stellar_admin_address} if settings.stellar_admin_address else set()
+    if settings.stellar_signing_key:
+        try:
+            keys.add(sc.signer_public_key())
+        except Exception as e:
+            logger.warning("[settlement] signing key unreadable: %s", _describe(e))
+    return frozenset(keys)
+
+
+def _exclusion(
+    payer: str | None, owner: str, settler: str | None, platform: frozenset[str] = frozenset()
+) -> Exclusion | None:
     """Which rule kept this charge out of revenue, or None when none did.
 
     The ORDER is the whole content of this function, and two steps of it are
@@ -526,7 +569,8 @@ def _exclusion(payer: str | None, owner: str, settler: str | None) -> Exclusion 
          for an external operator — whose owner is their own wallet and not one
          of ours — it is the only correct one. Reversed, this would tell that
          operator the platform had paid them.
-      3. `settler`: the platform funded it, the escrow paying itself.
+      3. `settler`: the platform funded it, the escrow paying itself — the
+         escrow's settler, or one of `platform`, this deployment's own keys.
       4. `settler_unreadable` last, because it is the weakest claim of the
          four: the payer was read and is neither of ours, and the only thing
          keeping this out of revenue is a check we could not run.
@@ -535,7 +579,7 @@ def _exclusion(payer: str | None, owner: str, settler: str | None) -> Exclusion 
         return "payer_unreadable"
     if payer == owner:
         return "owner"
-    if settler is not None and payer == settler:
+    if (settler is not None and payer == settler) or payer in platform:
         return "settler"
     if settler is None:
         return "settler_unreadable"
@@ -547,6 +591,7 @@ def _build_entries(
     payers: dict[str, str],
     owner: str,
     settler: str | None,
+    platform: frozenset[str] = frozenset(),
 ) -> tuple[list[SettlementEntry], int, int]:
     """Attribute every charge and split verified revenue from everything else.
 
@@ -584,7 +629,7 @@ def _build_entries(
     excluded = 0
     for charge in sorted(charges, key=lambda c: (c.ledger, c.auth_id, c.job_id)):
         payer = payers.get(charge.auth_id)
-        exclusion = _exclusion(payer, owner, settler)
+        exclusion = _exclusion(payer, owner, settler, platform)
         # The same predicate this has always applied, now read off the reason
         # rather than recomputed beside it — two expressions of one rule would
         # be free to drift, and the payload's arithmetic gates on this flag.
@@ -677,7 +722,7 @@ async def _settlement(agent_id: str) -> SettlementEvidence:
     # case for a young agent is an empty window.
     settler = await _read_settler(escrow_id) if scan.charges else None
     payers = await _resolve_payers(escrow_id, scan.charges)
-    entries, total, excluded = _build_entries(scan.charges, payers, owner, settler)
+    entries, total, excluded = _build_entries(scan.charges, payers, owner, settler, _platform_keys())
 
     if scan.truncated:
         logger.warning(

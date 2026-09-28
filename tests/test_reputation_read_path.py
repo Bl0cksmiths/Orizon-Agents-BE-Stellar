@@ -289,24 +289,35 @@ def test_a_failed_refresh_serves_the_last_read_stale(chain, caplog):
     assert "failing OPEN" not in lines[0]
 
 
-def test_an_invalidated_read_is_never_served_stale(chain):
-    """Invalidation says the stored read is WRONG now — a rating landed. It
-    must not come back as a stale answer while the fresh read is slow."""
+def test_an_invalidated_read_is_served_superseded_never_the_prior(chain):
+    """S8. Invalidation says a rating landed after the stored read. When the
+    fresh read then misses the deadline, the agent used to be served the prior
+    — its score went UP and it cleared the floor. Now it is served its last
+    on-chain read, stale with its age and superseded, which the floor refuses."""
     chain.state["agt_04m1"] = GOOD
 
     async def scenario():
-        await rep.fetch_reps(["agt_04m1"])
+        before = (await rep.fetch_reps(["agt_04m1"]))["agt_04m1"]
         rep.invalidate_rep("agt_04m1")
         chain.hold("agt_04m1")
         served = await rep.fetch_reps(["agt_04m1"], timeout_seconds=0.3)
         chain.release("agt_04m1")
         await asyncio.wait({_flight("agt_04m1")})
-        return served["agt_04m1"]
+        return before, served["agt_04m1"]
 
-    served = asyncio.run(scenario())
+    before, served = asyncio.run(scenario())
 
-    assert served.stale is False
-    assert served.degraded is True
+    assert served.degraded is False
+    assert served.source == "onchain"
+    assert served.stale is True
+    assert served.stale_age_seconds is not None and 0.0 <= served.stale_age_seconds < 5.0
+    assert served.superseded is True
+    assert served.model_dump(exclude={"stale", "stale_age_seconds"}) == before.model_dump(
+        exclude={"stale", "stale_age_seconds"}
+    )
+    # GOOD clears the floor on its numbers; superseded, it is refused anyway.
+    assert rep.passes_floor(before) is True
+    assert rep.passes_floor(served) is False
 
 
 def _join_prewarm(client) -> None:

@@ -94,6 +94,12 @@ there is nothing to dispute. The settlement record keeps a `delivered` flag per
 step precisely so this stays answerable a day later, when the run's trace is
 long gone.
 
+**Under escrow v2 each step is paid on its own (ADR 0010),** so the same rule
+holds a step at a time: a step's `price_usdc` on the settlement is what its
+payout actually moved, and a delivered step that was not paid — free, or run
+by an agent with no on-chain owner (`unpaid_reason`) — is recorded at `0` and
+cannot be disputed, because nothing was charged for it.
+
 This is worth stating to buyers directly, because it reads as a refusal when it
 is the opposite: a failed step already cost you nothing. What it costs the
 agent is reputational — a failed step is rated like any other, and a run where
@@ -146,9 +152,11 @@ It is a transfer from the settler's own wallet to the buyer over the asset
 contract — **not** a reversal of the original charge, and **not** a seizure of
 anything the agent was paid:
 
-- The deployed `PaymentEscrow` has no refund entrypoint and never takes
-  custody — `charge` sends USDC from the payer straight to the agent's owner,
-  so there is nothing held anywhere to reverse.
+- `PaymentEscrow` has no refund entrypoint. v1 never takes custody — `charge`
+  sends USDC from the payer straight to the agent's owner. v2 holds the
+  buyer's authorization in custody only until the run's one `settle`, which
+  pays each operator and returns the rest at once (ADR 0010). Either way,
+  once a step is paid there is nothing held anywhere to reverse.
 - Nothing in the system can take funds back out of an agent owner's wallet, and
   nothing tries to. An operator's settled earnings are final.
 
@@ -815,6 +823,7 @@ readable anywhere; only the deadline was.
 | `now` | this server's clock when the response was built, in epoch seconds. The window is enforced by the server, so a countdown run off the browser's clock is wrong by however far that clock has drifted; the console corrects by the difference |
 | `settlement` | null until the task settles; otherwise the object below |
 | `disputes` | every dispute raised on the task, in the order they were opened, each in the shape `GET /api/disputes/{dispute_id}` returns — "What a dispute returns" above |
+| `settlement_state` | what happened to the run's money: `settled` whenever a settlement is on record, otherwise the task's own — `released` (v2, nothing delivered, the custody went back), `skipped` (v1, nothing delivered, nothing charged), `unconfirmed` (it may still land, and is never retried) or `failed` (no money moved). Null when neither is known — a simulated run, or a task this process no longer holds (ADR 0010) |
 
 `settlement`:
 
@@ -824,7 +833,7 @@ readable anywhere; only the deadline was.
 | `payer` | the address that authorized the escrow and whose USDC moved: the only wallet whose signature can open a dispute on this task |
 | `settled_at`, `window_closes_at` | when the charge landed, and the deadline stamped from it |
 | `settled_usdc` | what the charge actually moved on-chain, the ceiling on every credit |
-| `charge_tx`, `proof_tx` | the charge and attestation transactions. `proof_tx` is null when the charge landed and the seal did not |
+| `charge_tx`, `proof_tx` | the charge (v1) or settle (v2) and attestation transactions — only ever ones that CONFIRMED. `proof_tx` is null when the payment landed and the seal did not |
 | `steps` | one entry per step of the plan, below |
 | `policy` | the terms a credit is paid under, below |
 
@@ -837,6 +846,8 @@ Each of `steps`:
 | `delivered` | whether the step produced output. Only a delivered step was billed, and only a delivered step can be disputed |
 | `creditable_usdc` | what an upheld dispute on this step would credit, computed by the server with the refund's own rule (the policy's fraction of `price_usdc`, rounded to 7 decimals), so it is the figure a dispute opened now would freeze. Exactly `0` for a step that did not deliver. The transfer is also bounded by `settled_usdc`, so this is a ceiling, never a sum the platform could exceed |
 | `output_summary` | the one line the trace showed for what the step produced: the agent's own words, cleaned and bounded to 280 characters before they were stored. Null for a step that delivered nothing, and for settlements recorded before this field existed |
+| `paid_usdc`, `receipt_id_hex` | escrow v2 only: what this step's payout moved to its operator, and the on-chain receipt it minted (public already, in the `charged` event). On a v2 settlement a delivered step's `price_usdc` is this amount. Null on a v1 settlement, which paid one total for the run |
+| `unpaid_reason` | escrow v2 only: why a delivered step was paid nothing — `free`, `no_onchain_owner` (the seeded catalogue is not registered on-chain), `owner_unreadable` or `over_authorized_cap`. Null otherwise |
 
 `policy`:
 

@@ -762,3 +762,17 @@ def test_a_refund_reconcile_interval_outside_the_bounds_refuses_to_boot(interval
     assert "REFUND_RECONCILE_INTERVAL_SECONDS" in message
     # The boot-failure rule: the variable is named, the value never is.
     assert str(interval) not in message.replace("30 to 3600", "")
+
+
+# ── registry boot sync wait ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bound", [0.0, 5.0, 60.0])
+def test_a_registry_boot_wait_inside_the_bound_boots(bound: float) -> None:
+    assert _settings(registry_boot_sync_timeout_seconds=bound).registry_boot_sync_timeout_seconds == bound
+
+
+@pytest.mark.parametrize("bound", [-1.0, 60.5, float("nan"), float("inf")])
+def test_a_registry_boot_wait_that_is_not_a_bound_is_refused(bound: float) -> None:
+    with pytest.raises(ValidationError, match="REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS"):
+        _settings(registry_boot_sync_timeout_seconds=bound)

@@ -1657,10 +1657,19 @@ def test_a_live_run_prints_how_the_agents_dispute_rate_moved(
     assert "moved:            +1666 bps" in out
 
 
+def superseded(disputed: int, count: int) -> reputation_svc.RepInfo:
+    """The read from before an invalidation, served stale because the fresh
+    one did not answer — what `fetch_rep` gives right after a rating lands on
+    a slow ledger."""
+    info = rep(disputed, count).model_copy(update={"stale": True, "stale_age_seconds": 1.0})
+    info._superseded = True
+    return info
+
+
 @pytest.mark.parametrize(
     "unreadable",
-    [RuntimeError("rpc down"), rep(0, 0, degraded=True)],
-    ids=["raises", "degraded-prior"],
+    [RuntimeError("rpc down"), rep(0, 0, degraded=True), superseded(0, 5)],
+    ids=["raises", "degraded-prior", "superseded"],
 )
 def test_a_reputation_read_that_fails_never_fails_the_run(
     unreadable: reputation_svc.RepInfo | BaseException,

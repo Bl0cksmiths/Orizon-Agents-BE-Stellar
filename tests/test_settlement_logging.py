@@ -112,7 +112,9 @@ def test_charge_that_does_not_settle_is_logged(monkeypatch, caplog):
 
     monkeypatch.setattr(sc, "invoke_with_server_key_async", fake_invoke)
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
-        assert _settle("tsk_settle_charge") == ("chargehash123", None, None)
+        # The rejected hash is logged below, never returned as if it were
+        # evidence the charge happened (S7).
+        assert _settle("tsk_settle_charge") == (None, None, None)
 
     msgs = [r.getMessage() for r in _errors(caplog)]
     assert any(
@@ -145,7 +147,7 @@ def test_an_unconfirmed_charge_is_logged_as_undisputable_not_as_a_failure(monkey
 
     monkeypatch.setattr(sc, "invoke_with_server_key_async", fake_invoke)
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
-        assert _settle("tsk_settle_unconfirmed") == ("chargehash123", None, None)
+        assert _settle("tsk_settle_unconfirmed") == (None, None, None)
 
     msgs = [r.getMessage() for r in _errors(caplog)]
     assert any(
@@ -180,7 +182,7 @@ def test_a_rejected_charge_is_still_logged_as_one_that_moved_nothing(monkeypatch
 
     monkeypatch.setattr(sc, "invoke_with_server_key_async", fake_invoke)
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
-        assert _settle("tsk_settle_rejected") == ("chargehash123", None, None)
+        assert _settle("tsk_settle_rejected") == (None, None, None)
 
     msgs = [r.getMessage() for r in _errors(caplog)]
     assert any("did not settle" in m for m in msgs)
@@ -199,7 +201,8 @@ def test_seal_that_does_not_settle_after_a_charge_is_logged(monkeypatch, caplog)
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
         charge_tx, proof_tx, job_id = _settle("tsk_settle_seal")
 
-    assert (charge_tx, proof_tx) == ("chargehash123", "sealhash456")
+    # The confirmed charge is kept; the seal that did not confirm is not (S7).
+    assert (charge_tx, proof_tx) == ("chargehash123", None)
     assert job_id is not None
     msgs = [r.getMessage() for r in _errors(caplog)]
     # Paid work left unattested: the charge tx and the job id have to be
