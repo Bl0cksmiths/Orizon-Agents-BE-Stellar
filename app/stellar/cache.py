@@ -21,9 +21,12 @@ Concurrency model — single-flight with shield:
     hard-down RPC doesn't fan out a fresh upstream call per request: within
     the window an equivalent exception is raised without spawning work.
   - `invalidate(key)` is how a caller says the upstream state changed. It
-    drops the key's entry and failure and detaches its flight, and a per-key
-    generation stops that flight — already reading the old state — from
-    writing its outcome back, while its own callers still get their answer.
+    marks the key's entry SUPERSEDED — never served as a hit again, but kept
+    as the last value the upstream gave (`last_stored`) until a read taken
+    after the change replaces it — drops its failure and detaches its flight,
+    and a per-key generation stops that flight — already reading the old
+    state — from writing its outcome back, while its own callers still get
+    their answer.
 """
 
 from __future__ import annotations
@@ -32,9 +35,17 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple
 
 _store: dict[str, tuple[float, Any]] = {}
+
+# Keys whose stored value predates an `invalidate`: the upstream has changed
+# since it was read. `get_or_set` treats such an entry as a miss, so the next
+# read goes upstream, yet the value stays in `_store` for `last_stored` to
+# report — flagged — as the last thing the upstream actually said. A write-back
+# from a read spawned after the invalidation clears the flag. Always a subset
+# of `_store`'s keys, so it is bounded by the same sweep.
+_superseded: set[str] = set()
 
 # In-flight producers: key → the Task computing that key's value.
 _flights: dict[str, asyncio.Task[Any]] = {}
@@ -94,7 +105,7 @@ async def get_or_set(
     """
     now = time.monotonic()
     hit = _store.get(key)
-    if hit is not None and hit[0] > now:
+    if hit is not None and hit[0] > now and key not in _superseded:
         return hit[1]
     neg = _failures.get(key)
     if neg is not None:
@@ -129,6 +140,7 @@ async def _produce(key: str, ttl_seconds: float, producer: Callable[[], Awaitabl
         raise
     if _is_current(key, generation):
         _store[key] = (time.monotonic() + ttl_seconds, value)
+        _superseded.discard(key)
     return value
 
 
@@ -192,6 +204,7 @@ def _sweep(now: float) -> None:
 
     overflow = len(_store) + len(_failures) - max(_MAX_ENTRIES - _EVICT_HEADROOM, 0)
     if overflow <= 0:
+        _superseded.intersection_update(_store)
         return
     # One ordering over both dicts, so the cap is enforced on their combined
     # size rather than on each independently. The middle element tags which
@@ -204,27 +217,43 @@ def _sweep(now: float) -> None:
             _failures.pop(key, None)
         else:
             _store.pop(key, None)
+    _superseded.intersection_update(_store)
 
 
-def last_stored(key: str) -> tuple[Any, float] | None:
-    """The value most recently stored under `key`, fresh OR expired, with the
-    monotonic time it expired (or will expire) at — None when there is none.
+class Stored(NamedTuple):
+    """What `last_stored` reports about a key's most recent write."""
 
-    An expired entry is never served by `get_or_set`; it stays in `_store`
-    only until the next write or sweep. This is how a caller that has run out
-    of time for a fresh read (the reputation batch deadline) can still answer
-    with the last value the upstream actually gave, and say how old it is,
-    instead of pretending it knows nothing. It never spawns work.
+    value: Any
+    # Monotonic time the entry expired, or will expire, at.
+    expiry: float
+    # True when `invalidate` has run since this value was read: the upstream
+    # changed after it, so it is the last thing the upstream said but not
+    # what it says now. A read spawned after the invalidation clears it.
+    superseded: bool
 
-    It is exactly as trustworthy as the cache's own write-back: `invalidate`
-    drops the entry, and a flight fenced by it never stores one, so a value a
-    caller has declared stale by invalidating cannot come back through here.
+
+def last_stored(key: str) -> Stored | None:
+    """The value most recently stored under `key` — fresh, expired or
+    superseded — with the monotonic time it expired (or will expire) at and
+    whether an `invalidate` has run since it was read. None when there is none.
+
+    Neither an expired nor a superseded entry is ever served by `get_or_set`;
+    both stay in `_store` only until the next write or sweep. This is how a
+    caller that has run out of time for a fresh read (the reputation batch
+    deadline) can still answer with the last value the upstream actually gave,
+    and say how old it is, instead of pretending it knows nothing. It never
+    spawns work.
+
+    `superseded` is the part a caller must not ignore: the upstream changed
+    after that value was read (a rating landed), so it is a floor on what is
+    known, not the current state. A flight fenced by `invalidate` never stores
+    a value, so a read from before the change can never clear the flag.
     """
     hit = _store.get(key)
     if hit is None:
         return None
     expiry, value = hit
-    return value, expiry
+    return Stored(value, expiry, key in _superseded)
 
 
 def invalidate(key: str) -> None:
@@ -233,8 +262,12 @@ def invalidate(key: str) -> None:
     For upstream state that changed under the cache — a rating that just
     landed moves an agent's score, and serving the old value for the rest of
     its TTL is exactly what a caller acting on the change cannot have.
-    Dropping the stored entry is the easy half. A read already in flight when
-    the state changed is the hard half, and it is:
+    Retiring the stored entry is the easy half. It is marked superseded
+    rather than dropped: `get_or_set` no longer serves it, so the next read
+    goes upstream, but `last_stored` still reports it — flagged — because the
+    last value the upstream gave is still better evidence than none when that
+    next read is slow. A read already in flight when the state changed is the
+    hard half, and it is:
 
       - DETACHED from `_flights`, so a caller arriving after this point spawns
         a fresh read instead of joining one that started too early;
@@ -246,7 +279,8 @@ def invalidate(key: str) -> None:
     The failure cache goes too: an error from before the change says nothing
     about the state after it.
     """
-    _store.pop(key, None)
+    if key in _store:
+        _superseded.add(key)
     _failures.pop(key, None)
     _flights.pop(key, None)
     if key in _running:
@@ -269,6 +303,7 @@ def clear() -> None:
     newer one.
     """
     _store.clear()
+    _superseded.clear()
     _failures.clear()
     _flights.clear()
     for key in _running:

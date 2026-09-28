@@ -143,6 +143,12 @@ _lock = asyncio.Lock()
 # Handle on the background loop; start()/stop() own its lifecycle.
 _task: asyncio.Task | None = None
 
+# Set once the loop's FIRST pass has finished — indexed, failed or found the
+# registry unconfigured. Boot waits on it, bounded (`wait_first_pass`), so the
+# reputation pre-warm reads the on-chain agents too. Created by start() with
+# the loop it belongs to; None when no loop has been started.
+_first_pass: asyncio.Event | None = None
+
 # Once-per-process log guards. The disabled notice would otherwise repeat
 # every tick on a deployment that simply has no registry configured, and a
 # squatted agt_ id would re-warn on every pass for as long as it exists
@@ -320,6 +326,7 @@ async def _sync_loop() -> None:
     DEBUG until the streak ends, INFO when a pass next succeeds.
     """
     global _failing
+    first = _first_pass
     while True:
         try:
             await sync_once()
@@ -336,6 +343,11 @@ async def _sync_loop() -> None:
             if _failing:
                 _failing = False
                 logger.info("registry sync recovered")
+        if first is not None:
+            # Failed or not: boot is waiting to know the pass is over, not
+            # that it worked, and a failure has already been logged above.
+            first.set()
+            first = None
         await asyncio.sleep(max(_MIN_INTERVAL_SECONDS, settings.registry_sync_seconds))
 
 
@@ -368,16 +380,54 @@ def kick() -> None:
 
 def start() -> None:
     """Start the background sync loop. Idempotent — a live loop is kept."""
-    global _task
+    global _task, _first_pass
     if _task is not None and not _task.done():
         return
+    _first_pass = asyncio.Event()
     _task = asyncio.create_task(_sync_loop())
     _task.add_done_callback(_on_task_done)
 
 
+async def wait_first_pass(timeout_seconds: float) -> bool:
+    """Wait up to `timeout_seconds` for the loop's first pass; True if it finished.
+
+    The boot half of S13. The loop's first pass ran in the background while
+    the reputation pre-warm read `state.list_agents()` — the seeded catalog
+    alone, on a fresh process — so after every restart the first plans were
+    built without any on-chain agent, and each one's first reputation read was
+    cold: the prior, failing open. Lifespan awaits this before the pre-warm.
+
+    Bounded, because nothing is served until lifespan startup returns: a pass
+    slower than the bound is NOT cancelled — it is the loop's own pass, and it
+    finishes in the background — boot just stops waiting for it, with one
+    WARNING. The event is awaited, never the pass itself, so a timeout here
+    cannot cancel a read the loop is part-way through. True at once when no
+    loop was started; False at once, without a warning, for a bound of 0 —
+    the setting's way of saying "do not wait".
+    """
+    event = _first_pass
+    if event is None or event.is_set():
+        return True
+    if not timeout_seconds > 0:
+        # REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS=0: the operator chose not to wait.
+        return False
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "registry sync: the first pass did not finish within %.1f s of boot — starting without it. The loop "
+            "carries on in the background; on-chain agents it indexes after this are missing from the "
+            "reputation pre-warm, so each one's first read is cold (REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS)",
+            timeout_seconds,
+        )
+        return False
+    return True
+
+
 async def stop() -> None:
     """Cancel the loop and wait for it to unwind (shutdown path)."""
-    global _task
+    global _task, _first_pass
+    _first_pass = None
     if _task is None:
         return
     _task.cancel()

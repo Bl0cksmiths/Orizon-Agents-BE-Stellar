@@ -74,19 +74,27 @@ def _returning(value: object):
     return producer, calls
 
 
-def test_invalidate_drops_the_stored_value():
+def test_invalidate_supersedes_the_stored_value():
+    """Invalidated, the entry is never served again, but it is KEPT — flagged
+    superseded — as the last thing the upstream said, until a read taken after
+    the invalidation replaces it and clears the flag."""
     stale, _ = _returning("pre-dispute")
     fresh, fresh_calls = _returning("post-dispute")
 
     async def run():
         await cache.get_or_set("k", 60.0, stale)
         cache.invalidate("k")
-        assert "k" not in cache._store
-        return await cache.get_or_set("k", 60.0, fresh)
+        kept = cache.last_stored("k")
+        assert kept is not None
+        assert (kept.value, kept.superseded) == ("pre-dispute", True)
+        served = await cache.get_or_set("k", 60.0, fresh)
+        return served, cache.last_stored("k")
 
     # Well inside the 60 s TTL, so only the invalidation explains the re-read.
-    assert asyncio.run(run()) == "post-dispute"
+    served, after = asyncio.run(run())
+    assert served == "post-dispute"
     assert fresh_calls["n"] == 1
+    assert after is not None and (after.value, after.superseded) == ("post-dispute", False)
 
 
 def test_a_read_in_flight_at_invalidation_does_not_write_back():
