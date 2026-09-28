@@ -1030,6 +1030,7 @@ class Runner:
             ) from exc
         self.state.dispute = {**(self.state.dispute or {}), "status": upheld.get("status")}
         self.save()
+        self.say(f"  upheld: dispute {dispute_id} is {upheld.get('status')}")
         self.note(
             "uphold",
             "upheld",
