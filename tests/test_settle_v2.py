@@ -500,6 +500,26 @@ def test_a_settle_refused_before_submitting_releases_the_custody(monkeypatch, st
     assert state.tasks["tsk_v2_refused"].settlement == "failed"
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [{"payer": "GB" + "A" * 54}, {"agent_id": "pln_other"}],
+    ids=["another-payers-authorization", "another-plans-authorization"],
+)
+def test_a_late_settle_never_spends_or_releases_custody_that_is_not_this_runs(monkeypatch, store, overrides):
+    """`/execute` could not read the escrow version, so it passed the run
+    without checking the authorization, and the settle is the first look at
+    it. Custody that is another payer's, or labelled for another plan, is
+    neither paid out nor released: nothing is sent at all."""
+    chain = _install(monkeypatch, _Chain(auth=_auth(**overrides)))
+    _workers(monkeypatch, {"agt_0": _Ok()})
+
+    _run(_plan((0.01,)), "tsk_v2_not_ours")
+
+    assert chain.named("settle") == []
+    assert store.recorded == []
+    assert state.tasks["tsk_v2_not_ours"].settlement == "failed"
+
+
 def test_a_settle_the_simulation_refused_releases_the_custody(monkeypatch, store):
     calls: list[list[Any]] = []
 
