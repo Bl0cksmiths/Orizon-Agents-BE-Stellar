@@ -19,6 +19,9 @@ from .retry import RetryPolicy
 from .stages import Runner
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A seed is ALSO a valid variable name (upper-case base32), so it is refused by
+# shape before the name rule is asked.
+_SEED_SHAPE = re.compile(r"^S[A-Z2-7]{55}$")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,7 +68,7 @@ def _env_name(value: str | None, flag: str) -> str | None:
     pasted seed — is refused without being echoed."""
     if value is None:
         return None
-    if not _ENV_NAME.match(value):
+    if _SEED_SHAPE.match(value) or not _ENV_NAME.match(value):
         raise ValueError(f"{flag} takes the NAME of an environment variable, and what was given is not one (not shown)")
     return value
 
