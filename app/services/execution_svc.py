@@ -432,6 +432,12 @@ async def _run(
     charge_tx: str | None = None
     proof_tx: str | None = None
     onchain = bool(auth_id_hex and payer)
+    # Set the moment a settle (or a v2 release) is handed to the chain. A run
+    # that ends WITHOUT one — cancelled, killed by shutdown, or failed by a bug
+    # — releases the buyer's v2 custody on its way out instead of stranding it
+    # until expiry (S4). One that ends after it never does: that settle may
+    # still land, and a second one is a replay at best and a race at worst.
+    settle_attempted = False
 
     # Accumulate prior step outputs so later steps can build on them.
     # The kit (if any) is seeded into context up-front so EVERY worker
@@ -762,6 +768,7 @@ async def _run(
                 # `settle` releases every stroop back to them now, instead of
                 # leaving it locked until they reclaim it after expiry. Nothing
                 # is recorded or sealed — there is no delivered work.
+                settle_attempted = True
                 charge_tx, _, _ = await _settle_v2(
                     task_id,
                     start,
@@ -826,6 +833,7 @@ async def _run(
                 # spin-down) would otherwise take the buyer's only evidence of
                 # what they paid for with it. It touches no chain, and a store
                 # that is down cannot fail the run — see `_record_settlement`.
+                settle_attempted = True
                 charge_tx, proof_tx, job_id = await _settle_and_record(
                     task_id,
                     start,
@@ -901,17 +909,33 @@ async def _run(
         # propagating. shield: a second cancel must not kill the trace line.
         _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
+        if auth_id_hex and payer and not settle_attempted:
+            await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
         raise
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
         _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
+        if auth_id_hex and payer and not settle_attempted:
+            await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
     finally:
         # The SSE terminator must reach subscribers even mid-cancellation:
         # run the drain-delay + close shielded so bus.close ALWAYS executes
         # (a bare `await asyncio.sleep` here would swallow the close when a
         # CancelledError landed on it).
         await asyncio.shield(_finish_stream(task_id))
+
+
+async def _release_on_exit(task_id: str, start: float, auth_id_hex: str, reason: str) -> None:
+    """Release a run's v2 custody on a path that ends it without a settle.
+
+    A no-op on v1 (`release_authorization` returns None there). Only a release
+    that CONFIRMED is traced, as `released`; every other outcome is already in
+    the log, and the task keeps whatever it said before.
+    """
+    tx = await release_authorization(auth_id_hex, reason=reason)
+    if tx:
+        await _emit(task_id, start, "cost", f"custody released to the buyer · tx {tx[:10]}…", settlement="released")
 
 
 def _terminal_status(total_steps: int, succeeded: int, artifact: dict | None) -> TaskStatus:
