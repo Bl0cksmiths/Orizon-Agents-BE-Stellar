@@ -1316,10 +1316,25 @@ async def _settle_onchain(
 # allowance is the submit profile in `client._server` — load_account, prepare
 # and send, each up to 15 s with one retry — plus the transaction's own 30 s
 # validity window for it to close in a ledger, with slack for the owner reads
-# before it. v2 refuses a settle once the ledger's clock passes `expires_at`,
-# so a run that outlives its authorization is work nobody can be paid for.
+# before it. v2 does not refuse a settle for being past `expires_at`, but from
+# that moment the payer may `reclaim`, and whichever lands first wins — so a
+# run that outlives its authorization is work that may never be paid for.
 STEP_OVERHEAD_SECONDS = 5.0
 SETTLE_ALLOWANCE_SECONDS = 150.0
+
+# How long an on-chain owner read is trusted. A registered agent's owner is
+# written at registration and the registry has no transfer entrypoint, so a
+# positive answer is cached long; "not registered" can end the moment the
+# operator registers, so it is cached briefly. A failed read is not cached.
+OWNER_READ_TTL_SECONDS = 900.0
+NO_OWNER_READ_TTL_SECONDS = 60.0
+_owner_reads: dict[str, tuple[str | None, float]] = {}
+
+# Why a delivered step was not paid, as the settlement records it.
+UNPAID_FREE = "free"
+UNPAID_NO_OWNER = "no_onchain_owner"
+UNPAID_OWNER_UNREADABLE = "owner_unreadable"
+UNPAID_OVER_CAP = "over_authorized_cap"
 
 
 def worst_case_run_seconds(step_count: int) -> float:
@@ -1547,12 +1562,13 @@ class _PayoutRefused(Exception):
 
 @dataclass(frozen=True)
 class _StepPayout:
-    """What one delivered step is paid, and which `payouts` entry pays it."""
+    """What one delivered step is paid, which `payouts` entry pays it, and why not."""
 
     step_index: int
     agent_id: str
     amount: int  # stroops; 0 when the step is not paid
     payout_index: int | None  # None when the step is not paid
+    unpaid_reason: str | None = None  # one of the UNPAID_* tokens when not paid
 
 
 @dataclass(frozen=True)
@@ -1561,13 +1577,19 @@ class _PayoutPlan:
 
     payouts: tuple[Any, ...]  # client.Payout, kept Any so this module imports the client lazily
     steps: tuple[_StepPayout, ...]
+    clamped_stroops: int = 0  # how much the authorized cap cut; 0 when it cut nothing
 
     @property
     def total(self) -> int:
         return sum(p.amount for p in self.payouts)
 
 
-def _payout_plan(plan: StoredPlan, delivered_steps: frozenset[int], unpayable: frozenset[str]) -> _PayoutPlan:
+def _payout_plan(
+    plan: StoredPlan,
+    delivered_steps: frozenset[int],
+    unpaid_agents: Mapping[str, str],
+    cap: int | None = None,
+) -> _PayoutPlan:
     """Build `settle`'s payouts from the steps that DELIVERED, and nothing else.
 
     `delivered_steps` is the run loop's own set — the steps that produced
@@ -1575,11 +1597,18 @@ def _payout_plan(plan: StoredPlan, delivered_steps: frozenset[int], unpayable: f
     returned the wrong shape or was never dispatched is not in it and is not
     paid (5.01 AC5). Each amount is that step's price in stroops.
 
-    Two delivered steps are still not paid: a free one (the contract refuses a
-    zero payout) and one whose agent has no on-chain owner (`unpayable`):
-    `settle` pays `owner_of(agent_id)`, and one missing owner reverts the
-    whole transaction, which would leave every other operator unpaid. Their
-    share stays in custody and goes back to the buyer.
+    A delivered step is still not paid, and its share goes back to the buyer
+    with the remainder, when:
+      - it was free: the contract refuses a zero payout;
+      - its agent is in `unpaid_agents` — no on-chain owner (the seeded `agt_*`
+        catalogue), or an owner that could not be confirmed. `settle` pays
+        `owner_of(agent_id)`, and ONE agent the registry does not hold reverts
+        the whole transaction, so only confirmed owners are named;
+      - `cap`, the authorization's `max_amount`, is already used up. Steps are
+        paid in plan order and the one that crosses the cap is cut to what is
+        left; `clamped_stroops` says how much was cut, so the caller can say
+        so loudly. The contract would refuse the whole settle (`Insufficient`)
+        instead, and the planner's rounding once made that reachable (S6).
 
     At most `MAX_SETTLE_PAYOUTS` entries. One entry per step keeps a receipt
     per step. Past the limit, entries are merged per agent, in first-seen
@@ -1591,13 +1620,23 @@ def _payout_plan(plan: StoredPlan, delivered_steps: frozenset[int], unpayable: f
     """
     from ..stellar import client as sc
 
+    remaining = cap
+    clamped = 0
     paid: list[tuple[int, str, int]] = []
     unpaid: list[_StepPayout] = []
     for index in sorted(delivered_steps):
         step = plan.plan.steps[index]
         amount = _stroops(step.est_price_usdc)
-        if amount <= 0 or step.agent_id in unpayable:
-            unpaid.append(_StepPayout(index, step.agent_id, 0, None))
+        reason = UNPAID_FREE if amount <= 0 else unpaid_agents.get(step.agent_id)
+        if reason is None and remaining is not None:
+            if amount > remaining:
+                clamped += amount - remaining
+                amount = remaining
+            remaining -= amount
+            if amount <= 0:
+                reason = UNPAID_OVER_CAP
+        if reason is not None:
+            unpaid.append(_StepPayout(index, step.agent_id, 0, None, reason))
         else:
             paid.append((index, step.agent_id, amount))
 
@@ -1622,40 +1661,75 @@ def _payout_plan(plan: StoredPlan, delivered_steps: frozenset[int], unpayable: f
                 f"more than the {sc.MAX_SETTLE_PAYOUTS} payouts one settle accepts"
             )
         payouts = [sc.Payout(agent_id, totals[i]) for agent_id, i in slot.items()]
-    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)))
+    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped)
 
 
-async def _unpayable_agents(agent_ids: set[str]) -> frozenset[str]:
-    """The agents among `agent_ids` the registry says have NO owner to pay.
+def _onchain_owner_sync(agent_id: str) -> str | None:
+    """`AgentRegistry.owner_of(agent_id)`: the owner, or None when the registry
+    answers NotFound (#2). Raises on anything else. Cached per agent id —
+    long for an owner, briefly for "none" — and a failure is never cached."""
+    from ..stellar import client as sc
 
-    A read that fails is not "no owner": the agent stays in the payouts and the
-    settle's own simulation decides, so an RPC blip can fail the settle before
-    it is sent but can never quietly drop an operator's pay.
+    hit = _owner_reads.get(agent_id)
+    if hit is not None and hit[1] > time.monotonic():
+        return hit[0]
+    registry = settings.stellar_agent_registry
+    if not registry:
+        raise RuntimeError("AgentRegistry is not configured (STELLAR_AGENT_REGISTRY is unset)")
+    try:
+        owner = sc.simulate_read(registry, "owner_of", [sc.sym(agent_id)], load_source=False)
+    except RuntimeError as e:
+        if sc._contract_error_code(str(e).removeprefix("simulate failed: ")) != 2:
+            raise
+        owner = None
+    if owner is not None and not (isinstance(owner, str) and owner):
+        raise RuntimeError(f"owner_of returned {type(owner).__name__}, not an address")
+    ttl = OWNER_READ_TTL_SECONDS if owner else NO_OWNER_READ_TTL_SECONDS
+    _owner_reads[agent_id] = (owner, time.monotonic() + ttl)
+    return owner
+
+
+async def _unpaid_agents(agent_ids: set[str]) -> dict[str, str]:
+    """The agents among `agent_ids` a settle must NOT name, and why.
+
+    Only a confirmed on-chain owner is paid (interface amendment, S1): one
+    payout naming an agent the registry does not hold reverts the whole settle,
+    every other operator's pay with it. An owner that could not be READ is
+    left out on the same ground — its step is recorded unpaid, with its own
+    reason, and its share goes back to the buyer.
     """
-    from . import external_binding
 
-    async def _owner(agent_id: str) -> tuple[str, bool]:
+    async def _check(agent_id: str) -> tuple[str, str | None]:
         try:
-            return agent_id, await external_binding.resolve_owner(agent_id) is None
-        except external_binding.OwnerLookupError as e:
-            logger.warning("owner of %s unreadable before settle — keeping it in the payouts: %s", agent_id, e)
-            return agent_id, False
+            owner = await asyncio.to_thread(_onchain_owner_sync, agent_id)
+        except Exception as e:
+            logger.error("owner of %s unreadable before settle — its steps are not paid: %s", agent_id, e)
+            return agent_id, UNPAID_OWNER_UNREADABLE
+        return agent_id, None if owner else UNPAID_NO_OWNER
 
-    results = await asyncio.gather(*(_owner(a) for a in sorted(agent_ids)))
-    return frozenset(agent_id for agent_id, missing in results if missing)
+    results = await asyncio.gather(*(_check(a) for a in sorted(agent_ids)))
+    return {agent_id: reason for agent_id, reason in results if reason is not None}
 
 
-async def _settle_refused(task_id: str, start: float, auth_id_hex: str, payer: str, reason: str, trace: str) -> None:
-    """Log and trace a settle refused before it was built. Nothing was sent."""
+async def _settle_refused(
+    task_id: str, start: float, auth_id_hex: str, payer: str, reason: str, trace: str
+) -> tuple[str | None, str | None, bytes | None]:
+    """A settle refused before it was built: say so, then release the custody.
+
+    Nothing was sent, so the buyer's funds would otherwise sit in custody until
+    they reclaim them after expiry (S4). The release is best-effort and never
+    retried; its own outcome is logged by `release_authorization`.
+    """
     logger.error(
-        "task %s: PaymentEscrow.settle NOT submitted — %s (auth %s, payer %s); the buyer's custody stays "
-        "reclaimable after the authorization expires",
+        "task %s: PaymentEscrow.settle NOT submitted — %s (auth %s, payer %s); releasing the custody",
         task_id,
         reason,
         auth_id_hex,
         payer,
     )
     await _emit(task_id, start, "error", f"settlement refused before submitting — {trace}", settlement="failed")
+    await release_authorization(auth_id_hex, reason="settle_refused")
+    return (None, None, None)
 
 
 async def _settle_v2(
@@ -1674,19 +1748,24 @@ async def _settle_v2(
     The v2 twin of `_settle_onchain`, and deliberately the same contract with
     its caller: returns (settle_tx, proof_tx, job_id), and `on_settled` is
     awaited the moment the settle CONFIRMS, before the seal, for the reason
-    `_settle_onchain` gives. The outcome lands on the task and its trace as
-    `settlement` (ADR 0010).
+    `_settle_onchain` gives. A hash is returned only for a transaction that
+    CONFIRMED (S7); a rejected or unconfirmed one is in the log and the trace.
+    The outcome lands on the task and its trace as `settlement` (ADR 0010).
 
     With no delivered steps it is a release: an empty `payouts` returns the
     buyer's whole custody and pays nobody, and there is nothing to record or
     seal. The job id is then `unsettled_job_id`, the one the run's ratings are
     written under anyway.
 
-    Before anything is signed the payouts are built from the delivered steps
-    and their sum is checked against `MAX_CHARGE_USDC` and against the
-    authorization's own max — the contract refuses a sum past the max too
-    (`Insufficient`), but a run that would be refused is said so here, loudly,
-    not discovered in a simulation error.
+    Before anything is signed the payouts are built from the delivered steps,
+    held under the authorization's own `max_amount` (read back from the chain
+    unless `/execute` already read it) and checked against `MAX_CHARGE_USDC`.
+    A settle refused there releases the custody instead.
+
+    The authorization's expiry is NOT checked: the amended interface lets a
+    settle land after `expires_at` until the payer reclaims, and a settle that
+    loses that race comes back `Revoked` — or `Replay` if something else
+    settled it — which is reported as not settled by us.
 
     An UNCONFIRMED settle is handled exactly as an unconfirmed charge: it may
     still land, so it is reported `unconfirmed`, no settlement is recorded, and
@@ -1718,30 +1797,52 @@ async def _settle_v2(
         return (None, None, None)
 
     escrow = sc.contract_ids().payment_escrow
+    if authorized_max is None and delivered_steps:
+        try:
+            auth = await asyncio.to_thread(sc.escrow_authorization, escrow, bytes.fromhex(auth_id_hex))
+        except Exception as e:
+            return await _settle_refused(
+                task_id, start, auth_id_hex, payer, f"authorization unreadable: {e}", "the authorization is unreadable"
+            )
+        if auth is None:
+            return await _settle_refused(
+                task_id, start, auth_id_hex, payer, "authorization not found", "the authorization was not found"
+            )
+        authorized_max = auth.max_amount
     try:
-        unpayable = (
-            await _unpayable_agents({plan.plan.steps[i].agent_id for i in delivered_steps})
-            if delivered_steps
-            else frozenset()
+        unpaid_agents = (
+            await _unpaid_agents({plan.plan.steps[i].agent_id for i in delivered_steps}) if delivered_steps else {}
         )
-        payout_plan = _payout_plan(plan, delivered_steps, unpayable)
+        payout_plan = _payout_plan(plan, delivered_steps, unpaid_agents, authorized_max)
     except _PayoutRefused as e:
-        await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
-        return (None, None, None)
+        return await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
     total = payout_plan.total
-    for unpaid in (s for s in payout_plan.steps if s.payout_index is None and s.agent_id in unpayable):
+    if payout_plan.clamped_stroops:
         logger.error(
-            "task %s: step %d (%s) delivered but its agent has no on-chain owner — not paid, its share "
-            "returns to the buyer (auth %s)",
+            "task %s: payouts CLAMPED by %d stroops to the authorized max %s — the plan priced more than the "
+            "buyer authorized (auth %s, payer %s)",
+            task_id,
+            payout_plan.clamped_stroops,
+            authorized_max,
+            auth_id_hex,
+            payer,
+        )
+        await _emit(task_id, start, "error", "payouts cut to what the buyer authorized")
+    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in (UNPAID_NO_OWNER, UNPAID_OWNER_UNREADABLE)):
+        logger.error(
+            "task %s: step %d (%s) delivered but is NOT paid (%s) — its share returns to the buyer (auth %s)",
             task_id,
             unpaid.step_index,
             unpaid.agent_id,
+            unpaid.unpaid_reason,
             auth_id_hex,
         )
-        await _emit(task_id, start, "error", f"{unpaid.agent_id} has no on-chain owner — its step is not paid")
+        await _emit(
+            task_id, start, "error", f"{unpaid.agent_id} has no confirmed on-chain owner — its step is not paid"
+        )
 
     if total > sc.usdc_to_i128(settings.max_charge_usdc):
-        await _settle_refused(
+        return await _settle_refused(
             task_id,
             start,
             auth_id_hex,
@@ -1749,34 +1850,10 @@ async def _settle_v2(
             f"payouts total {total} stroops exceed MAX_CHARGE_USDC={settings.max_charge_usdc}",
             "the payouts exceed the charge cap",
         )
-        return (None, None, None)
-    if authorized_max is None and total > 0:
-        try:
-            auth = await asyncio.to_thread(sc.escrow_authorization, escrow, bytes.fromhex(auth_id_hex))
-        except Exception as e:
-            await _settle_refused(
-                task_id, start, auth_id_hex, payer, f"authorization unreadable: {e}", "the authorization is unreadable"
-            )
-            return (None, None, None)
-        if auth is None:
-            await _settle_refused(
-                task_id, start, auth_id_hex, payer, "authorization not found", "the authorization was not found"
-            )
-            return (None, None, None)
-        authorized_max = auth.max_amount
-    if authorized_max is not None and total > authorized_max:
-        await _settle_refused(
-            task_id,
-            start,
-            auth_id_hex,
-            payer,
-            f"payouts total {total} stroops exceed the authorized max {authorized_max}",
-            "the payouts exceed what was authorized",
-        )
-        return (None, None, None)
 
     release = not payout_plan.payouts
     total_usdc = total / reputation_svc.STROOPS_PER_USDC
+    receipts: list[bytes] | None = None
     try:
         settler = sc._signer_keypair().public_key
         auth_id = bytes.fromhex(auth_id_hex)
@@ -1793,9 +1870,10 @@ async def _settle_v2(
                 sc.payouts_vec(list(payout_plan.payouts)),
             ],
         )
-        settle_tx = settle.get("hash")
+        tx = settle.get("hash")
         settle_status = str(settle.get("status") or "")
-        if settle_status == "SUCCESS" and settle_tx:
+        if settle_status == "SUCCESS" and tx:
+            settle_tx = tx
             settled_job_id = job_id
             receipts = sc.receipt_ids(settle.get("result"))
             if receipts is not None and len(receipts) != len(payout_plan.payouts):
@@ -1805,7 +1883,7 @@ async def _settle_v2(
                     task_id,
                     start,
                     "cost",
-                    f"x402 settle → nothing paid, custody released to the buyer · tx {settle_tx[:10]}…",
+                    f"x402 settle → nothing paid, custody released to the buyer · tx {tx[:10]}…",
                     settlement="released",
                 )
             else:
@@ -1814,25 +1892,25 @@ async def _settle_v2(
                     start,
                     "cost",
                     f"x402 settle → {total_usdc:.3f} USDC paid to {len(payout_plan.payouts)} "
-                    f"operator payout(s), the rest released · tx {settle_tx[:10]}…",
+                    f"operator payout(s), the rest released · tx {tx[:10]}…",
                     settlement="settled",
                 )
             if on_settled is not None and delivered_steps:
-                await on_settled(settle_tx, job_id, payout_plan, receipts)
+                await on_settled(tx, job_id, payout_plan, receipts)
         elif settle_status == "FAILED":
             logger.error(
                 "task %s: PaymentEscrow.settle did not settle — status=%s hash=%s "
                 "(auth %s, payer %s, %d stroops, job %s)",
                 task_id,
                 settle_status,
-                settle_tx,
+                tx,
                 auth_id_hex,
                 payer,
                 total,
                 job_hex,
             )
-            await _emit(task_id, start, "error", f"settle status={settle_status} hash={settle_tx}", settlement="failed")
-            return (settle_tx, None, None)
+            await _emit(task_id, start, "error", f"settle status={settle_status} hash={tx}", settlement="failed")
+            return (None, None, None)
         else:
             # `_settle_onchain`'s unconfirmed branch, for the same reasons: it
             # may still land, nothing is recorded, and it is never retried.
@@ -1842,7 +1920,7 @@ async def _settle_v2(
                 "(auth %s, payer %s, %d stroops, job %s)",
                 task_id,
                 settle_status or "missing",
-                settle_tx,
+                tx,
                 auth_id_hex,
                 payer,
                 total,
@@ -1852,11 +1930,11 @@ async def _settle_v2(
                 task_id,
                 start,
                 "error",
-                f"settle unconfirmed status={settle_status or 'missing'} hash={settle_tx} — it may still "
+                f"settle unconfirmed status={settle_status or 'missing'} hash={tx} — it may still "
                 "settle, and this run cannot be disputed",
                 settlement="unconfirmed",
             )
-            return (settle_tx, None, None)
+            return (None, None, None)
 
         if not delivered_steps:
             return (settle_tx, None, settled_job_id)
@@ -1892,9 +1970,10 @@ async def _settle_v2(
                 sc.i128(total),
             ],
         )
-        proof_tx = seal.get("hash")
-        if seal.get("status") == "SUCCESS" and proof_tx:
-            await _emit(task_id, start, "proof", f"ERC-8004 attestation sealed · tx {proof_tx[:10]}…")
+        seal_tx = seal.get("hash")
+        if seal.get("status") == "SUCCESS" and seal_tx:
+            proof_tx = seal_tx
+            await _emit(task_id, start, "proof", f"ERC-8004 attestation sealed · tx {seal_tx[:10]}…")
             await _emit(
                 task_id,
                 start,
@@ -1908,14 +1987,14 @@ async def _settle_v2(
                 "(job %s settled %d stroops via tx %s, auth %s, payer %s)",
                 task_id,
                 seal.get("status"),
-                proof_tx,
+                seal_tx,
                 job_hex,
                 total,
                 settle_tx,
                 auth_id_hex,
                 payer,
             )
-            await _emit(task_id, start, "error", f"seal status={seal.get('status')} hash={proof_tx}")
+            await _emit(task_id, start, "error", f"seal status={seal.get('status')} hash={seal_tx}")
     except asyncio.CancelledError:
         logger.error(
             "task %s: on-chain settle cancelled mid-flight (job %s, auth %s, payer %s, %d stroops, "
@@ -1951,6 +2030,16 @@ async def _settle_v2(
                 "error",
                 "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
                 settlement="unconfirmed",
+            )
+        elif isinstance(e, sc.ContractError) and e.code in _NOT_SETTLED_BY_US:
+            # Reclaimed by the payer first, already settled, or gone: nothing
+            # this settle did moved money, and there is nothing to release.
+            await _emit(
+                task_id,
+                start,
+                "error",
+                f"not settled by us — the authorization was {_NOT_SETTLED_BY_US[e.code].replace('_', ' ')}",
+                settlement="failed",
             )
         else:
             await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
