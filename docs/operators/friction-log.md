@@ -86,6 +86,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-005 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#fault-injection-is-for-testing-only`
 - 2026-09-29 · F-006 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#choose-where-to-host-it`
 - 2026-09-29 · F-007 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
+- 2026-09-29 · F-008 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#use-one-exact-url`
 
 ## Template
 
