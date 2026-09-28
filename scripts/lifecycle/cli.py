@@ -120,7 +120,7 @@ def main(
             api=OrizonApi(client=http, base=base, retry=retry),
             http=http,
             console=console,
-            log=EvidenceLog(cfg.evidence_dir),
+            log=EvidenceLog(cfg.evidence_dir, console.redactor),
             store=StateStore(cfg.evidence_dir),
             environ=dict(os.environ if environ is None else environ),
             sleep=do_sleep,
