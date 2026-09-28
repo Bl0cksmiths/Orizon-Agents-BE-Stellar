@@ -878,9 +878,10 @@ class SettlementStep:
     output_summary: str | None = None
     # What PaymentEscrow v2's `settle` paid this step's operator, and the
     # receipt that payout minted (ADR 0010). v2 pays per step, so on a v2
-    # record `price_usdc` IS this amount — the credit basis the docstring
-    # promises — and 0.0 for a delivered step nobody could be paid for (an
-    # agent with no on-chain owner), which no dispute can then credit. None on
+    # record a DELIVERED step's `price_usdc` IS this amount — the credit basis
+    # the docstring promises — and 0.0 for a delivered step nobody could be
+    # paid for (free, or an agent with no on-chain owner), which no dispute can
+    # then credit. An undelivered v2 step keeps the plan's quote and 0.0. None on
     # every v1 record: v1 moved one total for the run and minted one receipt,
     # so no step had an amount or a receipt of its own. Kept inside the JSONB
     # `steps` column, so the table's shape does not change.
