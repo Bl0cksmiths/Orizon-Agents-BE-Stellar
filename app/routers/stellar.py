@@ -22,8 +22,8 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import _operator_key_scheme, check_operator_key, require_api_key
-from ..services import registry_sync, reputation_svc, settlement_svc
+from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key
+from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
 from ..stellar import cache as rcache
@@ -710,7 +710,17 @@ class AuthorizeReq(BaseModel):
     # fails on-chain, after the payer signed the authorization envelope.
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
     max_amount_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
-    ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    # 1800 s by default. On escrow v2, `/execute` refuses an authorization whose
+    # remaining life cannot cover a worst-case run of its plan: the reputation
+    # re-check (2.5 s), 125 s per step and 150 s for the settle — 902.5 s for
+    # the planner's six-step maximum. The TTL starts counting HERE, before the
+    # wallet prompt, the authorize's confirmation and the execute call, so the
+    # old 300 s covered only a one-step plan signed at once. 1800 s leaves
+    # about 15 minutes for all of that on the longest plan. The cost of longer
+    # is the other side: a payer can `reclaim` only after expiry, so custody no
+    # run ever used stays locked for up to this long (a refused execute hands
+    # it back at once; ADR 0011).
+    ttl_seconds: int = Field(default=1800, ge=30, le=3600)
 
 
 @router.post("/build/authorize", response_model=AuthorizeXdrResponse)
@@ -755,6 +765,41 @@ async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
         raise HTTPException(400, "build_failed") from e
 
 
+class ReclaimReq(BaseModel):
+    payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
+    # Lowercase only: the id as the escrow's events and our receipts print it.
+    auth_id_hex: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+
+
+@router.post("/build/reclaim", response_model=XdrResponse)
+async def build_reclaim(req: ReclaimReq) -> XdrResponse:
+    """Build unsigned XDR for PaymentEscrow v2 `reclaim(payer, auth_id)`. The payer signs.
+
+    The payer's way back to custody no settle ever spent: allowed once the
+    authorization has expired, and never after it was settled or reclaimed.
+    Each of those is checked first with a read-only simulate and refused with
+    its own 409 (`authorization_settled`, `authorization_revoked`,
+    `authorization_locked`), so the wallet is never asked to sign a
+    transaction the contract will refuse. A v1 escrow holds no custody and
+    answers 409 `reclaim_unsupported`; an unreadable chain is 503
+    `authorization_unverifiable` (ADR 0011).
+    """
+    await authorization_guard.check_reclaimable(req.auth_id_hex, req.payer)
+    try:
+        args = [sc.addr(req.payer), sc.bytes16(bytes.fromhex(req.auth_id_hex))]
+        xdr = await asyncio.to_thread(
+            sc.build_invoke_xdr,
+            sc.contract_ids().payment_escrow,
+            "reclaim",
+            args,
+            source=req.payer,
+        )
+        return XdrResponse(xdr=xdr)
+    except Exception as e:
+        logger.exception("reclaim build failed")
+        raise HTTPException(400, "build_failed") from e
+
+
 class SubmitReq(BaseModel):
     # A prepared invoke tx is a few KB of base64; 32 KiB is generous headroom
     # while keeping the endpoint from swallowing arbitrary payloads.
@@ -789,13 +834,40 @@ class ChargeReq(BaseModel):
     job_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
 
 
+async def _refuse_charge_on_v2() -> None:
+    """409 `charge_unsupported_on_v2` against a v2 escrow.
+
+    An unreadable version is let through to the contract, unlike `/execute`:
+    nothing here is refused on the strength of the answer, and a v2 escrow has
+    no `charge` for the simulation to find, so it fails before anything is
+    signed or sent — exactly as every charge against v2 did before this check.
+    """
+    try:
+        version = await authorization_guard.escrow_version()
+    except authorization_guard.AuthorizationRefused:
+        return
+    if version >= 2:
+        raise CodedHTTPException(
+            409,
+            "charge_unsupported_on_v2",
+            "this escrow is v2, which has no charge — a v2 run is paid by settle, per delivered step, at its end",
+        )
+
+
 @router.post("/server/charge", dependencies=[Depends(require_api_key)])
 async def server_charge(req: ChargeReq) -> dict:
-    """Backend-signed PaymentEscrow.charge (the backend is the `settler` role)."""
+    """Backend-signed PaymentEscrow.charge (the backend is the `settler` role). v1 only.
+
+    PaymentEscrow v2 has no `charge`: a v2 run is paid by `settle`, per
+    delivered step, at the end of the run (ADR 0010). Against a v2 escrow this
+    answers 409 `charge_unsupported_on_v2` rather than a simulation failure
+    that reads like a transient fault.
+    """
     if not settings.stellar_signing_key:
         raise HTTPException(503, "backend signing key not configured")
     if not (0 < req.amount_usdc <= settings.max_charge_usdc):
         raise HTTPException(400, "amount_exceeds_charge_cap")
+    await _refuse_charge_on_v2()
     try:
         aid = bytes.fromhex(req.auth_id_hex)
         jid = bytes.fromhex(req.job_id_hex)
