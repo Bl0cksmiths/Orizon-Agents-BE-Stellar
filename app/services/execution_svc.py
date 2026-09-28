@@ -14,7 +14,7 @@ from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import PlanStep, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..schemas import PlanStep, SettlementState, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
@@ -97,8 +97,25 @@ def _now_ts(start: float) -> str:
     return f"{seconds:02d}.{hundredths:03d}"
 
 
-async def _emit(task_id: str, start: float, level: TraceLevel, msg: str) -> TraceLine:
-    line = TraceLine(t=_now_ts(start), level=level, msg=msg)
+async def _emit(
+    task_id: str,
+    start: float,
+    level: TraceLevel,
+    msg: str,
+    *,
+    settlement: SettlementState | None = None,
+) -> TraceLine:
+    """Append one trace line and publish it.
+
+    `settlement` marks the line that reports a paid run's settlement outcome,
+    and is written onto the task in the same breath, so the trace and the task
+    can never disagree about it (ADR 0010).
+    """
+    if settlement is not None:
+        task = state.tasks.get(task_id)
+        if task is not None:
+            state.tasks[task_id] = task.model_copy(update={"settlement": settlement})
+    line = TraceLine(t=_now_ts(start), level=level, msg=msg, settlement=settlement)
     state.append_trace(task_id, line)
     await bus.publish(task_id, line)
     return line
@@ -744,6 +761,7 @@ async def _run(
                     start,
                     "exec",
                     "no agent produced output — skipping on-chain charge/seal",
+                    settlement="skipped",
                 )
                 # Ratings are NOT skipped with them (ADR 0005 D2). Charge and
                 # seal are correctly withheld, but ratings run the other way:
@@ -975,6 +993,7 @@ async def _settle_onchain(
             start,
             "error",
             "STELLAR_SIGNING_KEY not set — skipping on-chain charge/seal",
+            settlement="failed",
         )
         return (None, None, None)
 
@@ -997,6 +1016,7 @@ async def _settle_onchain(
             start,
             "error",
             f"charge {total_usdc:.3f} USDC exceeds cap {settings.max_charge_usdc:.3f} — skipping on-chain charge/seal",
+            settlement="failed",
         )
         return (None, None, None)
 
@@ -1028,6 +1048,7 @@ async def _settle_onchain(
                 start,
                 "cost",
                 f"x402 charge → {total_usdc:.3f} USDC settled · tx {charge_tx[:10]}…",
+                settlement="settled",
             )
             if on_charged is not None:
                 await on_charged(charge_tx, job_id)
@@ -1049,6 +1070,7 @@ async def _settle_onchain(
                 start,
                 "error",
                 f"charge status={charge_status} hash={charge_tx}",
+                settlement="failed",
             )
             return (charge_tx, None, None)
         else:
@@ -1089,6 +1111,7 @@ async def _settle_onchain(
                 "error",
                 f"charge unconfirmed status={charge_status or 'missing'} hash={charge_tx} — it may still "
                 "settle, and this run cannot be disputed",
+                settlement="unconfirmed",
             )
             return (charge_tx, None, None)
 
@@ -1216,7 +1239,22 @@ async def _settle_onchain(
             proof_tx,
             exc_info=True,
         )
-        await _emit(task_id, start, "error", "on-chain settlement failed")
+        if settled_job_id is not None:
+            # The charge confirmed and something after it failed — the seal,
+            # or the settlement write. The money moved; the line is as it was.
+            await _emit(task_id, start, "error", "on-chain settlement failed")
+        elif isinstance(e, sc.InFlightError):
+            # Sent, then lost: the charge may still land, exactly as the
+            # unconfirmed branch above says of a poll that timed out.
+            await _emit(
+                task_id,
+                start,
+                "error",
+                "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
+                settlement="unconfirmed",
+            )
+        else:
+            await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
 
     return (charge_tx, proof_tx, settled_job_id)
 
