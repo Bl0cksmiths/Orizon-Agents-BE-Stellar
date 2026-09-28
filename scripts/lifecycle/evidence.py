@@ -124,8 +124,11 @@ class EvidenceLog:
         self.directory.mkdir(parents=True, exist_ok=True)
         row.seq = len(self.rows()) + 1
         line = json.dumps(asdict(row), sort_keys=True, ensure_ascii=False)
+        # A torn last line (a crash mid-write) has no newline; without one here
+        # this row would be glued onto it and lost with it.
+        torn = self.jsonl.exists() and self.jsonl.stat().st_size > 0 and not self.jsonl.read_bytes().endswith(b"\n")
         with self.jsonl.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+            fh.write(("\n" if torn else "") + line + "\n")
             fh.flush()
             os.fsync(fh.fileno())
         self.render()
