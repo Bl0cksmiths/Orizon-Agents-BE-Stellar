@@ -98,6 +98,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-017 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#when-a-dispatch-fails`
 - 2026-09-29 · F-018 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#the-dispatch-envelope`
 - 2026-09-29 · F-019 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
+- 2026-09-29 · F-020 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#reading-your-dashboard`
 
 ## Template
 
