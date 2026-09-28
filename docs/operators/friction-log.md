@@ -105,6 +105,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-024 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#deploy-the-reference-agent-on-render`
 - 2026-09-29 · F-025 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#check-your-registration`
 - 2026-09-29 · F-026 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#step-2-fund-from-friendbot`
+- 2026-09-29 · F-027 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
 
 ## Template
 
