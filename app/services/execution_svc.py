@@ -338,7 +338,7 @@ def _execute_refusal(step: PlanStep, info: reputation_svc.RepInfo | None) -> str
         return f"{step.agent_id} is no longer in the agent registry"
     if not _is_listed(agent):
         return f"{step.agent_id} was delisted by its operator after this plan was built"
-    if info is None or info.degraded or reputation_svc.passes_floor(info):
+    if info is None or info.degraded or info.superseded or reputation_svc.passes_floor(info):
         return None
     floor = settings.reputation_floor_bps
     if step.degraded:
