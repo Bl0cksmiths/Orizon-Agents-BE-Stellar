@@ -1033,3 +1033,182 @@ def get_transaction(tx_hash: str) -> LedgerTransaction:
         ledger=int(answer.ledger) if answer.ledger else None,
         envelope_xdr=answer.envelope_xdr,
     )
+
+
+# ── PaymentEscrow v2 (custody + per-step settle) ────────────────────────
+# v2 takes the payer's funds into custody at `authorize` and pays each
+# delivered step's operator at `settle`; `charge` and `revoke` are gone. The
+# frozen interface is the contracts repo's docs/escrow-v2-interface.md, and
+# ADR 0010 is the backend's side of it. Everything below is additive: the v1
+# helpers above are untouched, and a v1 deployment never reaches these.
+
+# The most payouts one `settle` accepts (`BadPayouts` past it).
+MAX_SETTLE_PAYOUTS = 16
+
+# What the host answers when a contract has no such function: the head of the
+# simulation error, and the diagnostic line that names the cause. Proven
+# read-only against the v1 escrow on testnet (CBJPTM…25PI, 2026-09-28):
+#   HostError: Error(WasmVm, MissingValue) … "trying to invoke non-existent
+#   contract function", version
+# Both are required, because `MissingValue` alone is a broader host error.
+_MISSING_FUNCTION_HEAD = re.compile(r"\s*HostError: Error\(WasmVm, MissingValue\)")
+_MISSING_FUNCTION_CAUSE = "non-existent contract function"
+
+# Contract id -> the version its `version()` answered (1 when it has none).
+# Immutable for the life of a contract id: a new escrow is a new id, never an
+# upgrade in place, so a definite answer is cached for the life of the
+# process. An unreadable answer is never cached.
+_escrow_versions: dict[str, int] = {}
+_escrow_versions_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class Payout:
+    """One entry of `settle`'s `payouts`: pay `owner_of(agent_id)` `amount` stroops."""
+
+    agent_id: str
+    amount: int
+
+
+def payouts_vec(payouts: list[Payout]) -> SCVal:
+    """`Vec<Payout>` as the contract decodes it.
+
+    A `#[contracttype]` struct is a map keyed by its field names as symbols,
+    in sorted order — `agent_id` before `amount` — which is written out here
+    rather than left to `scval.to_struct`, which the SDK marks experimental.
+    """
+    return scval.to_vec(
+        [scval.to_map({sym("agent_id"): sym(p.agent_id), sym("amount"): i128(p.amount)}) for p in payouts]
+    )
+
+
+def _simulate_view(contract_id: str, function_name: str, args: list[Any]) -> Any:
+    """Simulate a view call and return the RAW `SimulateTransactionResponse`.
+
+    `simulate_read` raises on any simulation error and logs it at ERROR,
+    which is right for a read that should succeed. The version probe has one
+    error that is an ANSWER — the function does not exist — so it needs the
+    response itself. Same envelope as `simulate_read(load_source=False)`: a
+    pure view, so the source's sequence is never checked.
+    """
+    src_addr = settings.stellar_admin_address
+    if not src_addr:
+        raise RuntimeError("no source address; set STELLAR_ADMIN_ADDRESS")
+    tx = (
+        TransactionBuilder(source_account=Account(src_addr, 0), network_passphrase=network_passphrase(), base_fee=100)
+        .append_invoke_contract_function_op(contract_id=contract_id, function_name=function_name, parameters=args)
+        .set_timeout(30)
+        .build()
+    )
+    return _server().simulate_transaction(tx)
+
+
+def _is_missing_function(simulation_error: str | None) -> bool:
+    text = simulation_error or ""
+    return bool(_MISSING_FUNCTION_HEAD.match(text)) and _MISSING_FUNCTION_CAUSE in text
+
+
+def cached_escrow_version(contract_id: str) -> int | None:
+    """The version already read for `contract_id`, or None. Never reads."""
+    with _escrow_versions_lock:
+        return _escrow_versions.get(contract_id)
+
+
+def escrow_version(contract_id: str) -> int:
+    """PaymentEscrow `contract_id`'s `version()`; 1 when it has no such function.
+
+    v1 never had `version()`, so the host's "non-existent contract function"
+    is the definite answer 1. Every definite answer is cached per contract id.
+    Anything else — an RPC failure, a simulation error that is not a missing
+    function, a result that is not a positive integer — raises and is NOT
+    cached: "could not read" must never be remembered as "v1". Blocking.
+    """
+    cached = cached_escrow_version(contract_id)
+    if cached is not None:
+        return cached
+    with _rpc_span("read", f"{_contract_label(contract_id)}.version", slow_ms=SLOW_READ_MS) as span:
+        span["stage"] = "simulate"
+        sim = _simulate_view(contract_id, "version", [])
+        if sim.error:
+            if not _is_missing_function(sim.error):
+                raise RuntimeError(f"simulate failed: {sim.error}")
+            version = 1
+        else:
+            value = scval.to_native(sim.results[0].xdr) if sim.results else None
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise RuntimeError(f"version() returned {value!r}, not a positive integer")
+            version = value
+        span["version"] = version
+    with _escrow_versions_lock:
+        _escrow_versions[contract_id] = version
+    return version
+
+
+def forget_escrow_versions() -> None:
+    """Drop every cached escrow version (tests; a process never needs it)."""
+    with _escrow_versions_lock:
+        _escrow_versions.clear()
+
+
+@dataclass(frozen=True)
+class EscrowAuthorization:
+    """`authorization(auth_id)` as v2 returns it. Amounts are stroops, time is epoch seconds."""
+
+    payer: str
+    agent_id: str
+    max_amount: int
+    spent: int
+    expires_at: int
+    revoked: bool
+    settled: bool
+
+
+def escrow_authorization(contract_id: str, auth_id: bytes) -> EscrowAuthorization | None:
+    """Read one v2 authorization. None when the escrow answers `NotFound` (#2).
+
+    Raises on anything else, a v1-shaped record (no `settled` field) included:
+    a caller deciding whether a run can be paid must not guess at a field.
+    Blocking.
+    """
+    try:
+        record = simulate_read(contract_id, "authorization", [bytes16(auth_id)], load_source=False)
+    except RuntimeError as e:
+        if _contract_error_code(str(e).removeprefix("simulate failed: ")) == 2:
+            return None
+        raise
+    if not isinstance(record, dict):
+        raise RuntimeError(f"authorization() returned {type(record).__name__}, not a record")
+    try:
+        return EscrowAuthorization(
+            payer=str(record["payer"]),
+            agent_id=str(record["agent_id"]),
+            max_amount=int(record["max_amount"]),
+            spent=int(record["spent"]),
+            expires_at=int(record["expires_at"]),
+            revoked=bool(record["revoked"]),
+            settled=bool(record["settled"]),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        raise RuntimeError(f"authorization() record does not have the v2 shape: {e!r}") from e
+
+
+def receipt_ids(result: Any) -> list[bytes] | None:
+    """The `Vec<BytesN<16>>` `settle` returned, from `_finalize_invoke`'s `result`.
+
+    `_finalize_invoke` hex-encodes only a top-level bytes value, so a vec
+    arrives as a list of raw bytes; hex strings are accepted as well. None
+    when the value is not a list of 16-byte ids — never a partial list.
+    """
+    if not isinstance(result, (list, tuple)):
+        return None
+    ids: list[bytes] = []
+    for item in result:
+        if isinstance(item, str):
+            try:
+                item = bytes.fromhex(item)
+            except ValueError:
+                return None
+        if not isinstance(item, (bytes, bytearray)) or len(item) != 16:
+            return None
+        ids.append(bytes(item))
+    return ids
