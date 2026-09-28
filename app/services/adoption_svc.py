@@ -299,10 +299,11 @@ async def _platform_keys() -> _PlatformKeys:
     the configured admin — then the chain's own answer for the roles that can
     move: the escrow's `settler()` and `admin()`, and the registry's `admin()`.
 
-    The escrow's `admin()` is best effort: v1 has no such view, so its absence
-    is expected there, and on v2 the admin it would name is the deployment
-    admin already added above. The settler and the registry admin are not: a
-    failed read of either leaves an owner we cannot rule out, and says so.
+    The escrow's `admin()` is read only on v2, because v1 has no such view
+    and asking would log an RPC error on every report. It is best effort even
+    there: the admin it names is the deployment admin already added above. The
+    settler and the registry admin are not best effort: a failed read of
+    either leaves an owner we cannot rule out, and says so.
     """
     keys = _PlatformKeys()
     keys.add(settings.stellar_admin_address, "deployment admin")
@@ -318,7 +319,7 @@ async def _platform_keys() -> _PlatformKeys:
     registry_id = settings.stellar_agent_registry
     settler, escrow_admin, registry_admin = await asyncio.gather(
         settlement_svc._read_settler(escrow_id) if escrow_id else _none(),
-        _read_view("escrowadmin", escrow_id, "admin") if escrow_id else _none(),
+        _escrow_admin(escrow_id) if escrow_id else _none(),
         _read_view("registryadmin", registry_id, "admin") if registry_id else _none(),
     )
     if escrow_id:
@@ -335,6 +336,19 @@ async def _platform_keys() -> _PlatformKeys:
 
 async def _none() -> None:
     return None
+
+
+async def _escrow_admin(escrow_id: str) -> str | None:
+    """v2's `admin()`, or None on v1. An unreadable version still tries the view."""
+    version = sc.cached_escrow_version(escrow_id)
+    if version is None:
+        try:
+            version = await asyncio.to_thread(sc.escrow_version, escrow_id)
+        except Exception as e:
+            logger.info("[adoption] escrow version unreadable: %s", _describe(e))
+    if version == 1:
+        return None
+    return await _read_view("escrowadmin", escrow_id, "admin")
 
 
 # ── the agent list ────────────────────────────────────────────────────────

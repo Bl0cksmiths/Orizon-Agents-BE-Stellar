@@ -83,7 +83,8 @@ class _Chain:
         self.list_ids: Any = []
         self.owners: dict[str, Any] = {}
         self.settler: Any = SETTLER
-        # v1's escrow has no admin() at all: the chain's own answer to it.
+        self.escrow_version: Any = 1
+        # v1's escrow has no admin() at all: the chain's own answer, if asked.
         self.escrow_admin: Any = RuntimeError("simulate failed: HostError: Error(WasmVm, MissingValue)")
         self.registry_admin: Any = REGISTRY_ADMIN
         self.reads: list[tuple[str, str]] = []
@@ -170,9 +171,17 @@ class _World:
         self.settlement_calls: list[str] = []
         self.store = _Store()
         monkeypatch.setattr(sc, "simulate_read", self.chain)
+        monkeypatch.setattr(sc, "cached_escrow_version", lambda _id: None)
+        monkeypatch.setattr(sc, "escrow_version", self._escrow_version)
         monkeypatch.setattr(settlement_svc, "fetch_settlement", self._fetch)
         monkeypatch.setattr(adoption_svc, "get_binding_store", lambda: self.store)
         monkeypatch.setattr(adoption_svc, "dispatch_signer_address", lambda: DISPATCH)
+
+    def _escrow_version(self, contract_id: str) -> int:
+        assert contract_id == ESCROW_ID
+        if isinstance(self.chain.escrow_version, BaseException):
+            raise self.chain.escrow_version
+        return int(self.chain.escrow_version)
 
     async def _fetch(self, agent_id: str) -> SettlementEvidence:
         self.settlement_calls.append(agent_id)
@@ -307,7 +316,8 @@ def test_a_runtime_platform_key_is_excluded_without_being_in_the_register(
     world: _World, monkeypatch: pytest.MonkeyPatch, owner: str, role: str
 ) -> None:
     monkeypatch.setattr(settings, "stellar_signing_key", SIGNER.secret)
-    world.chain.escrow_admin = ESCROW_ADMIN  # a v2 escrow, which has the view
+    world.chain.escrow_version = 2  # a v2 escrow, which has the view
+    world.chain.escrow_admin = ESCROW_ADMIN
     world.agent("platform_owned", owner, _entry(1))
     world.agent("ext_a", EXT_A)
     assert owner not in REGISTER
@@ -492,7 +502,20 @@ def test_an_unreadable_registry_or_platform_key_degrades_the_report(world: _Worl
     assert _totals(report) == (1, 1, 1)
 
 
-def test_a_v1_escrow_without_admin_does_not_degrade(world: _World) -> None:
+def test_a_v1_escrow_is_never_asked_for_an_admin_it_does_not_have(world: _World) -> None:
+    world.agent("ext_a", EXT_A)
+
+    report = world.report()
+
+    assert (ESCROW_ID, "admin") not in world.chain.reads
+    assert report.degraded is False
+
+
+@pytest.mark.parametrize("version", [2, ConnectionError("rpc down")], ids=["v2", "version_unreadable"])
+def test_an_escrow_admin_read_that_fails_does_not_degrade(world: _World, version: Any) -> None:
+    """Best effort on purpose: the admin it names is the deployment admin,
+    which is excluded from configuration already."""
+    world.chain.escrow_version = version
     world.agent("ext_a", EXT_A)
 
     report = world.report()
