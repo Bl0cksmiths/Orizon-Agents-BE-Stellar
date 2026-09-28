@@ -1851,6 +1851,28 @@ async def _settle_v2(
             return await _settle_refused(
                 task_id, start, auth_id_hex, payer, "authorization not found", "the authorization was not found"
             )
+        if auth.payer != payer or auth.agent_id != plan.id:
+            # `/execute` skipped its check (an escrow version it could not read
+            # at the time), so this is the first look at whose custody this is.
+            # Not this payer's, or not for this plan: never settle it, and never
+            # release it either — it is somebody else's money to reclaim.
+            logger.error(
+                "task %s: PaymentEscrow.settle NOT submitted — authorization %s is %s's for %s, not %s's for %s",
+                task_id,
+                auth_id_hex,
+                auth.payer,
+                auth.agent_id,
+                payer,
+                plan.id,
+            )
+            await _emit(
+                task_id,
+                start,
+                "error",
+                "settlement refused — the authorization is not this buyer's for this plan",
+                settlement="failed",
+            )
+            return (None, None, None)
         authorized_max = auth.max_amount
     try:
         unpaid_agents = (
