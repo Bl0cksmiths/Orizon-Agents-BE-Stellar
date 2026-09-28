@@ -320,6 +320,11 @@ def _execute_refusal(step: PlanStep, info: reputation_svc.RepInfo | None) -> str
         strip a plan the buyer already signed for because the chain was slow —
         and on a warm host the batch read degrades routinely, so that would be
         most plans.
+      * A read SUPERSEDED by a rating that landed since (`superseded`: the
+        last on-chain value, served while the fresh read is still out) proves
+        nothing about the agent's score now either, so it is treated exactly
+        like a failed read. Judging it would refuse with a pre-rating bound
+        that can sit above the floor — a false "fell below" to the buyer.
       * A read that succeeded and clears the floor dispatches.
       * A read that succeeded and does NOT clear it refuses — the agent is now
         provably below the floor — with one exception: a step the starvation
