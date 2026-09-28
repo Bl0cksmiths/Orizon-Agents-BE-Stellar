@@ -2,12 +2,14 @@ import hashlib
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse
-from ..security import KeyedRateLimiter, client_key
-from ..services.execution_svc import CapacityExhaustedError, execute_plan
+from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse, StoredPlan
+from ..security import CodedHTTPException, KeyedRateLimiter, client_key, request_id_var
+from ..services import authorization_guard as guard
+from ..services.execution_svc import CapacityExhaustedError, PlanExpiredError, execute_plan, plan_expired
 from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
 
@@ -69,15 +71,112 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
         raise HTTPException(502, "decompose_failed") from e
 
 
-@router.post("/execute", response_model=ExecuteResponse, summary="Execute a stored plan")
-async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse:
-    plan = state.plans.get(req.plan_id)
-    if plan is None:
-        raise HTTPException(404, f"unknown plan_id: {req.plan_id}")
-    try:
-        task_id = await execute_plan(plan, auth_id_hex=req.auth_id_hex, payer=req.payer)
-    except CapacityExhaustedError as e:
-        # No task was minted; the client should retry once a slot frees up.
-        logger.warning("execute rejected for plan %s: %s", req.plan_id, e)
-        raise HTTPException(503, "capacity_exhausted") from e
+def _refused_after_release(status: int, detail: str, code: str, message: str, released: guard.Release) -> JSONResponse:
+    """A refusal in the app's error envelope, plus what became of the buyer's custody.
+
+    `release_tx_hash` is the extra field: the full-release settle's hash when
+    it confirmed — the frontend's "your funds were returned" — and null when
+    it was attempted and did not, in which case the custody stays reclaimable
+    after `expires_at`. It is present ONLY when a release was attempted, so a
+    refusal that never touched the chain keeps the envelope it always had.
+    """
+    if released.tx_hash:
+        message = f"{message} — your authorized funds were returned to your wallet"
+    else:
+        message = f"{message} — your authorized funds could not be returned now; reclaim them once it expires"
+    return JSONResponse(
+        status_code=status,
+        content={
+            "detail": detail,
+            "error": {"code": code, "message": message, "request_id": request_id_var.get()},
+            "release_tx_hash": released.tx_hash,
+        },
+    )
+
+
+def _response(task_id: str) -> ExecuteResponse:
     return ExecuteResponse(task_id=task_id, read_token=state.task_tokens.get(task_id))
+
+
+@router.post("/execute", response_model=ExecuteResponse, summary="Execute a stored plan")
+async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONResponse:
+    if (req.auth_id_hex is None) != (req.payer is None):
+        # Half a pair used to run SIMULATED without a word, so a buyer who
+        # meant to pay got a demo run. Say so instead.
+        raise CodedHTTPException(
+            422,
+            "authorization_incomplete",
+            "send both auth_id_hex and payer for a paid run, or neither for a simulated one",
+        )
+    plan = state.plans.get(req.plan_id)
+    if req.auth_id_hex is None or req.payer is None:
+        # The simulated run: no authorization, no charge, no seal — and no
+        # on-chain rating, which `execute_plan` writes only on the paid path
+        # (ADR 0011, tests/test_execute_guard_route.py pins it).
+        if plan is None:
+            raise HTTPException(404, f"unknown plan_id: {req.plan_id}")
+        try:
+            task_id = await execute_plan(plan)
+        except CapacityExhaustedError as e:
+            # No task was minted; the client should retry once a slot frees up.
+            logger.warning("execute rejected for plan %s: %s", req.plan_id, e)
+            raise HTTPException(503, "capacity_exhausted") from e
+        return _response(task_id)
+    return await _execute_paid(req, plan, req.auth_id_hex, req.payer)
+
+
+async def _execute_paid(
+    req: ExecuteRequest, plan: StoredPlan | None, auth_id_hex: str, payer: str
+) -> ExecuteResponse | JSONResponse:
+    """A paid run: refused unless the authorization is this payer's, for this plan (S2).
+
+    Everything happens under the authorization's lock, so of two concurrent
+    executes against it exactly one can start a task (ADR 0011).
+    """
+    async with guard.exclusive(auth_id_hex):
+        # First, and before any release below: a claimed authorization is
+        # funding a run, and must never be released out from under it.
+        guard.refuse_if_claimed(auth_id_hex)
+        if plan is None:
+            # Gone — a restart, or evicted by newer plans. The authorization's
+            # label is this plan id, so it can never pay for anything else:
+            # hand the custody back rather than leave it locked until expiry.
+            released = await guard.release_if_owned(auth_id_hex, payer, req.plan_id, reason="plan_unknown")
+            detail = f"unknown plan_id: {req.plan_id}"
+            if released is None:
+                raise HTTPException(404, detail)
+            return _refused_after_release(404, detail, "not_found", "this plan is no longer held", released)
+        if plan_expired(plan):
+            # Checked here as well as in `execute_plan` so the release rests on
+            # ownership alone: an expired plan's authorization is dead whatever
+            # its cap or expiry, and the fit checks would otherwise refuse
+            # first and leave it locked.
+            released = await guard.release_if_owned(auth_id_hex, payer, plan.id, reason="plan_expired")
+            if released is None:
+                raise PlanExpiredError(plan.id)
+            return _plan_expired(plan, released)
+        verified = await guard.verify(auth_id_hex, payer, plan)
+        try:
+            task_id = await execute_plan(plan, auth_id_hex=auth_id_hex, payer=payer)
+        except PlanExpiredError:
+            # The plan crossed its TTL between the check above and here.
+            released = await guard.release_verified(verified, reason="plan_expired")
+            if released is None:
+                raise
+            return _plan_expired(plan, released)
+        except CapacityExhaustedError as e:
+            logger.warning("execute rejected for plan %s: %s", req.plan_id, e)
+            released = await guard.release_verified(verified, reason="capacity_exhausted")
+            if released is None:
+                raise HTTPException(503, "capacity_exhausted") from e
+            return _refused_after_release(
+                503, "capacity_exhausted", "capacity_exhausted", "the service is at capacity", released
+            )
+        if verified.enforced:
+            guard.claim(auth_id_hex, task_id)
+    return _response(task_id)
+
+
+def _plan_expired(plan: StoredPlan, released: guard.Release) -> JSONResponse:
+    expired = PlanExpiredError(plan.id)
+    return _refused_after_release(410, "plan_expired", "plan_expired", expired.message, released)
