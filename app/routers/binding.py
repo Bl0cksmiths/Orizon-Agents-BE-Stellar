@@ -26,7 +26,7 @@ import base64
 import binascii
 import logging
 import secrets
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query
@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..services import external_binding
+from ..services import external_binding, operator_readiness
 from ..services.binding_registry import note_bound, note_unbound
 from ..services.binding_store import get_binding_store
 from ..services.endpoint_policy import EndpointPolicyError, resolve_and_check, validate_endpoint_url
@@ -128,6 +128,29 @@ class EndpointCheckResponse(BaseModel):
     allowed: bool
     rule: str | None = None
     message: str | None = None
+
+
+class ReadinessStep(BaseModel):
+    key: Literal["registered", "active", "bound", "reachable", "routable", "first_run", "first_settlement"]
+    status: Literal["done", "todo", "failed", "unknown"]
+    detail: str
+    # The concrete next thing to do; always set on `todo` and `failed`.
+    action: str | None
+    # `registered`: {"explorer"} (the owner's account); `first_settlement`:
+    # {"tx_hash", "explorer"}. Null elsewhere. Never an endpoint URL or host.
+    evidence: dict[str, str] | None
+
+
+class ReadinessResponse(BaseModel):
+    """Frozen contract (story 5.02): all seven steps, always, in this order."""
+
+    agent_id: str
+    # Unix seconds the answer was computed — up to ~30 s before the request,
+    # because the answer is cached per agent.
+    checked_at: int
+    # registered, active, bound, reachable and routable are all `done`.
+    ready: bool
+    steps: list[ReadinessStep]
 
 
 def _host(url: str) -> str:
@@ -469,4 +492,39 @@ async def read_binding(
         owner=record.owner,
         bound_at=record.bound_at,
         replaced=record.previous_endpoint_url is not None,
+    )
+
+
+@router.get(
+    "/{agent_id}/readiness",
+    response_model=ReadinessResponse,
+    summary="Operator readiness self-check: the next thing to fix",
+)
+async def readiness(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> ReadinessResponse:
+    """Seven steps from registration to first settlement, each `done`, `todo`,
+    `failed` or `unknown`, with the next action for anything not done. See
+    `app/services/operator_readiness.py` for each step's source.
+
+    Public, like every fact it reports. The one cost it carries — a GET of the
+    agent's bound endpoint — is paid at most once per agent per 30 s: the whole
+    answer is cached and single-flight. Nothing in the request reaches the
+    probe; it only ever fetches the URL already in the binding store, through
+    the dispatch path's SSRF guard, and neither the URL nor its host is
+    returned. An unknown agent id is a 200 whose `registered` step is `todo`.
+    """
+    result = await operator_readiness.check_readiness(agent_id)
+    return ReadinessResponse(
+        agent_id=result.agent_id,
+        checked_at=result.checked_at,
+        ready=result.ready,
+        steps=[
+            ReadinessStep(
+                key=step.key,
+                status=step.status,
+                detail=step.detail,
+                action=step.action,
+                evidence=step.evidence,
+            )
+            for step in result.steps
+        ],
     )
