@@ -74,6 +74,16 @@ def _floor_reason(info: RepInfo | None) -> str:
     the callers hold `dict.get` results and should not have to narrow them.
     """
     lb = info.lower_bound_bps if info is not None else 0
+    if info is not None and info.superseded:
+        # Not below the floor on these numbers — refused because they predate
+        # a rating that has since landed (`reputation_svc.passes_floor`), so
+        # "below routing floor (7042 < 5500 bps)" would state a false
+        # inequality. A new sentence for a new case: every sentence above is
+        # unchanged, and `reason_code` stays `below_floor`, the floor's verdict.
+        return (
+            f"rated since its last reputation read ({lb} bps), so held off routing until a fresh read answers "
+            f"(floor {settings.reputation_floor_bps} bps)"
+        )
     return f"below routing floor ({lb} < {settings.reputation_floor_bps} bps)"
 
 

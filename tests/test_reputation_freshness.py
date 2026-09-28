@@ -431,7 +431,11 @@ def test_the_planner_never_routes_a_just_disputed_agent_on_the_prior(chain, seed
     # While the refresh is parked: refused, never the prior.
     assert not _routed_cleanly(during, disputed)
     assert all(s.rep_source != "prior" for s in during.steps if s.agent_id == disputed)
-    assert any(n.agent_id == disputed for n in during.notices)
+    held = next(n for n in during.notices if n.agent_id == disputed)
+    assert held.reason_code == "below_floor"
+    assert held.reason.startswith("rated since its last reputation read (")
+    assert "held off routing until a fresh read answers" in held.reason
+    assert held.count == 4  # the pre-dispute read it was held on, not the prior's 0
     # Once the refresh has landed: judged on the post-dispute read.
     assert not _routed_cleanly(after, disputed)
     notice = next(n for n in after.notices if n.agent_id == disputed)
