@@ -13,6 +13,7 @@ an Event the test releases, so nothing depends on wall-clock luck.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -208,6 +209,28 @@ def test_a_cold_agent_with_no_known_value_is_still_the_degraded_prior(chain):
     assert served.source == "prior"
     assert served.degraded is True
     assert served.stale is False and served.superseded is False
+
+
+def test_the_warning_says_a_superseded_agent_is_refused_not_judged(chain, caplog):
+    chain.state["agt_01h8"] = PRE
+
+    async def scenario():
+        await rep.fetch_reps(["agt_01h8"])
+        chain.hold("agt_01h8")
+        rep.invalidate_rep("agt_01h8")
+        with caplog.at_level(logging.WARNING, logger="app.services.reputation_svc"):
+            await rep.fetch_reps(["agt_01h8"], timeout_seconds=0.2)
+        chain.release("agt_01h8")
+        await _join_refresh("agt_01h8")
+
+    asyncio.run(scenario())
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "app.services.reputation_svc"]
+    assert len(lines) == 1
+    assert "last known on-chain value for 1/1 agents [agt_01h8]" in lines[0]
+    assert "refuses it until a fresh read answers" in lines[0]
+    assert "still applied to that evidence" not in lines[0]
+    assert "failing OPEN" not in lines[0]
 
 
 # ── the background refresh ──────────────────────────────────────

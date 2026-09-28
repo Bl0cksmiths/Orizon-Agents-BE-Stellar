@@ -552,6 +552,8 @@ def _log_stale(infos: list[RepInfo], total: int, reason: str) -> None:
     Not `_log_degraded`: nothing here fails open. These agents are still
     judged on real evidence, only older than the TTL, so the line says how
     old — the oldest of them — rather than which way the floor is failing.
+    Superseded ones are not judged at all but refused (`passes_floor`), and
+    the line says so rather than claiming the floor weighed their evidence.
     """
     ids = [info.agent_id for info in infos]
     shown = ", ".join(ids[:_DEGRADED_LOG_AGENT_LIMIT])
@@ -559,20 +561,23 @@ def _log_stale(infos: list[RepInfo], total: int, reason: str) -> None:
         shown = f"{shown}, +{len(ids) - _DEGRADED_LOG_AGENT_LIMIT} more"
     oldest = max(info.stale_age_seconds or 0.0 for info in infos)
     superseded = sum(1 for info in infos if info.superseded)
-    held = (
-        f"; {superseded} of them rated since that read and held off routing until a fresh read answers"
-        if superseded
-        else ""
-    )
+    if not superseded:
+        verdict = "the routing floor is still applied to that evidence"
+    elif superseded == len(infos):
+        verdict = "each was rated since that read, so the routing floor refuses it until a fresh read answers"
+    else:
+        verdict = (
+            f"the routing floor is still applied to that evidence, except for the {superseded} rated since "
+            "that read, which it refuses until a fresh read answers"
+        )
     logger.warning(
-        "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — the routing "
-        "floor is still applied to that evidence (oldest read %.1f s ago)%s",
+        "reputation reads served the last known on-chain value for %d/%d agents [%s]: %s — %s (oldest read %.1f s ago)",
         len(ids),
         total,
         shown,
         reason,
+        verdict,
         oldest,
-        held,
     )
 
 
