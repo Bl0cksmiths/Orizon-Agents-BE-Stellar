@@ -197,13 +197,11 @@ def _probe_client() -> httpx.AsyncClient:
         # A followed 30x would fetch a URL nobody validated. Dispatch never
         # follows one either, so a redirect is reported as what it is.
         follow_redirects=False,
-        # With trust_env on, an HTTPS_PROXY in the environment mounts a proxy
-        # transport that takes precedence over `transport=` — the pin below
-        # would be skipped and the proxy would resolve the name instead.
-        trust_env=False,
         # The dispatch path's own SSRF guard: resolves the host, refuses it
         # unless EVERY address is public, then dials the address it checked,
         # with SNI and certificate verification still against the name.
+        # Supplying `transport=` is also what keeps an HTTPS_PROXY in the
+        # environment out: httpx mounts env proxies only when none is given.
         transport=_PinnedAddressTransport(_inner_transport()),
     )
 
