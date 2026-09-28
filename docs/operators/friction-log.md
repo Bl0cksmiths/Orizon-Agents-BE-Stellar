@@ -95,6 +95,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-014 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#before-you-start`
 - 2026-09-29 · F-015 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#read-the-binding-back`
 - 2026-09-29 · F-016 · documented (unchanged) · 5.03 guide v1.0.0 addressed at `#when-a-dispatch-fails`
+- 2026-09-29 · F-017 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#when-a-dispatch-fails`
 
 ## Template
 
