@@ -47,6 +47,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
+from ..schemas import SettlementState
 from ..security import (
     CodedHTTPException,
     ErrorEnvelope,
@@ -58,6 +59,7 @@ from ..security import (
 from ..services import dispute_read, dispute_svc, refund_svc
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
+from ..state import state
 from ..task_auth import TaskReadProof, task_read_proof
 
 logger = logging.getLogger(__name__)
@@ -462,6 +464,11 @@ class SettlementStepView(BaseModel):
     delivered: bool
     creditable_usdc: float
     output_summary: str | None
+    # What escrow v2 paid this step's operator, and the on-chain receipt that
+    # payout minted — public already, in the `charged` event. Null on a v1
+    # settlement, which paid one total for the run (ADR 0010).
+    paid_usdc: float | None = None
+    receipt_id_hex: str | None = None
 
     @classmethod
     def of(cls, step: SettlementStep, fraction: float) -> SettlementStepView:
@@ -478,6 +485,8 @@ class SettlementStepView(BaseModel):
             # can claim.
             creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, fraction) if step.delivered else 0.0,
             output_summary=step.output_summary,
+            paid_usdc=step.paid_usdc,
+            receipt_id_hex=step.receipt_id_hex,
         )
 
 
@@ -563,6 +572,12 @@ class TaskDisputesResponse(BaseModel):
     now: float
     settlement: SettlementView | None
     disputes: list[DisputeResponse]
+    # What happened to the run's money, as the task records it (ADR 0010):
+    # "settled" whenever a settlement is on record, otherwise the task's own
+    # `settlement` while this process still holds the task — so a run whose
+    # settlement failed or is unconfirmed says so here rather than reading as
+    # merely "not settled yet". Null when neither is known.
+    settlement_state: SettlementState | None = None
 
 
 def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
@@ -974,7 +989,16 @@ async def list_task_disputes(
         now=time.time(),
         settlement=SettlementView.of(settlement) if settlement is not None else None,
         disputes=[DisputeResponse.of(d, free_text=free_text) for d in disputes],
+        settlement_state=_settlement_state(task_id, settlement),
     )
+
+
+def _settlement_state(task_id: str, settlement: SettlementRecord | None) -> SettlementState | None:
+    """The receipt's settlement state: the record's word first, then the task's."""
+    if settlement is not None:
+        return "settled"
+    task = state.tasks.get(task_id)
+    return task.settlement if task is not None else None
 
 
 # Every status the adjudication pair actually answers with, so the published
