@@ -1359,6 +1359,32 @@ async def _escrow_version() -> int:
         return 1
 
 
+async def release_authorization(auth_id_hex: str, *, reason: str) -> str | None:
+    """Return a v2 authorization's whole custody to its payer. Never raises.
+
+    FROZEN SIGNATURE — other lanes call this (the execute and stellar routers
+    among them), so it changes only by agreement.
+
+    Submits `settle(settler, auth_id, <fresh job id>, [])`, which pays nobody
+    and returns every stroop of `max_amount` to the payer, for the paths that
+    end a paid run without a settle: nothing delivered, a run cancelled or
+    killed by shutdown, a settle refused before it was submitted, an execute
+    refused after the buyer had already authorized.
+
+    `reason` is a short token naming that path; it goes into the log line
+    only, never on-chain and never into a trace.
+
+    Returns the transaction hash when the release CONFIRMED, and None in every
+    other case: a v1 escrow (a no-op — v1 holds no custody), no signing key,
+    an escrow version that cannot be read, a release refused (already settled,
+    already reclaimed, no such authorization), rejected, or unconfirmed. Every
+    outcome is logged. An UNCONFIRMED release may still land and is never
+    retried, for `_settle_onchain`'s reason: a second settle of the same
+    authorization is a replay at best and a race at worst.
+    """
+    return None
+
+
 class AuthorizationRefusedError(CodedHTTPException):
     """`/execute` refused a v2 authorization before anything ran.
 
