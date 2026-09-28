@@ -254,6 +254,23 @@ def test_refuses_to_sign_an_envelope_for_another_contract(buyer: Keypair, tmp_pa
     assert posts(world, "/api/stellar/submit") == 0
 
 
+def test_refuses_an_unfunded_buyer_before_anything_is_signed(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key)
+    del world.balances[buyer.public_key]
+    result = run(world, buyer, tmp_path)
+    assert result.code == EXIT_REFUSED
+    assert "friendbot" in result.out
+    assert posts(world, "/api/stellar/build/authorize") == 0
+
+
+def test_a_dry_run_names_an_unfunded_buyer(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key)
+    del world.balances[buyer.public_key]
+    result = run(world, buyer, tmp_path / "run", "--dry-run")
+    assert result.code == EXIT_OK
+    assert "does not exist on testnet" in result.out
+
+
 def test_refuses_without_the_buyer_secret(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     stream = io.StringIO()
     code = main(
