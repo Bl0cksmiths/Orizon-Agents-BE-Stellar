@@ -120,6 +120,11 @@ def _dispute_rate(info: RepInfo | None) -> int | None:
     return None if info is None else info.dispute_rate_bps
 
 
+def _awaiting_fresh_read(info: RepInfo | None) -> bool:
+    """Whether the floor acted on numbers a newer rating has superseded."""
+    return info is not None and info.superseded
+
+
 def below_floor_exclusion(agent: Agent, info: RepInfo | None) -> PlanFloorNotice:
     """A sub-floor agent dropped from the plan outright, with no stand-in."""
     return PlanFloorNotice(
