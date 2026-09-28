@@ -1478,11 +1478,11 @@ class AuthorizationRefusedError(CodedHTTPException):
     """`/execute` refused a v2 authorization before anything ran.
 
     Raised only against a v2 escrow, where the authorization is custody the
-    settle must be able to spend: one that is not the caller's, already spent,
-    too small for the plan, or too close to expiry to outlive a worst-case run
-    would buy work nobody can be paid for. Before any task is minted, like
-    `PlanExpiredError`, and an HTTP exception for the same reason. Messages
-    say what to do, never a configured limit.
+    settle must be able to spend: one that is not the caller's, not for this
+    plan, already spent, too small for the plan, or too close to expiry to
+    outlive a worst-case run would buy work nobody can be paid for. Before any
+    task is minted, like `PlanExpiredError`, and an HTTP exception for the same
+    reason. Messages say what to do, never a configured limit.
     """
 
 
@@ -1516,6 +1516,13 @@ async def _authorize_for_execute(plan: StoredPlan, auth_id_hex: str, payer: str)
         logger.warning("execute refused: authorization %s belongs to %s, not %s", auth_id_hex, auth.payer, payer)
         raise AuthorizationRefusedError(
             403, "authorization_payer_mismatch", "this authorization was made by a different wallet"
+        )
+    if auth.agent_id != plan.id:
+        # The interface binds an authorization's label to the plan it pays for
+        # (finding S2), so one plan's custody cannot pay for another plan.
+        logger.warning("execute refused: authorization %s is for %s, not plan %s", auth_id_hex, auth.agent_id, plan.id)
+        raise AuthorizationRefusedError(
+            409, "authorization_plan_mismatch", f"this authorization was made for a different plan — {_REAUTHORIZE}"
         )
     if auth.settled or auth.revoked:
         raise AuthorizationRefusedError(
