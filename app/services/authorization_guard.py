@@ -4,20 +4,26 @@ The execute authorization guard (story 5.01, seam audit S2, ADR 0011).
 `/execute` used to take any `auth_id_hex` and `payer` on trust. Under
 PaymentEscrow v2 both are public — they sit in every `authd` event — so anyone
 could point THEIR plan at a victim's authorization and have the first `settle`
-pay the agents they chose, up to the victim's `max_amount`. Even on v1, where
-the charge cannot land, an execute with a made-up authorization still wrote
-on-chain ratings.
+pay the agents they chose, up to the victim's `max_amount`. v2 closes it by
+making the authorization's label (`agent_id` in `authorize`) the PLAN ID the
+buyer is paying for.
 
-v2 closes it by making the authorization's label (`agent_id` in `authorize`)
-the PLAN ID the buyer is paying for. This module reads the authorization back
-from the configured escrow — a read-only simulate, nothing signed — and refuses
-to run a plan against one that is not this payer's, not for this plan, already
-spent, too small, or about to expire. Every refusal is a coded 4xx in the app's
-error envelope; a chain that cannot be read is a 503, never a pass.
+The check that a run may START is `execution_svc._authorize_for_execute`,
+inside `execute_plan`: one verifier, one read, one set of codes. What this
+module adds around it, in the `/execute` route (ADR 0011):
 
-Against a v1 escrow nothing is refused: v1 holds no custody and its charge
-cannot settle, so there is nothing to protect and the live demo keeps its
-runs. That is logged on every paid execute, so it is never silent.
+  - the escrow VERSION, read before a paid run and never guessed: an
+    unreadable one is a 503, not "v1";
+  - one authorization, one task — a claim held under a per-authorization lock;
+  - the custody release when the route refuses a run that can never happen
+    (plan gone, plan expired, no capacity), which reads the authorization only
+    to prove it is this payer's and labelled for this plan before handing it
+    back;
+  - the pre-check behind `POST /api/stellar/build/reclaim`.
+
+Every refusal uses the settle lane's code for the same condition, so a client
+sees one vocabulary. Every read is a read-only simulate; nothing is signed.
+Against a v1 escrow nothing is claimed, released or refused.
 """
 
 from __future__ import annotations
@@ -25,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import math
 import re
 import time
 from collections import OrderedDict
@@ -34,15 +39,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from ..config import settings
-from ..schemas import StoredPlan
 from ..security import CodedHTTPException
 from ..state import state
 from ..stellar import client as sc
 
 logger = logging.getLogger(__name__)
-
-STROOPS_PER_USDC = 10_000_000
 
 # How long one read may take before the guard gives up and answers 503. The
 # read runs on a worker thread that cannot be cancelled, so this bounds the
@@ -79,10 +80,10 @@ class AuthorizationRefused(CodedHTTPException):
         self.code = code
 
 
-def _unverifiable(what: str) -> AuthorizationRefused:
-    logger.warning("authorization unverifiable: %s", what)
+def _unreadable(what: str) -> AuthorizationRefused:
+    logger.warning("authorization unreadable: %s", what)
     return AuthorizationRefused(
-        503, "authorization_unverifiable", "the authorization could not be checked on-chain — try again shortly"
+        503, "authorization_unreadable", "the authorization could not be read on-chain — try again shortly"
     )
 
 
@@ -101,7 +102,7 @@ class OnChainAuthorization:
 
 @dataclass(frozen=True)
 class Verified:
-    """What `verify` established about an authorization.
+    """What `verify_ownership` established about an authorization.
 
     `authorization` is None exactly when the escrow is v1, where nothing is
     read and nothing enforced; `enforced` says which.
@@ -137,13 +138,29 @@ def _escrow_id() -> str:
     if not escrow:
         # A paid run with no escrow cannot settle, but it would still rate:
         # the exact farming this guard exists to stop. Not a pass.
-        raise _unverifiable("no PaymentEscrow is configured")
+        raise _unreadable("no PaymentEscrow is configured")
     return escrow
 
 
 async def escrow_version() -> int:
-    """The configured escrow's `version()`: 1 when it has none. Raises 503 when unreadable."""
+    """The configured escrow's `version()`: 1 when it has none. Raises 503 when unreadable.
+
+    Through the client's own `escrow_version` when this build has it, so the
+    answer lands in the SAME cache `execute_plan` reads. That matters: the
+    settle lane reads an unreadable version as 1 and skips its authorization
+    check, so a paid execute must never reach it before a definite answer is
+    cached. The fallback below is the same read for a build without it.
+    """
     escrow = _escrow_id()
+    shared = getattr(sc, "escrow_version", None)
+    if callable(shared):
+        try:
+            value = await asyncio.wait_for(asyncio.to_thread(shared, escrow), timeout=READ_TIMEOUT_SECONDS)
+        except Exception as e:
+            raise _unreadable(f"PaymentEscrow {escrow} version() failed: {type(e).__name__}: {str(e)[:200]}") from e
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise _unreadable(f"PaymentEscrow {escrow} version() returned {value!r}")
+        return value
     cached = _versions.get(escrow)
     if cached is not None:
         return cached
@@ -152,13 +169,13 @@ async def escrow_version() -> int:
     except RuntimeError as e:
         text = _simulate_error(e)
         if not (_MISSING_FUNCTION_HEAD.match(text) and _MISSING_FUNCTION_CAUSE in text):
-            raise _unverifiable(f"PaymentEscrow {escrow} version() failed: {text[:200]}") from e
+            raise _unreadable(f"PaymentEscrow {escrow} version() failed: {text[:200]}") from e
         version = 1
     except Exception as e:
-        raise _unverifiable(f"PaymentEscrow {escrow} version() failed: {type(e).__name__}") from e
+        raise _unreadable(f"PaymentEscrow {escrow} version() failed: {type(e).__name__}") from e
     else:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise _unverifiable(f"PaymentEscrow {escrow} version() returned {value!r}")
+            raise _unreadable(f"PaymentEscrow {escrow} version() returned {value!r}")
         version = value
     _versions[escrow] = version
     return version
@@ -173,13 +190,13 @@ async def read_authorization(auth_id_hex: str) -> OnChainAuthorization | None:
         match = _CONTRACT_ERROR_HEAD.match(_simulate_error(e))
         if match and int(match.group(1)) == _NOT_FOUND:
             return None
-        raise _unverifiable(f"authorization {auth_id_hex} unreadable: {_simulate_error(e)[:200]}") from e
+        raise _unreadable(f"authorization {auth_id_hex} unreadable: {_simulate_error(e)[:200]}") from e
     except Exception as e:
-        raise _unverifiable(f"authorization {auth_id_hex} unreadable: {type(e).__name__}") from e
+        raise _unreadable(f"authorization {auth_id_hex} unreadable: {type(e).__name__}") from e
     try:
         return _parse_authorization(record)
     except (KeyError, TypeError, ValueError) as e:
-        raise _unverifiable(f"authorization {auth_id_hex} is not the v2 shape: {e!r}") from e
+        raise _unreadable(f"authorization {auth_id_hex} is not the v2 shape: {e!r}") from e
 
 
 def _parse_authorization(record: Any) -> OnChainAuthorization:
@@ -216,50 +233,6 @@ def _parse_authorization(record: Any) -> OnChainAuthorization:
     )
 
 
-def required_stroops(plan: StoredPlan) -> int | None:
-    """The least `max_amount` that can pay for `plan`, in stroops; None if nothing can.
-
-    Two readings, and the larger wins. The per-step sum is what `settle` pays
-    (each step's price in stroops). The plan total is what the buyer was
-    quoted, taken to the next whole stroop — rounded UP, because a total
-    rounded down to a stroop would let an authorization one stroop short
-    through. The `round(…, 6)` first strips float noise (0.012 * 1e7 is
-    120000.00000000001) so an exact total is not pushed up a stroop by it.
-    """
-    per_step = 0
-    for step in plan.plan.steps:
-        price = step.est_price_usdc
-        if not math.isfinite(price) or price < 0:
-            return None
-        per_step += sc.usdc_to_i128(price)
-    total = plan.total_usdc
-    if not math.isfinite(total) or total < 0:
-        return None
-    return max(per_step, math.ceil(round(total * STROOPS_PER_USDC, 6)))
-
-
-def run_margin_seconds(step_count: int) -> float:
-    """How long an authorization must still live for a run of `step_count` steps to settle.
-
-    `settle` is allowed after `expires_at`, but so is the payer's `reclaim`,
-    and whichever lands first wins. A run that outlives its authorization is
-    therefore a race its operators can lose — or a payer can win on purpose, by
-    reclaiming the moment the clock passes. So the whole worst-case run has to
-    fit before expiry. The settle lane's own figure is used when it exists, so
-    the two checks can never disagree; the fallback is the same sum.
-    """
-    from . import execution_svc
-
-    worst_case = getattr(execution_svc, "worst_case_run_seconds", None)
-    if callable(worst_case):
-        return float(worst_case(step_count))
-    return (
-        settings.reputation_batch_timeout_seconds
-        + step_count * (execution_svc.STEP_TIMEOUT_SECONDS + 5.0)  # the step deadline plus its dispatch overhead
-        + 150.0  # the settle's submit and confirmation
-    )
-
-
 def check_ownership(auth: OnChainAuthorization, *, auth_id_hex: str, payer: str, plan_id: str) -> None:
     """Refuse an authorization that is not this payer's, not for this plan, or already spent."""
     if auth.payer != payer:
@@ -272,60 +245,19 @@ def check_ownership(auth: OnChainAuthorization, *, auth_id_hex: str, payer: str,
         # at a plan of the attacker's choosing.
         logger.warning("authorization %s refused: made for %s, presented for %s", auth_id_hex, auth.label, plan_id)
         raise AuthorizationRefused(
-            403, "authorization_plan_mismatch", f"this authorization was made for a different plan — {_REAUTHORIZE}"
+            409, "authorization_plan_mismatch", f"this authorization was made for a different plan — {_REAUTHORIZE}"
         )
-    if auth.settled:
-        raise AuthorizationRefused(
-            409, "authorization_settled", f"this authorization has already been settled — {_REAUTHORIZE}"
-        )
-    if auth.revoked:
-        raise AuthorizationRefused(
-            409, "authorization_revoked", f"this authorization was reclaimed by its payer — {_REAUTHORIZE}"
-        )
-
-
-def check_fit(auth: OnChainAuthorization, *, auth_id_hex: str, plan: StoredPlan) -> None:
-    """Refuse an authorization too small for `plan`, or too close to expiry to outlive a run of it."""
-    required = required_stroops(plan)
-    if required is None or auth.max_amount < required:
-        logger.warning(
-            "authorization %s refused: max %d stroops, plan %s needs %s",
-            auth_id_hex,
-            auth.max_amount,
-            plan.id,
-            required,
-        )
-        raise AuthorizationRefused(
-            409, "authorization_insufficient", f"this authorization does not cover the plan's total — {_REAUTHORIZE}"
-        )
-    remaining = auth.expires_at - _wall_clock()
-    needed = run_margin_seconds(len(plan.plan.steps))
-    if remaining < needed:
-        logger.warning(
-            "authorization %s refused: %.0fs left, a %d-step run can need %.0fs",
-            auth_id_hex,
-            remaining,
-            len(plan.plan.steps),
-            needed,
-        )
-        raise AuthorizationRefused(
-            409,
-            "authorization_expired",
-            f"this authorization expires before a run of this plan could be paid for — {_REAUTHORIZE}",
-        )
+    if auth.settled or auth.revoked:
+        raise AuthorizationRefused(409, "authorization_spent", f"this authorization is already spent — {_REAUTHORIZE}")
 
 
 async def _read_enforced(auth_id_hex: str) -> tuple[int, OnChainAuthorization | None]:
     """(version, authorization). The authorization is None on v1; a missing one is a 404."""
     version = await escrow_version()
     if version == 1:
-        logger.warning(
-            "paid execute against a v1 PaymentEscrow: authorization %s is NOT verified (v1 holds no custody)",
-            auth_id_hex,
-        )
         return 1, None
     if version != 2:
-        raise _unverifiable(f"PaymentEscrow version {version} is not one this guard knows")
+        raise _unreadable(f"PaymentEscrow version {version} is not one this guard knows")
     auth = await read_authorization(auth_id_hex)
     if auth is None:
         raise AuthorizationRefused(404, "authorization_not_found", f"no such authorization — {_REAUTHORIZE}")
@@ -333,30 +265,17 @@ async def _read_enforced(auth_id_hex: str) -> tuple[int, OnChainAuthorization | 
 
 
 async def verify_ownership(auth_id_hex: str, payer: str, plan_id: str) -> Verified:
-    """`verify` without the plan-fit checks, for a plan that no longer exists.
+    """Prove the authorization is live and was made by `payer` for `plan_id`; raise otherwise.
 
-    Proves only that the authorization is live and was made by `payer` for
-    `plan_id` — which is all a release needs, since a release returns the
-    custody to that same payer and nobody else.
+    Deliberately NOT the run's verification, which is `execute_plan`'s: no
+    cap and no expiry, because a release needs neither. It returns the custody
+    to that same payer and nobody else, so all it must establish is that the
+    custody is this payer's, for this plan, and not already spent.
     """
     key = auth_id_hex.lower()
     version, auth = await _read_enforced(key)
     if auth is not None:
         check_ownership(auth, auth_id_hex=key, payer=payer, plan_id=plan_id)
-    return Verified(auth_id_hex=key, escrow_version=version, authorization=auth)
-
-
-async def verify(auth_id_hex: str, payer: str, plan: StoredPlan) -> Verified:
-    """Check that the authorization can pay for THIS payer's run of THIS plan.
-
-    Raises `AuthorizationRefused` for every failure; returns only when the run
-    may start. On v1 it returns an unenforced result and refuses nothing.
-    """
-    key = auth_id_hex.lower()
-    version, auth = await _read_enforced(key)
-    if auth is not None:
-        check_ownership(auth, auth_id_hex=key, payer=payer, plan_id=plan.id)
-        check_fit(auth, auth_id_hex=key, plan=plan)
     return Verified(auth_id_hex=key, escrow_version=version, authorization=auth)
 
 
@@ -387,7 +306,7 @@ async def check_reclaimable(auth_id_hex: str, payer: str) -> OnChainAuthorizatio
             409, "reclaim_unsupported", "this escrow holds no custody, so there is nothing to reclaim"
         )
     if version != 2:
-        raise _unverifiable(f"PaymentEscrow version {version} is not one this guard knows")
+        raise _unreadable(f"PaymentEscrow version {version} is not one this guard knows")
     key = auth_id_hex.lower()
     auth = await read_authorization(key)
     if auth is None:
@@ -396,12 +315,13 @@ async def check_reclaimable(auth_id_hex: str, payer: str) -> OnChainAuthorizatio
         raise AuthorizationRefused(
             403, "authorization_payer_mismatch", "only the wallet that made this authorization can reclaim it"
         )
+    # One code for both, the settle lane's; the message says which it was.
     if auth.settled:
         raise AuthorizationRefused(
-            409, "authorization_settled", "this authorization was already settled — anything unspent was returned"
+            409, "authorization_spent", "this authorization was already settled — anything unspent was returned"
         )
     if auth.revoked:
-        raise AuthorizationRefused(409, "authorization_revoked", "this authorization was already reclaimed")
+        raise AuthorizationRefused(409, "authorization_spent", "this authorization was already reclaimed")
     if _wall_clock() <= auth.expires_at + LEDGER_CLOCK_ALLOWANCE_SECONDS:
         # The instant is public on-chain, so saying it discloses nothing.
         raise AuthorizationRefused(
@@ -421,20 +341,25 @@ async def check_reclaimable(auth_id_hex: str, payer: str) -> OnChainAuthorizatio
 #
 # The durable half is the chain itself. A run that settled left the
 # authorization `settled`, and one the payer reclaimed left it `revoked`, and
-# `check_ownership` refuses both on every execute, after a restart included.
+# `execute_plan` refuses both on every execute (`authorization_spent`), after a
+# restart included.
 # What only this process knows is the window before that: a task that is
 # still running, or one that finished without a settle landing. That is what
 # the claims below hold. One worker (render.yaml `--workers 1`) makes this
 # process the whole service; a second worker would have its own claims and
 # could start a second run, so scaling out needs a shared claim (ADR 0011).
 
-# The most claims kept. A claim is only ever made for an authorization the
-# chain verified — real custody the payer locked — so the map is bounded by
-# what callers have actually paid into the escrow; the cap is hygiene on top.
-# A running task's claim is never the one evicted.
+# The most claims kept. A claim outlives its request only when `execute_plan`
+# minted a task, which on v2 it does only for an authorization it verified —
+# real custody the payer locked — so the map is bounded by what callers have
+# actually paid into the escrow; the cap is hygiene on top. A running task's
+# claim, or one still pending, is never the one evicted.
 MAX_CLAIMS = 4096
 
-# auth id (lowercase hex) -> the task it started, oldest first.
+# The claim taken BEFORE `execute_plan` is called, while no task id exists yet.
+PENDING = "pending"
+
+# auth id (lowercase hex) -> the task it started (or PENDING), oldest first.
 _claims: OrderedDict[str, str] = OrderedDict()
 # One lock per authorization under check, and how many requests hold or await
 # it, so the entry goes when the last of them leaves and the map stays bounded
@@ -447,10 +372,10 @@ _lock_users: dict[str, int] = {}
 async def exclusive(auth_id_hex: str) -> AsyncIterator[None]:
     """Serialise every execute against one authorization, in this process.
 
-    Held across the claim check, the on-chain read, the task mint and the
-    claim, so two concurrent executes against one authorization cannot both
-    pass the check before either records its claim — the read in between is
-    an await, which is exactly where the event loop would interleave them.
+    Held across the claim check, the reads, `execute_plan` and the claim, so
+    two concurrent executes against one authorization cannot both pass the
+    check before either records its claim — every read in between is an
+    await, which is exactly where the event loop would interleave them.
     Executes against DIFFERENT authorizations never wait on each other.
     """
     key = auth_id_hex.lower()
@@ -489,16 +414,23 @@ def refuse_if_claimed(auth_id_hex: str) -> None:
 
 
 def _running(task_id: str) -> bool:
+    if task_id == PENDING:
+        return True
     task = state.tasks.get(task_id)
     return task is not None and task.status == "running"
 
 
-def claim(auth_id_hex: str, task_id: str) -> None:
-    """Record that `auth_id_hex` started `task_id`. Call with `exclusive` held."""
+def claim(auth_id_hex: str, task_id: str = PENDING) -> None:
+    """Record that `auth_id_hex` started `task_id` (or is about to). Call with `exclusive` held."""
     _claims[auth_id_hex.lower()] = task_id
     while len(_claims) > MAX_CLAIMS:
         evict = next((a for a, t in _claims.items() if not _running(t)), next(iter(_claims)))
         del _claims[evict]
+
+
+def unclaim(auth_id_hex: str) -> None:
+    """Drop a claim whose `execute_plan` raised before minting a task. Call with `exclusive` held."""
+    _claims.pop(auth_id_hex.lower(), None)
 
 
 def forget_claims() -> None:
@@ -548,10 +480,10 @@ async def release(auth_id_hex: str, *, reason: str) -> str | None:
 async def release_if_owned(auth_id_hex: str, payer: str, plan_id: str, *, reason: str) -> Release | None:
     """Release the authorization only if it is live and is `payer`'s, for `plan_id`.
 
-    For a refusal that means this authorization can never pay for a run: its
-    plan expired or is gone (its label can never match another plan), or the
-    service refused it for capacity. None when nothing was attempted — v1, an
-    unreadable chain, or an authorization that failed ownership. Never release
+    For a refusal the route makes before any run: the plan expired or is gone
+    (the label can never match another plan), or the service had no capacity.
+    None when nothing was attempted — v1, an unreadable chain, or an
+    authorization that failed ownership. Never release
     what failed ownership: that custody may be someone else's, and whoever
     sent its public id has no say over it. Call with `exclusive` held and after
     `refuse_if_claimed`, so a claimed authorization — one funding a run — is
@@ -566,7 +498,7 @@ async def release_if_owned(auth_id_hex: str, payer: str, plan_id: str, *, reason
 
 
 async def release_verified(verified: Verified, *, reason: str) -> Release | None:
-    """Release an authorization `verify` already passed; None (nothing attempted) on v1."""
+    """Release an authorization `verify_ownership` passed; None (nothing attempted) on v1."""
     if not verified.enforced:
         return None
     tx_hash = await release(verified.auth_id_hex, reason=reason)

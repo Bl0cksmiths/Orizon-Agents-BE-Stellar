@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.routers import orchestrator as orchestrator_router
 from app.schemas import ExecuteRequest, StoredPlan, Task
+from app.security import CodedHTTPException
 from app.services import authorization_guard as guard
 from app.services import execution_svc, orchestrator_svc
 from app.services.execution_svc import CapacityExhaustedError
@@ -98,59 +99,69 @@ def paid(client: TestClient, plan_id: str = PLAN_ID, auth: str = AUTH, payer: st
     return client.post("/api/orchestrator/execute", json={"plan_id": plan_id, "auth_id_hex": auth, "payer": payer})
 
 
-# ── verification at the route ───────────────────────────────────────────
+# ── the route and `execute_plan`'s single verifier ──────────────────────
 
 
-def test_a_matching_authorization_starts_one_run(client: TestClient, monkeypatch, runs, releases) -> None:
-    install(monkeypatch, FakeEscrow(auth=live_record()))
+def settle_lane_refusal(status: int, code: str) -> Exception:
+    """What `execute_plan`'s own check raises (`AuthorizationRefusedError`, a coded HTTP exception)."""
+    return CodedHTTPException(status, code, "refused by execute_plan's authorization check")
+
+
+def test_a_v2_execute_reads_only_the_version_before_execute_plan(
+    client: TestClient, monkeypatch, runs, releases
+) -> None:
+    """One verifier: the authorization itself is `execute_plan`'s to read, never read twice."""
+    escrow = install(monkeypatch, FakeEscrow(auth=RuntimeError("the route must not read the authorization")))
     live_plan()
     r = paid(client)
     assert r.status_code == 200, r.text
     assert r.json()["task_id"] == "tsk_0000000000000001"
     assert runs.calls == [(PLAN_ID, AUTH, PAYER)]
+    assert escrow.calls == [(ESCROW, "version")]
     assert guard.claimed_by(AUTH) == "tsk_0000000000000001"
     assert releases.calls == []
 
 
 @pytest.mark.parametrize(
-    ("auth", "payer", "status", "code"),
+    ("status", "code"),
     [
-        ({"agent_id": "pln_ffffffff"}, PAYER, 403, "authorization_plan_mismatch"),
-        ({}, OTHER, 403, "authorization_payer_mismatch"),
-        ({"settled": True}, PAYER, 409, "authorization_settled"),
-        ({"revoked": True}, PAYER, 409, "authorization_revoked"),
-        ({"max_amount": 1}, PAYER, 409, "authorization_insufficient"),
-        ({"expires_at": 1}, PAYER, 409, "authorization_expired"),
+        (403, "authorization_payer_mismatch"),
+        (409, "authorization_plan_mismatch"),
+        (409, "authorization_spent"),
+        (409, "authorization_insufficient"),
+        (409, "authorization_expiring"),
+        (404, "authorization_not_found"),
+        (503, "authorization_unreadable"),
     ],
 )
-def test_every_refusal_reaches_the_envelope_and_starts_nothing(
-    client: TestClient, monkeypatch, runs, releases, auth: dict[str, Any], payer: str, status: int, code: str
+def test_execute_plans_refusal_passes_through_unreleased_and_unclaimed(
+    client: TestClient, monkeypatch, releases, status: int, code: str
 ) -> None:
-    install(monkeypatch, FakeEscrow(auth=live_record(**auth)))
+    """It may be someone else's authorization, or another plan's: never released, and never left claimed."""
+    escrow = install(monkeypatch, FakeEscrow())
     live_plan()
-    r = paid(client, payer=payer)
+    refusing = RunRecorder(fail=settle_lane_refusal(status, code))
+    monkeypatch.setattr(orchestrator_router, "execute_plan", refusing)
+    r = paid(client)
     assert r.status_code == status
     body = r.json()
     assert body["detail"] == code and body["error"]["code"] == code
     assert "release_tx_hash" not in body
-    assert runs.calls == [] and releases.calls == []
+    assert releases.calls == [] and (ESCROW, "authorization") not in escrow.calls
     assert guard.claimed_by(AUTH) is None
+    # So the same authorization is not refused as "used" when the buyer retries.
+    assert paid(client).json()["error"]["code"] == code
+    assert len(refusing.calls) == 2
 
 
-def test_a_missing_authorization_is_404(client: TestClient, monkeypatch, runs) -> None:
-    install(monkeypatch, FakeEscrow(auth=RuntimeError("simulate failed: HostError: Error(Contract, #2)")))
-    live_plan()
-    r = paid(client)
-    assert (r.status_code, r.json()["error"]["code"]) == (404, "authorization_not_found")
-    assert runs.calls == []
-
-
-def test_an_unreadable_chain_is_503_and_never_runs(client: TestClient, monkeypatch, runs, releases) -> None:
+def test_an_unreadable_version_is_503_and_never_runs(client: TestClient, monkeypatch, runs, releases) -> None:
+    """Never guessed as v1: that is the reading under which `execute_plan` skips its own check."""
     install(monkeypatch, FakeEscrow(version=ConnectionError("rpc down")))
     live_plan()
     r = paid(client)
-    assert (r.status_code, r.json()["error"]["code"]) == (503, "authorization_unverifiable")
+    assert (r.status_code, r.json()["error"]["code"]) == (503, "authorization_unreadable")
     assert runs.calls == [] and releases.calls == []
+    assert guard.claimed_by(AUTH) is None
 
 
 def test_half_an_authorization_is_refused_not_run_simulated(client: TestClient, runs) -> None:
@@ -200,7 +211,7 @@ def test_v1_refusals_keep_their_old_envelopes(client: TestClient, monkeypatch, r
 
 
 def test_a_second_execute_against_one_authorization_is_refused(client: TestClient, monkeypatch, runs) -> None:
-    install(monkeypatch, FakeEscrow(auth=live_record()))
+    install(monkeypatch, FakeEscrow())
     live_plan()
     assert paid(client).status_code == 200
     r = paid(client, auth=AUTH.upper())  # the same authorization, spelled differently
@@ -210,7 +221,7 @@ def test_a_second_execute_against_one_authorization_is_refused(client: TestClien
 
 def test_the_claim_outlives_the_run(client: TestClient, monkeypatch, runs) -> None:
     """A finished run whose settle never landed leaves the authorization unsettled; it still may not run twice."""
-    install(monkeypatch, FakeEscrow(auth=live_record()))
+    install(monkeypatch, FakeEscrow())
     live_plan()
     task_id = paid(client).json()["task_id"]
     state.tasks[task_id].status = "failed"
@@ -227,7 +238,8 @@ class SlowEscrow(FakeEscrow):
 
 
 def test_two_concurrent_executes_against_one_authorization_start_exactly_one_run(monkeypatch, runs) -> None:
-    install(monkeypatch, SlowEscrow(auth=live_record()))
+    """The version read is the await between the claim check and the claim: exactly where two would interleave."""
+    install(monkeypatch, SlowEscrow())
     live_plan()
     req = ExecuteRequest(plan_id=PLAN_ID, auth_id_hex=AUTH, payer=PAYER)
 
@@ -247,10 +259,35 @@ def test_two_concurrent_executes_against_one_authorization_start_exactly_one_run
     assert guard._locks == {} and guard._lock_users == {}  # nothing left behind
 
 
-def test_different_authorizations_do_not_wait_on_each_other(monkeypatch, runs) -> None:
-    other_auth = "cd" * 16
-    install(monkeypatch, SlowEscrow(auth=live_record()))
+class SlowRun(RunRecorder):
+    async def __call__(self, plan: StoredPlan, *, auth_id_hex: str | None = None, payer: str | None = None) -> str:
+        await asyncio.sleep(0.3)
+        return await super().__call__(plan, auth_id_hex=auth_id_hex, payer=payer)
+
+
+def test_the_claim_is_pending_while_execute_plan_runs(monkeypatch) -> None:
+    install(monkeypatch, FakeEscrow())
     live_plan()
+    seen: list[str | None] = []
+
+    async def peek(plan: StoredPlan, *, auth_id_hex: str | None = None, payer: str | None = None) -> str:
+        seen.append(guard.claimed_by(AUTH))
+        return "tsk_peeked"
+
+    monkeypatch.setattr(orchestrator_router, "execute_plan", peek)
+    asyncio.run(
+        orchestrator_router.orchestrator_execute(ExecuteRequest(plan_id=PLAN_ID, auth_id_hex=AUTH, payer=PAYER))
+    )
+    assert seen == [guard.PENDING]
+    assert guard.claimed_by(AUTH) == "tsk_peeked"
+
+
+def test_different_authorizations_do_not_wait_on_each_other(monkeypatch) -> None:
+    other_auth = "cd" * 16
+    install(monkeypatch, FakeEscrow())
+    live_plan()
+    slow = SlowRun()
+    monkeypatch.setattr(orchestrator_router, "execute_plan", slow)
 
     async def both() -> list[Any]:
         return await asyncio.gather(
@@ -260,12 +297,12 @@ def test_different_authorizations_do_not_wait_on_each_other(monkeypatch, runs) -
             ),
         )
 
+    asyncio.run(guard.escrow_version())  # cached, so the only wait left is the run itself
     began = time.monotonic()
     asyncio.run(both())
-    # Two reads each (version, then authorization) at 200 ms: side by side that is
-    # about 400 ms, one after the other at least 600 ms (the second skips the cached version).
-    assert time.monotonic() - began < 0.55
-    assert len(runs.calls) == 2
+    # 300 ms each: side by side about 300 ms, one after the other at least 600 ms.
+    assert time.monotonic() - began < 0.5
+    assert len(slow.calls) == 2
 
 
 def test_claims_are_bounded_and_never_evict_a_running_task(monkeypatch) -> None:
@@ -277,6 +314,15 @@ def test_claims_are_bounded_and_never_evict_a_running_task(monkeypatch) -> None:
     assert len(guard._claims) == 3
     assert guard.claimed_by("a" * 32) == "tsk_running"
     assert guard.claimed_by("0" * 32) is None
+
+
+def test_a_pending_claim_is_never_evicted(monkeypatch) -> None:
+    monkeypatch.setattr(guard, "MAX_CLAIMS", 2)
+    guard.claim("a" * 32)
+    guard.claim("b" * 32, "tsk_gone_b")
+    guard.claim("c" * 32, "tsk_gone_c")
+    assert guard.claimed_by("a" * 32) == guard.PENDING
+    assert guard.claimed_by("b" * 32) is None
 
 
 # ── custody release on a refusal ────────────────────────────────────────
@@ -360,14 +406,13 @@ def test_an_unowned_or_spent_authorization_is_never_released(
     assert releases.calls == [] and runs.calls == []
 
 
-def test_a_fit_refusal_never_releases(client: TestClient, monkeypatch, releases) -> None:
-    """Insufficient or expiring: the buyer's to fix, not a run that can never happen."""
+def test_capacity_never_releases_an_unowned_authorization(client: TestClient, monkeypatch, releases) -> None:
+    install(monkeypatch, FakeEscrow(auth=live_record(payer=OTHER)))
     live_plan()
-    for fields in ({"max_amount": 1}, {"expires_at": int(time.time()) + 5}):
-        guard.forget_versions()
-        install(monkeypatch, FakeEscrow(auth=live_record(**fields)))
-        assert paid(client).status_code == 409
-    assert releases.calls == []
+    monkeypatch.setattr(orchestrator_router, "execute_plan", RunRecorder(fail=CapacityExhaustedError("full")))
+    r = paid(client)
+    assert (r.status_code, r.json()["detail"]) == (503, "capacity_exhausted")
+    assert "release_tx_hash" not in r.json() and releases.calls == []
 
 
 def test_an_unreadable_chain_never_releases(client: TestClient, monkeypatch, releases) -> None:

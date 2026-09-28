@@ -103,8 +103,8 @@ def test_the_xdr_is_an_unsigned_reclaim_with_the_payer_as_source(
 @pytest.mark.parametrize(
     ("auth", "payer", "status", "code"),
     [
-        (expired(settled=True), PAYER, 409, "authorization_settled"),
-        (expired(revoked=True), PAYER, 409, "authorization_revoked"),
+        (expired(settled=True), PAYER, 409, "authorization_spent"),
+        (expired(revoked=True), PAYER, 409, "authorization_spent"),
         (expired(expires_at=int(time.time()) + 3_600), PAYER, 409, "authorization_locked"),
         (expired(), STRANGER, 403, "authorization_payer_mismatch"),
     ],
@@ -123,6 +123,15 @@ def test_every_refusal_is_named_before_anything_is_built(
     assert r.status_code == status
     assert r.json()["detail"] == code and r.json()["error"]["code"] == code
     assert builds.calls == []
+
+
+def test_settled_and_reclaimed_share_a_code_and_say_which(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, builds: BuildRecorder
+) -> None:
+    install(monkeypatch, FakeEscrow(auth=expired(settled=True)))
+    assert "settled" in reclaim(client).json()["error"]["message"]
+    install(monkeypatch, FakeEscrow(auth=expired(revoked=True)))
+    assert "reclaimed" in reclaim(client).json()["error"]["message"]
 
 
 def test_locked_holds_past_expiry_until_the_ledger_can_have_caught_up(
@@ -161,7 +170,7 @@ def test_an_unreadable_chain_is_503(
     down = ConnectionError("rpc down")
     install(monkeypatch, FakeEscrow(version=down) if where == "version" else FakeEscrow(auth=down))
     r = reclaim(client)
-    assert (r.status_code, r.json()["error"]["code"]) == (503, "authorization_unverifiable")
+    assert (r.status_code, r.json()["error"]["code"]) == (503, "authorization_unreadable")
     assert builds.calls == []
 
 

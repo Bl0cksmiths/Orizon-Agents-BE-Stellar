@@ -128,14 +128,18 @@ async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONRes
 async def _execute_paid(
     req: ExecuteRequest, plan: StoredPlan | None, auth_id_hex: str, payer: str
 ) -> ExecuteResponse | JSONResponse:
-    """A paid run: refused unless the authorization is this payer's, for this plan (S2).
+    """A paid run: one task per authorization, and custody back on a run that can never happen.
 
-    Everything happens under the authorization's lock, so of two concurrent
+    Whether the authorization may pay for this run at all — this payer's, for
+    this plan, unspent, large enough, long enough — is `execute_plan`'s check
+    (`authorization_*` codes, S2), and it is not repeated here. Everything
+    below happens under the authorization's lock, so of two concurrent
     executes against it exactly one can start a task (ADR 0011).
     """
     async with guard.exclusive(auth_id_hex):
         # First, and before any release below: a claimed authorization is
-        # funding a run, and must never be released out from under it.
+        # funding a run, and must never be released out from under it. Only a
+        # v2 execute ever claims, so on v1 this never refuses.
         guard.refuse_if_claimed(auth_id_hex)
         if plan is None:
             # Gone — a restart, or evicted by newer plans. The authorization's
@@ -147,34 +151,45 @@ async def _execute_paid(
                 raise HTTPException(404, detail)
             return _refused_after_release(404, detail, "not_found", "this plan is no longer held", released)
         if plan_expired(plan):
-            # Checked here as well as in `execute_plan` so the release rests on
-            # ownership alone: an expired plan's authorization is dead whatever
-            # its cap or expiry, and the fit checks would otherwise refuse
-            # first and leave it locked.
-            released = await guard.release_if_owned(auth_id_hex, payer, plan.id, reason="plan_expired")
-            if released is None:
-                raise PlanExpiredError(plan.id)
-            return _plan_expired(plan, released)
-        verified = await guard.verify(auth_id_hex, payer, plan)
+            # `execute_plan` refuses this too, first thing; answering here keeps
+            # the 410 when the chain cannot be read, as it always was.
+            return await _refuse_expired(plan, auth_id_hex, payer)
+        # Read, never guessed, before any paid run: an unreadable version is a
+        # 503 here, where `execute_plan` would read it as v1 and skip its check.
+        enforced = await guard.escrow_version() >= 2
+        if enforced:
+            guard.claim(auth_id_hex)
         try:
             task_id = await execute_plan(plan, auth_id_hex=auth_id_hex, payer=payer)
         except PlanExpiredError:
             # The plan crossed its TTL between the check above and here.
-            released = await guard.release_verified(verified, reason="plan_expired")
-            if released is None:
-                raise
-            return _plan_expired(plan, released)
+            guard.unclaim(auth_id_hex)
+            return await _refuse_expired(plan, auth_id_hex, payer)
         except CapacityExhaustedError as e:
+            guard.unclaim(auth_id_hex)
             logger.warning("execute rejected for plan %s: %s", req.plan_id, e)
-            released = await guard.release_verified(verified, reason="capacity_exhausted")
+            released = await guard.release_if_owned(auth_id_hex, payer, plan.id, reason="capacity_exhausted")
             if released is None:
                 raise HTTPException(503, "capacity_exhausted") from e
             return _refused_after_release(
                 503, "capacity_exhausted", "capacity_exhausted", "the service is at capacity", released
             )
-        if verified.enforced:
+        except BaseException:
+            # Refused before a task was minted — `authorization_*` from
+            # `execute_plan` among it. Nothing is released: that authorization
+            # may be someone else's, or another plan's.
+            guard.unclaim(auth_id_hex)
+            raise
+        if enforced:
             guard.claim(auth_id_hex, task_id)
     return _response(task_id)
+
+
+async def _refuse_expired(plan: StoredPlan, auth_id_hex: str, payer: str) -> JSONResponse:
+    released = await guard.release_if_owned(auth_id_hex, payer, plan.id, reason="plan_expired")
+    if released is None:
+        raise PlanExpiredError(plan.id)
+    return _plan_expired(plan, released)
 
 
 def _plan_expired(plan: StoredPlan, released: guard.Release) -> JSONResponse:
