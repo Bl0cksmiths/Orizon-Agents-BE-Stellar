@@ -1020,8 +1020,11 @@ async def _settle_onchain(
     propagates out of here without returning the job id — so whatever must
     survive a confirmed charge has to be written by then, not after.
 
-    Returns (charge_tx, proof_tx, job_id); either tx may be None if that step
-    failed, and job_id is None whenever the charge did not CONFIRM — skipped,
+    Returns (charge_tx, proof_tx, job_id). A hash is returned only for a
+    transaction that CONFIRMED (S7): a rejected or unconfirmed charge or seal
+    returns None in its place, and its hash is kept in the log line and the
+    trace, never on the task or the settlement as if it were evidence. job_id
+    is None whenever the charge did not CONFIRM — skipped,
     raised, rejected, or submitted and never confirmed. The last of those is
     not a failure: a charge that timed out may still settle on-chain, so a None
     job id means "we do not know that the money moved", never "it did not".
@@ -1138,7 +1141,7 @@ async def _settle_onchain(
                 f"charge status={charge_status} hash={charge_tx}",
                 settlement="failed",
             )
-            return (charge_tx, None, None)
+            return (None, None, None)
         else:
             # NOT a failure: `"timeout"` is the client's word for submitted and
             # then lost track of, and a SUCCESS with no hash is the same
@@ -1179,7 +1182,7 @@ async def _settle_onchain(
                 "settle, and this run cannot be disputed",
                 settlement="unconfirmed",
             )
-            return (charge_tx, None, None)
+            return (None, None, None)
 
         # 2. seal
         intent_hash = hashlib.sha256(plan.intent.encode("utf-8")).digest()
@@ -1273,6 +1276,10 @@ async def _settle_onchain(
                 "error",
                 f"seal status={seal.get('status')} hash={proof_tx}",
             )
+            # Never handed on as the proof: a seal that did not confirm proves
+            # nothing, and the task and the settlement would show it as if it
+            # did (S7). The hash stays in the log line and the trace above.
+            proof_tx = None
     except asyncio.CancelledError:
         # CancelledError is a BaseException, so the handler below never sees
         # it — yet a shutdown cancel (main.py's drain window) can land between
