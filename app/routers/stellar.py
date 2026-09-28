@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..security import _operator_key_scheme, check_operator_key, require_api_key
-from ..services import registry_sync, reputation_svc, settlement_svc
+from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
 from ..stellar import cache as rcache
@@ -734,6 +734,41 @@ async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
         return AuthorizeXdrResponse(xdr=xdr, expires_at=expires_at)
     except Exception as e:
         logger.exception("authorize build failed")
+        raise HTTPException(400, "build_failed") from e
+
+
+class ReclaimReq(BaseModel):
+    payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
+    # Lowercase only: the id as the escrow's events and our receipts print it.
+    auth_id_hex: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+
+
+@router.post("/build/reclaim", response_model=XdrResponse)
+async def build_reclaim(req: ReclaimReq) -> XdrResponse:
+    """Build unsigned XDR for PaymentEscrow v2 `reclaim(payer, auth_id)`. The payer signs.
+
+    The payer's way back to custody no settle ever spent: allowed once the
+    authorization has expired, and never after it was settled or reclaimed.
+    Each of those is checked first with a read-only simulate and refused with
+    its own 409 (`authorization_settled`, `authorization_revoked`,
+    `authorization_locked`), so the wallet is never asked to sign a
+    transaction the contract will refuse. A v1 escrow holds no custody and
+    answers 409 `reclaim_unsupported`; an unreadable chain is 503
+    `authorization_unverifiable` (ADR 0011).
+    """
+    await authorization_guard.check_reclaimable(req.auth_id_hex, req.payer)
+    try:
+        args = [sc.addr(req.payer), sc.bytes16(bytes.fromhex(req.auth_id_hex))]
+        xdr = await asyncio.to_thread(
+            sc.build_invoke_xdr,
+            sc.contract_ids().payment_escrow,
+            "reclaim",
+            args,
+            source=req.payer,
+        )
+        return XdrResponse(xdr=xdr)
+    except Exception as e:
+        logger.exception("reclaim build failed")
         raise HTTPException(400, "build_failed") from e
 
 
