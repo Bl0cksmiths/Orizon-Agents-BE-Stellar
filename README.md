@@ -61,7 +61,7 @@ cp .env.example .env
 | POST | `/api/stellar/build/register-agent`  | unsigned XDR — owner signs via Freighter |
 | POST | `/api/stellar/build/authorize`       | unsigned XDR — x402 pre-auth |
 | POST | `/api/stellar/submit`                | submit a Freighter-signed XDR |
-| POST | `/api/stellar/server/charge`         | backend-signed escrow charge (needs `X-API-Key`) |
+| POST | `/api/stellar/server/charge`         | backend-signed escrow charge (needs `X-API-Key`; escrow v1 only — v2 settles inside the run, ADR 0010) |
 | POST | `/api/stellar/server/seal`           | backend-signed attestation seal (needs `X-API-Key`) |
 | GET  | `/api/stellar/new-id`                | fresh random 16-byte id for job/auth ids |
 | POST | `/api/disputes/challenge`            | mint the exact message + nonce the payer's wallet signs to dispute a step |
@@ -126,6 +126,8 @@ Read it via `GET /api/stellar/reputation` (all agents + floor/prior) or `GET /ap
 
 ## Dispute window
 
+**How a paid run settles (ADR 0010).** Against PaymentEscrow v2 the buyer's authorization is custody, and the run ends in one `settle` that pays each step that actually delivered its own price, to that agent's on-chain owner, and returns the rest; a run that delivered nothing releases the whole custody, and a run that ends any other way without a settle (cancelled, crashed, refused before sending) releases it too. `/execute` refuses a v2 authorization that is not the caller's, not for this plan, already spent, too small, or too close to expiry for a worst-case run (902.5 s for six steps — ask for a 1200 s TTL). Every paid task carries `settlement` — `settled`, `released`, `skipped`, `unconfirmed` or `failed` — on the task, on its trace line and on its receipt, because a run whose money did not move still finalizes `complete` when it delivered. Against v1 the old single `charge` runs unchanged.
+
 A settled workflow can be argued with. When a paid workflow settles, the settlement is recorded — the job id, the payer, what each step was actually charged — and stamped with a closing time `DISPUTE_WINDOW_SECONDS` (24 h) ahead of it. Until that moment the buyer may dispute any step that was charged: `POST /api/disputes/challenge` returns the exact string to sign, the wallet that paid signs it, and `POST /api/disputes` records the claim. There is no account and no API key anywhere in that flow — **the wallet signature is the credential**, exactly as it is for endpoint binding, because the only thing that needs proving is "I am the address that paid this job", and a shared operator key cannot say that. It would be the wrong key besides: the operator is the party being disputed.
 
 The deadline is stamped on the settlement record rather than recomputed on read, so retuning `DISPUTE_WINDOW_SECONDS` can never move a closing time a buyer was already given; it only applies to workflows that settle afterwards. One dispute per `(job, step)`: a repeat is answered with the original dispute unchanged, not a second record. `GET /api/tasks/{id}/disputes` returns the window and everything raised on a task, which is what the console shows while the clock runs.
@@ -154,7 +156,7 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 | `RATE_LIMIT_PER_MINUTE` | `1200` | request budget per resolved client key (sliding 60 s window) — see below |
 | `TRUSTED_PROXY_HOPS` | `0` | how many **trailing** `X-Forwarded-For` entries are this deployment's own infrastructure and are skipped when resolving the client |
 | `FORWARDED_CHAIN_SAMPLES` | `5` | log the raw forwarded chain + resolved key for the first N non-exempt requests after each restart (`0` disables) |
-| `MAX_CHARGE_USDC` | `100` | server-side ceiling for a single `PaymentEscrow.charge`, in USDC |
+| `MAX_CHARGE_USDC` | `100` | server-side ceiling for a single `PaymentEscrow.charge` (v1) or one `settle`'s payouts (v2), in USDC |
 | `DISPUTE_REFUNDS_ENABLED` | `false` | master switch on the refund path — while it is false, `/api/disputes/{id}/uphold` and `/reject` refuse. **Turning it on makes `API_KEY` mandatory on its own: the process refuses to boot without one, on every network including testnet, whether or not a signing key or an asset SAC is wired up yet.** |
 | `MAX_REFUND_USDC` | `1.0` | ceiling on a single dispute credit, checked before anything is signed — deliberately not `MAX_CHARGE_USDC`, because that bounds what a buyer authorised themselves to spend and this bounds what the platform pays out of its own wallet |
 | `DOCS_ENABLED` | `true` | serve `/docs`, `/redoc`, and `/openapi.json` |
