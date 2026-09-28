@@ -735,14 +735,16 @@ async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
     by the settler's `settle`, the rest returned, or reclaimed by the payer
     once `expires_at` has passed.
 
-    `ttl_seconds` sets `expires_at`, and on v2 it is a hard deadline: `settle`
-    is refused once the ledger's clock passes it, and `/execute` refuses an
-    authorization whose remaining life cannot cover a worst-case run of the
-    plan (`execution_svc.worst_case_run_seconds`: the re-check's batch read,
-    125 s per step, 150 s for the settle — 902.5 s for the planner's six-step
-    maximum). A client should ask for 1200 s: that covers a six-step run with
-    about five minutes left for the wallet signature and the authorize to
-    confirm. The default below predates v2 and covers only a one-step plan.
+    `ttl_seconds` sets `expires_at`. On v2 it is when the payer may start
+    reclaiming custody, not a deadline for the settler: `settle` still lands
+    after it until the payer reclaims, and whichever lands first wins (the
+    amended interface). `/execute` refuses an authorization whose remaining
+    life cannot cover a worst-case run of the plan
+    (`execution_svc.worst_case_run_seconds`: the re-check's batch read, 125 s
+    per step, 150 s for the settle — 902.5 s for the planner's six-step
+    maximum), so a run it starts is never racing a reclaim. The default of
+    1800 s covers that with room for the wallet signature and the authorize to
+    confirm.
     """
     try:
         expires_at = int(time.time()) + req.ttl_seconds
