@@ -157,7 +157,7 @@ class FakeWorld:
 
     @staticmethod
     def write_register(path: Path, accounts: list[str] | None = None) -> Path:
-        """A register in the shape Lane P is expected to commit; the verifier reads any shape."""
+        """A register in the layout the backend commits: a `wallets` list of declared addresses."""
         wallets = [{"address": a, "role": "team"} for a in (accounts if accounts is not None else [TEAM, PLATFORM])]
         path.write_text(json.dumps({"wallets": wallets}))
         return path
