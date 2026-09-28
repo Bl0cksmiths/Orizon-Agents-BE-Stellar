@@ -62,8 +62,31 @@ def check_tx(name: str, seen: Observation | None) -> Check:
 
 
 # ── v2 ──────────────────────────────────────────────────────────
-def check_charged_events(events: list[ChainEvent], settlement: dict[str, Any]) -> tuple[Check, int]:
-    """One `charged` per delivered step, naming its agent, for its price. Returns (check, paid sum)."""
+def expected_payouts(settlement: dict[str, Any], owners: dict[str, str]) -> Counter[tuple[Any, int]]:
+    """(agent, stroops) for every delivered step v2 should have paid.
+
+    A delivered step is paid only when its agent has an on-chain owner: the
+    interface has a payout to an unregistered agent revert the whole settle,
+    so the backend leaves the seeded catalogue out. A settlement that states
+    each step's `paid_usdc` (the settle lane's receipt, ADR 0010) is taken at
+    its word for WHICH steps and HOW MUCH — the events are then checked
+    against that — and otherwise the step's price and the registry decide.
+    """
+    out: Counter[tuple[Any, int]] = Counter()
+    for s in delivered_steps(settlement):
+        if "paid_usdc" in s:
+            if s.get("paid_usdc") is None:
+                continue
+            out[(s.get("agent_id"), usdc_to_stroops(float(s["paid_usdc"])))] += 1
+        elif s.get("agent_id") in owners:
+            out[(s.get("agent_id"), usdc_to_stroops(float(s.get("price_usdc") or 0)))] += 1
+    return out
+
+
+def check_charged_events(
+    events: list[ChainEvent], settlement: dict[str, Any], owners: dict[str, str]
+) -> tuple[list[Check], int]:
+    """One `charged` per paid step, naming its agent, for its amount. Returns (checks, paid sum)."""
     charged = _named(events, "charged")
     job = settlement.get("job_id_hex")
     seen: Counter[tuple[Any, int]] = Counter()
@@ -77,18 +100,18 @@ def check_charged_events(events: list[ChainEvent], settlement: dict[str, Any]) -
             wrong_job += 1
         seen[(agent, amount)] += 1
         paid += amount
-    expected = Counter(
-        (s.get("agent_id"), usdc_to_stroops(float(s.get("price_usdc") or 0))) for s in delivered_steps(settlement)
-    )
-    settled = usdc_to_stroops(float(settlement.get("settled_usdc") or 0))
-    ok = seen == expected and wrong_job == 0 and paid == settled
+    expected = expected_payouts(settlement, owners)
     detail = (
-        f"{len(charged)} charged event(s) for {sum(expected.values())} delivered step(s); "
-        f"paid {dict(seen)} expected {dict(expected)}; sum {paid}, settlement says {settled}"
+        f"{len(charged)} charged event(s) for {sum(expected.values())} paid step(s); "
+        f"paid {dict(seen)} expected {dict(expected)}"
     )
     if wrong_job:
         detail += f"; {wrong_job} name a job other than {job}"
-    return Check("v2_charged_per_delivered_step", ok, detail), paid
+    settled = usdc_to_stroops(float(settlement.get("settled_usdc") or 0))
+    return [
+        Check("v2_charged_per_delivered_step", seen == expected and wrong_job == 0, detail),
+        Check("v2_paid_sum_matches_settlement", paid == settled, f"charged sum {paid}, settlement says {settled}"),
+    ], paid
 
 
 def check_settled_event(
