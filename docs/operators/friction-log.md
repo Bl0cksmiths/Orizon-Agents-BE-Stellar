@@ -82,6 +82,7 @@ Append dated notes here when a row's status, 5.03 section or fix changes, for ex
 - 2026-09-29 · F-001 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
 - 2026-09-29 · F-002 · unresolved (unchanged) · 5.03 guide v1.0.0 listed under Known issues as unresolved
 - 2026-09-29 · F-003 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#step-2-fund-from-friendbot`
+- 2026-09-29 · F-004 · fixed (unchanged) · 5.03 guide v1.0.0 addressed at `#step-2-fund-from-friendbot`
 
 ## Template
 
