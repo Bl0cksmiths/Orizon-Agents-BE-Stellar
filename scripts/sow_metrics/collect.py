@@ -143,6 +143,9 @@ class Snapshot:
     repos: dict[str, Answer] = field(default_factory=dict)
     failures: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Each account's history as read this run: a platform key that also owns
+    # an agent is read once, not twice.
+    histories: dict[str, list[Operation]] = field(default_factory=dict)
 
     # ── derived views ───────────────────────────────────────────
     def contract(self, name: str) -> str | None:
@@ -354,6 +357,12 @@ def _match_charges(snap: Snapshot, op: Operation) -> None:
         snap.charge_txs.setdefault((r.escrow, r.id_hex), TxRef(op.tx_hash, op.date))
 
 
+def history(snap: Snapshot, chain: ChainReader, account: str) -> list[Operation]:
+    if account not in snap.histories:
+        snap.histories[account] = chain.operations(account)
+    return snap.histories[account]
+
+
 def read_histories(snap: Snapshot, chain: ChainReader) -> None:
     """Horizon's history of every platform key: who charged, who rated a dispute, who paid a refund.
 
@@ -366,7 +375,7 @@ def read_histories(snap: Snapshot, chain: ChainReader) -> None:
     seen: set[str] = set()
     for account in sorted(snap.platform):
         try:
-            operations = chain.operations(account)
+            operations = history(snap, chain, account)
         except FAILURES as exc:
             snap.fail("history", exc)
             continue
@@ -430,7 +439,7 @@ def read_registrations(snap: Snapshot, chain: ChainReader) -> None:
     wanted = {a.id for a in snap.agents}
     for owner in sorted({a.owner for a in snap.agents}):
         try:
-            operations = chain.operations(owner)
+            operations = history(snap, chain, owner)
         except FAILURES as exc:
             snap.warnings.append(f"registration history of an owner could not be read: {type(exc).__name__}: {exc}")
             continue
