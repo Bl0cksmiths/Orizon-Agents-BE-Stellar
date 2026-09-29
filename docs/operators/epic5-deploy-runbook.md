@@ -429,7 +429,7 @@ Follows the frontend's `docs/escrow-v2-switch.md`, steps 3–5. Right after 4.3.
      redirect to a login is a failure, not a pass.
 3. **Verify the plan card**, with a funded testnet wallet (a team wallet),
    at `$SITE/app/orchestrator`: decompose any intent and read the card. Since
-   frontend #96 the card's custody copy follows the escrow the backend
+   frontend #97 the card's custody copy follows the escrow the backend
    reports (`lib/escrow-generation.ts`): v2 only when the pin is set and the
    backend reports it, v1 when the backend reports the v1 id, neutral
    otherwise. **Expected:** the v2 line ("…moves up to X from your wallet
