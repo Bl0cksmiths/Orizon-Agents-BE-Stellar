@@ -502,10 +502,16 @@ def collect(
     snap = Snapshot(network=network, team=dict(team.roles))
     readiness = _read(snap, "readiness", reads.readiness)
     if readiness is not None:
-        if isinstance(readiness.body, dict) and readiness.status in (200, 503):
-            snap.readiness = readiness.body
+        # /readiness answers 503 WITH its report when a dependency is missing; a
+        # 503 without one (a proxy's error page) names no ratings signer, and
+        # any owner could be that signer, so it is a failed read.
+        body = readiness.body if isinstance(readiness.body, dict) else {}
+        if readiness.status in (200, 503) and isinstance(body.get("ratings"), dict):
+            snap.readiness = body
         else:
-            snap.failures["readiness"] = f"{readiness.url} answered HTTP {readiness.status}"
+            snap.failures["readiness"] = (
+                f"{readiness.url} answered HTTP {readiness.status} without a readiness report naming the ratings keys"
+            )
     read_platform_keys(snap, chain)
     read_registry(snap, chain)
     read_escrows(snap, chain, extra_escrows)
