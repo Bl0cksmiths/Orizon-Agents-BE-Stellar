@@ -138,7 +138,8 @@ class ChainReader:
         record = self._horizon(f"/accounts/{account}")
         if record is None:
             return None
-        native = next((b for b in record.get("balances") or [] if b.get("asset_type") == "native"), {})
+        balances = record.get("balances") or []
+        native: dict[str, Any] = next((b for b in balances if b.get("asset_type") == "native"), {})
         return AccountFacts(
             account=account,
             native=_units(native.get("balance")),
