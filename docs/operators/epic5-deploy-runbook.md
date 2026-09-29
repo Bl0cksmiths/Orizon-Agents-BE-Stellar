@@ -457,3 +457,56 @@ Follows the frontend's `docs/escrow-v2-switch.md`, steps 3–5. Right after 4.3.
    Production** (Instant Rollback). Then revert the pin PR (`"testnet": null`)
    so the next push to `main` does not re-deploy it. With the pin back at
    `null`, the checks report it as pending again.
+
+---
+
+## 6. Refunds on
+
+Only after step 4.3 reads `escrow.version: 2`. An upheld dispute pays the
+credit from the platform's own signing key (ADR 0002, ADR 0008), so that key
+must hold it.
+
+### 6.1 Fund the platform signing key
+
+1. **Check its balance** (the settler, `$SETTLER`):
+
+   ```sh
+   curl -s "https://horizon-testnet.stellar.org/accounts/$SETTLER" \
+     | jq '{balances: [.balances[] | select(.asset_type=="native") | .balance], subentries: .subentry_count}'
+   ```
+
+2. **It must be able to spend at least `MAX_REFUND_USDC` (the dashboard
+   value from 3.1) plus 2 XLM of fees, above its reserve.** The reserve is
+   (2 + subentries + sponsoring − sponsored) × 0.5 XLM. On testnet the escrow
+   settles native XLM, so `MAX_REFUND_USDC` is an XLM amount here.
+3. **If it is short:** fund it from friendbot
+   (`https://friendbot.stellar.org/?addr=$SETTLER`) or send XLM from another
+   team testnet wallet. Never paste its secret anywhere to do this.
+4. **Verify:** `demo_preflight`'s `refunds.settler_balance` check (step 9.2)
+   passes with `--max-refund` set to the dashboard's `MAX_REFUND_USDC`.
+
+### 6.2 Turn both switches on
+
+1. **Action:** Render → **Environment** → confirm `API_KEY` and `DATABASE_URL`
+   are set (3.1), then set `DISPUTE_REFUNDS_ENABLED=true` and
+   `REFUND_RECONCILE_ENABLED=true` → save → **Manual Deploy** → **Deploy
+   latest commit**.
+2. **Expected:** the service boots. If it does not, and the log says
+   `API_KEY` is required, the key is missing: turning refunds on makes it
+   mandatory on every network.
+3. **Verify:**
+
+   ```sh
+   curl -s "$BE_HOST/readiness" | jq '.disputes'
+   # "store": "postgres", "reconcile": { "enabled": true, "running": true, ... }
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST "$SITE/api/disputes/any/uphold"
+   # 401 (invalid_api_key), no longer 503 dispute_refunds_disabled
+   ```
+
+   `disputes.reconcile.enabled` is `true` only when **both** switches are on.
+   The uphold probe comes from the demo script's GO condition. **Confirm** the
+   exact status an unknown dispute id gives without a key before relying on
+   it; the point is that the answer is no longer `503 dispute_refunds_disabled`.
+4. **Rollback:** set both switches back to `false` and Manual Deploy. A
+   dispute already in `crediting` stays there for an operator to reconcile by
+   hand (`docs/disputes.md`); nothing pays twice.
