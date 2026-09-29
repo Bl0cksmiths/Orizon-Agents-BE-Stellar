@@ -724,6 +724,7 @@ The morning of the session, and again right before recording:
 cd "$BE" && source .venv/bin/activate
 python -m scripts.demo_preflight \
     --buyer G...BUYER --operator G...OPERATOR --cap 0.5 \
+    --operator-endpoint <the operator agent's bound endpoint URL> \
     --max-refund <the dashboard's MAX_REFUND_USDC> \
     --with-decompose "the intent the video types" \
     --out-dir docs/evidence/5.04/preflight
