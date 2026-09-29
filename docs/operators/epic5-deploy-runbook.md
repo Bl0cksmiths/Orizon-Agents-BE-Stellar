@@ -170,24 +170,11 @@ For each PR: wait for its checks to go green, then merge it.
 # contracts
 gh pr merge 5  -R Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar --merge
 
-# backend: the stack, bottom first, then the licence
-gh pr merge 90 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
-gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
-gh pr merge 93 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
-gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
-gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge   # Epic 5 audit fixes, on #93
+# backend
+gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
 
-# frontend: #96 first and on its own (it fixes live copy), then #91 and #92
-# together, then the rest, then the licence
-gh pr merge 96 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-# if GitHub then reports a conflict on #97, merge main into
-# fix/5-audit-fe-integration and keep #97's version of the custody files
-gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-gh pr merge 95 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-gh pr merge 93 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-gh pr merge 97 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge   # Epic 5 audit fixes, on #95
+# frontend: first, because production's custody copy is wrong until it ships
+gh pr merge 97 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 ```
 
 **Frontend #91 and #92 ship together.** Vercel deploys every push to
