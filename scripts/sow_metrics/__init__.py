@@ -15,6 +15,12 @@ A milestone page that answers 404 is never linked: a dead link proves
 nothing. `--pending-link ID=URL[=label]` links the pull request that adds it
 instead, and without one the row links nothing and its method says why.
 
+No outside operator's agent id, wallet or hash is published before their
+consent is recorded: by default (`--withhold-external`) every proof link that
+names one is replaced by one link to the Ecosystem page, and the counts do
+not change. `--publish-external` links them once consent exists. The raw
+JSON always keeps them.
+
 It is read-only: every call is a GET or a simulation, retried a bounded number
 of times, and it holds no secret. It refuses any network but testnet, checked
 against the RPC's `getNetwork`, Horizon's root document and the API's own

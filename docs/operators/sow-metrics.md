@@ -25,6 +25,8 @@ Render waking up and one simulation per escrow id).
 | `--escrow C...` | — | another escrow contract to count, besides the live one and the known v1 (repeatable) |
 | `--team-register` | `app/data/team_wallets.json` | the committed register of team wallets |
 | `--pending-link ID=URL[=label]` | — | for milestone `m06`, `m09` or `m10`: when its page answers 404, link this GitHub pull request (`https://github.com/<owner>/<repo>/pull/<n>`) in place of the page (repeatable, once per milestone). The label is optional; without one it reads "Pull request #n in owner/repo that adds the /page page (not deployed yet)". A label must be at least two words. Ignored, with a note, when the page does not answer 404 |
+| `--withhold-external` | **on** | replace every proof link that names an outside operator with one link to the Ecosystem page, until their consent is recorded. See [Consent](#consent) |
+| `--publish-external` | off | link outside operators' registrations, wallets and payments. Only once every one of them has consented in writing. Cannot be combined with `--withhold-external` |
 | `--rpc-url`, `--horizon-url` | the public testnet endpoints | |
 | `--out-dir` | — | write the three outputs below |
 | `--print-block` | off | also print the frozen block to stdout |
@@ -35,7 +37,7 @@ Render waking up and one simulation per escrow id).
 |---|---|
 | `sow-metrics.block.json` | **The frozen metrics block.** The frontend's `content/evidence/index.json` `metrics` array is pasted from it, unchanged. |
 | `sow-metrics.md` | The same eleven rows as a Markdown table, each with why it was missed, how it was measured and its proof links. |
-| `sow-metrics.raw.json` | Every counted and excluded item per metric with its raw addresses and hashes, the sources read, every read failure and warning, and a summary (agents, each escrow's ids, ratings by kind, platform transfers). |
+| `sow-metrics.raw.json` | Every counted and excluded item per metric with its raw addresses and hashes, the sources read, every read failure and warning, and a summary (agents, each escrow's ids, ratings by kind, each agent's `bound` flag from the adoption report, platform transfers). `withheld_external` says whether the block held outside operators back. **It always holds every address and hash**, whatever the flag: keep it with the team, and do not publish it while anything is withheld. |
 
 The block is an array of eleven entries, `m01`..`m11` in SOW order:
 
@@ -66,6 +68,33 @@ The block is an array of eleven entries, `m01`..`m11` in SOW order:
 The generator checks this shape before it writes anything, and refuses (with a
 traceback) to write a block that breaks it.
 
+## Consent
+
+No outside operator's agent id, wallet, transaction hash or URL is published
+until their consent is recorded ([friction-log.md](friction-log.md), "Rules";
+[onboarding-session-runbook.md](onboarding-session-runbook.md)). The block is
+pasted into the public evidence index, so **by default** the generator holds
+them back (`--withhold-external`):
+
+- Every proof link that would name an outside operator is left out: their
+  registrations (m01, m06), their wallets (m02), payments to their agents or
+  from their wallets (m03, m04), and dispute ratings and refunds that involve
+  them (m05).
+- In their place, the row carries **one** link, where the first of them was:
+  `https://orizons.xyz/app/ecosystem` (the `--frontend` host), `kind: "page"`,
+  labelled "Outside operators' agents, on the Ecosystem page. Their agent ids,
+  wallets and transaction hashes are held back until each operator's consent
+  to publish them is recorded".
+- Nothing else changes: the counts, statuses, reasons and methods are the
+  same either way, and none of them names an outside operator. Links to the
+  team's own wallets and agents stay, since those can be named.
+- The Markdown says it at the top, and the run prints a `note:` line.
+
+Once every outside operator in the block has consented in writing, run with
+`--publish-external` to link them. The tests pin both modes, and pin with a
+regex that no outside `G…` address or agent id reaches the block or the
+Markdown while they are withheld (`tests/test_sow_metrics_consent.py`).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -89,7 +118,7 @@ them is Not measured: an owner that cannot be ruled out is not counted.
 |---|---|
 | m01 | Every agent `AgentRegistry.list_ids()` lists, with its owner from `get(id)`; counted when the owner is external. Each registration links its transaction (found in the owner's Horizon history). |
 | m02 | The distinct owners of the registered agents, each classified the same way. |
-| m03 | A workflow is a distinct settled job with at least one counted charge (m04) to an externally owned agent. Two payouts of one job are one workflow. |
+| m03 | A workflow is a distinct settled job with at least one counted charge (m04) to an externally owned agent. Two payouts of one job are one workflow. The row says agents are **owned** by outside operators, never "run" by them: the registry shows an owner, not a working agent. A miss also says how many of those agents are bound to an endpoint, from `bound` in the live `/api/ecosystem/adoption` report (the backend's record of a binding, not proof the endpoint answers). If that report cannot be read, the row says so and the count is still measured. |
 | m04 | Every receipt each escrow has issued is one charge: a v1 `charge`, or one payout of a v2 `settle`. The escrow's instance `Nonce` numbers every authorization and receipt it has ever issued, so ids `0..Nonce-1` are its complete history, read by `receipt(id)` / `authorization(id)`, independent of how long the RPC keeps events. A charge is **excluded** when it is a self-payment (the payer owns the agent, is the escrow's settler, or is a platform key) or settled before the sprint began (2026-09-07). The live escrow is read, plus the known v1 escrow (so its history is still counted after the move to v2), plus any `--escrow`. v2 answers `version()` with 2; v1 has no `version()`. |
 | m05 | A dispute refund counts only when it traces to a real dispute: a `kind=dispute` rating (from the platform keys' Horizon history of `ReputationLedger.submit`) whose job id is the derived dispute id of a counted charge's job (`job_id[:8] ‖ sha256(job_id ‖ "orizon-dispute:v1" ‖ step)[:8]`, `app/services/dispute_rating.py`), followed by an asset-contract transfer from a platform key to that charge's payer, after the charge and no larger than it. A transfer with no dispute behind it — the 4.01 drill to a team key — is excluded. The ledger's lifetime `rep_state(id).disputed` is read as a cross-check: if the ledger counts more disputes than the history shows, m05 is Not measured rather than 0. |
 | m06 | `/app/register` answers 200 with no login (redirects are not followed), and the live backend's `/openapi.json` publishes `POST /api/stellar/build/register-agent`. The most recent registration signed by a key other than the registry admin is linked. |
@@ -115,12 +144,14 @@ m04's method.
 
 ## Refreshing the evidence index
 
-1. Run the generator with `--out-dir`, and a `--pending-link` for each milestone page that is not deployed yet,
+1. Run the generator with `--out-dir` (outside operators are withheld by default; add `--publish-external` only once
+   each has consented), and a `--pending-link` for each milestone page that is not deployed yet,
    for example
    `--pending-link m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/97`. Exit 0 means every
    row was measured.
 2. Paste `sow-metrics.block.json` as the `metrics` array of the frontend's `content/evidence/index.json`.
-3. Keep `sow-metrics.raw.json` next to it: it is the answer to "which items were excluded, and why".
+3. Keep `sow-metrics.raw.json` with the team: it is the answer to "which items were excluded, and why", and it
+   holds every address and hash, so it is not published while anything is withheld.
 
 The contract tests (`tests/test_sow_metrics_contract.py`) pin every backend
 fact the generator re-states — the derived dispute id, the routes, the
