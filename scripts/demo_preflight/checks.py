@@ -475,9 +475,18 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
     external = external_agents(facts.adoption)
     if not external:
         return check.skipped("there is no external agent to check", "Fix operator.external first.")
+    # The exclusion scene's subject fails `routable` by design: the floor is
+    # meant to exclude it. It is judged by exclusion.below_floor instead.
+    subjects = [a for a, _ in external if a in facts.below_floor]
+    judged = [(a, o) for a, o in external if a not in facts.below_floor]
+    if not judged:
+        return check.failed(
+            f"the only external agent(s), {', '.join(subjects)}, are below the floor: none can serve the recording",
+            "Onboard (or restore) an external agent that clears the floor, beside the one the floor excludes.",
+        )
     unready: list[str] = []
     ready: list[str] = []
-    for agent_id, _owner in external:
+    for agent_id, _owner in judged:
         try:
             answer = reads.agent_readiness(agent_id)
         except Unreachable as exc:
@@ -502,7 +511,8 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
             "Have each operator fix the named step (their /app/operator page shows the same list), "
             "or have them unbind an agent they no longer run.",
         )
-    return check.passed("ready and reachable: " + ", ".join(ready))
+    aside = f"; below the floor by design (the exclusion subject): {', '.join(subjects)}" if subjects else ""
+    return check.passed("ready and reachable: " + ", ".join(ready) + aside)
 
 
 # ── the exclusion moment ────────────────────────────────────────
@@ -702,10 +712,12 @@ def run_checks(
     add(check_refunds_enabled(facts))
     add(check_dispute_store(facts))
     add(check_settler_balance(chain, facts, cfg))
-    add(check_external_count(facts))
-    add(check_external_ready(reads, facts))
+    # The floor is read before the operator group: the agent it excludes is
+    # meant to fail `routable`, and operator.ready has to know which it is.
     add(check_below_floor(reads, facts))
     add(check_decompose(reads, facts, cfg.decompose_intent))
+    add(check_external_count(facts))
+    add(check_external_ready(reads, facts))
     add(check_buyer(chain, cfg))
     add(check_operator(chain, facts, cfg))
     add(check_team_wallets(team, facts, cfg))
