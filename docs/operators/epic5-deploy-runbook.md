@@ -593,9 +593,10 @@ settler; two funded buyer wallets; the operator `API_KEY` and
 
 ```sh
 cd "$BE" && source .venv/bin/activate
-export BUYER_1_SECRET=…   # buyer wallet 1's S… seed; typed at the prompt, never committed
-export BUYER_2_SECRET=…   # buyer wallet 2, a different account
-export ORIZON_API_KEY=…   # the deployment's operator API_KEY
+# read -s keeps each value out of the terminal and the shell history
+read -rs -p 'buyer 1 seed: ' BUYER_1_SECRET && export BUYER_1_SECRET; echo   # buyer wallet 1's S… seed
+read -rs -p 'buyer 2 seed: ' BUYER_2_SECRET && export BUYER_2_SECRET; echo   # buyer wallet 2, a different account
+read -rs -p 'API_KEY: ' ORIZON_API_KEY && export ORIZON_API_KEY; echo        # the deployment's operator API_KEY
 ```
 
 The secrets are passed by variable **name**; nothing the harness prints or
