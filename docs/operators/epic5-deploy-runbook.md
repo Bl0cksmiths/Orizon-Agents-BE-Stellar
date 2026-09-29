@@ -155,9 +155,10 @@ Already merged and deployed: backend #88 (5.01) and #89 (5.02); frontend #89
 (5.01, the v2 console) and #90 (5.02). The example agent has no open PR and
 GitHub already detects its MIT licence.
 
-Backend #91 and #93 change scripts, docs and tests only, nothing in `app/`
-(their PR descriptions say so). #90 adds the friction-coverage mapping. So the
-backend behaviour step 3 deploys is 5.01 + 5.02 (#88, #89), which are already
+Most of backend #94 is scripts, docs and tests. In `app/` it adds
+`window_days` to `GET /api/ecosystem/adoption`, one entry to
+`app/data/team_wallets.json`, and a reworded refund refusal message. The rest
+of the behaviour step 3 deploys is 5.01 + 5.02 (#88, #89), which are already
 on `main` but, per the demo script's live check on 2026-09-29, not yet on
 Render.
 
