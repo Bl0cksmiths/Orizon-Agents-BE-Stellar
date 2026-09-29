@@ -545,14 +545,56 @@ def test_reputation_gating_needs_the_floor_on(tmp_path: Path, params: dict[str, 
     assert out.status("m07") == "not_met" and out.metric("m07")["reason"] == expected
 
 
+def _v1_world() -> FakeWorld:
+    """The deployment before escrow v2: the live escrow is v1, so no payment can settle."""
+    world = met_world()
+    world.live_escrow = ESCROW_V1
+    del world.escrows[ESCROW_V2]
+    world.readiness["escrow"] = {"contract": ESCROW_V1, "version": 1}
+    return world
+
+
+def test_the_dispute_milestone_is_partly_met_before_v2_with_refunds_off(tmp_path: Path) -> None:
+    """The state the audit found: routes deployed, v1 live, refunds off. No window is live, so it never says so."""
+    world = _v1_world()
+    world.readiness["disputes"]["reconcile"]["enabled"] = False
+    out = run(world, tmp_path)
+    m = out.metric("m08")
+    assert m["status"] == "not_met"
+    assert m["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute window can open until a payment settles, which "
+        "needs escrow v2, and refunds are switched off."
+    )
+    assert "window is live" not in json.dumps(m)
+    assert m["reason"].startswith("No dispute window can open until a payment settles, which needs escrow v2")
+
+
+def test_the_dispute_milestone_before_v2_with_refunds_on_is_partly_met(tmp_path: Path) -> None:
+    out = run(_v1_world(), tmp_path)
+    assert out.metric("m08")["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute window can open until a payment settles, which "
+        "needs escrow v2."
+    )
+
+
+def test_a_live_v2_that_has_settled_nothing_opens_no_window(tmp_path: Path) -> None:
+    world = met_world()
+    world.escrows[ESCROW_V2].ids = [(kind, f) for kind, f in world.escrows[ESCROW_V2].ids if kind != "receipt"]
+    world.drop(world.marks["refund"])
+    out = run(world, tmp_path)
+    assert out.metric("m08")["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute window has opened yet, because no payment has "
+        "settled on escrow v2."
+    )
+
+
 def test_the_dispute_milestone_needs_refunds_switched_on(tmp_path: Path) -> None:
     world = met_world()
     world.readiness["disputes"]["reconcile"]["enabled"] = False
     out = run(world, tmp_path)
     assert out.status("m08") == "not_met"
-    assert out.metric("m08")["reason"] == (
-        "The dispute window is live, but the live backend does not report refunds as switched on."
-    )
+    assert out.metric("m08")["achieved"] == "Partly: the dispute routes are deployed, but refunds are switched off."
+    assert out.metric("m08")["reason"] == "Refunds are switched off."
 
 
 def test_a_readiness_without_the_refund_switch_is_not_refunds_on(tmp_path: Path) -> None:
@@ -560,24 +602,31 @@ def test_a_readiness_without_the_refund_switch_is_not_refunds_on(tmp_path: Path)
     del world.readiness["disputes"]
     out = run(world, tmp_path)
     assert out.metric("m08")["reason"] == (
-        "The dispute window is live, but the live backend does not report refunds as switched on (its readiness "
-        "report predates the refund switch)."
+        "Refunds are not reported as switched on (the readiness report predates the refund switch)."
     )
 
 
-def test_the_dispute_milestone_needs_every_dispute_route(tmp_path: Path) -> None:
+def test_the_dispute_milestone_is_no_without_every_dispute_route(tmp_path: Path) -> None:
     world = met_world()
     world.routes.discard("POST /api/disputes/{dispute_id}/uphold")
+    world.readiness["disputes"]["reconcile"]["enabled"] = False
     out = run(world, tmp_path)
+    assert out.metric("m08")["achieved"] == "No"
     assert out.metric("m08")["reason"] == "The live backend does not publish every dispute route."
 
 
 def test_the_dispute_milestone_needs_a_real_refund(tmp_path: Path) -> None:
     out = run(_no_refund_world(), tmp_path)
     assert out.status("m08") == "not_met"
-    assert out.metric("m08")["reason"] == (
-        "The dispute window is live, but no dispute has been refunded on-chain yet (see the dispute refund row)."
+    assert out.metric("m08")["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute has been refunded on-chain yet (see the dispute "
+        "refund row)."
     )
+
+
+def test_the_dispute_milestone_is_yes_when_everything_holds(tmp_path: Path) -> None:
+    m = run(met_world(), tmp_path).metric("m08")
+    assert m["achieved"] == "Yes" and m["status"] == "met" and "reason" not in m
 
 
 def test_the_guide_must_answer_with_no_login(tmp_path: Path) -> None:

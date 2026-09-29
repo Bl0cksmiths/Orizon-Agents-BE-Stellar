@@ -821,13 +821,22 @@ def m07(snap: Snapshot, rules: Rules) -> Metric:
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
 
 
+def _and_list(parts: list[str]) -> str:
+    """Clauses joined with a serial comma: several of them carry commas of their own."""
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + ", and " + parts[-1]
+
+
 def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     row = SOW_ROWS[7]
     method = (
-        "Checked that the live backend publishes the dispute routes (open, read, uphold, reject), that its "
+        "Checked that the live backend publishes the dispute routes (open, read, uphold, reject); that a dispute "
+        "window can open at all, which needs a settled payment, and so the escrow v2 contract live; that its "
         "readiness report shows refunds switched on (disputes.reconcile.enabled, true only when refunds and the "
-        "refund sweep are both on), and that at least one dispute has been refunded on-chain (the dispute refund "
-        "row above)."
+        "refund sweep are both on); and that at least one dispute has been refunded on-chain (the dispute refund "
+        "row above). Yes when all hold, Partly when the routes are deployed but the rest does not, and No when the "
+        "routes are not."
     )
     links = [
         Link("Live backend route list", snap.urls["openapi"], "doc"),
@@ -839,27 +848,47 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
         return unmeasured
     routes = snap.openapi_routes or set()
     missing = [r for r in DISPUTE_ROUTES if r not in routes]
+    # A dispute window opens only when a payment settles, and only escrow v2
+    # settles one (v1's charge cannot move a payer's funds, D-039).
+    v2_live = any(e.live and e.version >= 2 for e in snap.escrows)
+    v2_settled = any(e.receipts for e in snap.escrows if e.version >= 2)
     disputes = (snap.readiness or {}).get("disputes")
     reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
     refunds_on = isinstance(reconcile, dict) and reconcile.get("enabled") is True
     refunded = refunds.status == MET
-    met = not missing and refunds_on and refunded
-    reason = None
-    if not met:
+    met = not missing and v2_live and v2_settled and refunds_on and refunded
+    achieved, reason = "Yes", None
+    if missing:
+        achieved = "No"
+        reason = "The live backend does not publish every dispute route."
+    elif not met:
         parts = []
-        if missing:
-            parts.append("the live backend does not publish every dispute route")
+        if not v2_live:
+            parts.append("no dispute window can open until a payment settles, which needs escrow v2")
+        elif not v2_settled:
+            parts.append("no dispute window has opened yet, because no payment has settled on escrow v2")
         if not refunds_on:
             parts.append(
-                "the live backend does not report refunds as switched on"
-                + (" (its readiness report predates the refund switch)" if not isinstance(disputes, dict) else "")
+                "refunds are switched off"
+                if isinstance(disputes, dict)
+                else "refunds are not reported as switched on (the readiness report predates the refund switch)"
             )
-        if not refunded:
+        # With no window able to open, no refund is implied; it is said only
+        # when a window could have opened and none was refunded.
+        if not refunded and v2_live and v2_settled:
             parts.append("no dispute has been refunded on-chain yet (see the dispute refund row)")
-        lead = "The dispute window is live, but " if not missing else ""
-        reason = (lead + _join(parts) + ".") if lead else _sentence(_join(parts)) + "."
-    counted = [{"missing_routes": missing, "refunds_on": refunds_on, "refunded_disputes": refunds.achieved}]
-    return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
+        achieved = "Partly: the dispute routes are deployed, but " + _and_list(parts) + "."
+        reason = _sentence(_and_list(parts)) + "."
+    counted = [
+        {
+            "missing_routes": missing,
+            "escrow_v2_live": v2_live,
+            "escrow_v2_settled": v2_settled,
+            "refunds_on": refunds_on,
+            "refunded_disputes": refunds.achieved,
+        }
+    ]
+    return Metric(row, achieved, MET if met else NOT_MET, method, links, reason, counted)
 
 
 def m09(snap: Snapshot, rules: Rules) -> Metric:
