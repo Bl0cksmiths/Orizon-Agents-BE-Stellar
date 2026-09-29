@@ -222,3 +222,67 @@ plan card tells buyers that signing Authorize moves the cap into escrow while
 production still settles through v1, which cannot do that (D-039). This
 runbook does not create that gap; it closes it. Keep steps 3 to 5 in one
 sitting so it closes as soon as possible.
+
+---
+
+## 3. Render: deploy the backend `main`
+
+Everything in this step happens in the Render dashboard, on the backend
+service. The dashboard's environment is the one in force; `render.yaml` is not
+read on a manual deploy's environment (it is stale: mainnet values and
+`autoDeploy: true`). Change nothing in `render.yaml` as part of this runbook.
+
+### 3.1 Check the environment
+
+Open the service → **Environment**. Check, without copying any value out of
+the dashboard:
+
+| Variable | Must be | Why |
+|---|---|---|
+| `STELLAR_NETWORK` | `testnet` | testnet only for the sprint |
+| `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE` | the testnet values in `.env.example` | |
+| `STELLAR_PAYMENT_ESCROW` | `$ESCROW_V1` for now | step 4 changes it |
+| `DATABASE_URL` | **set** (a secret: the Postgres connection string, Neon) | without it settlements, disputes and bindings live in memory and are lost on the next deploy or sleep |
+| `API_KEY` | **set** (a secret: the operator key; 8+ printable ASCII characters per the demo script) | mandatory as soon as `DISPUTE_REFUNDS_ENABLED=true`; the process refuses to boot without it |
+| `STELLAR_SIGNING_KEY` | **set** (a secret: the `S…` whose public half is `$SETTLER`) | settles, rates, seals and pays credits |
+| `REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS` | `5` (add it if missing) | how long boot waits for the first registry sync before pre-warming reputation; 0–60, and the config refuses anything else |
+| `DISPUTE_REFUNDS_ENABLED` | `false` | stays off until step 6 |
+| `REFUND_RECONCILE_ENABLED` | `false` | stays off until step 6 |
+| `MAX_REFUND_USDC` | note its value | step 6 funds the signer against it; no public route reports it (default `1.0`) |
+
+`5` is also the code default (`app/config.py`); setting it explicitly records
+the choice in the dashboard, which is the environment of record.
+
+### 3.2 Manual Deploy
+
+1. **Action:** service → **Manual Deploy** → **Deploy latest commit** (branch
+   `main`).
+2. **Expected:** the deploy log ends live; the Events tab names the merge
+   commit of the last backend PR from step 2.
+3. **Verify** (the first request can take a minute on the free tier):
+
+   ```sh
+   curl -s "$SITE/api/health"
+   curl -s "$BE_HOST/readiness" | jq '{status, escrow, disputes, ratings}'
+   curl -s -o /dev/null -w '%{http_code}\n' "$SITE/api/ecosystem/adoption"
+   curl -s -o /dev/null -w '%{http_code}\n' "$SITE/api/agents/any_id/readiness"
+   ```
+
+   - `/readiness` answers `"status": "ready"` and carries **both** a
+     `disputes` block (`store`, `reconcile`) and an `escrow` block
+     (`contract`, `version`). A response without them is an older build.
+   - `disputes.store` is `"postgres"`. `"memory"` means `DATABASE_URL` is not
+     in force: stop and fix it before anything else.
+   - `disputes.reconcile.enabled` is `false`.
+   - `escrow.contract` is `$ESCROW_V1`. `escrow.version` is `1`, or `null`
+     on the first probe after boot (the probe starts a background read;
+     ask again after a few seconds).
+   - `ratings.signer` is `$SETTLER` and `ratings.writer` is `scorer`
+     (`ratings.signer` can be `null` until the rating writer's chain read
+     lands; ask again).
+   - `/api/ecosystem/adoption` answers `200`.
+   - `/api/agents/{id}/readiness` answers `200` (an unregistered id still gets
+     200 with `registered: todo`).
+4. **Rollback:** service → **Manual Deploy** → **Deploy a specific commit** →
+   the commit noted in step 1.5. Environment changes are separate from
+   deploys: set any variable you changed back by hand, then deploy.
