@@ -157,6 +157,8 @@ Open PRs on 2026-09-29 (`gh pr list`, all MERGEABLE):
 | frontend | #94 | `feat/5.05-integration` | 5.05: the public evidence index, `/evidence` | #92 |
 | frontend | #95 | `feat/5.06-integration` | 5.06: the litepaper | #94 |
 | frontend | #93 | `chore/mit-license` | the MIT licence | — |
+| frontend | #96 | `fix/custody-copy-main` | the escrow-aware custody copy, straight to `main` (production says funds move into escrow on v1) | — |
+| frontend | #97 | `fix/5-audit-fe-integration` | Epic 5 audit fixes: custody copy, guide, demo script, evidence index, Ecosystem window, litepaper | #95 |
 
 Already merged and deployed: backend #88 (5.01) and #89 (5.02); frontend #89
 (5.01, the v2 console) and #90 (5.02). The example agent has no open PR and
@@ -189,7 +191,7 @@ gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 gh pr merge 95 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 gh pr merge 93 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-# then the Epic 5 audit-fix PR (number not yet known: confirm)
+gh pr merge 97 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge   # Epic 5 audit fixes, on #95
 ```
 
 **Frontend #91 and #92 ship together.** Vercel deploys every push to
