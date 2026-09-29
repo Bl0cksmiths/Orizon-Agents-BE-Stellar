@@ -554,6 +554,28 @@ def test_one_degraded_agent_is_not_a_cold_start_and_is_not_read_again(tmp_path: 
     assert "after" not in out.check("exclusion.below_floor")["detail"]
 
 
+@pytest.mark.parametrize(("change", "why"), [("unbound", "not bound"), ("delisted", "delisted")])
+def test_a_below_floor_agent_that_is_not_routable_does_not_count(tmp_path: Path, change: str, why: str) -> None:
+    world = healthy_world()
+    lowrep = next(a for a in world.agents if a["id"] == "lowrep")
+    if change == "unbound":
+        lowrep["bound"] = False
+    else:
+        lowrep["status"] = "offline"
+    out = run(world, tmp_path)
+    check = out.check("exclusion.below_floor")
+    assert check["status"] == FAIL, check
+    assert f"lowrep (4100 bps, {why}: not routable, so never excluded)" in check["detail"]
+    assert "no endpoint" in check["fix"]
+    assert out.status("exclusion.card_figure") == SKIPPED
+    assert out.code == EXIT_NO_GO
+
+
+def test_a_bound_listed_below_floor_agent_counts(tmp_path: Path) -> None:
+    check = run(healthy_world(), tmp_path).check("exclusion.below_floor")
+    assert check["status"] == PASS and check["detail"] == "lowrep (4100 < 5500 bps)"
+
+
 def test_a_seeded_agent_below_the_floor_does_not_count(tmp_path: Path) -> None:
     world = healthy_world()
     world.reputations["lowrep"] = rep("lowrep", 5600)

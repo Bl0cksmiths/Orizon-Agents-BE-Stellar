@@ -609,7 +609,9 @@ def all_degraded(reputations: dict[str, Any], agent_ids: list[str]) -> bool:
 
 
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
-    check = Check("exclusion.below_floor", "exclusion", "A registered agent is genuinely below the reputation floor")
+    check = Check(
+        "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
+    )
     if not facts.warm:
         return check.skipped("the backend never answered", "Fix network.warm first.")
     if facts.agents is None:
@@ -665,6 +667,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     reread = (
         f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
     )
+    rows = {str(a.get("id")): a for a in facts.agents}
     genuine: list[str] = []
     ignored: list[str] = []
     for agent_id in registered:
@@ -677,6 +680,13 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             why = "degraded" if rep.get("degraded") is True else "stale"
             ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why})")
             continue
+        # The planner only judges agents it could route to. An unbound one
+        # renders as "no endpoint" and a delisted one not at all: neither is
+        # the "excluded" row the exclusion scene films.
+        if not routable(rows[agent_id]):
+            why = "delisted" if rows[agent_id].get("status") == "offline" else "not bound"
+            ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why}: not routable, so never excluded)")
+            continue
         genuine.append(agent_id)
         facts.below_floor.append(agent_id)
         facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
@@ -685,7 +695,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
     degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
     return check.failed(
-        f"no registered, listed agent has an on-chain lower bound below {floor} bps"
+        f"no registered, bound and listed agent has an on-chain lower bound below {floor} bps"
         + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else "")
         + (
             f"; {len(degraded)} of {len(registered)} registered agents read degraded (the ledger could not be read)"
@@ -695,7 +705,8 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         + reread,
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
-        "A degraded or stale read is the prior or an old read, never a verdict.",
+        "A degraded or stale read is the prior or an old read, never a verdict. The agent must also be bound "
+        "(rebind it from its owner wallet) and listed, or the card shows 'no endpoint', not 'excluded'.",
     )
 
 
