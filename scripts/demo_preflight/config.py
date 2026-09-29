@@ -22,14 +22,18 @@ DEFAULT_BACKEND = "https://orizon-agents-be-stellar.onrender.com"
 DEFAULT_TEAM_REGISTER = Path("app/data/team_wallets.json")
 
 # Every page the recording visits, and none that needs a login to answer.
+# `/app/trace` carries the receipt and the dispute (S07-S09), and `/demo` is
+# where the published video and its evidence sheet are read.
 FRONTEND_PAGES: tuple[str, ...] = (
     "/app/register",
     "/app/bind",
     "/app/operator",
     "/app/orchestrator",
     "/app/agents",
+    "/app/trace",
     "/app/ecosystem",
     "/guide/list-your-agent",
+    "/demo",
 )
 
 # Render's free tier boots in 30-60 s, and a sleeping one can take longer.

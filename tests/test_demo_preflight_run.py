@@ -581,3 +581,14 @@ def test_a_page_that_is_not_200_fails(tmp_path: Path, status: int) -> None:
     assert check["status"] == FAIL and f"answered {status}" in check["detail"]
     if status == 307:
         assert "/login" in check["detail"]
+
+
+@pytest.mark.parametrize("path", ["/app/trace", "/demo"])
+def test_the_trace_and_demo_pages_are_required(tmp_path: Path, path: str) -> None:
+    assert run(healthy_world(), tmp_path).status(f"frontend.{path}") == PASS
+    world = healthy_world()
+    world.pages[path] = 404
+    out = run(world, tmp_path)
+    check = out.check(f"frontend.{path}")
+    assert check["status"] == FAIL and check["required"] is True and "answered 404" in check["detail"]
+    assert out.code == EXIT_NO_GO
