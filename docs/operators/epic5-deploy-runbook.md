@@ -919,7 +919,6 @@ before the step that needs it, and record the answer where it says.
 | C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
 | C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
 | C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
-| C9 | 9.3 | The merged flag names and usage of `demo_evidence`'s `--tx` / `--rows` for browser-recorded hashes | the lane that lands it |
 | C10 | 10.2 | That the frontend's `docs/evidence-index-after-deploy.md` has merged | the lane writing it |
 | C11 | 10.4 | Where the 6.04 re-verification report goes, and whether it reopens BLO-43 (Done) or gets its own issue | Rie |
 | C12 | 10.5 | The form of the Chapter Lead's §6.2 sign-off and where it is recorded | Chapter Lead |
