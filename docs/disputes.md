@@ -170,8 +170,10 @@ Why the credit cannot be a reversal:
 - Nothing in the system can take funds back out of an agent owner's wallet, and
   nothing tries to. An operator's settled earnings are final.
 
-The full reasoning, the rejected alternatives and the testnet proof that a real
-credit lands are in `docs/decisions/0002-partial-credit-refund.md`.
+The full reasoning and the rejected alternatives are in
+`docs/decisions/0002-partial-credit-refund.md`. Its testnet proof, `9b8ffaa4…`,
+is an operator-script transfer from the admin key to a team key, tied to no
+dispute: it proves the transfer mechanism only (its 2026-09-29 amendment).
 
 ## How a dispute is adjudicated, and how the credit is paid
 
