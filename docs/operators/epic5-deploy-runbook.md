@@ -51,6 +51,14 @@ Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
 - `GET $SITE/api/stellar/network` names `testnet`, with `$ESCROW_V1` as
   `contracts.payment_escrow`.
 
+**Team hygiene.** The team agent `3D_Artbot`, owned by the admin key
+`GA7AI5…5OQV`, is bound to `https://arbot.com`. That endpoint does not answer:
+its readiness shows `reachable` failed ("did not answer within 5 s"), and a
+plain `GET` timed out after 15 s. It is still routable, at 5677 bps against the
+5500 floor. So the planner can put it in a buyer's plan, and each run that
+reaches it fails that step (F-034). The admin key holder should unbind it, or
+rebind it to an agent that answers, before any wallet-authorized run.
+
 ## The four repositories
 
 | Short name | GitHub | Local checkout (Dan's machine) |
