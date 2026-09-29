@@ -203,6 +203,7 @@ def render_raw(metrics: list[Metric], snap: Snapshot, run: RunFacts, code: int) 
                 for e in snap.escrows
             ],
             "ratings_by_kind": snap.rating_kinds,
+            "bound_per_adoption_report": snap.bound,
             "dispute_ratings": len(snap.dispute_ratings),
             "ledger_lifetime_disputes": sum(snap.ledger_disputed.values()),
             "platform_transfers": [asdict(t) for t in snap.transfers],

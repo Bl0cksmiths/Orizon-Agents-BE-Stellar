@@ -21,6 +21,7 @@ from app.config import settings
 from app.main import app
 from app.routers.stellar import NetworkInfo, ReputationParams
 from app.services import dispute_rating
+from app.services.adoption_svc import AdoptionAgent, AdoptionOperator, AdoptionReport
 from scripts.sow_metrics import metrics
 from scripts.sow_metrics.config import DEFAULT_TEAM_REGISTER, DISPUTE_ROUTES, MAX_TRACED_STEPS, REGISTER_ROUTE
 from scripts.sow_metrics.fakes import met_world
@@ -42,6 +43,7 @@ def _routes() -> set[str]:
         "GET /readiness",
         "GET /api/stellar/network",
         "GET /api/stellar/reputation/params",
+        "GET /api/ecosystem/adoption",
     ],
 )
 def test_every_route_the_generator_reads_or_requires_exists(route: str) -> None:
@@ -73,6 +75,14 @@ def test_the_network_document_carries_the_keys_and_contracts_read() -> None:
 def test_the_reputation_settings_carry_the_floor_fields() -> None:
     assert ReputationParams.model_fields["enabled"].annotation is bool
     assert ReputationParams.model_fields["floor_bps"].annotation is int
+
+
+def test_the_adoption_report_carries_the_bound_flag_read() -> None:
+    """The generator reads `operators[].agents[].agent_id` and `.bound` (True, False or None) and nothing else."""
+    assert AdoptionReport.model_fields["operators"].annotation == list[AdoptionOperator]
+    assert AdoptionOperator.model_fields["agents"].annotation == list[AdoptionAgent]
+    assert AdoptionAgent.model_fields["agent_id"].annotation is str
+    assert AdoptionAgent.model_fields["bound"].annotation == bool | None
 
 
 def test_the_real_readiness_names_the_ratings_keys(client: Any) -> None:

@@ -299,6 +299,25 @@ def test_a_charge_to_a_team_agent_counts_for_charges_but_not_for_external_workfl
     assert reasons == [["the agent is run by the team's QA throwaway operator key"]]
 
 
+def test_the_bound_flags_are_the_adoption_reports_own(tmp_path: Path) -> None:
+    world = met_world()
+    world.bound = {"alpha": True, "beta": False, "gamma": None}
+    out = run(world, tmp_path)
+    bound = out.raw()["summary"]["bound_per_adoption_report"]
+    assert {k: bound[k] for k in ("alpha", "beta", "gamma")} == {"alpha": True, "beta": False, "gamma": None}
+    assert "api /api/ecosystem/adoption" in world.calls
+
+
+def test_the_adoption_report_unreachable_only_loses_the_bound_count(tmp_path: Path) -> None:
+    world = met_world()
+    world.api_down.add("/api/ecosystem/adoption")
+    out = run(world, tmp_path)
+    assert out.code == EXIT_MEASURED, out.out
+    assert "exit 0: 11 of 11 met" in out.out
+    assert "warning: the adoption report could not be read, so no bound count is stated" in out.out
+    assert out.raw()["summary"]["bound_per_adoption_report"] is None
+
+
 def test_two_payouts_of_one_job_are_two_charges_but_one_workflow(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path)
     workflows = out.raw_metric("m03")["counted"]

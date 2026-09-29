@@ -20,7 +20,9 @@ Sources, by name (the keys of `Snapshot.failures`):
     github          the GitHub repository reads
 
 A failure to find a proof LINK (a registration transaction in an owner's
-history) is only a warning: it changes a link, not a count.
+history) is only a warning: it changes a link, not a count. So is a failure to
+read the adoption report (`/api/ecosystem/adoption`), which is read only for
+each agent's `bound` flag: it changes a sentence, not a count.
 """
 
 from __future__ import annotations
@@ -136,6 +138,9 @@ class Snapshot:
     rating_kinds: dict[str, int] = field(default_factory=dict)  # every ledger submit seen, by kind
     transfers: list[Transfer] = field(default_factory=list)
     params: dict[str, Any] | None = None
+    # agent id -> the adoption report's own `bound` flag (None: the binding
+    # store could not be read). None when the report itself could not be read.
+    bound: dict[str, bool | None] | None = None
     openapi_routes: set[str] | None = None
     pages: dict[str, Answer] = field(default_factory=dict)
     page_urls: dict[str, str] = field(default_factory=dict)
@@ -463,6 +468,34 @@ def _read(snap: Snapshot, source: str, call: Callable[[], Answer]) -> Answer | N
         return None
 
 
+def read_bound(snap: Snapshot, reads: Reads) -> None:
+    """Each agent's `bound` flag, exactly as the live adoption report states it. A miss is a warning.
+
+    Whether an agent is bound is the backend's word (an off-chain binding),
+    not a chain fact, and it says nothing about whether the endpoint works.
+    """
+    snap.urls["adoption"] = reads.api_url("/ecosystem/adoption")
+    try:
+        answer = reads.adoption()
+    except FAILURES as exc:
+        snap.warnings.append(f"the adoption report could not be read, so no bound count is stated: {exc}")
+        return
+    operators = answer.obj().get("operators")
+    if not answer.ok or not isinstance(operators, list):
+        snap.warnings.append(
+            f"the adoption report answered HTTP {answer.status} without its operators, so no bound count is stated"
+        )
+        return
+    bound: dict[str, bool | None] = {}
+    for operator in operators:
+        agents = operator.get("agents") if isinstance(operator, dict) else None
+        for agent in agents if isinstance(agents, list) else []:
+            if isinstance(agent, dict) and isinstance(agent.get("agent_id"), str):
+                flag = agent.get("bound")
+                bound[agent["agent_id"]] = flag if isinstance(flag, bool) else None
+    snap.bound = bound
+
+
 def read_deployment(snap: Snapshot, reads: Reads) -> None:
     snap.urls.update(
         params=reads.api_url("/stellar/reputation/params"),
@@ -528,4 +561,5 @@ def collect(
     read_ledger(snap, chain)
     read_registrations(snap, chain)
     read_deployment(snap, reads)
+    read_bound(snap, reads)
     return snap

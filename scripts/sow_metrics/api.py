@@ -102,6 +102,10 @@ class Reads:
     def readiness(self) -> Answer:
         return self.get(f"{self.backend}/readiness", answers=frozenset({503}))
 
+    def adoption(self) -> Answer:
+        """The live adoption report: read here only for each agent's `bound` flag."""
+        return self.get(self.api_url("/ecosystem/adoption"))
+
     def reputation_params(self) -> Answer:
         return self.get(self.api_url("/stellar/reputation/params"))
 

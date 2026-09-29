@@ -144,6 +144,8 @@ class FakeWorld:
     readiness: dict[str, Any] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
     routes: set[str] = field(default_factory=set)
+    # agent id -> the adoption report's `bound` flag; an agent not named is unbound.
+    bound: dict[str, bool | None] = field(default_factory=dict)
     pages: dict[str, tuple[int, str]] = field(default_factory=dict)
     repos: dict[str, tuple[int, str | None]] = field(default_factory=dict)
     # Failure switches.
@@ -414,7 +416,24 @@ class FakeWorld:
             )
         if path == "/api/stellar/reputation/params":
             return _json(200, self.params)
+        if path == "/api/ecosystem/adoption":
+            return _json(200, {"network": "testnet", "operators": self._adoption_operators()})
         return _json(404, {"detail": "Not Found"})
+
+    def _adoption_operators(self) -> list[dict[str, Any]]:
+        """Every agent grouped by owner, with its `bound` flag. The generator reads only the flags."""
+        owners: dict[str, list[dict[str, Any]]] = {}
+        for agent_id, agent in sorted(self.agents.items()):
+            owners.setdefault(agent["owner"], []).append(
+                {
+                    "agent_id": agent_id,
+                    "name": agent["name"],
+                    "active": agent["active"],
+                    "bound": self.bound.get(agent_id, False),
+                    "settled_workflows": [],
+                }
+            )
+        return [{"owner": owner, "agents": agents} for owner, agents in owners.items()]
 
     # ── RPC ─────────────────────────────────────────────────────
     def rpc(self, payload: dict[str, Any]) -> httpx.Response:
@@ -639,6 +658,7 @@ def met_world() -> FakeWorld:
         "escrow": {"contract": ESCROW_V2, "version": 2},
     }
     w.params = {"enabled": True, "floor_bps": 5500, "prior_bps": 7000, "network": "testnet"}
+    w.bound = {"alpha": True, "beta": True, "gamma": True}
     w.routes = {REGISTER_ROUTE, *DISPUTE_ROUTES, "GET /readiness"}
     w.pages = {
         REGISTER_PAGE: (200, "<html>register</html>"),
