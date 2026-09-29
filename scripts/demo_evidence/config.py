@@ -116,3 +116,6 @@ class RunConfig:
     horizon_url: str
     title: str
     disclosures: tuple[str, ...] = ()
+    tx_args: tuple[str, ...] = ()  # `--tx KIND=HASH[:label]`, as given
+    rows_files: tuple[Path, ...] = ()  # `--rows file.json`
+    index_links: Path | None = None  # `--index-links`: where the evidence index's links go
