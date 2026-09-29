@@ -34,8 +34,9 @@ transaction. It spends no key and moves nothing. It sits under the service-wide
 `RateLimitMiddleware` like the other public reads, and the whole report is
 cached single-flight for about 30 s (`app/stellar/cache.py`).
 
-The shape is frozen, because the frontend codes against it. The one field the
-brief did not spell out is `payer_team_role` on each settled workflow (D5).
+The shape is frozen, because the frontend codes against it. The fields the
+brief did not spell out are `payer_team_role` on each settled workflow (D5)
+and the top-level `window_days` (D8).
 
 ### D2. The team register: a committed, public declaration
 
@@ -158,12 +159,29 @@ also set `degraded`. If no report can be produced at all, the answer is 503
 `met` does not look at `degraded`. A client that wants "met and trustworthy"
 reads both.
 
+### D8. The report says how far back it looked
+
+*Added 2026-09-29, from the Epic 5 audit.* `settled_external_workflows` only
+sees what the settlement scans see, and the response did not say so.
+`window_days` is now a top-level number on the report:
+
+- It is the settlement scan's **measured** span, `SettlementEvidence.window_days`
+  (`scanned_ledgers` × the node's own seconds per ledger), not a constant.
+- When the per-agent scans cover different spans, it is the **smallest**, so
+  "settled in the last N days" holds for every external agent. A truncated
+  scan counts with the span it did cover.
+- A scan that did not run (failed, timed out, `unavailable`) has no span and is
+  left out. That agent is already in `unreadable_agents` and `degraded` is set.
+- It is `0` when no scan ran at all, for example when there are no external
+  agents.
+
 ## Consequences
 
-- **The window is seven days.** Soroban RPC keeps events for about seven days,
-  and settlement evidence is read from events. A settlement older than that
-  drops out of `settled_external_workflows`, so the number can fall. The
-  report is therefore a live view. The durable evidence for §6.3 is the
+- **The window is about seven days, and the report says so.** Soroban RPC
+  keeps events for about seven days, and settlement evidence is read from
+  events. A settlement older than that drops out of
+  `settled_external_workflows`, so the number can fall. The span actually
+  scanned is `window_days` (D8). The report is therefore a live view. The durable evidence for §6.3 is the
   transaction hashes it links, which a reviewer can open after they have left
   the window. Capture them into the evidence bundle when the target is met.
 - **The unit is the escrow's asset.** `amount_usdc` is the escrow's 7-decimal
