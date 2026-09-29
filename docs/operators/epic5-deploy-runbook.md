@@ -286,3 +286,101 @@ the choice in the dashboard, which is the environment of record.
 4. **Rollback:** service → **Manual Deploy** → **Deploy a specific commit** →
    the commit noted in step 1.5. Environment changes are separate from
    deploys: set any variable you changed back by hand, then deploy.
+
+---
+
+## 4. Escrow v2: deploy the contract and switch the backend to it
+
+Needs the R9 approval from step 1.1. Do steps 4 and 5 in one sitting: between
+4.2 (the address book names v2) and 4.3 (the backend settles through it) the
+frontend's 6-hourly smoke is red on purpose, because production is not on the
+escrow the address book now names.
+
+### 4.1 Deploy PaymentEscrow v2 (contracts repo)
+
+1. **Before:** confirm the settler you are about to fix into the contract is
+   the key the backend really signs with. Both must print `$SETTLER`:
+
+   ```sh
+   curl -s "$BE_HOST/readiness" | jq -r .ratings.signer
+   echo "$SETTLER"
+   ```
+
+   If they differ, stop: every `settle` would revert Unauthorized.
+2. **Action**, from an up-to-date `main` of the contracts repo (after #5):
+
+   ```sh
+   git -C "$CONTRACTS" fetch origin && git -C "$CONTRACTS" status -sb   # on main, level with origin/main
+   cd "$CONTRACTS"
+   make deploy-escrow-v2 SETTLER=GDB4N25UYM3YNTTAWX7LSGI2P7OR62QZQXRNQWAGF5TFVENDKCTTCDHP
+   ```
+
+   `SOURCE` defaults to the stellar-cli identity `admin`, which pays for and
+   signs the deploy, and `ADMIN` (the only address that can rotate the
+   settler) defaults to that identity's address. The script refuses any
+   network but testnet, reuses the testnet `agent_registry` and `asset_sac`
+   from `addresses.json`, builds only the escrow wasm and deploys nothing else.
+3. **Expected:** it prints the source, admin, settler, registry and asset, then
+   `PaymentEscrow v2: C…`, then `version=2 settler=G… admin=G…`, then
+   `✓ deployed.` and the address book, which now holds three new keys beside
+   v1's untouched `payment_escrow`: `payment_escrow_v2`,
+   `payment_escrow_v2_settler`, `payment_escrow_v2_admin`.
+4. **Verify:** the script itself fails unless `version()` is 2, `settler()`
+   equals `SETTLER` and `admin()` equals `ADMIN`, all read by simulation. Keep
+   the id:
+
+   ```sh
+   export ESCROW_V2=$(python3 -c 'import json;print(json.load(open("addresses.json"))["payment_escrow_v2"])')
+   echo "$ESCROW_V2"
+   ```
+
+   and open `https://stellar.expert/explorer/testnet/contract/$ESCROW_V2`.
+5. **If it fails:** `✗ deploy did not return a contract id` means the RPC
+   dropped the submission; the transaction may still land late. Check the
+   `admin` account on Stellar Expert testnet before running it again, so you
+   do not deploy two. Nothing was written to `addresses.json`.
+
+### 4.2 Commit the address book (contracts repo)
+
+```sh
+cd "$CONTRACTS"
+git add addresses.json
+git commit -m "recorded escrow v2 on testnet"
+git push origin main
+```
+
+The frontend's `docs/escrow-v2-switch.md` says to commit and push it to the
+contracts repo's default branch. **Confirm** whether `main` there takes a
+direct push or needs a PR (merged with a merge commit); either way it must be
+on `main` before step 5, because the frontend's `check:addresses` CI job and
+`smoke` read the address book from the contracts repo.
+
+- **Expected:** `git -C "$CONTRACTS" log -1 origin/main -- addresses.json` is
+  your commit.
+- **Do not** change the backend's `.env.example` or `render.yaml` escrow id.
+  The backend's contract-drift check (`scripts/check_contract_drift.py`, run in
+  CI and daily) compares their `STELLAR_PAYMENT_ESCROW` with the address book's
+  `payment_escrow`, which stays v1's id.
+
+### 4.3 Point the backend at v2 (Render)
+
+1. **Action:** Render dashboard → the backend service → **Environment** → set
+   `STELLAR_PAYMENT_ESCROW` to `$ESCROW_V2` → save → **Manual Deploy** →
+   **Deploy latest commit**.
+2. **Verify:**
+
+   ```sh
+   curl -s "$BE_HOST/readiness" | jq '{escrow, signer: .ratings.signer}'
+   # escrow: { "contract": "<ESCROW_V2>", "version": 2 }  (null on the first probe: ask again)
+   curl -s "$SITE/api/stellar/network" | jq -r .contracts.payment_escrow
+   # <ESCROW_V2>
+   ```
+
+   - `escrow.contract` is `$ESCROW_V2` and `escrow.version` is `2`.
+   - `ratings.signer` equals the `settler=` the deploy script printed
+     (`$SETTLER`).
+   - `demo_preflight` (step 9.2) re-checks both on-chain, as `escrow.version`
+     and `escrow.settler`.
+3. **Rollback:** set `STELLAR_PAYMENT_ESCROW` back to `$ESCROW_V1` and Manual
+   Deploy. v1's id stays valid; nothing about it changed. Funds already in v2
+   custody stay reclaimable by their payers after expiry regardless.
