@@ -4,7 +4,15 @@
         --out-dir docs/evidence/5.04/video
 
 Input: the lifecycle harness's `lifecycle.jsonl` from each recording run (or
-the evidence directories that hold them). Output, in `--out-dir`:
+the evidence directories that hold them), and the hashes the browser takes
+produced, which never pass through the harness (`given.py`):
+
+    --tx KIND=HASH[:label]   repeatable; HASH may be its Stellar Expert testnet link
+    --rows browser.json      a JSON list of {"kind", "tx_hash", "label"?, "deliverable"?}
+
+Harness rows come first, then the `--rows` files, then `--tx`, each in the
+order given; a hash is kept once, at its first appearance. Output, in
+`--out-dir`:
 
     evidence-sheet.md   every transaction the video shows, in order: stage,
                         what it proves, its D1–D4 deliverable, the hash, its
@@ -16,6 +24,9 @@ the evidence directories that hold them). Output, in `--out-dir`:
     evidence.json       the list the frontend's /demo page reads (frozen shape,
                         see `render.py`)
 
+and, with `--index-links FILE.json`, every verified hash as a link of the
+frontend's evidence index, grouped by index item (shape in `links.py`).
+
 Every hash is re-verified read-only — Soroban RPC `getTransaction`, falling
 back to Horizon — and one that is not SUCCESS is listed in the sheet as failed
 and NEVER written to `evidence.json` or the description. A row from any
@@ -24,16 +35,19 @@ Horizon that is not on testnet.
 
 Exit codes (`config.py`): 0 every hash SUCCESS; 3 refused (nothing written);
 5 a hash is FAILED, NOT_FOUND or malformed (outputs written without it); 8 a
-read failed, so a hash is unverified (outputs written without it; rerun).
+read failed, so a hash is unverified or has no ledger date for its index link
+(outputs written without it; rerun).
 
 Modules:
 
     config    exit codes, network constants, the kind and deliverable maps
     retry     bounded retries, for reads (every call here is one)
     redact    masks anything shaped like a secret in every output
-    rows      the harness's evidence rows, and the network refusal
+    rows      the harness's evidence rows, the network refusal, and the merge
+    given     hashes given with --tx and --rows, checked as harness rows are
     chain     one hash re-verified: RPC, then Horizon
     render    the sheet, the description and the frozen JSON
+    links     the evidence index's links, its label rule and the ledger date
     cli       argparse and `main`
     fakes     an in-memory RPC + Horizon for the hermetic suite
 
