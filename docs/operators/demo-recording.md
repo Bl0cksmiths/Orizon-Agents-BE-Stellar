@@ -9,7 +9,7 @@ recording session:
 | Tool | What it answers | Reads | Writes |
 |---|---|---|---|
 | `python -m scripts.demo_preflight` | GO / NO-GO: is the live deployment in the state the script needs? | the deployment, the backend host's `/readiness`, Soroban RPC, Horizon, the frontend pages | nothing (one opted-in decompose aside) |
-| `python -m scripts.demo_evidence` | Which transactions did the video show, and does each still verify? | the harness's `lifecycle.jsonl`, Soroban RPC, Horizon | `evidence-sheet.md`, `description.txt`, `evidence.json` |
+| `python -m scripts.demo_evidence` | Which transactions did the video show, and does each still verify? | the harness's `lifecycle.jsonl`, the browser's hashes (`--rows`, `--tx`), Soroban RPC, Horizon | `evidence-sheet.md`, `description.txt`, `evidence.json`; with `--index-links`, the evidence index's links |
 
 Both are **testnet only** and refuse anything else before they judge a thing.
 Neither holds or needs a secret: every flag is a public key, a URL or a number.
@@ -98,6 +98,60 @@ python -m scripts.lifecycle --api https://orizons.xyz --agent <the external agen
 ```
 
 If the pre-flight said to disclose a team wallet, say so on camera.
+
+### The hashes the browser produces
+
+The video's key moments are driven **in the browser**, not by the harness: the
+operator registers (S02), the buyer authorizes (S06), the step settles and is
+sealed and rated (S07), and the dispute is upheld and refunded (S08–S09).
+Their hashes are never in a `lifecycle.jsonl`, so collect each one **as it is
+produced**, copied in full from where the frontend's shot list
+(`content/demo/shot-list.md`, "Where each hash comes from") says, into one
+file per session, in the order the video shows them:
+
+```json
+[
+  {"kind": "register", "tx_hash": "<register_tx>", "label": "Outside operator registers research_demo1"},
+  {"kind": "authorize", "tx_hash": "<authorize_tx>"},
+  {"kind": "settle", "tx_hash": "<settle_tx>"},
+  {"kind": "seal", "tx_hash": "<seal_tx>"},
+  {"kind": "rating", "tx_hash": "<rating_tx_1>"},
+  {"kind": "dispute_rating", "tx_hash": "<dispute_rating_tx>"},
+  {"kind": "refund", "tx_hash": "<refund_tx>"}
+]
+```
+
+Save it as `docs/evidence/5.04/browser.json` and hand it to the evidence tool
+with `--rows` (§3). A hash can also be given on its own with
+`--tx KIND=HASH[:label]`, for example
+`--tx "register=<register_tx>:Outside operator registers research_demo1"`.
+
+| Scene | Shot-list placeholder | `kind` | Deliverable |
+|---|---|---|---|
+| S02 | `<register_tx>` | `register` | D1 |
+| S06 | `<authorize_tx>` | `authorize` | D4 |
+| S07 | `<settle_tx>` | `settle` | D4 |
+| S07 | `<seal_tx>` | `seal` | D4 |
+| S07 | `<rating_tx_1>` | `rating` | D2 |
+| S08/S09 | `<dispute_rating_tx>` | `dispute_rating` | D3 |
+| S08/S09 | `<refund_tx>` | `refund` | D3 |
+
+- `kind` is one of `register`, `authorize`, `settle`, `seal`, `rating`,
+  `dispute_rating`, `refund`, `other`; anything else is refused.
+- `tx_hash` is the 64-hex hash, or its Stellar Expert **testnet** link
+  (`https://stellar.expert/explorer/testnet/tx/<hash>`). A link on any other
+  network is refused.
+- `label` is optional. When given it must be plain language: at least two
+  real words, never a bare hash or address (the evidence index's own rule).
+  If the operator is a team wallet, say so in it, for example
+  `"Registration of research_demo1 by the team's QA operator key (team wallet: not external)"`.
+  Without one, the kind's label is used ("Agent registration").
+- `deliverable` is optional and may only restate the kind's; an `other` may
+  name any of D1–D4.
+- `network` is optional; anything but `"testnet"` is refused.
+
+The S05 fault runs are harness runs: their evidence directories go to §3 as
+positional inputs, as the takes' do.
 
 ## 3. The evidence sheet
 
