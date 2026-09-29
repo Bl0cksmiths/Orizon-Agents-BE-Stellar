@@ -634,7 +634,7 @@ def _refuse_credit(
     `level` is WARNING for a refusal an adjudicator caused and asked for, and
     ERROR for one that leaves money in a state a human has to resolve. Nothing
     secret is logged and nothing secret is reachable from here: the payer is a
-    public address, and the settler's signing key never enters this module.
+    public address, and the platform's signing key never enters this module.
     """
     logger.log(
         level,
