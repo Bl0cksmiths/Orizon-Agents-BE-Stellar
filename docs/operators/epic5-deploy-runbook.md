@@ -177,13 +177,11 @@ gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
 gh pr merge 97 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 ```
 
-**Frontend #91 and #92 ship together.** Vercel deploys every push to
-`main`, so merge #92 immediately after #91, before Vercel has promoted a
-deployment of #91 alone if you can, and at the latest before anyone is pointed
-at the guide. The guide in #91 and the Register page's labels agree only from
-#92 on: #92 is where the Register label (and receipts, the dispute dialog, the
-trace and the dashboard) stops hard-coding "USDC" and follows the network
-asset, XLM on testnet (friction F-022).
+**The guide and the Register labels ship together.** They agree only
+together: the guide quotes "price per step (XLM)", and #97 is also where the
+Register label (and receipts, the dispute dialog, the trace and the
+dashboard) stops hard-coding "USDC" and follows the network asset, XLM on
+testnet (friction F-022). One PR means one Vercel deployment carries both.
 
 After each merge:
 
