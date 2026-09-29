@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from .collect import DisputeRating, ReceiptRecord, Snapshot, Transfer
+from .collect import AgentRecord, DisputeRating, ReceiptRecord, Snapshot, Transfer
 from .config import (
     DEMO_MAX_SECONDS,
     DEMO_MIN_SECONDS,
@@ -451,11 +451,41 @@ def _missing_links_warning(snap: Snapshot, charges: list[Charge]) -> None:
         snap.warnings.append(note)
 
 
+def bound_sentence(snap: Snapshot, agents: list[AgentRecord]) -> str:
+    """How many of these outside agents are bound to an endpoint, in the adoption report's own words.
+
+    Owning an agent is not running one: an agent can be registered and never
+    bound, and nothing can be routed to it. The count is the report's `bound`
+    flag, which is the backend's record of a binding; it does not say the
+    endpoint answers.
+    """
+    total = len(agents)
+    if snap.bound is None:
+        return (
+            "Whether any agent owned by an outside operator is bound to an endpoint could not be read: the live "
+            "adoption report did not answer."
+        )
+    flags = [snap.bound.get(a.id) for a in agents]
+    bound = sum(1 for f in flags if f is True)
+    unknown = sum(1 for f in flags if f is None)
+    if total == 1:
+        state = "could not be checked for a binding" if unknown else ("is bound" if bound else "is not bound")
+        text = f"The one agent owned by an outside operator {state}" + ("" if unknown else " to an endpoint")
+    elif bound == 0 and not unknown:
+        text = f"None of the {total} agents owned by outside operators is bound to an endpoint"
+    else:
+        text = (
+            f"Of the {total} agents owned by outside operators, {bound} {'is' if bound == 1 else 'are'} bound to an "
+            "endpoint" + (f" and {unknown} could not be checked" if unknown else "")
+        )
+    return text + ", per the live adoption report."
+
+
 def m03(snap: Snapshot, rules: Rules) -> Metric:
     row = SOW_ROWS[2]
     method = (
         _settlement_method(snap)
-        + " A workflow counts when at least one of its counted charges paid an agent run by an outside operator; "
+        + " A workflow counts when at least one of its counted charges paid an agent owned by an outside operator; "
         "several charges of one job are one workflow."
     )
     links = _escrow_links(snap)
@@ -466,7 +496,7 @@ def m03(snap: Snapshot, rules: Rules) -> Metric:
     excluded, item_links = [], []
     for c in rules.charges:
         party = rules.party(c.owner)
-        extra = [] if party.exclusion is None else [f"the agent is run by {party.phrase}"]
+        extra = [] if party.exclusion is None else [f"the agent is owned by {party.phrase}"]
         reasons = [*c.reasons, *extra]
         if not reasons:
             workflows.setdefault((c.receipt.escrow, c.receipt.job_id), []).append(c)
@@ -486,19 +516,20 @@ def m03(snap: Snapshot, rules: Rules) -> Metric:
     if n < 3:
         if n == 0 and not external_agents:
             reason = (
-                "No agent run by an outside operator exists yet, so no workflow could be routed to one and settled. "
+                "No agent owned by an outside operator exists yet, so no workflow could be routed to one and settled. "
                 f"None of the {plural(len(rules.charges), 'charge')} on record paid one."
             )
         elif n == 0:
             reason = (
-                f"{plural(len(external_agents), 'agent')} run by outside operators "
+                f"{plural(len(external_agents), 'agent')} owned by outside operators "
                 f"{'is' if len(external_agents) == 1 else 'are'} registered, but no workflow paid to one has "
-                f"settled since the sprint began on {SPRINT_DAY}."
+                f"settled since the sprint began on {SPRINT_DAY}. " + bound_sentence(snap, external_agents)
             )
         else:
             reason = (
-                f"Only {plural(n, 'workflow')} paid to agents run by outside operators "
-                f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3."
+                f"Only {plural(n, 'workflow')} paid to agents owned by outside operators "
+                f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3. "
+                + bound_sentence(snap, external_agents)
             )
     return Metric(
         row, str(n), MET if n >= 3 else NOT_MET, method, links + _by_date(item_links), reason, counted, excluded

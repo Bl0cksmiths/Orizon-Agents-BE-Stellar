@@ -627,7 +627,7 @@ def met_world() -> FakeWorld:
     w.add_escrow(ESCROW_V2, version=2, settler=SIGNER)
     w.add_escrow(ESCROW_V1, version=1, settler=ADMIN)
 
-    # The registry: three agents run by two outside operators, and the team's own.
+    # The registry: three agents owned by two outside operators, and the team's own.
     w.add_agent("house_agent", ADMIN, at="2026-04-20")
     w.add_agent("qa_agent", TEAM_OP, at="2026-09-17")
     w.add_agent("signer_agent", SIGNER, at="2026-09-18")  # a platform key, not in the register

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,7 @@ from scripts.sow_metrics.fakes import (
     demo_html,
     job,
     met_world,
+    ts,
 )
 from scripts.sow_metrics.report import block_problems
 
@@ -231,7 +233,7 @@ def test_no_outside_operator_is_stated_plainly(tmp_path: Path) -> None:
         "controls."
     )
     assert out.metric("m03")["achieved"] == "0"
-    assert out.metric("m03")["reason"].startswith("No agent run by an outside operator exists yet")
+    assert out.metric("m03")["reason"].startswith("No agent owned by an outside operator exists yet")
 
 
 # ── m03 / m04: settlements ──────────────────────────────────────
@@ -296,7 +298,7 @@ def test_a_charge_to_a_team_agent_counts_for_charges_but_not_for_external_workfl
     assert out.metric("m04")["achieved"] == "5"
     assert out.metric("m03")["achieved"] == "3"
     reasons = [e["reasons"] for e in out.raw_metric("m03")["excluded"] if e["job_id"] == job("team-agent")]
-    assert reasons == [["the agent is run by the team's QA throwaway operator key"]]
+    assert reasons == [["the agent is owned by the team's QA throwaway operator key"]]
 
 
 def test_the_bound_flags_are_the_adoption_reports_own(tmp_path: Path) -> None:
@@ -316,6 +318,98 @@ def test_the_adoption_report_unreachable_only_loses_the_bound_count(tmp_path: Pa
     assert "exit 0: 11 of 11 met" in out.out
     assert "warning: the adoption report could not be read, so no bound count is stated" in out.out
     assert out.raw()["summary"]["bound_per_adoption_report"] is None
+
+
+def _unsettled(world: FakeWorld) -> FakeWorld:
+    """No sprint settlement at all: the registry holds outside agents, and nothing has paid one."""
+    world.escrows[ESCROW_V2].ids.clear()
+    for name in ("settle1", "settle2", "settle3"):
+        world.drop(world.marks[name])
+    return world
+
+
+UNSETTLED = (
+    "3 agents owned by outside operators are registered, but no workflow paid to one has settled since the sprint "
+    "began on 2026-09-07. "
+)
+
+
+@pytest.mark.parametrize(
+    ("bound", "sentence"),
+    [
+        (
+            {"alpha": True, "beta": False, "gamma": False},
+            "Of the 3 agents owned by outside operators, 1 is bound to an endpoint, per the live adoption report.",
+        ),
+        (
+            {"alpha": True, "beta": True, "gamma": True},
+            "Of the 3 agents owned by outside operators, 3 are bound to an endpoint, per the live adoption report.",
+        ),
+        ({}, "None of the 3 agents owned by outside operators is bound to an endpoint, per the live adoption report."),
+        (
+            {"alpha": True, "beta": None},
+            "Of the 3 agents owned by outside operators, 1 is bound to an endpoint and 1 could not be checked, per the "
+            "live adoption report.",
+        ),
+    ],
+)
+def test_a_settlement_miss_says_owned_and_how_many_are_bound(
+    tmp_path: Path, bound: dict[str, bool | None], sentence: str
+) -> None:
+    """Owning an agent is not running one: the row says owned, and counts bound from the report's own flag."""
+    world = _unsettled(met_world())
+    world.bound = bound  # an agent the dict leaves out is reported unbound
+    out = run(world, tmp_path)
+    assert out.metric("m03")["achieved"] == "0"
+    assert out.metric("m03")["reason"] == UNSETTLED + sentence
+
+
+def test_one_outside_agent_is_named_in_the_singular(tmp_path: Path) -> None:
+    register = FakeWorld.write_register(tmp_path / "r.json", {**REGISTER_ROLES, OP2: "second QA operator key"})
+    world = _unsettled(met_world())
+    world.bound = {"alpha": False}
+    out = run(world, tmp_path, register=register)
+    assert out.metric("m03")["reason"] == (
+        "1 agent owned by outside operators is registered, but no workflow paid to one has settled since the sprint "
+        "began on 2026-09-07. The one agent owned by an outside operator is not bound to an endpoint, per the live "
+        "adoption report."
+    )
+
+
+def test_a_partial_settlement_miss_also_counts_the_bound(tmp_path: Path) -> None:
+    world = met_world()
+    for kind, fields in world.escrows[ESCROW_V2].ids:  # jobs 2 and 3 settled before the sprint: only job 1 counts
+        if kind == "receipt" and fields["job_id"] != JOB1:
+            fields["settled_at"] = ts("2026-09-01")
+    world.bound = {"alpha": True}
+    out = run(world, tmp_path)
+    assert out.metric("m03")["achieved"] == "1"
+    assert out.metric("m03")["reason"] == (
+        "Only 1 workflow paid to agents owned by outside operators has settled since the sprint began. The target is "
+        "3. Of the 3 agents owned by outside operators, 1 is bound to an endpoint, per the live adoption report."
+    )
+
+
+def test_an_unread_adoption_report_says_the_bound_count_is_unknown(tmp_path: Path) -> None:
+    world = _unsettled(met_world())
+    world.api_down.add("/api/ecosystem/adoption")
+    out = run(world, tmp_path)
+    assert out.code == EXIT_MEASURED
+    assert out.metric("m03")["reason"] == UNSETTLED + (
+        "Whether any agent owned by an outside operator is bound to an endpoint could not be read: the live "
+        "adoption report did not answer."
+    )
+
+
+@pytest.mark.parametrize("unsettled", [False, True])
+def test_no_row_says_an_agent_is_run_by_anyone(tmp_path: Path, unsettled: bool) -> None:
+    """A registered agent is owned; whether anyone runs it is not something the chain can show."""
+    world = _unsettled(met_world()) if unsettled else met_world()
+    world.settle_v2(BUYER2, [("qa_agent", 700_000)], job("team-agent"), at="2026-09-25")
+    out = run(world, tmp_path)
+    text = json.dumps(out.block()) + (out.dir / MARKDOWN_NAME).read_text()
+    assert re.search(r"\brun by\b", text) is None
+    assert "owned by the team's QA throwaway operator key" in json.dumps(out.raw_metric("m03")["excluded"])
 
 
 def test_two_payouts_of_one_job_are_two_charges_but_one_workflow(tmp_path: Path) -> None:
