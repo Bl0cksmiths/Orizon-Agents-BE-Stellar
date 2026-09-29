@@ -865,10 +865,10 @@ and the frontend's after-deploy checklist.
    that needs the Chapter Lead. Record attendance, what was raised, what was
    answered and any commitments as a comment on BLO-138.
 4. **Linear status updates.** Move each story to the state its evidence
-   supports, never further: 5.01 (BLO-35), 5.02 (BLO-36), 5.04 (BLO-38), 5.05
-   (BLO-39), and 5.03 / 5.06 once their pages are live. Update R5 and R9 in
-   the risk register (steps 1.1 and 7.5). **Confirm** the issue ids for 5.03
-   and 5.06, which no source here names.
+   supports, never further: 5.01 (BLO-35), 5.02 (BLO-36), 5.03 (BLO-37), 5.04
+   (BLO-38), 5.05 (BLO-39) and 5.06 (BLO-47, still in Backlog on 2026-09-29
+   although its PR is open), then the epic (BLO-9). Update R5 and R9 in the
+   risk register (steps 1.1 and 7.5).
 5. **Verify:** BLO-134 links every item it lists, and each link opens.
 
 ---
