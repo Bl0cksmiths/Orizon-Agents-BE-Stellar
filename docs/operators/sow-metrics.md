@@ -24,6 +24,7 @@ Render waking up and one simulation per escrow id).
 | `--github-api` | `https://api.github.com` | where the repository licences are read (unauthenticated; four calls) |
 | `--escrow C...` | — | another escrow contract to count, besides the live one and the known v1 (repeatable) |
 | `--team-register` | `app/data/team_wallets.json` | the committed register of team wallets |
+| `--pending-link ID=URL[=label]` | — | for milestone `m06`, `m09` or `m10`: when its page answers 404, link this GitHub pull request (`https://github.com/<owner>/<repo>/pull/<n>`) in place of the page (repeatable, once per milestone). The label is optional; without one it reads "Pull request #n in owner/repo that adds the /page page (not deployed yet)". A label must be at least two words. Ignored, with a note, when the page does not answer 404 |
 | `--rpc-url`, `--horizon-url` | the public testnet endpoints | |
 | `--out-dir` | — | write the three outputs below |
 | `--print-block` | off | also print the frozen block to stdout |
@@ -55,6 +56,10 @@ The block is an array of eleven entries, `m01`..`m11` in SOW order:
   (`tx`, `contract`, `account`, `page`, `pr`, `repo`, `video`, `doc`). Explorer links are exactly
   `https://stellar.expert/explorer/testnet/tx/<hash>`, `…/contract/C…` or `…/account/G…`; a `tx` link also
   carries its `tx_hash` and `date` (`YYYY-MM-DD`).
+- **No dead links.** A milestone page (`/app/register`, `/guide/list-your-agent`, `/demo`) that answers 404 is
+  not linked: a link that 404s proves nothing, and the evidence index cannot take it. With `--pending-link`
+  the pull request that adds the page is linked instead (`kind: "pr"`); without it the row links nothing for
+  that page. Either way its `method` ends by saying so.
 - The block carries no timestamp: two runs against an unchanged chain and deployment write byte-identical
   blocks, so a diff of the block is a diff of the evidence.
 
@@ -89,9 +94,9 @@ them is Not measured: an owner that cannot be ruled out is not counted.
 | m05 | A dispute refund counts only when it traces to a real dispute: a `kind=dispute` rating (from the platform keys' Horizon history of `ReputationLedger.submit`) whose job id is the derived dispute id of a counted charge's job (`job_id[:8] ‖ sha256(job_id ‖ "orizon-dispute:v1" ‖ step)[:8]`, `app/services/dispute_rating.py`), followed by an asset-contract transfer from a platform key to that charge's payer, after the charge and no larger than it. A transfer with no dispute behind it — the 4.01 drill to a team key — is excluded. The ledger's lifetime `rep_state(id).disputed` is read as a cross-check: if the ledger counts more disputes than the history shows, m05 is Not measured rather than 0. |
 | m06 | `/app/register` answers 200 with no login (redirects are not followed), and the live backend's `/openapi.json` publishes `POST /api/stellar/build/register-agent`. The most recent registration signed by a key other than the registry admin is linked. |
 | m07 | `/api/stellar/reputation/params` says `"enabled": true` with a positive `floor_bps`. |
-| m08 | The live backend publishes the dispute routes (open, read, uphold, reject), **and** `/readiness` reports `disputes.reconcile.enabled: true` (true only when `DISPUTE_REFUNDS_ENABLED` and `REFUND_RECONCILE_ENABLED` are both on; a readiness report without the field predates the refund switch), **and** m05 found at least one real refund. |
-| m09 | `/guide/list-your-agent` answers 200 with no login. |
-| m10 | `/demo` answers 200 with no login, its article carries `data-demo="published"` (rendered by the frontend's `components/demo/demo-article.tsx` from `content/demo/demo.json`'s `status`), and the running time it shows (`<time dateTime="PT3M42S">`) is 3 to 5 minutes inclusive. |
+| m08 | Met (`Yes`) when the live backend publishes the dispute routes (open, read, uphold, reject), **and** a dispute window can open, **and** `/readiness` reports `disputes.reconcile.enabled: true` (true only when `DISPUTE_REFUNDS_ENABLED` and `REFUND_RECONCILE_ENABLED` are both on; a readiness report without the field predates the refund switch), **and** m05 found at least one real refund. A dispute window opens only when a payment settles, and only escrow v2 settles one (v1's `charge` cannot move a payer's funds, D-039): so it can open only while the live escrow is v2, and has opened only once a v2 escrow holds a receipt. `achieved` is `No` when a dispute route is missing. When the routes are deployed but anything else fails, it is `Partly: the dispute routes are deployed, but …` naming each gap, and never says the window is live. Before v2 with refunds off it reads exactly: `Partly: the dispute routes are deployed, but no dispute window can open until a payment settles, which needs escrow v2, and refunds are switched off.` "No refund yet" is named only when a window could have opened. |
+| m09 | `/guide/list-your-agent` answers 200 with no login. A 404 is linked as its `--pending-link`, or not at all. |
+| m10 | `/demo` answers 200 with no login, its article carries `data-demo="published"` (rendered by the frontend's `components/demo/demo-article.tsx` from `content/demo/demo.json`'s `status`), and the running time it shows (`<time dateTime="PT3M42S">`) is 3 to 5 minutes inclusive. A 404 is linked as its `--pending-link`, or not at all. |
 | m11 | GitHub's API detects `license.spdx_id == "MIT"` on each of `Bl0cksmiths/Orizon-Agents-FE-Stellar`, `-BE-Stellar`, `-Smart-Contract-Stellar` (the SOW's repositories) and `Orizon-Agents-Example-Agent-Stellar`. A `LICENSE` file GitHub does not detect, or metadata in `Cargo.toml`, does not count. |
 
 "USDC" in the SOW's wording settles as native XLM on testnet: the escrow's
@@ -110,7 +115,10 @@ m04's method.
 
 ## Refreshing the evidence index
 
-1. Run the generator with `--out-dir`. Exit 0 means every row was measured.
+1. Run the generator with `--out-dir`, and a `--pending-link` for each milestone page that is not deployed yet,
+   for example
+   `--pending-link m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/91`. Exit 0 means every
+   row was measured.
 2. Paste `sow-metrics.block.json` as the `metrics` array of the frontend's `content/evidence/index.json`.
 3. Keep `sow-metrics.raw.json` next to it: it is the answer to "which items were excluded, and why".
 
