@@ -85,7 +85,7 @@ class ConfigGap:
     reason: str
 
 
-_NO_KEY = ConfigGap("STELLAR_SIGNING_KEY is unset", "there is no settler to pay a credit from")
+_NO_KEY = ConfigGap("STELLAR_SIGNING_KEY is unset", "there is no platform signing key to pay a credit from")
 _NO_SAC = ConfigGap("STELLAR_ASSET_SAC is unset", "there is no asset contract to pay a credit over")
 
 
