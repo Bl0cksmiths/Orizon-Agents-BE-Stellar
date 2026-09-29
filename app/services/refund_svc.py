@@ -1,9 +1,15 @@
-"""Partial-credit refund — story 4.01, Option A (settler-funded platform credit).
+"""Partial-credit refund — story 4.01, Option A (platform-funded credit).
 
 The deployed `PaymentEscrow` has no refund entrypoint and never takes custody:
 `charge` sends USDC payer → agent-owner directly, so there is nothing to reverse.
 A dispute refund is therefore a **new transfer from the platform**, not a
-clawback — the settler credits the buyer over the asset SAC.
+clawback — the platform's signing key credits the buyer over the asset SAC.
+
+Which key that is: the platform's signing key (`STELLAR_SIGNING_KEY`,
+`GDB4N25…CDHP` on testnet) pays dispute credits, writes ratings (scorer) and
+seals attestations (sealer), and it becomes the escrow's settler once escrow v2
+is deployed. The deployed v1 escrow's settler is the admin key
+(`GA7AI5…5OQV`), so this module never calls the credit's payer "the settler".
 
 Money only. The dispute's reputation consequence is `dispute_rating`'s (story
 4.04), written under a *derived* job id once the credit has landed, and kept
@@ -50,7 +56,7 @@ class RefundRefused(Exception):
     """A refund that must NOT be signed, with a stable `code` the caller branches on.
 
     Every instance of this is money that did not move, raised before anything
-    reaches the settler's key. Three codes today:
+    reaches the platform's signing key. Three codes today:
 
       - `nothing_to_credit` — the settlement says there is nothing to give back
         for this step (no such step, a step that never delivered, or an amount
@@ -97,8 +103,8 @@ def config_gap() -> ConfigGap | None:
     fix them, asked before anything is claimed or signed.
 
     It exists because the credit was the one money path with no such check, and
-    the absence was not merely untidy. `execute_refund` reads the settler
-    through `sc.signer_public_key`, which RAISES on an empty key BEFORE it
+    the absence was not merely untidy. `execute_refund` reads the platform's
+    signing key through `sc.signer_public_key`, which RAISES on an empty key BEFORE it
     submits anything. `credit_refund` now reads that raise — a
     `NotSubmittedError`, like a key that is present but will not parse — as
     FAILED and hands the claim back; before it did, an unconfigured deployment
@@ -131,7 +137,7 @@ RefundStatus = Literal["SUCCESS", "FAILED", "TIMEOUT"]
 
 @dataclass(frozen=True)
 class RefundOutcome:
-    """The result of one settler-funded credit, as the caller must treat it.
+    """The result of one platform-funded credit, as the caller must treat it.
 
       - `SUCCESS` — the transfer landed and `tx_hash` is its receipt. Record it
         on the dispute and close it.
@@ -236,7 +242,7 @@ def creditable_for(
     chain what moved. `settlement.settled_usdc` is what `PaymentEscrow.charge`
     ACTUALLY MOVED: `_settle_onchain` floors the total to dust and rounds it to
     7 decimals, so the two genuinely differ. Only the minimum of the two is safe
-    to pay — this is a settler-funded credit out of the platform's own wallet
+    to pay — this is a platform-funded credit out of the signing key's own wallet
     (see the module docstring), so crediting an estimate that ran above the
     charge pays the buyer money the platform never took.
 
@@ -460,12 +466,13 @@ def _tagged_recipient(buyer: str, dispute_id: str) -> tuple[SCVal, int] | None:
 
 
 async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | None = None) -> dict[str, Any]:
-    """Settler-funded platform credit: transfer `amount_usdc` from the settler
-    to the buyer over the asset SAC. Returns the invoke result (incl. `hash`).
+    """Platform-funded credit: transfer `amount_usdc` from the platform's
+    signing key to the buyer over the asset SAC. Returns the invoke result
+    (incl. `hash`).
 
     A credit, never a clawback — the funds leave the platform wallet, so the
-    settler must hold enough of the asset. The server signing key IS the
-    settler, so the SAC `transfer(settler → buyer)` is authorised by that key.
+    signing key's account must hold enough of the asset. It is the key that
+    signs, so the SAC `transfer(signer → buyer)` is authorised by that key.
 
     With `dispute_id`, the `to` is the buyer's G address muxed with
     `refund_muxed_id(dispute_id)`. The funds land in the same G account — the
@@ -480,14 +487,14 @@ async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | No
         host answers an asset contract that takes a plain `Address` there.
         That type is the client's proof nothing was sent, so the second
         transfer cannot pay the buyer twice.
-    Every other refusal is raised exactly as before — a settler short of funds,
+    Every other refusal is raised exactly as before — a signer short of funds,
     an RPC down at `load_account`, a send the RPC refused — because the plain
     address would meet it too, and a second attempt would change what the
     money path does on a failure that has nothing to do with the tag. Anything
     that may have been sent is returned or raised untouched: that transfer may
     land, and a second one would pay the buyer twice.
     """
-    settler = sc.signer_public_key()
+    signer = sc.signer_public_key()
     sac = sc.contract_ids().asset_sac
     amount = sc.i128(sc.usdc_to_i128(amount_usdc))
     tagged = _tagged_recipient(buyer, dispute_id) if dispute_id is not None else None
@@ -495,7 +502,7 @@ async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | No
         to, muxed_id = tagged
         logger.info("dispute %s: refund to %s tagged with muxed id %d", dispute_id, buyer, muxed_id)
         try:
-            return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), to, amount])
+            return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(signer), to, amount])
         except sc.NotSubmittedError as e:
             if isinstance(e, sc.ContractError) or not _MUXED_REFUSED_HEAD.match(str(e)):
                 raise
@@ -505,7 +512,7 @@ async def execute_refund(buyer: str, amount_usdc: float, *, dispute_id: str | No
                 buyer,
                 str(e).splitlines()[0],
             )
-    return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(settler), sc.addr(buyer), amount])
+    return await sc.invoke_with_server_key_async(sac, "transfer", [sc.addr(signer), sc.addr(buyer), amount])
 
 
 async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOutcome:
@@ -523,7 +530,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
 
       - `sc.NotSubmittedError` → FAILED. The client raises it only ahead of
         `sendTransaction` — the signing key, the source account, the build,
-        the simulation (a settler holding too little USDC is refused here),
+        the simulation (a signer holding too little USDC is refused here),
         the signature — or for a send the RPC refused outright. No transaction
         exists anywhere after one of these, so nothing can land later.
       - any other exception → TIMEOUT. It may have been raised after the send.
@@ -554,7 +561,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
 
     `amount_usdc` must have come from `creditable_for`; the three guards below
     re-check it rather than trust the caller, so a hand-computed or stale amount
-    cannot reach the settler's key either — and the finiteness one leads, for
+    cannot reach the platform's signing key either — and the finiteness one leads, for
     the reason `creditable_for`'s does: the other two are comparisons, and a
     comparison cannot refuse a NaN.
     """
@@ -594,7 +601,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         # client raises it only before `sendTransaction`, or when the RPC
         # refused the send and holds nothing of it. Filing it as TIMEOUT, as
         # the catch-all below would, parked the dispute in `crediting` over a
-        # transfer that never existed — an under-funded settler or an RPC
+        # transfer that never existed — an under-funded signer or an RPC
         # outage at `load_account` wedged every uphold it met, and only a hand
         # edit could pay the buyer. Anything else still falls through to the
         # catch-all, because only this type carries that proof.
