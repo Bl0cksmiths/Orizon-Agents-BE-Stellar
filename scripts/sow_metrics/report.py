@@ -48,6 +48,7 @@ class RunFacts:
     github_api: str
     generated_at: int  # unix seconds
     generated_utc: str
+    withheld_external: bool = True
 
 
 def render_block(metrics: list[Metric]) -> list[dict[str, Any]]:
@@ -143,6 +144,16 @@ def render_markdown(metrics: list[Metric], run: RunFacts, code: int) -> str:
         f"Measured {run.generated_utc} on Stellar testnet, read-only: API `{run.api}`, backend `{run.backend}`, "
         f"frontend `{run.frontend}`, RPC `{run.rpc_url}`, Horizon `{run.horizon_url}`, GitHub `{run.github_api}`.",
         "",
+        *(
+            [
+                "Outside operators' agent ids, wallets and transaction hashes are held back until each operator's "
+                "consent to publish them is recorded: a row that would link them links the Ecosystem page instead. "
+                "The counts are unchanged.",
+                "",
+            ]
+            if run.withheld_external
+            else []
+        ),
         "| # | Category | Metric (SOW) | Target | Achieved | Status |",
         "|---|---|---|---|---|---|",
     ]
@@ -174,6 +185,7 @@ def render_raw(metrics: list[Metric], snap: Snapshot, run: RunFacts, code: int) 
         "generated_utc": run.generated_utc,
         "network": "testnet",
         "exit_code": code,
+        "withheld_external": run.withheld_external,
         "sources": {
             "api": run.api,
             "backend": run.backend,

@@ -253,7 +253,7 @@ def test_the_block_is_byte_identical_across_runs(tmp_path: Path) -> None:
         [
             *("--api", API, "--backend", BACKEND, "--frontend", FRONTEND, "--rpc-url", RPC),
             *("--horizon-url", HORIZON, "--github-api", GITHUB, "--team-register", str(reg)),
-            *("--out-dir", str(tmp_path / "b")),
+            *("--out-dir", str(tmp_path / "b"), "--publish-external"),
         ],
         transport=met_world().transport(),
         stream=stream,

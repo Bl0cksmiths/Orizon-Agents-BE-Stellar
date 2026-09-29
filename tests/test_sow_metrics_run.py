@@ -92,7 +92,15 @@ class Outcome:
         return str(self.metric(metric_id)["status"])
 
 
-def run(world: FakeWorld, tmp_path: Path, *extra: str, register: Path | None = None) -> Outcome:
+def run(
+    world: FakeWorld,
+    tmp_path: Path,
+    *extra: str,
+    register: Path | None = None,
+    consent: str | None = "--publish-external",
+) -> Outcome:
+    """One run. The rules are tested with every proof link published; `consent=None` runs the default."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     stream = io.StringIO()
     out_dir = tmp_path / "metrics"
     reg = register or FakeWorld.write_register(tmp_path / "team_wallets.json")
@@ -114,6 +122,7 @@ def run(world: FakeWorld, tmp_path: Path, *extra: str, register: Path | None = N
             str(reg),
             "--out-dir",
             str(out_dir),
+            *([consent] if consent else []),
             *extra,
         ],
         transport=world.transport(),
