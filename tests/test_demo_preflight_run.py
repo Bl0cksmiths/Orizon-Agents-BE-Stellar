@@ -331,6 +331,7 @@ def test_no_signing_key_fails_the_settler_check(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     check = out.check("escrow.settler")
     assert check["status"] == FAIL and "STELLAR_SIGNING_KEY" in check["fix"]
+    assert "no usable signing key" in check["detail"]
 
 
 # ── refunds ─────────────────────────────────────────────────────
