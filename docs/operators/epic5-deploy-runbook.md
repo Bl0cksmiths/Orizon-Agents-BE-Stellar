@@ -188,8 +188,8 @@ gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge   # Epic 5 audit 
 # frontend: #96 first and on its own (it fixes live copy), then #91 and #92
 # together, then the rest, then the licence
 gh pr merge 96 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
-# after #96: merge main into feat/5.03-integration's stack top if GitHub
-# reports a conflict on #97, keeping #97's version of the custody files
+# if GitHub then reports a conflict on #97, merge main into
+# fix/5-audit-fe-integration and keep #97's version of the custody files
 gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
 gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
