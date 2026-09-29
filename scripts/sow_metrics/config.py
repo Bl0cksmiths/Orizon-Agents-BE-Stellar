@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -117,6 +118,44 @@ MARKDOWN_NAME = "sow-metrics.md"
 RAW_NAME = "sow-metrics.raw.json"
 
 
+# The milestones whose evidence is a page on the live dApp. Before a page is
+# deployed it answers 404, and a link to it proves nothing; `--pending-link`
+# names the pull request that adds it instead.
+PAGE_METRICS: dict[str, str] = {"m06": REGISTER_PAGE, "m09": GUIDE_PAGE, "m10": DEMO_PAGE}
+_PULL_URL = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$")
+
+
+@dataclass(frozen=True)
+class PendingLink:
+    """The pull request that adds a milestone's page, linked while the page answers 404."""
+
+    url: str
+    label: str
+
+
+def parse_pending_link(raw: str) -> tuple[str, PendingLink]:
+    """`ID=URL[=label]` -> (metric id, link). The URL is a GitHub pull request; the label defaults to plain words."""
+    metric_id, sep, rest = raw.partition("=")
+    metric_id = metric_id.strip()
+    if not sep or metric_id not in PAGE_METRICS:
+        raise ValueError(f"--pending-link takes ID=URL[=label] with ID one of {', '.join(PAGE_METRICS)}, got {raw!r}")
+    url, _, label = rest.partition("=")
+    url, label = url.strip(), label.strip()
+    match = _PULL_URL.match(url)
+    if match is None:
+        raise ValueError(
+            f"--pending-link {metric_id}: {url!r} is not a GitHub pull request URL (https://github.com/…/pull/N)"
+        )
+    owner, repo, number = match.groups()
+    if not label:
+        label = (
+            f"Pull request #{number} in {owner}/{repo} that adds the {PAGE_METRICS[metric_id]} page (not deployed yet)"
+        )
+    elif len(re.findall(r"[A-Za-z]{2,}", label)) < 2:
+        raise ValueError(f"--pending-link {metric_id}: the label must say in words what the link is, got {label!r}")
+    return metric_id, PendingLink(url, label)
+
+
 @dataclass(frozen=True)
 class RunConfig:
     """Everything one invocation measures against. Holds no secret: none is needed."""
@@ -130,6 +169,7 @@ class RunConfig:
     team_register: Path
     extra_escrows: tuple[str, ...]
     out_dir: Path | None
+    pending_links: dict[str, PendingLink] = field(default_factory=dict)
 
 
 def normalize_base(raw: str, flag: str, *, strip_api: bool = False) -> str:

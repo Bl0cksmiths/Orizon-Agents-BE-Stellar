@@ -27,6 +27,7 @@ from .config import (
     TESTNET_RPC,
     WARMUP_BUDGET_SECONDS,
     RunConfig,
+    endpoint_origin,
     normalize_base,
 )
 from .redact import SEED_SHAPE, Console
@@ -56,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--buyer", metavar="G...", help="the buyer wallet the recording pays from")
     p.add_argument("--operator", metavar="G...", help="the operator wallet the recording registers and binds from")
+    p.add_argument(
+        "--operator-endpoint",
+        metavar="URL",
+        help="the operator's reference agent endpoint (the one bound in S03); its GET / must show no fault "
+        "injection. Only the origin is used and shown",
+    )
     p.add_argument(
         "--cap",
         type=float,
@@ -126,6 +133,7 @@ def _config(args: argparse.Namespace) -> RunConfig:
         allow_team_operator=args.allow_team_operator,
         decompose_intent=intent,
         out_dir=args.out_dir,
+        operator_endpoint=endpoint_origin(args.operator_endpoint) if args.operator_endpoint is not None else None,
     )
 
 

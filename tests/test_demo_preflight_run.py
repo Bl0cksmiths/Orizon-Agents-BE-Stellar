@@ -16,10 +16,11 @@ from typing import Any
 
 import pytest
 
-from scripts.demo_preflight.checks import FAIL, PASS, SKIPPED, WARN
+from scripts.demo_preflight.checks import FAIL, PASS, SKIPPED, WARN, card_stars, highest_visibly_below
 from scripts.demo_preflight.cli import main
 from scripts.demo_preflight.config import EXIT_GO, EXIT_INCOMPLETE, EXIT_NO_GO, EXIT_REFUSED, FRONTEND_PAGES
 from scripts.demo_preflight.fakes import (
+    AGENT_ENDPOINT,
     API,
     BACKEND,
     BUYER,
@@ -49,6 +50,7 @@ class Outcome:
     out: str
     dir: Path
     world: FakeWorld
+    sleeps: list[float]
 
     def report(self) -> dict[str, Any]:
         return json.loads((self.dir / "demo-preflight.json").read_text())
@@ -69,21 +71,26 @@ def run(
     *extra: str,
     buyer: str | None = BUYER,
     operator: str | None = OP1,
+    endpoint: str | None = AGENT_ENDPOINT + "/dispatch?token=bound-secret-7f3",
     register: Path | None = None,
 ) -> Outcome:
     stream = io.StringIO()
     out_dir = tmp_path / "preflight"
     reg = register or FakeWorld.write_register(tmp_path / "team_wallets.json")
     clock = [0.0]
+    sleeps: list[float] = []
 
     def sleep(seconds: float) -> None:
         clock[0] += seconds
+        sleeps.append(seconds)
 
     wallets: list[str] = []
     if buyer is not None:
         wallets += ["--buyer", buyer]
     if operator is not None:
         wallets += ["--operator", operator]
+    if endpoint is not None:
+        wallets += ["--operator-endpoint", endpoint]
     code = main(
         [
             "--api",
@@ -111,7 +118,7 @@ def run(
         clock=lambda: clock[0],
         now=lambda: 1_790_000_000.0,
     )
-    return Outcome(code, stream.getvalue(), out_dir, world)
+    return Outcome(code, stream.getvalue(), out_dir, world, sleeps)
 
 
 # ── the ready deployment ────────────────────────────────────────
@@ -137,10 +144,14 @@ def test_every_check_is_in_the_report(tmp_path: Path) -> None:
         "escrow.version",
         "escrow.settler",
         "refunds.enabled",
+        "refunds.store",
         "refunds.settler_balance",
         "operator.external",
         "operator.ready",
+        "operator.endpoint",
         "exclusion.below_floor",
+        "exclusion.card_figure",
+        "exclusion.routable_count",
         "exclusion.decompose",
         "wallets.buyer",
         "wallets.operator",
@@ -346,14 +357,20 @@ def test_refunds_off_fails(tmp_path: Path) -> None:
     assert "DISPUTE_REFUNDS_ENABLED=true" in check["fix"] and "REFUND_RECONCILE_ENABLED=true" in check["fix"]
 
 
-def test_an_in_memory_dispute_store_warns_and_does_not_gate(tmp_path: Path) -> None:
+def test_a_durable_dispute_store_passes(tmp_path: Path) -> None:
+    check = run(healthy_world(), tmp_path).check("refunds.store")
+    assert check["status"] == PASS and check["required"] is True
+
+
+def test_an_in_memory_dispute_store_fails_and_gates(tmp_path: Path) -> None:
     world = healthy_world()
     assert world.readiness is not None
     world.readiness["disputes"]["store"] = "memory"
     out = run(world, tmp_path)
-    assert out.code == EXIT_GO, out.out
+    assert out.code == EXIT_NO_GO, out.out
     check = out.check("refunds.store")
-    assert check["status"] == WARN and check["required"] is False and "DATABASE_URL" in check["fix"]
+    assert check["status"] == FAIL and check["required"] is True
+    assert "'memory'" in check["detail"] and "DATABASE_URL" in check["fix"]
 
 
 def test_a_settler_that_cannot_pay_a_refund_fails(tmp_path: Path) -> None:
@@ -425,6 +442,54 @@ def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path
     assert check["status"] == FAIL and "none can serve the recording" in check["detail"]
 
 
+def test_a_healthy_operator_endpoint_passes_and_its_secret_is_never_shown(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path)
+    check = out.check("operator.endpoint")
+    assert check["status"] == PASS and check["required"] is True
+    assert check["detail"] == (
+        'https://agent.test/ answered {"ok": true} with no fault_injection field and no X-Fault-Injection header'
+    )
+    assert "agent GET /?" in out.world.calls  # the origin's root, not the bound path and its query
+    for text in (out.out, (out.dir / "demo-preflight.json").read_text(), (out.dir / "demo-preflight.md").read_text()):
+        assert "bound-secret-7f3" not in text and "/dispatch" not in text
+
+
+@pytest.mark.parametrize("how", ["field", "header", "both"])
+def test_fault_injection_on_the_operator_endpoint_fails(tmp_path: Path, how: str) -> None:
+    world = healthy_world()
+    if how in ("field", "both"):
+        world.agent_health["fault_injection"] = "hang_after:0 (scope process)"
+    if how in ("header", "both"):
+        world.agent_headers["X-Fault-Injection"] = "hang_after:0 (scope process)"
+    out = run(world, tmp_path)
+    check = out.check("operator.endpoint")
+    assert check["status"] == FAIL and "fault injection is on" in check["detail"]
+    assert ("fault_injection: 'hang_after:0 (scope process)'" in check["detail"]) is (how != "header")
+    assert ("X-Fault-Injection header" in check["detail"]) is (how != "field")
+    assert "FAULT_MODE" in check["fix"]
+    assert out.code == EXIT_NO_GO
+
+
+@pytest.mark.parametrize(("status", "body"), [(503, {"ok": True}), (200, {"ok": False}), (200, {"status": "up"})])
+def test_an_operator_endpoint_that_is_not_healthy_fails(tmp_path: Path, status: int, body: dict[str, Any]) -> None:
+    world = healthy_world()
+    world.agent_status, world.agent_health = status, body
+    check = run(world, tmp_path).check("operator.endpoint")
+    assert check["status"] == FAIL and f"answered HTTP {status} without" in check["detail"]
+
+
+def test_no_operator_endpoint_is_skipped_and_keeps_the_verdict_incomplete(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path, endpoint=None)
+    assert out.status("operator.endpoint") == SKIPPED
+    assert out.code == EXIT_INCOMPLETE
+
+
+def test_an_operator_endpoint_that_is_not_a_url_is_refused_unechoed(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path, endpoint="agent.test/?token=bound-secret-7f3")
+    assert out.code == EXIT_REFUSED
+    assert "bound-secret-7f3" not in out.out and "--operator-endpoint" in out.out
+
+
 # ── the exclusion moment ────────────────────────────────────────
 def test_no_below_floor_agent_fails(tmp_path: Path) -> None:
     world = healthy_world()
@@ -446,6 +511,71 @@ def test_a_degraded_or_stale_below_floor_read_never_counts(tmp_path: Path, flag:
     assert f"lowrep (4100 bps, {flag})" in check["detail"]
 
 
+def _batch_reads(world: FakeWorld) -> int:
+    return world.calls.count("api GET /api/stellar/reputation")
+
+
+@pytest.mark.parametrize("cold", [1, 2])
+def test_a_cold_start_that_reads_every_agent_degraded_is_read_again(tmp_path: Path, cold: int) -> None:
+    world = healthy_world()
+    world.degraded_batches = cold
+    out = run(world, tmp_path)
+    check = out.check("exclusion.below_floor")
+    assert check["status"] == PASS, check
+    assert "lowrep (4100 < 5500 bps)" in check["detail"]
+    assert f"after {cold + 1} reads: every agent read degraded first" in check["detail"]
+    assert _batch_reads(world) == cold + 1
+    assert out.sleeps.count(5.0) == cold
+    assert out.status("exclusion.routable_count") == PASS
+    assert out.code == EXIT_GO, out.out
+
+
+def test_every_agent_degraded_on_every_read_fails_honestly(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.degraded_batches = 10
+    out = run(world, tmp_path)
+    check = out.check("exclusion.below_floor")
+    assert check["status"] == FAIL
+    assert check["detail"].startswith("every registered agent (3) read degraded on each of 3 reads 5 s apart")
+    assert "no verdict on any agent" in check["detail"]
+    assert "no registered, listed agent" not in check["detail"]
+    assert "RPC" in check["fix"]
+    assert _batch_reads(world) == 3  # bounded: three reads, never more
+    assert out.sleeps.count(5.0) == 2
+    assert out.status("exclusion.routable_count") == SKIPPED
+    assert out.code == EXIT_NO_GO
+
+
+def test_one_degraded_agent_is_not_a_cold_start_and_is_not_read_again(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.reputations["alpha"] = rep("alpha", 6100, degraded=True)
+    out = run(world, tmp_path)
+    assert _batch_reads(world) == 1
+    assert "after" not in out.check("exclusion.below_floor")["detail"]
+
+
+@pytest.mark.parametrize(("change", "why"), [("unbound", "not bound"), ("delisted", "delisted")])
+def test_a_below_floor_agent_that_is_not_routable_does_not_count(tmp_path: Path, change: str, why: str) -> None:
+    world = healthy_world()
+    lowrep = next(a for a in world.agents if a["id"] == "lowrep")
+    if change == "unbound":
+        lowrep["bound"] = False
+    else:
+        lowrep["status"] = "offline"
+    out = run(world, tmp_path)
+    check = out.check("exclusion.below_floor")
+    assert check["status"] == FAIL, check
+    assert f"lowrep (4100 bps, {why}: not routable, so never excluded)" in check["detail"]
+    assert "no endpoint" in check["fix"]
+    assert out.status("exclusion.card_figure") == SKIPPED
+    assert out.code == EXIT_NO_GO
+
+
+def test_a_bound_listed_below_floor_agent_counts(tmp_path: Path) -> None:
+    check = run(healthy_world(), tmp_path).check("exclusion.below_floor")
+    assert check["status"] == PASS and check["detail"] == "lowrep (4100 < 5500 bps)"
+
+
 def test_a_seeded_agent_below_the_floor_does_not_count(tmp_path: Path) -> None:
     world = healthy_world()
     world.reputations["lowrep"] = rep("lowrep", 5600)
@@ -457,6 +587,89 @@ def test_an_unlisted_agent_below_the_floor_does_not_count(tmp_path: Path) -> Non
     world = healthy_world()
     world.agents = [a for a in world.agents if a["id"] != "lowrep"]
     assert run(world, tmp_path).status("exclusion.below_floor") == FAIL
+
+
+@pytest.mark.parametrize(
+    ("bps", "figure"),
+    [(5443, "2.72"), (5489, "2.74"), (5490, "2.75"), (5499, "2.75"), (5500, "2.75"), (4100, "2.05")],
+)
+def test_the_card_figure_is_the_frontends_to_fixed(bps: int, figure: str) -> None:
+    # `(bps / 2000).toFixed(2)`, lib/reputation-math.ts scoreOutOfFive.
+    assert card_stars(bps) == figure
+
+
+def test_the_highest_visible_bound_is_derived_from_the_floor() -> None:
+    assert highest_visibly_below(5500) == 5489
+    assert highest_visibly_below(6000) == 5989
+
+
+def test_a_bound_of_5489_prints_below_the_floor_and_passes(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.reputations["lowrep"] = rep("lowrep", 5489)
+    out = run(world, tmp_path)
+    check = out.check("exclusion.card_figure")
+    assert check["status"] == PASS and check["required"] is True, check
+    assert "lowrep: 2.74 (5489 bps)" in check["detail"] and "2.75 (5500 bps)" in check["detail"]
+    assert out.code == EXIT_GO, out.out
+
+
+@pytest.mark.parametrize("bps", [5490, 5499])
+def test_a_bound_that_prints_as_the_floors_figure_fails(tmp_path: Path, bps: int) -> None:
+    world = healthy_world()
+    world.reputations["lowrep"] = rep("lowrep", bps)
+    out = run(world, tmp_path)
+    assert out.status("exclusion.below_floor") == PASS
+    check = out.check("exclusion.card_figure")
+    assert check["status"] == FAIL
+    assert f"lowrep's lower bound {bps} bps prints as 2.75, the floor's own figure" in check["detail"]
+    assert "5489 bps or lower" in check["fix"]
+    assert out.code == EXIT_NO_GO
+
+
+def test_the_card_figure_is_skipped_without_a_below_floor_agent(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.reputations["lowrep"] = rep("lowrep", 5600)
+    assert run(world, tmp_path).status("exclusion.card_figure") == SKIPPED
+
+
+def test_three_routable_agents_clearing_the_floor_pass(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path)
+    check = out.check("exclusion.routable_count")
+    assert check["status"] == PASS and check["required"] is True
+    assert check["detail"].startswith("3 clear 5500 bps: agt_01h8, alpha, beta")
+
+
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        ("delisted", ""),
+        ("unbound", ""),
+        ("below", ""),
+        ("degraded", "beta (degraded)"),
+        ("stale", "beta (stale)"),
+        ("missing", "beta (no reputation entry)"),
+    ],
+)
+def test_fewer_than_three_routable_agents_clearing_the_floor_fails(tmp_path: Path, change: str, named: str) -> None:
+    world = healthy_world()
+    beta = next(a for a in world.agents if a["id"] == "beta")
+    if change == "delisted":
+        beta["status"] = "offline"
+    elif change == "unbound":
+        beta["bound"] = False
+    elif change == "below":
+        world.reputations["beta"] = rep("beta", 5499)
+    elif change == "missing":
+        del world.reputations["beta"]
+    else:
+        world.reputations["beta"] = rep("beta", 6000, **{change: True})
+    out = run(world, tmp_path)
+    check = out.check("exclusion.routable_count")
+    assert check["status"] == FAIL, check
+    assert "only 2 routable agent(s) clear 5500 bps (agt_01h8, alpha)" in check["detail"]
+    assert "'kept below floor', not 'excluded'" in check["detail"]
+    assert named in check["detail"]
+    assert out.code == EXIT_NO_GO
 
 
 def test_reputation_routing_off_fails(tmp_path: Path) -> None:
@@ -581,3 +794,14 @@ def test_a_page_that_is_not_200_fails(tmp_path: Path, status: int) -> None:
     assert check["status"] == FAIL and f"answered {status}" in check["detail"]
     if status == 307:
         assert "/login" in check["detail"]
+
+
+@pytest.mark.parametrize("path", ["/app/trace", "/demo"])
+def test_the_trace_and_demo_pages_are_required(tmp_path: Path, path: str) -> None:
+    assert run(healthy_world(), tmp_path).status(f"frontend.{path}") == PASS
+    world = healthy_world()
+    world.pages[path] = 404
+    out = run(world, tmp_path)
+    check = out.check(f"frontend.{path}")
+    assert check["status"] == FAIL and check["required"] is True and "answered 404" in check["detail"]
+    assert out.code == EXIT_NO_GO

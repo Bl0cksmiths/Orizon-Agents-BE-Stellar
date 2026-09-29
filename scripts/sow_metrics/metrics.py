@@ -54,6 +54,7 @@ from .config import (
     SOW_ROWS,
     SPRINT_START,
     STROOPS_PER_UNIT,
+    PendingLink,
     SowRow,
 )
 
@@ -752,14 +753,33 @@ def _page_state(snap: Snapshot, path: str) -> tuple[bool, str]:
     return False, f"the {path} page answers HTTP {page.status}"
 
 
-def m06(snap: Snapshot, rules: Rules) -> Metric:
+def _page_evidence(
+    snap: Snapshot, path: str, page: Link, method: str, pending: PendingLink | None
+) -> tuple[list[Link], str]:
+    """The page's link and the method, or — when the page answers 404 — never a dead link.
+
+    A 404 page proves nothing and the evidence index cannot take it. With a
+    pending link the pull request that adds the page stands in for it;
+    without one, nothing is linked, and the method says why.
+    """
+    answer = snap.pages.get(path)
+    if answer is None or answer.status != 404:
+        return [page], method
+    if pending is not None:
+        note = " The page answered 404 when this ran, so the pull request that adds it is linked instead of the page."
+        return [Link(pending.label, pending.url, "pr")], method + note
+    return [], method + " The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
+
+
+def m06(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[5]
     method = (
         f"Opened the {REGISTER_PAGE} page on the live dApp with no login, and checked the live backend publishes the "
         "route that builds an unsigned registration transaction for the owner's own wallet to sign. The registry "
         "contract's register needs only the owner's signature, no admin."
     )
-    base = [Link("Register an agent page (opens with no login)", snap.page_urls[REGISTER_PAGE], "page")]
+    page = Link("Register an agent page (opens with no login)", snap.page_urls[REGISTER_PAGE], "page")
+    base, method = _page_evidence(snap, REGISTER_PAGE, page, method, pending)
     base += [Link("Live backend route list", snap.urls["openapi"], "doc")] + _registry_link(snap)
     unmeasured = _unmeasured(row, snap, method, base)
     if unmeasured:
@@ -821,13 +841,22 @@ def m07(snap: Snapshot, rules: Rules) -> Metric:
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
 
 
+def _and_list(parts: list[str]) -> str:
+    """Clauses joined with a serial comma: several of them carry commas of their own."""
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + ", and " + parts[-1]
+
+
 def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     row = SOW_ROWS[7]
     method = (
-        "Checked that the live backend publishes the dispute routes (open, read, uphold, reject), that its "
+        "Checked that the live backend publishes the dispute routes (open, read, uphold, reject); that a dispute "
+        "window can open at all, which needs a settled payment, and so the escrow v2 contract live; that its "
         "readiness report shows refunds switched on (disputes.reconcile.enabled, true only when refunds and the "
-        "refund sweep are both on), and that at least one dispute has been refunded on-chain (the dispute refund "
-        "row above)."
+        "refund sweep are both on); and that at least one dispute has been refunded on-chain (the dispute refund "
+        "row above). Yes when all hold, Partly when the routes are deployed but the rest does not, and No when the "
+        "routes are not."
     )
     links = [
         Link("Live backend route list", snap.urls["openapi"], "doc"),
@@ -839,33 +868,54 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
         return unmeasured
     routes = snap.openapi_routes or set()
     missing = [r for r in DISPUTE_ROUTES if r not in routes]
+    # A dispute window opens only when a payment settles, and only escrow v2
+    # settles one (v1's charge cannot move a payer's funds, D-039).
+    v2_live = any(e.live and e.version >= 2 for e in snap.escrows)
+    v2_settled = any(e.receipts for e in snap.escrows if e.version >= 2)
     disputes = (snap.readiness or {}).get("disputes")
     reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
     refunds_on = isinstance(reconcile, dict) and reconcile.get("enabled") is True
     refunded = refunds.status == MET
-    met = not missing and refunds_on and refunded
-    reason = None
-    if not met:
+    met = not missing and v2_live and v2_settled and refunds_on and refunded
+    achieved, reason = "Yes", None
+    if missing:
+        achieved = "No"
+        reason = "The live backend does not publish every dispute route."
+    elif not met:
         parts = []
-        if missing:
-            parts.append("the live backend does not publish every dispute route")
+        if not v2_live:
+            parts.append("no dispute window can open until a payment settles, which needs escrow v2")
+        elif not v2_settled:
+            parts.append("no dispute window has opened yet, because no payment has settled on escrow v2")
         if not refunds_on:
             parts.append(
-                "the live backend does not report refunds as switched on"
-                + (" (its readiness report predates the refund switch)" if not isinstance(disputes, dict) else "")
+                "refunds are switched off"
+                if isinstance(disputes, dict)
+                else "refunds are not reported as switched on (the readiness report predates the refund switch)"
             )
-        if not refunded:
+        # With no window able to open, no refund is implied; it is said only
+        # when a window could have opened and none was refunded.
+        if not refunded and v2_live and v2_settled:
             parts.append("no dispute has been refunded on-chain yet (see the dispute refund row)")
-        lead = "The dispute window is live, but " if not missing else ""
-        reason = (lead + _join(parts) + ".") if lead else _sentence(_join(parts)) + "."
-    counted = [{"missing_routes": missing, "refunds_on": refunds_on, "refunded_disputes": refunds.achieved}]
-    return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
+        achieved = "Partly: the dispute routes are deployed, but " + _and_list(parts) + "."
+        reason = _sentence(_and_list(parts)) + "."
+    counted = [
+        {
+            "missing_routes": missing,
+            "escrow_v2_live": v2_live,
+            "escrow_v2_settled": v2_settled,
+            "refunds_on": refunds_on,
+            "refunded_disputes": refunds.achieved,
+        }
+    ]
+    return Metric(row, achieved, MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m09(snap: Snapshot, rules: Rules) -> Metric:
+def m09(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[8]
     method = f"Opened the {GUIDE_PAGE} page on the live dApp with no login; published means it answers there."
-    links = [Link('"List your agent on Orizon" guide', snap.page_urls[GUIDE_PAGE], "page")]
+    page = Link('"List your agent on Orizon" guide', snap.page_urls[GUIDE_PAGE], "page")
+    links, method = _page_evidence(snap, GUIDE_PAGE, page, method, pending)
     unmeasured = _unmeasured(row, snap, method, links)
     if unmeasured:
         return unmeasured
@@ -895,13 +945,15 @@ def demo_state(html: str) -> tuple[str | None, int | None]:
     return (state.group(1) if state else None), seconds
 
 
-def m10(snap: Snapshot, rules: Rules) -> Metric:
+def m10(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[9]
     method = (
         f"Opened the {DEMO_PAGE} page on the live dApp with no login and read the published marker the page renders "
         f'(data-demo="published") and the video\'s running time, which must be 3 to 5 minutes.'
     )
-    links = [Link("Demo page", snap.page_urls[DEMO_PAGE], "page")]
+    links, method = _page_evidence(
+        snap, DEMO_PAGE, Link("Demo page", snap.page_urls[DEMO_PAGE], "page"), method, pending
+    )
     unmeasured = _unmeasured(row, snap, method, links)
     if unmeasured:
         return unmeasured
@@ -965,8 +1017,9 @@ def m11(snap: Snapshot, rules: Rules) -> Metric:
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted, excluded)
 
 
-def measure(snap: Snapshot) -> list[Metric]:
-    """All eleven, in SOW order."""
+def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None) -> list[Metric]:
+    """All eleven, in SOW order. `pending_links` stand in for a milestone page that answers 404."""
+    pending = pending_links or {}
     rules = Rules(snap)
     refunds = m05(snap, rules)
     return [
@@ -975,10 +1028,10 @@ def measure(snap: Snapshot) -> list[Metric]:
         m03(snap, rules),
         m04(snap, rules),
         refunds,
-        m06(snap, rules),
+        m06(snap, rules, pending.get("m06")),
         m07(snap, rules),
         m08(snap, rules, refunds),
-        m09(snap, rules),
-        m10(snap, rules),
+        m09(snap, rules, pending.get("m09")),
+        m10(snap, rules, pending.get("m10")),
         m11(snap, rules),
     ]

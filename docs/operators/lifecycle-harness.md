@@ -56,9 +56,9 @@ evidence.
 | `--agent ID` | The external agent this run is about. The plan must route to it, or the run stops before anything is signed (exit 4). |
 | `--intent TEXT` | What the buyer asks for. Required for a fresh run. Word it towards the agent's skills. |
 | `--buyer-secret-env NAME` | See above. A value shaped like a seed is refused, and not echoed. |
-| `--adjudicator-key-env NAME` | See above. Needed only to run through `uphold`. |
+| `--adjudicator-key-env NAME` | See above. Needed only to run through `uphold`, and not for `--dry-run`, which signs nothing. A dry run without it says the real run will need it. |
 | `--evidence-dir DIR` | **One directory per run.** Holds `lifecycle.jsonl`, `lifecycle.md` and `state.json`. |
-| `--dry-run` | Does every read (warm-up, network, RPC, agents, reputation, escrow version, buyer balance), then prints the plan. Builds, signs and writes nothing. |
+| `--dry-run` | Does every read (warm-up, network, RPC, agents, reputation, escrow version, buyer balance), then prints the plan. Builds, signs and writes nothing. It exits 0 only when the real run with the same flags would not stop on something the reads already show. Otherwise it lists every such blocker and exits 3: a buyer that does not exist on testnet (a fresh run), an agent that is not external and bound (a fresh run), or a v1 escrow when the run would reach `verify`, where a real run stops with exit 7 after the buyer has signed. |
 | `--until STAGE` | Stop after this stage. |
 | `--from-task TASK_ID` | Resume at `poll` for this task, for example after a backend restart. |
 | `--from-dispute DISPUTE_ID` | Resume at `uphold` for this dispute. |
@@ -104,7 +104,7 @@ charge transaction's status and its `charged` event.
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | Done through `--until`. | Nothing. |
-| 3 | Refused before anything was signed: wrong network, missing variable, unfunded buyer, agent not external and bound, backend never woke. | Fix the named precondition. |
+| 3 | Refused before anything was signed: wrong network, missing variable, unfunded buyer, agent not external and bound, backend never woke. From `--dry-run`, also: a blocker the real run would hit, each one named (a buyer that does not exist, an agent that is not external and bound, or a v1 escrow on a run that reaches `verify`). | Fix the named precondition, then dry-run again until it exits 0. |
 | 4 | The plan does not route to `--agent`. Nothing signed. | Reword `--intent`. |
 | 5 | A definitive failure: the ledger or the server said no. | Read the last rows. |
 | 6 | **Unknown outcome.** A submit, execute, uphold or dispute open was sent and its answer lost. The ledger has been read back and the result recorded. | Look the hash up on Stellar Expert before anything else. Never rerun the stage blindly. |
@@ -117,7 +117,9 @@ charge transaction's status and its `charged` event.
 ## The two-run recipe (AC1–AC3, AC6)
 
 Dry-run each first. It prints the escrow version, the agent's record and the
-buyer's balance, and nothing is built or signed.
+buyer's balance, and nothing is built or signed. Go on to the real run only
+when the dry run exits 0; exit 3 names what would stop the real run. A dry
+run does not need `ORIZON_API_KEY`.
 
 ```bash
 source .venv/bin/activate

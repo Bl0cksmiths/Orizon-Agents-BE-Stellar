@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # The only network the demo is recorded on. SOW §3.6 makes the sprint
 # testnet-only, and a video whose hashes resolve on mainnet (or not at all)
@@ -22,19 +23,30 @@ DEFAULT_BACKEND = "https://orizon-agents-be-stellar.onrender.com"
 DEFAULT_TEAM_REGISTER = Path("app/data/team_wallets.json")
 
 # Every page the recording visits, and none that needs a login to answer.
+# `/app/trace` carries the receipt and the dispute (S07-S09), and `/demo` is
+# where the published video and its evidence sheet are read.
 FRONTEND_PAGES: tuple[str, ...] = (
     "/app/register",
     "/app/bind",
     "/app/operator",
     "/app/orchestrator",
     "/app/agents",
+    "/app/trace",
     "/app/ecosystem",
     "/guide/list-your-agent",
+    "/demo",
 )
 
 # Render's free tier boots in 30-60 s, and a sleeping one can take longer.
 # The health probe is asked again until this budget is spent.
 WARMUP_BUDGET_SECONDS = 120.0
+
+# A backend that has just woken reads every agent's reputation as `degraded`
+# (the prior, served because the ledger read has not answered yet). When EVERY
+# registered agent reads degraded, the batch is read again, this many times
+# in all and this far apart, before anything is concluded from it.
+REPUTATION_READ_ATTEMPTS = 3
+REPUTATION_REREAD_SECONDS = 5.0
 
 # The backend's own defaults, restated. `MAX_REFUND_USDC` is not on any public
 # route, so the pre-flight takes it as a flag and says which value it assumed;
@@ -89,6 +101,7 @@ class RunConfig:
     allow_team_operator: bool
     decompose_intent: str | None
     out_dir: Path | None
+    operator_endpoint: str | None = None  # the origin only: a bound URL's query can carry a shared secret
 
 
 def normalize_base(raw: str, flag: str, *, strip_api: bool = False) -> str:
@@ -103,6 +116,20 @@ def normalize_base(raw: str, flag: str, *, strip_api: bool = False) -> str:
     if not base.startswith(("http://", "https://")):
         raise ValueError(f"{flag} must be an absolute http(s) URL, got {raw!r}")
     return base
+
+
+def endpoint_origin(raw: str) -> str:
+    """The scheme and host of an agent endpoint, without its path, query or fragment.
+
+    The reference agent answers its health check on any GET path, and a bound
+    endpoint may carry a shared secret in its query string, which must never
+    reach the terminal or the report. So only the origin is kept, and `/` is
+    asked there.
+    """
+    parts = urlsplit(raw.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("--operator-endpoint must be an absolute http(s) URL (not shown: it may carry a secret)")
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def to_units(stroops: int) -> float:

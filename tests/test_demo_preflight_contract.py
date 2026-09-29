@@ -125,6 +125,16 @@ def test_the_reputation_fields_the_floor_check_reads_exist() -> None:
     assert "onchain" in typing.get_args(Agent.model_fields["source"].annotation)
 
 
+def test_the_routable_minimum_is_the_planners_backstop() -> None:
+    from app.services import orchestrator_svc
+
+    assert checks.MIN_ROUTABLE_AGENTS == orchestrator_svc._MIN_ROUTABLE_AGENTS
+
+
+def test_the_routable_rule_reads_fields_the_agent_row_carries() -> None:
+    assert {"status", "source", "bound"} <= set(Agent.model_fields)
+
+
 def test_the_assumed_refund_cap_is_the_backends_default() -> None:
     assert Settings.model_fields["max_refund_usdc"].default == DEFAULT_MAX_REFUND
 

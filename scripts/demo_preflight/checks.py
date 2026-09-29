@@ -4,7 +4,7 @@ Each check reads, judges and says what to fix. It is one of
 
   PASS     holds; nothing to do
   WARN     holds, with a caveat the take must act on (a team wallet to disclose
-           on camera, an in-memory dispute store that a restart would empty)
+           on camera)
   FAIL     does not hold; `fix` says exactly what to change
   SKIPPED  could not be judged — a flag was not given, or a check it depends
            on failed. SKIPPED is NEVER a pass: a required check that was
@@ -31,12 +31,18 @@ Where a fact comes from, and why it is the honest source:
               that can say the refund switch is on. The settler's balance is a
               Horizon read.
   operator    `GET /api/ecosystem/adoption` for who is external, and each
-              external agent's `GET /api/agents/{id}/readiness`.
+              external agent's `GET /api/agents/{id}/readiness`; the
+              reference agent's own `GET /` (`--operator-endpoint`) for its
+              fault-injection field and header.
   exclusion   `GET /api/stellar/reputation` (+ `/params` for the floor and the
               switch), joined with `GET /api/agents` for registered, listed
               agents. A `degraded` read is the prior served because the ledger
               could not be read, and a `stale` one is an old read: neither is
-              a verdict on the agent, so neither ever counts.
+              a verdict on the agent, so neither ever counts. When every
+              agent reads degraded (a cold start), the batch is read again.
+              The same batch, with each row's status and binding, counts the
+              routable agents that clear the floor, and the excluded bound is
+              judged by the figure the plan card prints (`card_stars`).
   wallets     Horizon, against `--cap` and the fee allowances in `config.py`,
               and the committed team register.
   frontend    a GET of each page the script visits, redirects NOT followed.
@@ -46,6 +52,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from .api import Answer, Reads, Unreachable
@@ -55,6 +62,8 @@ from .config import (
     EXPLORER_ACCOUNT,
     FRONTEND_PAGES,
     OPERATOR_FEE_ALLOWANCE,
+    REPUTATION_READ_ATTEMPTS,
+    REPUTATION_REREAD_SECONDS,
     SETTLER_FEE_ALLOWANCE,
     TESTNET_PASSPHRASE,
     WARMUP_BUDGET_SECONDS,
@@ -72,6 +81,12 @@ CHAIN_ERRORS: tuple[type[Exception], ...] = (*READ_ERRORS, RpcError, SimulationE
 # `app/services/operator_readiness.py` READY_KEYS, in its STEP_KEYS order: the
 # steps that make an agent routable and dispatchable.
 READY_STEPS: tuple[str, ...] = ("registered", "active", "bound", "reachable", "routable")
+
+# `app/services/orchestrator_svc.py` _MIN_ROUTABLE_AGENTS: when fewer routable
+# agents than this clear the floor, the planner's starvation backstop
+# re-admits sub-floor agents, and the card reads "kept below floor" rather
+# than "excluded".
+MIN_ROUTABLE_AGENTS = 3
 
 # The escrow version the demo needs, and the defect v1 carries.
 ESCROW_V2 = 2
@@ -125,6 +140,9 @@ class Facts:
     escrow_version: int | None = None
     settler: str | None = None
     below_floor: list[str] = field(default_factory=list)
+    floor_bps: int | None = None
+    reputations: dict[str, Any] | None = None  # the reputation batch the floor was judged on
+    lower_bounds: dict[str, int] = field(default_factory=dict)  # agent id -> lower_bound_bps, as last read
     disclosures: list[str] = field(default_factory=list)
 
     @property
@@ -172,6 +190,26 @@ def first_unready_step(body: dict[str, Any]) -> dict[str, Any] | None:
         if step.get("status") != "done":
             return step
     return None
+
+
+def card_stars(bps: int) -> str:
+    """The figure the plan card prints for `bps`: the frontend's `(bps / 2000).toFixed(2)`.
+
+    `scoreOutOfFive` in `lib/reputation-math.ts`, which the exclusions panel
+    renders the lower bound and the floor with. `toFixed` rounds the exact
+    binary value of the quotient half up, and so does this: `Decimal(float)`
+    is that exact value.
+    """
+    return str(Decimal(bps / 2000).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def highest_visibly_below(floor_bps: int) -> int:
+    """The highest lower bound the card prints as a smaller figure than the floor's own."""
+    floor_figure = Decimal(card_stars(floor_bps))
+    bps = floor_bps - 1
+    while Decimal(card_stars(bps)) >= floor_figure:
+        bps -= 1
+    return bps
 
 
 # ── network ─────────────────────────────────────────────────────
@@ -401,16 +439,20 @@ def check_refunds_enabled(facts: Facts) -> Check:
 
 
 def check_dispute_store(facts: Facts) -> Check:
-    check = Check("refunds.store", "refunds", "Settlements and disputes survive a restart", required=False)
+    # Required, not advisory: story 5.01 AC4 (a dispute accepted after a
+    # restart) and the script's refunds row both need DATABASE_URL. Recording
+    # "in one sitting" is no workaround — a free-tier sleep is not scheduled.
+    check = Check("refunds.store", "refunds", "Settlements and disputes survive a restart (a durable store)")
     disputes = (facts.readiness or {}).get("disputes")
     store = disputes.get("store") if isinstance(disputes, dict) else None
     if store is None:
         return check.skipped("/readiness has no disputes.store", "Fix build.readiness first.")
     if store != "postgres":
-        return check.warned(
-            f"disputes.store is {store!r}: a restart between the settle and the dispute (a free-tier sleep) "
-            "loses the settlement, and the dispute scene with it",
-            "Set DATABASE_URL on the Render dashboard, or record the settle-to-uphold scenes in one sitting.",
+        return check.failed(
+            f"disputes.store is {store!r}, not a durable store: a restart between the settle and the dispute "
+            "(a free-tier sleep) loses the settlement, and the dispute scene with it",
+            "Set DATABASE_URL on the Render dashboard to a Postgres database, then redeploy; /readiness must "
+            "read disputes.store: postgres.",
         )
     return check.passed("postgres")
 
@@ -511,9 +553,65 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
     return check.passed("ready and reachable: " + ", ".join(ready) + aside)
 
 
+# The reference agent's fault-injection markers (Orizon-Agents-Example-Agent-
+# Stellar agent.py, "Fault injection"): a `fault_injection` field in its
+# `GET /` health check and an `X-Fault-Injection` header on every answer,
+# both present only while FAULT_MODE is set.
+FAULT_FIELD = "fault_injection"
+FAULT_HEADER = "X-Fault-Injection"
+
+
+def check_operator_endpoint(reads: Reads, cfg: RunConfig) -> Check:
+    check = Check(
+        "operator.endpoint",
+        "operator",
+        "The operator's reference agent answers GET / with no fault injection",
+    )
+    origin = cfg.operator_endpoint
+    if origin is None:
+        return check.skipped(
+            "no --operator-endpoint given",
+            "Pass --operator-endpoint https://… (the endpoint the operator wallet binds in S03).",
+        )
+    try:
+        answer = reads.agent_health(origin)
+    except Unreachable as exc:
+        return check.failed(
+            str(exc),
+            "Start (or redeploy) the operator's reference agent, wait for it to answer GET /, and rerun.",
+        )
+    body = answer.obj()
+    if not answer.ok or body.get("ok") is not True:
+        return check.failed(
+            f'{origin}/ answered HTTP {answer.status} without {{"ok": true}}',
+            "Point --operator-endpoint at the reference agent the operator binds, and check it is deployed and awake.",
+        )
+    faults: list[str] = []
+    if FAULT_FIELD in body:
+        faults.append(f"its health check carries {FAULT_FIELD}: {body.get(FAULT_FIELD)!r}")
+    header = answer.headers.get(FAULT_HEADER.lower())
+    if header is not None:
+        faults.append(f"it answers with the {FAULT_HEADER} header ({header!r})")
+    if faults:
+        return check.failed(
+            f"{origin}/: fault injection is on: " + "; ".join(faults),
+            "Unset FAULT_MODE (and FAULT_SCOPE) on the operator's reference agent and redeploy it. Fault injection "
+            "belongs only on the separate faulty test agent; never record against an agent that has it on.",
+        )
+    return check.passed(f'{origin}/ answered {{"ok": true}} with no {FAULT_FIELD} field and no {FAULT_HEADER} header')
+
+
 # ── the exclusion moment ────────────────────────────────────────
+def all_degraded(reputations: dict[str, Any], agent_ids: list[str]) -> bool:
+    """Whether every one of `agent_ids` that has an entry reads degraded (and at least one does)."""
+    entries = [reputations[a] for a in agent_ids if isinstance(reputations.get(a), dict)]
+    return bool(entries) and all(e.get("degraded") is True for e in entries)
+
+
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
-    check = Check("exclusion.below_floor", "exclusion", "A registered agent is genuinely below the reputation floor")
+    check = Check(
+        "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
+    )
     if not facts.warm:
         return check.skipped("the backend never answered", "Fix network.warm first.")
     if facts.agents is None:
@@ -536,8 +634,40 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     floor = params.obj().get("floor_bps")
     if not isinstance(floor, int):
         return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
-    reputations = batch.obj().get("reputations") or {}
+    facts.floor_bps = floor
     registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
+    reputations = batch.obj().get("reputations") or {}
+    # A cold start reads every agent degraded until the backend's first
+    # ledger read answers. That is the backend waking, not a finding about
+    # any agent, so the batch is read again before anything is concluded.
+    reads_made = 1
+    while all_degraded(reputations, registered) and reads_made < REPUTATION_READ_ATTEMPTS:
+        reads.sleep(REPUTATION_REREAD_SECONDS)
+        try:
+            batch = reads.reputation()
+        except Unreachable as exc:
+            return check.failed(str(exc), "Rerun; the reputation route did not answer.")
+        if not batch.ok:
+            return check.failed(
+                f"reputation batch {_status_line(batch)} on re-read {reads_made + 1}",
+                "Rerun; the reputation route did not answer.",
+            )
+        reputations = batch.obj().get("reputations") or {}
+        reads_made += 1
+    if all_degraded(reputations, registered):
+        return check.failed(
+            f"every registered agent ({len(registered)}) read degraded on each of {reads_made} reads "
+            f"{REPUTATION_REREAD_SECONDS:.0f} s apart: the backend could not read the ReputationLedger, so this "
+            "is no verdict on any agent, not a finding that none is below the floor",
+            "Check the Soroban RPC the backend reads (/api/stellar/network rpc_url) answers and that the "
+            "reputation_ledger id there is right, wait a minute for the backend's ledger read, and rerun. On "
+            "camera a degraded read shows '⚠ unverified' and no exclusion at all.",
+        )
+    facts.reputations = reputations if isinstance(reputations, dict) else {}
+    reread = (
+        f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
+    )
+    rows = {str(a.get("id")): a for a in facts.agents}
     genuine: list[str] = []
     ignored: list[str] = []
     for agent_id in registered:
@@ -550,23 +680,120 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             why = "degraded" if rep.get("degraded") is True else "stale"
             ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why})")
             continue
+        # The planner only judges agents it could route to. An unbound one
+        # renders as "no endpoint" and a delisted one not at all: neither is
+        # the "excluded" row the exclusion scene films.
+        if not routable(rows[agent_id]):
+            why = "delisted" if rows[agent_id].get("status") == "offline" else "not bound"
+            ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why}: not routable, so never excluded)")
+            continue
         genuine.append(agent_id)
         facts.below_floor.append(agent_id)
+        facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
     if genuine:
         detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
-        return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else ""))
+        return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
     degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
     return check.failed(
-        f"no registered, listed agent has an on-chain lower bound below {floor} bps"
+        f"no registered, bound and listed agent has an on-chain lower bound below {floor} bps"
         + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else "")
         + (
             f"; {len(degraded)} of {len(registered)} registered agents read degraded (the ledger could not be read)"
             if degraded
             else ""
-        ),
+        )
+        + reread,
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
-        "A degraded or stale read is the prior or an old read, never a verdict.",
+        "A degraded or stale read is the prior or an old read, never a verdict. The agent must also be bound "
+        "(rebind it from its owner wallet) and listed, or the card shows 'no endpoint', not 'excluded'.",
+    )
+
+
+def routable(agent: dict[str, Any]) -> bool:
+    """Whether the planner may route to this `GET /api/agents` row: listed and dispatchable.
+
+    `_snapshot_registry` in app/services/orchestrator_svc.py: `_is_listed` is
+    "status is not offline" (a delisting), and `is_dispatchable` is a local
+    worker (every seeded agent) or a bound endpoint (an on-chain agent).
+    """
+    if agent.get("status") == "offline":
+        return False
+    if agent.get("source") == "seeded":
+        return True
+    return agent.get("source") == "onchain" and agent.get("bound") is True
+
+
+def check_routable_count(facts: Facts) -> Check:
+    check = Check(
+        "exclusion.routable_count",
+        "exclusion",
+        f"At least {MIN_ROUTABLE_AGENTS} routable agents clear the floor, so the subject is excluded, not kept",
+    )
+    if facts.agents is None or facts.reputations is None or facts.floor_bps is None:
+        return check.skipped("the agents or the reputation batch were not read", "Fix exclusion.below_floor first.")
+    floor = facts.floor_bps
+    clear: list[str] = []
+    unjudged: list[str] = []
+    for agent in facts.agents:
+        if not routable(agent):
+            continue
+        agent_id = str(agent.get("id"))
+        rep = facts.reputations.get(agent_id)
+        if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
+            unjudged.append(f"{agent_id} (no reputation entry)")
+            continue
+        # A degraded read is the prior served because the ledger could not be
+        # read, and a stale one may predate a rating: neither is a verdict, so
+        # neither is counted as clearing the floor.
+        if rep.get("degraded") is True or rep.get("stale") is True:
+            why = "degraded" if rep.get("degraded") is True else "stale"
+            unjudged.append(f"{agent_id} ({why})")
+            continue
+        if rep["lower_bound_bps"] >= floor:
+            clear.append(agent_id)
+    aside = f"; not counted: {', '.join(unjudged)}" if unjudged else ""
+    if len(clear) >= MIN_ROUTABLE_AGENTS:
+        return check.passed(f"{len(clear)} clear {floor} bps: {', '.join(clear)}{aside}")
+    return check.failed(
+        f"only {len(clear)} routable agent(s) clear {floor} bps"
+        + (f" ({', '.join(clear)})" if clear else "")
+        + aside
+        + f": with fewer than {MIN_ROUTABLE_AGENTS}, the planner's backstop re-admits one below the floor, so the "
+        "card reads 'kept below floor', not 'excluded'",
+        f"Bind, or relist, agents that clear the floor until at least {MIN_ROUTABLE_AGENTS} routable ones do "
+        "(listed, and seeded or bound, with a fresh read at or above the floor), then rerun. Retake S05 only "
+        "after the registry is fixed.",
+    )
+
+
+def check_card_figure(facts: Facts) -> Check:
+    check = Check(
+        "exclusion.card_figure",
+        "exclusion",
+        "The plan card prints the excluded agent's lower bound below the floor's figure",
+    )
+    if not facts.below_floor or facts.floor_bps is None:
+        return check.skipped("there is no genuinely below-floor agent to judge", "Fix exclusion.below_floor first.")
+    floor = facts.floor_bps
+    floor_figure = card_stars(floor)
+    ceiling = highest_visibly_below(floor)
+    blurred = [a for a in facts.below_floor if Decimal(card_stars(facts.lower_bounds[a])) >= Decimal(floor_figure)]
+    if blurred:
+        return check.failed(
+            "; ".join(
+                f"{a}'s lower bound {facts.lower_bounds[a]} bps prints as {card_stars(facts.lower_bounds[a])}, "
+                f"the floor's own figure ({floor} bps prints as {floor_figure})"
+                for a in blurred
+            )
+            + ": on camera the row reads as if the agent clears the floor",
+            f"The bound must be {ceiling} bps or lower (it prints as {card_stars(ceiling)}). Give the agent one more "
+            "real failed run (demo script, 'How the below-floor agent is made, honestly'), wait for a fresh read, "
+            "and rerun. Never write a rating by hand.",
+        )
+    return check.passed(
+        ", ".join(f"{a}: {card_stars(facts.lower_bounds[a])} ({facts.lower_bounds[a]} bps)" for a in facts.below_floor)
+        + f" against the floor's {floor_figure} ({floor} bps); at most {ceiling} bps prints below it"
     )
 
 
@@ -711,9 +938,12 @@ def run_checks(
     # The floor is read before the operator group: the agent it excludes is
     # meant to fail `routable`, and operator.ready has to know which it is.
     add(check_below_floor(reads, facts))
+    add(check_card_figure(facts))
+    add(check_routable_count(facts))
     add(check_decompose(reads, facts, cfg.decompose_intent))
     add(check_external_count(facts))
     add(check_external_ready(reads, facts))
+    add(check_operator_endpoint(reads, cfg))
     add(check_buyer(chain, cfg))
     add(check_operator(chain, facts, cfg))
     add(check_team_wallets(team, facts, cfg))

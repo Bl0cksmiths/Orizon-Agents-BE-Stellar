@@ -59,6 +59,7 @@ from scripts.sow_metrics.fakes import (
     job,
     met_world,
 )
+from scripts.sow_metrics.report import block_problems
 
 ALL = [f"m{i:02d}" for i in range(1, 12)]
 
@@ -545,14 +546,56 @@ def test_reputation_gating_needs_the_floor_on(tmp_path: Path, params: dict[str, 
     assert out.status("m07") == "not_met" and out.metric("m07")["reason"] == expected
 
 
+def _v1_world() -> FakeWorld:
+    """The deployment before escrow v2: the live escrow is v1, so no payment can settle."""
+    world = met_world()
+    world.live_escrow = ESCROW_V1
+    del world.escrows[ESCROW_V2]
+    world.readiness["escrow"] = {"contract": ESCROW_V1, "version": 1}
+    return world
+
+
+def test_the_dispute_milestone_is_partly_met_before_v2_with_refunds_off(tmp_path: Path) -> None:
+    """The state the audit found: routes deployed, v1 live, refunds off. No window is live, so it never says so."""
+    world = _v1_world()
+    world.readiness["disputes"]["reconcile"]["enabled"] = False
+    out = run(world, tmp_path)
+    m = out.metric("m08")
+    assert m["status"] == "not_met"
+    assert m["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute window can open until a payment settles, which "
+        "needs escrow v2, and refunds are switched off."
+    )
+    assert "window is live" not in json.dumps(m)
+    assert m["reason"].startswith("No dispute window can open until a payment settles, which needs escrow v2")
+
+
+def test_the_dispute_milestone_before_v2_with_refunds_on_is_partly_met(tmp_path: Path) -> None:
+    out = run(_v1_world(), tmp_path)
+    assert out.metric("m08")["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute window can open until a payment settles, which "
+        "needs escrow v2."
+    )
+
+
+def test_a_live_v2_that_has_settled_nothing_opens_no_window(tmp_path: Path) -> None:
+    world = met_world()
+    world.escrows[ESCROW_V2].ids = [(kind, f) for kind, f in world.escrows[ESCROW_V2].ids if kind != "receipt"]
+    world.drop(world.marks["refund"])
+    out = run(world, tmp_path)
+    assert out.metric("m08")["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute window has opened yet, because no payment has "
+        "settled on escrow v2."
+    )
+
+
 def test_the_dispute_milestone_needs_refunds_switched_on(tmp_path: Path) -> None:
     world = met_world()
     world.readiness["disputes"]["reconcile"]["enabled"] = False
     out = run(world, tmp_path)
     assert out.status("m08") == "not_met"
-    assert out.metric("m08")["reason"] == (
-        "The dispute window is live, but the live backend does not report refunds as switched on."
-    )
+    assert out.metric("m08")["achieved"] == "Partly: the dispute routes are deployed, but refunds are switched off."
+    assert out.metric("m08")["reason"] == "Refunds are switched off."
 
 
 def test_a_readiness_without_the_refund_switch_is_not_refunds_on(tmp_path: Path) -> None:
@@ -560,24 +603,31 @@ def test_a_readiness_without_the_refund_switch_is_not_refunds_on(tmp_path: Path)
     del world.readiness["disputes"]
     out = run(world, tmp_path)
     assert out.metric("m08")["reason"] == (
-        "The dispute window is live, but the live backend does not report refunds as switched on (its readiness "
-        "report predates the refund switch)."
+        "Refunds are not reported as switched on (the readiness report predates the refund switch)."
     )
 
 
-def test_the_dispute_milestone_needs_every_dispute_route(tmp_path: Path) -> None:
+def test_the_dispute_milestone_is_no_without_every_dispute_route(tmp_path: Path) -> None:
     world = met_world()
     world.routes.discard("POST /api/disputes/{dispute_id}/uphold")
+    world.readiness["disputes"]["reconcile"]["enabled"] = False
     out = run(world, tmp_path)
+    assert out.metric("m08")["achieved"] == "No"
     assert out.metric("m08")["reason"] == "The live backend does not publish every dispute route."
 
 
 def test_the_dispute_milestone_needs_a_real_refund(tmp_path: Path) -> None:
     out = run(_no_refund_world(), tmp_path)
     assert out.status("m08") == "not_met"
-    assert out.metric("m08")["reason"] == (
-        "The dispute window is live, but no dispute has been refunded on-chain yet (see the dispute refund row)."
+    assert out.metric("m08")["achieved"] == (
+        "Partly: the dispute routes are deployed, but no dispute has been refunded on-chain yet (see the dispute "
+        "refund row)."
     )
+
+
+def test_the_dispute_milestone_is_yes_when_everything_holds(tmp_path: Path) -> None:
+    m = run(met_world(), tmp_path).metric("m08")
+    assert m["achieved"] == "Yes" and m["status"] == "met" and "reason" not in m
 
 
 def test_the_guide_must_answer_with_no_login(tmp_path: Path) -> None:
@@ -803,3 +853,88 @@ def test_a_bad_escrow_flag_is_refused(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path, "--escrow", BUYER2)
     assert out.code == EXIT_REFUSED
     assert "--escrow must be a contract id" in out.out
+
+
+# ── a milestone page that answers 404 ───────────────────────────
+PR91 = "https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/91"
+PR92 = "https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/92"
+
+
+def _dead_pages() -> FakeWorld:
+    world = met_world()
+    for path in (REGISTER_PAGE, GUIDE_PAGE, DEMO_PAGE):
+        world.pages[path] = (404, "<html>not found</html>")
+    return world
+
+
+def test_a_404_page_is_never_linked(tmp_path: Path) -> None:
+    out = run(_dead_pages(), tmp_path)
+    assert out.code == EXIT_MEASURED
+    urls = [link["url"] for m in out.block() for link in m["links"]]
+    assert not [u for u in urls if u.startswith(FRONTEND)], urls
+    for metric_id in ("m09", "m10"):
+        m = out.metric(metric_id)
+        assert m["links"] == [] and m["status"] == "not_met"
+        assert m["method"].endswith(
+            "The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
+        )
+    assert block_problems(out.block()) == []
+
+
+def test_a_pending_link_stands_in_for_a_404_page(tmp_path: Path) -> None:
+    out = run(
+        _dead_pages(),
+        tmp_path,
+        "--pending-link",
+        f"m09={PR91}",
+        "--pending-link",
+        f"m10={PR92}=Frontend pull request #92 (open): the demo script and the /demo page",
+        "--pending-link",
+        f"m06={PR91}",
+    )
+    assert out.metric("m09")["links"] == [
+        {
+            "label": "Pull request #91 in Bl0cksmiths/Orizon-Agents-FE-Stellar that adds the /guide/list-your-agent "
+            "page (not deployed yet)",
+            "url": PR91,
+            "kind": "pr",
+        }
+    ]
+    assert out.metric("m10")["links"] == [
+        {"label": "Frontend pull request #92 (open): the demo script and the /demo page", "url": PR92, "kind": "pr"}
+    ]
+    assert out.metric("m09")["method"].endswith(
+        "The page answered 404 when this ran, so the pull request that adds it is linked instead of the page."
+    )
+    assert [link["kind"] for link in out.metric("m06")["links"]][:2] == ["pr", "doc"]
+    urls = [link["url"] for m in out.block() for link in m["links"]]
+    assert not [u for u in urls if u.startswith(FRONTEND)], urls
+    assert block_problems(out.block()) == []
+
+
+def test_a_pending_link_is_not_used_for_a_live_page(tmp_path: Path) -> None:
+    out = run(met_world(), tmp_path, "--pending-link", f"m09={PR91}")
+    assert out.metric("m09")["links"][0]["url"] == f"{FRONTEND}{GUIDE_PAGE}"
+    assert PR91 not in json.dumps(out.block())
+    assert "note: --pending-link m09 was not used: /guide/list-your-agent answered HTTP 200, not 404" in out.out
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"m03={PR91}",
+        f"m09={PR91.replace('https', 'http')}",
+        "m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/tree/main",
+        f"m09={PR91}=#91",
+        "m09",
+    ],
+)
+def test_a_bad_pending_link_is_refused(tmp_path: Path, value: str) -> None:
+    out = run(met_world(), tmp_path, "--pending-link", value)
+    assert out.code == EXIT_REFUSED
+    assert "REFUSED: --pending-link" in out.out
+
+
+def test_a_pending_link_given_twice_is_refused(tmp_path: Path) -> None:
+    out = run(met_world(), tmp_path, "--pending-link", f"m09={PR91}", "--pending-link", f"m09={PR92}")
+    assert out.code == EXIT_REFUSED and "given twice" in out.out

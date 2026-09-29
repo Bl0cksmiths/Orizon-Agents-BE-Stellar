@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -39,6 +39,7 @@ class Answer:
     status: int
     body: Any  # the parsed JSON, or None when the body is not JSON
     location: str | None = None  # a redirect's target, for a page that is not a 200
+    headers: dict[str, str] = field(default_factory=dict)  # lower-cased names
 
     @property
     def ok(self) -> bool:
@@ -89,7 +90,13 @@ class Reads:
             )
             if response.status_code in RETRYABLE_STATUS and response.status_code not in answers:
                 raise RetryableStatus(response.status_code, retry_after_seconds(response))
-            return Answer(url, response.status_code, _json(response), response.headers.get("location"))
+            return Answer(
+                url,
+                response.status_code,
+                _json(response),
+                response.headers.get("location"),
+                {k.lower(): v for k, v in response.headers.items()},
+            )
 
         try:
             return self.retry.run(once)
@@ -155,6 +162,10 @@ class Reads:
     def page(self, path: str) -> Answer:
         """A frontend page, NOT following redirects: a redirect to a login is not a 200."""
         return self.get(f"{self.frontend}{path}", follow_redirects=False)
+
+    def agent_health(self, origin: str) -> Answer:
+        """GET / on an agent endpoint's origin: the reference agent's health check."""
+        return self.get(f"{origin}/")
 
     # ── the one write, opt-in ───────────────────────────────────
     def decompose(self, intent: str) -> Answer:

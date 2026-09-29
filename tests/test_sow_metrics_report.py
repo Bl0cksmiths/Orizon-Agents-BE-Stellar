@@ -134,15 +134,10 @@ def test_one_missed_entry_is_pinned_exactly(tmp_path: Path) -> None:
         "status": "not_met",
         "reason": "The /guide/list-your-agent page answers HTTP 404: it has not been deployed yet.",
         "method": (
-            "Opened the /guide/list-your-agent page on the live dApp with no login; published means it answers there."
+            "Opened the /guide/list-your-agent page on the live dApp with no login; published means it answers there. "
+            "The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
         ),
-        "links": [
-            {
-                "label": '"List your agent on Orizon" guide',
-                "url": "https://front.test/guide/list-your-agent",
-                "kind": "page",
-            }
-        ],
+        "links": [],
     }
 
 
@@ -206,7 +201,7 @@ def _mutations() -> list[tuple[str, Any]]:
         ("bare hash label", lambda b: first_tx(b).update(label=first_tx(b)["tx_hash"])),
         ("address in label", lambda b: b[1]["links"][0].update(label=f"owner {ADMIN}")),
         ("mainnet url", lambda b: first_tx(b).update(url=first_tx(b)["url"].replace("/testnet/", "/public/"))),
-        ("http url", lambda b: b[8]["links"][0].update(url="http://orizons.xyz/guide/list-your-agent")),
+        ("http url", lambda b: b[9]["links"][0].update(url="http://orizons.xyz/demo")),
         ("hash mismatch", lambda b: first_tx(b).update(tx_hash="c" * 64)),
         ("tx without hash", lambda b: first_tx(b).pop("tx_hash")),
         ("bad date", lambda b: first_tx(b).update(date="24/09/2026")),
@@ -238,8 +233,8 @@ def test_the_generator_refuses_to_write_a_block_that_breaks_the_shape(
 ) -> None:
     real = metrics_module.m09
 
-    def leaky(snap: Any, rules: Any) -> Any:
-        m = real(snap, rules)
+    def leaky(snap: Any, rules: Any, pending: Any = None) -> Any:
+        m = real(snap, rules, pending)
         m.links[0] = metrics_module.Link(f"guide by {ADMIN}", m.links[0].url, "page")
         return m
 

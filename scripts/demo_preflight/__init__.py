@@ -1,13 +1,15 @@
 """The demo pre-flight (story 5.04): GO / NO-GO for recording the demo video.
 
     python -m scripts.demo_preflight --buyer G... --operator G... --cap 0.5 \\
-        --out-dir docs/evidence/5.04/preflight
+        --operator-endpoint https://<the operator's agent> --out-dir docs/evidence/5.04/preflight
 
 The video shows only real testnet transactions, so the live deployment has to
 be in exactly the right state before the camera rolls: escrow v2 deployed and
 settling, refunds switched on, the 5.02 routes deployed, a real external
-operator bound and reachable, a real agent genuinely below the reputation
-floor for the exclusion scene, and funded buyer and operator wallets. A take
+operator bound and reachable, the operator's own agent free of fault
+injection, a real agent genuinely below the reputation floor for the exclusion
+scene (by a margin the plan card shows) beside at least three routable agents
+that clear it, a durable dispute store, and funded buyer and operator wallets. A take
 that finds a missing piece halfway through wastes the session. This tool finds
 it first, and every check says exactly what to fix.
 
