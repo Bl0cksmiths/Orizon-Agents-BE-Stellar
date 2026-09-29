@@ -384,3 +384,76 @@ on `main` before step 5, because the frontend's `check:addresses` CI job and
 3. **Rollback:** set `STELLAR_PAYMENT_ESCROW` back to `$ESCROW_V1` and Manual
    Deploy. v1's id stays valid; nothing about it changed. Funds already in v2
    custody stay reclaimable by their payers after expiry regardless.
+
+---
+
+## 5. Frontend: pin v2, deploy, check
+
+Follows the frontend's `docs/escrow-v2-switch.md`, steps 3–5. Right after 4.3.
+
+### 5.1 The v2 pin PR (frontend repo)
+
+1. **Action**, on a new branch from `origin/main` (in a worktree if the
+   checkout is busy):
+   - `lib/escrow-address.json`: set `"testnet"` to `$ESCROW_V2`. Leave
+     `"public"` as `null`: v2 is not on mainnet. Never type a guessed or
+     placeholder id here; every check compares it with a real source.
+   - `README.md`: in the testnet contracts table, add a `PaymentEscrow v2` row
+     with its Stellar Expert testnet link
+     (`https://stellar.expert/explorer/testnet/contract/$ESCROW_V2`) beside the
+     v1 row (`CBJPTMAP…25PI`), and label the v1 row as history. It stays in the
+     evidence.
+2. **Verify locally, before the PR:**
+
+   ```sh
+   cd "$FE"   # the worktree holding the pin branch
+   ORIZON_CONTRACTS_DIR="$CONTRACTS" npm run check:addresses
+   #   ok  escrow v2 pin (testnet)  C…
+   ORIZON_CONTRACTS_DIR="$CONTRACTS" ORIZON_ESCROW_PINS=lib/escrow-address.json npm run smoke
+   #   ✓ escrow v2 pin → live escrow is C…
+   ```
+
+   `check:addresses` compares the pin with `payment_escrow_v2` in the contracts
+   address book, and every README contract link with the address book (which
+   now holds both ids). `smoke` compares the pin with the escrow the **live**
+   backend reports (`/api/stellar/network` → `contracts.payment_escrow`); once
+   the address book records `payment_escrow_v2`, it also requires production's
+   `payment_escrow` to be that id. A `null` pin prints as `pend`/pending and is
+   not counted as checked.
+3. **PR and merge:** open the PR to `main`, wait for the `addresses` job to go
+   green, merge with a merge commit.
+
+### 5.2 Vercel deploys `main`
+
+1. **Expected:** Vercel builds and promotes the merge commit to production on
+   its own. **Verify** in the Vercel dashboard that the production deployment's
+   commit is the pin PR's merge commit.
+2. **Verify the deployment:**
+
+   ```sh
+   cd "$FE"   # up to date with origin/main
+   ORIZON_CONTRACTS_DIR="$CONTRACTS" npm run smoke
+   ORIZON_CONTRACTS_DIR="$CONTRACTS" npm run check:addresses
+   for p in /guide/list-your-agent /evidence /demo /litepaper /app/register; do
+     printf '%s ' "$p"; curl -s -o /dev/null -w '%{http_code}\n' "$SITE$p"
+   done
+   ```
+
+   - `smoke` and `check:addresses` both pass, and the escrow pin line reads
+     `ok`/`✓`, not pending.
+   - Every page answers `200`. Redirects are not followed on purpose: a
+     redirect to a login is a failure, not a pass.
+3. **Verify the plan card**, with a funded testnet wallet (a team wallet),
+   at `$SITE/app/orchestrator`: decompose any intent and read the card. Since
+   frontend #89 the card's payment copy always describes v2 custody: the
+   signature moves the plan's maximum into escrow, delivered steps are paid
+   from it and the rest comes back. What the pin changes is that the card now
+   has a v2 id to compare with the backend's escrow. **Expected:** no
+   "On-chain payment is paused" notice. If it shows, it names both ids: the
+   pin and the backend disagree, and Authorize stays paused until they agree.
+   Simulate is unaffected either way.
+4. **Rollback:** Vercel dashboard → the frontend project → **Deployments** →
+   the previous production deployment (noted in step 1.5) → **Promote to
+   Production** (Instant Rollback). Then revert the pin PR (`"testnet": null`)
+   so the next push to `main` does not re-deploy it. With the pin back at
+   `null`, the checks report it as pending again.
