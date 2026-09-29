@@ -125,6 +125,9 @@ class Runner:
     rating_seen: int = 0
     # agent name -> id from GET /api/agents, for a resumed run with no plan.
     directory: dict[str, str] = field(default_factory=dict)
+    # What a dry run found that would stop the real run it rehearses. A dry
+    # run with any of these exits EXIT_REFUSED, naming each, never 0.
+    blockers: list[str] = field(default_factory=list)
 
     # ── output ──────────────────────────────────────────────────
     def say(self, line: str = "") -> None:
@@ -206,6 +209,15 @@ class Runner:
             start = self.preflight()
             if self.cfg.dry_run:
                 self.print_plan(start)
+                if self.blockers:
+                    self.say("")
+                    self.say("A real run with these flags would stop:")
+                    for blocker in self.blockers:
+                        self.say(f"  - {blocker}")
+                    raise Stop(
+                        EXIT_REFUSED,
+                        f"dry run: {len(self.blockers)} blocker(s) a real run would hit: " + "; ".join(self.blockers),
+                    )
                 return EXIT_OK
             last = stage_index(self.cfg.until)
             for name in STAGES[stage_index(start) : last + 1]:
@@ -312,7 +324,7 @@ class Runner:
             )
             if not self.cfg.dry_run:
                 raise Stop(EXIT_REFUSED, message)
-            self.say(f"WARNING: {message}; a real run refuses")
+            self.blockers.append(f"{message}: a real run refuses it before decompose (exit {EXIT_REFUSED})")
 
         if not self.cfg.dry_run:
             self.save()
@@ -397,13 +409,26 @@ class Runner:
     def print_plan(self, start: str) -> None:
         buyer = self.need_buyer().public_key
         chain = self.need_chain()
+        stages = STAGES[stage_index(start) : stage_index(self.cfg.until) + 1]
         sac = self.network.get("asset_sac")
         if sac:
             balance = chain.sac_balance(str(sac), buyer, buyer)
             if balance is None:
                 self.say(f"buyer {buyer} does not exist on testnet: fund it (friendbot) before a real run")
+                if "decompose" in stages:
+                    self.blockers.append(
+                        f"the buyer {buyer} does not exist on testnet: a real run refuses it after decompose, "
+                        f"before anything is signed (exit {EXIT_REFUSED}); fund it (friendbot) first"
+                    )
             else:
                 self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
+        version = self.state.escrow_version or 1
+        if version < 2 and "verify" in stages:
+            escrow = (self.state.authorize or {}).get("escrow") or self.contracts.get("payment_escrow")
+            self.blockers.append(
+                f"the escrow {escrow} is v1, which cannot settle an external payer's funds (D-039): a real run "
+                f"stops at 'verify' with exit {EXIT_VERIFY_FAILED}, after the buyer has signed; deploy escrow v2 first"
+            )
         self.say("")
         self.say("DRY RUN — nothing was built, signed or submitted. The plan:")
         steps = {
@@ -431,7 +456,7 @@ class Runner:
             "refund": "GET /api/disputes/{id} until credited with a confirmed rating; getTransaction on both",
             "reputation": "GET /api/stellar/reputation; compare start / after ratings / after dispute",
         }
-        for name in STAGES[stage_index(start) : stage_index(self.cfg.until) + 1]:
+        for name in stages:
             self.say(f"  {name:<10} {steps[name]}")
         self.say(f"evidence would be appended to {self.log.jsonl}")
 

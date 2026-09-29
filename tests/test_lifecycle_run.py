@@ -263,12 +263,50 @@ def test_refuses_an_unfunded_buyer_before_anything_is_signed(buyer: Keypair, tmp
     assert posts(world, "/api/stellar/build/authorize") == 0
 
 
-def test_a_dry_run_names_an_unfunded_buyer(buyer: Keypair, tmp_path: Path) -> None:
+def test_a_dry_run_blocks_on_an_unfunded_buyer(buyer: Keypair, tmp_path: Path) -> None:
     world = FakeWorld(buyer=buyer.public_key)
     del world.balances[buyer.public_key]
     result = run(world, buyer, tmp_path / "run", "--dry-run")
-    assert result.code == EXIT_OK
-    assert "does not exist on testnet" in result.out
+    assert result.code == EXIT_REFUSED, result.out
+    assert "A real run with these flags would stop:" in result.out
+    assert f"the buyer {buyer.public_key} does not exist on testnet" in result.out
+    assert "STOPPED (exit 3): dry run: 1 blocker(s)" in result.out
+    assert not [c for c in world.calls if c["method"] == "POST" and not c["path"] == "/"]
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_dry_run_blocks_on_a_v1_escrow_that_the_run_would_verify(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, escrow_version=1)
+    result = run(world, buyer, tmp_path / "run", "--dry-run")
+    assert result.code == EXIT_REFUSED, result.out
+    assert f"the escrow {ESCROW} is v1" in result.out and "D-039" in result.out
+    assert "stops at 'verify' with exit 7" in result.out
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_v1_dry_run_that_stops_before_verify_is_not_blocked(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, escrow_version=1)
+    result = run(world, buyer, tmp_path / "run", "--dry-run", "--until", "execute")
+    assert result.code == EXIT_OK, result.out
+    assert "would stop" not in result.out
+
+
+def test_a_dry_run_names_every_blocker_at_once(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, escrow_version=1, agent_bound=False)
+    del world.balances[buyer.public_key]
+    result = run(world, buyer, tmp_path / "run", "--dry-run")
+    assert result.code == EXIT_REFUSED
+    assert "dry run: 3 blocker(s)" in result.out
+    assert "is not an external, bound agent" in result.out
+    assert "does not exist on testnet" in result.out and "is v1" in result.out
+
+
+def test_a_dry_run_blocks_on_an_agent_a_real_run_refuses(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, agent_bound=False)
+    result = run(world, buyer, tmp_path / "run", "--dry-run")
+    assert result.code == EXIT_REFUSED
+    assert f"agent {AGENT!r} is not an external, bound agent" in result.out
+    assert "a real run refuses it before decompose (exit 3)" in result.out
 
 
 def test_refuses_without_the_buyer_secret(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
