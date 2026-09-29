@@ -75,14 +75,19 @@ class Reads:
     clock: Callable[[], float] = time.monotonic
 
     # ── plumbing ────────────────────────────────────────────────
-    def get(self, url: str, *, follow_redirects: bool = True) -> Answer:
-        """One GET, retried on transient failures. Any final status is an Answer."""
+    def get(self, url: str, *, follow_redirects: bool = True, answers: frozenset[int] = frozenset()) -> Answer:
+        """One GET, retried on transient failures. Any final status is an Answer.
+
+        `answers` names statuses that are a real answer on this route rather
+        than a transient failure: /readiness answers 503 WITH its report when
+        a dependency is missing, and asking again gets the same report.
+        """
 
         def once() -> Answer:
             response = self.client.get(
                 url, timeout=GET_TIMEOUT, headers={"accept": "application/json"}, follow_redirects=follow_redirects
             )
-            if response.status_code in RETRYABLE_STATUS:
+            if response.status_code in RETRYABLE_STATUS and response.status_code not in answers:
                 raise RetryableStatus(response.status_code, retry_after_seconds(response))
             return Answer(url, response.status_code, _json(response), response.headers.get("location"))
 
@@ -130,7 +135,7 @@ class Reads:
         return self.get(self.api_url("/stellar/network"))
 
     def readiness(self) -> Answer:
-        return self.get(f"{self.backend}/readiness")
+        return self.get(f"{self.backend}/readiness", answers=frozenset({503}))
 
     def adoption(self) -> Answer:
         return self.get(self.api_url("/ecosystem/adoption"))
