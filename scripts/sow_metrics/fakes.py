@@ -155,6 +155,7 @@ class FakeWorld:
     api_down: set[str] = field(default_factory=set)  # paths answering 503
     github_status: int | None = None  # every repository read answers this
     calls: list[str] = field(default_factory=list)
+    marks: dict[str, str] = field(default_factory=dict)  # a name -> the tx hash of a notable transaction
     _n: int = 0
 
     # ── building the world ──────────────────────────────────────
@@ -199,6 +200,11 @@ class FakeWorld:
         for who in (account, *also):
             self.histories.setdefault(who, []).append(copy.deepcopy(record))
         return tx_hash
+
+    def drop(self, tx_hash: str) -> None:
+        """Remove a transaction from every history, as if it had never been sent."""
+        for account, records in self.histories.items():
+            self.histories[account] = [r for r in records if r["transaction_hash"] != tx_hash]
 
     def add_agent(self, agent_id: str, owner: str, *, at: str = "2026-09-10", signer: str | None = None) -> str:
         when = ts(at)
@@ -613,18 +619,18 @@ def met_world() -> FakeWorld:
     # v1 history: the admin paying itself before the sprint (excluded twice over).
     w.charge_v1(ADMIN, "house_agent", 1_140_000, job("v1-a"), at="2026-05-13")
     # v2 sprint settlements: three workflows to outside operators' agents, four charges.
-    w.settle_v2(BUYER1, [("alpha", A1)], JOB1, at="2026-09-21T10:00:00")
-    w.settle_v2(BUYER2, [("beta", A2)], JOB2, at="2026-09-22T10:00:00")
-    w.settle_v2(BUYER1, [("gamma", A3), ("alpha", A3)], JOB3, at="2026-09-23T10:00:00")
+    w.marks["settle1"] = w.settle_v2(BUYER1, [("alpha", A1)], JOB1, at="2026-09-21T10:00:00")
+    w.marks["settle2"] = w.settle_v2(BUYER2, [("beta", A2)], JOB2, at="2026-09-22T10:00:00")
+    w.marks["settle3"] = w.settle_v2(BUYER1, [("gamma", A3), ("alpha", A3)], JOB3, at="2026-09-23T10:00:00")
 
     # Ratings: automatic ones, and one upheld dispute on job 1 refunded to its payer.
     for agent_id, job_hex, payer in (("alpha", JOB1, BUYER1), ("beta", JOB2, BUYER2), ("gamma", JOB3, BUYER1)):
         w.rate(agent_id, job_hex, payer, at="2026-09-23")
     # The refund is also seen from the dispatch signer's history: it must count once.
-    w.dispute("alpha", JOB1, BUYER1, at="2026-09-24T09:00:00")
-    w.transfer(SIGNER, BUYER1, A1 // 2, at="2026-09-24T09:05:00", also=(DISPATCH,))
+    w.marks["dispute"] = w.dispute("alpha", JOB1, BUYER1, at="2026-09-24T09:00:00")
+    w.marks["refund"] = w.transfer(SIGNER, BUYER1, A1 // 2, at="2026-09-24T09:05:00", also=(DISPATCH,))
     # The 4.01 drill: the admin paying a team key, with no dispute behind it.
-    w.transfer(ADMIN, TEAM_OP, 540_000, at="2026-09-12")
+    w.marks["drill"] = w.transfer(ADMIN, TEAM_OP, 540_000, at="2026-09-12")
 
     w.readiness = {
         "status": "ready",
