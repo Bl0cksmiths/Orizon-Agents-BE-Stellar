@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from .api import Answer, Reads, Unreachable
@@ -125,6 +126,8 @@ class Facts:
     escrow_version: int | None = None
     settler: str | None = None
     below_floor: list[str] = field(default_factory=list)
+    floor_bps: int | None = None
+    lower_bounds: dict[str, int] = field(default_factory=dict)  # agent id -> lower_bound_bps, as last read
     disclosures: list[str] = field(default_factory=list)
 
     @property
@@ -172,6 +175,26 @@ def first_unready_step(body: dict[str, Any]) -> dict[str, Any] | None:
         if step.get("status") != "done":
             return step
     return None
+
+
+def card_stars(bps: int) -> str:
+    """The figure the plan card prints for `bps`: the frontend's `(bps / 2000).toFixed(2)`.
+
+    `scoreOutOfFive` in `lib/reputation-math.ts`, which the exclusions panel
+    renders the lower bound and the floor with. `toFixed` rounds the exact
+    binary value of the quotient half up, and so does this: `Decimal(float)`
+    is that exact value.
+    """
+    return str(Decimal(bps / 2000).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def highest_visibly_below(floor_bps: int) -> int:
+    """The highest lower bound the card prints as a smaller figure than the floor's own."""
+    floor_figure = Decimal(card_stars(floor_bps))
+    bps = floor_bps - 1
+    while Decimal(card_stars(bps)) >= floor_figure:
+        bps -= 1
+    return bps
 
 
 # ── network ─────────────────────────────────────────────────────
@@ -540,6 +563,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     floor = params.obj().get("floor_bps")
     if not isinstance(floor, int):
         return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
+    facts.floor_bps = floor
     reputations = batch.obj().get("reputations") or {}
     registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
     genuine: list[str] = []
@@ -556,6 +580,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             continue
         genuine.append(agent_id)
         facts.below_floor.append(agent_id)
+        facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
     if genuine:
         detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
         return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else ""))
@@ -571,6 +596,36 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
         "A degraded or stale read is the prior or an old read, never a verdict.",
+    )
+
+
+def check_card_figure(facts: Facts) -> Check:
+    check = Check(
+        "exclusion.card_figure",
+        "exclusion",
+        "The plan card prints the excluded agent's lower bound below the floor's figure",
+    )
+    if not facts.below_floor or facts.floor_bps is None:
+        return check.skipped("there is no genuinely below-floor agent to judge", "Fix exclusion.below_floor first.")
+    floor = facts.floor_bps
+    floor_figure = card_stars(floor)
+    ceiling = highest_visibly_below(floor)
+    blurred = [a for a in facts.below_floor if Decimal(card_stars(facts.lower_bounds[a])) >= Decimal(floor_figure)]
+    if blurred:
+        return check.failed(
+            "; ".join(
+                f"{a}'s lower bound {facts.lower_bounds[a]} bps prints as {card_stars(facts.lower_bounds[a])}, "
+                f"the floor's own figure ({floor} bps prints as {floor_figure})"
+                for a in blurred
+            )
+            + ": on camera the row reads as if the agent clears the floor",
+            f"The bound must be {ceiling} bps or lower (it prints as {card_stars(ceiling)}). Give the agent one more "
+            "real failed run (demo script, 'How the below-floor agent is made, honestly'), wait for a fresh read, "
+            "and rerun. Never write a rating by hand.",
+        )
+    return check.passed(
+        ", ".join(f"{a}: {card_stars(facts.lower_bounds[a])} ({facts.lower_bounds[a]} bps)" for a in facts.below_floor)
+        + f" against the floor's {floor_figure} ({floor} bps); at most {ceiling} bps prints below it"
     )
 
 
@@ -715,6 +770,7 @@ def run_checks(
     # The floor is read before the operator group: the agent it excludes is
     # meant to fail `routable`, and operator.ready has to know which it is.
     add(check_below_floor(reads, facts))
+    add(check_card_figure(facts))
     add(check_decompose(reads, facts, cfg.decompose_intent))
     add(check_external_count(facts))
     add(check_external_ready(reads, facts))

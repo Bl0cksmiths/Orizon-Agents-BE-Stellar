@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from scripts.demo_preflight.checks import FAIL, PASS, SKIPPED, WARN
+from scripts.demo_preflight.checks import FAIL, PASS, SKIPPED, WARN, card_stars, highest_visibly_below
 from scripts.demo_preflight.cli import main
 from scripts.demo_preflight.config import EXIT_GO, EXIT_INCOMPLETE, EXIT_NO_GO, EXIT_REFUSED, FRONTEND_PAGES
 from scripts.demo_preflight.fakes import (
@@ -142,6 +142,7 @@ def test_every_check_is_in_the_report(tmp_path: Path) -> None:
         "operator.external",
         "operator.ready",
         "exclusion.below_floor",
+        "exclusion.card_figure",
         "exclusion.decompose",
         "wallets.buyer",
         "wallets.operator",
@@ -464,6 +465,49 @@ def test_an_unlisted_agent_below_the_floor_does_not_count(tmp_path: Path) -> Non
     world = healthy_world()
     world.agents = [a for a in world.agents if a["id"] != "lowrep"]
     assert run(world, tmp_path).status("exclusion.below_floor") == FAIL
+
+
+@pytest.mark.parametrize(
+    ("bps", "figure"),
+    [(5443, "2.72"), (5489, "2.74"), (5490, "2.75"), (5499, "2.75"), (5500, "2.75"), (4100, "2.05")],
+)
+def test_the_card_figure_is_the_frontends_to_fixed(bps: int, figure: str) -> None:
+    # `(bps / 2000).toFixed(2)`, lib/reputation-math.ts scoreOutOfFive.
+    assert card_stars(bps) == figure
+
+
+def test_the_highest_visible_bound_is_derived_from_the_floor() -> None:
+    assert highest_visibly_below(5500) == 5489
+    assert highest_visibly_below(6000) == 5989
+
+
+def test_a_bound_of_5489_prints_below_the_floor_and_passes(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.reputations["lowrep"] = rep("lowrep", 5489)
+    out = run(world, tmp_path)
+    check = out.check("exclusion.card_figure")
+    assert check["status"] == PASS and check["required"] is True, check
+    assert "lowrep: 2.74 (5489 bps)" in check["detail"] and "2.75 (5500 bps)" in check["detail"]
+    assert out.code == EXIT_GO, out.out
+
+
+@pytest.mark.parametrize("bps", [5490, 5499])
+def test_a_bound_that_prints_as_the_floors_figure_fails(tmp_path: Path, bps: int) -> None:
+    world = healthy_world()
+    world.reputations["lowrep"] = rep("lowrep", bps)
+    out = run(world, tmp_path)
+    assert out.status("exclusion.below_floor") == PASS
+    check = out.check("exclusion.card_figure")
+    assert check["status"] == FAIL
+    assert f"lowrep's lower bound {bps} bps prints as 2.75, the floor's own figure" in check["detail"]
+    assert "5489 bps or lower" in check["fix"]
+    assert out.code == EXIT_NO_GO
+
+
+def test_the_card_figure_is_skipped_without_a_below_floor_agent(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.reputations["lowrep"] = rep("lowrep", 5600)
+    assert run(world, tmp_path).status("exclusion.card_figure") == SKIPPED
 
 
 def test_reputation_routing_off_fails(tmp_path: Path) -> None:
