@@ -40,6 +40,13 @@ FRONTEND_PAGES: tuple[str, ...] = (
 # The health probe is asked again until this budget is spent.
 WARMUP_BUDGET_SECONDS = 120.0
 
+# A backend that has just woken reads every agent's reputation as `degraded`
+# (the prior, served because the ledger read has not answered yet). When EVERY
+# registered agent reads degraded, the batch is read again, this many times
+# in all and this far apart, before anything is concluded from it.
+REPUTATION_READ_ATTEMPTS = 3
+REPUTATION_REREAD_SECONDS = 5.0
+
 # The backend's own defaults, restated. `MAX_REFUND_USDC` is not on any public
 # route, so the pre-flight takes it as a flag and says which value it assumed;
 # the Render dashboard overrides render.yaml, so only the operator knows the

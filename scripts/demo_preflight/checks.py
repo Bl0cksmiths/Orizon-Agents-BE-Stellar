@@ -56,6 +56,8 @@ from .config import (
     EXPLORER_ACCOUNT,
     FRONTEND_PAGES,
     OPERATOR_FEE_ALLOWANCE,
+    REPUTATION_READ_ATTEMPTS,
+    REPUTATION_REREAD_SECONDS,
     SETTLER_FEE_ALLOWANCE,
     TESTNET_PASSPHRASE,
     WARMUP_BUDGET_SECONDS,
@@ -546,6 +548,12 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
 
 
 # ── the exclusion moment ────────────────────────────────────────
+def all_degraded(reputations: dict[str, Any], agent_ids: list[str]) -> bool:
+    """Whether every one of `agent_ids` that has an entry reads degraded (and at least one does)."""
+    entries = [reputations[a] for a in agent_ids if isinstance(reputations.get(a), dict)]
+    return bool(entries) and all(e.get("degraded") is True for e in entries)
+
+
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
     check = Check("exclusion.below_floor", "exclusion", "A registered agent is genuinely below the reputation floor")
     if not facts.warm:
@@ -571,9 +579,38 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     if not isinstance(floor, int):
         return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
     facts.floor_bps = floor
-    reputations = batch.obj().get("reputations") or {}
-    facts.reputations = reputations if isinstance(reputations, dict) else {}
     registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
+    reputations = batch.obj().get("reputations") or {}
+    # A cold start reads every agent degraded until the backend's first
+    # ledger read answers. That is the backend waking, not a finding about
+    # any agent, so the batch is read again before anything is concluded.
+    reads_made = 1
+    while all_degraded(reputations, registered) and reads_made < REPUTATION_READ_ATTEMPTS:
+        reads.sleep(REPUTATION_REREAD_SECONDS)
+        try:
+            batch = reads.reputation()
+        except Unreachable as exc:
+            return check.failed(str(exc), "Rerun; the reputation route did not answer.")
+        if not batch.ok:
+            return check.failed(
+                f"reputation batch {_status_line(batch)} on re-read {reads_made + 1}",
+                "Rerun; the reputation route did not answer.",
+            )
+        reputations = batch.obj().get("reputations") or {}
+        reads_made += 1
+    if all_degraded(reputations, registered):
+        return check.failed(
+            f"every registered agent ({len(registered)}) read degraded on each of {reads_made} reads "
+            f"{REPUTATION_REREAD_SECONDS:.0f} s apart: the backend could not read the ReputationLedger, so this "
+            "is no verdict on any agent, not a finding that none is below the floor",
+            "Check the Soroban RPC the backend reads (/api/stellar/network rpc_url) answers and that the "
+            "reputation_ledger id there is right, wait a minute for the backend's ledger read, and rerun. On "
+            "camera a degraded read shows '⚠ unverified' and no exclusion at all.",
+        )
+    facts.reputations = reputations if isinstance(reputations, dict) else {}
+    reread = (
+        f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
+    )
     genuine: list[str] = []
     ignored: list[str] = []
     for agent_id in registered:
@@ -591,7 +628,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
     if genuine:
         detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
-        return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else ""))
+        return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
     degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
     return check.failed(
         f"no registered, listed agent has an on-chain lower bound below {floor} bps"
@@ -600,7 +637,8 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             f"; {len(degraded)} of {len(registered)} registered agents read degraded (the ledger could not be read)"
             if degraded
             else ""
-        ),
+        )
+        + reread,
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
         "A degraded or stale read is the prior or an old read, never a verdict.",

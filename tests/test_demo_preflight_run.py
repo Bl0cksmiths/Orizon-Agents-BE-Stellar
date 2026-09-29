@@ -49,6 +49,7 @@ class Outcome:
     out: str
     dir: Path
     world: FakeWorld
+    sleeps: list[float]
 
     def report(self) -> dict[str, Any]:
         return json.loads((self.dir / "demo-preflight.json").read_text())
@@ -75,9 +76,11 @@ def run(
     out_dir = tmp_path / "preflight"
     reg = register or FakeWorld.write_register(tmp_path / "team_wallets.json")
     clock = [0.0]
+    sleeps: list[float] = []
 
     def sleep(seconds: float) -> None:
         clock[0] += seconds
+        sleeps.append(seconds)
 
     wallets: list[str] = []
     if buyer is not None:
@@ -111,7 +114,7 @@ def run(
         clock=lambda: clock[0],
         now=lambda: 1_790_000_000.0,
     )
-    return Outcome(code, stream.getvalue(), out_dir, world)
+    return Outcome(code, stream.getvalue(), out_dir, world, sleeps)
 
 
 # ── the ready deployment ────────────────────────────────────────
@@ -453,6 +456,49 @@ def test_a_degraded_or_stale_below_floor_read_never_counts(tmp_path: Path, flag:
     check = out.check("exclusion.below_floor")
     assert check["status"] == FAIL
     assert f"lowrep (4100 bps, {flag})" in check["detail"]
+
+
+def _batch_reads(world: FakeWorld) -> int:
+    return world.calls.count("api GET /api/stellar/reputation")
+
+
+@pytest.mark.parametrize("cold", [1, 2])
+def test_a_cold_start_that_reads_every_agent_degraded_is_read_again(tmp_path: Path, cold: int) -> None:
+    world = healthy_world()
+    world.degraded_batches = cold
+    out = run(world, tmp_path)
+    check = out.check("exclusion.below_floor")
+    assert check["status"] == PASS, check
+    assert "lowrep (4100 < 5500 bps)" in check["detail"]
+    assert f"after {cold + 1} reads: every agent read degraded first" in check["detail"]
+    assert _batch_reads(world) == cold + 1
+    assert out.sleeps.count(5.0) == cold
+    assert out.status("exclusion.routable_count") == PASS
+    assert out.code == EXIT_GO, out.out
+
+
+def test_every_agent_degraded_on_every_read_fails_honestly(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.degraded_batches = 10
+    out = run(world, tmp_path)
+    check = out.check("exclusion.below_floor")
+    assert check["status"] == FAIL
+    assert check["detail"].startswith("every registered agent (3) read degraded on each of 3 reads 5 s apart")
+    assert "no verdict on any agent" in check["detail"]
+    assert "no registered, listed agent" not in check["detail"]
+    assert "RPC" in check["fix"]
+    assert _batch_reads(world) == 3  # bounded: three reads, never more
+    assert out.sleeps.count(5.0) == 2
+    assert out.status("exclusion.routable_count") == SKIPPED
+    assert out.code == EXIT_NO_GO
+
+
+def test_one_degraded_agent_is_not_a_cold_start_and_is_not_read_again(tmp_path: Path) -> None:
+    world = healthy_world()
+    world.reputations["alpha"] = rep("alpha", 6100, degraded=True)
+    out = run(world, tmp_path)
+    assert _batch_reads(world) == 1
+    assert "after" not in out.check("exclusion.below_floor")["detail"]
 
 
 def test_a_seeded_agent_below_the_floor_does_not_count(tmp_path: Path) -> None:

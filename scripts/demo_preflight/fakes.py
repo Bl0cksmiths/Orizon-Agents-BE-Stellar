@@ -130,6 +130,7 @@ class FakeWorld:
     pages: dict[str, int] = field(default_factory=dict)
     decompose_body: dict[str, Any] = field(default_factory=dict)
     decompose_status: int = 200
+    degraded_batches: int = 0  # reputation batch reads that answer every entry degraded (a cold start)
     calls: list[str] = field(default_factory=list)
     _health_seen: int = 0
 
@@ -210,7 +211,14 @@ class FakeWorld:
                 body = {"agent_id": agent_id, "checked_at": 1, "ready": False, "steps": ready_steps(registered="todo")}
             return _json(200, body)
         if path == "/api/stellar/reputation":
-            return _json(200, {"reputations": self.reputations, "floor_bps": FLOOR, "prior_bps": 7000})
+            reputations = self.reputations
+            if self.degraded_batches > 0:
+                self.degraded_batches -= 1
+                reputations = {
+                    a: {**r, "lower_bound_bps": 5677, "source": "prior", "degraded": True}
+                    for a, r in reputations.items()
+                }
+            return _json(200, {"reputations": reputations, "floor_bps": FLOOR, "prior_bps": 7000})
         if path == "/api/stellar/reputation/params":
             return _json(200, self.params)
         return not_found
