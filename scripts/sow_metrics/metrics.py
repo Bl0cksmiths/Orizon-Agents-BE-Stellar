@@ -379,7 +379,8 @@ def m02(snap: Snapshot, rules: Rules) -> Metric:
     for owner, agent_ids in sorted(owners.items(), key=lambda kv: (rules.party(kv[0]).phrase, kv[0])):
         party = rules.party(owner)
         verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
-        label = f"{_sentence(party.phrase)} — owns {plural(len(agent_ids), 'agent')} ({verdict})"
+        owned = _join(sorted(agent_ids)) if len(agent_ids) <= 3 else plural(len(agent_ids), "agent")
+        label = f"{_sentence(party.phrase)} — owns {owned} ({verdict})"
         links.append(account_link(label, owner))
         item = {"owner": owner, "agents": sorted(agent_ids), "label": label}
         if party.exclusion is None:
