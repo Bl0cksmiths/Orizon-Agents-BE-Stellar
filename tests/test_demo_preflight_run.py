@@ -137,6 +137,7 @@ def test_every_check_is_in_the_report(tmp_path: Path) -> None:
         "escrow.version",
         "escrow.settler",
         "refunds.enabled",
+        "refunds.store",
         "refunds.settler_balance",
         "operator.external",
         "operator.ready",
@@ -346,14 +347,20 @@ def test_refunds_off_fails(tmp_path: Path) -> None:
     assert "DISPUTE_REFUNDS_ENABLED=true" in check["fix"] and "REFUND_RECONCILE_ENABLED=true" in check["fix"]
 
 
-def test_an_in_memory_dispute_store_warns_and_does_not_gate(tmp_path: Path) -> None:
+def test_a_durable_dispute_store_passes(tmp_path: Path) -> None:
+    check = run(healthy_world(), tmp_path).check("refunds.store")
+    assert check["status"] == PASS and check["required"] is True
+
+
+def test_an_in_memory_dispute_store_fails_and_gates(tmp_path: Path) -> None:
     world = healthy_world()
     assert world.readiness is not None
     world.readiness["disputes"]["store"] = "memory"
     out = run(world, tmp_path)
-    assert out.code == EXIT_GO, out.out
+    assert out.code == EXIT_NO_GO, out.out
     check = out.check("refunds.store")
-    assert check["status"] == WARN and check["required"] is False and "DATABASE_URL" in check["fix"]
+    assert check["status"] == FAIL and check["required"] is True
+    assert "'memory'" in check["detail"] and "DATABASE_URL" in check["fix"]
 
 
 def test_a_settler_that_cannot_pay_a_refund_fails(tmp_path: Path) -> None:

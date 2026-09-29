@@ -4,7 +4,7 @@ Each check reads, judges and says what to fix. It is one of
 
   PASS     holds; nothing to do
   WARN     holds, with a caveat the take must act on (a team wallet to disclose
-           on camera, an in-memory dispute store that a restart would empty)
+           on camera)
   FAIL     does not hold; `fix` says exactly what to change
   SKIPPED  could not be judged — a flag was not given, or a check it depends
            on failed. SKIPPED is NEVER a pass: a required check that was
@@ -401,16 +401,20 @@ def check_refunds_enabled(facts: Facts) -> Check:
 
 
 def check_dispute_store(facts: Facts) -> Check:
-    check = Check("refunds.store", "refunds", "Settlements and disputes survive a restart", required=False)
+    # Required, not advisory: story 5.01 AC4 (a dispute accepted after a
+    # restart) and the script's refunds row both need DATABASE_URL. Recording
+    # "in one sitting" is no workaround — a free-tier sleep is not scheduled.
+    check = Check("refunds.store", "refunds", "Settlements and disputes survive a restart (a durable store)")
     disputes = (facts.readiness or {}).get("disputes")
     store = disputes.get("store") if isinstance(disputes, dict) else None
     if store is None:
         return check.skipped("/readiness has no disputes.store", "Fix build.readiness first.")
     if store != "postgres":
-        return check.warned(
-            f"disputes.store is {store!r}: a restart between the settle and the dispute (a free-tier sleep) "
-            "loses the settlement, and the dispute scene with it",
-            "Set DATABASE_URL on the Render dashboard, or record the settle-to-uphold scenes in one sitting.",
+        return check.failed(
+            f"disputes.store is {store!r}, not a durable store: a restart between the settle and the dispute "
+            "(a free-tier sleep) loses the settlement, and the dispute scene with it",
+            "Set DATABASE_URL on the Render dashboard to a Postgres database, then redeploy; /readiness must "
+            "read disputes.store: postgres.",
         )
     return check.passed("postgres")
 
