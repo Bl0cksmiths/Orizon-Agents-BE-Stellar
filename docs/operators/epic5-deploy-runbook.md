@@ -846,3 +846,51 @@ and the frontend's after-deploy checklist.
    recorded (the check-in issue, BLO-138, is the natural place).
 6. **Rollback:** revert the index PR; the previous index stays valid, since
    every value in it was measured when it was written.
+
+---
+
+## 11. Closing (Rie, with Dan's inputs)
+
+1. **The Week-4 evidence bundle (BLO-134, due Fri 2026-10-02).** SOW §6.1 row
+   for Week 4 / D4: the demo video, the public guide URL
+   (`$SITE/guide/list-your-agent`), the settled-workflow hashes (from 8 and
+   7.4), that week's merged PRs (step 2), and the Week-4 X post. Start
+   assembling Thu 2026-10-01.
+2. **The X post (BLO-136, due Fri 2026-10-02).** One post, tagging
+   @StellarOrg @PHI_stellar @riseinweb3, claiming only what has shipped. The
+   escrow asset on testnet is native XLM: no "earning USDC" claim. Add its URL
+   to BLO-134.
+3. **The check-in (BLO-138, Wed 2026-09-30).** Bring specific blockers:
+   anything in this runbook not done, and every open **confirm** item below
+   that needs the Chapter Lead. Record attendance, what was raised, what was
+   answered and any commitments as a comment on BLO-138.
+4. **Linear status updates.** Move each story to the state its evidence
+   supports, never further: 5.01 (BLO-35), 5.02 (BLO-36), 5.04 (BLO-38), 5.05
+   (BLO-39), and 5.03 / 5.06 once their pages are live. Update R5 and R9 in
+   the risk register (steps 1.1 and 7.5). **Confirm** the issue ids for 5.03
+   and 5.06, which no source here names.
+5. **Verify:** BLO-134 links every item it lists, and each link opens.
+
+---
+
+## 12. Rollback, per step
+
+Roll back the latest step first and work backwards. Nothing here deletes a
+contract, a transaction or a deployment.
+
+| Step | Undo | Result |
+|---|---|---|
+| 2. Merges | a revert PR of the merge commit (`git revert -m 1 <sha>`), merged with a merge commit; never force-push `main` | `main` without that PR |
+| 3. Render deploy | Render → Manual Deploy → **Deploy a specific commit** → the commit from step 1.5; put back any environment value you changed | the backend as it was |
+| 4.1–4.2 Escrow v2 contract | nothing to undo on-chain. **v1's id stays valid**: `payment_escrow` in the address book never changed. Revert the address-book commit only if v2 is abandoned, and only after 5.1 is reverted, or `check:addresses` fails | v2 exists, unused |
+| 4.3 Backend on v2 | Render → set `STELLAR_PAYMENT_ESCROW` to `$ESCROW_V1` → Manual Deploy | runs settle through v1 again (which cannot pay external operators, D-039); v2 custody stays reclaimable by each payer after expiry |
+| 5. Frontend | Vercel → Deployments → the previous production deployment → **Promote to Production**; then a PR setting the pin back to `"testnet": null` | the previous site; the checks report the pin as pending |
+| 6. Refunds on | Render → `DISPUTE_REFUNDS_ENABLED=false`, `REFUND_RECONCILE_ENABLED=false` → Manual Deploy | no new credits; a dispute in `crediting` waits for a human (`docs/disputes.md`) |
+| 7–8. Operators, lifecycle | none: on-chain facts stand. Resume an unconfirmed stage with `--from-task` / `--from-dispute`; never repeat it | |
+| 9. Demo | `demo.json` back to `"status": "unpublished"`; the video private or unlisted | `/demo` shows the unpublished state |
+| 10. Evidence index | revert the index PR | the previous, measured index |
+
+**The escrow pair must move together.** If the backend goes back to v1
+(4.3), the frontend pin must go back to `null` in the same sitting.
+Otherwise the plan card sees a v2 pin and a v1 backend and pauses Authorize
+with a notice naming both ids (Simulate still works).
