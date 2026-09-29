@@ -140,3 +140,20 @@ settler key can be rotated (it cannot — write-once).
 > `DISPUTE_RATING` by `dispute_rating.DISPUTE_RATING`, still 10. Why the old
 > formula could be replaced at no cost, and why the new one can never change
 > once a rating lands, are in [`0009-dispute-rating.md`](0009-dispute-rating.md).
+
+> **Amended 2026-09-29 (Epic 5 audit): which key pays a credit.** This ADR
+> calls the key that pays a credit "the settler": in the Decision
+> (`transfer(settler → buyer)`, "signed by the server (settler) key"), in
+> Context ("the settler already auto-rates every settled step") and in the
+> proof's instructions ("`STELLAR_SIGNING_KEY` set (the settler, funded via
+> friendbot)"). On the deployed escrow that is wrong. The platform's signing
+> key (`STELLAR_SIGNING_KEY`, `GDB4N25…CDHP` on testnet) pays dispute credits,
+> writes ratings (scorer) and seals attestations (sealer), and it becomes the
+> escrow's settler once escrow v2 is deployed. The deployed v1 escrow's settler
+> is the admin key (`GA7AI5…5OQV`). Context's "the settler key is write-once
+> at construction" is about that v1 settler, and still holds. The decision
+> stands: a credit is a platform-funded `transfer` over the asset SAC, never a
+> clawback, and `refund_svc.execute_refund` signs it with `STELLAR_SIGNING_KEY`.
+> Only the name was wrong. Where this ADR says "the settler" for the key that
+> pays a credit or writes a rating, read "the platform's signing key". The
+> current wording is in [`docs/disputes.md`](../disputes.md).
