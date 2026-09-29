@@ -790,3 +790,59 @@ python -m scripts.demo_preflight \
    of each kind through to Stellar Expert testnet.
 6. **Rollback:** set `demo.json` back to `"status": "unpublished"` (no video,
    no evidence) in a PR, and make the video private or unlisted on YouTube.
+
+---
+
+## 10. The evidence index (5.05, BLO-39)
+
+After steps 7–9, when the evidence exists. From [sow-metrics.md](sow-metrics.md)
+and the frontend's after-deploy checklist.
+
+1. **Measure the eleven §6.3 metrics** (read-only, no secret, about a minute):
+
+   ```sh
+   cd "$BE" && source .venv/bin/activate
+   python -m scripts.sow_metrics --print-block --out-dir docs/evidence/5.05/metrics
+   ```
+
+   - **Expected:** exit 0, which means every metric was **measured**, whatever
+     it came to. A measured miss is a successful measurement.
+   - Exit 4: a read failed and at least one metric reads `"Not measured"`
+     (never `0`). Run it again; do not publish a Not measured row you can
+     remeasure.
+   - Exit 3: refused (not testnet, bad flag, unreadable team register).
+   - It reads the live escrow and the known v1 escrow, so v1's history is still
+     counted after the switch.
+2. **Update `content/evidence/index.json`** in the frontend, per
+   `docs/evidence-index-after-deploy.md` (frontend repo; another lane is
+   writing it, so **confirm** it has merged and follow it as written):
+   - paste `sow-metrics.block.json` as the `metrics` array, **unchanged**;
+   - keep `sow-metrics.raw.json` with the evidence: it answers "which items
+     were excluded, and why";
+   - update the items that were partial or missing because a page was not
+     deployed or a transaction did not exist yet, pointing each at the live
+     page or the verified transaction instead of its PR. No drill, fixture or
+     test transaction is presented as deliverable evidence.
+3. **Verify every link live:**
+
+   ```sh
+   cd "$FE"   # the branch holding the updated index
+   npm run evidence:verify
+   ```
+
+   Exit 0 only. Exit 1: something failed; fix it. Exit 3: nothing failed but a
+   link could not be checked; that is **not** a pass, run it again. Exit 2:
+   bad usage, or refused as not testnet. The report goes to
+   `<tmp>/orizon-evidence-report` unless `--report-dir` says otherwise; keep it
+   for 6.04. Then PR, merge commit, and check `$SITE/evidence` after Vercel
+   deploys.
+4. **6.04 re-verification (Rie, BLO-43):** Rie independently re-verifies
+   every on-chain claim in the index against Stellar Expert testnet and keeps
+   the live `evidence:verify` report. **Confirm** where BLO-43 wants the
+   report attached; the card is already `Done` from the earlier weeks, so
+   **confirm** whether the Epic 5 re-run reopens it or gets its own issue.
+5. **The §6.2 sign-off (the Chapter Lead):** the Chapter Lead reviews the
+   published index and signs off. **Confirm** the form it takes and where it is
+   recorded (the check-in issue, BLO-138, is the natural place).
+6. **Rollback:** revert the index PR; the previous index stays valid, since
+   every value in it was measured when it was written.
