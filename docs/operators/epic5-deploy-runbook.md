@@ -145,18 +145,11 @@ Open PRs on 2026-09-29 (`gh pr list`, all MERGEABLE):
 | Repo | PR | Branch | What it is | Stacked on |
 |---|---|---|---|---|
 | contracts | #5 | `chore/mit-license` | the MIT licence | — |
-| backend | #90 | `feat/5.03-friction-coverage` | 5.03: friction log → guide coverage | #89 (merged) |
-| backend | #91 | `feat/5.04-demo-tools` | 5.04: `demo_preflight`, `demo_evidence` | #90 |
-| backend | #93 | `feat/5.05-sow-metrics` | 5.05: `sow_metrics` | #91 |
-| backend | #92 | `chore/mit-license` | the MIT licence | — |
-| backend | #94 | `fix/5-audit-integration` | Epic 5 audit fixes: `window_days`, demo tools, runbook, ADR amendments | #93 |
-| frontend | #91 | `feat/5.03-integration` | 5.03: the `/guide/list-your-agent` guide | #90, #89 (merged) |
-| frontend | #92 | `feat/5.04-integration` | 5.04: the demo script, `/demo`, honest copy | #91 |
-| frontend | #94 | `feat/5.05-integration` | 5.05: the public evidence index, `/evidence` | #92 |
-| frontend | #95 | `feat/5.06-integration` | 5.06: the litepaper | #94 |
-| frontend | #93 | `chore/mit-license` | the MIT licence | — |
-| frontend | #96 | `fix/custody-copy-main` | the escrow-aware custody copy, straight to `main` (production says funds move into escrow on v1) | — |
-| frontend | #97 | `fix/5-audit-fe-integration` | Epic 5 audit fixes: custody copy, guide, demo script, evidence index, Ecosystem window, litepaper | #95 |
+| backend | #94 | `fix/5-audit-integration` | 5.03 friction coverage, 5.04 demo tools, 5.05 `sow_metrics`, the MIT licence, and the audit fixes (`window_days`, the team register, this runbook, ADR amendments) | — |
+| frontend | #97 | `fix/5-audit-fe-integration` | 5.03 guide, 5.04 demo script and `/demo`, 5.05 `/evidence`, 5.06 litepaper, the MIT licence, and the audit fixes (the escrow-aware custody copy, the Ecosystem window) | — |
+
+Backend #90, #91, #92 and #93 and frontend #91 to #96 are closed as
+consolidated: every one of their commits is in #94 or #97.
 
 Already merged and deployed: backend #88 (5.01) and #89 (5.02); frontend #89
 (5.01, the v2 console) and #90 (5.02). The example agent has no open PR and
