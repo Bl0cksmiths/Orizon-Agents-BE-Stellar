@@ -135,12 +135,10 @@ Nothing in steps 2–12 starts until every box here is ticked.
 
 ## 2. Merge order
 
-**Merge commits only. Never squash, never rebase-merge.** Every stack below
-was built as a chain of branches, each on the one before it, and every PR
-targets `main`. A merge commit keeps each lower branch's commits in `main`
-with their original ids, so the next PR in the stack shrinks to its own
-commits. A squash rewrites them, and the next PR then shows the whole lower
-stack again as conflicts.
+**Merge commits only. Never squash, never rebase-merge.** Each repo has one
+PR for Epic 5, and each carries its stories as merged branches. A merge commit
+keeps every story's commits in `main` with their original ids, which the
+evidence index and the litepaper cite; a squash would rewrite them into one.
 
 Open PRs on 2026-09-29 (`gh pr list`, all MERGEABLE):
 
