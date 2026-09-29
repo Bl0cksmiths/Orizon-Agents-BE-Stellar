@@ -922,7 +922,6 @@ before the step that needs it, and record the answer where it says.
 | C2 | 1.2, 7.5 | What actually happened at the Week-2 operator checkpoint (Fri 2026-09-18): committed operators, or the date of the escalation. Nothing is recorded on BLO-36 or R5 | Dan |
 | C3 | 1.3 | Whether Rie facilitates or observes the operator sessions | Dan, Rie |
 | C4 | 1.4 | That the stellar-cli identity `admin` is the address book's `admin` (`GA7AI5…5OQV`); the deploy script makes that identity the escrow v2 admin | Dan |
-| C5 | 2 | The PR numbers of the backend and frontend Epic 5 audit-fix PRs, and that each sits last in its repo's order | Dan |
 | C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
 | C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
 | C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
