@@ -166,6 +166,19 @@ step ends up carrying weigh the same. The helper's cap and floor come with it:
 `REPUTATION_MAX_RATING_WEIGHT_USDC` (100 USDC, the ledger's own `MAX_WEIGHT`)
 above, one stroop below.
 
+> **Amended 2026-09-29 (Epic 5 audit): the cap is 12 USDC, not 100.** The
+> paragraph above gives the helper's upper cap as
+> `REPUTATION_MAX_RATING_WEIGHT_USDC`, 100 USDC. Since 2026-09-27 (`f4076c4`)
+> that is only the outer bound. `reputation_svc.max_rating_weight_usdc()`
+> computes the effective cap as
+> `min(REPUTATION_MAX_RATING_WEIGHT_USDC, REPUTATION_MAX_RATING_TO_PRIOR_RATIO
+> × REPUTATION_PRIOR_WEIGHT_USDC)`, which with the shipped settings
+> (`app/config.py`) is min(100, 1.0 × 12) = **12 USDC**: one rating can at
+> most equal the prior's weight. D2's decision is unchanged. The dispute
+> rating still goes through `rating_weight_stroops`, the same helper as the
+> automatic rating of the same step, so both carry the same weight under the
+> same 12 USDC cap and the one-stroop floor.
+
 **The card contradicts itself on this point, and this records which half
 won.** Its product rule reads *"Weight by the settled value, consistent with
 how every other rating in the system is weighted."* Every other rating in the
