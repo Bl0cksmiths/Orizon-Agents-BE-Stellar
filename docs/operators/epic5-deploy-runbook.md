@@ -51,6 +51,10 @@ Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
 - `GET $SITE/api/stellar/network` names `testnet`, with `$ESCROW_V1` as
   `contracts.payment_escrow`.
 
+**Confirm list, re-checked.** The deploys closed C10: the frontend's
+after-deploy checklist merged with #97. C1 to C4, C6 to C8, C11 and C12 stay
+open, because no deploy answers them.
+
 **Team hygiene.** The team agent `3D_Artbot`, owned by the admin key
 `GA7AI5…5OQV`, is bound to `https://arbot.com`. That endpoint does not answer:
 its readiness shows `reachable` failed ("did not answer within 5 s"), and a
@@ -98,7 +102,7 @@ separate `git worktree` of `origin/main` rather than switching branches in it.
 | Operators (5.02) | [onboarding-session-runbook.md](onboarding-session-runbook.md), [friction-log.md](friction-log.md), [readiness.md](readiness.md), ADR 0012 |
 | Lifecycle (5.01) | [lifecycle-harness.md](lifecycle-harness.md) |
 | Demo (5.04) | [demo-recording.md](demo-recording.md); frontend `content/demo/script.md`, `shot-list.md` |
-| Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (being written by another lane) |
+| Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (on `main` since frontend #97) |
 | Gates | Linear: "Sprint Risk Register & Decision Log" (R5, R9), BLO-36 |
 
 ---
@@ -848,8 +852,8 @@ and the frontend's after-deploy checklist.
    - It reads the live escrow and the known v1 escrow, so v1's history is still
      counted after the switch.
 2. **Update `content/evidence/index.json`** in the frontend, per
-   `docs/evidence-index-after-deploy.md` (frontend repo; another lane is
-   writing it, so **confirm** it has merged and follow it as written):
+   `docs/evidence-index-after-deploy.md` (frontend repo, merged with #97 on
+   2026-09-29; follow it as written):
    - paste `sow-metrics.block.json` as the `metrics` array, **unchanged**;
    - keep `sow-metrics.raw.json` with the evidence: it answers "which items
      were excluded, and why";
@@ -945,6 +949,6 @@ before the step that needs it, and record the answer where it says.
 | C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
 | C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
 | C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
-| C10 | 10.2 | That the frontend's `docs/evidence-index-after-deploy.md` has merged | the lane writing it |
+| ~~C10~~ | 10.2 | **Closed 2026-09-30.** The frontend's `docs/evidence-index-after-deploy.md` merged with frontend #97 on 2026-09-29 and is on `main` | — |
 | C11 | 10.4 | Where the 6.04 re-verification report goes, and whether it reopens BLO-43 (Done) or gets its own issue | Rie |
 | C12 | 10.5 | The form of the Chapter Lead's §6.2 sign-off and where it is recorded | Chapter Lead |
