@@ -115,6 +115,7 @@ class FakeWorld:
     health_failures: int = 0  # health probes that fail before the first 200
     health_down: bool = False
     rpc_down: bool = False
+    simulate_down: bool = False  # the RPC answers getNetwork, then fails every simulation with a 503
     escrow_version: int = 2
     settler: str = SIGNER
     network: dict[str, Any] = field(default_factory=dict)
@@ -223,6 +224,8 @@ class FakeWorld:
         if method == "getNetwork":
             return ok({"passphrase": self.rpc_passphrase, "protocolVersion": 23})
         if method == "simulateTransaction":
+            if self.simulate_down:
+                return _json(503, {"error": "unavailable"})
             return ok(self.simulate(params["transaction"]))
         return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601, "message": "no"}})
 
