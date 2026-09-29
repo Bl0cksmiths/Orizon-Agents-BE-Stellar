@@ -74,6 +74,12 @@ CHAIN_ERRORS: tuple[type[Exception], ...] = (*READ_ERRORS, RpcError, SimulationE
 # steps that make an agent routable and dispatchable.
 READY_STEPS: tuple[str, ...] = ("registered", "active", "bound", "reachable", "routable")
 
+# `app/services/orchestrator_svc.py` _MIN_ROUTABLE_AGENTS: when fewer routable
+# agents than this clear the floor, the planner's starvation backstop
+# re-admits sub-floor agents, and the card reads "kept below floor" rather
+# than "excluded".
+MIN_ROUTABLE_AGENTS = 3
+
 # The escrow version the demo needs, and the defect v1 carries.
 ESCROW_V2 = 2
 D039 = (
@@ -127,6 +133,7 @@ class Facts:
     settler: str | None = None
     below_floor: list[str] = field(default_factory=list)
     floor_bps: int | None = None
+    reputations: dict[str, Any] | None = None  # the reputation batch the floor was judged on
     lower_bounds: dict[str, int] = field(default_factory=dict)  # agent id -> lower_bound_bps, as last read
     disclosures: list[str] = field(default_factory=list)
 
@@ -565,6 +572,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
     facts.floor_bps = floor
     reputations = batch.obj().get("reputations") or {}
+    facts.reputations = reputations if isinstance(reputations, dict) else {}
     registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
     genuine: list[str] = []
     ignored: list[str] = []
@@ -596,6 +604,63 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
         "A degraded or stale read is the prior or an old read, never a verdict.",
+    )
+
+
+def routable(agent: dict[str, Any]) -> bool:
+    """Whether the planner may route to this `GET /api/agents` row: listed and dispatchable.
+
+    `_snapshot_registry` in app/services/orchestrator_svc.py: `_is_listed` is
+    "status is not offline" (a delisting), and `is_dispatchable` is a local
+    worker (every seeded agent) or a bound endpoint (an on-chain agent).
+    """
+    if agent.get("status") == "offline":
+        return False
+    if agent.get("source") == "seeded":
+        return True
+    return agent.get("source") == "onchain" and agent.get("bound") is True
+
+
+def check_routable_count(facts: Facts) -> Check:
+    check = Check(
+        "exclusion.routable_count",
+        "exclusion",
+        f"At least {MIN_ROUTABLE_AGENTS} routable agents clear the floor, so the subject is excluded, not kept",
+    )
+    if facts.agents is None or facts.reputations is None or facts.floor_bps is None:
+        return check.skipped("the agents or the reputation batch were not read", "Fix exclusion.below_floor first.")
+    floor = facts.floor_bps
+    clear: list[str] = []
+    unjudged: list[str] = []
+    for agent in facts.agents:
+        if not routable(agent):
+            continue
+        agent_id = str(agent.get("id"))
+        rep = facts.reputations.get(agent_id)
+        if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
+            unjudged.append(f"{agent_id} (no reputation entry)")
+            continue
+        # A degraded read is the prior served because the ledger could not be
+        # read, and a stale one may predate a rating: neither is a verdict, so
+        # neither is counted as clearing the floor.
+        if rep.get("degraded") is True or rep.get("stale") is True:
+            why = "degraded" if rep.get("degraded") is True else "stale"
+            unjudged.append(f"{agent_id} ({why})")
+            continue
+        if rep["lower_bound_bps"] >= floor:
+            clear.append(agent_id)
+    aside = f"; not counted: {', '.join(unjudged)}" if unjudged else ""
+    if len(clear) >= MIN_ROUTABLE_AGENTS:
+        return check.passed(f"{len(clear)} clear {floor} bps: {', '.join(clear)}{aside}")
+    return check.failed(
+        f"only {len(clear)} routable agent(s) clear {floor} bps"
+        + (f" ({', '.join(clear)})" if clear else "")
+        + aside
+        + f": with fewer than {MIN_ROUTABLE_AGENTS}, the planner's backstop re-admits one below the floor, so the "
+        "card reads 'kept below floor', not 'excluded'",
+        f"Bind, or relist, agents that clear the floor until at least {MIN_ROUTABLE_AGENTS} routable ones do "
+        "(listed, and seeded or bound, with a fresh read at or above the floor), then rerun. Retake S05 only "
+        "after the registry is fixed.",
     )
 
 
@@ -771,6 +836,7 @@ def run_checks(
     # meant to fail `routable`, and operator.ready has to know which it is.
     add(check_below_floor(reads, facts))
     add(check_card_figure(facts))
+    add(check_routable_count(facts))
     add(check_decompose(reads, facts, cfg.decompose_intent))
     add(check_external_count(facts))
     add(check_external_ready(reads, facts))

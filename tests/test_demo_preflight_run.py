@@ -143,6 +143,7 @@ def test_every_check_is_in_the_report(tmp_path: Path) -> None:
         "operator.ready",
         "exclusion.below_floor",
         "exclusion.card_figure",
+        "exclusion.routable_count",
         "exclusion.decompose",
         "wallets.buyer",
         "wallets.operator",
@@ -508,6 +509,46 @@ def test_the_card_figure_is_skipped_without_a_below_floor_agent(tmp_path: Path) 
     world = healthy_world()
     world.reputations["lowrep"] = rep("lowrep", 5600)
     assert run(world, tmp_path).status("exclusion.card_figure") == SKIPPED
+
+
+def test_three_routable_agents_clearing_the_floor_pass(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path)
+    check = out.check("exclusion.routable_count")
+    assert check["status"] == PASS and check["required"] is True
+    assert check["detail"].startswith("3 clear 5500 bps: agt_01h8, alpha, beta")
+
+
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        ("delisted", ""),
+        ("unbound", ""),
+        ("below", ""),
+        ("degraded", "beta (degraded)"),
+        ("stale", "beta (stale)"),
+        ("missing", "beta (no reputation entry)"),
+    ],
+)
+def test_fewer_than_three_routable_agents_clearing_the_floor_fails(tmp_path: Path, change: str, named: str) -> None:
+    world = healthy_world()
+    beta = next(a for a in world.agents if a["id"] == "beta")
+    if change == "delisted":
+        beta["status"] = "offline"
+    elif change == "unbound":
+        beta["bound"] = False
+    elif change == "below":
+        world.reputations["beta"] = rep("beta", 5499)
+    elif change == "missing":
+        del world.reputations["beta"]
+    else:
+        world.reputations["beta"] = rep("beta", 6000, **{change: True})
+    out = run(world, tmp_path)
+    check = out.check("exclusion.routable_count")
+    assert check["status"] == FAIL, check
+    assert "only 2 routable agent(s) clear 5500 bps (agt_01h8, alpha)" in check["detail"]
+    assert "'kept below floor', not 'excluded'" in check["detail"]
+    assert named in check["detail"]
+    assert out.code == EXIT_NO_GO
 
 
 def test_reputation_routing_off_fails(tmp_path: Path) -> None:
