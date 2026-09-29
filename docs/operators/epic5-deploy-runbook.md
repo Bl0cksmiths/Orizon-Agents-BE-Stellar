@@ -151,6 +151,7 @@ Open PRs on 2026-09-29 (`gh pr list`, all MERGEABLE):
 | backend | #91 | `feat/5.04-demo-tools` | 5.04: `demo_preflight`, `demo_evidence` | #90 |
 | backend | #93 | `feat/5.05-sow-metrics` | 5.05: `sow_metrics` | #91 |
 | backend | #92 | `chore/mit-license` | the MIT licence | — |
+| backend | #94 | `fix/5-audit-integration` | Epic 5 audit fixes: `window_days`, demo tools, runbook, ADR amendments | #93 |
 | frontend | #91 | `feat/5.03-integration` | 5.03: the `/guide/list-your-agent` guide | #90, #89 (merged) |
 | frontend | #92 | `feat/5.04-integration` | 5.04: the demo script, `/demo`, honest copy | #91 |
 | frontend | #94 | `feat/5.05-integration` | 5.05: the public evidence index, `/evidence` | #92 |
@@ -180,7 +181,7 @@ gh pr merge 90 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
 gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
 gh pr merge 93 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
 gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
-# then the Epic 5 audit-fix PR (number not yet known: confirm)
+gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge   # Epic 5 audit fixes, on #93
 
 # frontend: #91 and #92 together, then the rest, then the licence
 gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
