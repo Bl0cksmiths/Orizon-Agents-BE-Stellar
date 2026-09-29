@@ -148,9 +148,19 @@ workflow — the steps that did deliver — stays paid, and their agents keep th
 earnings.
 
 **The credit is funded by the platform, and never clawed back from the agent.**
-It is a transfer from the settler's own wallet to the buyer over the asset
-contract — **not** a reversal of the original charge, and **not** a seizure of
-anything the agent was paid:
+It is a transfer from the platform signing key's own wallet to the buyer over
+the asset contract — **not** a reversal of the original charge, and **not** a
+seizure of anything the agent was paid.
+
+**Which key that is.** The platform's signing key (`STELLAR_SIGNING_KEY`,
+`GDB4N25…CDHP` on testnet) pays dispute credits, writes ratings (scorer) and
+seals attestations (sealer), and it becomes the escrow's settler once escrow v2
+is deployed. The deployed v1 escrow's settler is the admin key
+(`GA7AI5…5OQV`). Earlier versions of this page called the signing key "the
+settler"; on the deployed v1 escrow it is not, so this page now names it by
+what it is. *(Corrected 2026-09-29, from the Epic 5 audit.)*
+
+Why the credit cannot be a reversal:
 
 - `PaymentEscrow` has no refund entrypoint. v1 never takes custody — `charge`
   sends USDC from the payer straight to the agent's owner. v2 holds the
@@ -197,11 +207,11 @@ what a dispute says" below. It is never written to the log.
    be paid — nothing is signed at all.
 3. The amount is computed and checked against `MAX_REFUND_USDC` **before** any
    transaction is built.
-4. The settler signs a transfer of that amount to the buyer over the asset
-   contract.
+4. The platform's signing key signs a transfer of that amount to the buyer
+   over the asset contract.
 5. On success the dispute moves to `credited` with the refund transaction hash
    on its record, and the claim is dropped.
-6. Only then — the credit landed **and** recorded — the settler writes the
+6. Only then — the credit landed **and** recorded — the signing key writes the
    dispute rating against the agent, and its transaction hash is added to the
    same record. "After `credited`" below is what that step does, and why
    nothing it does can reach back into the five before it.
@@ -241,11 +251,12 @@ on the chain to say what happened, or on a person with a block explorer.
 ## After `credited`: the dispute rating
 
 An upheld, paid dispute has one more consequence, and it is the one that falls
-on the agent: the settler writes a rating against it on the ReputationLedger,
+on the agent: the platform's signing key writes a rating against it on the
+ReputationLedger,
 `kind = "dispute"`, scored **10 out of 100**. It is written only **once the
 credit has landed and been recorded** — so no agent is ever rated for a dispute
 whose buyer was not paid — and it lands as a second, separate rating beside the
-one the settler wrote for that step at settlement. What it does to the agent's
+one that key wrote for that step at settlement. What it does to the agent's
 score is in `docs/reputation.md`.
 
 **It never touches the refund.** Whatever happens to the rating, the dispute
@@ -468,7 +479,7 @@ they belong to. They are different kinds of evidence, and they tie back to the
 disputed job in different ways.
 
 **The refund transfer** (`refund_tx`) is a `transfer` on the asset contract,
-signed by the settler: from the settler, to the payer, for the credited
+signed by the platform's signing key: from that key, to the payer, for the credited
 amount. It is what shows the buyer was paid. It carries **no job id**, but it
 does carry **its dispute**: the `to` is the payer's address **muxed** with a
 64-bit id derived from the dispute id (CAP-67, protocol 23 and later). The
@@ -533,14 +544,14 @@ memos.`. A memo would also sit on the transaction envelope, where neither the
 contract nor its events can see it.
 
 *Evidence.* Simulated read-only on testnet on 2026-09-27 (protocol 28): the
-settler's `transfer` to a muxed payer succeeded and emitted
-`transfer(settler, <payer G…>, "native")` with data
+signing key's `transfer` to a muxed payer succeeded and emitted
+`transfer(<signing key G…>, <payer G…>, "native")` with data
 `{amount: 1200000, to_muxed_id: 81985529216486895}`. The minimum resource fee
 was 23,847 stroops, against 23,468 for the same transfer to the plain address,
 which is 379 stroops or +1.6%. Nothing was signed or sent.
 
 **The dispute rating** (`rating_tx`) is a call to `ReputationLedger.submit`,
-signed by the settler as the ledger's Scorer:
+signed by the platform's signing key as the ledger's Scorer:
 
 | argument | value |
 | --- | --- |
@@ -549,7 +560,7 @@ signed by the settler as the ledger's Scorer:
 | `rating_0_to_100` | `10` |
 | `weight` | the step's quoted price, in stroops |
 | `payer` | the dispute's payer |
-| `kind` | `dispute` — every rating the settler writes at settlement is `auto` |
+| `kind` | `dispute` — every rating the signing key writes at settlement is `auto` |
 
 and the ledger emits a `rated` event for the agent carrying the same rating,
 weight, job id and kind.
@@ -558,7 +569,7 @@ weight, job id and kind.
 id's **first sixteen hex characters are the disputed job's own**. The job's
 full id is an argument of the workflow's charge (`PaymentEscrow.charge`), of its
 attestation seal (`AttestationRegistry.seal`, the settlement's `proof_tx`) and
-of each automatic rating the settler wrote for it. So:
+of each automatic rating the signing key wrote for it. So:
 
 1. Open the dispute rating on Stellar Expert and read its `job_id` argument.
 2. Open the workflow's seal — or its charge, for the rare job whose seal did not
@@ -630,8 +641,8 @@ What an adjudicator can be told, and what each answer means:
 | refusal | when |
 | --- | --- |
 | 503 `dispute_refunds_disabled` | the switch is off — nothing on this deployment is adjudicable. A configuration state, not the caller's mistake |
-| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see. **The credential at the door**, not the settler's key — see the row below, which is the one it is confused with |
-| 503 `refunds_not_configured` | the switch is on, the caller is authenticated, and **the settler cannot sign**: no `STELLAR_SIGNING_KEY`, or no `STELLAR_ASSET_SAC`. Asked after the terminal-status checks and *before* the dispute is moved or claimed, so the dispute is left exactly as the buyer left it. Logged at ERROR — an upheld dispute nobody is configured to pay is a buyer waiting on a human |
+| 503 `adjudication_not_configured` | the switch is on but `API_KEY` is empty. Logged at ERROR: a live refund switch with no credential behind it is a misconfiguration someone has to see. **The credential at the door**, not the signing key — see the row below, which is the one it is confused with |
+| 503 `refunds_not_configured` | the switch is on, the caller is authenticated, and **the platform's signing key cannot sign**: no `STELLAR_SIGNING_KEY`, or no `STELLAR_ASSET_SAC`. Asked after the terminal-status checks and *before* the dispute is moved or claimed, so the dispute is left exactly as the buyer left it. Logged at ERROR — an upheld dispute nobody is configured to pay is a buyer waiting on a human |
 | 401 `invalid_api_key` | the key is missing or wrong. The answer is the same either way — an adjudication route that distinguished them would be an oracle |
 | 404 `unknown_dispute` | no dispute with that id |
 | 409 `dispute_not_open` | a rejection aimed at a dispute that is no longer `open` |
@@ -654,10 +665,10 @@ request:
 
 - `adjudication_not_configured` is **the door**. `API_KEY` is empty, so the
   route cannot tell an adjudicator from a stranger, and it refuses everyone.
-  Nothing about the settler is even looked at. Fix it in the deployment's
+  Nothing about the signing key is even looked at. Fix it in the deployment's
   credentials (ADR 0008 D1).
 - `refunds_not_configured` is **the wallet**. The caller got through the door;
-  this deployment has no settler key or no asset SAC, so it could not sign a
+  this deployment has no signing key or no asset SAC, so it could not sign a
   transfer if it decided to. Fix it by wiring the signer.
 
 A deployment can be in either state alone, and setting `API_KEY` does nothing
@@ -854,7 +865,7 @@ Each of `steps`:
 | field | what it is |
 | --- | --- |
 | `credited_fraction` | the share of a step's price an upheld dispute credits: `DISPUTE_CREDITED_FRACTION`, clamped to [0, 1] exactly as the refund clamps it, so it states what would really be paid |
-| `funded_by` | always `platform`. The credit comes from the settler's own wallet, never from the agent |
+| `funded_by` | always `platform`. The credit comes from the platform signing key's own wallet, never from the agent |
 | `adjudicated_by` | always `platform`. A person decides the claim; there is no on-chain arbitration |
 
 **What this read exposes, and why none of it is new.** While
@@ -961,7 +972,8 @@ in-flight hash and acts on the answer:
 | `NOT_FOUND` before that | nothing — it may still land. The next pass asks again. |
 
 "This dispute's refund" means the envelope the chain holds hashes to the hash
-on record and is a single `transfer` over the asset SAC, from the settler, to
+on record and is a single `transfer` over the asset SAC, from the platform's
+signing key, to
 this dispute's payer — the payer's address muxed with this dispute's refund id,
 or the plain payer for an untagged refund, and never the payer muxed with any
 other id, which is another dispute's credit — and, when the record carries the
@@ -1003,7 +1015,7 @@ ran, and that pass's counts by action — never a dispute id or a hash.
 them, each with its own `action`:
 
 - `no_hash` — the submission returned no hash, so there is nothing to look up.
-  Step 2 below (the settler's history) is yours.
+  Step 2 below (the signing key's history) is yours.
 - `history_gap` — the hash is older than the RPC's history.
 - `rpc_error` — the RPC could not be asked, or gave an answer the sweep does
   not know. The next pass asks again; a claim that stays here needs you.
@@ -1051,8 +1063,8 @@ and the amount. Search it for the dispute id before touching anything.
    service's record of it is missing. If the record carries **no hash at all**
    — which is what a submission that raised before it had one looks like —
    there is nothing to look up, so go straight to the next step.
-2. **The settler's own history**, if the hash turns up nothing. Read the
-   settler account's transfers over the asset contract around the claim time,
+2. **The signing key's own history**, if the hash turns up nothing. Read the
+   signing key account's transfers over the asset contract around the claim time,
    looking for one whose event carries `to_muxed_id` equal to this dispute's
    refund id ("Tying the refund to its dispute" above). That match names the
    dispute, even when the same payer has another credit of the same amount in
@@ -1144,7 +1156,7 @@ argument.
    rating is logged before the record is written, precisely so this case has a
    hash to start from. Look that hash up.
 2. **Otherwise, go to the chain.** Search the ReputationLedger's `rated` events
-   for the agent, or the settler account's transactions from around the time
+   for the agent, or the signing key account's transactions from around the time
    the credit landed, for a `submit` whose `job_id` argument is the `derived=`
    value on the line.
 
