@@ -763,10 +763,13 @@ python -m scripts.demo_preflight \
    Exit 8: a read failed; rerun.
 3. **The browser-recorded hashes.** Transactions signed in the browser on
    camera (the operator's registration, the buyer's authorize in the console)
-   are not in a harness `lifecycle.jsonl`. They go into the sheet through
-   `demo_evidence`'s `--tx` / `--rows` inputs **once that change lands**
-   (**confirm** its merged flag names and usage before relying on them). Until
-   then, `demo_evidence` reads only harness rows.
+   are not in a harness `lifecycle.jsonl`. Add them to the step 2 command
+   with `--tx KIND=HASH[:label]` (repeatable) or `--rows browser.json`; they
+   are verified exactly like harness rows. Add `--index-links
+   docs/evidence/5.04/video/index-links.json` to also write every verified
+   hash in the evidence index's link shape, grouped by item, for step 10.
+   The browser table and the rows format are in
+   [demo-recording.md §2](demo-recording.md).
 
 ### 9.4 Upload and publish
 
