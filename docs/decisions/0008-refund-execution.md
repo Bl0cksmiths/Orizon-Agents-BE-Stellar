@@ -435,6 +435,13 @@ for ADR 0007 D5's reason, and nothing here writes a rating. A dispute may reach
 > procedure in [`docs/disputes.md`](../disputes.md) now starts from that key's
 > account.
 
+> **Amended 2026-09-29 (Epic 5 audit): what ADR 0002 proved.** Context opens
+> with "ADR 0002 proved a credit can be paid: a real one landed on testnet on
+> 2026-09-12." That transaction, `9b8ffaa4…`, was an operator-script transfer
+> from the admin key to a team key, tied to no dispute. It proves the transfer
+> mechanism only, not that a dispute was credited (ADR 0002's 2026-09-29
+> amendment).
+
 Related: ADR 0002 (the credit mechanism and the trust model), ADR 0007 (the
 window, the proof of payer and the settlement record), `docs/disputes.md` (the
 buyer- and operator-facing version, including the reconciliation procedure),
