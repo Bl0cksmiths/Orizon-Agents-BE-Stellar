@@ -223,6 +223,31 @@ read, and nothing is written.
 1. Paste `description.txt` into the video's description, replacing the
    chapters and summary placeholders with the edit's timestamps.
 2. Upload the video.
-3. Commit `evidence.json` where the frontend's `/demo` page reads it, with the
-   video's URL beside it, and the sheet with it (`docs/evidence/5.04/`).
-4. Open `/demo` and click one link of each kind through to Stellar Expert.
+3. In the **frontend** repo, fill `content/demo/demo.json`, the manifest the
+   `/demo` page is built from. `evidence.json` is not read as a file anywhere:
+   its whole object, `{"generated_at", "network", "items"}`, is pasted
+   **verbatim** as the value of the manifest's `evidence` key, beside `status`
+   (`"published"`), `video` and `chapters`:
+
+   ```json
+   {
+     "status": "published",
+     "video": {"provider": "...", "id": "...", "title": "...", "duration_seconds": 240, "published_at": "..."},
+     "chapters": [...],
+     "evidence": {"generated_at": 1790000000, "network": "testnet", "items": [...]},
+     "transcript_file": "...",
+     "captions_file": "..."
+   }
+   ```
+
+   Run `npm run demo:check` there: it refuses a manifest whose evidence is not
+   testnet, has an item that is not `verified: true` or whose `explorer` is
+   not the testnet page for its own hash, or lacks at least one `settle`, one
+   `dispute_rating` and one `refund` — the browser's hashes (§2), so give them
+   to the tool. Commit it on the frontend.
+4. Commit the sheet, `description.txt` and `evidence.json` in the backend repo
+   under `docs/evidence/5.04/video/`, beside `browser.json` and the takes'
+   evidence directories (never their `state.json`).
+5. Merge `index-links.json` into the frontend's `content/evidence/index.json`,
+   as "Feeding story 5.05" in `docs/operators/lifecycle-harness.md` describes.
+6. Open `/demo` and click one link of each kind through to Stellar Expert.
