@@ -549,9 +549,15 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     if genuine:
         detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
         return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else ""))
+    degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
     return check.failed(
         f"no registered, listed agent has an on-chain lower bound below {floor} bps"
-        + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else ""),
+        + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else "")
+        + (
+            f"; {len(degraded)} of {len(registered)} registered agents read degraded (the ledger could not be read)"
+            if degraded
+            else ""
+        ),
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
         "A degraded or stale read is the prior or an old read, never a verdict.",
