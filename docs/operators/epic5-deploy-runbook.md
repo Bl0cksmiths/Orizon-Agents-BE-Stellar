@@ -558,10 +558,10 @@ written. This runbook adds only the order and the records.
    `payment_escrow_v2`), not only from `/api/stellar/network`. **Expected:**
    exit 0 and one MET / NOT MET line per §6.3 target. A NOT MET line is still a
    valid report: commit it. Exit 5 or 6 means do not publish; file it. Exit 8
-   means a chain read failed; run it again later. **Confirm** whether
-   `--escrow` should name v2 only, or whether the report needs to be run once
-   per escrow: its documentation predates v2 and names only
-   `contracts.payment_escrow`.
+   means a chain read failed; run it again later. `--escrow` takes one id and
+   the verifier checks v2 `settle` payouts, so name v2: the backend's adoption
+   route reads the configured escrow only, and no v1 `charged` event was ever
+   anyone but the platform paying itself (ADR 0010 D10).
 5. **Record the Week-2 checkpoint and the fallback truthfully.**
    - On **BLO-36**, a comment stating what happened at the Week-2 checkpoint
      (Fri 2026-09-18): two named, committed operators, or the date the
