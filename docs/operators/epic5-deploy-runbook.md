@@ -298,7 +298,7 @@ escrow the address book now names.
 
 ### 4.1 Deploy PaymentEscrow v2 (contracts repo)
 
-1. **Before:** confirm the settler you are about to fix into the contract is
+1. **Before:** check that the settler you are about to fix into the contract is
    the key the backend really signs with. Both must print `$SETTLER`:
 
    ```sh
@@ -487,7 +487,7 @@ must hold it.
 
 ### 6.2 Turn both switches on
 
-1. **Action:** Render → **Environment** → confirm `API_KEY` and `DATABASE_URL`
+1. **Action:** Render → **Environment** → check that `API_KEY` and `DATABASE_URL`
    are set (3.1), then set `DISPUTE_REFUNDS_ENABLED=true` and
    `REFUND_RECONCILE_ENABLED=true` → save → **Manual Deploy** → **Deploy
    latest commit**.
