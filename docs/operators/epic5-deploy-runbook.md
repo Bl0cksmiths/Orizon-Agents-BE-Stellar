@@ -499,14 +499,21 @@ must hold it.
    ```sh
    curl -s "$BE_HOST/readiness" | jq '.disputes'
    # "store": "postgres", "reconcile": { "enabled": true, "running": true, ... }
-   curl -s -o /dev/null -w '%{http_code}\n' -X POST "$SITE/api/disputes/any/uphold"
-   # 401 (invalid_api_key), no longer 503 dispute_refunds_disabled
+   # ORIZON_API_KEY holds the dashboard's API_KEY; it is read from the
+   # environment, never typed on the command line
+   curl -s -X POST -H "X-API-Key: $ORIZON_API_KEY" "$SITE/api/disputes/no_such_dispute/uphold"
+   # anything but {"detail": "dispute_refunds_disabled"} (503)
    ```
 
    `disputes.reconcile.enabled` is `true` only when **both** switches are on.
-   The uphold probe comes from the demo script's GO condition. **Confirm** the
-   exact status an unknown dispute id gives without a key before relying on
-   it; the point is that the answer is no longer `503 dispute_refunds_disabled`.
+   The uphold probe must carry the key: since D-052 `require_adjudicator`
+   checks the key first, so an anonymous call answers `401 invalid_api_key`
+   whether refunds are on or off, and only a keyed call reaches the switch
+   (`app/security.py`). The frontend demo script's GO condition ("uphold
+   without a key answers 401, not 503") predates that and no longer tells the
+   two apart. **Confirm** what a keyed uphold of an unknown id answers once
+   the switch is on (the route's own not-found answer is expected); the point
+   is that it is no longer `503 dispute_refunds_disabled`.
 4. **Rollback:** set both switches back to `false` and Manual Deploy. A
    dispute already in `crediting` stays there for an operator to reconcile by
    hand (`docs/disputes.md`); nothing pays twice.
