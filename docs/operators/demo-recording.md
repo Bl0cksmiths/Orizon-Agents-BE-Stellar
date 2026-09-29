@@ -157,14 +157,26 @@ positional inputs, as the takes' do.
 
 ```sh
 python -m scripts.demo_evidence docs/evidence/5.04/take-1 docs/evidence/5.04/take-2 \
+    --rows docs/evidence/5.04/browser.json \
     --title "Orizon Agents — Blue Belt demo (Stellar testnet)" \
-    --out-dir docs/evidence/5.04/video
+    --out-dir docs/evidence/5.04/video \
+    --index-links docs/evidence/5.04/video/index-links.json
 ```
 
-Inputs are `lifecycle.jsonl` files or the evidence directories that hold them,
-read in the order given. A hash repeated across rows (a resumed run) is kept
-once. `--disclose "<sentence>"` (repeatable) appends to the limitations
-paragraph — use it for a team wallet the pre-flight named.
+| Input | Meaning |
+|---|---|
+| positional | `lifecycle.jsonl` files or the evidence directories that hold them (optional when `--rows` or `--tx` is given) |
+| `--rows FILE.json` | the browser's hashes (§2), repeatable |
+| `--tx KIND=HASH[:label]` | one browser hash, repeatable |
+| `--index-links FILE.json` | also write every verified hash as an evidence index link, grouped by index item (see "Feeding story 5.05" in `docs/operators/lifecycle-harness.md`) |
+| `--disclose "<sentence>"` | appended to the limitations paragraph (repeatable) — use it for a team wallet the pre-flight named |
+
+The harness's rows come first, then the `--rows` files, then the `--tx`
+hashes, each in the order given. A hash repeated anywhere (a resumed run, or a
+browser hash the harness also recorded) is kept once, at its first appearance,
+and counted in the sheet; the same hash given as two different kinds is
+refused. A browser hash is verified exactly as a harness row is, and shows in
+the sheet under the stage `browser`.
 
 Every hash is **re-verified read-only**: RPC `getTransaction`, falling back to
 Horizon for anything past the RPC's ~7-day window or when the RPC does not
@@ -202,9 +214,9 @@ read, and nothing is written.
 | Code | Meaning |
 |---|---|
 | 0 | every hash re-verified SUCCESS |
-| 3 | **Refused** — another network (in a row, the RPC or Horizon), an unreadable input, or no transaction rows. Nothing written |
+| 3 | **Refused** — another network (in a row, a `--rows` row, a `--tx` link, the RPC or Horizon), an unreadable input, a `--tx` or `--rows` row with an unknown kind, a bad label or a bad deliverable, one hash given as two kinds, or no transaction rows. Nothing written |
 | 5 | a hash is FAILED, NOT_FOUND or malformed. Outputs written **without** it; rerun that stage or cut it from the video |
-| 8 | nothing was contradicted, but a read failed, so a hash is unverified. Outputs written without it; rerun |
+| 8 | nothing was contradicted, but a read failed, so a hash is unverified, or (with `--index-links`) a verified hash's ledger date could not be read from Horizon. Outputs written without it; rerun |
 
 ## 4. Upload, and fill the /demo manifest
 
