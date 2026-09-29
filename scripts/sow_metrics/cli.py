@@ -24,11 +24,14 @@ from .config import (
     EXIT_MEASURED,
     EXIT_REFUSED,
     EXIT_UNREADABLE,
+    PAGE_METRICS,
     TESTNET_HORIZON,
     TESTNET_PASSPHRASE,
     TESTNET_RPC,
+    PendingLink,
     RunConfig,
     normalize_base,
+    parse_pending_link,
 )
 from .metrics import MET, measure
 from .register import RegisterError
@@ -77,6 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--rpc-url", default=TESTNET_RPC, help=f"Soroban RPC (default {TESTNET_RPC})")
     p.add_argument("--horizon-url", default=TESTNET_HORIZON, help=f"Horizon (default {TESTNET_HORIZON})")
+    p.add_argument(
+        "--pending-link",
+        action="append",
+        default=[],
+        metavar="ID=URL[=label]",
+        help="for milestone ID (m06, m09 or m10): when its page answers 404, link this GitHub pull request instead "
+        "(repeatable). Without it, a 404 page is not linked at all",
+    )
     p.add_argument("--out-dir", type=Path, help="write the block, the Markdown and the raw JSON here")
     p.add_argument("--print-block", action="store_true", help="also print the frozen metrics block as JSON")
     return p
@@ -86,6 +97,16 @@ def _escrow(value: str) -> str:
     if not StrKey.is_valid_contract(value.strip()):
         raise ValueError(f"--escrow must be a contract id (C...), got {value!r}")
     return value.strip()
+
+
+def _pending_links(values: list[str]) -> dict[str, PendingLink]:
+    out: dict[str, PendingLink] = {}
+    for raw in values:
+        metric_id, link = parse_pending_link(raw)
+        if metric_id in out:
+            raise ValueError(f"--pending-link {metric_id} was given twice")
+        out[metric_id] = link
+    return out
 
 
 def _config(args: argparse.Namespace) -> RunConfig:
@@ -99,6 +120,7 @@ def _config(args: argparse.Namespace) -> RunConfig:
         team_register=args.team_register,
         extra_escrows=tuple(_escrow(e) for e in args.escrow),
         out_dir=args.out_dir,
+        pending_links=_pending_links(args.pending_link),
     )
 
 
@@ -164,7 +186,7 @@ def main(
             return EXIT_UNREADABLE
         snap = collect(dict(network), team, reads, chain, extra_escrows=cfg.extra_escrows)
 
-    metrics = measure(snap)
+    metrics = measure(snap, cfg.pending_links)
     code = EXIT_MEASURED if all(m.measured for m in metrics) else EXIT_UNREADABLE
     block = render_block(metrics)
     problems = block_problems(block)
@@ -189,6 +211,11 @@ def main(
         say(f"read failed: {source}: {failure}")
     for warning in snap.warnings:
         say(f"warning: {warning}")
+    for metric_id in sorted(cfg.pending_links):
+        page = snap.pages.get(PAGE_METRICS[metric_id])
+        if page is None or page.status != 404:
+            status = "could not be read" if page is None else f"answered HTTP {page.status}"
+            say(f"note: --pending-link {metric_id} was not used: {PAGE_METRICS[metric_id]} {status}, not 404")
     if cfg.out_dir is not None:
         paths = write(cfg.out_dir, block, render_markdown(metrics, run, code), render_raw(metrics, snap, run, code))
         say("wrote " + ", ".join(str(p) for p in paths))

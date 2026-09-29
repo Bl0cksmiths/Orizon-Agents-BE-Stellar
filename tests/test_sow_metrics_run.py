@@ -59,6 +59,7 @@ from scripts.sow_metrics.fakes import (
     job,
     met_world,
 )
+from scripts.sow_metrics.report import block_problems
 
 ALL = [f"m{i:02d}" for i in range(1, 12)]
 
@@ -852,3 +853,88 @@ def test_a_bad_escrow_flag_is_refused(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path, "--escrow", BUYER2)
     assert out.code == EXIT_REFUSED
     assert "--escrow must be a contract id" in out.out
+
+
+# ── a milestone page that answers 404 ───────────────────────────
+PR91 = "https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/91"
+PR92 = "https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/92"
+
+
+def _dead_pages() -> FakeWorld:
+    world = met_world()
+    for path in (REGISTER_PAGE, GUIDE_PAGE, DEMO_PAGE):
+        world.pages[path] = (404, "<html>not found</html>")
+    return world
+
+
+def test_a_404_page_is_never_linked(tmp_path: Path) -> None:
+    out = run(_dead_pages(), tmp_path)
+    assert out.code == EXIT_MEASURED
+    urls = [link["url"] for m in out.block() for link in m["links"]]
+    assert not [u for u in urls if u.startswith(FRONTEND)], urls
+    for metric_id in ("m09", "m10"):
+        m = out.metric(metric_id)
+        assert m["links"] == [] and m["status"] == "not_met"
+        assert m["method"].endswith(
+            "The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
+        )
+    assert block_problems(out.block()) == []
+
+
+def test_a_pending_link_stands_in_for_a_404_page(tmp_path: Path) -> None:
+    out = run(
+        _dead_pages(),
+        tmp_path,
+        "--pending-link",
+        f"m09={PR91}",
+        "--pending-link",
+        f"m10={PR92}=Frontend pull request #92 (open): the demo script and the /demo page",
+        "--pending-link",
+        f"m06={PR91}",
+    )
+    assert out.metric("m09")["links"] == [
+        {
+            "label": "Pull request #91 in Bl0cksmiths/Orizon-Agents-FE-Stellar that adds the /guide/list-your-agent "
+            "page (not deployed yet)",
+            "url": PR91,
+            "kind": "pr",
+        }
+    ]
+    assert out.metric("m10")["links"] == [
+        {"label": "Frontend pull request #92 (open): the demo script and the /demo page", "url": PR92, "kind": "pr"}
+    ]
+    assert out.metric("m09")["method"].endswith(
+        "The page answered 404 when this ran, so the pull request that adds it is linked instead of the page."
+    )
+    assert [link["kind"] for link in out.metric("m06")["links"]][:2] == ["pr", "doc"]
+    urls = [link["url"] for m in out.block() for link in m["links"]]
+    assert not [u for u in urls if u.startswith(FRONTEND)], urls
+    assert block_problems(out.block()) == []
+
+
+def test_a_pending_link_is_not_used_for_a_live_page(tmp_path: Path) -> None:
+    out = run(met_world(), tmp_path, "--pending-link", f"m09={PR91}")
+    assert out.metric("m09")["links"][0]["url"] == f"{FRONTEND}{GUIDE_PAGE}"
+    assert PR91 not in json.dumps(out.block())
+    assert "note: --pending-link m09 was not used: /guide/list-your-agent answered HTTP 200, not 404" in out.out
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"m03={PR91}",
+        f"m09={PR91.replace('https', 'http')}",
+        "m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/tree/main",
+        f"m09={PR91}=#91",
+        "m09",
+    ],
+)
+def test_a_bad_pending_link_is_refused(tmp_path: Path, value: str) -> None:
+    out = run(met_world(), tmp_path, "--pending-link", value)
+    assert out.code == EXIT_REFUSED
+    assert "REFUSED: --pending-link" in out.out
+
+
+def test_a_pending_link_given_twice_is_refused(tmp_path: Path) -> None:
+    out = run(met_world(), tmp_path, "--pending-link", f"m09={PR91}", "--pending-link", f"m09={PR92}")
+    assert out.code == EXIT_REFUSED and "given twice" in out.out

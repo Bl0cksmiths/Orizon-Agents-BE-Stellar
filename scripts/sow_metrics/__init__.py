@@ -11,6 +11,10 @@ frontend's `content/evidence/index.json` pastes (`sow-metrics.block.json`), a
 Markdown table (`sow-metrics.md`), and the raw counted and excluded items per
 metric (`sow-metrics.raw.json`).
 
+A milestone page that answers 404 is never linked: a dead link proves
+nothing. `--pending-link ID=URL[=label]` links the pull request that adds it
+instead, and without one the row links nothing and its method says why.
+
 It is read-only: every call is a GET or a simulation, retried a bounded number
 of times, and it holds no secret. It refuses any network but testnet, checked
 against the RPC's `getNetwork`, Horizon's root document and the API's own

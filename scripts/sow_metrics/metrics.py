@@ -54,6 +54,7 @@ from .config import (
     SOW_ROWS,
     SPRINT_START,
     STROOPS_PER_UNIT,
+    PendingLink,
     SowRow,
 )
 
@@ -752,14 +753,33 @@ def _page_state(snap: Snapshot, path: str) -> tuple[bool, str]:
     return False, f"the {path} page answers HTTP {page.status}"
 
 
-def m06(snap: Snapshot, rules: Rules) -> Metric:
+def _page_evidence(
+    snap: Snapshot, path: str, page: Link, method: str, pending: PendingLink | None
+) -> tuple[list[Link], str]:
+    """The page's link and the method, or — when the page answers 404 — never a dead link.
+
+    A 404 page proves nothing and the evidence index cannot take it. With a
+    pending link the pull request that adds the page stands in for it;
+    without one, nothing is linked, and the method says why.
+    """
+    answer = snap.pages.get(path)
+    if answer is None or answer.status != 404:
+        return [page], method
+    if pending is not None:
+        note = " The page answered 404 when this ran, so the pull request that adds it is linked instead of the page."
+        return [Link(pending.label, pending.url, "pr")], method + note
+    return [], method + " The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
+
+
+def m06(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[5]
     method = (
         f"Opened the {REGISTER_PAGE} page on the live dApp with no login, and checked the live backend publishes the "
         "route that builds an unsigned registration transaction for the owner's own wallet to sign. The registry "
         "contract's register needs only the owner's signature, no admin."
     )
-    base = [Link("Register an agent page (opens with no login)", snap.page_urls[REGISTER_PAGE], "page")]
+    page = Link("Register an agent page (opens with no login)", snap.page_urls[REGISTER_PAGE], "page")
+    base, method = _page_evidence(snap, REGISTER_PAGE, page, method, pending)
     base += [Link("Live backend route list", snap.urls["openapi"], "doc")] + _registry_link(snap)
     unmeasured = _unmeasured(row, snap, method, base)
     if unmeasured:
@@ -891,10 +911,11 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     return Metric(row, achieved, MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m09(snap: Snapshot, rules: Rules) -> Metric:
+def m09(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[8]
     method = f"Opened the {GUIDE_PAGE} page on the live dApp with no login; published means it answers there."
-    links = [Link('"List your agent on Orizon" guide', snap.page_urls[GUIDE_PAGE], "page")]
+    page = Link('"List your agent on Orizon" guide', snap.page_urls[GUIDE_PAGE], "page")
+    links, method = _page_evidence(snap, GUIDE_PAGE, page, method, pending)
     unmeasured = _unmeasured(row, snap, method, links)
     if unmeasured:
         return unmeasured
@@ -924,13 +945,15 @@ def demo_state(html: str) -> tuple[str | None, int | None]:
     return (state.group(1) if state else None), seconds
 
 
-def m10(snap: Snapshot, rules: Rules) -> Metric:
+def m10(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[9]
     method = (
         f"Opened the {DEMO_PAGE} page on the live dApp with no login and read the published marker the page renders "
         f'(data-demo="published") and the video\'s running time, which must be 3 to 5 minutes.'
     )
-    links = [Link("Demo page", snap.page_urls[DEMO_PAGE], "page")]
+    links, method = _page_evidence(
+        snap, DEMO_PAGE, Link("Demo page", snap.page_urls[DEMO_PAGE], "page"), method, pending
+    )
     unmeasured = _unmeasured(row, snap, method, links)
     if unmeasured:
         return unmeasured
@@ -994,8 +1017,9 @@ def m11(snap: Snapshot, rules: Rules) -> Metric:
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted, excluded)
 
 
-def measure(snap: Snapshot) -> list[Metric]:
-    """All eleven, in SOW order."""
+def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None) -> list[Metric]:
+    """All eleven, in SOW order. `pending_links` stand in for a milestone page that answers 404."""
+    pending = pending_links or {}
     rules = Rules(snap)
     refunds = m05(snap, rules)
     return [
@@ -1004,10 +1028,10 @@ def measure(snap: Snapshot) -> list[Metric]:
         m03(snap, rules),
         m04(snap, rules),
         refunds,
-        m06(snap, rules),
+        m06(snap, rules, pending.get("m06")),
         m07(snap, rules),
         m08(snap, rules, refunds),
-        m09(snap, rules),
-        m10(snap, rules),
+        m09(snap, rules, pending.get("m09")),
+        m10(snap, rules, pending.get("m10")),
         m11(snap, rules),
     ]
