@@ -111,10 +111,6 @@ class Check:
         self.status, self.detail, self.fix = SKIPPED, detail, fix
         return self
 
-    @property
-    def holds(self) -> bool:
-        return self.status in (PASS, WARN)
-
 
 @dataclass
 class Facts:
