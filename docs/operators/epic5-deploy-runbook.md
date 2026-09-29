@@ -130,3 +130,95 @@ Nothing in steps 2–12 starts until every box here is ticked.
    Also note, from the Render dashboard, the commit the backend is currently
    running, and from Vercel, the current production deployment. Those two are
    what step 12 rolls back to.
+
+---
+
+## 2. Merge order
+
+**Merge commits only. Never squash, never rebase-merge.** Every stack below
+was built as a chain of branches, each on the one before it, and every PR
+targets `main`. A merge commit keeps each lower branch's commits in `main`
+with their original ids, so the next PR in the stack shrinks to its own
+commits. A squash rewrites them, and the next PR then shows the whole lower
+stack again as conflicts.
+
+Open PRs on 2026-09-29 (`gh pr list`, all MERGEABLE):
+
+| Repo | PR | Branch | What it is | Stacked on |
+|---|---|---|---|---|
+| contracts | #5 | `chore/mit-license` | the MIT licence | — |
+| backend | #90 | `feat/5.03-friction-coverage` | 5.03: friction log → guide coverage | #89 (merged) |
+| backend | #91 | `feat/5.04-demo-tools` | 5.04: `demo_preflight`, `demo_evidence` | #90 |
+| backend | #93 | `feat/5.05-sow-metrics` | 5.05: `sow_metrics` | #91 |
+| backend | #92 | `chore/mit-license` | the MIT licence | — |
+| frontend | #91 | `feat/5.03-integration` | 5.03: the `/guide/list-your-agent` guide | #90, #89 (merged) |
+| frontend | #92 | `feat/5.04-integration` | 5.04: the demo script, `/demo`, honest copy | #91 |
+| frontend | #94 | `feat/5.05-integration` | 5.05: the public evidence index, `/evidence` | #92 |
+| frontend | #95 | `feat/5.06-integration` | 5.06: the litepaper | #94 |
+| frontend | #93 | `chore/mit-license` | the MIT licence | — |
+
+Already merged and deployed: backend #88 (5.01) and #89 (5.02); frontend #89
+(5.01, the v2 console) and #90 (5.02). The example agent has no open PR and
+GitHub already detects its MIT licence.
+
+Backend #91 and #93 change scripts, docs and tests only, nothing in `app/`
+(their PR descriptions say so). #90 adds the friction-coverage mapping. So the
+backend behaviour step 3 deploys is 5.01 + 5.02 (#88, #89), which are already
+on `main` but, per the demo script's live check on 2026-09-29, not yet on
+Render.
+
+### The order
+
+For each PR: wait for its checks to go green, then merge it.
+
+```sh
+# contracts
+gh pr merge 5  -R Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar --merge
+
+# backend: the stack, bottom first, then the licence
+gh pr merge 90 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
+gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
+gh pr merge 93 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
+gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-BE-Stellar --merge
+# then the Epic 5 audit-fix PR (number not yet known: confirm)
+
+# frontend: #91 and #92 together, then the rest, then the licence
+gh pr merge 91 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
+gh pr merge 92 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
+gh pr merge 94 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
+gh pr merge 95 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
+gh pr merge 93 -R Bl0cksmiths/Orizon-Agents-FE-Stellar --merge
+# then the Epic 5 audit-fix PR (number not yet known: confirm)
+```
+
+**Frontend #91 and #92 ship together.** Vercel deploys every push to
+`main`, so merge #92 immediately after #91, before Vercel has promoted a
+deployment of #91 alone if you can, and at the latest before anyone is pointed
+at the guide. The guide in #91 and the Register page's labels agree only from
+#92 on: #92 is where the Register label (and receipts, the dispute dialog, the
+trace and the dashboard) stops hard-coding "USDC" and follows the network
+asset, XLM on testnet (friction F-022).
+
+After each merge:
+
+1. **Expected:** the next PR in the stack shows only its own commits (`gh pr
+   view <n> --json commits --jq '.commits | length'` drops). If it suddenly
+   shows the lower stack's commits again, a squash happened: stop.
+2. **Verify:** `git -C "$BE" fetch origin && git -C "$BE" log --oneline --merges
+   -3 origin/main` (and the same for `$FE`) shows a merge commit per PR.
+3. **Rollback:** a merged PR is undone with a revert PR of its merge commit
+   (`git revert -m 1 <merge sha>` on a new branch, PR to `main`). Never force-push
+   `main`.
+
+The frontend's Vercel deploy of these merges is fine to let happen now: the
+pages it adds (`/guide/list-your-agent`, `/demo`, `/evidence`, `/litepaper`)
+are static and do not depend on escrow v2. The escrow pin stays `null` until
+step 5, so nothing is paused.
+
+**The frontend already speaks v2.** `docs/escrow-v2-switch.md` assumes the
+frontend merges last, after the contract and backend switch. That no longer
+holds: frontend #89 (the v2 console) is merged and deployed, so today the
+plan card tells buyers that signing Authorize moves the cap into escrow while
+production still settles through v1, which cannot do that (D-039). This
+runbook does not create that gap; it closes it. Keep steps 3 to 5 in one
+sitting so it closes as soon as possible.
