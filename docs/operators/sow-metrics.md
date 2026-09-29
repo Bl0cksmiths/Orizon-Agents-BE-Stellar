@@ -117,7 +117,7 @@ m04's method.
 
 1. Run the generator with `--out-dir`, and a `--pending-link` for each milestone page that is not deployed yet,
    for example
-   `--pending-link m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/91`. Exit 0 means every
+   `--pending-link m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/97`. Exit 0 means every
    row was measured.
 2. Paste `sow-metrics.block.json` as the `metrics` array of the frontend's `content/evidence/index.json`.
 3. Keep `sow-metrics.raw.json` next to it: it is the answer to "which items were excluded, and why".
