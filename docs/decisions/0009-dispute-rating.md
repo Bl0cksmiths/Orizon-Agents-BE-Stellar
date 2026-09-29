@@ -508,6 +508,18 @@ ADRs keep their bodies as the record of what was decided at the time, and each
 carries a dated amendment wherever it names a retired helper as the thing 4.04
 would call.
 
+> **Amended 2026-09-29 (Epic 5 audit): which key writes the ratings.** This ADR
+> calls the key that writes the automatic and the dispute ratings "the
+> settler" (D2's heading, "the settler's automatic rating", "the settler keys
+> every automatic rating"). On the deployed escrow that is wrong. The
+> platform's signing key (`STELLAR_SIGNING_KEY`, `GDB4N25…CDHP` on testnet)
+> pays dispute credits, writes ratings (scorer) and seals attestations
+> (sealer), and it becomes the escrow's settler once escrow v2 is deployed.
+> The deployed v1 escrow's settler is the admin key (`GA7AI5…5OQV`). Nothing
+> decided here changes: both ratings on a disputed step are written by the
+> same key, the ledger's Scorer. Where this ADR says "the settler" for the
+> rating writer, read "the platform's signing key".
+
 Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (a failed step
 is never billed — the reason every rating is weighted by the quoted price
 rather than the settled value), ADR 0007 (the dispute record the rating is
