@@ -517,3 +517,63 @@ must hold it.
 4. **Rollback:** set both switches back to `false` and Manual Deploy. A
    dispute already in `crediting` stays there for an operator to reconcile by
    hand (`docs/disputes.md`); nothing pays twice.
+
+---
+
+## 7. The operators (5.02, BLO-36)
+
+One session per external operator, run from
+[onboarding-session-runbook.md](onboarding-session-runbook.md) exactly as
+written. This runbook adds only the order and the records.
+
+1. **The day before each session**, the facilitator's checklist in the
+   onboarding runbook (consent in writing and an `OP-n`, a buyer wallet that is
+   not the operator's, the known blockers read, the friction log open).
+   `curl -s "$SITE/api/stellar/network"` should now name `$ESCROW_V2` as
+   `contracts.payment_escrow`. The onboarding runbook still lists **F-019**
+   (settlement to an external operator cannot land) as a known blocker: with
+   step 4 done it no longer applies, so step 7 of the session is where the
+   settled workflow comes from.
+2. **Run the session** (45–60 min). The facilitator rules are absolute: never
+   handle the operator's secret, never register, bind or pay from a team
+   wallet for them, never let them pay for their own workflow, never turn on
+   fault injection on their deploy, never put their identity in the repository.
+3. **Log friction live** into [friction-log.md](friction-log.md), the moment
+   it happens: the next `F-0NN`, the date, `OP-n`, the step name, the exact
+   on-screen text. Repeats get their own row (`same as F-0NN`).
+4. **Produce the evidence** after each session, from the backend repo root
+   with its virtualenv active:
+
+   ```sh
+   cd "$BE" && source .venv/bin/activate
+   python -m scripts.adoption_report \
+     --api https://orizons.xyz \
+     --registry CAPHXWU53UZUZJGV7IAE57NNMH3YYB5MTWO6YA53KKMXSFVLOITBJ3GQ \
+     --escrow "$ESCROW_V2" \
+     --team-register app/data/team_wallets.json \
+     --out-dir docs/evidence/5.02/$(date +%F)
+   ```
+
+   Take the ids from the contracts address book (`agent_registry`,
+   `payment_escrow_v2`), not only from `/api/stellar/network`. **Expected:**
+   exit 0 and one MET / NOT MET line per §6.3 target. A NOT MET line is still a
+   valid report: commit it. Exit 5 or 6 means do not publish; file it. Exit 8
+   means a chain read failed; run it again later. **Confirm** whether
+   `--escrow` should name v2 only, or whether the report needs to be run once
+   per escrow: its documentation predates v2 and names only
+   `contracts.payment_escrow`.
+5. **Record the Week-2 checkpoint and the fallback truthfully.**
+   - On **BLO-36**, a comment stating what happened at the Week-2 checkpoint
+     (Fri 2026-09-18): two named, committed operators, or the date the
+     escalation to the Chapter Lead was raised. If it was raised late, the
+     comment says late, and when.
+   - If any operator came through the chapter fallback (a Stellar Philippines
+     contributor), the session record says `recruited via: chapter fallback`,
+     and the completion report must say so plainly, without being asked.
+   - In the risk register, update **R5**'s status line with the same facts and
+     the date.
+6. **Verify:** `$SITE/app/ecosystem` shows each external operator under
+   "External operators", and no team wallet there.
+7. **Rollback:** nothing to roll back. An operator who withdraws consent
+   before publication is removed from the evidence (their `OP-n` stays in the
+   friction log without the wallet).
