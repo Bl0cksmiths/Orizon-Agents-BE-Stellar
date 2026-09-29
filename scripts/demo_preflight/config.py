@@ -84,7 +84,6 @@ class RunConfig:
     team_register: Path
     buyer: str | None
     operator: str | None
-    agent: str | None
     cap: float
     max_refund: float
     allow_team_operator: bool
