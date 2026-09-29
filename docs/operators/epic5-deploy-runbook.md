@@ -57,3 +57,76 @@ separate `git worktree` of `origin/main` rather than switching branches in it.
 | Demo (5.04) | [demo-recording.md](demo-recording.md); frontend `content/demo/script.md`, `shot-list.md` |
 | Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (being written by another lane) |
 | Gates | Linear: "Sprint Risk Register & Decision Log" (R5, R9), BLO-36 |
+
+---
+
+## 1. Preconditions and gates
+
+Nothing in steps 2–12 starts until every box here is ticked.
+
+1. **The Chapter Lead has approved the escrow v2 testnet deploy.**
+   - Why: risk **R9** ("Contract redeploy would invalidate published evidence")
+     says *no redeploy without the Chapter Lead's agreement*, and ADR 0002
+     rejected a new escrow entrypoint in Week 1 for the same reason:
+     re-publishing contract ids that SOW §6.1 lists as submitted evidence is
+     barred without it. Escrow v2 is a **new** contract id beside v1, and v1's
+     id stays valid and stays in the evidence as history, but the id the live
+     service settles through changes.
+   - Record it: as a dated decision entry in the Linear document "Sprint Risk
+     Register & Decision Log" under R9, quoting the Chapter Lead's words and
+     the date, with a link to where it was given (the check-in issue, BLO-138,
+     if it is given at the Wed 2026-09-30 check-in). **Confirm** that this is
+     where the Chapter Lead wants it recorded.
+   - Verify: the risk register shows the entry, and R9's status names it.
+   - If it is refused: stop. Do steps 2, 3 and 7 only; the lifecycle (8), the
+     demo's settlement scenes (9) and the refund metric cannot be produced on
+     v1 (D-039), and the evidence index (10) states that plainly.
+2. **The Week-2 operator checkpoint status is known and recorded truthfully.**
+   - The gate (BLO-36 and risk **R5**): by the end of Week 2 (Fri
+     2026-09-18), two named, committed external operators, **or** an
+     escalation to the Chapter Lead raised that same day, with the chapter
+     fallback triggered.
+   - Status when this runbook was written (2026-09-29): **not recorded.**
+     BLO-36 has no comments and no checkpoint entry; R5 in the risk register
+     is still `open` and was last updated 2026-09-21. **Confirm** what actually
+     happened at the checkpoint before step 7, and record it (step 7.5).
+   - Do not backfill a checkpoint that did not happen. If no escalation was
+     raised on 2026-09-18, the record says so and says when it was raised.
+3. **Who does what.** From D-003 in the risk register and the Linear
+   assignees:
+
+   | Person | Owns in this runbook |
+   |---|---|
+   | **Dan** (Danielle Bagaforo Meer, lead) | steps 1–10: the merges, every deploy and dashboard change, the escrow v2 deploy, the operator sessions (5.02), the lifecycle runs (5.01), the demo recording (5.04), the metrics run (5.05) |
+   | **Rie** (Rieselle Saure, PM + QA) | the 6.04 re-verification in step 10 (BLO-43), and step 11: the Week-4 bundle (BLO-134), the X post (BLO-136), the check-in record (BLO-138) |
+   | **The Chapter Lead** | the R9 approval in 1.1, and the §6.2 sign-off in step 10 |
+
+   **Confirm** whether Rie also facilitates or observes the operator
+   sessions: no source assigns them to her.
+4. **Access.** Before starting, check you have each of these. None of the
+   secrets is written down anywhere in the repositories.
+   - Render dashboard access to the backend service (environment and Manual
+     Deploy).
+   - Vercel access to the frontend project (deployments and promote).
+   - The stellar-cli identity `admin` on the machine that deploys the
+     contract. `stellar keys address admin` should print the address book's
+     `admin`, `GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV`
+     (**confirm**: the deploy script defaults the escrow admin to this
+     identity's address, and no source states the two are the same key).
+   - Merge rights on all four repositories, and `gh` authenticated.
+   - The deployment's operator `API_KEY` (a secret, from the Render dashboard)
+     for the lifecycle harness's `--adjudicator-key-env`.
+   - Two funded testnet buyer wallets whose seeds you hold (step 8), and a
+     third team wallet for the faulty demo agent (step 9).
+5. **The live state before you start.** Read it and keep the output; it is
+   the baseline every rollback returns to.
+
+   ```sh
+   curl -s "$BE_HOST/readiness" | jq '{status, escrow, ratings, disputes}'
+   curl -s "$SITE/api/stellar/network" | jq '{network, contracts}'
+   gh pr list -R Bl0cksmiths/Orizon-Agents-BE-Stellar --state merged --limit 3
+   ```
+
+   Also note, from the Render dashboard, the commit the backend is currently
+   running, and from Vercel, the current production deployment. Those two are
+   what step 12 rolls back to.
