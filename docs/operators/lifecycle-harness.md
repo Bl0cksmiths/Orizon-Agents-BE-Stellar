@@ -219,3 +219,63 @@ Each run directory holds:
 
 Amounts are labelled with the asset the network reports. On testnet the
 escrow's SAC wraps native XLM, so they read `XLM (native)`, never USDC.
+
+### Into the evidence index
+
+Story 5.01's rule is that every hash goes into the frontend's evidence index
+(`content/evidence/index.json`) as it is produced. The evidence tool writes
+the run's hashes in the index's own link shape, re-verified, so nothing is
+retyped:
+
+```sh
+python -m scripts.demo_evidence docs/evidence/5.01/run-1 \
+    --out-dir docs/evidence/5.01/run-1/evidence \
+    --index-links docs/evidence/5.01/run-1/evidence/index-links.json
+```
+
+Browser hashes join the same file with `--rows` or `--tx`
+(`docs/operators/demo-recording.md` §2). Only a hash that re-verifies SUCCESS
+on testnet is ever a link:
+
+```json
+{"schema": "orizon.evidence-index-links/1", "network": "testnet", "generated_at": 1790000000,
+ "items": [{"id": "6.1-D4-d",
+            "links": [{"label": "Settlement for agent alpha of 0.0100000 XLM on Stellar testnet — 2026-09-24",
+                       "url": "https://stellar.expert/explorer/testnet/tx/<hash>",
+                       "kind": "tx", "tx_hash": "<64 hex>", "date": "2026-09-24"}]}]}
+```
+
+- Each link has exactly the index's keys, in its order: `label`, `url`,
+  `kind` (always `"tx"`), `tx_hash`, `date`.
+- `date` is the UTC calendar date of the ledger's `created_at` on Horizon, as
+  the index's snapshot method dates every transaction. A verified hash whose
+  date cannot be read gets no link, and the run exits 8: rerun.
+- `label` is plain language by the index validator's rule: at least two real
+  words, never a bare hash or address; a full hash or address inside one is
+  shortened (`GBI2I…ADBH`). It is the `--tx`/`--rows` label when given,
+  otherwise built from the kind, agent and amount, and it ends with the date.
+- Items appear in the index's order, and only when they gained a link:
+
+| `kind` (harness `event`) | Index item | What the item owes |
+|---|---|---|
+| `register` | `6.1-D1-c` | an agent registered from its operator's own wallet |
+| `rating` | `6.1-D2-a` | the on-chain ratings the plan card shows |
+| `dispute_rating` | `6.1-D3-a` | the dispute's negative on-chain rating |
+| `refund` | `6.1-D3-b` | the matching partial-credit refund |
+| `authorize` (`authorize`, `authorize_unknown`), `settle` (`settle`, `charge`), `seal` | `6.1-D4-d` | settlements, each with its receipt and attestation |
+| `other` | `6.1-RD-f` | activity viewable on Stellar Expert |
+
+**Merging it (the coordinator).** In the frontend repo, for each entry of
+`items`, find the item with that `id` in `content/evidence/index.json` and
+append its `links` to that item's `links`, skipping a link whose `tx_hash` the
+item already lists. Then, by hand:
+
+- make each label say whose wallet signed, as the index's labels do (for
+  example "… by the team's QA operator key GBWMD…7BQJ (team wallet: not
+  external)"). The tool cannot tell a team wallet from an outside one;
+- copy a registration by an **outside** operator into `6.1-D4-c` as well;
+- update the item's `status` and `note` if the new links change them, and the
+  snapshot's `as_of`;
+- run `npm run evidence:check` (the index's rules, offline) and
+  `npm run evidence:verify` (every link re-read on the network) before
+  committing.

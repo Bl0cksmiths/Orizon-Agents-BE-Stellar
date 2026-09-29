@@ -67,6 +67,28 @@ KIND_LABEL: dict[str, str] = {
     "other": "Transaction",
 }
 
+# The item of the frontend's evidence index (`content/evidence/index.json`)
+# each kind of transaction is evidence for, by that item's `id`. A
+# registration is D1-c's (an operator registering from its own wallet; it is
+# also D4-c's when the operator is outside the team, which only the
+# coordinator can judge); the dispute's rating is D3-a's and its refund D3-b's;
+# the authorize, settle and seal of a routed workflow are D4-d's ("each with
+# its on-chain receipt and attestation"); a rating feeds D2-a's plan card; any
+# other transaction is RD-f's "viewable on Stellar Expert".
+KIND_INDEX_ITEM: dict[str, str] = {
+    "register": "6.1-D1-c",
+    "rating": "6.1-D2-a",
+    "dispute_rating": "6.1-D3-a",
+    "refund": "6.1-D3-b",
+    "authorize": "6.1-D4-d",
+    "settle": "6.1-D4-d",
+    "seal": "6.1-D4-d",
+    "other": "6.1-RD-f",
+}
+# The order those items appear in the index, which the index-links file keeps.
+INDEX_ITEMS: tuple[str, ...] = ("6.1-D1-c", "6.1-D2-a", "6.1-D3-a", "6.1-D3-b", "6.1-D4-d", "6.1-RD-f")
+INDEX_LINKS_SCHEMA = "orizon.evidence-index-links/1"
+
 KIND_PROVES: dict[str, str] = {
     "register": "AgentRegistry registered the agent from its operator's own wallet",
     "authorize": "the buyer's wallet authorized the plan's spend on PaymentEscrow",
@@ -94,3 +116,6 @@ class RunConfig:
     horizon_url: str
     title: str
     disclosures: tuple[str, ...] = ()
+    tx_args: tuple[str, ...] = ()  # `--tx KIND=HASH[:label]`, as given
+    rows_files: tuple[Path, ...] = ()  # `--rows file.json`
+    index_links: Path | None = None  # `--index-links`: where the evidence index's links go

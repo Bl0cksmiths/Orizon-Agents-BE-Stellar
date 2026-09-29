@@ -37,6 +37,7 @@ class FakeTx:
     ledger: int
     rpc_visible: bool = True
     horizon_visible: bool = True
+    created_at: str = "2026-09-24T12:00:00Z"
 
 
 @dataclass
@@ -48,9 +49,17 @@ class FakeLedger:
     txs: dict[str, FakeTx] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
 
-    def add(self, tag: str, status: str = "SUCCESS", *, rpc: bool = True, horizon: bool = True) -> str:
+    def add(
+        self,
+        tag: str,
+        status: str = "SUCCESS",
+        *,
+        rpc: bool = True,
+        horizon: bool = True,
+        created_at: str = "2026-09-24T12:00:00Z",
+    ) -> str:
         h = tx_hash(tag)
-        self.txs[h] = FakeTx(status, 1000 + len(self.txs), rpc, horizon)
+        self.txs[h] = FakeTx(status, 1000 + len(self.txs), rpc, horizon, created_at)
         return h
 
     def transport(self) -> httpx.MockTransport:
@@ -87,7 +96,9 @@ class FakeLedger:
                 tx = self.txs.get(path.split("/")[2])
                 if tx is None or not tx.horizon_visible:
                     return _json(404, {"status": 404})
-                return _json(200, {"successful": tx.status == "SUCCESS", "ledger": tx.ledger})
+                return _json(
+                    200, {"successful": tx.status == "SUCCESS", "ledger": tx.ledger, "created_at": tx.created_at}
+                )
             return _json(404, {"status": 404})
         raise AssertionError(f"unexpected request {request.method} {url}")
 

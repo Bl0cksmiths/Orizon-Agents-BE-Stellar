@@ -54,6 +54,10 @@ class TxRow:
     contract: str | None
     recorded_status: str | None  # what the harness read back when it wrote the row
     summary: str
+    # A hash given on the command line (`--tx`, `--rows`) rather than by the
+    # harness: the operator's own label, and a deliverable for an `other`.
+    given_label: str | None = None
+    given_deliverable: str | None = None
 
     @property
     def kind(self) -> str:
@@ -61,7 +65,7 @@ class TxRow:
 
     @property
     def deliverable(self) -> str:
-        return KIND_DELIVERABLE[self.kind]
+        return self.given_deliverable or KIND_DELIVERABLE[self.kind]
 
     @property
     def proves(self) -> str:
@@ -73,6 +77,8 @@ class TxRow:
 
     @property
     def label(self) -> str:
+        if self.given_label:
+            return self.given_label
         parts = [KIND_LABEL[self.kind]]
         if self.agent:
             parts.append(f"— {self.agent}")
@@ -87,6 +93,8 @@ class Loaded:
     files: list[Path]
     skipped_lines: int
     duplicates: int
+    given_files: tuple[Path, ...] = ()  # `--rows` files merged in
+    given_tx: int = 0  # `--tx` hashes merged in
 
 
 def _file(path: Path) -> Path:
@@ -100,8 +108,12 @@ def _str(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
-def load(paths: list[Path]) -> Loaded:
-    """Every transaction row of every input, in input order then file order. Raises on another network."""
+def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
+    """Every transaction row of every input, in input order then file order. Raises on another network.
+
+    `require_rows=False` when hashes are also given on the command line, which
+    `merge` adds; the run then needs a row from either, not from both.
+    """
     files = [_file(p) for p in paths]
     rows: list[TxRow] = []
     seen: set[str] = set()
@@ -160,6 +172,40 @@ def load(paths: list[Path]) -> Loaded:
                     summary=str(detail.get("summary") or ""),
                 )
             )
-    if not rows:
+    if not rows and require_rows:
         raise InputError(f"no transaction rows in {', '.join(str(f) for f in files)}")
     return Loaded(rows=rows, files=files, skipped_lines=skipped, duplicates=duplicates)
+
+
+def merge(loaded: Loaded, given: list[TxRow], given_files: tuple[Path, ...], given_tx: int) -> Loaded:
+    """The harness's rows, then the given ones, each hash kept once at its first appearance.
+
+    A hash filed as two different kinds is refused: one of the two labels would
+    be wrong in the video's description, and the tool cannot tell which.
+    """
+    rows = list(loaded.rows)
+    first = {r.tx_hash: r for r in rows}
+    duplicates = loaded.duplicates
+    for row in given:
+        prior = first.get(row.tx_hash)
+        if prior is not None:
+            if prior.kind != row.kind:
+                raise InputError(
+                    f"{row.source}: {row.tx_hash} is given as {row.kind!r}, but {prior.source} filed it as "
+                    f"{prior.kind!r}; give each hash one kind"
+                )
+            duplicates += 1
+            continue
+        first[row.tx_hash] = row
+        rows.append(row)
+    if not rows:
+        sources = [str(f) for f in (*loaded.files, *given_files)] + (["--tx"] if given_tx else [])
+        raise InputError(f"no transaction rows in {', '.join(sources) or 'the input'}")
+    return Loaded(
+        rows=rows,
+        files=loaded.files,
+        skipped_lines=loaded.skipped_lines,
+        duplicates=duplicates,
+        given_files=given_files,
+        given_tx=given_tx,
+    )

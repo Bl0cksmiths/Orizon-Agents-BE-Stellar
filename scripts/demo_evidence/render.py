@@ -78,13 +78,20 @@ def render_json(entries: list[Entry], generated_at: int) -> dict[str, Any]:
     }
 
 
+def _sources(loaded: Loaded) -> str:
+    named = [f"`{f}`" for f in (*loaded.files, *loaded.given_files)]
+    if loaded.given_tx:
+        named.append(f"{loaded.given_tx} hash(es) given with `--tx`")
+    return ", ".join(named)
+
+
 def render_sheet(entries: list[Entry], loaded: Loaded, generated_at: int, title: str) -> str:
     verified = [e for e in entries if e.verified]
     failed = [e for e in entries if not e.verified]
     out = [
         f"# Evidence sheet — {title}",
         "",
-        f"Generated {_utc(generated_at)} from {', '.join(f'`{f}`' for f in loaded.files)}. Network: **testnet**.",
+        f"Generated {_utc(generated_at)} from {_sources(loaded)}. Network: **testnet**.",
         "",
         f"**{len(verified)} of {len(entries)} transaction(s) re-verified SUCCESS** on the ledger just now "
         "(Soroban RPC `getTransaction`, falling back to Horizon). Only those are in `evidence.json` and "
@@ -164,6 +171,11 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def write_json(path: Path, body: dict[str, Any]) -> Path:
+    _atomic_write(path, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
+    return path
 
 
 def write(out_dir: Path, sheet: str, description: str, body: dict[str, Any]) -> list[Path]:

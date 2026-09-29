@@ -40,6 +40,7 @@ class Verdict:
     ledger: int | None
     source: str  # "rpc" | "horizon" | "none"
     note: str = ""
+    created_at: str | None = None  # Horizon's `created_at` for the ledger, when Horizon answered
 
     @property
     def verified(self) -> bool:
@@ -94,6 +95,13 @@ class ChainReader:
         root = self._horizon("/")
         return None if root is None else str(root.get("network_passphrase"))
 
+    def created_at(self, tx_hash: str) -> str | None:
+        """Horizon's `created_at` for the transaction's ledger; None when Horizon has no record of it."""
+        record = self._horizon(f"/transactions/{tx_hash}")
+        if record is None or record.get("created_at") is None:
+            return None
+        return str(record["created_at"])
+
     def verify(self, tx_hash: str) -> Verdict:
         rpc_note = ""
         try:
@@ -116,4 +124,12 @@ class ChainReader:
             return Verdict(tx_hash, NOT_FOUND, None, "none", "neither the RPC nor Horizon knows this hash")
         ledger = record.get("ledger")
         status = SUCCESS if record.get("successful") is True else FAILED
-        return Verdict(tx_hash, status, int(ledger) if ledger else None, "horizon", rpc_note.rstrip("; "))
+        created = record.get("created_at")
+        return Verdict(
+            tx_hash,
+            status,
+            int(ledger) if ledger else None,
+            "horizon",
+            rpc_note.rstrip("; "),
+            None if created is None else str(created),
+        )
