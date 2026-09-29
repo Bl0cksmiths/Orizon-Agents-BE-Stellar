@@ -67,6 +67,10 @@ payment path that breaks the existing x402 flow. Roadmap, not sprint. Rejected.
 
 ## Proof (the AC "a real refund has landed on testnet") — DONE
 
+> **Read the 2026-09-29 amendment at the end first.** The transaction below
+> is an operator-script transfer tied to no dispute. It proves the transfer
+> mechanism only.
+
 A real refund landed on testnet on 2026-09-12: tx
 `9b8ffaa44b2b966e4c3f1ab581f4203a30d282901ba3b231a578e46d8f919a68` (ledger
 4635132, `successful: true` on Horizon), the settler crediting the 1.05
@@ -157,3 +161,20 @@ settler key can be rotated (it cannot — write-once).
 > Only the name was wrong. Where this ADR says "the settler" for the key that
 > pays a credit or writes a rating, read "the platform's signing key". The
 > current wording is in [`docs/disputes.md`](../disputes.md).
+
+> **Amended 2026-09-29 (Epic 5 audit): what the proof proves.** The Proof
+> section says "a real refund landed on testnet" in
+> `9b8ffaa44b2b966e4c3f1ab581f4203a30d282901ba3b231a578e46d8f919a68`. It was
+> not a refund. Horizon shows a single `transfer` over the native asset SAC
+> (`CDLZFC3S…CYSC`) of 0.054 XLM, signed and sent by the admin key
+> (`GA7AI5…5OQV`) to the team's audit key (`GBI2I3WL…ADBH`, declared in
+> `app/data/team_wallets.json`), at 2026-09-12T07:47:27Z. It was an
+> operator-script transfer from the admin key to a team key, tied to no
+> dispute: it carries no dispute tag, and no dispute could have existed yet,
+> because disputes were first recorded with story 4.02 on 2026-09-21. It
+> proves the transfer mechanism only — that a server-signed SAC `transfer` to
+> an address lands on testnet — and not that any dispute was ever credited.
+> The Proof section's "DONE" stands for that mechanism and nothing more. A
+> real credit is one `POST /api/disputes/{dispute_id}/uphold` pays, signed by
+> `STELLAR_SIGNING_KEY` and recorded on its dispute as `refund_tx` (see
+> [`docs/disputes.md`](../disputes.md), "Reading the two on-chain artifacts").
