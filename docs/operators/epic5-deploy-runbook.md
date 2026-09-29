@@ -228,9 +228,9 @@ sitting so it closes as soon as possible.
 ## 3. Render: deploy the backend `main`
 
 Everything in this step happens in the Render dashboard, on the backend
-service. The dashboard's environment is the one in force; `render.yaml` is not
-read on a manual deploy's environment (it is stale: mainnet values and
-`autoDeploy: true`). Change nothing in `render.yaml` as part of this runbook.
+service. The dashboard's environment is the one in force: it overrides
+`render.yaml`, which is stale (mainnet values and `autoDeploy: true`). Change
+nothing in `render.yaml` as part of this runbook.
 
 ### 3.1 Check the environment
 
