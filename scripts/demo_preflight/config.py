@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # The only network the demo is recorded on. SOW §3.6 makes the sprint
 # testnet-only, and a video whose hashes resolve on mainnet (or not at all)
@@ -100,6 +101,7 @@ class RunConfig:
     allow_team_operator: bool
     decompose_intent: str | None
     out_dir: Path | None
+    operator_endpoint: str | None = None  # the origin only: a bound URL's query can carry a shared secret
 
 
 def normalize_base(raw: str, flag: str, *, strip_api: bool = False) -> str:
@@ -114,6 +116,20 @@ def normalize_base(raw: str, flag: str, *, strip_api: bool = False) -> str:
     if not base.startswith(("http://", "https://")):
         raise ValueError(f"{flag} must be an absolute http(s) URL, got {raw!r}")
     return base
+
+
+def endpoint_origin(raw: str) -> str:
+    """The scheme and host of an agent endpoint, without its path, query or fragment.
+
+    The reference agent answers its health check on any GET path, and a bound
+    endpoint may carry a shared secret in its query string, which must never
+    reach the terminal or the report. So only the origin is kept, and `/` is
+    asked there.
+    """
+    parts = urlsplit(raw.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("--operator-endpoint must be an absolute http(s) URL (not shown: it may carry a secret)")
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def to_units(stroops: int) -> float:

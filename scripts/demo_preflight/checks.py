@@ -31,12 +31,18 @@ Where a fact comes from, and why it is the honest source:
               that can say the refund switch is on. The settler's balance is a
               Horizon read.
   operator    `GET /api/ecosystem/adoption` for who is external, and each
-              external agent's `GET /api/agents/{id}/readiness`.
+              external agent's `GET /api/agents/{id}/readiness`; the
+              reference agent's own `GET /` (`--operator-endpoint`) for its
+              fault-injection field and header.
   exclusion   `GET /api/stellar/reputation` (+ `/params` for the floor and the
               switch), joined with `GET /api/agents` for registered, listed
               agents. A `degraded` read is the prior served because the ledger
               could not be read, and a `stale` one is an old read: neither is
-              a verdict on the agent, so neither ever counts.
+              a verdict on the agent, so neither ever counts. When every
+              agent reads degraded (a cold start), the batch is read again.
+              The same batch, with each row's status and binding, counts the
+              routable agents that clear the floor, and the excluded bound is
+              judged by the figure the plan card prints (`card_stars`).
   wallets     Horizon, against `--cap` and the fee allowances in `config.py`,
               and the committed team register.
   frontend    a GET of each page the script visits, redirects NOT followed.
@@ -547,6 +553,54 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
     return check.passed("ready and reachable: " + ", ".join(ready) + aside)
 
 
+# The reference agent's fault-injection markers (Orizon-Agents-Example-Agent-
+# Stellar agent.py, "Fault injection"): a `fault_injection` field in its
+# `GET /` health check and an `X-Fault-Injection` header on every answer,
+# both present only while FAULT_MODE is set.
+FAULT_FIELD = "fault_injection"
+FAULT_HEADER = "X-Fault-Injection"
+
+
+def check_operator_endpoint(reads: Reads, cfg: RunConfig) -> Check:
+    check = Check(
+        "operator.endpoint",
+        "operator",
+        "The operator's reference agent answers GET / with no fault injection",
+    )
+    origin = cfg.operator_endpoint
+    if origin is None:
+        return check.skipped(
+            "no --operator-endpoint given",
+            "Pass --operator-endpoint https://… (the endpoint the operator wallet binds in S03).",
+        )
+    try:
+        answer = reads.agent_health(origin)
+    except Unreachable as exc:
+        return check.failed(
+            str(exc),
+            "Start (or redeploy) the operator's reference agent, wait for it to answer GET /, and rerun.",
+        )
+    body = answer.obj()
+    if not answer.ok or body.get("ok") is not True:
+        return check.failed(
+            f'{origin}/ answered HTTP {answer.status} without {{"ok": true}}',
+            "Point --operator-endpoint at the reference agent the operator binds, and check it is deployed and awake.",
+        )
+    faults: list[str] = []
+    if FAULT_FIELD in body:
+        faults.append(f"its health check carries {FAULT_FIELD}: {body.get(FAULT_FIELD)!r}")
+    header = answer.headers.get(FAULT_HEADER.lower())
+    if header is not None:
+        faults.append(f"it answers with the {FAULT_HEADER} header ({header!r})")
+    if faults:
+        return check.failed(
+            f"{origin}/: fault injection is on: " + "; ".join(faults),
+            "Unset FAULT_MODE (and FAULT_SCOPE) on the operator's reference agent and redeploy it. Fault injection "
+            "belongs only on the separate faulty test agent; never record against an agent that has it on.",
+        )
+    return check.passed(f'{origin}/ answered {{"ok": true}} with no {FAULT_FIELD} field and no {FAULT_HEADER} header')
+
+
 # ── the exclusion moment ────────────────────────────────────────
 def all_degraded(reputations: dict[str, Any], agent_ids: list[str]) -> bool:
     """Whether every one of `agent_ids` that has an entry reads degraded (and at least one does)."""
@@ -878,6 +932,7 @@ def run_checks(
     add(check_decompose(reads, facts, cfg.decompose_intent))
     add(check_external_count(facts))
     add(check_external_ready(reads, facts))
+    add(check_operator_endpoint(reads, cfg))
     add(check_buyer(chain, cfg))
     add(check_operator(chain, facts, cfg))
     add(check_team_wallets(team, facts, cfg))

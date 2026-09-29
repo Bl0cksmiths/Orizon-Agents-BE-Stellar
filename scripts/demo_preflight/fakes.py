@@ -27,6 +27,7 @@ API = "https://orizon.test"
 BACKEND = "https://backend.test"
 FRONTEND = "https://front.test"
 RPC = "https://rpc.test"
+AGENT_ENDPOINT = "https://agent.test"
 HORIZON = "https://horizon.test"
 MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
 
@@ -131,6 +132,17 @@ class FakeWorld:
     decompose_body: dict[str, Any] = field(default_factory=dict)
     decompose_status: int = 200
     degraded_batches: int = 0  # reputation batch reads that answer every entry degraded (a cold start)
+    # The operator's reference agent, as its GET / answers (agent.py do_GET).
+    agent_status: int = 200
+    agent_health: dict[str, Any] = field(
+        default_factory=lambda: {
+            "ok": True,
+            "endpoint_url": AGENT_ENDPOINT + "/",
+            "network": "testnet",
+            "signature_required": True,
+        }
+    )
+    agent_headers: dict[str, str] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
     _health_seen: int = 0
 
@@ -174,6 +186,9 @@ class FakeWorld:
             if status in (301, 302, 307, 308):
                 return httpx.Response(status, headers={"location": f"{FRONTEND}/login"})
             return httpx.Response(status, text="<html></html>")
+        if url.startswith(AGENT_ENDPOINT):
+            self.calls.append(f"agent {request.method} {request.url.path}?{request.url.query.decode()}")
+            return httpx.Response(self.agent_status, json=self.agent_health, headers=self.agent_headers)
         if url.startswith(RPC):
             payload = json.loads(request.content)
             self.calls.append(f"rpc {payload.get('method')}")

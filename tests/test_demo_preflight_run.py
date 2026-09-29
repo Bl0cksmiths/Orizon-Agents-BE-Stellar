@@ -20,6 +20,7 @@ from scripts.demo_preflight.checks import FAIL, PASS, SKIPPED, WARN, card_stars,
 from scripts.demo_preflight.cli import main
 from scripts.demo_preflight.config import EXIT_GO, EXIT_INCOMPLETE, EXIT_NO_GO, EXIT_REFUSED, FRONTEND_PAGES
 from scripts.demo_preflight.fakes import (
+    AGENT_ENDPOINT,
     API,
     BACKEND,
     BUYER,
@@ -70,6 +71,7 @@ def run(
     *extra: str,
     buyer: str | None = BUYER,
     operator: str | None = OP1,
+    endpoint: str | None = AGENT_ENDPOINT + "/dispatch?token=bound-secret-7f3",
     register: Path | None = None,
 ) -> Outcome:
     stream = io.StringIO()
@@ -87,6 +89,8 @@ def run(
         wallets += ["--buyer", buyer]
     if operator is not None:
         wallets += ["--operator", operator]
+    if endpoint is not None:
+        wallets += ["--operator-endpoint", endpoint]
     code = main(
         [
             "--api",
@@ -144,6 +148,7 @@ def test_every_check_is_in_the_report(tmp_path: Path) -> None:
         "refunds.settler_balance",
         "operator.external",
         "operator.ready",
+        "operator.endpoint",
         "exclusion.below_floor",
         "exclusion.card_figure",
         "exclusion.routable_count",
@@ -435,6 +440,54 @@ def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path
     out = run(world, tmp_path)
     check = out.check("operator.ready")
     assert check["status"] == FAIL and "none can serve the recording" in check["detail"]
+
+
+def test_a_healthy_operator_endpoint_passes_and_its_secret_is_never_shown(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path)
+    check = out.check("operator.endpoint")
+    assert check["status"] == PASS and check["required"] is True
+    assert check["detail"] == (
+        'https://agent.test/ answered {"ok": true} with no fault_injection field and no X-Fault-Injection header'
+    )
+    assert "agent GET /?" in out.world.calls  # the origin's root, not the bound path and its query
+    for text in (out.out, (out.dir / "demo-preflight.json").read_text(), (out.dir / "demo-preflight.md").read_text()):
+        assert "bound-secret-7f3" not in text and "/dispatch" not in text
+
+
+@pytest.mark.parametrize("how", ["field", "header", "both"])
+def test_fault_injection_on_the_operator_endpoint_fails(tmp_path: Path, how: str) -> None:
+    world = healthy_world()
+    if how in ("field", "both"):
+        world.agent_health["fault_injection"] = "hang_after:0 (scope process)"
+    if how in ("header", "both"):
+        world.agent_headers["X-Fault-Injection"] = "hang_after:0 (scope process)"
+    out = run(world, tmp_path)
+    check = out.check("operator.endpoint")
+    assert check["status"] == FAIL and "fault injection is on" in check["detail"]
+    assert ("fault_injection: 'hang_after:0 (scope process)'" in check["detail"]) is (how != "header")
+    assert ("X-Fault-Injection header" in check["detail"]) is (how != "field")
+    assert "FAULT_MODE" in check["fix"]
+    assert out.code == EXIT_NO_GO
+
+
+@pytest.mark.parametrize(("status", "body"), [(503, {"ok": True}), (200, {"ok": False}), (200, {"status": "up"})])
+def test_an_operator_endpoint_that_is_not_healthy_fails(tmp_path: Path, status: int, body: dict[str, Any]) -> None:
+    world = healthy_world()
+    world.agent_status, world.agent_health = status, body
+    check = run(world, tmp_path).check("operator.endpoint")
+    assert check["status"] == FAIL and f"answered HTTP {status} without" in check["detail"]
+
+
+def test_no_operator_endpoint_is_skipped_and_keeps_the_verdict_incomplete(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path, endpoint=None)
+    assert out.status("operator.endpoint") == SKIPPED
+    assert out.code == EXIT_INCOMPLETE
+
+
+def test_an_operator_endpoint_that_is_not_a_url_is_refused_unechoed(tmp_path: Path) -> None:
+    out = run(healthy_world(), tmp_path, endpoint="agent.test/?token=bound-secret-7f3")
+    assert out.code == EXIT_REFUSED
+    assert "bound-secret-7f3" not in out.out and "--operator-endpoint" in out.out
 
 
 # ── the exclusion moment ────────────────────────────────────────
