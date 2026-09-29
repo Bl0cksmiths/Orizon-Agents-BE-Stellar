@@ -894,3 +894,25 @@ contract, a transaction or a deployment.
 (4.3), the frontend pin must go back to `null` in the same sitting.
 Otherwise the plan card sees a v2 pin and a v1 backend and pauses Authorize
 with a notice naming both ids (Simulate still works).
+
+---
+
+## Confirm list
+
+Everything this runbook could not settle from a source. Close each one
+before the step that needs it, and record the answer where it says.
+
+| # | Step | Confirm | Ask |
+|---|---|---|---|
+| C1 | 1.1 | Where the Chapter Lead's escrow v2 approval is recorded (proposed: a dated decision entry under R9 in the risk register, linked from BLO-138) | Chapter Lead |
+| C2 | 1.2, 7.5 | What actually happened at the Week-2 operator checkpoint (Fri 2026-09-18): committed operators, or the date of the escalation. Nothing is recorded on BLO-36 or R5 | Dan |
+| C3 | 1.3 | Whether Rie facilitates or observes the operator sessions | Dan, Rie |
+| C4 | 1.4 | That the stellar-cli identity `admin` is the address book's `admin` (`GA7AI5…5OQV`); the deploy script makes that identity the escrow v2 admin | Dan |
+| C5 | 2 | The PR numbers of the backend and frontend Epic 5 audit-fix PRs, and that each sits last in its repo's order | Dan |
+| C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
+| C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
+| C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
+| C9 | 9.3 | The merged flag names and usage of `demo_evidence`'s `--tx` / `--rows` for browser-recorded hashes | the lane that lands it |
+| C10 | 10.2 | That the frontend's `docs/evidence-index-after-deploy.md` has merged | the lane writing it |
+| C11 | 10.4 | Where the 6.04 re-verification report goes, and whether it reopens BLO-43 (Done) or gets its own issue | Rie |
+| C12 | 10.5 | The form of the Chapter Lead's §6.2 sign-off and where it is recorded | Chapter Lead |
