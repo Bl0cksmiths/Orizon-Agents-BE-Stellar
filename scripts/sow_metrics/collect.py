@@ -125,6 +125,7 @@ class Snapshot:
     network: dict[str, Any]
     team: dict[str, str]  # the committed register: address -> role
     platform: dict[str, str] = field(default_factory=dict)  # runtime keys: address -> role
+    registry_admin: str | None = None
     readiness: dict[str, Any] | None = None
     agents: list[AgentRecord] = field(default_factory=list)
     registrations: dict[str, Registration] = field(default_factory=dict)
@@ -132,11 +133,13 @@ class Snapshot:
     charge_txs: dict[tuple[str, str], TxRef] = field(default_factory=dict)  # (escrow, receipt id) -> tx
     ledger_disputed: dict[str, int] = field(default_factory=dict)
     dispute_ratings: list[DisputeRating] = field(default_factory=list)
+    rating_kinds: dict[str, int] = field(default_factory=dict)  # every ledger submit seen, by kind
     transfers: list[Transfer] = field(default_factory=list)
     params: dict[str, Any] | None = None
     openapi_routes: set[str] | None = None
     pages: dict[str, Answer] = field(default_factory=dict)
     page_urls: dict[str, str] = field(default_factory=dict)
+    urls: dict[str, str] = field(default_factory=dict)  # source -> the URL it was read from
     repos: dict[str, Answer] = field(default_factory=dict)
     failures: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -195,7 +198,9 @@ def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     registry = snap.contract("agent_registry")
     if registry:
         try:
-            add(chain.simulate(registry, "admin"), "registry admin")
+            admin = chain.simulate(registry, "admin")
+            add(admin, "registry admin")
+            snap.registry_admin = admin if _is_account(admin) else None
         except FAILURES as exc:
             snap.fail("platform_keys", exc)
     for name, roles in (
@@ -372,6 +377,9 @@ def read_histories(snap: Snapshot, chain: ChainReader) -> None:
             if op.contract_id is None:
                 continue
             _match_charges(snap, op)
+            if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7:
+                kind = str(op.args[6])
+                snap.rating_kinds[kind] = snap.rating_kinds.get(kind, 0) + 1
             if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7 and op.args[6] == "dispute":
                 # submit(caller, agent_id, job_id, rating, weight, payer, kind)
                 snap.dispute_ratings.append(
@@ -447,6 +455,11 @@ def _read(snap: Snapshot, source: str, call: Callable[[], Answer]) -> Answer | N
 
 
 def read_deployment(snap: Snapshot, reads: Reads) -> None:
+    snap.urls.update(
+        params=reads.api_url("/stellar/reputation/params"),
+        openapi=f"{reads.backend}/openapi.json",
+        readiness=f"{reads.backend}/readiness",
+    )
     params = _read(snap, "params", reads.reputation_params)
     if params is not None:
         if params.ok and isinstance(params.body, dict):
