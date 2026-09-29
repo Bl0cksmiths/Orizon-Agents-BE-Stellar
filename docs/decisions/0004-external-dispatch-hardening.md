@@ -55,6 +55,17 @@ settlement to every honest agent in the plan.
 for `source == "baked"`; honouring an operator-supplied value is self-dealing
 with up to 100 USDC of rating weight behind it.
 
+> **Amended 2026-09-29 (Epic 5 audit): the weight is capped at 12 USDC, not
+> 100.** "Up to 100 USDC of rating weight" was the absolute cap,
+> `REPUTATION_MAX_RATING_WEIGHT_USDC`, when this was written. Since 2026-09-27
+> (`f4076c4`) that is only the outer bound. `reputation_svc.max_rating_weight_usdc()`
+> computes the effective cap as `min(REPUTATION_MAX_RATING_WEIGHT_USDC,
+> REPUTATION_MAX_RATING_TO_PRIOR_RATIO × REPUTATION_PRIOR_WEIGHT_USDC)`, which
+> with the shipped settings (`app/config.py`) is min(100, 1.0 × 12) = **12
+> USDC**. The decision stands: an operator-supplied `source` is still refused,
+> because a self-awarded 95/100 at the prior's full weight still pulls a score
+> halfway to itself.
+
 External HTML artifacts go through `harden_artifact` like local ones. Today
 only `code_gen` and `code_critic` call it, so an operator's `preview_html`
 reaches the viewer's `srcDoc` with no injected CSP — the sandbox blocks parent

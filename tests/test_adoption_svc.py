@@ -143,11 +143,13 @@ def _entry(
     )
 
 
-def _evidence(agent_id: str, *entries: SettlementEntry, truncated: bool = False) -> SettlementEvidence:
+def _evidence(
+    agent_id: str, *entries: SettlementEntry, truncated: bool = False, window_days: float = 7.0
+) -> SettlementEvidence:
     return SettlementEvidence(
         agent_id=agent_id,
         asset="native",
-        window_days=7.0,
+        window_days=window_days,
         scanned_ledgers=120_960,
         entries=list(entries),
         total_stroops=sum(e.amount_stroops for e in entries if not e.self_payment),
@@ -419,9 +421,65 @@ def test_the_real_settlement_scan_excludes_what_it_excludes(world: _World, monke
     (workflow,) = report.operators[0].agents[0].settled_workflows
     assert (workflow.job_id_hex, workflow.payer) == (_job_id(3).hex(), BUYER)
     assert report.degraded is False
+    # The window is the one the scan measured, not a constant.
+    scanned = asyncio.run(settlement_svc.fetch_settlement("ext_agent"))
+    assert scanned.window_days > 0
+    assert report.window_days == scanned.window_days
 
 
 _REAL_FETCH = settlement_svc.fetch_settlement
+
+
+# ── how far back it looked ──────────────────────────────────────────────────
+def test_the_window_is_the_scans_own_measured_span(world: _World) -> None:
+    world.agent("ext_a", EXT_A)
+    world.settlements["ext_a"] = _evidence("ext_a", _entry(1), window_days=6.482)
+
+    report = world.report()
+
+    assert report.window_days == 6.482
+
+
+def test_differing_windows_report_the_smallest_so_the_claim_holds_for_all(world: _World) -> None:
+    world.agent("ext_a", EXT_A)
+    world.agent("ext_b", EXT_B)
+    world.agent("ext_c", EXT_C)
+    world.settlements["ext_a"] = _evidence("ext_a", _entry(1), window_days=7.0)
+    world.settlements["ext_b"] = _evidence("ext_b", window_days=6.9)
+    # A truncated scan still ran; the span it did cover is the honest bound.
+    world.settlements["ext_c"] = _evidence("ext_c", truncated=True, window_days=2.5)
+
+    report = world.report()
+
+    assert report.window_days == 2.5
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [_unavailable("ext_b"), RuntimeError("cache layer"), TimeoutError()],
+    ids=["unavailable", "raised", "timed_out"],
+)
+def test_a_scan_that_did_not_run_does_not_shrink_the_window(world: _World, failure: Any) -> None:
+    """It has no window to report; its absence is `unreadable_agents`' job."""
+    world.agent("ext_a", EXT_A, _entry(1))
+    world.agent("ext_b", EXT_B)
+    world.settlements["ext_b"] = failure
+
+    report = world.report()
+
+    assert report.window_days == 7.0
+    assert report.unreadable_agents == ["ext_b"]
+
+
+def test_no_scan_at_all_is_a_zero_window(world: _World) -> None:
+    world.agent("ext_a", EXT_A)
+    world.settlements["ext_a"] = _unavailable("ext_a")
+    world.agent("ours", QA_OPERATOR)
+
+    report = world.report()
+
+    assert report.window_days == 0.0
+    assert world.settlement_calls == ["ext_a"]
 
 
 # ── ignorance is never zero ─────────────────────────────────────────────────

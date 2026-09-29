@@ -2,14 +2,16 @@
 
 An upheld dispute costs the buyer nothing — the platform credits them (4.03) —
 and without this module it would cost the agent nothing either. Here the
-settler writes a low, `dispute`-kind rating to the ReputationLedger, so the
-agent's `dispute_rate_bps` rises and its score falls, and non-delivery costs it
-future routing rather than one refund.
+platform's signing key (`STELLAR_SIGNING_KEY`, the ledger's scorer) writes a
+low, `dispute`-kind rating to the ReputationLedger, so the agent's
+`dispute_rate_bps` rises and its score falls, and non-delivery costs it future
+routing rather than one refund. That key is not the deployed v1 escrow's
+settler, which is the admin key; it becomes the settler only on escrow v2.
 
 The obstacle is R12. `ReputationLedger.submit` guards on `Rated(agent_id,
 job_id)` and returns `Error::Replay` before it ever reads `kind`, and the
-settler has already auto-rated every step of every settled job under that very
-pair. So the dispute rating is recorded under a DERIVED job id — distinct from
+platform's signing key has already auto-rated every step of every settled job
+under that very pair. So the dispute rating is recorded under a DERIVED job id — distinct from
 the job's own key, deterministic, and unique per disputed step.
 
 That same guard then becomes the idempotency. Once the derived id is unique per
@@ -74,7 +76,7 @@ def dispute_job_id(job_id: bytes, step_index: int) -> bytes:
     derived = job_id[:_LINKED_PREFIX_BYTES] + digest[:_LINKED_PREFIX_BYTES]
     # Equal only if eight hash bytes happen to reproduce the job id's own tail —
     # one chance in 2**64. Checked anyway, because if it ever happened the
-    # dispute rating would land on the key the settler's auto-rating already
+    # dispute rating would land on the ledger key the automatic rating already
     # holds and be refused as a replay of it forever. Refusing to derive is
     # loud; a rating that can never be written is not.
     if derived == job_id:
@@ -119,14 +121,14 @@ class RatingOutcome:
     reason: str | None = None
 
 
-# The score an upheld dispute writes, on the 0..100 scale of the settler's own
-# `reputation_svc.synthetic_rating`, whose anchors are 20 for a step that
+# The score an upheld dispute writes, on the 0..100 scale of the automatic
+# rating the platform's signing key writes, `reputation_svc.synthetic_rating`, whose anchors are 20 for a step that
 # delivered nothing (a timeout, a raise, an empty reply, or an external reply
 # with nothing checkable in it), 95 for a baked kit artifact, and 40 to 95 for
 # the work in between — base 70, moved by the artifact and the critic's pass.
 #
-# Below 20 on purpose. ADR 0005 D3 fixed the settler's scale so that a reply
-# which delivers nothing never outscores an honest failure; an upheld dispute
+# Below 20 on purpose. ADR 0005 D3 fixed the automatic rating's scale so that a
+# reply which delivers nothing never outscores an honest failure; an upheld dispute
 # sits one step beneath both. The step was billed — a refund is only ever paid
 # against a delivered step — and the credit comes out of the platform's wallet,
 # not the agent's, so the agent keeps what it was paid for work that failed the
@@ -135,7 +137,7 @@ class RatingOutcome:
 # no appeal, and a unilateral judgement should not carry the harshest score the
 # scale has.
 #
-# It does not replace what the settler wrote for the step, which stays on the
+# It does not replace what the signing key wrote for the step, which stays on the
 # ledger under the job's own key — nothing on-chain can amend a rating — so the
 # two stand side by side at the same weight and average between 15 and 52.5. A
 # dispute costs an agent the clean record it had, and `dispute_rate_bps` counts
@@ -173,11 +175,12 @@ def not_submitted_reason(exc: BaseException) -> str:
 async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
     """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
 
-    `DISPUTE_RATING`, kind `dispute`, from the settler to `dispute.agent_id`,
-    under the DERIVED id for the disputed step and on behalf of the payer. The
-    weight is `reputation_svc.rating_weight_stroops` of the settled step's price
-    (D2) — the helper and the quoted price the settler weighted its own rating of
-    that step with, so the two carry exactly the same evidence.
+    `DISPUTE_RATING`, kind `dispute`, from the platform's signing key to
+    `dispute.agent_id`, under the DERIVED id for the disputed step and on
+    behalf of the payer. The weight is `reputation_svc.rating_weight_stroops`
+    of the settled step's price (D2) — the helper and the quoted price the
+    signing key weighted its own rating of that step with, so the two carry
+    exactly the same evidence.
 
     What this decides is what the chain said, never what that means for the
     dispute: whether a REPLAY is a retry that already landed or a collision

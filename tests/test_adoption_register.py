@@ -32,10 +32,12 @@ DECLARED = {
     "GBWMD26IB6CMG3JO3HU7SD7ZJSTF4BIJ5JS77ANMLJ52M6FV6K3J7BQJ",
     "GBI2I3WLMP2Q6L26G7CBKRPP5WJ6G3GGYJHWALOJ7D6EBRGL5OZAADBH",
     "GDJHP2I6NRCWYZTB3ZOXRE74V4M4EGXRYORGNPTGQ6BVNJNSSJO4PKXJ",
-    # The 2026-09-15 x402 escrow spike's two random keys: spike_97437's owner
-    # and the payer that authorized against it.
+    # The 2026-09-15 x402 escrow spike's three random keys: spike_97437's owner,
+    # the payer that authorized against it, and the payer that authorized
+    # against orizon_batch and revoked 45 seconds later.
     "GA5LEGIRHKZGDKGQ4XHBEMU2Z7BGDX7AE2XUWDXB3V6TCOVTD2LZMQ2M",
     "GDWE6IDZ73VSMH6F75IDVA5BDAC7UJI3TOZC23VGAOXNYYHC6NDCIWRX",
+    "GB4K6YRHDHB2HHNM3E7UUZJU5JP3MSQE3GXKMEA5IT4AM45D23YKAYKK",
 }
 
 GOOD = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -56,7 +58,7 @@ def test_the_committed_register_loads_and_holds_every_declared_wallet() -> None:
     wallets = load_team_register()
 
     assert {w.address for w in wallets} == DECLARED
-    assert len(wallets) == len(DECLARED) == 8
+    assert len(wallets) == len(DECLARED) == 9
     assert all(w.role and w.evidence for w in wallets)
     assert adoption_svc.TEAM_REGISTER == wallets
 

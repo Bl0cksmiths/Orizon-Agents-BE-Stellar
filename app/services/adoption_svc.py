@@ -16,7 +16,9 @@ working so they never have to trust us:
     this deployment demonstrably holds at runtime, and every agent that fails
     that test is listed under `excluded` with the reason;
   - a settled workflow is a `charged` event `settlement_svc` already counts as
-    verified revenue, carrying its transaction hash and a Stellar Expert link;
+    verified revenue, carrying its transaction hash and a Stellar Expert link,
+    found in a scan of the RPC's event retention (about seven days), whose
+    measured span the report carries as `window_days`;
   - a read that could not be made is reported as unreadable and never as zero.
 
 The team register
@@ -213,8 +215,21 @@ class ExcludedOwner(BaseModel):
 
 
 class AdoptionReport(BaseModel):
+    """SOW §6.3's answer, with the limits of what was looked at.
+
+    `window_days` is how far back `settled_external_workflows` can see. The
+    settled workflows come from `settlement_svc`'s scan of Soroban RPC events,
+    which the node keeps for about seven days, so an older settlement is not
+    counted. It is the scan's MEASURED span (`SettlementEvidence.window_days`),
+    not a constant: when the per-agent scans cover different spans, it is the
+    smallest, so "settled in the last N days" holds for every agent. Only scans
+    that ran count toward it; an agent whose scan did not run is already named
+    in `unreadable_agents`. 0 when no scan ran, e.g. no external agents.
+    """
+
     network: str
     generated_at: int
+    window_days: float
     targets: AdoptionCounts
     totals: AdoptionCounts
     met: AdoptionMet
@@ -429,6 +444,7 @@ def _unix(at: str | None) -> int | None:
 class _AgentResult:
     agent: AdoptionAgent
     complete: bool  # False: the settled list may be missing charges
+    window_days: float | None  # the scan's measured span; None when no scan ran
 
 
 async def _external_agent(agent: Agent, team_roles: dict[str, str]) -> _AgentResult:
@@ -475,6 +491,7 @@ async def _external_agent(agent: Agent, team_roles: dict[str, str]) -> _AgentRes
             settled_workflows=workflows,
         ),
         complete=complete,
+        window_days=evidence.window_days if evidence is not None and evidence.unavailable is None else None,
     )
 
 
@@ -541,6 +558,9 @@ async def build_report() -> AdoptionReport:
             unreadable.add(result.agent.agent_id)
     if unreadable:
         degraded = True
+    # The smallest span any scan covered, so the claim holds for every agent.
+    windows = [r.window_days for r in results.values() if r.window_days is not None]
+    window_days = min(windows) if windows else 0.0
 
     operators = [
         AdoptionOperator(
@@ -560,6 +580,7 @@ async def build_report() -> AdoptionReport:
     report = AdoptionReport(
         network=_network(),
         generated_at=int(time.time()),
+        window_days=window_days,
         targets=TARGETS,
         totals=totals,
         met=AdoptionMet(
@@ -573,11 +594,12 @@ async def build_report() -> AdoptionReport:
         unreadable_agents=sorted(unreadable),
     )
     logger.info(
-        "[adoption] external_agents=%d unique_operator_wallets=%d settled_external_workflows=%d "
+        "[adoption] external_agents=%d unique_operator_wallets=%d settled_external_workflows=%d window_days=%s "
         "excluded_owners=%d unreadable_agents=%d degraded=%s platform_unreadable=%s registry_listed=%s elapsed_ms=%d",
         totals.external_agents,
         totals.unique_operator_wallets,
         totals.settled_external_workflows,
+        window_days,
         len(report.excluded),
         len(report.unreadable_agents),
         degraded,
