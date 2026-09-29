@@ -666,3 +666,127 @@ writes contains them.
 6. **Rollback:** none. Every write happened once, on-chain; the evidence is
    what it recorded. An unconfirmed stage is resumed (`--from-task`,
    `--from-dispute`), never repeated.
+
+---
+
+## 9. The demo (5.04, BLO-38)
+
+Run from [demo-recording.md](demo-recording.md) and the frontend's
+`content/demo/script.md` and `shot-list.md`. The video shows only real testnet
+transactions.
+
+### 9.1 Build the faulty agent (before the recording day)
+
+From the frontend's `content/demo/script.md`, "How the below-floor agent is
+made, honestly". No rating is ever written by hand.
+
+1. **Deploy a second copy of the reference agent** as its own Render service
+   with its own `ORIZON_ENDPOINT_URL`, the same `ORIZON_SIGNER` as the healthy
+   one, `ORIZON_NETWORK=testnet` and `FAULT_MODE=hang_after:0`.
+   **Verify:** `curl -sS <its url>/` reports
+   `"fault_injection": "hang_after:0 scope=process"`.
+2. **Register it from a third team wallet** (neither the buyer nor the
+   settler), with a display name that discloses it (for example
+   `Faulty test agent (deliberate)`), skills distinct from the operator's
+   agent, and a price of **`0.20`**. Bind it to its endpoint.
+3. **Declare the team wallets.** Add the faulty agent's owner, the buyer
+   wallet and, if it is a team wallet, the operator wallet to
+   `app/data/team_wallets.json` in the backend. That file is read by the
+   running service (`app/services/adoption_svc.py`), so it needs a backend PR
+   (merge commit), then a Render **Manual Deploy**. **Verify:** none of them
+   appears under "External operators" on `$SITE/app/ecosystem`.
+4. **Run it three times** with the lifecycle harness, each with a fresh
+   directory and a differently worded intent that fits its skills:
+
+   ```sh
+   python -m scripts.lifecycle --api https://orizons.xyz --agent <faulty_id> \
+     --intent "<run N: an intent its skills fit>" \
+     --buyer-secret-env BUYER_1_SECRET \
+     --evidence-dir docs/evidence/5.04/fault-run-N --until poll
+   ```
+
+   Exit 4 means nothing was signed: reword and use a new directory. Under v2
+   an all-failed run settles empty and releases the whole cap back to the
+   buyer, so each run costs only fees.
+5. **Verify:** `curl -s "$SITE/api/stellar/reputation/<faulty_id>"` reads
+   `source: "onchain"`, `count: 3`, `lower_bound_bps: 5443` (card: 2.72
+   against the 2.75 floor), not stale; `/app/agents` shows it "below floor ·
+   not eligible". If the agent already had ratings, the 0.20 × 3 table does not
+   apply: run until `lower_bound_bps` ≤ 5489 and change S05's narration to the
+   real count. Then leave it **bound, listed and untouched**: no further rating
+   against it, and do not route it on the recording day.
+
+### 9.2 Pre-flight: GO / NO-GO
+
+The morning of the session, and again right before recording:
+
+```sh
+cd "$BE" && source .venv/bin/activate
+python -m scripts.demo_preflight \
+    --buyer G...BUYER --operator G...OPERATOR --cap 0.5 \
+    --max-refund <the dashboard's MAX_REFUND_USDC> \
+    --with-decompose "the intent the video types" \
+    --out-dir docs/evidence/5.04/preflight
+```
+
+- **Expected:** exit **0, GO**. Every required check PASS or WARN, including
+  `build.readiness`, `escrow.version` (v2), `escrow.settler`,
+  `refunds.enabled`, `refunds.settler_balance`, `exclusion.below_floor`,
+  `operator.external` and the frontend pages.
+- Exit 4 or 5 is NO-GO: fix what the report names (5 means a required check
+  was SKIPPED, usually a missing `--buyer` or `--operator`; SKIPPED is never a
+  pass). Exit 3 is refused: not testnet or a bad flag.
+- With `--allow-team-operator`, a team operator is a WARN that **must be
+  disclosed on camera**.
+
+### 9.3 Record, then the evidence sheet
+
+1. **Record** against the deployment the pre-flight passed; the harness
+   produces each take's on-chain evidence in its own directory
+   (`--evidence-dir docs/evidence/5.04/take-N`).
+2. **Build the sheet:**
+
+   ```sh
+   python -m scripts.demo_evidence docs/evidence/5.04/take-1 docs/evidence/5.04/take-2 \
+       --title "Orizon Agents — Blue Belt demo (Stellar testnet)" \
+       --disclose "<one sentence per team wallet the pre-flight named>" \
+       --out-dir docs/evidence/5.04/video
+   ```
+
+   **Expected:** exit 0, every hash re-verified `SUCCESS`; it writes
+   `evidence-sheet.md`, `description.txt` and `evidence.json`. Exit 5 means a
+   hash failed: it is left out; rerun that stage or cut it from the video.
+   Exit 8: a read failed; rerun.
+3. **The browser-recorded hashes.** Transactions signed in the browser on
+   camera (the operator's registration, the buyer's authorize in the console)
+   are not in a harness `lifecycle.jsonl`. They go into the sheet through
+   `demo_evidence`'s `--tx` / `--rows` inputs **once that change lands**
+   (**confirm** its merged flag names and usage before relying on them). Until
+   then, `demo_evidence` reads only harness rows.
+
+### 9.4 Upload and publish
+
+1. Paste `description.txt` into the video description, replacing the summary
+   and chapters placeholders with the edit's timestamps. List the faulty
+   agent's owner wallet and its three failure-rating hashes.
+2. Upload the video to YouTube as **Public**.
+3. Publish `content/demo/demo.json` in the frontend (a PR, merge commit):
+   `"status": "published"`, `video` with `provider: "youtube"`, the 11-character
+   `id`, `title`, `duration_seconds` and `published_at`, the `chapters`, and
+   `evidence` set to `evidence.json` **verbatim**. Commit the sheet to the
+   backend's `docs/evidence/5.04/`.
+4. **Verify** before merging:
+
+   ```sh
+   cd "$FE"   # the branch holding the published manifest
+   npm run demo:check -- --video <the rendered video file>
+   ```
+
+   Exit 0 only: the manifest passes the build's own rules, and ffprobe measures
+   the file at 180–300 s, matching `duration_seconds` to the second. Exit 3
+   means ffprobe is missing and the duration was **not** verified; that is not
+   a pass.
+5. **Verify after deploy:** `$SITE/demo` answers 200 and plays; click one link
+   of each kind through to Stellar Expert testnet.
+6. **Rollback:** set `demo.json` back to `"status": "unpublished"` (no video,
+   no evidence) in a PR, and make the video private or unlisted on YouTube.
