@@ -185,11 +185,11 @@ testnet (friction F-022). One PR means one Vercel deployment carries both.
 
 After each merge:
 
-1. **Expected:** the next PR in the stack shows only its own commits (`gh pr
-   view <n> --json commits --jq '.commits | length'` drops). If it suddenly
-   shows the lower stack's commits again, a squash happened: stop.
+1. **Expected:** GitHub shows the PR as merged, not squashed: `gh pr view
+   <n> --json mergeCommit,commits` lists every commit, and `main` holds them
+   with their original ids.
 2. **Verify:** `git -C "$BE" fetch origin && git -C "$BE" log --oneline --merges
-   -3 origin/main` (and the same for `$FE`) shows a merge commit per PR.
+   -1 origin/main` (and the same for `$FE`) shows the PR's merge commit.
 3. **Rollback:** a merged PR is undone with a revert PR of its merge commit
    (`git revert -m 1 <merge sha>` on a new branch, PR to `main`). Never force-push
    `main`.
