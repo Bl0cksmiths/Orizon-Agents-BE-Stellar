@@ -851,12 +851,20 @@ and the frontend's after-deploy checklist.
    - Exit 3: refused (not testnet, bad flag, unreadable team register).
    - It reads the live escrow and the known v1 escrow, so v1's history is still
      counted after the switch.
+   - **Consent.** By default (`--withhold-external`) the block and the
+     Markdown name no outside operator: their links are replaced by one link
+     to `$SITE/app/ecosystem`, and the counts do not change. Add
+     `--publish-external` only once every outside operator in it has
+     consented in writing (see [sow-metrics.md](sow-metrics.md#consent)).
+     `sow-metrics.raw.json` always holds every wallet and hash: while anything
+     is withheld, do not commit it to the repository or publish it.
 2. **Update `content/evidence/index.json`** in the frontend, per
    `docs/evidence-index-after-deploy.md` (frontend repo, merged with #97 on
    2026-09-29; follow it as written):
    - paste `sow-metrics.block.json` as the `metrics` array, **unchanged**;
-   - keep `sow-metrics.raw.json` with the evidence: it answers "which items
-     were excluded, and why";
+   - keep `sow-metrics.raw.json` with the team: it answers "which items were
+     excluded, and why", and it goes into the published evidence only once
+     every outside operator it names has consented;
    - update the items that were partial or missing because a page was not
      deployed or a transaction did not exist yet, pointing each at the live
      page or the verified transaction instead of its PR. No drill, fixture or
