@@ -106,6 +106,7 @@ class BalanceChange:
 class Operation:
     """One successful operation from an account's Horizon history."""
 
+    id: str  # Horizon's operation id: one operation seen from two accounts is one operation
     tx_hash: str
     created_at: str  # ISO 8601, UTC
     source_account: str
@@ -150,6 +151,7 @@ def operation_from_horizon(record: dict[str, Any]) -> Operation:
         if len(decoded) >= 2 and isinstance(decoded[0], str) and isinstance(decoded[1], str):
             contract_id, function, args = decoded[0], decoded[1], decoded[2:]
     return Operation(
+        id=str(record["id"]),
         tx_hash=str(record["transaction_hash"]),
         created_at=str(record["created_at"]),
         source_account=str(record.get("source_account") or ""),
