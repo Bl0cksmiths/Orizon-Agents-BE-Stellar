@@ -732,8 +732,11 @@ python -m scripts.demo_preflight \
 
 - **Expected:** exit **0, GO**. Every required check PASS or WARN, including
   `build.readiness`, `escrow.version` (v2), `escrow.settler`,
-  `refunds.enabled`, `refunds.settler_balance`, `exclusion.below_floor`,
-  `operator.external` and the frontend pages.
+  `refunds.enabled`, `refunds.store` (postgres), `refunds.settler_balance`,
+  `exclusion.below_floor` (a bound, listed subject), `exclusion.card_figure`
+  (lower bound ≤ 5489), `exclusion.routable_count` (at least 3 clear the
+  floor), `operator.external`, `operator.endpoint` (no fault injection) and
+  the frontend pages.
 - Exit 4 or 5 is NO-GO: fix what the report names (5 means a required check
   was SKIPPED, usually a missing `--buyer` or `--operator`; SKIPPED is never a
   pass). Exit 3 is refused: not testnet or a bad flag.
