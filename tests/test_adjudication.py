@@ -928,16 +928,22 @@ def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) ->
 
 
 @pytest.mark.parametrize(
-    ("setting", "named"),
+    ("setting", "named", "said"),
     [
-        ("stellar_signing_key", "STELLAR_SIGNING_KEY is unset"),
-        ("stellar_asset_sac", "STELLAR_ASSET_SAC is unset"),
+        (
+            "stellar_signing_key",
+            "STELLAR_SIGNING_KEY is unset",
+            "there is no platform signing key to pay a credit from",
+        ),
+        ("stellar_asset_sac", "STELLAR_ASSET_SAC is unset", "there is no asset contract to pay a credit over"),
     ],
 )
-def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(monkeypatch, caplog, setting: str, named: str) -> None:
+def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(
+    monkeypatch, caplog, setting: str, named: str, said: str
+) -> None:
     """The refund was the one money path with no presence check on its config,
-    and the absence was not cosmetic. `execute_refund` reads the settler
-    through `sc.signer_public_key`, which raises on an empty key BEFORE it
+    and the absence was not cosmetic. `execute_refund` reads the platform's
+    signing key through `sc.signer_public_key`, which raises on an empty key BEFORE it
     submits anything; `credit_refund` can only read a raise as "may still have
     landed", so the claim was kept and the dispute parked in `crediting` with
     an ERROR line that refuted itself — "MAY HAVE LANDED — do not retry:
@@ -968,6 +974,7 @@ def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(monkeypatch, capl
     # The refusal an adjudicator reads names no setting: it is the operator's
     # line above that does, and only the operator can act on it.
     assert named not in refused.value.message
+    assert refused.value.message == f"this deployment cannot sign a credit: {said}"
 
 
 def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:

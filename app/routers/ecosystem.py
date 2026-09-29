@@ -34,7 +34,10 @@ async def adoption() -> adoption_svc.AdoptionReport:
     team wallet or a key this deployment holds are listed under `excluded`
     with the reason, never counted. A read that failed sets `degraded` and
     names the agent in `unreadable_agents`: the totals are then a floor, not
-    a zero. Cached for about 30 s.
+    a zero. Settlements are read from Soroban RPC events, which the node keeps
+    for about seven days: `window_days` is the span the scans actually covered
+    (the smallest, when agents' scans differ; 0 when none ran), and a
+    settlement older than that is not counted. Cached for about 30 s.
 
     503 only when no report could be produced at all — the per-read failures
     above are answered in the report itself.

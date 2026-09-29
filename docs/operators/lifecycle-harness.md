@@ -56,9 +56,9 @@ evidence.
 | `--agent ID` | The external agent this run is about. The plan must route to it, or the run stops before anything is signed (exit 4). |
 | `--intent TEXT` | What the buyer asks for. Required for a fresh run. Word it towards the agent's skills. |
 | `--buyer-secret-env NAME` | See above. A value shaped like a seed is refused, and not echoed. |
-| `--adjudicator-key-env NAME` | See above. Needed only to run through `uphold`. |
+| `--adjudicator-key-env NAME` | See above. Needed only to run through `uphold`, and not for `--dry-run`, which signs nothing. A dry run without it says the real run will need it. |
 | `--evidence-dir DIR` | **One directory per run.** Holds `lifecycle.jsonl`, `lifecycle.md` and `state.json`. |
-| `--dry-run` | Does every read (warm-up, network, RPC, agents, reputation, escrow version, buyer balance), then prints the plan. Builds, signs and writes nothing. |
+| `--dry-run` | Does every read (warm-up, network, RPC, agents, reputation, escrow version, buyer balance), then prints the plan. Builds, signs and writes nothing. It exits 0 only when the real run with the same flags would not stop on something the reads already show. Otherwise it lists every such blocker and exits 3: a buyer that does not exist on testnet (a fresh run), an agent that is not external and bound (a fresh run), or a v1 escrow when the run would reach `verify`, where a real run stops with exit 7 after the buyer has signed. |
 | `--until STAGE` | Stop after this stage. |
 | `--from-task TASK_ID` | Resume at `poll` for this task, for example after a backend restart. |
 | `--from-dispute DISPUTE_ID` | Resume at `uphold` for this dispute. |
@@ -104,7 +104,7 @@ charge transaction's status and its `charged` event.
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | Done through `--until`. | Nothing. |
-| 3 | Refused before anything was signed: wrong network, missing variable, unfunded buyer, agent not external and bound, backend never woke. | Fix the named precondition. |
+| 3 | Refused before anything was signed: wrong network, missing variable, unfunded buyer, agent not external and bound, backend never woke. From `--dry-run`, also: a blocker the real run would hit, each one named (a buyer that does not exist, an agent that is not external and bound, or a v1 escrow on a run that reaches `verify`). | Fix the named precondition, then dry-run again until it exits 0. |
 | 4 | The plan does not route to `--agent`. Nothing signed. | Reword `--intent`. |
 | 5 | A definitive failure: the ledger or the server said no. | Read the last rows. |
 | 6 | **Unknown outcome.** A submit, execute, uphold or dispute open was sent and its answer lost. The ledger has been read back and the result recorded. | Look the hash up on Stellar Expert before anything else. Never rerun the stage blindly. |
@@ -117,7 +117,9 @@ charge transaction's status and its `charged` event.
 ## The two-run recipe (AC1–AC3, AC6)
 
 Dry-run each first. It prints the escrow version, the agent's record and the
-buyer's balance, and nothing is built or signed.
+buyer's balance, and nothing is built or signed. Go on to the real run only
+when the dry run exits 0; exit 3 names what would stop the real run. A dry
+run does not need `ORIZON_API_KEY`.
 
 ```bash
 source .venv/bin/activate
@@ -219,3 +221,63 @@ Each run directory holds:
 
 Amounts are labelled with the asset the network reports. On testnet the
 escrow's SAC wraps native XLM, so they read `XLM (native)`, never USDC.
+
+### Into the evidence index
+
+Story 5.01's rule is that every hash goes into the frontend's evidence index
+(`content/evidence/index.json`) as it is produced. The evidence tool writes
+the run's hashes in the index's own link shape, re-verified, so nothing is
+retyped:
+
+```sh
+python -m scripts.demo_evidence docs/evidence/5.01/run-1 \
+    --out-dir docs/evidence/5.01/run-1/evidence \
+    --index-links docs/evidence/5.01/run-1/evidence/index-links.json
+```
+
+Browser hashes join the same file with `--rows` or `--tx`
+(`docs/operators/demo-recording.md` §2). Only a hash that re-verifies SUCCESS
+on testnet is ever a link:
+
+```json
+{"schema": "orizon.evidence-index-links/1", "network": "testnet", "generated_at": 1790000000,
+ "items": [{"id": "6.1-D4-d",
+            "links": [{"label": "Settlement for agent alpha of 0.0100000 XLM on Stellar testnet — 2026-09-24",
+                       "url": "https://stellar.expert/explorer/testnet/tx/<hash>",
+                       "kind": "tx", "tx_hash": "<64 hex>", "date": "2026-09-24"}]}]}
+```
+
+- Each link has exactly the index's keys, in its order: `label`, `url`,
+  `kind` (always `"tx"`), `tx_hash`, `date`.
+- `date` is the UTC calendar date of the ledger's `created_at` on Horizon, as
+  the index's snapshot method dates every transaction. A verified hash whose
+  date cannot be read gets no link, and the run exits 8: rerun.
+- `label` is plain language by the index validator's rule: at least two real
+  words, never a bare hash or address; a full hash or address inside one is
+  shortened (`GBI2I…ADBH`). It is the `--tx`/`--rows` label when given,
+  otherwise built from the kind, agent and amount, and it ends with the date.
+- Items appear in the index's order, and only when they gained a link:
+
+| `kind` (harness `event`) | Index item | What the item owes |
+|---|---|---|
+| `register` | `6.1-D1-c` | an agent registered from its operator's own wallet |
+| `rating` | `6.1-D2-a` | the on-chain ratings the plan card shows |
+| `dispute_rating` | `6.1-D3-a` | the dispute's negative on-chain rating |
+| `refund` | `6.1-D3-b` | the matching partial-credit refund |
+| `authorize` (`authorize`, `authorize_unknown`), `settle` (`settle`, `charge`), `seal` | `6.1-D4-d` | settlements, each with its receipt and attestation |
+| `other` | `6.1-RD-f` | activity viewable on Stellar Expert |
+
+**Merging it (the coordinator).** In the frontend repo, for each entry of
+`items`, find the item with that `id` in `content/evidence/index.json` and
+append its `links` to that item's `links`, skipping a link whose `tx_hash` the
+item already lists. Then, by hand:
+
+- make each label say whose wallet signed, as the index's labels do (for
+  example "… by the team's QA operator key GBWMD…7BQJ (team wallet: not
+  external)"). The tool cannot tell a team wallet from an outside one;
+- copy a registration by an **outside** operator into `6.1-D4-c` as well;
+- update the item's `status` and `note` if the new links change them, and the
+  snapshot's `as_of`;
+- run `npm run evidence:check` (the index's rules, offline) and
+  `npm run evidence:verify` (every link re-read on the network) before
+  committing.

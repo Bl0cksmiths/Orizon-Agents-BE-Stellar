@@ -420,6 +420,28 @@ for ADR 0007 D5's reason, and nothing here writes a rating. A dispute may reach
 > refund — and nothing in this ADR's order changed: the rating comes after all
 > of it.
 
+> **Amended 2026-09-29 (Epic 5 audit): which key pays a credit.** This ADR
+> calls the key that pays a credit "the settler": `settler → buyer`, "the
+> settler wallet", "the settler key", "the settler account" (Context §1, D1's
+> rejected alternatives, D3, D5 and the Consequences). On the deployed escrow
+> that is wrong. The platform's signing key (`STELLAR_SIGNING_KEY`,
+> `GDB4N25…CDHP` on testnet) pays dispute credits, writes ratings (scorer) and
+> seals attestations (sealer), and it becomes the escrow's settler once escrow
+> v2 is deployed. The deployed v1 escrow's settler is the admin key
+> (`GA7AI5…5OQV`). Every decision here stands, because each one is about the
+> key that signs the credit and that key was always `STELLAR_SIGNING_KEY`:
+> `refund_svc.execute_refund` transfers from `sc.signer_public_key()`. Where
+> this ADR says "settler", read "the platform's signing key". The reconciliation
+> procedure in [`docs/disputes.md`](../disputes.md) now starts from that key's
+> account.
+
+> **Amended 2026-09-29 (Epic 5 audit): what ADR 0002 proved.** Context opens
+> with "ADR 0002 proved a credit can be paid: a real one landed on testnet on
+> 2026-09-12." That transaction, `9b8ffaa4…`, was an operator-script transfer
+> from the admin key to a team key, tied to no dispute. It proves the transfer
+> mechanism only, not that a dispute was credited (ADR 0002's 2026-09-29
+> amendment).
+
 Related: ADR 0002 (the credit mechanism and the trust model), ADR 0007 (the
 window, the proof of payer and the settlement record), `docs/disputes.md` (the
 buyer- and operator-facing version, including the reconciliation procedure),

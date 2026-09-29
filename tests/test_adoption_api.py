@@ -65,6 +65,7 @@ def test_the_response_is_exactly_the_frozen_shape(world: _World, monkeypatch: py
     assert response.json() == {
         "network": "testnet",
         "generated_at": GENERATED_AT,
+        "window_days": 7.0,
         "targets": {"external_agents": 2, "unique_operator_wallets": 2, "settled_external_workflows": 3},
         "totals": {"external_agents": 3, "unique_operator_wallets": 2, "settled_external_workflows": 2},
         "met": {"external_agents": True, "unique_operator_wallets": True, "settled_external_workflows": False},
