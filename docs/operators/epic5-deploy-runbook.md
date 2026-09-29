@@ -445,11 +445,11 @@ Follows the frontend's `docs/escrow-v2-switch.md`, steps 3–5. Right after 4.3.
      redirect to a login is a failure, not a pass.
 3. **Verify the plan card**, with a funded testnet wallet (a team wallet),
    at `$SITE/app/orchestrator`: decompose any intent and read the card. Since
-   frontend #89 the card's payment copy always describes v2 custody: the
-   signature moves the plan's maximum into escrow, delivered steps are paid
-   from it and the rest comes back. What the pin changes is that the card now
-   has a v2 id to compare with the backend's escrow. **Expected:** no
-   "On-chain payment is paused" notice. If it shows, it names both ids: the
+   frontend #96 the card's custody copy follows the escrow the backend
+   reports (`lib/escrow-generation.ts`): v2 only when the pin is set and the
+   backend reports it, v1 when the backend reports the v1 id, neutral
+   otherwise. **Expected:** the v2 line ("…moves up to X from your wallet
+   into escrow now…") and no "On-chain payment is paused" notice. If it shows, it names both ids: the
    pin and the backend disagree, and Authorize stays paused until they agree.
    Simulate is unaffected either way.
 4. **Rollback:** Vercel dashboard → the frontend project → **Deployments** →
