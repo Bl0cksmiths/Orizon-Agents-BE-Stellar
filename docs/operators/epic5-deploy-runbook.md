@@ -577,3 +577,91 @@ written. This runbook adds only the order and the records.
 7. **Rollback:** nothing to roll back. An operator who withdraws consent
    before publication is removed from the evidence (their `OP-n` stays in the
    friction log without the wallet).
+
+---
+
+## 8. The live lifecycle (5.01, BLO-35)
+
+Run from [lifecycle-harness.md](lifecycle-harness.md). Needs steps 4 and 6
+(escrow v2 and refunds on); against v1 the harness stops at `verify` with exit
+7. It moves real testnet funds and never retries a write.
+
+**Prerequisites** (the harness's P1–P6): the API on testnet; escrow v2 live;
+two external, bound agents owned by wallets that are neither buyer nor
+settler; two funded buyer wallets; the operator `API_KEY` and
+`DISPUTE_REFUNDS_ENABLED=true`; the backend virtualenv.
+
+```sh
+cd "$BE" && source .venv/bin/activate
+export BUYER_1_SECRET=…   # buyer wallet 1's S… seed; typed at the prompt, never committed
+export BUYER_2_SECRET=…   # buyer wallet 2, a different account
+export ORIZON_API_KEY=…   # the deployment's operator API_KEY
+```
+
+The secrets are passed by variable **name**; nothing the harness prints or
+writes contains them.
+
+1. **Runs 1 and 2 (AC1–AC3): two agents, two buyers.** Dry-run each first
+   (it builds and signs nothing), then run it for real:
+
+   ```sh
+   python -m scripts.lifecycle --api https://orizons.xyz --agent <agent_1> \
+     --intent "<a task agent 1's skills fit>" \
+     --buyer-secret-env BUYER_1_SECRET --adjudicator-key-env ORIZON_API_KEY \
+     --evidence-dir docs/evidence/5.01/run-1 --dry-run
+   # then the same without --dry-run
+
+   python -m scripts.lifecycle --api https://orizons.xyz --agent <agent_2> \
+     --intent "<a task agent 2's skills fit>" \
+     --buyer-secret-env BUYER_2_SECRET --adjudicator-key-env ORIZON_API_KEY \
+     --evidence-dir docs/evidence/5.01/run-2
+   ```
+
+   - **Expected:** the first lines say `escrow v2 (version() view)`; exit 0.
+   - **Verify:** each `lifecycle.md` has an `authorize`, a `settle`, a `seal`,
+     a `refund` and a `dispute_rating` transaction, each `SUCCESS`, and a
+     `settlement_checks` row whose checks hold.
+   - Exit 4 (the plan did not route to `--agent`): nothing was signed; reword
+     the intent and use a **new** directory. Exit 6 (unknown outcome): look the
+     hash up on Stellar Expert before anything else; never rerun the stage
+     blindly. Exit 9: the directory already holds a run; resume it or use a new
+     one, or you may authorize a second payment.
+2. **AC4, a backend restart between seal and dispute:**
+
+   ```sh
+   python -m scripts.lifecycle ... --evidence-dir docs/evidence/5.01/ac4 --until verify
+   # note the task id; then Render → the service → Manual Deploy → Restart service
+   # wait until $SITE/api/health answers, then:
+   python -m scripts.lifecycle ... --evidence-dir docs/evidence/5.01/ac4 --from-task <task_id>
+   ```
+
+   Leave out `--intent` on the resume. **Expected:** a `task_not_in_memory`
+   row, then the dispute accepted and credited after the restart. That is the
+   AC4 evidence, and it depends on `disputes.store` being `postgres`.
+3. **AC5, an external endpoint that stops answering mid-workflow:** a second
+   copy of the reference agent, registered and bound from its own wallet,
+   deployed with `FAULT_MODE=hang_after:0` (or `hang_after:1` with
+   `FAULT_SCOPE=intent`). Check `curl -sS <its url>/` shows `fault_injection`.
+   Run with `--agent` set to the **healthy** agent and an intent both agents
+   fit, in `docs/evidence/5.01/ac5`. **Expected:** the faulty step fails as
+   `response_timeout` about 100 s after dispatch; `settlement_checks` shows
+   charged events only for delivered steps, the buyer charged exactly the paid
+   sum, and the seal present. Afterwards unset `FAULT_MODE` and redeploy it, or
+   delete the service.
+   - **Do not use the demo's faulty agent (step 9.1) for AC5.** Every run that
+     routes to it writes another 20/100 rating, and the demo's figures (three
+     ratings, lower bound 5443) assume exactly three. **Confirm** whether the
+     team wants one faulty agent for both; if so, AC5 comes first and the
+     demo's run count is re-derived from its live reputation.
+4. **AC6, the reputation cycle:** start from an agent that has **never been
+   rated** (its `start` snapshot reads `source: prior`). Run `--until verify`
+   a few times, each in its own directory, then one full run. **Expected:**
+   each `after_rating_N` snapshot moves the score, `source` moves from `prior`
+   to `onchain`, `after_dispute` shows it fall, and the `reputation_summary`
+   row says whether each stage moved.
+5. **Commit the evidence**: `lifecycle.jsonl` and `lifecycle.md` from each
+   directory. **Never** commit `state.json`: it holds the task read token (the
+   harness writes a `.gitignore` beside it).
+6. **Rollback:** none. Every write happened once, on-chain; the evidence is
+   what it recorded. An unconfirmed stage is resumed (`--from-task`,
+   `--from-dispute`), never repeated.
