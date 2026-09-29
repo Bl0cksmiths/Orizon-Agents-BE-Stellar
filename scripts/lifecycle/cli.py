@@ -47,10 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--adjudicator-key-env",
         metavar="NAME",
-        help="NAME of the environment variable holding the operator API key; needed to run through 'uphold'",
+        help="NAME of the environment variable holding the operator API key; needed to run through 'uphold' "
+        "(a --dry-run signs nothing and does not need it)",
     )
     p.add_argument("--evidence-dir", required=True, type=Path, help="one directory per run: JSONL, Markdown, state")
-    p.add_argument("--dry-run", action="store_true", help="do every read, build and sign nothing, print the plan")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="do every read, build and sign nothing, print the plan; exit 3 naming any blocker a real run would hit",
+    )
     p.add_argument("--until", choices=STAGES, default=STAGES[-1], help="stop after this stage (default: all)")
     resume = p.add_mutually_exclusive_group()
     resume.add_argument("--from-task", metavar="TASK_ID", help="resume at 'poll' for this task (e.g. after a restart)")

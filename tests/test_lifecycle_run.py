@@ -65,7 +65,9 @@ def world(buyer: Keypair) -> FakeWorld:
     return FakeWorld(buyer=buyer.public_key)
 
 
-def run(world: FakeWorld, buyer: Keypair, directory: Path, *extra: str, intent: bool = True) -> Outcome:
+def run(
+    world: FakeWorld, buyer: Keypair, directory: Path, *extra: str, intent: bool = True, adjudicator: bool = True
+) -> Outcome:
     clock = [0.0]
 
     def sleep(seconds: float) -> None:
@@ -79,8 +81,7 @@ def run(world: FakeWorld, buyer: Keypair, directory: Path, *extra: str, intent: 
         AGENT,
         "--buyer-secret-env",
         "BUYER_1_SECRET",
-        "--adjudicator-key-env",
-        "ORIZON_API_KEY",
+        *(["--adjudicator-key-env", "ORIZON_API_KEY"] if adjudicator else []),
         "--evidence-dir",
         str(directory),
         *(["--intent", "build me a landing page"] if intent else []),
@@ -660,6 +661,24 @@ def test_dry_run_reads_and_signs_nothing(world: FakeWorld, buyer: Keypair, tmp_p
     assert "DRY RUN" in result.out and "POST /api/stellar/submit" in result.out
     assert not [c for c in world.calls if c["method"] == "POST" and not c["path"] == "/"]
     assert not (tmp_path / "run").exists()
+
+
+def test_a_dry_run_needs_no_adjudicator_key(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
+    result = run(world, buyer, tmp_path / "run", "--dry-run", adjudicator=False)
+    assert result.code == EXIT_OK, result.out
+    assert "NOTE: the real run through 'uphold' needs --adjudicator-key-env" in result.out
+    assert "X-API-Key from $<the --adjudicator-key-env variable> ONCE" in result.out
+    assert "$None" not in result.out
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_real_run_through_uphold_still_needs_the_adjudicator_key(
+    world: FakeWorld, buyer: Keypair, tmp_path: Path
+) -> None:
+    result = run(world, buyer, tmp_path / "run", adjudicator=False)
+    assert result.code == EXIT_REFUSED
+    assert "--adjudicator-key-env is required to run through 'uphold'" in result.out
+    assert not [c for c in world.calls if c["method"] == "POST" and not c["path"] == "/"]
 
 
 def test_warms_a_sleeping_backend_before_the_first_call(buyer: Keypair, tmp_path: Path) -> None:

@@ -282,9 +282,14 @@ class Runner:
         self.buyer = load_keypair(self.cfg.buyer_secret_env, self.console.redactor, self.environ)
         needs_uphold = stage_index(self.cfg.until) >= stage_index("uphold")
         if needs_uphold:
-            if not self.cfg.adjudicator_key_env:
+            if self.cfg.adjudicator_key_env:
+                self.adjudicator_key = load_api_key(self.cfg.adjudicator_key_env, self.console.redactor, self.environ)
+            elif not self.cfg.dry_run:
                 raise Stop(EXIT_REFUSED, "--adjudicator-key-env is required to run through 'uphold'")
-            self.adjudicator_key = load_api_key(self.cfg.adjudicator_key_env, self.console.redactor, self.environ)
+            else:
+                # A dry run signs and adjudicates nothing, so it does not ask
+                # for the operator key; the real run still will.
+                self.say("NOTE: the real run through 'uphold' needs --adjudicator-key-env; this dry run does not")
 
         start = self.resume_point()
         version, how = self.chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
@@ -452,7 +457,8 @@ class Runner:
             ),
             "dispute": "POST /api/disputes/challenge; SEP-53 sign; POST /api/disputes; "
             "read grant via /api/disputes/read-*",
-            "uphold": f"POST /api/disputes/{{id}}/uphold with X-API-Key from ${self.cfg.adjudicator_key_env} ONCE",
+            "uphold": "POST /api/disputes/{id}/uphold with X-API-Key from "
+            f"${self.cfg.adjudicator_key_env or '<the --adjudicator-key-env variable>'} ONCE",
             "refund": "GET /api/disputes/{id} until credited with a confirmed rating; getTransaction on both",
             "reputation": "GET /api/stellar/reputation; compare start / after ratings / after dispute",
         }
