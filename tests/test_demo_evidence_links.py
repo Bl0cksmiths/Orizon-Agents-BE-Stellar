@@ -252,7 +252,8 @@ def test_the_label_rule_refuses_a_bare_id(label: str) -> None:
     assert label_problem(label) == "is a bare hash or address; say in words what the link shows"
 
 
-@pytest.mark.parametrize("label", ["Link", "Tx 9b8ffaa4…8f919a68", "Account G" + "A" * 55])
+# "Settlement x": a word is two letters in a row, so a lone letter is not one.
+@pytest.mark.parametrize("label", ["Link", "Tx 9b8ffaa4…8f919a68", "Account G" + "A" * 55, "Settlement x"])
 def test_the_label_rule_refuses_one_word(label: str) -> None:
     assert label_problem(label) == "must be at least two words of plain language, not just an id"
 
