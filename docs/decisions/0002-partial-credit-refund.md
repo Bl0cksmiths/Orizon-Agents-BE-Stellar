@@ -162,6 +162,19 @@ settler key can be rotated (it cannot — write-once).
 > pays a credit or writes a rating, read "the platform's signing key". The
 > current wording is in [`docs/disputes.md`](../disputes.md).
 
+> **Amended 2026-09-30: escrow v2 is live.** The 2026-09-29 amendment above
+> says the platform's signing key "becomes the escrow's settler once escrow v2
+> is deployed" and calls v1 "the deployed escrow". Escrow v2 was deployed to
+> testnet on 2026-09-30 as `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`;
+> the deploy read `settler()` back as `GDB4N25…CDHP` and `admin()` as
+> `GA7AI5…5OQV`, and the backend settles through it (`/readiness`
+> `escrow.version` 2). So the platform's signing key is now the live escrow's
+> settler as well, and the admin key is v1's settler only. Refunds are switched on in that deployment too. The first
+> dispute on v2,
+> `dsp_15acee279ac02852a5877ac1696ec4b5`, is open and not yet upheld, so no
+> credit has yet been paid for a real dispute, and the Proof amendment below
+> still stands. The decision is unchanged.
+
 > **Amended 2026-09-29 (Epic 5 audit): what the proof proves.** The Proof
 > section says "a real refund landed on testnet" in
 > `9b8ffaa44b2b966e4c3f1ab581f4203a30d282901ba3b231a578e46d8f919a68`. It was
