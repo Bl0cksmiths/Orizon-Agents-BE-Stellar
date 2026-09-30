@@ -36,7 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--api", required=True, help="the deployed base, e.g. https://orizons.xyz (the /api prefix is added)"
     )
-    p.add_argument("--agent", required=True, help="the external agent id the plan must route to")
+    p.add_argument(
+        "--agent",
+        required=True,
+        action="append",
+        help="an external agent id the plan must route to; repeat it for a multi-agent plan, which must route to "
+        "every one (in any order). The first is the one snapshotted and, when its step delivered, disputed",
+    )
     p.add_argument("--intent", help="what the buyer asks for; required for a fresh run")
     p.add_argument(
         "--buyer-secret-env",
@@ -100,10 +106,12 @@ def main(
         console.say(f"REFUSED: {exc}")
         return EXIT_REFUSED
     assert buyer_env is not None
+    agents = tuple(dict.fromkeys(args.agent))
 
     cfg = RunConfig(
         api=base,
-        agent=args.agent,
+        agent=agents[0],
+        agents=agents,
         intent=args.intent,
         buyer_secret_env=buyer_env,
         adjudicator_key_env=adjudicator_env,
