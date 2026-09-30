@@ -43,26 +43,32 @@ On-chain evidence — every transaction below is on the Stellar testnet and was 
 12. Attestation seal — calculatorai (D4)
    efca274fb83b50865cfc20dc40b6949e5abd1ae23ed3e7a7622e6c9eda37c0a8
    https://stellar.expert/explorer/testnet/tx/efca274fb83b50865cfc20dc40b6949e5abd1ae23ed3e7a7622e6c9eda37c0a8
-13. Buyer authorization — faulty_test_v2 (0.2000000 XLM (native)) (D4)
+13. Partial-credit refund — calculatorai (0.0100000 XLM (native)) (D3)
+   cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f
+   https://stellar.expert/explorer/testnet/tx/cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f
+14. Dispute rating — calculatorai (D3)
+   b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49
+   https://stellar.expert/explorer/testnet/tx/b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49
+15. Buyer authorization — faulty_test_v2 (0.2000000 XLM (native)) (D4)
    f10d0f48669d0f1de97d4ae5841f10c4fc27ab60747d1425ad77f16f3c34befb
    https://stellar.expert/explorer/testnet/tx/f10d0f48669d0f1de97d4ae5841f10c4fc27ab60747d1425ad77f16f3c34befb
-14. Reputation rating — faulty_test_v2 (D2)
+16. Reputation rating — faulty_test_v2 (D2)
    e7885bf192688ed4b65006abe82b5b5f58737b15fd06bfaa9c54de13fa0b9663
    https://stellar.expert/explorer/testnet/tx/e7885bf192688ed4b65006abe82b5b5f58737b15fd06bfaa9c54de13fa0b9663
-15. Buyer authorization — faulty_test_v2 (0.2000000 XLM (native)) (D4)
+17. Buyer authorization — faulty_test_v2 (0.2000000 XLM (native)) (D4)
    55f233224e00d96d4e56579fa8077f797c9c3f3c578638a80139eeb5c82c8949
    https://stellar.expert/explorer/testnet/tx/55f233224e00d96d4e56579fa8077f797c9c3f3c578638a80139eeb5c82c8949
-16. Reputation rating — faulty_test_v2 (D2)
+18. Reputation rating — faulty_test_v2 (D2)
    2980361e248b6a1284e17a2a7ec38d354991afc25f6f982270eb0710fa1aa388
    https://stellar.expert/explorer/testnet/tx/2980361e248b6a1284e17a2a7ec38d354991afc25f6f982270eb0710fa1aa388
-17. Buyer authorization — faulty_test_v2 (0.2000000 XLM (native)) (D4)
+19. Buyer authorization — faulty_test_v2 (0.2000000 XLM (native)) (D4)
    6af4f1c3afd8ee50fa25e478897eab9a1563d743a3a112db26d0d560b03b4463
    https://stellar.expert/explorer/testnet/tx/6af4f1c3afd8ee50fa25e478897eab9a1563d743a3a112db26d0d560b03b4463
-18. Reputation rating — faulty_test_v2 (D2)
+20. Reputation rating — faulty_test_v2 (D2)
    cc83982bd11e39fe61f3446df7f9cfa4a30a741d77ab717abf204894bbf4e30f
    https://stellar.expert/explorer/testnet/tx/cc83982bd11e39fe61f3446df7f9cfa4a30a741d77ab717abf204894bbf4e30f
-19. Registration of the disclosed faulty test agent by team key GB4K6…YKAYKK (D1)
+21. Registration of the disclosed faulty test agent by team key GB4K6…YKAYKK (D1)
    2f01f2c88205a26263ee4b17e5331ba48ecfccb44b9e9cd690202cd036a81191
    https://stellar.expert/explorer/testnet/tx/2f01f2c88205a26263ee4b17e5331ba48ecfccb44b9e9cd690202cd036a81191
 
-Limitations. Everything in this video runs on the Stellar TESTNET (SOW §3.6); no real value moved. On testnet the escrow's asset contract wraps native XLM, so amounts the interface labels USDC are testnet XLM. No dispute has been upheld yet: dispute dsp_15acee279ac02852a5877ac1696ec4b5 is open, so no refund has been paid. When one is upheld, it is by the platform's adjudicator key — a human decision behind an API key, not an on-chain arbiter — and the refund is a partial credit paid from the platform's signing key, not a clawback from the operator. Reputation scores are prior-smoothed, so an agent's lower bound near the floor can move with a single rating. The contracts have not been externally audited. Every wallet in these runs is a team wallet: buyers GB4K6…YKAYKK, GCNQA…A2GP and the admin GA7AI…5OQV; the agents are admin-owned or the disclosed faulty test agent.
+Limitations. Everything in this video runs on the Stellar TESTNET (SOW §3.6); no real value moved. On testnet the escrow's asset contract wraps native XLM, so every amount is testnet XLM, and the interface labels it XLM; the "usdc" in some API field names is the field's name, not the asset. A dispute was upheld by the platform's adjudicator key — a human decision behind an API key, not an on-chain arbiter — and its refund is a partial credit paid from the platform's signing key, which is also escrow v2's settler, not a clawback from the operator. The dispute's rating then landed on the ReputationLedger. Reputation scores are prior-smoothed, so an agent's lower bound near the floor can move with a single rating. The contracts have not been externally audited. Every wallet in these runs is a team wallet: buyers GB4K6…YKAYKK, GCNQA…A2GP and the admin GA7AI…5OQV; the agents are admin-owned or the disclosed faulty test agent.
