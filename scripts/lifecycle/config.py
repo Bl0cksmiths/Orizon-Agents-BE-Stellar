@@ -58,7 +58,7 @@ STAGES: tuple[str, ...] = (
 # so neither is reused.
 EXIT_OK = 0
 EXIT_REFUSED = 3  # preconditions not met: wrong network, missing env, bad args
-EXIT_PLAN_MISSING_AGENT = 4  # the plan does not route to --agent; nothing signed
+EXIT_PLAN_MISSING_AGENT = 4  # the plan does not route to every --agent; nothing signed
 EXIT_STAGE_FAILED = 5  # a definitive failure: the server or the ledger said no
 EXIT_UNKNOWN_OUTCOME = 6  # sent, outcome unknown: state read back, run stopped
 EXIT_VERIFY_FAILED = 7  # the chain does not show what the API says happened
@@ -84,6 +84,8 @@ class RunConfig:
     credentials are named by the environment variable that carries them."""
 
     api: str
+    # The first --agent: the one the run is named after, whose reputation is
+    # snapshotted, and the first choice to dispute.
     agent: str
     intent: str | None
     buyer_secret_env: str
@@ -96,6 +98,17 @@ class RunConfig:
     dispute_reason: str = "Harness 5.01: the delivered output did not meet the plan's stated step."
     rpc_url: str | None = None
     horizon_url: str = TESTNET_HORIZON
+    # Every --agent, in the order given, `agent` first. Empty means `agent`
+    # alone. The plan must route to all of them (order does not matter).
+    agents: tuple[str, ...] = ()
+
+    @property
+    def all_agents(self) -> tuple[str, ...]:
+        return self.agents or (self.agent,)
+
+    @property
+    def multi_agent(self) -> bool:
+        return len(self.all_agents) > 1
 
 
 def normalize_api_base(raw: str) -> str:

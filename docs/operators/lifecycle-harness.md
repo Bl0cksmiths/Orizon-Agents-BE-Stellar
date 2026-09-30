@@ -1,7 +1,8 @@
 # The lifecycle harness (story 5.01)
 
 `python -m scripts.lifecycle` drives the **deployed** API through the whole
-buyer lifecycle on **testnet**, with one buyer wallet and one external agent,
+buyer lifecycle on **testnet**, with one buyer wallet and one external agent
+(or several: `--agent` repeats, see [AC5](#ac5--an-external-endpoint-that-stops-answering-mid-workflow)),
 and writes every transaction hash into an evidence file the moment the hash
 exists. Story 5.05's evidence index is built from that file.
 
@@ -53,7 +54,7 @@ evidence.
 | Flag | Meaning |
 |---|---|
 | `--api URL` | The deployed base, for example `https://orizons.xyz`. `/api` is added, and a trailing `/api` is stripped, as the frontend does. |
-| `--agent ID` | The external agent this run is about. The plan must route to it, or the run stops before anything is signed (exit 4). |
+| `--agent ID` | The external agent this run is about. The plan must route to it, or the run stops before anything is signed (exit 4). **Repeatable:** give it once per agent for a multi-agent plan, which must route to every one of them, in any order, or the run stops with exit 4. The first `--agent` names the run, is the one whose reputation is snapshotted, and is disputed when its step delivered; otherwise the next one whose step did. With one `--agent` the harness behaves exactly as it always has. |
 | `--intent TEXT` | What the buyer asks for. Required for a fresh run. Word it towards the agent's skills. |
 | `--buyer-secret-env NAME` | See above. A value shaped like a seed is refused, and not echoed. |
 | `--adjudicator-key-env NAME` | See above. Needed only to run through `uphold`, and not for `--dry-run`, which signs nothing. A dry run without it says the real run will need it. |
@@ -69,8 +70,8 @@ evidence.
 
 | Stage | Calls (as the dApp makes them) | Evidence rows |
 |---|---|---|
-| preflight | `GET /api/health` until it answers (the Render wake-up, as `components/backend-warmup.tsx` does it), `GET /api/stellar/network`, RPC `getNetwork`, `GET /api/agents`, `GET /readiness` (best effort), escrow `version()` | `preflight`, `reputation_snapshot` (`start`) |
-| decompose | `POST /api/orchestrator/decompose {intent}`, then `GET /api/stellar/agent/{id}` per routed agent and SAC `balance` for the buyer and each owner | `plan`, `balances_before` |
+| preflight | `GET /api/health` until it answers (the Render wake-up, as `components/backend-warmup.tsx` does it), `GET /api/stellar/network`, RPC `getNetwork`, `GET /api/agents` (every `--agent` must be listed, external and bound), `GET /readiness` (best effort), escrow `version()` | `preflight`, `reputation_snapshot` (`start`) |
+| decompose | `POST /api/orchestrator/decompose {intent}`, refused (exit 4) unless the plan routes to every `--agent`; then `GET /api/stellar/agent/{id}` per routed agent and SAC `balance` for the buyer and each owner | `plan` (or `plan_missing_agent`), `balances_before` |
 | authorize | `POST /api/stellar/build/authorize {payer, agent_id, max_amount_usdc, ttl_seconds}`; the envelope is decoded and checked to be `PaymentEscrow.authorize` from the buyer for that cap before it is signed; `POST /api/stellar/submit {signed_xdr}` once | `authorize` (tx) |
 | execute | `POST /api/orchestrator/execute {plan_id, auth_id_hex, payer}` once, with the auth id read off the submit's `return_value` exactly as `execution-plan.tsx` reads it | `execute` |
 | poll | `GET /api/tasks/{id}` and `GET /api/trace/{id}` with `X-Task-Token` until the task is terminal; a reputation snapshot each time the trace says the agent was rated; each rating's full hash recovered from the ReputationLedger's `rated` events | `reputation_snapshot` (`after_rating_N`), `task_terminal`, `rating` (tx) per rating, `reputation_snapshot` (`after_ratings`) |
@@ -99,13 +100,28 @@ operator is also the buyer or the settler); the seal on the registry naming
 the agent, carrying the settled total and the charged receipts. **On v1:** the
 charge transaction's status and its `charged` event.
 
+**With more than one `--agent`, `verify` adds the partial-delivery checks**
+(AC5), each read from the chain:
+
+| Check | Passes when |
+|---|---|
+| `seal_names_every_agent` | `AttestationRegistry.get(job_id).agents` lists every `--agent`. The seal records the whole plan in plan order, the agent that failed included; what was *paid* is in its receipts. |
+| `seal_receipts_are_delivered_steps` | The seal's receipts are exactly the settlement's delivered steps' `receipt_id_hex`, and no undelivered step carries one. With `seal_receipts_match_charges` (sealed = the settle's `charged` receipts) this ties seal, settle and settlement together. |
+| `failed_step_rated_20:<agent>` | Each step that did not deliver cost its agent a landed 20/100: counted per agent, from the ReputationLedger's `rated` events the poll stage read back, never from the trace. `failed_steps_rated_20` when every step delivered. "Not measured" when the ratings could not be read (the task was gone from the backend, or `getEvents` refused). |
+
+The rest of AC5 is already in the v2 checks above: `v2_charged_per_delivered_step`
+(the settle's `charged` events cover exactly the delivered, paid steps),
+`v2_settled_event` (`returned` equals the authorized max minus the paid sum)
+and `v2_buyer_balance_delta` (the buyer is down the paid sum plus the
+authorize fee, nothing more).
+
 ## Exit codes
 
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | Done through `--until`. | Nothing. |
 | 3 | Refused before anything was signed: wrong network, missing variable, unfunded buyer, agent not external and bound, backend never woke. From `--dry-run`, also: a blocker the real run would hit, each one named (a buyer that does not exist, an agent that is not external and bound, or a v1 escrow on a run that reaches `verify`). | Fix the named precondition, then dry-run again until it exits 0. |
-| 4 | The plan does not route to `--agent`. Nothing signed. | Reword `--intent`. |
+| 4 | The plan does not route to every `--agent`. Nothing signed. The `plan_missing_agent` row names the plan and, with several agents, which are missing. | Reword `--intent`, in a new `--evidence-dir`. |
 | 5 | A definitive failure: the ledger or the server said no. | Read the last rows. |
 | 6 | **Unknown outcome.** A submit, execute, uphold or dispute open was sent and its answer lost. The ledger has been read back and the result recorded. | Look the hash up on Stellar Expert before anything else. Never rerun the stage blindly. |
 | 7 | The chain does not show what the API says happened (or, on v1, there is no settlement). | This is a finding. Record it. |
@@ -173,30 +189,87 @@ decomposed or authorized again.
 
 ## AC5 — an external endpoint that stops answering mid-workflow
 
-Use the reference agent's fault injection (`orizon-agents-Example-Agent-Stellar`,
-README "Fault injection"): a second copy of the reference agent, registered and
-bound from its own wallet, deployed with `FAULT_MODE=hang_after:0` (or
-`hang_after:1` with `FAULT_SCOPE=intent` to fail partway through one
-workflow). Check `GET /` on it shows `fault_injection` before you spend a
-workflow.
+> Given an external agent that stops responding partway through a workflow,
+> when the workflow completes, then the buyer is charged only for delivered
+> steps and the workflow still seals.
 
-Run the harness with `--agent` set to the **healthy** agent and an intent that
-the planner will split across both. The `plan` row lists the routed agents;
-if the faulty agent is not in it, reword the intent and use a new directory.
+One run, one plan, two external agents: a healthy one that delivers and a
+faulty one that never answers. The harness names both, refuses a plan that
+leaves either out, and proves from the chain which one was paid.
+
+**1. The faulty agent.** A second copy of the reference agent
+(`orizon-agents-Example-Agent-Stellar`, README "Fault injection" and "A second
+agent that stops answering"), registered and bound from its own wallet, with
+skills distinct from the healthy agent's, deployed with:
+
+| Variable | Value |
+|---|---|
+| `FAULT_MODE` | `hang_after:0`: every dispatch is held open past the orchestrator's 100 s deadline and never answered, so its step fails as `response_timeout`, unbilled |
+| `ORIZON_SIGNER` | the deployment's `dispatch_signer` (from `GET /api/stellar/network`), pinned; the agent refuses to start a fault mode without it |
+| `ORIZON_NETWORK` | `testnet`; the agent refuses a fault mode on any other network |
+| `ORIZON_ENDPOINT_URL` | its own URL, exactly as bound |
+
+Check it before spending a workflow on it:
 
 ```bash
-python -m scripts.lifecycle --api https://orizons.xyz --agent <healthy_agent> \
-  --intent "<an intent both agents' skills fit>" \
-  --buyer-secret-env BUYER_1_SECRET --adjudicator-key-env ORIZON_API_KEY \
-  --evidence-dir docs/evidence/5.01/ac5
+curl -sS https://<faulty-agent-host>/ | jq .fault_injection   # "hang_after:0 scope=process"
+curl -sS https://<healthy-agent-host>/ | jq .fault_injection  # null
 ```
 
-The faulty step fails as `response_timeout` about 100 s after dispatch. The
-`settlement_checks` row is the AC5 evidence: charged events only for the
-delivered steps, the buyer charged the paid sum and nothing more, and the seal
-present. Pointing `--agent` at the faulty agent instead stops at `dispute`
-with exit 5, because there is no delivered step of its to dispute. Unset
-`FAULT_MODE` and redeploy (or delete the faulty service) when you are done.
+**2. Dry-run, then run.** Name the healthy agent first (it is the one
+snapshotted and disputed) and the faulty one second, with an intent that needs
+both agents' skills:
+
+```bash
+source .venv/bin/activate
+export BUYER_1_SECRET=S...   # a funded testnet buyer
+export ORIZON_API_KEY=...    # the deployment's operator key
+
+python -m scripts.lifecycle --api https://orizons.xyz \
+  --agent <healthy_agent_id> --agent <faulty_agent_id> \
+  --intent "<one task that needs both agents' skills>" \
+  --buyer-secret-env BUYER_1_SECRET --adjudicator-key-env ORIZON_API_KEY \
+  --evidence-dir docs/evidence/5.01/ac5 --dry-run
+```
+
+Then the same command without `--dry-run`. Exit 4 means the planner left one
+of them out, and nothing was signed: reword the intent and use a new
+`--evidence-dir`. Expect the faulty step to take about 100 s; the task budget
+is 900 s.
+
+**3. What proves AC5.** In the `settlement_checks` row, all of these PASS:
+
+- `v2_charged_per_delivered_step`: `charged` events for the healthy agent's
+  step and none for the faulty one's;
+- `v2_settled_event`: `returned` is the authorized max minus the paid sum, so
+  the faulty step's price went back to the buyer;
+- `v2_buyer_balance_delta`: the buyer is down exactly the paid sum plus the
+  authorize fee;
+- `seal_tx`, `seal_on_registry`, `seal_receipts_match_charges`,
+  `seal_receipts_are_delivered_steps`: the workflow sealed, carrying only the
+  delivered step's receipt;
+- `failed_step_rated_20:<faulty_agent_id>`: the faulty agent took a landed
+  20/100.
+
+The `settlement_checks` row's `steps` shows the faulty step `delivered: false`,
+`paid_usdc: 0.0`, `receipt_id_hex: null`. The task itself reads `complete`
+when a delivered step shipped an artifact (the reference agent always does),
+and `failed` when none did; either way the delivered work is charged, sealed
+and disputable. The dispute stage then disputes the healthy agent's step.
+
+A plan may also route to a seeded `agt_*` agent. Its step delivers but is not
+paid (no on-chain owner), so it has no `charged` event and no receipt; the
+checks expect exactly that.
+
+Each run costs the faulty agent a 20/100, so after a few it falls below the
+reputation floor and stops being planned: register a fresh agent id rather
+than fighting it. Unset `FAULT_MODE` and redeploy (or delete the faulty
+service) when you are done.
+
+**Variants.** `hang_after:1` with `FAULT_SCOPE=intent` serves the faulty
+agent's first step of a workflow and hangs on its second, for a plan that
+hires it twice. For a control run, point the same two `--agent` flags at two
+healthy agents: `failed_steps_rated_20` then reads "every step delivered".
 
 ## Feeding story 5.05
 

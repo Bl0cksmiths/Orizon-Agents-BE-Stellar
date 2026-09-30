@@ -123,6 +123,9 @@ class Runner:
     # saved, never printed.
     grant: str | None = None
     rating_seen: int = 0
+    # (agent id, rating, ledger status) for each of this run's ratings, read
+    # back from the ReputationLedger by the poll stage; None until it has.
+    ratings: list[tuple[str, int | None, str]] | None = None
     # agent name -> id from GET /api/agents, for a resumed run with no plan.
     directory: dict[str, str] = field(default_factory=dict)
     # What a dry run found that would stop the real run it rehearses. A dry
@@ -192,6 +195,11 @@ class Runner:
     @property
     def contracts(self) -> dict[str, str]:
         return dict(self.network.get("contracts") or {})
+
+    @property
+    def agents_label(self) -> str:
+        """Every --agent, for a sentence: exactly `cfg.agent` for a single-agent run."""
+        return ", ".join(self.cfg.all_agents)
 
     def need_chain(self) -> ChainReader:
         if self.chain is None:
@@ -309,27 +317,30 @@ class Runner:
         listed = self.api.agents()
         agents = {a.get("id"): a for a in listed}
         self.directory = {str(a.get("name")): str(a.get("id")) for a in listed if a.get("name")}
-        agent = agents.get(self.cfg.agent)
         readiness = self.api.readiness()
         self.say(f"network: {self.state.network} · escrow v{version} ({how}) · buyer {self.state.buyer}")
         self.say(f"api {self.api.base} · rpc {rpc_url}")
         if readiness is not None:
             self.say(f"readiness: {readiness.get('status')} · ratings {readiness.get('ratings')}")
-        if agent is None:
-            raise Stop(EXIT_REFUSED, f"agent {self.cfg.agent!r} is not listed by GET /api/agents")
-        self.say(
-            f"agent {self.cfg.agent}: source={agent.get('source')} bound={agent.get('bound')} "
-            f"owner={agent.get('owner')} price={agent.get('price')}"
-        )
-        external = agent.get("source") == "onchain" and agent.get("bound") is True
-        if not external and start == "decompose":
-            message = (
-                f"agent {self.cfg.agent!r} is not an external, bound agent "
-                f"(source={agent.get('source')}, bound={agent.get('bound')})"
+        records: dict[str, dict[str, Any]] = {}
+        for agent_id in self.cfg.all_agents:
+            agent = agents.get(agent_id)
+            if agent is None:
+                raise Stop(EXIT_REFUSED, f"agent {agent_id!r} is not listed by GET /api/agents")
+            records[agent_id] = agent
+            self.say(
+                f"agent {agent_id}: source={agent.get('source')} bound={agent.get('bound')} "
+                f"owner={agent.get('owner')} price={agent.get('price')}"
             )
-            if not self.cfg.dry_run:
-                raise Stop(EXIT_REFUSED, message)
-            self.blockers.append(f"{message}: a real run refuses it before decompose (exit {EXIT_REFUSED})")
+            external = agent.get("source") == "onchain" and agent.get("bound") is True
+            if not external and start == "decompose":
+                message = (
+                    f"agent {agent_id!r} is not an external, bound agent "
+                    f"(source={agent.get('source')}, bound={agent.get('bound')})"
+                )
+                if not self.cfg.dry_run:
+                    raise Stop(EXIT_REFUSED, message)
+                self.blockers.append(f"{message}: a real run refuses it before decompose (exit {EXIT_REFUSED})")
 
         if not self.cfg.dry_run:
             self.save()
@@ -341,9 +352,10 @@ class Runner:
                 escrow_version_source=how,
                 escrow=self.contracts.get("payment_escrow"),
                 readiness=readiness,
-                agent_record=agent,
+                agent_record=records[self.cfg.agent],
                 start_stage=start,
                 until=self.cfg.until,
+                **({"agents": list(self.cfg.all_agents), "agent_records": records} if self.cfg.multi_agent else {}),
             )
         self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
         return start
@@ -438,7 +450,7 @@ class Runner:
         self.say("DRY RUN — nothing was built, signed or submitted. The plan:")
         steps = {
             "decompose": f"POST /api/orchestrator/decompose {{intent}}; "
-            f"refuse unless the plan routes to {self.cfg.agent}",
+            f"refuse unless the plan routes to {self.agents_label}",
             "authorize": (
                 f"POST /api/stellar/build/authorize {{payer: {buyer}, "
                 f"agent_id: {authorize_label(self.state.escrow_version or 1, '<plan_id>')}, "
@@ -516,17 +528,23 @@ class Runner:
         ]
         routed = [s["agent_id"] for s in steps]
         self.say(f"  plan {plan.get('plan_id')}: {routed} total {plan.get('total_usdc')}")
-        if self.cfg.agent not in routed:
+        missing = [a for a in self.cfg.all_agents if a not in routed]
+        if missing:
             self.note(
                 "decompose",
                 "plan_missing_agent",
-                f"plan routes to {routed}, not {self.cfg.agent}",
+                f"plan routes to {routed}, not {', '.join(missing)}",
                 plan_id=plan.get("plan_id"),
+                **({"missing": missing} if self.cfg.multi_agent else {}),
             )
             raise Stop(
                 EXIT_PLAN_MISSING_AGENT,
-                f"the plan routes to {routed}, not {self.cfg.agent}; nothing was signed. "
-                "Reword --intent toward the agent's skills.",
+                f"the plan routes to {routed}, not {', '.join(missing)}; nothing was signed. "
+                + (
+                    "Reword --intent so the planner needs every agent's skills."
+                    if self.cfg.multi_agent
+                    else "Reword --intent toward the agent's skills."
+                ),
             )
         self.state.plan = {
             "plan_id": plan.get("plan_id"),
@@ -768,6 +786,7 @@ class Runner:
             u = UNLANDED_LINE.match(msg)
             if u:
                 wanted.append((u.group("prefix"), names.get(u.group("name"), u.group("name")), None, False))
+        self.ratings = []
         if not wanted:
             return
         chain = self.need_chain()
@@ -779,6 +798,7 @@ class Runner:
         except RpcError as exc:
             # Each rating below is then recorded as unresolved, with its prefix.
             self.note("poll", "events_unavailable", f"getEvents refused: {exc}", ledger=start)
+            self.ratings = None
             events = []
         for prefix, agent_id, rating, landed in wanted:
             match = next((e for e in events if e.tx_hash.startswith(prefix) and e.topics[1:2] == [agent_id]), None)
@@ -794,6 +814,8 @@ class Runner:
                 continue
             seen = chain.observe(match.tx_hash, self.budgets.tx_observe)
             value = match.value if isinstance(match.value, list) else []
+            if self.ratings is not None:
+                self.ratings.append((agent_id, int(value[0]) if value else None, seen.status))
             self.tx(
                 "poll",
                 "rating",
@@ -905,6 +927,14 @@ class Runner:
             self.contracts["attestation_registry"], str(settlement.get("job_id_hex")), buyer
         )
         checks += verify.check_seal(attestation, settlement, self.cfg.agent, receipts)
+        if self.cfg.multi_agent:
+            # Partial delivery (AC5): the seal and the ratings say which steps
+            # delivered as plainly as the settle's payouts do.
+            checks += [
+                verify.check_seal_names_every_agent(attestation, self.cfg.all_agents),
+                verify.check_seal_receipts_are_delivered_steps(attestation, settlement),
+                *verify.check_failed_steps_rated(settlement, self.ratings),
+            ]
 
         ok = verify.passed(checks)
         for c in checks:
@@ -959,13 +989,20 @@ class Runner:
         kp = self.need_buyer()
         settlement = self.read_settlement() or {}
         job = str(settlement.get("job_id_hex") or "")
+        # The first --agent whose step delivered: a multi-agent run proving
+        # that one agent failed still disputes the work that was paid for.
         step = next(
-            (s for s in settlement.get("steps") or [] if s.get("agent_id") == self.cfg.agent and s.get("delivered")),
+            (
+                s
+                for agent in self.cfg.all_agents
+                for s in settlement.get("steps") or []
+                if s.get("agent_id") == agent and s.get("delivered")
+            ),
             None,
         )
         if not job or step is None:
-            self.note("dispute", "nothing_to_dispute", f"no delivered step by {self.cfg.agent} in the settlement")
-            raise Stop(EXIT_STAGE_FAILED, f"the settlement has no delivered step by {self.cfg.agent} to dispute")
+            self.note("dispute", "nothing_to_dispute", f"no delivered step by {self.agents_label} in the settlement")
+            raise Stop(EXIT_STAGE_FAILED, f"the settlement has no delivered step by {self.agents_label} to dispute")
         index = int(step["step_index"])
 
         existing = self.find_dispute(job, index)

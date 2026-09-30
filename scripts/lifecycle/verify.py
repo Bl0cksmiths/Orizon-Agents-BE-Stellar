@@ -20,6 +20,12 @@ contracts repo), and the checks follow the contract, not the API:
     whether the charge transaction succeeded and emitted `charged`, and the
     report says which.
 
+A multi-agent run (`--agent` repeated, story 5.01 AC5: one agent stops
+answering partway through) adds three checks on top: the seal names every
+agent the run was asked about, the seal's receipts are exactly the delivered
+steps' receipts, and every step that did not deliver cost its agent a landed
+20/100 rating, read back from the ReputationLedger's `rated` events.
+
 A check whose inputs were not measured (a resumed run with no pre-authorize
 balance snapshot, an operator who is also the buyer) is `ok=None` — reported,
 never counted as a pass or a failure.
@@ -254,6 +260,82 @@ def check_seal(
                 "seal_receipts_match_charges",
                 sealed == sorted(receipts),
                 f"sealed receipts {sealed}, charged {sorted(receipts)}",
+            )
+        )
+    return checks
+
+
+# ── partial delivery (multi-agent runs) ─────────────────────────
+# What the settler rates a step that delivered nothing — timed out, raised, or
+# answered with nothing checkable (app/services/reputation_svc.py
+# `synthetic_rating`, ADR 0005 D2/D3).
+FAILED_STEP_RATING = 20
+
+
+def check_seal_names_every_agent(attestation: dict[str, Any] | None, agents: tuple[str, ...]) -> Check:
+    """The seal lists every plan step's agent, the one that failed included:
+    it attests to what was planned, and the receipts say what was paid."""
+    sealed = (attestation or {}).get("agents") or []
+    missing = [a for a in agents if a not in sealed]
+    return Check(
+        "seal_names_every_agent",
+        attestation is not None and not missing,
+        f"sealed agents {sealed}" + (f"; missing {missing}" if missing else ""),
+    )
+
+
+def check_seal_receipts_are_delivered_steps(attestation: dict[str, Any] | None, settlement: dict[str, Any]) -> Check:
+    """The seal carries the receipts of the steps that delivered, and of no other.
+
+    Read against the settlement's per-step `receipt_id_hex` (ADR 0010); with
+    the charged events' receipts already held to the seal's by
+    `seal_receipts_match_charges`, this ties all three together. An older
+    backend that records no per-step receipt is not measured.
+    """
+    name = "seal_receipts_are_delivered_steps"
+    steps = settlement.get("steps") or []
+    if not any("receipt_id_hex" in s for s in steps):
+        return Check(name, None, "not measured: the settlement records no per-step receipts")
+    if attestation is None:
+        return Check(name, False, "no attestation to read receipts from")
+    delivered = sorted(str(s["receipt_id_hex"]) for s in steps if s.get("delivered") and s.get("receipt_id_hex"))
+    stray = [s.get("step_index") for s in steps if not s.get("delivered") and s.get("receipt_id_hex")]
+    sealed = sorted(str(r) for r in attestation.get("receipts") or [])
+    detail = f"sealed {sealed}, delivered steps' receipts {delivered}"
+    if stray:
+        detail += f"; undelivered step(s) {stray} carry a receipt"
+    return Check(name, sealed == delivered and not stray, detail)
+
+
+def check_failed_steps_rated(
+    settlement: dict[str, Any], ratings: list[tuple[str, int | None, str]] | None
+) -> list[Check]:
+    """Every step that did not deliver cost its agent a landed 20/100.
+
+    `ratings` is what the poll stage read back from the ReputationLedger's
+    `rated` events for this run: (agent id, rating, the transaction's ledger
+    status). None when they were never read (the task was gone from the
+    backend, or getEvents refused), which is not measured rather than failed.
+    One check per agent, counted: an agent with two failed steps needs two.
+    """
+    failed: Counter[str] = Counter(
+        str(s.get("agent_id")) for s in settlement.get("steps") or [] if not s.get("delivered")
+    )
+    if not failed:
+        return [Check("failed_steps_rated_20", True, "every step delivered; no failure to rate")]
+    checks = []
+    for agent, count in sorted(failed.items()):
+        name = f"failed_step_rated_20:{agent}"
+        if ratings is None:
+            checks.append(Check(name, None, "not measured: this run's ratings were not read from the ledger"))
+            continue
+        landed = [r for a, r, status in ratings if a == agent and status == "SUCCESS"]
+        twenties = landed.count(FAILED_STEP_RATING)
+        checks.append(
+            Check(
+                name,
+                twenties >= count,
+                f"{count} undelivered step(s); ratings landed for {agent}: {landed}",
             )
         )
     return checks
