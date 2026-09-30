@@ -1,5 +1,5 @@
 {
-  "generated_at": 1790764685,
+  "generated_at": 1790781991,
   "network": "testnet",
   "items": [
     {
@@ -96,6 +96,22 @@
       "kind": "seal",
       "tx_hash": "efca274fb83b50865cfc20dc40b6949e5abd1ae23ed3e7a7622e6c9eda37c0a8",
       "explorer": "https://stellar.expert/explorer/testnet/tx/efca274fb83b50865cfc20dc40b6949e5abd1ae23ed3e7a7622e6c9eda37c0a8",
+      "verified": true
+    },
+    {
+      "label": "Partial-credit refund \u2014 calculatorai (0.0100000 XLM (native))",
+      "deliverable": "D3",
+      "kind": "refund",
+      "tx_hash": "cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f",
+      "verified": true
+    },
+    {
+      "label": "Dispute rating \u2014 calculatorai",
+      "deliverable": "D3",
+      "kind": "dispute_rating",
+      "tx_hash": "b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49",
       "verified": true
     },
     {
