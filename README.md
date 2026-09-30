@@ -10,7 +10,18 @@ FastAPI + Agno + OpenAI. The brain behind the Orizon Agents frontend.
 | 🌐 **Frontend** (Vercel) | **https://orizon-agents-fe-stellar.vercel.app** | [Frontend repo](https://github.com/ALGOREX-PH/Orizon-Agents-FE-Stellar) |
 | 🔗 **Soroban contracts** | 4 contracts deployed on Stellar **mainnet** + testnet | [Contracts repo](https://github.com/ALGOREX-PH/Orizon-Agents-Smart-Contract-Stellar) |
 
-**Verify it's live:** `curl https://orizon-agents-be-stellar.onrender.com/api/stellar/network` — returns the four contract IDs the FE renders (mainnet in production via `render.yaml`; testnet is the local-dev default).
+**Verify it's live:** `curl https://orizon-agents-be-stellar.onrender.com/api/stellar/network` — returns the network and the four contract IDs the FE renders. **Production runs on Stellar testnet for the sprint**: the Render dashboard's environment overrides `render.yaml`, whose `STELLAR_NETWORK: mainnet` and `autoDeploy: true` are stale. Since 2026-09-30 its `payment_escrow` is escrow v2, `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`.
+
+`curl https://orizon-agents-be-stellar.onrender.com/readiness` answers with this shape (read live on 2026-09-30; `cold_start`, the per-dependency fields and the reconcile timestamps omitted):
+
+```json
+{
+  "status": "ready",
+  "ratings": { "writer": "scorer", "signer": "GDB4N25…CDHP", "scorer": "GDB4N25…CDHP" },
+  "disputes": { "store": "postgres", "reconcile": { "enabled": true, "running": true } },
+  "escrow": { "contract": "CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4", "version": 2 }
+}
+```
 
 **▸ Try the full flow:** [open the dApp](https://orizon-agents-fe-stellar.vercel.app/app/orchestrator) → connect [Freighter](https://freighter.app) on **Test Net** → type `code a calculator web app` → **Authorize & Execute**.
 
