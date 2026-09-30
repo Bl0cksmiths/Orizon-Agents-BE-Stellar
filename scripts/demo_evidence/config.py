@@ -95,8 +95,8 @@ KIND_PROVES: dict[str, str] = {
     "settle": "PaymentEscrow paid the agent's owner for the delivered step",
     "seal": "AttestationRegistry sealed the job, tying the payout to the work",
     "rating": "ReputationLedger recorded the run's rating, which the routing floor reads",
-    "dispute_rating": "the upheld dispute's kind=dispute rating landed on the ReputationLedger",
-    "refund": "the settler paid the buyer the partial credit for the disputed step",
+    "dispute_rating": "a kind=dispute rating against the disputed agent landed on the ReputationLedger",
+    "refund": "the platform's signing key paid the buyer a partial credit for the disputed step",
     "other": "a transaction the recorded run produced",
 }
 
