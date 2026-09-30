@@ -166,7 +166,10 @@ python -m scripts.lifecycle ... --evidence-dir docs/evidence/5.01/ac4 --from-tas
 The restart forgets the task and its read token (both live in memory). The
 harness records `task_not_in_memory`, reads the settlement from the dispute
 store, which survives the restart, or from its own state file when
-`TASK_AUTH_REQUIRED` gates the listing, and disputes. The dispute being
+`TASK_AUTH_REQUIRED` gates the listing, and disputes. Everything the dispute
+itself needs — the payer, the window, the steps, the refund claim — is read
+from Postgres, never from the task or its token (`docs/disputes.md`, "What a
+restart keeps"); `tests/test_dispute_restart.py` runs the same sequence in CI. The dispute being
 accepted and credited after the restart is the AC4 evidence. Leave out
 `--intent` on the resume. `--from-task` does not need it, and nothing is
 decomposed or authorized again.
