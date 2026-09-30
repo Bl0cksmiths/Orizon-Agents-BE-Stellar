@@ -92,13 +92,14 @@ export BE_HOST=https://orizon-agents-be-stellar.onrender.com   # root-level /rea
 export SITE=https://orizons.xyz                                # the frontend, which proxies /api
 export SETTLER=GDB4N25UYM3YNTTAWX7LSGI2P7OR62QZQXRNQWAGF5TFVENDKCTTCDHP
 export ESCROW_V1=CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI
+export ESCROW_V2=CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4   # live since 2026-09-30 (step 4)
 ```
 
 `SETTLER` is the public half of the production signing key (the one Render's
 `STELLAR_SIGNING_KEY` holds), per the frontend's `docs/escrow-v2-switch.md`.
 `ESCROW_V1` is `payment_escrow` in the contracts repo's `addresses.json`
-(testnet). `orizons.xyz` does not proxy `/readiness`, so it is always read from
-`$BE_HOST`.
+(testnet), and `ESCROW_V2` is its `payment_escrow_v2`. `orizons.xyz` does not
+proxy `/readiness`, so it is always read from `$BE_HOST`.
 
 If a local checkout is hosting another lane's branch, run the steps from a
 separate `git worktree` of `origin/main` rather than switching branches in it.
