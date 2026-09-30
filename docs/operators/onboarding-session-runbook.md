@@ -86,9 +86,10 @@ report, proactively.
       `contracts.payment_escrow` and `dispatch_signer`. The operator needs `dispatch_signer` in step 4.
 - [ ] A **buyer wallet** for step 7, funded on testnet, that is **not** the operator's. A team buyer wallet is fine: the
       metric counts external *operators*, not external buyers.
-- [ ] The known blockers, read so they can be stated honestly and not discovered live: **F-019** (settlement on the
-      deployed escrow), **F-010** (Albedo and Rabet cannot bind), **F-008** (the exact-URL rule), **F-001** (no
-      tunnels).
+- [ ] The known blockers, read so they can be stated honestly and not discovered live: **F-010** (Albedo and Rabet
+      cannot bind), **F-008** (the exact-URL rule), **F-001** (no tunnels). F-019 (settlement on escrow v1) is fixed:
+      escrow v2 has been live on testnet since 2026-09-30, and `contracts.payment_escrow` should read
+      `CCNO5TEN…Q5VC4`.
 - [ ] The [friction log](friction-log.md) open for editing, and a session record started (template in
       [Capturing evidence](#capturing-evidence)).
 - [ ] Ten minutes before the session: open `https://orizons.xyz` so the backend is awake. The free tier can take minutes
@@ -274,16 +275,17 @@ operator's (rule 3).
 3. **Watch both ends:** the buyer's trace shows the agent's step dispatched and delivered, and the operator's Render
    logs show the incoming, signature-verified dispatch.
 
-**Facilitator checks:** `first_run` turns green. Then check `first_settlement` honestly. On the escrow deployed today,
-settlement to an external operator cannot land (F-019, D-039): runs finish `complete` with an
-`on-chain settlement failed` line, and no `charged` event names the agent. **Record it as it is.** Do not re-run with
-another wallet to "make it work", and do not describe an authorization as a settlement. When custody settlement (escrow
-v2, ADR 0010) is live, repeat this step: that is what produces the "3 settled workflows" evidence.
+**Facilitator checks:** `first_run` turns green. Then check `first_settlement` honestly. Since 2026-09-30 the backend
+settles through escrow v2 (ADR 0010), so a wallet-authorized run ends in one `settle` that pays each delivered step's
+owner, and its `charged` event names the agent. That settle is what produces the "3 settled workflows" evidence. If it
+does not land, **record it as it is.** Do not re-run with another wallet to "make it work", and do not describe an
+authorization as a settlement. *(Rewritten 2026-09-30: until then testnet settled through v1, which could not pay an
+external operator, F-019.)*
 
 **Evidence:** the task id, the authorization tx hash, and the settlement tx hash if one exists, all captured the moment
 they appear. A backend restart erases tasks and traces (F-007). The chain keeps the hashes; the backend may not.
 
-**Known friction:** F-002, F-007, F-016, F-019, F-027, F-029.
+**Known friction:** F-002, F-007, F-016, F-027, F-029.
 
 ### Step 8: Wrap-up (5 min)
 

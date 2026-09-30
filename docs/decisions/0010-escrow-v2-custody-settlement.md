@@ -10,6 +10,24 @@
   the backend knows which escrow it has**, **what it pays**, **what it records**,
   **what it does when it cannot pay**, and **how long an authorization must live**.
 
+> **Amended 2026-09-30: deployed.** This ADR was written while testnet still
+> settled through v1. Escrow v2 was deployed to testnet on 2026-09-30 with
+> `make deploy-escrow-v2`, as
+> `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`; the script read
+> back `version()` 2, `settler()` `GDB4N25…CDHP` (the platform's signing key)
+> and `admin()` `GA7AI5…5OQV`. The address book took it as contracts #6, the
+> frontend pinned it in #101, and Render's `STELLAR_PAYMENT_ESCROW` names it,
+> so `/readiness` reports `escrow.version` 2. The first v2 settles landed the
+> same day in disclosed team runs, each paying the delivered step's owner and
+> each sealed:
+> [`f0674419…8d1235`](https://stellar.expert/explorer/testnet/tx/f0674419992bdf30cf730139e54e4cdd985e32b43ee15c91733e08424a8d1235),
+> [`19f3420d…a83397`](https://stellar.expert/explorer/testnet/tx/19f3420ddb5232a8328c66ec57c1e34890d09a38350e172fdfd9ce8d04a83397)
+> and
+> [`785428bf…ca554b`](https://stellar.expert/explorer/testnet/tx/785428bf6552208750b375703556c534da557dccd64df8d1db7f954a04ca554b).
+> The owner paid in all three was the team's admin key, so none is an
+> external settlement under D10. v1 (`CBJPTMAP…25PI`) stays valid, and its
+> history is still counted. Nothing decided here changes.
+
 ## Context
 
 PaymentEscrow v1 can never settle (defect D-039): `charge` moves the payer's

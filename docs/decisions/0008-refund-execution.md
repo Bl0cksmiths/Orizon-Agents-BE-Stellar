@@ -435,6 +435,18 @@ for ADR 0007 D5's reason, and nothing here writes a rating. A dispute may reach
 > procedure in [`docs/disputes.md`](../disputes.md) now starts from that key's
 > account.
 
+> **Amended 2026-09-30: escrow v2 is live.** The 2026-09-29 amendment above
+> says the platform's signing key "becomes the escrow's settler once escrow v2
+> is deployed" and calls v1 "the deployed escrow". Escrow v2 was deployed to
+> testnet on 2026-09-30 as `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`;
+> the deploy read `settler()` back as `GDB4N25…CDHP` and `admin()` as
+> `GA7AI5…5OQV`, and the backend settles through it (`/readiness`
+> `escrow.version` 2). So the platform's signing key is now the live escrow's
+> settler as well, and the admin key is v1's settler only.
+> Both refund switches have been on in that deployment since 2026-09-30
+> (`disputes.reconcile.enabled` true, the sweep running, store `postgres`).
+> Every decision here stands.
+
 > **Amended 2026-09-29 (Epic 5 audit): what ADR 0002 proved.** Context opens
 > with "ADR 0002 proved a credit can be paid: a real one landed on testnet on
 > 2026-09-12." That transaction, `9b8ffaa4…`, was an operator-script transfer

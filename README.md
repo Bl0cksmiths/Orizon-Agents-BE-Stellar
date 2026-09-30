@@ -10,7 +10,18 @@ FastAPI + Agno + OpenAI. The brain behind the Orizon Agents frontend.
 | 🌐 **Frontend** (Vercel) | **https://orizon-agents-fe-stellar.vercel.app** | [Frontend repo](https://github.com/ALGOREX-PH/Orizon-Agents-FE-Stellar) |
 | 🔗 **Soroban contracts** | 4 contracts deployed on Stellar **mainnet** + testnet | [Contracts repo](https://github.com/ALGOREX-PH/Orizon-Agents-Smart-Contract-Stellar) |
 
-**Verify it's live:** `curl https://orizon-agents-be-stellar.onrender.com/api/stellar/network` — returns the four contract IDs the FE renders (mainnet in production via `render.yaml`; testnet is the local-dev default).
+**Verify it's live:** `curl https://orizon-agents-be-stellar.onrender.com/api/stellar/network` — returns the network and the four contract IDs the FE renders. **Production runs on Stellar testnet for the sprint**: the Render dashboard's environment overrides `render.yaml`, whose `STELLAR_NETWORK: mainnet` and `autoDeploy: true` are stale. Since 2026-09-30 its `payment_escrow` is escrow v2, `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`.
+
+`curl https://orizon-agents-be-stellar.onrender.com/readiness` answers with this shape (read live on 2026-09-30; `cold_start`, the per-dependency fields and the reconcile timestamps omitted):
+
+```json
+{
+  "status": "ready",
+  "ratings": { "writer": "scorer", "signer": "GDB4N25…CDHP", "scorer": "GDB4N25…CDHP" },
+  "disputes": { "store": "postgres", "reconcile": { "enabled": true, "running": true } },
+  "escrow": { "contract": "CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4", "version": 2 }
+}
+```
 
 **▸ Try the full flow:** [open the dApp](https://orizon-agents-fe-stellar.vercel.app/app/orchestrator) → connect [Freighter](https://freighter.app) on **Test Net** → type `code a calculator web app` → **Authorize & Execute**.
 
@@ -216,9 +227,13 @@ The repo ships a `render.yaml` blueprint + a `runtime.txt` pinning Python 3.12. 
    ```
    One-time tx; runs against whichever contract addresses are in your `.env`.
 
-### Mainnet
+### What production runs, and the mainnet IDs
 
-The contracts are live on Stellar **mainnet** — `render.yaml` ships these as the production env (testnet stays the local-dev default in `.env.example`):
+**Production runs on testnet for the sprint.** The Render dashboard's environment is the one in force and overrides `render.yaml`, so the `STELLAR_NETWORK: mainnet` and mainnet contract IDs in the file are not what the service uses. Read the live network from `/api/stellar/network` and the live escrow from `/readiness` (`escrow.contract`, `escrow.version`), never from the file.
+
+**There is no auto-deploy.** `render.yaml` says `autoDeploy: true`, but Render's GitHub App is not installed on the `Bl0cksmiths` organization, so a merge to `main` deploys nothing. Every backend deploy is a **Manual Deploy** from the Render dashboard ([docs/operators/epic5-deploy-runbook.md](docs/operators/epic5-deploy-runbook.md), step 3).
+
+The contracts also exist on Stellar **mainnet**, and `render.yaml` still carries their IDs. Production does not use them. Escrow v2 is deployed on testnet only; the frontend's mainnet escrow pin stays `null`:
 
 | contract | mainnet ID |
 | --- | --- |
@@ -228,7 +243,7 @@ The contracts are live on Stellar **mainnet** — `render.yaml` ships these as t
 | AttestationRegistry | [`CBLV6QGFCMXBXHT62JZ7YH22NXW7MVBGV6TGOGX3OHY46GQGPYCTAAK4`](https://stellar.expert/explorer/public/contract/CBLV6QGFCMXBXHT62JZ7YH22NXW7MVBGV6TGOGX3OHY46GQGPYCTAAK4) |
 | XLM SAC (native, SEP-41) | [`CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA`](https://stellar.expert/explorer/public/contract/CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA) |
 
-**Go live:** the Render dashboard env overrides `render.yaml` — flip the dashboard's Stellar vars to the `render.yaml` values and the service redeploys on mainnet.
+**Mainnet is out of scope for the sprint.** Moving production there means changing the dashboard's Stellar variables and a Manual Deploy, and it needs escrow v2 deployed on mainnet first; nothing in this repository does it.
 
 ### Gotchas
 

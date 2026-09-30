@@ -23,15 +23,15 @@ Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
 
 | Step | State | What is done | What remains |
 |---|---|---|---|
-| 1. Preconditions | open | — | 1.1, the Chapter Lead's R9 approval, is what step 4 waits on. The rest of step 1 is not tracked here. |
+| 1. Preconditions | open | 1.1: the lead confirmed that the Chapter Lead approved the escrow v2 testnet deploy on 2026-09-30 (C1). | The rest of step 1 is not tracked here. |
 | 2. Merge order | **done** 2026-09-29 | All with merge commits: contracts #5 (`4e04e67`, 12:03 UTC), backend #94 (`44c3411`, 12:01 UTC), frontend #97 (`d90b37e`, 12:00 UTC). The evidence index followed in frontend #98 (`be3e826`, 16:27 UTC) and #99 (`b14d4cb`, 17:01 UTC). | nothing |
 | 3. Render deploy | **done** 2026-09-29 | A Manual Deploy of backend `main` at `44c3411`. The 3.2 checks, live: see below. | nothing |
-| 4. Escrow v2 | not started | — | Needs the Chapter Lead's approval (1.1, R9). v2 is not deployed; the backend still settles through v1 (`CBJPTMAP…25PI`). |
-| 5. The v2 pin | not started | — | Waits for step 4. The frontend's `testnet` pin stays `null`. |
-| 6. Refunds on | not started | — | Waits for steps 4 and 5. Both switches are off (`disputes.reconcile.enabled: false`). |
-| 7. Operators | in progress | Two outside wallets have registered agents: OP-1 one trial agent, OP-2 five. The live adoption report counts 6 external agents from 2 wallets, 0 settled. | Neither has a working bound agent. OP-1's one agent is bound to a parked web page (F-033, F-034); none of OP-2's five is bound. A settled workflow to an outside agent also needs step 4 (F-019). The checkpoint record (7.5) is still open. |
-| 8. Lifecycle | not started | — | Needs steps 4 and 6. |
-| 9. Demo | not started | — | Its settlement scenes need steps 4 and 6. |
+| 4. Escrow v2 | **done** 2026-09-30 | `make deploy-escrow-v2` deployed PaymentEscrow v2 as `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`. The script read back `version=2`, settler `GDB4N25…CDHP` (`$SETTLER`) and admin `GA7AI5…5OQV`. The address book went to contracts `main` as a PR, #6 (merged). Render's `STELLAR_PAYMENT_ESCROW` now names v2, and `/readiness` reports `escrow.version` `2`. | nothing. v1 (`CBJPTMAP…25PI`) stays valid and stays in the evidence as history. |
+| 5. The v2 pin | **done** 2026-09-30 | Frontend #101 (merged) sets the `testnet` pin to v2. | nothing |
+| 6. Refunds on | **done** 2026-09-30 | `DISPUTE_REFUNDS_ENABLED` and `REFUND_RECONCILE_ENABLED` are both `true`. `/readiness` reports `disputes.store` `postgres`, `disputes.reconcile.enabled` `true` and the sweep running. | nothing |
+| 7. Operators | in progress | Two outside wallets have registered agents: OP-1 one trial agent, OP-2 five. The live adoption report counts 6 external agents from 2 wallets, 0 settled. | Neither has a working bound agent. OP-1's one agent is bound to a parked web page (F-033, F-034); none of OP-2's five is bound. Step 4 no longer blocks them: F-019 is fixed. The checkpoint record (7.5) is still open. |
+| 8. Lifecycle | **partly done** 2026-09-30 | Disclosed team runs on v2, with team wallets as buyers and the team's own agents: 3 settled workflows (settles `f0674419…`, `19f3420d…`, `785428bf…`), each sealed and rated, every harness check passing. The faulty agent `faulty_test_v2` (team key owner `GB4K6…YKAYKK`) took three failure ratings to lower bound 5443 and is excluded live. Dispute `dsp_15acee279ac02852a5877ac1696ec4b5` is open, on run 3's settled step. The evidence sheet re-verified 19 of 19 hashes `SUCCESS`. The evidence is committed in [`docs/evidence/5.01/v2-team-runs/`](../evidence/5.01/v2-team-runs/): the sheet, `evidence.json` and `description.txt` under `evidence/`, and each run's `lifecycle.md` and `lifecycle.jsonl` under `h1`, `h2b`, `h3` (settled runs) and `f1` to `f3` (the faulty agent's). No `state.json` is committed. | The uphold, which waits for the adjudicator key, and then its refund and dispute rating. AC4 (the restart between seal and dispute) was skipped: Render cannot be restarted from the runner. |
+| 9. Demo | ready to record | Steps 4 and 6 are done, and the below-floor agent that 9.1 builds exists (`faulty_test_v2`, 3 ratings, lower bound 5443). | Choose the operator on camera, an outside one or a disclosed team one (`--allow-team-operator`), then 9.2 onward. |
 | 10. Evidence re-run | not started | The index was refreshed to the post-deploy state in frontend #98 and #99. | The full re-run after steps 7 to 9, with `--withhold-external` (the default) until each outside operator's consent is recorded. |
 | 11. Closing | not started | — | BLO-134 and BLO-136 are due Fri 2026-10-02; the check-in (BLO-138) is today. |
 
@@ -52,8 +52,9 @@ Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
   `contracts.payment_escrow`.
 
 **Confirm list, re-checked.** The deploys closed C10: the frontend's
-after-deploy checklist merged with #97. C1 to C4, C6 to C8, C11 and C12 stay
-open, because no deploy answers them.
+after-deploy checklist merged with #97. The escrow v2 deploy on 2026-09-30
+closed C1, C4 and C6 (see [the confirm list](#confirm-list)). C2, C3, C7, C8,
+C11 and C12 stay open.
 
 **Team hygiene.** The team agent `3D_Artbot`, owned by the admin key
 `GA7AI5…5OQV`, is bound to `https://arbot.com`. That endpoint does not answer:
@@ -62,6 +63,15 @@ plain `GET` timed out after 15 s. It is still routable, at 5677 bps against the
 5500 floor. So the planner can put it in a buyer's plan, and each run that
 reaches it fails that step (F-034). The admin key holder should unbind it, or
 rebind it to an agent that answers, before any wallet-authorized run.
+
+**Team hygiene, 2026-09-30.** For the step 8 runs, the admin key rebound
+`calculatorai` and `keyboardai` from their placeholder hosts to a reference
+agent, and unbound both afterwards. Two admin-owned agents are **still bound
+to a placeholder or dead URL and still routable**: `algorex` (`https://testing.com`)
+and `3D_Artbot` (`https://arbot.com`, above). Neither can deliver a step, so
+each run the planner routes to one fails that step (F-002, F-034). Unbind both,
+or rebind them to an agent that answers, before the demo or any operator
+session.
 
 ## The four repositories
 
@@ -82,13 +92,14 @@ export BE_HOST=https://orizon-agents-be-stellar.onrender.com   # root-level /rea
 export SITE=https://orizons.xyz                                # the frontend, which proxies /api
 export SETTLER=GDB4N25UYM3YNTTAWX7LSGI2P7OR62QZQXRNQWAGF5TFVENDKCTTCDHP
 export ESCROW_V1=CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI
+export ESCROW_V2=CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4   # live since 2026-09-30 (step 4)
 ```
 
 `SETTLER` is the public half of the production signing key (the one Render's
 `STELLAR_SIGNING_KEY` holds), per the frontend's `docs/escrow-v2-switch.md`.
 `ESCROW_V1` is `payment_escrow` in the contracts repo's `addresses.json`
-(testnet). `orizons.xyz` does not proxy `/readiness`, so it is always read from
-`$BE_HOST`.
+(testnet), and `ESCROW_V2` is its `payment_escrow_v2`. `orizons.xyz` does not
+proxy `/readiness`, so it is always read from `$BE_HOST`.
 
 If a local checkout is hosting another lane's branch, run the steps from a
 separate `git worktree` of `origin/main` rather than switching branches in it.
@@ -104,6 +115,7 @@ separate `git worktree` of `origin/main` rather than switching branches in it.
 | Demo (5.04) | [demo-recording.md](demo-recording.md); frontend `content/demo/script.md`, `shot-list.md` |
 | Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (on `main` since frontend #97) |
 | Gates | Linear: "Sprint Risk Register & Decision Log" (R5, R9), BLO-36 |
+| Task read tokens (no step; `TASK_AUTH_REQUIRED` stays `false`) | [task-token-auth.md](task-token-auth.md), the 2026-09-30 audit: what breaks if it is turned on today, the safe path and the staging |
 
 ---
 
@@ -122,8 +134,8 @@ Nothing in steps 2–12 starts until every box here is ticked.
    - Record it: as a dated decision entry in the Linear document "Sprint Risk
      Register & Decision Log" under R9, quoting the Chapter Lead's words and
      the date, with a link to where it was given (the check-in issue, BLO-138,
-     if it is given at the Wed 2026-09-30 check-in). **Confirm** that this is
-     where the Chapter Lead wants it recorded.
+     if it is given at the Wed 2026-09-30 check-in). *(C1, closed 2026-09-30:
+     the lead confirmed the Chapter Lead approved on 2026-09-30.)*
    - Verify: the risk register shows the entry, and R9's status names it.
    - If it is refused: stop. Do steps 2, 3 and 7 only; the lifecycle (8), the
      demo's settlement scenes (9) and the refund metric cannot be produced on
@@ -157,9 +169,10 @@ Nothing in steps 2–12 starts until every box here is ticked.
    - Vercel access to the frontend project (deployments and promote).
    - The stellar-cli identity `admin` on the machine that deploys the
      contract. `stellar keys address admin` should print the address book's
-     `admin`, `GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV`
-     (**confirm**: the deploy script defaults the escrow admin to this
-     identity's address, and no source states the two are the same key).
+     `admin`, `GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV`.
+     The deploy script defaults the escrow admin to this identity's address.
+     *(C4, closed 2026-09-30: the v2 deploy read back admin `GA7AI5…5OQV`,
+     so the identity is the address book's `admin`.)*
    - Merge rights on all four repositories, and `gh` authenticated.
    - The deployment's operator `API_KEY` (a secret, from the Render dashboard)
      for the lifecycle harness's `--adjudicator-key-env`.
@@ -252,7 +265,8 @@ holds: frontend #89 (the v2 console) is merged and deployed, so today the
 plan card tells buyers that signing Authorize moves the cap into escrow while
 production still settles through v1, which cannot do that (D-039). This
 runbook does not create that gap; it closes it. Keep steps 3 to 5 in one
-sitting so it closes as soon as possible.
+sitting so it closes as soon as possible. *(Closed 2026-09-30: steps 4 and 5
+are done, and production settles through v2.)*
 
 ---
 
@@ -280,6 +294,7 @@ the dashboard:
 | `DISPUTE_REFUNDS_ENABLED` | `false` | stays off until step 6 |
 | `REFUND_RECONCILE_ENABLED` | `false` | stays off until step 6 |
 | `MAX_REFUND_USDC` | note its value | step 6 funds the signer against it; no public route reports it (default `1.0`) |
+| `TASK_AUTH_REQUIRED` | `false` | leave it off: turning it on today hides receipts and breaks shared links ([task-token-auth.md](task-token-auth.md)) |
 
 `5` is also the code default (`app/config.py`); setting it explicitly records
 the choice in the dashboard, which is the environment of record.
@@ -381,8 +396,8 @@ git push origin main
 ```
 
 The frontend's `docs/escrow-v2-switch.md` says to commit and push it to the
-contracts repo's default branch. **Confirm** whether `main` there takes a
-direct push or needs a PR (merged with a merge commit); either way it must be
+contracts repo's default branch. *(C6, closed 2026-09-30: `main` there took
+the address book as a PR, contracts #6, merged.)* It must be
 on `main` before step 5, because the frontend's `check:addresses` CI job and
 `smoke` read the address book from the contracts repo.
 
@@ -561,10 +576,10 @@ written. This runbook adds only the order and the records.
    onboarding runbook (consent in writing and an `OP-n`, a buyer wallet that is
    not the operator's, the known blockers read, the friction log open).
    `curl -s "$SITE/api/stellar/network"` should now name `$ESCROW_V2` as
-   `contracts.payment_escrow`. The onboarding runbook still lists **F-019**
-   (settlement to an external operator cannot land) as a known blocker: with
-   step 4 done it no longer applies, so step 7 of the session is where the
-   settled workflow comes from.
+   `contracts.payment_escrow`. **F-019** (settlement to an external operator
+   cannot land) is fixed since step 4 (2026-09-30), and the onboarding runbook
+   no longer lists it as a known blocker, so step 7 of the session is where
+   the settled workflow comes from.
 2. **Run the session** (45–60 min). The facilitator rules are absolute: never
    handle the operator's secret, never register, bind or pay from a team
    wallet for them, never let them pay for their own workflow, never turn on
@@ -950,11 +965,11 @@ before the step that needs it, and record the answer where it says.
 
 | # | Step | Confirm | Ask |
 |---|---|---|---|
-| C1 | 1.1 | Where the Chapter Lead's escrow v2 approval is recorded (proposed: a dated decision entry under R9 in the risk register, linked from BLO-138) | Chapter Lead |
+| ~~C1~~ | 1.1 | **Closed 2026-09-30.** The lead confirmed that the Chapter Lead approved the escrow v2 testnet deploy on 2026-09-30 | — |
 | C2 | 1.2, 7.5 | What actually happened at the Week-2 operator checkpoint (Fri 2026-09-18): committed operators, or the date of the escalation. Nothing is recorded on BLO-36 or R5 | Dan |
 | C3 | 1.3 | Whether Rie facilitates or observes the operator sessions | Dan, Rie |
-| C4 | 1.4 | That the stellar-cli identity `admin` is the address book's `admin` (`GA7AI5…5OQV`); the deploy script makes that identity the escrow v2 admin | Dan |
-| C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
+| ~~C4~~ | 1.4 | **Closed 2026-09-30.** The stellar-cli identity `admin` is the address book's `admin`, `GA7AI5…5OQV`: the v2 deploy script read `admin()` back as that address | — |
+| ~~C6~~ | 4.2 | **Closed 2026-09-30.** The contracts repo took the address book as a PR, #6 (merged) | — |
 | C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
 | C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
 | ~~C10~~ | 10.2 | **Closed 2026-09-30.** The frontend's `docs/evidence-index-after-deploy.md` merged with frontend #97 on 2026-09-29 and is on `main` | — |
