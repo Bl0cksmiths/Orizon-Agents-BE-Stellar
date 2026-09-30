@@ -263,7 +263,8 @@ holds: frontend #89 (the v2 console) is merged and deployed, so today the
 plan card tells buyers that signing Authorize moves the cap into escrow while
 production still settles through v1, which cannot do that (D-039). This
 runbook does not create that gap; it closes it. Keep steps 3 to 5 in one
-sitting so it closes as soon as possible.
+sitting so it closes as soon as possible. *(Closed 2026-09-30: steps 4 and 5
+are done, and production settles through v2.)*
 
 ---
 
@@ -572,10 +573,10 @@ written. This runbook adds only the order and the records.
    onboarding runbook (consent in writing and an `OP-n`, a buyer wallet that is
    not the operator's, the known blockers read, the friction log open).
    `curl -s "$SITE/api/stellar/network"` should now name `$ESCROW_V2` as
-   `contracts.payment_escrow`. The onboarding runbook still lists **F-019**
-   (settlement to an external operator cannot land) as a known blocker: with
-   step 4 done it no longer applies, so step 7 of the session is where the
-   settled workflow comes from.
+   `contracts.payment_escrow`. **F-019** (settlement to an external operator
+   cannot land) is fixed since step 4 (2026-09-30), and the onboarding runbook
+   no longer lists it as a known blocker, so step 7 of the session is where
+   the settled workflow comes from.
 2. **Run the session** (45–60 min). The facilitator rules are absolute: never
    handle the operator's secret, never register, bind or pay from a team
    wallet for them, never let them pay for their own workflow, never turn on
