@@ -64,6 +64,15 @@ plain `GET` timed out after 15 s. It is still routable, at 5677 bps against the
 reaches it fails that step (F-034). The admin key holder should unbind it, or
 rebind it to an agent that answers, before any wallet-authorized run.
 
+**Team hygiene, 2026-09-30.** For the step 8 runs, the admin key rebound
+`calculatorai` and `keyboardai` from their placeholder hosts to a reference
+agent, and unbound both afterwards. Two admin-owned agents are **still bound
+to a placeholder or dead URL and still routable**: `algorex` (`https://testing.com`)
+and `3D_Artbot` (`https://arbot.com`, above). Neither can deliver a step, so
+each run the planner routes to one fails that step (F-002, F-034). Unbind both,
+or rebind them to an agent that answers, before the demo or any operator
+session.
+
 ## The four repositories
 
 | Short name | GitHub | Local checkout (Dan's machine) |
