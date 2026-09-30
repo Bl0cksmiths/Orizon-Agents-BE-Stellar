@@ -190,6 +190,17 @@ accepted and credited after the restart is the AC4 evidence. Leave out
 `--intent` on the resume. `--from-task` does not need it, and nothing is
 decomposed or authorized again.
 
+**Proven on 2026-10-01** in a disclosed team run (buyer `GCNQA…A2GP`,
+`calculatorai`, task `tsk_fcd544e62f0f0958`). The team lead restarted the
+Render service between seal and dispute: `/api/health` `uptime_seconds` fell
+from 1388.9 to 163.3, and `GET /api/tasks/tsk_fcd544e62f0f0958` went from 200
+to 404. The resume logged `task_not_in_memory`, verified from the settlement
+record, and dispute `dsp_d87167ccf384e41c7cc48b1e78c78e42` was upheld and
+credited (refund `01c3175a…efa5be`, dispute rating `60bc5249…ba730e`). That run
+had `TASK_AUTH_REQUIRED` off. The evidence is
+[`docs/evidence/5.01/ac4/`](../evidence/5.01/ac4/lifecycle.md), and the
+re-verified sheet is in [`docs/evidence/5.01/ac4-ac5/`](../evidence/5.01/ac4-ac5/evidence-sheet.md).
+
 ## AC5 — an external endpoint that stops answering mid-workflow
 
 > Given an external agent that stops responding partway through a workflow,
