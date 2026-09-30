@@ -9,8 +9,11 @@ from scripts.lifecycle.verify import (
     check_authorization_view,
     check_buyer_delta,
     check_charged_events,
+    check_failed_steps_rated,
     check_operator_deltas,
     check_seal,
+    check_seal_names_every_agent,
+    check_seal_receipts_are_delivered_steps,
     check_settled_event,
     check_tx,
     check_v1_charge,
@@ -157,3 +160,66 @@ def test_seal() -> None:
     assert not passed(check_seal({**att, "total_spent": 1}, _settlement(), "ext", None))
     assert not passed(check_seal(att, _settlement(), "ext", ["0d" * 16]))
     assert not passed(check_seal(None, _settlement(), "ext", None))
+
+
+# ── partial delivery (multi-agent runs) ─────────────────────────
+def _with_receipts() -> dict[str, Any]:
+    steps = [
+        {**_settlement()["steps"][0], "receipt_id_hex": "0c" * 16},
+        {**_settlement()["steps"][1], "receipt_id_hex": None},
+        {**_settlement()["steps"][2], "receipt_id_hex": None},
+    ]
+    return _settlement(steps=steps)
+
+
+def test_the_seal_names_every_agent_the_run_named() -> None:
+    att = {"agents": ["ext", "agt_seed", "ext2"]}
+    assert check_seal_names_every_agent(att, ("ext", "ext2")).ok is True
+    assert check_seal_names_every_agent({"agents": ["ext"]}, ("ext", "ext2")).ok is False
+    assert check_seal_names_every_agent(None, ("ext",)).ok is False
+
+
+def test_the_seal_carries_exactly_the_delivered_steps_receipts() -> None:
+    att = {"receipts": ["0c" * 16]}
+    assert check_seal_receipts_are_delivered_steps(att, _with_receipts()).ok is True
+    # a receipt for the step that did not deliver, sealed
+    assert check_seal_receipts_are_delivered_steps({"receipts": ["0c" * 16, "0d" * 16]}, _with_receipts()).ok is False
+    # the delivered step's receipt, missing
+    assert check_seal_receipts_are_delivered_steps({"receipts": []}, _with_receipts()).ok is False
+    # a settlement that pins a receipt on an undelivered step
+    stray = _with_receipts()
+    stray["steps"][2]["receipt_id_hex"] = "0d" * 16
+    check = check_seal_receipts_are_delivered_steps(att, stray)
+    assert check.ok is False and "undelivered step(s) [2] carry a receipt" in check.detail
+    assert check_seal_receipts_are_delivered_steps(None, _with_receipts()).ok is False
+    # an older backend records no per-step receipt: not measured
+    assert check_seal_receipts_are_delivered_steps(att, _settlement()).ok is None
+
+
+def test_every_failed_step_costs_its_agent_a_landed_twenty() -> None:
+    [check] = check_failed_steps_rated(_settlement(), [("ext", 90, "SUCCESS"), ("ext2", 20, "SUCCESS")])
+    assert (check.name, check.ok) == ("failed_step_rated_20:ext2", True)
+    # rated, but not 20
+    assert check_failed_steps_rated(_settlement(), [("ext2", 70, "SUCCESS")])[0].ok is False
+    # a 20 that did not land
+    assert check_failed_steps_rated(_settlement(), [("ext2", 20, "FAILED")])[0].ok is False
+    # a 20 for someone else
+    assert check_failed_steps_rated(_settlement(), [("ext", 20, "SUCCESS")])[0].ok is False
+    # never read from the ledger: not measured
+    assert check_failed_steps_rated(_settlement(), None)[0].ok is None
+
+
+def test_two_failed_steps_by_one_agent_need_two_twenties() -> None:
+    twice = _settlement(
+        steps=[
+            {"step_index": 0, "agent_id": "ext2", "delivered": False},
+            {"step_index": 1, "agent_id": "ext2", "delivered": False},
+        ]
+    )
+    assert check_failed_steps_rated(twice, [("ext2", 20, "SUCCESS")])[0].ok is False
+    assert check_failed_steps_rated(twice, [("ext2", 20, "SUCCESS")] * 2)[0].ok is True
+
+
+def test_a_run_where_every_step_delivered_has_nothing_to_rate_down() -> None:
+    delivered = _settlement(steps=[{"step_index": 0, "agent_id": "ext", "delivered": True}])
+    assert [(c.name, c.ok) for c in check_failed_steps_rated(delivered, None)] == [("failed_steps_rated_20", True)]

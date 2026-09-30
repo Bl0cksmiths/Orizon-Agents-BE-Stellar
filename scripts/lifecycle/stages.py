@@ -123,6 +123,9 @@ class Runner:
     # saved, never printed.
     grant: str | None = None
     rating_seen: int = 0
+    # (agent id, rating, ledger status) for each of this run's ratings, read
+    # back from the ReputationLedger by the poll stage; None until it has.
+    ratings: list[tuple[str, int | None, str]] | None = None
     # agent name -> id from GET /api/agents, for a resumed run with no plan.
     directory: dict[str, str] = field(default_factory=dict)
     # What a dry run found that would stop the real run it rehearses. A dry
@@ -783,6 +786,7 @@ class Runner:
             u = UNLANDED_LINE.match(msg)
             if u:
                 wanted.append((u.group("prefix"), names.get(u.group("name"), u.group("name")), None, False))
+        self.ratings = []
         if not wanted:
             return
         chain = self.need_chain()
@@ -794,6 +798,7 @@ class Runner:
         except RpcError as exc:
             # Each rating below is then recorded as unresolved, with its prefix.
             self.note("poll", "events_unavailable", f"getEvents refused: {exc}", ledger=start)
+            self.ratings = None
             events = []
         for prefix, agent_id, rating, landed in wanted:
             match = next((e for e in events if e.tx_hash.startswith(prefix) and e.topics[1:2] == [agent_id]), None)
@@ -809,6 +814,8 @@ class Runner:
                 continue
             seen = chain.observe(match.tx_hash, self.budgets.tx_observe)
             value = match.value if isinstance(match.value, list) else []
+            if self.ratings is not None:
+                self.ratings.append((agent_id, int(value[0]) if value else None, seen.status))
             self.tx(
                 "poll",
                 "rating",
@@ -920,6 +927,14 @@ class Runner:
             self.contracts["attestation_registry"], str(settlement.get("job_id_hex")), buyer
         )
         checks += verify.check_seal(attestation, settlement, self.cfg.agent, receipts)
+        if self.cfg.multi_agent:
+            # Partial delivery (AC5): the seal and the ratings say which steps
+            # delivered as plainly as the settle's payouts do.
+            checks += [
+                verify.check_seal_names_every_agent(attestation, self.cfg.all_agents),
+                verify.check_seal_receipts_are_delivered_steps(attestation, settlement),
+                *verify.check_failed_steps_rated(settlement, self.ratings),
+            ]
 
         ok = verify.passed(checks)
         for c in checks:

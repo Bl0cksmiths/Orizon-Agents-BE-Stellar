@@ -22,8 +22,8 @@ import pytest
 from stellar_sdk import Keypair
 
 from scripts.lifecycle.cli import main
-from scripts.lifecycle.config import EXIT_PLAN_MISSING_AGENT, Budgets
-from scripts.lifecycle.fakes import AGENT, AGENT_2, API, FakeWorld
+from scripts.lifecycle.config import EXIT_PLAN_MISSING_AGENT, EXIT_VERIFY_FAILED, Budgets
+from scripts.lifecycle.fakes import AGENT, AGENT_2, AGENT_2_NAME, API, FakeWorld
 
 BUDGETS = Budgets(warmup=30, task=60, poll_interval=4, tx_observe=4, refund=30, refund_interval=5)
 
@@ -115,3 +115,115 @@ def test_the_order_of_the_agents_does_not_matter(buyer: Keypair, tmp_path: Path)
 
     assert result.code == 0, result.out
     assert [s["agent_id"] for s in result.row("plan")["detail"]["plan"]["steps"]] == [AGENT, AGENT_2, "agt_writer"]
+
+
+# ── partial delivery: one agent delivers, one stops answering ───────────
+AC5_CHECKS = {
+    "v2_charged_per_delivered_step",
+    "v2_paid_sum_matches_settlement",
+    "v2_settled_event",
+    "v2_buyer_balance_delta",
+    "seal_receipts_match_charges",
+    "seal_names_every_agent",
+    "seal_receipts_are_delivered_steps",
+    f"failed_step_rated_20:{AGENT_2}",
+}
+
+
+@pytest.mark.parametrize(
+    ("second_first", "agents"),
+    [(False, (AGENT, AGENT_2)), (True, (AGENT_2, AGENT))],
+    ids=["timeout-last", "timeout-first-and-named-first"],
+)
+def test_a_mixed_plan_proves_only_the_delivered_step_was_paid(
+    buyer: Keypair, tmp_path: Path, second_first: bool, agents: tuple[str, str]
+) -> None:
+    world = FakeWorld(buyer=buyer.public_key, second_agent=True, second_first=second_first, undelivered={AGENT_2})
+
+    result = run(world, buyer, tmp_path, *agents)
+
+    assert result.code == 0, result.out
+    checks = result.checks()
+    assert AC5_CHECKS <= set(checks), sorted(checks)
+    assert all(checks[name]["ok"] is True for name in AC5_CHECKS), {n: checks[n] for n in AC5_CHECKS}
+    # The chain paid AGENT alone and handed AGENT_2's share back to the buyer.
+    price = 500_000
+    authorized = 2 * price + 200_000  # two external steps at 0.05, the writer at 0.02
+    assert checks["v2_settled_event"]["detail"] == f"spent {price}, returned {authorized - price} to the buyer"
+    assert checks["v2_buyer_balance_delta"]["detail"].startswith(f"buyer balance fell {price + 100} stroops")
+    assert world.balances[world.owner_2] == 50 * 10_000_000
+    [sealed] = world.attestations.values()
+    delivered = next(s for s in result.row("settlement_checks")["detail"]["steps"] if s["agent_id"] == AGENT)
+    assert sealed["receipts"] == [delivered["receipt_id_hex"]]
+    # The failed agent's 20/100 was read back from the ledger, not the trace.
+    rated = {r["agent"]: r["detail"]["rating"] for r in result.rows() if r["event"] == "rating"}
+    assert rated[AGENT_2] == 20
+    # The dispute goes to the step that was paid for, whichever agent was named first.
+    assert result.row("dispute_opened")["detail"]["step_index"] == delivered["step_index"]
+    assert "[PASS] failed_step_rated_20:ext_faulty" in result.out
+
+
+def test_an_all_delivered_plan_has_no_failure_to_rate(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, second_agent=True)
+
+    result = run(world, buyer, tmp_path, AGENT, AGENT_2, until="verify")
+
+    assert result.code == 0, result.out
+    checks = result.checks()
+    assert checks["failed_steps_rated_20"] == {
+        "name": "failed_steps_rated_20",
+        "ok": True,
+        "detail": "every step delivered; no failure to rate",
+    }
+    assert checks["seal_receipts_are_delivered_steps"]["ok"] is True
+    assert checks["v2_charged_per_delivered_step"]["detail"].startswith("2 charged event(s) for 2 paid step(s)")
+    assert checks["v2_settled_event"]["detail"] == "spent 1000000, returned 200000 to the buyer"
+
+
+def test_a_settle_that_paid_the_step_that_timed_out_fails_verification(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, second_agent=True, undelivered={AGENT_2}, pays_undelivered=True)
+
+    result = run(world, buyer, tmp_path, AGENT, AGENT_2)
+
+    assert result.code == EXIT_VERIFY_FAILED, result.out
+    checks = result.checks()
+    assert checks["v2_charged_per_delivered_step"]["ok"] is False
+    assert checks["seal_receipts_are_delivered_steps"]["ok"] is False
+    assert "dispute_opened" not in result.events()
+
+
+def test_a_failed_step_that_was_not_rated_20_fails_verification(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, second_agent=True, undelivered={AGENT_2}, failed_rating=70)
+
+    result = run(world, buyer, tmp_path, AGENT, AGENT_2)
+
+    assert result.code == EXIT_VERIFY_FAILED, result.out
+    check = result.checks()[f"failed_step_rated_20:{AGENT_2}"]
+    assert check["ok"] is False
+    assert check["detail"] == f"1 undelivered step(s); ratings landed for {AGENT_2}: [70]"
+
+
+def test_a_twenty_the_trace_claims_but_the_ledger_does_not_hold_fails_verification(
+    buyer: Keypair, tmp_path: Path
+) -> None:
+    world = FakeWorld(buyer=buyer.public_key, second_agent=True, undelivered={AGENT_2}, ledger_failed_rating=70)
+
+    result = run(world, buyer, tmp_path, AGENT, AGENT_2)
+
+    assert result.code == EXIT_VERIFY_FAILED, result.out
+    # The trace says 20/100; the ledger's `rated` event, which is what counts, says 70.
+    [trace] = world.traces.values()
+    assert any(line["msg"].startswith(f"reputation → {AGENT_2_NAME} rated 20/100") for line in trace)
+    assert result.checks()[f"failed_step_rated_20:{AGENT_2}"]["ok"] is False
+
+
+def test_a_settle_that_kept_back_part_of_the_remainder_fails_verification(buyer: Keypair, tmp_path: Path) -> None:
+    world = FakeWorld(buyer=buyer.public_key, second_agent=True, undelivered={AGENT_2}, withheld=1)
+
+    result = run(world, buyer, tmp_path, AGENT, AGENT_2)
+
+    assert result.code == EXIT_VERIFY_FAILED, result.out
+    checks = result.checks()
+    assert checks["v2_settled_event"]["ok"] is False
+    assert "returned 699999 != max 1200000 - spent 500000" in checks["v2_settled_event"]["detail"]
+    assert checks["v2_buyer_balance_delta"]["ok"] is False
