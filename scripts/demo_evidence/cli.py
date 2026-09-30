@@ -192,7 +192,7 @@ def main(
     paths = write(
         cfg.out_dir,
         render_sheet(entries, loaded, generated_at, cfg.title),
-        render_description(entries, generated_at, cfg.title, cfg.disclosures),
+        render_description(entries, generated_at, cfg.title, cfg.disclosures, loaded.open_disputes),
         render_json(entries, generated_at),
     )
     if cfg.index_links:

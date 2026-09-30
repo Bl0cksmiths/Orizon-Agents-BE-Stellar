@@ -15,11 +15,18 @@ video's description that resolves on the wrong explorer, or nowhere.
 A torn line — the harness died mid-write — is skipped and counted, exactly as
 the harness's own reader skips it. The same hash in two rows (a resumed run
 re-recording what it read back) is kept once, at its first appearance.
+
+A dispute is known only from the rows that name it by `detail.dispute_id`.
+Its status is the one the last such row recorded; a row that names it without
+a status (a refund, a skipped uphold) leaves it unknown. Only a dispute last
+recorded `open` is reported open — the description says so, and claims no
+adjudication for it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +36,12 @@ from .config import EVENT_KINDS, JSONL_NAME, KIND_DELIVERABLE, KIND_LABEL, KIND_
 # A row written before the harness read the network (`Runner.note` falls back
 # to "unknown") says nothing about it either way.
 _NO_NETWORK = frozenset({"", "unknown"})
+
+# The harness's notes for a dispute it opened or found. Rows written before it
+# recorded `detail.status` carry the status only at the end of their summary:
+# "dispute <id> on step <n> (<agent>), status open" (`stages.py` stage_dispute).
+_DISPUTE_FOUND = frozenset({"dispute_opened", "dispute_existing"})
+_SUMMARY_STATUS = re.compile(r", status ([a-z_]+)$")
 
 
 class InputError(Exception):
@@ -95,6 +108,7 @@ class Loaded:
     duplicates: int
     given_files: tuple[Path, ...] = ()  # `--rows` files merged in
     given_tx: int = 0  # `--tx` hashes merged in
+    open_disputes: tuple[str, ...] = ()  # dispute ids the harness last recorded as open
 
 
 def _file(path: Path) -> Path:
@@ -108,6 +122,14 @@ def _str(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
+def _dispute_status(event: str, detail: dict[str, Any]) -> str | None:
+    status = detail.get("status")
+    if status is None and event in _DISPUTE_FOUND:
+        found = _SUMMARY_STATUS.search(str(detail.get("summary") or ""))
+        status = found.group(1) if found else None
+    return None if status is None else str(status)
+
+
 def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     """Every transaction row of every input, in input order then file order. Raises on another network.
 
@@ -119,6 +141,7 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     seen: set[str] = set()
     skipped = 0
     duplicates = 0
+    disputes: dict[str, str | None] = {}
     for path in files:
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -140,6 +163,10 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
             tx_hash = raw.get("tx_hash")
             if network not in _NO_NETWORK and network != TESTNET:
                 raise WrongNetwork(f"{where}: a row from network {network!r}; the video's evidence is testnet only")
+            raw_detail = raw.get("detail")
+            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+            if detail.get("dispute_id"):
+                disputes[str(detail["dispute_id"])] = _dispute_status(str(raw.get("event") or ""), detail)
             if not tx_hash:
                 continue
             if network != TESTNET:
@@ -152,8 +179,6 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
                 duplicates += 1
                 continue
             seen.add(tx_hash)
-            raw_detail = raw.get("detail")
-            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
             seq = raw.get("seq")
             rows.append(
                 TxRow(
@@ -174,7 +199,13 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
             )
     if not rows and require_rows:
         raise InputError(f"no transaction rows in {', '.join(str(f) for f in files)}")
-    return Loaded(rows=rows, files=files, skipped_lines=skipped, duplicates=duplicates)
+    return Loaded(
+        rows=rows,
+        files=files,
+        skipped_lines=skipped,
+        duplicates=duplicates,
+        open_disputes=tuple(d for d, status in disputes.items() if status == "open"),
+    )
 
 
 def merge(loaded: Loaded, given: list[TxRow], given_files: tuple[Path, ...], given_tx: int) -> Loaded:
@@ -208,4 +239,5 @@ def merge(loaded: Loaded, given: list[TxRow], given_files: tuple[Path, ...], giv
         duplicates=duplicates,
         given_files=given_files,
         given_tx=given_tx,
+        open_disputes=loaded.open_disputes,
     )

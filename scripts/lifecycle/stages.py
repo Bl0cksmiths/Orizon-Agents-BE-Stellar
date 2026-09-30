@@ -982,6 +982,7 @@ class Runner:
             "dispute_existing" if existing else "dispute_opened",
             f"dispute {dispute['id']} on step {index} ({dispute.get('agent_id')}), status {dispute.get('status')}",
             dispute_id=dispute["id"],
+            status=dispute.get("status"),
             step_index=index,
             charged_usdc=dispute.get("charged_usdc"),
             creditable_usdc=dispute.get("creditable_usdc"),

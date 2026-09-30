@@ -190,7 +190,7 @@ answer. Only a hash that reads SUCCESS is published.
 | Output | Contents |
 |---|---|
 | `evidence-sheet.md` | every transaction, in order: stage, what it proves, its deliverable, the hash, the Stellar Expert testnet link, the status the harness recorded and the status re-read now. Anything not SUCCESS is listed again under **Failed verification** |
-| `description.txt` | ready to paste: title, a summary placeholder, a **chapters placeholder**, every verified hash with its link, and the limitations paragraph |
+| `description.txt` | ready to paste: title, a summary placeholder, a **chapters placeholder**, every verified hash with its link, and the limitations paragraph (below) |
 | `evidence.json` | the list the frontend's `/demo` page reads, in the frozen shape below; **never** a hash that failed verification |
 
 ```json
@@ -199,6 +199,24 @@ answer. Only a hash that reads SUCCESS is published.
             "tx_hash": "<64 hex>", "explorer": "https://stellar.expert/explorer/testnet/tx/<hash>",
             "verified": true}]}
 ```
+
+The limitations paragraph always states that the run is testnet only, that
+every amount is testnet XLM and the interface labels it XLM (the "usdc" in API
+field names is a field name), that scores are prior-smoothed, and that the
+contracts are unaudited. What it says of a dispute is derived from the run:
+
+| The run shows | The paragraph says |
+|---|---|
+| a verified `refund` | the dispute was upheld by the adjudicator key, and the refund is a partial credit from the platform's signing key (escrow v2's settler), not a clawback |
+| … and a verified `dispute_rating` | the dispute's rating then landed on the ReputationLedger |
+| … and no verified `dispute_rating` | the video claims no dispute rating |
+| a verified `dispute_rating` alone | the rating landed; the video claims no refund, and no uphold |
+| a dispute the harness last recorded `open` | that dispute, by id, was open when the run was recorded, with no refund or dispute rating claimed for it |
+| none of these | nothing about disputes |
+
+A refund or rating that did not re-verify SUCCESS counts as absent. `--rows`
+and `--tx` carry no dispute status, so a dispute opened in the browser and
+never adjudicated is not mentioned; say so with `--disclose`.
 
 | Harness event | `kind` | Deliverable |
 |---|---|---|
