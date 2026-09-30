@@ -532,6 +532,18 @@ would call.
 > `dsp_15acee279ac02852a5877ac1696ec4b5`, is open and not yet upheld. Nothing
 > decided here changes.
 
+> **Amended 2026-09-30: the first dispute rating on v2.** The amendment above
+> says no dispute rating has been written on v2 yet. That dispute,
+> `dsp_15acee279ac02852a5877ac1696ec4b5`, was upheld on 2026-09-30 and
+> credited in `cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f`,
+> and its `kind=dispute` rating then landed on the ReputationLedger in
+> `b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49`, after the
+> credit, as D3 orders. Both re-verified `SUCCESS`. The agent, `calculatorai`,
+> fell from 7004 to 6999 bps and its lower bound from 5683 to 5678, with
+> `disputed: 1`. The evidence is in
+> [`docs/evidence/5.01/v2-team-runs/`](../evidence/5.01/v2-team-runs/). Nothing
+> decided here changes.
+
 Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (a failed step
 is never billed — the reason every rating is weighted by the quoted price
 rather than the settled value), ADR 0007 (the dispute record the rating is
