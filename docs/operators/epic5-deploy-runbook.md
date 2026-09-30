@@ -115,6 +115,7 @@ separate `git worktree` of `origin/main` rather than switching branches in it.
 | Demo (5.04) | [demo-recording.md](demo-recording.md); frontend `content/demo/script.md`, `shot-list.md` |
 | Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (on `main` since frontend #97) |
 | Gates | Linear: "Sprint Risk Register & Decision Log" (R5, R9), BLO-36 |
+| Task read tokens (no step; `TASK_AUTH_REQUIRED` stays `false`) | [task-token-auth.md](task-token-auth.md), the 2026-09-30 audit: what breaks if it is turned on today, the safe path and the staging |
 
 ---
 
@@ -293,6 +294,7 @@ the dashboard:
 | `DISPUTE_REFUNDS_ENABLED` | `false` | stays off until step 6 |
 | `REFUND_RECONCILE_ENABLED` | `false` | stays off until step 6 |
 | `MAX_REFUND_USDC` | note its value | step 6 funds the signer against it; no public route reports it (default `1.0`) |
+| `TASK_AUTH_REQUIRED` | `false` | leave it off: turning it on today hides receipts and breaks shared links ([task-token-auth.md](task-token-auth.md)) |
 
 `5` is also the code default (`app/config.py`); setting it explicitly records
 the choice in the dashboard, which is the environment of record.
