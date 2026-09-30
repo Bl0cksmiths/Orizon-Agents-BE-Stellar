@@ -1,0 +1,94 @@
+{
+  "generated_at": 1790791449,
+  "network": "testnet",
+  "items": [
+    {
+      "label": "Buyer authorization \u2014 calculatorai (0.2100000 XLM (native))",
+      "deliverable": "D4",
+      "kind": "authorize",
+      "tx_hash": "634549330a8188d28d32d6530e56ddb14298680de0d86d2568b91d3d5a612e9f",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/634549330a8188d28d32d6530e56ddb14298680de0d86d2568b91d3d5a612e9f",
+      "verified": true
+    },
+    {
+      "label": "Reputation rating \u2014 calculatorai",
+      "deliverable": "D2",
+      "kind": "rating",
+      "tx_hash": "023103b255895eb22ffbb93608d9ab333c37ce3434c2ad69c41a5c890504523a",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/023103b255895eb22ffbb93608d9ab333c37ce3434c2ad69c41a5c890504523a",
+      "verified": true
+    },
+    {
+      "label": "Reputation rating \u2014 keyboardai",
+      "deliverable": "D2",
+      "kind": "rating",
+      "tx_hash": "fc9a8268b806831f863e70f9a8f103882baef87b8fd34b5b7dda95f7c5f7212e",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/fc9a8268b806831f863e70f9a8f103882baef87b8fd34b5b7dda95f7c5f7212e",
+      "verified": true
+    },
+    {
+      "label": "Settlement \u2014 calculatorai (0.0100000 XLM (native))",
+      "deliverable": "D4",
+      "kind": "settle",
+      "tx_hash": "0ada07084b5aa1c196fb8e45b15d3712dcbefaf320a315a84e8cf2ab7adc556b",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/0ada07084b5aa1c196fb8e45b15d3712dcbefaf320a315a84e8cf2ab7adc556b",
+      "verified": true
+    },
+    {
+      "label": "Attestation seal \u2014 calculatorai",
+      "deliverable": "D4",
+      "kind": "seal",
+      "tx_hash": "41a159ffd7d96265dd4dd0863c0211697d94e77d636c9b9e198d8cf3cc56fd64",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/41a159ffd7d96265dd4dd0863c0211697d94e77d636c9b9e198d8cf3cc56fd64",
+      "verified": true
+    },
+    {
+      "label": "Buyer authorization \u2014 calculatorai (0.0100000 XLM (native))",
+      "deliverable": "D4",
+      "kind": "authorize",
+      "tx_hash": "c87a92152ec0e4c1a04c20fd58d31913a22a76282a6e1619a9e9fc35f78ba0f4",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/c87a92152ec0e4c1a04c20fd58d31913a22a76282a6e1619a9e9fc35f78ba0f4",
+      "verified": true
+    },
+    {
+      "label": "Reputation rating \u2014 calculatorai",
+      "deliverable": "D2",
+      "kind": "rating",
+      "tx_hash": "a1c821649c15cdaba43c4208358f11fdc431a1389e0bafefe0f3155477431a6d",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/a1c821649c15cdaba43c4208358f11fdc431a1389e0bafefe0f3155477431a6d",
+      "verified": true
+    },
+    {
+      "label": "Settlement \u2014 calculatorai (0.0100000 XLM (native))",
+      "deliverable": "D4",
+      "kind": "settle",
+      "tx_hash": "eb118e0b679aa8f88c680cf6095b9718f014ecf67344d6393d5d1f2eb4d2a24b",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/eb118e0b679aa8f88c680cf6095b9718f014ecf67344d6393d5d1f2eb4d2a24b",
+      "verified": true
+    },
+    {
+      "label": "Attestation seal \u2014 calculatorai",
+      "deliverable": "D4",
+      "kind": "seal",
+      "tx_hash": "77605170243e5e7690a5ece510144363c7a1a57aeb77ebcea2ce0e0473f9503c",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/77605170243e5e7690a5ece510144363c7a1a57aeb77ebcea2ce0e0473f9503c",
+      "verified": true
+    },
+    {
+      "label": "Partial-credit refund \u2014 calculatorai (0.0100000 XLM (native))",
+      "deliverable": "D3",
+      "kind": "refund",
+      "tx_hash": "01c3175a881658808e15dc9a284439f2fbce4091a3566bfe3894ecedc1efa5be",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/01c3175a881658808e15dc9a284439f2fbce4091a3566bfe3894ecedc1efa5be",
+      "verified": true
+    },
+    {
+      "label": "Dispute rating \u2014 calculatorai",
+      "deliverable": "D3",
+      "kind": "dispute_rating",
+      "tx_hash": "60bc5249af542ea005ea62573800b0bd48a101eeef6d748f1884f807c1ba730e",
+      "explorer": "https://stellar.expert/explorer/testnet/tx/60bc5249af542ea005ea62573800b0bd48a101eeef6d748f1884f807c1ba730e",
+      "verified": true
+    }
+  ]
+}
