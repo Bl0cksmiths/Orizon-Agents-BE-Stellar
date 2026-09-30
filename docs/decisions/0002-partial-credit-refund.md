@@ -191,3 +191,21 @@ settler key can be rotated (it cannot — write-once).
 > real credit is one `POST /api/disputes/{dispute_id}/uphold` pays, signed by
 > `STELLAR_SIGNING_KEY` and recorded on its dispute as `refund_tx` (see
 > [`docs/disputes.md`](../disputes.md), "Reading the two on-chain artifacts").
+
+> **Amended 2026-09-30: the first real dispute credit.** The first dispute on
+> escrow v2, `dsp_15acee279ac02852a5877ac1696ec4b5` (a disclosed team run:
+> buyer `GCNQA…A2GP`, agent `calculatorai`, admin-owned), was upheld on
+> 2026-09-30 with the adjudicator key. The platform's signing key
+> (`GDB4N25…CDHP`) paid the buyer a 0.01 XLM credit over the native asset SAC
+> in
+> `cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f`
+> (`https://stellar.expert/explorer/testnet/tx/cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f`),
+> and the dispute's rating followed in `b512135f…453a49`. Both re-verified
+> `SUCCESS` on the ledger; the evidence is in
+> [`docs/evidence/5.01/v2-team-runs/`](../evidence/5.01/v2-team-runs/). So the
+> caveat in the Proof amendment above is resolved: a credit paid by
+> `POST /api/disputes/{dispute_id}/uphold`, signed by `STELLAR_SIGNING_KEY` and
+> tied to a dispute, has now landed on testnet. The "escrow v2 is live"
+> amendment's "open
+> and not yet upheld" is superseded. `9b8ffaa4…` still proves the transfer
+> mechanism only. The decision is unchanged.
