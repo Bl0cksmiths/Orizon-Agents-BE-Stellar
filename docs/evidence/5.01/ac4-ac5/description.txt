@@ -1,0 +1,44 @@
+Orizon Agents story 5.01 AC4 and AC5 team runs (Stellar testnet)
+
+[One or two sentences on what the video shows — fill in before publishing.]
+
+Chapters
+00:00 [CHAPTERS — replace with the timestamps from the edit]
+
+On-chain evidence — every transaction below is on the Stellar testnet and was re-verified SUCCESS on 2026-09-30:
+
+1. Buyer authorization — calculatorai (0.2100000 XLM (native)) (D4)
+   634549330a8188d28d32d6530e56ddb14298680de0d86d2568b91d3d5a612e9f
+   https://stellar.expert/explorer/testnet/tx/634549330a8188d28d32d6530e56ddb14298680de0d86d2568b91d3d5a612e9f
+2. Reputation rating — calculatorai (D2)
+   023103b255895eb22ffbb93608d9ab333c37ce3434c2ad69c41a5c890504523a
+   https://stellar.expert/explorer/testnet/tx/023103b255895eb22ffbb93608d9ab333c37ce3434c2ad69c41a5c890504523a
+3. Reputation rating — keyboardai (D2)
+   fc9a8268b806831f863e70f9a8f103882baef87b8fd34b5b7dda95f7c5f7212e
+   https://stellar.expert/explorer/testnet/tx/fc9a8268b806831f863e70f9a8f103882baef87b8fd34b5b7dda95f7c5f7212e
+4. Settlement — calculatorai (0.0100000 XLM (native)) (D4)
+   0ada07084b5aa1c196fb8e45b15d3712dcbefaf320a315a84e8cf2ab7adc556b
+   https://stellar.expert/explorer/testnet/tx/0ada07084b5aa1c196fb8e45b15d3712dcbefaf320a315a84e8cf2ab7adc556b
+5. Attestation seal — calculatorai (D4)
+   41a159ffd7d96265dd4dd0863c0211697d94e77d636c9b9e198d8cf3cc56fd64
+   https://stellar.expert/explorer/testnet/tx/41a159ffd7d96265dd4dd0863c0211697d94e77d636c9b9e198d8cf3cc56fd64
+6. Buyer authorization — calculatorai (0.0100000 XLM (native)) (D4)
+   c87a92152ec0e4c1a04c20fd58d31913a22a76282a6e1619a9e9fc35f78ba0f4
+   https://stellar.expert/explorer/testnet/tx/c87a92152ec0e4c1a04c20fd58d31913a22a76282a6e1619a9e9fc35f78ba0f4
+7. Reputation rating — calculatorai (D2)
+   a1c821649c15cdaba43c4208358f11fdc431a1389e0bafefe0f3155477431a6d
+   https://stellar.expert/explorer/testnet/tx/a1c821649c15cdaba43c4208358f11fdc431a1389e0bafefe0f3155477431a6d
+8. Settlement — calculatorai (0.0100000 XLM (native)) (D4)
+   eb118e0b679aa8f88c680cf6095b9718f014ecf67344d6393d5d1f2eb4d2a24b
+   https://stellar.expert/explorer/testnet/tx/eb118e0b679aa8f88c680cf6095b9718f014ecf67344d6393d5d1f2eb4d2a24b
+9. Attestation seal — calculatorai (D4)
+   77605170243e5e7690a5ece510144363c7a1a57aeb77ebcea2ce0e0473f9503c
+   https://stellar.expert/explorer/testnet/tx/77605170243e5e7690a5ece510144363c7a1a57aeb77ebcea2ce0e0473f9503c
+10. Partial-credit refund — calculatorai (0.0100000 XLM (native)) (D3)
+   01c3175a881658808e15dc9a284439f2fbce4091a3566bfe3894ecedc1efa5be
+   https://stellar.expert/explorer/testnet/tx/01c3175a881658808e15dc9a284439f2fbce4091a3566bfe3894ecedc1efa5be
+11. Dispute rating — calculatorai (D3)
+   60bc5249af542ea005ea62573800b0bd48a101eeef6d748f1884f807c1ba730e
+   https://stellar.expert/explorer/testnet/tx/60bc5249af542ea005ea62573800b0bd48a101eeef6d748f1884f807c1ba730e
+
+Limitations. Everything in this video runs on the Stellar TESTNET (SOW §3.6); no real value moved. On testnet the escrow's asset contract wraps native XLM, so every amount is testnet XLM, and the interface labels it XLM; the "usdc" in some API field names is the field's name, not the asset. A dispute was upheld by the platform's adjudicator key — a human decision behind an API key, not an on-chain arbiter — and its refund is a partial credit paid from the platform's signing key, which is also escrow v2's settler, not a clawback from the operator. The dispute's rating then landed on the ReputationLedger. Reputation scores are prior-smoothed, so an agent's lower bound near the floor can move with a single rating. The contracts have not been externally audited. Every wallet in these runs is a team wallet: buyers GB4K6…YKAYKK and GCNQA…A2GP; both agents are owned by the admin GA7AI…5OQV. keyboardai was bound to a reference agent with FAULT_MODE=hang_after:0 for AC5.
