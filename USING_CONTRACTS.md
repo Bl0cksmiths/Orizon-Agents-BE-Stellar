@@ -13,7 +13,10 @@ matching HTTP route on this backend.
 | **AttestationRegistry** | write-once job proof | sealer (backend) | `POST /api/stellar/server/seal` |
 | **ReputationLedger** | rating aggregates | scorer (backend) | (backend-only; rating submission route TBD) |
 
-Current deploy (testnet): see `/api/stellar/network` or `addresses.json`.
+Current deploy (testnet): see `/api/stellar/network` or `addresses.json`. Since
+2026-09-30 the testnet backend settles through escrow v2,
+`CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4` (`payment_escrow_v2`
+in the address book); v1's `payment_escrow` stays there as history.
 
 > **Escrow v2 (ADR 0010).** v1's `charge` can never settle (D-039). v2 takes
 > the payer's `max_amount` into custody at `authorize` (same signature — the
