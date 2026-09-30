@@ -686,7 +686,9 @@ _READ_CHALLENGE_RESPONSES: dict[int | str, dict[str, object]] = {
         "model": ErrorEnvelope,
         "description": (
             "`unknown_task`, or `no_settlement` — the task never settled, so there is no payer to prove; "
-            "or `no_disputes` — it settled, but nothing was disputed, so there is nothing to read."
+            "or `no_disputes` — it settled, but nothing was disputed, so there is nothing to read. With "
+            "TASK_AUTH_REQUIRED on, a task that can still be disputed is minted for without a dispute, so "
+            "its payer can reach the listing to raise a first one after a restart."
         ),
     },
     503: {
@@ -721,10 +723,12 @@ async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadCh
     """The first half of D-067's fix: a nonce for the payer to sign.
 
     Public, like `/disputes/challenge`, and safe for the same reasons: it mints
-    only for a task that has a settlement AND at least one dispute, into the
-    `dispute_read` budget, and
-    a live challenge comes back as is, so a flood cannot cancel the one the
-    payer is signing. The service decides; this renders.
+    only for a task that has a settlement AND at least one dispute — or, under
+    TASK_AUTH_REQUIRED, one that could still be disputed, so a payer whose
+    token a restart forgot can reach the listing for a first dispute — into the
+    `dispute_read` budget, and a live challenge comes back as is, so a flood
+    cannot cancel the one the payer is signing. The service decides; this
+    renders.
     """
     try:
         nonce, expires_at = await dispute_read.issue_read_challenge(body.task_id)
