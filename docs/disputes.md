@@ -154,11 +154,14 @@ seizure of anything the agent was paid.
 
 **Which key that is.** The platform's signing key (`STELLAR_SIGNING_KEY`,
 `GDB4N25…CDHP` on testnet) pays dispute credits, writes ratings (scorer) and
-seals attestations (sealer), and it becomes the escrow's settler once escrow v2
-is deployed. The deployed v1 escrow's settler is the admin key
-(`GA7AI5…5OQV`). Earlier versions of this page called the signing key "the
-settler"; on the deployed v1 escrow it is not, so this page now names it by
-what it is. *(Corrected 2026-09-29, from the Epic 5 audit.)*
+seals attestations (sealer), and it is also the settler of escrow v2
+(`CCNO5TEN…Q5VC4`), which the testnet backend has settled through since
+2026-09-30: the deploy read `settler()` back as `GDB4N25…CDHP`. The v1 escrow
+(`CBJPTMAP…25PI`), which the backend settled through until then, has the admin
+key (`GA7AI5…5OQV`) as its settler. Earlier versions of this page called the
+signing key "the settler" while v1 was live, when it was not, so this page
+names it by what it is. *(Corrected 2026-09-29, from the Epic 5 audit;
+updated 2026-09-30, when escrow v2 went live.)*
 
 Why the credit cannot be a reversal:
 
