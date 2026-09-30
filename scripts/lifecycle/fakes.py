@@ -12,7 +12,8 @@ the way it would fail on testnet.
 
 Knobs on the world turn on the failure paths: a sleeping backend, a submit or
 an uphold whose answer is lost, a restart that forgets the task, a step that
-does not deliver, mainnet.
+does not deliver, mainnet — and a second external agent, for a plan that
+routes to two operators of which one may stop answering (story 5.01 AC5).
 
 Not a production module. It lives in the package only because the suite's
 several test files share it, and it imports nothing from `app/`.
@@ -48,6 +49,9 @@ MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
 
 AGENT = "ext_agent"
 AGENT_NAME = "External Agent"
+# The second external agent, listed and planned only when `second_agent` is on.
+AGENT_2 = "ext_faulty"
+AGENT_2_NAME = "Faulty Agent"
 SEEDED = "agt_writer"
 SEEDED_NAME = "Writer"
 FEE = 100
@@ -73,12 +77,16 @@ class FakeWorld:
     passphrase: str = TESTNET_PASSPHRASE
     rpc_passphrase: str | None = None
     owner: str = field(default_factory=lambda: Keypair.random().public_key)
+    owner_2: str = field(default_factory=lambda: Keypair.random().public_key)
     settler: str = field(default_factory=lambda: Keypair.random().public_key)
     agent_bound: bool = True
     task_auth_required: bool = True
     d067: bool = True  # the read-grant routes exist
     v2_receipt_fields: bool = True  # settle lane's paid_usdc / receipt_id_hex
     undelivered: set[str] = field(default_factory=set)
+    second_agent: bool = False  # list, bind and plan AGENT_2 as well
+    second_first: bool = False  # plan AGENT_2 ahead of AGENT
+    plan_routes_second: bool = True  # False: the planner leaves AGENT_2 out
     agent_price: float = 0.05
     seeded_price: float = 0.02
     polls_to_finish: int = 2
@@ -126,6 +134,8 @@ class FakeWorld:
     def __post_init__(self) -> None:
         self.balances.setdefault(self.buyer, 10_000 * 10_000_000)
         self.balances.setdefault(self.owner, 50 * 10_000_000)
+        if self.second_agent:
+            self.balances.setdefault(self.owner_2, 50 * 10_000_000)
         self.rep = {
             "agent_id": AGENT,
             "smoothed_bps": 7000,
@@ -163,6 +173,10 @@ class FakeWorld:
                 "txHash": tx_hash,
             }
         )
+
+    def owners(self) -> dict[str, str]:
+        """agent id -> owner, for every agent the registry holds."""
+        return {AGENT: self.owner, **({AGENT_2: self.owner_2} if self.second_agent else {})}
 
     def call_log(self, path: str) -> list[dict[str, Any]]:
         return [c for c in self.calls if c["path"] == path]
@@ -234,6 +248,24 @@ class FakeWorld:
                         "source": "onchain",
                         "bound": self.agent_bound,
                     },
+                    *(
+                        [
+                            {
+                                "id": AGENT_2,
+                                "name": AGENT_2_NAME,
+                                "skills": ["review"],
+                                "price": self.agent_price,
+                                "rep": 4.0,
+                                "status": "online",
+                                "runs": 0,
+                                "owner": self.owner_2,
+                                "source": "onchain",
+                                "bound": True,
+                            }
+                        ]
+                        if self.second_agent
+                        else []
+                    ),
                     {
                         "id": SEEDED,
                         "name": SEEDED_NAME,
@@ -250,6 +282,8 @@ class FakeWorld:
             )
         if path == f"/api/stellar/agent/{AGENT}":
             return _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}})
+        if path == f"/api/stellar/agent/{AGENT_2}" and self.second_agent:
+            return _json(200, {"agent": {"owner": self.owner_2, "name": AGENT_2_NAME}})
         if path.startswith("/api/stellar/agent/"):
             return _err(404, "agent_read_failed")
         if path == "/api/stellar/reputation":
@@ -290,6 +324,16 @@ class FakeWorld:
             steps.insert(
                 0,
                 {"agent_id": AGENT, "agent_name": AGENT_NAME, "rationale": "code", "est_price_usdc": self.agent_price},
+            )
+        if self.second_agent and self.plan_routes_second:
+            steps.insert(
+                0 if self.second_first else len(steps) - 1,
+                {
+                    "agent_id": AGENT_2,
+                    "agent_name": AGENT_2_NAME,
+                    "rationale": "review",
+                    "est_price_usdc": self.agent_price,
+                },
             )
         total = round(sum(s["est_price_usdc"] for s in steps), 7)
         self.plan = {"plan_id": "pln_0a1b2c3d", "intent": body["intent"], "steps": steps, "total_usdc": total}
@@ -461,8 +505,9 @@ class FakeWorld:
         if self.escrow_version >= 2:
             charge_tx = self._tx(fee=FEE)
             spent = 0
+            owners = self.owners()
             for index, s in enumerate(steps):
-                if s not in delivered or s["agent_id"] != AGENT:
+                if s not in delivered or s["agent_id"] not in owners:
                     continue  # a seeded agent has no on-chain owner, so no payout
                 amount = usdc_to_stroops(s["est_price_usdc"])
                 receipt = secrets.token_hex(16)
@@ -479,7 +524,7 @@ class FakeWorld:
                         ]
                     ),
                 )
-                self.balances[self.owner] += amount - (1 if self.tamper_payout else 0)
+                self.balances[owners[s["agent_id"]]] += amount - (1 if self.tamper_payout else 0)
                 spent += amount
                 paid_steps.append((index, s, amount, receipt))
             returned = auth["max_amount"] - spent
