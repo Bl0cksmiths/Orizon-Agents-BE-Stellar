@@ -27,15 +27,6 @@ from .config import DESCRIPTION_NAME, EXPLORER_TX, JSON_NAME, SHEET_NAME, TESTNE
 from .redact import scrub
 from .rows import Loaded, TxRow
 
-LIMITATIONS = (
-    "Limitations. Everything in this video runs on the Stellar TESTNET (SOW §3.6); no real value moved. On "
-    "testnet the escrow's asset contract wraps native XLM, so amounts the interface labels USDC are testnet XLM. "
-    "The dispute was upheld by the platform's adjudicator key — a human decision behind an API key, not an "
-    "on-chain arbiter — and the refund is a partial credit paid from the platform's settler wallet, not a "
-    "clawback from the operator. Reputation scores are prior-smoothed, so an agent's lower bound near the floor "
-    "can move with a single rating. The contracts have not been externally audited."
-)
-
 
 @dataclass(frozen=True)
 class Entry:
@@ -49,6 +40,77 @@ class Entry:
     @property
     def explorer(self) -> str:
         return EXPLORER_TX.format(self.row.tx_hash)
+
+
+# The limitations paragraph, one sentence at a time. Every sentence that is
+# not true of every run is derived from what the run shows: a dispute's
+# sentence is written only when a verified row, or the harness's own record,
+# supports it. The asset sentence is the frontend's: since #92/#97 it labels
+# amounts in the network's asset, "XLM" on testnet (`lib/trace-amounts.ts`,
+# `lib/register-validation.ts`), and "usdc" survives only in wire field names.
+TESTNET_SENTENCE = "Everything in this video runs on the Stellar TESTNET (SOW §3.6); no real value moved."
+ASSET_SENTENCE = (
+    "On testnet the escrow's asset contract wraps native XLM, so every amount is testnet XLM, and the interface "
+    'labels it XLM; the "usdc" in some API field names is the field\'s name, not the asset.'
+)
+UPHELD_SENTENCE = (
+    "A dispute was upheld by the platform's adjudicator key — a human decision behind an API key, not an on-chain "
+    "arbiter — and its refund is a partial credit paid from the platform's signing key, which is also escrow v2's "
+    "settler, not a clawback from the operator."
+)
+RATED_AFTER_REFUND = "The dispute's rating then landed on the ReputationLedger."
+NOT_RATED_AFTER_REFUND = "No dispute rating is among the verified transactions, so the video claims none."
+RATED_ONLY = (
+    "A dispute rating landed on the ReputationLedger, but no refund is among the verified transactions, so the "
+    "video claims none."
+)
+OPEN_SENTENCE = (
+    "{noun} {ids} {verb} open when the run was recorded: no one had adjudicated {it}, so the video claims no refund "
+    "and no dispute rating for {it}."
+)
+PRIOR_SENTENCE = (
+    "Reputation scores are prior-smoothed, so an agent's lower bound near the floor can move with a single rating."
+)
+AUDIT_SENTENCE = "The contracts have not been externally audited."
+
+
+def dispute_sentences(entries: list[Entry], open_disputes: tuple[str, ...] = ()) -> list[str]:
+    """What the run shows of disputes, and nothing more.
+
+    A verified `refund` is what shows an uphold: the credit is only ever paid
+    on one. A verified `dispute_rating` shows the rating and nothing else. A
+    dispute the harness last recorded as open is said to be open. With none of
+    these there is no sentence at all.
+    """
+    kinds = {e.row.kind for e in entries if e.verified}
+    out: list[str] = []
+    if "refund" in kinds:
+        out += [UPHELD_SENTENCE, RATED_AFTER_REFUND if "dispute_rating" in kinds else NOT_RATED_AFTER_REFUND]
+    elif "dispute_rating" in kinds:
+        out.append(RATED_ONLY)
+    if open_disputes:
+        one = len(open_disputes) == 1
+        out.append(
+            OPEN_SENTENCE.format(
+                noun="Dispute" if one else "Disputes",
+                ids=", ".join(open_disputes),
+                verb="was" if one else "were",
+                it="it" if one else "them",
+            )
+        )
+    return out
+
+
+def limitations(entries: list[Entry], open_disputes: tuple[str, ...], disclosures: tuple[str, ...]) -> str:
+    sentences = [
+        TESTNET_SENTENCE,
+        ASSET_SENTENCE,
+        *dispute_sentences(entries, open_disputes),
+        PRIOR_SENTENCE,
+        AUDIT_SENTENCE,
+        *disclosures,
+    ]
+    return "Limitations. " + " ".join(sentences)
 
 
 def _cell(value: object) -> str:
@@ -145,7 +207,13 @@ def render_sheet(entries: list[Entry], loaded: Loaded, generated_at: int, title:
     return scrub("\n".join(out) + "\n")
 
 
-def render_description(entries: list[Entry], generated_at: int, title: str, disclosures: tuple[str, ...]) -> str:
+def render_description(
+    entries: list[Entry],
+    generated_at: int,
+    title: str,
+    disclosures: tuple[str, ...],
+    open_disputes: tuple[str, ...] = (),
+) -> str:
     verified = [e for e in entries if e.verified]
     out = [
         title,
@@ -161,8 +229,7 @@ def render_description(entries: list[Entry], generated_at: int, title: str, disc
     ]
     for i, e in enumerate(verified, start=1):
         out += [f"{i}. {e.row.label} ({e.row.deliverable})", f"   {e.row.tx_hash}", f"   {e.explorer}"]
-    limitations = LIMITATIONS + ("" if not disclosures else " " + " ".join(disclosures))
-    out += ["", limitations, ""]
+    out += ["", limitations(verified, open_disputes, disclosures), ""]
     return scrub("\n".join(out))
 
 
