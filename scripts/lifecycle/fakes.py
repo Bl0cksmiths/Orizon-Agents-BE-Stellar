@@ -105,6 +105,10 @@ class FakeWorld:
     plan_routes_agent: bool = True
     wrong_escrow_in_xdr: bool = False
     tamper_payout: bool = False  # v2 settle pays the operator one stroop short
+    pays_undelivered: bool = False  # v2 settle also pays a step that did not deliver
+    failed_rating: int = 20  # what a step that did not deliver is rated
+    ledger_failed_rating: int | None = None  # the ledger holds this instead of what the trace says
+    withheld: int = 0  # stroops the v2 settle keeps back from the buyer's remainder
     crash_on: str | None = None  # a route that raises inside the transport
     readiness_reachable: bool = True  # False: the frontend proxy, which forwards /api/* only
     events_forgotten: bool = False  # getEvents refuses: the settle is past the RPC's retention
@@ -471,7 +475,8 @@ class FakeWorld:
 
         # one rating per dispatched step, as `_submit_ratings` writes them
         for s in steps:
-            rating = 90 if s in delivered else 20
+            rating = 90 if s in delivered else self.failed_rating
+            on_ledger = rating if s in delivered or self.ledger_failed_rating is None else self.ledger_failed_rating
             tx = self._tx()
             self._event(
                 LEDGER,
@@ -479,7 +484,7 @@ class FakeWorld:
                 [scval.to_symbol("rated"), scval.to_symbol(s["agent_id"])],
                 scval.to_vec(
                     [
-                        scval.to_uint32(rating),
+                        scval.to_uint32(on_ledger),
                         scval.to_int128(1000),
                         scval.to_bytes(bytes.fromhex(job)),
                         scval.to_symbol("run"),
@@ -507,7 +512,7 @@ class FakeWorld:
             spent = 0
             owners = self.owners()
             for index, s in enumerate(steps):
-                if s not in delivered or s["agent_id"] not in owners:
+                if (s not in delivered and not self.pays_undelivered) or s["agent_id"] not in owners:
                     continue  # a seeded agent has no on-chain owner, so no payout
                 amount = usdc_to_stroops(s["est_price_usdc"])
                 receipt = secrets.token_hex(16)
@@ -527,7 +532,7 @@ class FakeWorld:
                 self.balances[owners[s["agent_id"]]] += amount - (1 if self.tamper_payout else 0)
                 spent += amount
                 paid_steps.append((index, s, amount, receipt))
-            returned = auth["max_amount"] - spent
+            returned = auth["max_amount"] - spent - self.withheld
             self.balances[payer] += returned
             auth.update(spent=spent, settled=True)
             self._event(
