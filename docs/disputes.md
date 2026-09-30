@@ -627,7 +627,8 @@ fail closed.** Every other route in this service treats an unset `API_KEY` as
 testnet. They also refuse while `DISPUTE_REFUNDS_ENABLED` is false, which is
 the shipped default — so a deployment that has not deliberately turned the
 money path on cannot be talked into adjudicating by someone who knows a dispute
-id. The reason for the divergence is that `/api/stellar/server/charge` can only
+id. The public testnet deployment turned it on, with `API_KEY` set, on
+2026-09-30. The reason for the divergence is that `/api/stellar/server/charge` can only
 spend an allowance the payer already authorised on-chain, while an upheld
 dispute spends the platform's own balance on an adjudicator's say-so with
 nothing on-chain to bound it. `docs/decisions/0008-refund-execution.md` D1 has
@@ -960,7 +961,9 @@ With `REFUND_RECONCILE_ENABLED=true` **and** `DISPUTE_REFUNDS_ENABLED=true`, a
 background sweep (`app/services/refund_reconcile.py`) does the first step of
 the procedure below for every claim that has a hash to look up. Both are off
 by default; with the refund switch off the sweep does not start, and says so
-at boot. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 120, from
+at boot. The public testnet deployment has run with both on since 2026-09-30:
+its `/readiness` reports `disputes.reconcile.enabled: true`, the sweep
+running, and `disputes.store: "postgres"`. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 120, from
 30 to 3600 — anything else refuses to boot), one pass at a time, and it
 **signs and submits nothing**: it reads the chain with `getTransaction` and
 writes the dispute record, and that is all.
