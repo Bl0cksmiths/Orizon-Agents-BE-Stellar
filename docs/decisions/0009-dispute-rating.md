@@ -520,6 +520,18 @@ would call.
 > same key, the ledger's Scorer. Where this ADR says "the settler" for the
 > rating writer, read "the platform's signing key".
 
+> **Amended 2026-09-30: escrow v2 is live.** The 2026-09-29 amendment above
+> says the platform's signing key "becomes the escrow's settler once escrow v2
+> is deployed" and calls v1 "the deployed escrow". Escrow v2 was deployed to
+> testnet on 2026-09-30 as `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`;
+> the deploy read `settler()` back as `GDB4N25…CDHP` and `admin()` as
+> `GA7AI5…5OQV`, and the backend settles through it (`/readiness`
+> `escrow.version` 2). So the platform's signing key is now the live escrow's
+> settler as well, and the admin key is v1's settler only.
+> No dispute rating has been written on v2 yet: the first dispute,
+> `dsp_15acee279ac02852a5877ac1696ec4b5`, is open and not yet upheld. Nothing
+> decided here changes.
+
 Related: ADR 0002 (the credit mechanism and R12), ADR 0005 D1 (a failed step
 is never billed — the reason every rating is weighted by the quoted price
 rather than the settled value), ADR 0007 (the dispute record the rating is
