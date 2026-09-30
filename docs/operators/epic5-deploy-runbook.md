@@ -16,6 +16,53 @@ organization. Every backend deploy below is a **Manual Deploy**.
 and never gives it. Where no source settles something, it says **confirm**;
 [the confirm list](#confirm-list) at the end collects every one of them.
 
+## Progress (2026-09-30)
+
+Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
+2026-09-29 17:35 UTC), with GETs only.
+
+| Step | State | What is done | What remains |
+|---|---|---|---|
+| 1. Preconditions | open | — | 1.1, the Chapter Lead's R9 approval, is what step 4 waits on. The rest of step 1 is not tracked here. |
+| 2. Merge order | **done** 2026-09-29 | All with merge commits: contracts #5 (`4e04e67`, 12:03 UTC), backend #94 (`44c3411`, 12:01 UTC), frontend #97 (`d90b37e`, 12:00 UTC). The evidence index followed in frontend #98 (`be3e826`, 16:27 UTC) and #99 (`b14d4cb`, 17:01 UTC). | nothing |
+| 3. Render deploy | **done** 2026-09-29 | A Manual Deploy of backend `main` at `44c3411`. The 3.2 checks, live: see below. | nothing |
+| 4. Escrow v2 | not started | — | Needs the Chapter Lead's approval (1.1, R9). v2 is not deployed; the backend still settles through v1 (`CBJPTMAP…25PI`). |
+| 5. The v2 pin | not started | — | Waits for step 4. The frontend's `testnet` pin stays `null`. |
+| 6. Refunds on | not started | — | Waits for steps 4 and 5. Both switches are off (`disputes.reconcile.enabled: false`). |
+| 7. Operators | in progress | Two outside wallets have registered agents: OP-1 one trial agent, OP-2 five. The live adoption report counts 6 external agents from 2 wallets, 0 settled. | Neither has a working bound agent. OP-1's one agent is bound to a parked web page (F-033, F-034); none of OP-2's five is bound. A settled workflow to an outside agent also needs step 4 (F-019). The checkpoint record (7.5) is still open. |
+| 8. Lifecycle | not started | — | Needs steps 4 and 6. |
+| 9. Demo | not started | — | Its settlement scenes need steps 4 and 6. |
+| 10. Evidence re-run | not started | The index was refreshed to the post-deploy state in frontend #98 and #99. | The full re-run after steps 7 to 9, with `--withhold-external` (the default) until each outside operator's consent is recorded. |
+| 11. Closing | not started | — | BLO-134 and BLO-136 are due Fri 2026-10-02; the check-in (BLO-138) is today. |
+
+**Step 3 checks, live.** Every 3.2 check passes:
+
+- `GET $SITE/api/health` answered `{"status":"ok"}`.
+- `GET $BE_HOST/readiness` answered `"status": "ready"` with both blocks:
+  `disputes.store` is `"postgres"`, `disputes.reconcile.enabled` is `false`,
+  `escrow.contract` is `$ESCROW_V1` (`CBJPTMAP…25PI`) and `escrow.version` is
+  `1`. `ratings.signer` and `ratings.scorer` are `$SETTLER`, and
+  `ratings.writer` is `scorer`.
+- `GET $SITE/api/ecosystem/adoption` answered `200`: 6 external agents from 2
+  operator wallets, 0 settled external workflows, `window_days` 7, not
+  degraded. Only one of the six is bound.
+- `GET $SITE/api/agents/any_id/readiness` answered `200`, with `registered`
+  at `todo`.
+- `GET $SITE/api/stellar/network` names `testnet`, with `$ESCROW_V1` as
+  `contracts.payment_escrow`.
+
+**Confirm list, re-checked.** The deploys closed C10: the frontend's
+after-deploy checklist merged with #97. C1 to C4, C6 to C8, C11 and C12 stay
+open, because no deploy answers them.
+
+**Team hygiene.** The team agent `3D_Artbot`, owned by the admin key
+`GA7AI5…5OQV`, is bound to `https://arbot.com`. That endpoint does not answer:
+its readiness shows `reachable` failed ("did not answer within 5 s"), and a
+plain `GET` timed out after 15 s. It is still routable, at 5677 bps against the
+5500 floor. So the planner can put it in a buyer's plan, and each run that
+reaches it fails that step (F-034). The admin key holder should unbind it, or
+rebind it to an agent that answers, before any wallet-authorized run.
+
 ## The four repositories
 
 | Short name | GitHub | Local checkout (Dan's machine) |
@@ -55,7 +102,7 @@ separate `git worktree` of `origin/main` rather than switching branches in it.
 | Operators (5.02) | [onboarding-session-runbook.md](onboarding-session-runbook.md), [friction-log.md](friction-log.md), [readiness.md](readiness.md), ADR 0012 |
 | Lifecycle (5.01) | [lifecycle-harness.md](lifecycle-harness.md) |
 | Demo (5.04) | [demo-recording.md](demo-recording.md); frontend `content/demo/script.md`, `shot-list.md` |
-| Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (being written by another lane) |
+| Evidence index (5.05) | [sow-metrics.md](sow-metrics.md); frontend `content/evidence/index.json`, `docs/evidence-index-after-deploy.md` (on `main` since frontend #97) |
 | Gates | Linear: "Sprint Risk Register & Decision Log" (R5, R9), BLO-36 |
 
 ---
@@ -804,12 +851,20 @@ and the frontend's after-deploy checklist.
    - Exit 3: refused (not testnet, bad flag, unreadable team register).
    - It reads the live escrow and the known v1 escrow, so v1's history is still
      counted after the switch.
+   - **Consent.** By default (`--withhold-external`) the block and the
+     Markdown name no outside operator: their links are replaced by one link
+     to `$SITE/app/ecosystem`, and the counts do not change. Add
+     `--publish-external` only once every outside operator in it has
+     consented in writing (see [sow-metrics.md](sow-metrics.md#consent)).
+     `sow-metrics.raw.json` always holds every wallet and hash: while anything
+     is withheld, do not commit it to the repository or publish it.
 2. **Update `content/evidence/index.json`** in the frontend, per
-   `docs/evidence-index-after-deploy.md` (frontend repo; another lane is
-   writing it, so **confirm** it has merged and follow it as written):
+   `docs/evidence-index-after-deploy.md` (frontend repo, merged with #97 on
+   2026-09-29; follow it as written):
    - paste `sow-metrics.block.json` as the `metrics` array, **unchanged**;
-   - keep `sow-metrics.raw.json` with the evidence: it answers "which items
-     were excluded, and why";
+   - keep `sow-metrics.raw.json` with the team: it answers "which items were
+     excluded, and why", and it goes into the published evidence only once
+     every outside operator it names has consented;
    - update the items that were partial or missing because a page was not
      deployed or a transaction did not exist yet, pointing each at the live
      page or the verified transaction instead of its PR. No drill, fixture or
@@ -902,6 +957,6 @@ before the step that needs it, and record the answer where it says.
 | C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
 | C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
 | C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
-| C10 | 10.2 | That the frontend's `docs/evidence-index-after-deploy.md` has merged | the lane writing it |
+| ~~C10~~ | 10.2 | **Closed 2026-09-30.** The frontend's `docs/evidence-index-after-deploy.md` merged with frontend #97 on 2026-09-29 and is on `main` | — |
 | C11 | 10.4 | Where the 6.04 re-verification report goes, and whether it reopens BLO-43 (Done) or gets its own issue | Rie |
 | C12 | 10.5 | The form of the Chapter Lead's §6.2 sign-off and where it is recorded | Chapter Lead |

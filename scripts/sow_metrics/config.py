@@ -45,6 +45,9 @@ REPOSITORIES: tuple[tuple[str, str], ...] = (
 
 # The pages and routes the milestones are checked against.
 REGISTER_PAGE = "/app/register"
+# Where the proof links that would name an outside operator point instead,
+# until their consent is recorded (`--withhold-external`).
+ECOSYSTEM_PAGE = "/app/ecosystem"
 GUIDE_PAGE = "/guide/list-your-agent"
 DEMO_PAGE = "/demo"
 REGISTER_ROUTE = "POST /api/stellar/build/register-agent"
@@ -170,6 +173,9 @@ class RunConfig:
     extra_escrows: tuple[str, ...]
     out_dir: Path | None
     pending_links: dict[str, PendingLink] = field(default_factory=dict)
+    # No outside operator's agent id, wallet or hash in the block or the
+    # Markdown until their consent is recorded. On unless --publish-external.
+    withhold_external: bool = True
 
 
 def normalize_base(raw: str, flag: str, *, strip_api: bool = False) -> str:

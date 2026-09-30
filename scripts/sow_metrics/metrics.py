@@ -26,6 +26,12 @@ The rules, each stated where it is applied:
   UNMEASURED. A metric whose sources failed to read is "Not measured": its
   status is `not_met` and its achieved value is never a number. A count read
   from a source that did not answer would be a guess.
+
+  CONSENT. No outside operator's agent id, wallet or transaction hash is
+  published before their consent is recorded (docs/operators/friction-log.md,
+  "Rules"). Every link that would name one is marked `external` where it is
+  made, and `withhold_external` replaces them with one link to the Ecosystem
+  page. The counts do not change: only the proof links do.
 """
 
 from __future__ import annotations
@@ -33,11 +39,11 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from .collect import DisputeRating, ReceiptRecord, Snapshot, Transfer
+from .collect import AgentRecord, DisputeRating, ReceiptRecord, Snapshot, Transfer
 from .config import (
     DEMO_MAX_SECONDS,
     DEMO_MIN_SECONDS,
@@ -110,6 +116,9 @@ class Link:
     kind: str
     tx_hash: str | None = None
     date: str | None = None
+    # Names an outside operator (their agent id, wallet or transaction): never
+    # published before their consent is recorded. Not part of the block.
+    external: bool = False
 
     def as_dict(self) -> dict[str, str]:
         out = {"label": self.label, "url": self.url, "kind": self.kind}
@@ -153,16 +162,16 @@ class Metric:
         return out
 
 
-def tx_link(label: str, tx_hash: str, date: str) -> Link:
-    return Link(label, EXPLORER_TX.format(tx_hash), "tx", tx_hash, date)
+def tx_link(label: str, tx_hash: str, date: str, *, external: bool = False) -> Link:
+    return Link(label, EXPLORER_TX.format(tx_hash), "tx", tx_hash, date, external)
 
 
 def contract_link(label: str, contract_id: str) -> Link:
     return Link(label, EXPLORER_CONTRACT.format(contract_id), "contract")
 
 
-def account_link(label: str, account: str) -> Link:
-    return Link(label, EXPLORER_ACCOUNT.format(account), "account")
+def account_link(label: str, account: str, *, external: bool = False) -> Link:
+    return Link(label, EXPLORER_ACCOUNT.format(account), "account", external=external)
 
 
 def day(unix: int) -> str:
@@ -224,6 +233,10 @@ class Rules:
 
     def external(self, address: str | None) -> bool:
         return address is not None and self.party(address).exclusion is None
+
+    def rated_external(self, rating: DisputeRating) -> bool:
+        """A dispute rating names an outside operator when the rated agent or the payer is one."""
+        return self.external(self.owner_of.get(rating.agent_id)) or self.external(rating.payer)
 
     # ── charges ─────────────────────────────────────────────────
     def _classify_charges(self) -> list[Charge]:
@@ -337,7 +350,7 @@ def m01(snap: Snapshot, rules: Rules) -> Metric:
         date = reg.date if reg else (day(agent.registered_at) if agent.registered_at else "")
         label = f"Registration of {agent.id} by {party.phrase}" + (f" — {date}" if date else "") + f" ({verdict})"
         if reg:
-            item_links.append(tx_link(label, reg.tx_hash, reg.date))
+            item_links.append(tx_link(label, reg.tx_hash, reg.date, external=party.exclusion is None))
         item = {"agent_id": agent.id, "owner": agent.owner, "active": agent.active, "registered": date, "label": label}
         item["register_tx"] = reg.tx_hash if reg else None
         if party.exclusion is None:
@@ -382,7 +395,7 @@ def m02(snap: Snapshot, rules: Rules) -> Metric:
         verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
         owned = _join(sorted(agent_ids)) if len(agent_ids) <= 3 else plural(len(agent_ids), "agent")
         label = f"{_sentence(party.phrase)} — owns {owned} ({verdict})"
-        links.append(account_link(label, owner))
+        links.append(account_link(label, owner, external=party.exclusion is None))
         item = {"owner": owner, "agents": sorted(agent_ids), "label": label}
         if party.exclusion is None:
             counted.append(item)
@@ -416,7 +429,7 @@ def _settlement_method(snap: Snapshot) -> str:
     )
 
 
-def _charge_link(snap: Snapshot, c: Charge, extra: list[str]) -> Link | None:
+def _charge_link(snap: Snapshot, rules: Rules, c: Charge, extra: list[str]) -> Link | None:
     if c.tx_hash is None or c.tx_date is None:
         return None
     version = next((e.version for e in snap.escrows if e.contract == c.receipt.escrow), 1)
@@ -424,7 +437,7 @@ def _charge_link(snap: Snapshot, c: Charge, extra: list[str]) -> Link | None:
         f"Charge of {amount(c.receipt.amount)} {snap.asset_name} to {c.receipt.agent_id} on the v{version} escrow "
         f"— {c.date} ({_verdict([*c.reasons, *extra])})"
     )
-    return tx_link(label, c.tx_hash, c.tx_date)
+    return tx_link(label, c.tx_hash, c.tx_date, external=rules.external(c.owner) or rules.external(c.payer))
 
 
 def _charge_item(c: Charge, reasons: list[str]) -> dict[str, Any]:
@@ -451,11 +464,41 @@ def _missing_links_warning(snap: Snapshot, charges: list[Charge]) -> None:
         snap.warnings.append(note)
 
 
+def bound_sentence(snap: Snapshot, agents: list[AgentRecord]) -> str:
+    """How many of these outside agents are bound to an endpoint, in the adoption report's own words.
+
+    Owning an agent is not running one: an agent can be registered and never
+    bound, and nothing can be routed to it. The count is the report's `bound`
+    flag, which is the backend's record of a binding; it does not say the
+    endpoint answers.
+    """
+    total = len(agents)
+    if snap.bound is None:
+        return (
+            "Whether any agent owned by an outside operator is bound to an endpoint could not be read: the live "
+            "adoption report did not answer."
+        )
+    flags = [snap.bound.get(a.id) for a in agents]
+    bound = sum(1 for f in flags if f is True)
+    unknown = sum(1 for f in flags if f is None)
+    if total == 1:
+        state = "could not be checked for a binding" if unknown else ("is bound" if bound else "is not bound")
+        text = f"The one agent owned by an outside operator {state}" + ("" if unknown else " to an endpoint")
+    elif bound == 0 and not unknown:
+        text = f"None of the {total} agents owned by outside operators is bound to an endpoint"
+    else:
+        text = (
+            f"Of the {total} agents owned by outside operators, {bound} {'is' if bound == 1 else 'are'} bound to an "
+            "endpoint" + (f" and {unknown} could not be checked" if unknown else "")
+        )
+    return text + ", per the live adoption report."
+
+
 def m03(snap: Snapshot, rules: Rules) -> Metric:
     row = SOW_ROWS[2]
     method = (
         _settlement_method(snap)
-        + " A workflow counts when at least one of its counted charges paid an agent run by an outside operator; "
+        + " A workflow counts when at least one of its counted charges paid an agent owned by an outside operator; "
         "several charges of one job are one workflow."
     )
     links = _escrow_links(snap)
@@ -466,13 +509,13 @@ def m03(snap: Snapshot, rules: Rules) -> Metric:
     excluded, item_links = [], []
     for c in rules.charges:
         party = rules.party(c.owner)
-        extra = [] if party.exclusion is None else [f"the agent is run by {party.phrase}"]
+        extra = [] if party.exclusion is None else [f"the agent is owned by {party.phrase}"]
         reasons = [*c.reasons, *extra]
         if not reasons:
             workflows.setdefault((c.receipt.escrow, c.receipt.job_id), []).append(c)
         else:
             excluded.append(_charge_item(c, reasons))
-        link = _charge_link(snap, c, extra)
+        link = _charge_link(snap, rules, c, extra)
         if link:
             item_links.append(link)
     _missing_links_warning(snap, rules.charges)
@@ -486,19 +529,20 @@ def m03(snap: Snapshot, rules: Rules) -> Metric:
     if n < 3:
         if n == 0 and not external_agents:
             reason = (
-                "No agent run by an outside operator exists yet, so no workflow could be routed to one and settled. "
+                "No agent owned by an outside operator exists yet, so no workflow could be routed to one and settled. "
                 f"None of the {plural(len(rules.charges), 'charge')} on record paid one."
             )
         elif n == 0:
             reason = (
-                f"{plural(len(external_agents), 'agent')} run by outside operators "
+                f"{plural(len(external_agents), 'agent')} owned by outside operators "
                 f"{'is' if len(external_agents) == 1 else 'are'} registered, but no workflow paid to one has "
-                f"settled since the sprint began on {SPRINT_DAY}."
+                f"settled since the sprint began on {SPRINT_DAY}. " + bound_sentence(snap, external_agents)
             )
         else:
             reason = (
-                f"Only {plural(n, 'workflow')} paid to agents run by outside operators "
-                f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3."
+                f"Only {plural(n, 'workflow')} paid to agents owned by outside operators "
+                f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3. "
+                + bound_sentence(snap, external_agents)
             )
     return Metric(
         row, str(n), MET if n >= 3 else NOT_MET, method, links + _by_date(item_links), reason, counted, excluded
@@ -535,7 +579,7 @@ def m04(snap: Snapshot, rules: Rules) -> Metric:
         return unmeasured
     counted = [_charge_item(c, []) for c in rules.charges if c.counts]
     excluded = [_charge_item(c, c.reasons) for c in rules.charges if not c.counts]
-    item_links = [link for c in rules.charges if (link := _charge_link(snap, c, []))]
+    item_links = [link for c in rules.charges if (link := _charge_link(snap, rules, c, []))]
     _missing_links_warning(snap, rules.charges)
     n, total = len(counted), len(rules.charges)
     reason = None
@@ -695,8 +739,13 @@ def m05(snap: Snapshot, rules: Rules) -> Metric:
             f"— {p.refund.created_at[:10]} (counted)"
         )
         item_links += [
-            tx_link(rating_label, p.rating.tx_hash, p.rating.created_at[:10]),
-            tx_link(refund_label, p.refund.tx_hash, p.refund.created_at[:10]),
+            tx_link(rating_label, p.rating.tx_hash, p.rating.created_at[:10], external=rules.rated_external(p.rating)),
+            tx_link(
+                refund_label,
+                p.refund.tx_hash,
+                p.refund.created_at[:10],
+                external=rules.external(p.refund.destination) or rules.external(p.charge.owner),
+            ),
         ]
         counted.append(
             {
@@ -712,7 +761,7 @@ def m05(snap: Snapshot, rules: Rules) -> Metric:
     for r in rejected:
         rating: DisputeRating = r["rating"]
         label = f"Dispute rating on {rating.agent_id} — {rating.created_at[:10]} (excluded: {r['reason']})"
-        item_links.append(tx_link(label, rating.tx_hash, rating.created_at[:10]))
+        item_links.append(tx_link(label, rating.tx_hash, rating.created_at[:10], external=rules.rated_external(rating)))
         excluded.append(
             {"kind": "dispute rating", "agent_id": rating.agent_id, "dispute_job_id": rating.job_id}
             | {"tx_hash": rating.tx_hash, "reason": r["reason"]}
@@ -728,7 +777,7 @@ def m05(snap: Snapshot, rules: Rules) -> Metric:
             f"Transfer of {amount(t.amount_stroops)} {snap.asset_name} from {rules.party(t.source).phrase} to "
             f"{dest.phrase} — {t.created_at[:10]} ({_verdict(reasons)})"
         )
-        item_links.append(tx_link(label, t.tx_hash, t.created_at[:10]))
+        item_links.append(tx_link(label, t.tx_hash, t.created_at[:10], external=rules.external(t.destination)))
         excluded.append(
             {"kind": "transfer", "source": t.source, "destination": t.destination, "amount_stroops": t.amount_stroops}
             | {"tx_hash": t.tx_hash, "date": t.created_at[:10], "reason": "; ".join(reasons)}
@@ -799,6 +848,7 @@ def m06(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Met
                 f"admin — {latest.date}",
                 latest.tx_hash,
                 latest.date,
+                external=rules.external(latest.signer) or rules.external(rules.owner_of.get(latest.agent_id)),
             )
         )
     met = page_ok and route_ok
@@ -1015,6 +1065,31 @@ def m11(snap: Snapshot, rules: Rules) -> Metric:
             f"licence that GitHub recognises: {_join(missing)}."
         )
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted, excluded)
+
+
+WITHHELD_LABEL = (
+    "Outside operators' agents, on the Ecosystem page. Their agent ids, wallets and transaction hashes are held "
+    "back until each operator's consent to publish them is recorded"
+)
+
+
+def withhold_external(metrics: list[Metric], ecosystem_url: str) -> list[Metric]:
+    """Each metric with every link that names an outside operator replaced by one link to the Ecosystem page.
+
+    The replacement sits where the first withheld link was. A metric with no
+    such link is unchanged, and no count, reason or method changes: those
+    never name an outside operator.
+    """
+    out = []
+    for m in metrics:
+        first = next((i for i, link in enumerate(m.links) if link.external), None)
+        if first is None:
+            out.append(m)
+            continue
+        kept = [link for link in m.links if not link.external]
+        page = Link(WITHHELD_LABEL, ecosystem_url, "page")
+        out.append(replace(m, links=[*kept[:first], page, *kept[first:]]))
+    return out
 
 
 def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None) -> list[Metric]:

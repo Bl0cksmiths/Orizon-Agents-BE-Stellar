@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_FRONTEND,
     DEFAULT_GITHUB_API,
     DEFAULT_TEAM_REGISTER,
+    ECOSYSTEM_PAGE,
     EXIT_MEASURED,
     EXIT_REFUSED,
     EXIT_UNREADABLE,
@@ -33,7 +34,7 @@ from .config import (
     normalize_base,
     parse_pending_link,
 )
-from .metrics import MET, measure
+from .metrics import MET, measure, withhold_external
 from .register import RegisterError
 from .register import load as load_register
 from .report import RunFacts, block_problems, dump_block, render_block, render_markdown, render_raw, write
@@ -88,6 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="for milestone ID (m06, m09 or m10): when its page answers 404, link this GitHub pull request instead "
         "(repeatable). Without it, a 404 page is not linked at all",
     )
+    consent = p.add_mutually_exclusive_group()
+    consent.add_argument(
+        "--withhold-external",
+        dest="withhold_external",
+        action="store_true",
+        default=True,
+        help="the default: replace every proof link that names an outside operator (their registrations, wallets "
+        "and payments) with one link to the Ecosystem page, so no outside agent id, wallet or hash is in the block "
+        "or the Markdown until their consent is recorded. The raw JSON keeps them",
+    )
+    consent.add_argument(
+        "--publish-external",
+        dest="withhold_external",
+        action="store_false",
+        help="link outside operators' registrations, wallets and payments. Only once every one of them has "
+        "consented in writing",
+    )
     p.add_argument("--out-dir", type=Path, help="write the block, the Markdown and the raw JSON here")
     p.add_argument("--print-block", action="store_true", help="also print the frozen metrics block as JSON")
     return p
@@ -121,6 +139,7 @@ def _config(args: argparse.Namespace) -> RunConfig:
         extra_escrows=tuple(_escrow(e) for e in args.escrow),
         out_dir=args.out_dir,
         pending_links=_pending_links(args.pending_link),
+        withhold_external=args.withhold_external,
     )
 
 
@@ -187,6 +206,8 @@ def main(
         snap = collect(dict(network), team, reads, chain, extra_escrows=cfg.extra_escrows)
 
     metrics = measure(snap, cfg.pending_links)
+    if cfg.withhold_external:
+        metrics = withhold_external(metrics, cfg.frontend + ECOSYSTEM_PAGE)
     code = EXIT_MEASURED if all(m.measured for m in metrics) else EXIT_UNREADABLE
     block = render_block(metrics)
     problems = block_problems(block)
@@ -203,6 +224,7 @@ def main(
         github_api=cfg.github_api,
         generated_at=int(stamp),
         generated_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
+        withheld_external=cfg.withhold_external,
     )
     for m in metrics:
         status = "MET    " if m.status == MET else ("UNREAD " if not m.measured else "NOT MET")
@@ -211,6 +233,12 @@ def main(
         say(f"read failed: {source}: {failure}")
     for warning in snap.warnings:
         say(f"warning: {warning}")
+    if cfg.withhold_external:
+        say(
+            "note: outside operators' agent ids, wallets and hashes are held back from the block and the Markdown "
+            "until their consent is recorded (--publish-external links them); the raw JSON keeps them, so do not "
+            "publish it"
+        )
     for metric_id in sorted(cfg.pending_links):
         page = snap.pages.get(PAGE_METRICS[metric_id])
         if page is None or page.status != 404:
