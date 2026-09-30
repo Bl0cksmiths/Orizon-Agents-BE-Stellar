@@ -229,7 +229,7 @@ def render_description(
     ]
     for i, e in enumerate(verified, start=1):
         out += [f"{i}. {e.row.label} ({e.row.deliverable})", f"   {e.row.tx_hash}", f"   {e.explorer}"]
-    out += ["", limitations(verified, open_disputes, disclosures), ""]
+    out += ["", limitations(entries, open_disputes, disclosures), ""]
     return scrub("\n".join(out))
 
 
