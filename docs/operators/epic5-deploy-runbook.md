@@ -23,7 +23,7 @@ Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
 
 | Step | State | What is done | What remains |
 |---|---|---|---|
-| 1. Preconditions | open | — | 1.1, the Chapter Lead's R9 approval, is what step 4 waits on. The rest of step 1 is not tracked here. |
+| 1. Preconditions | open | 1.1: the lead confirmed that the Chapter Lead approved the escrow v2 testnet deploy on 2026-09-30 (C1). | The rest of step 1 is not tracked here. |
 | 2. Merge order | **done** 2026-09-29 | All with merge commits: contracts #5 (`4e04e67`, 12:03 UTC), backend #94 (`44c3411`, 12:01 UTC), frontend #97 (`d90b37e`, 12:00 UTC). The evidence index followed in frontend #98 (`be3e826`, 16:27 UTC) and #99 (`b14d4cb`, 17:01 UTC). | nothing |
 | 3. Render deploy | **done** 2026-09-29 | A Manual Deploy of backend `main` at `44c3411`. The 3.2 checks, live: see below. | nothing |
 | 4. Escrow v2 | **done** 2026-09-30 | `make deploy-escrow-v2` deployed PaymentEscrow v2 as `CCNO5TENCK3EK532I3OZLZ63323FEEULPAKJ74CUP3JZK3XQINRQ5VC4`. The script read back `version=2`, settler `GDB4N25…CDHP` (`$SETTLER`) and admin `GA7AI5…5OQV`. The address book went to contracts `main` as a PR, #6 (merged). Render's `STELLAR_PAYMENT_ESCROW` now names v2, and `/readiness` reports `escrow.version` `2`. | nothing. v1 (`CBJPTMAP…25PI`) stays valid and stays in the evidence as history. |
@@ -52,8 +52,9 @@ Where each step stands. The live checks were read on 2026-09-30 (Asia/Manila;
   `contracts.payment_escrow`.
 
 **Confirm list, re-checked.** The deploys closed C10: the frontend's
-after-deploy checklist merged with #97. C1 to C4, C6 to C8, C11 and C12 stay
-open, because no deploy answers them.
+after-deploy checklist merged with #97. The escrow v2 deploy on 2026-09-30
+closed C1, C4 and C6 (see [the confirm list](#confirm-list)). C2, C3, C7, C8,
+C11 and C12 stay open.
 
 **Team hygiene.** The team agent `3D_Artbot`, owned by the admin key
 `GA7AI5…5OQV`, is bound to `https://arbot.com`. That endpoint does not answer:
@@ -122,8 +123,8 @@ Nothing in steps 2–12 starts until every box here is ticked.
    - Record it: as a dated decision entry in the Linear document "Sprint Risk
      Register & Decision Log" under R9, quoting the Chapter Lead's words and
      the date, with a link to where it was given (the check-in issue, BLO-138,
-     if it is given at the Wed 2026-09-30 check-in). **Confirm** that this is
-     where the Chapter Lead wants it recorded.
+     if it is given at the Wed 2026-09-30 check-in). *(C1, closed 2026-09-30:
+     the lead confirmed the Chapter Lead approved on 2026-09-30.)*
    - Verify: the risk register shows the entry, and R9's status names it.
    - If it is refused: stop. Do steps 2, 3 and 7 only; the lifecycle (8), the
      demo's settlement scenes (9) and the refund metric cannot be produced on
@@ -157,9 +158,10 @@ Nothing in steps 2–12 starts until every box here is ticked.
    - Vercel access to the frontend project (deployments and promote).
    - The stellar-cli identity `admin` on the machine that deploys the
      contract. `stellar keys address admin` should print the address book's
-     `admin`, `GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV`
-     (**confirm**: the deploy script defaults the escrow admin to this
-     identity's address, and no source states the two are the same key).
+     `admin`, `GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV`.
+     The deploy script defaults the escrow admin to this identity's address.
+     *(C4, closed 2026-09-30: the v2 deploy read back admin `GA7AI5…5OQV`,
+     so the identity is the address book's `admin`.)*
    - Merge rights on all four repositories, and `gh` authenticated.
    - The deployment's operator `API_KEY` (a secret, from the Render dashboard)
      for the lifecycle harness's `--adjudicator-key-env`.
@@ -381,8 +383,8 @@ git push origin main
 ```
 
 The frontend's `docs/escrow-v2-switch.md` says to commit and push it to the
-contracts repo's default branch. **Confirm** whether `main` there takes a
-direct push or needs a PR (merged with a merge commit); either way it must be
+contracts repo's default branch. *(C6, closed 2026-09-30: `main` there took
+the address book as a PR, contracts #6, merged.)* It must be
 on `main` before step 5, because the frontend's `check:addresses` CI job and
 `smoke` read the address book from the contracts repo.
 
@@ -950,11 +952,11 @@ before the step that needs it, and record the answer where it says.
 
 | # | Step | Confirm | Ask |
 |---|---|---|---|
-| C1 | 1.1 | Where the Chapter Lead's escrow v2 approval is recorded (proposed: a dated decision entry under R9 in the risk register, linked from BLO-138) | Chapter Lead |
+| ~~C1~~ | 1.1 | **Closed 2026-09-30.** The lead confirmed that the Chapter Lead approved the escrow v2 testnet deploy on 2026-09-30 | — |
 | C2 | 1.2, 7.5 | What actually happened at the Week-2 operator checkpoint (Fri 2026-09-18): committed operators, or the date of the escalation. Nothing is recorded on BLO-36 or R5 | Dan |
 | C3 | 1.3 | Whether Rie facilitates or observes the operator sessions | Dan, Rie |
-| C4 | 1.4 | That the stellar-cli identity `admin` is the address book's `admin` (`GA7AI5…5OQV`); the deploy script makes that identity the escrow v2 admin | Dan |
-| C6 | 4.2 | Whether the contracts repo's `main` takes a direct push of `addresses.json` or needs a PR | Dan |
+| ~~C4~~ | 1.4 | **Closed 2026-09-30.** The stellar-cli identity `admin` is the address book's `admin`, `GA7AI5…5OQV`: the v2 deploy script read `admin()` back as that address | — |
+| ~~C6~~ | 4.2 | **Closed 2026-09-30.** The contracts repo took the address book as a PR, #6 (merged) | — |
 | C7 | 6.2 | What a keyed `uphold` of an unknown dispute id answers once refunds are on (expected: the dispute service's refusal, not `503 dispute_refunds_disabled`) | read `dispute_svc.uphold` |
 | C8 | 8.3 | Whether AC5 uses its own faulty agent (this runbook's default) or the demo's; sharing one changes the demo's rating count | Dan |
 | ~~C10~~ | 10.2 | **Closed 2026-09-30.** The frontend's `docs/evidence-index-after-deploy.md` merged with frontend #97 on 2026-09-29 and is on `main` | — |
