@@ -787,6 +787,7 @@ task, both reasons come back and `reason_withheld` is `false`.
 | --- | --- |
 | 404 `unknown_task` | no such task, and no settlement for it |
 | 404 `no_settlement` | the task exists but never settled, so there is no payer to prove |
+| 404 `no_disputes` | the read challenge only: the task settled but nothing was disputed, so there is nothing to read. With `TASK_AUTH_REQUIRED` on, a task that can **still be disputed** (window open, a delivered and paid step) is minted for anyway: that grant is how its payer reaches the listing to raise a first dispute once a restart has forgotten their token |
 | 403 `not_the_payer` | the signature is not the settlement's payer's over this read message: a stranger's wallet, a malformed signature, or a signature over some other message. The challenge is left alone, so a stranger's attempt cannot cancel the payer's |
 | 409 `challenge_unknown` | the nonce is not this task's outstanding read challenge — including one already spent, so a replayed signature never buys a second grant |
 | 409 `challenge_expired` | it was, and its five minutes are up. Ask for another |
@@ -803,9 +804,11 @@ dispute reads and nothing else:
 
 - it is **not** a task token. `GET /api/tasks/{task_id}`, its artifact, its
   trace and the trace stream never look at it, so with `TASK_AUTH_REQUIRED` on
-  a grant-holder is refused there exactly like a stranger — and that includes
-  `GET /api/tasks/{task_id}/disputes` itself, which is gated by the same
-  check. The single-dispute read is not, and serves the grant-holder in full;
+  a grant-holder is refused there exactly like a stranger. The two dispute
+  reads are the exception, and the only one: with the switch on,
+  `GET /api/tasks/{task_id}/disputes` admits a grant for that task and its
+  settlement's payer as well as a token or the operator key, and the
+  single-dispute read is never gated at all;
 - it opens no dispute, adjudicates nothing and moves no money;
 - it is for one task and one payer. A grant for another task — even one the
   same wallet paid for — or for another payer reads nothing;
@@ -936,18 +939,41 @@ never the DSN. It reports the store selected, not a live connection check: an
 unreachable Postgres fails the first request that needs it, loudly, and never
 falls back to memory.
 
-One read is weaker than the records behind it. With `TASK_AUTH_REQUIRED` on,
-`GET /api/tasks/{task_id}/disputes` is gated by the task's read token, and
-those tokens live in memory with the task state, not in Postgres — so after a
-restart that read answers as though the task were unknown, even though the
-settlement and its disputes survived. A dispute already opened is unaffected:
-`GET /api/disputes/{dispute_id}` keeps working, and opening one is gated by the
-payer's wallet signature, never by the task token. A **first** dispute is not
-unaffected, because this read is where the console gets the job id to ask for a
-challenge; after a restart under enforcement, the buyer's console cannot start
-one, and an operator can read the same view with the API key. With enforcement
-off, the default, none of this applies: the read is served from the durable
-records and survives a restart with them.
+### What a restart keeps (5.01 AC4)
+
+A restart — a redeploy, a Render restart, a free instance spinning down —
+loses everything the process held and nothing Postgres holds. Every step of a
+dispute is judged against Postgres, so a buyer inside their window disputes
+after a restart exactly as before it:
+
+| the buyer needs | read from | survives a restart |
+| --- | --- | --- |
+| the receipt: job id, payer, steps, amounts, receipts, settle and seal hashes, the window | `workflow_settlements`, written at settle time | yes |
+| a dispute challenge | the settlement (payer, window, step); the nonce itself is minted fresh | yes — a challenge minted before the restart is gone, and a new one takes a second |
+| to open the dispute | the settlement's payer, checked against their wallet signature | yes — no task token, no task state |
+| to have it upheld and credited | the dispute, the refund claim, the settlement | yes — the claim is the durable mutex, so a payout interrupted by the restart is never paid twice |
+| to read their own reason | the settlement's payer, by a read grant | yes — a grant from before the restart is invalid; the payer signs once more |
+| the task itself, its trace, its artifact, its token | process memory | **no** |
+
+What is lost is the task (`GET /api/tasks/{task_id}` answers 404), its trace
+and its read token. The receipt does not need them: `settlement_state` is read
+from the settlement once one is on record, and a credit or rating line that
+would have been added to an evicted trace is skipped, since the dispute record
+is the durable account of the outcome.
+
+**Under `TASK_AUTH_REQUIRED`.** The listing is gated, and the token it takes
+lived in the process. The payer gets back in by signature: a read challenge is
+minted for a task that can still be disputed even before any dispute exists,
+the grant it earns admits the listing, and the listing gives the job id for a
+first dispute. The operator key reads the same view. With enforcement off, the
+default and how production runs, the listing is open and served from the
+durable records.
+
+`tests/test_dispute_restart.py` pins all of this over HTTP and a real
+Postgres: a paid v2 run settles in one process, the process is thrown away,
+and in a second one the payer reads the receipt, disputes, is upheld,
+credited and rated — and a stranger, a closed window and an anonymous reader
+are each refused what they were refused before the restart.
 
 A settlement is recorded after the charge and the seal have landed, so it can
 never fail the workflow. If it cannot be written, the workflow is paid and

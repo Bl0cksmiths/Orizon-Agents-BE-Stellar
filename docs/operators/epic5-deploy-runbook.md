@@ -685,6 +685,17 @@ writes contains them.
    Leave out `--intent` on the resume. **Expected:** a `task_not_in_memory`
    row, then the dispute accepted and credited after the restart. That is the
    AC4 evidence, and it depends on `disputes.store` being `postgres`.
+
+   **Before the restart, confirm** `curl -s "$BE_HOST/readiness" | jq .disputes`
+   shows `"store": "postgres"`. Use **Restart service**, not a redeploy, so the
+   run is on the same build either side. The restart loses the task, its
+   trace and its read token; the settlement, the dispute and the refund claim
+   are in Postgres, and every step of the dispute is judged against them
+   (`docs/disputes.md`, "What a restart keeps"). The whole sequence is pinned
+   in CI by `tests/test_dispute_restart.py`, over a real Postgres, so the live
+   run is the proof on Render rather than the first test of it. With
+   `TASK_AUTH_REQUIRED` on, the payer reaches the listing after the restart by
+   a read grant, which can now be earned before a first dispute.
 3. **AC5, an external endpoint that stops answering mid-workflow:** a second
    copy of the reference agent, registered and bound from its own wallet,
    deployed with `FAULT_MODE=hang_after:0` (or `hang_after:1` with

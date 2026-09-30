@@ -1,8 +1,10 @@
 # Task read tokens: turning on `TASK_AUTH_REQUIRED` safely (proposal)
 
-**Status:** proposal, from an audit on 2026-09-30. Nothing here is changed yet.
-`TASK_AUTH_REQUIRED` stays `false` on the testnet deployment, and this document
-is the record of why, and of what must ship before it can be turned on.
+**Status:** proposal, from an audit on 2026-09-30. `TASK_AUTH_REQUIRED` stays
+`false` on the testnet deployment, and this document is the record of why, and
+of what must ship before it can be turned on. One item has shipped since: the
+restart breakage (item 4 below) is closed for the payer, by signature
+(2026-10-01).
 
 ## Current state
 
@@ -21,7 +23,8 @@ is the record of why, and of what must ship before it can be turned on.
   switch on, each needs the token (`X-Task-Token`, or `?token=` for
   EventSource) or the operator `X-API-Key`; anything else answers
   `404 unknown_task`. `GET /api/tasks/{id}/disputes` is gated by the same
-  proof. `GET /api/tasks` (the recent-tasks list) answers `[]`.
+  proof or by the payer's dispute read grant (D-067). `GET /api/tasks` (the
+  recent-tasks list) answers `[]`.
 - **What it does not gate.** A single dispute, `GET /api/disputes/{id}`, stays
   readable; its free text is withheld without a token, an operator key or the
   payer's dispute read grant, whatever the switch says (`docs/disputes.md`).
@@ -46,17 +49,25 @@ is the record of why, and of what must ship before it can be turned on.
    the switch is on, so every recent-tasks view in the dApp goes blank for
    everyone.
 4. **Tokens are lost on restart.** `state.task_tokens` is process memory. A
-   Render restart, redeploy or free-tier spin-down forgets every token. The
-   settlement and its disputes survive in Postgres, but
-   `GET /api/tasks/{id}/disputes` then answers as if the task were unknown, and
-   that read is where the console gets the job id to start a **first**
-   dispute. So after a restart under enforcement, a buyer inside a valid 24-hour
-   dispute window cannot open one from the console (`docs/disputes.md`,
-   "For operators: where the records live"; ADR 0007, "Why not turn
-   `TASK_AUTH_REQUIRED` on and keep the token").
+   Render restart, redeploy or free-tier spin-down forgets every token, so
+   every task read that takes only a token answers `404 unknown_task`
+   afterwards. The settlement and its disputes survive in Postgres.
+   **Changed 2026-10-01 for the payer's receipt:** this used to block a
+   **first** dispute, because the listing — where the console gets the job id —
+   admitted a token or a read grant, and a read grant could only be minted for
+   a task that already had a dispute. `POST /api/disputes/read-challenge` now
+   also mints, with enforcement on, for a settled task that can still be
+   disputed (window open, a delivered and paid step), so the payer signs once,
+   reads the listing with the grant, and disputes. It does not reopen the
+   `dispute_read` budget: with enforcement on `GET /api/tasks` lists nothing,
+   and the set is bounded by open windows like the dispute mint's. The
+   dispute itself never depended on the token: challenge, open, uphold,
+   credit and rating all read the settlement from Postgres
+   (`docs/disputes.md`, "What a restart keeps"; `tests/test_dispute_restart.py`).
+   The token is still lost for the task, artifact and trace reads.
 
-Any one of these would be a visible regression on the public demo; the fourth
-also takes a right away from paying buyers.
+Any one of these would be a visible regression on the public demo. The fourth
+used to take a right away from paying buyers too; it no longer does (above).
 
 ## The safe path
 
@@ -64,10 +75,11 @@ Each item removes one breakage above. All four are needed before the switch
 is turned on.
 
 1. **Keep the receipt reachable.** The payer must be able to reach their own
-   receipt without the tab that ran it. The dispute read grant (D-067) already
-   proves "I am the wallet that paid this task" by a signed challenge; the
-   receipt and the disputes-on-task read should accept that same proof, so a
-   payer in a new tab or on another device signs once and reads.
+   receipt without the tab that ran it. **Done for the disputes-on-task read:**
+   it accepts the dispute read grant (D-067), and the grant can be earned
+   before a first dispute while the task can still be disputed, so a payer in
+   a new tab, on another device or after a restart signs once and reads. The
+   task, artifact and trace reads still take only the token.
 2. **Put the token in the share-link fragment.** A shared trace link becomes
    `…/app/trace?task=<id>#t=<token>`. The fragment is never sent to a server,
    so it stays out of access logs and `Referer` headers; the page reads it and

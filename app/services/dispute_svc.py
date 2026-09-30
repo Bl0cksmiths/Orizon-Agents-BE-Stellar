@@ -48,6 +48,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..config import settings
@@ -385,41 +386,41 @@ def _duplicate(existing: DisputeRecord, job_id_hex: str, step_index: int) -> Dis
     )
 
 
-def _disputable_step(settlement: SettlementRecord, step_index: int) -> SettlementStep:
-    """The settled step a dispute may be raised against, or the refusal that says why not.
+@dataclass(frozen=True)
+class _StepRefusal:
+    """Why a step cannot be disputed: `DisputeError`'s three fields, not yet raised or logged."""
+
+    code: str
+    status_code: int
+    message: str
+
+
+def _step_refusal(settlement: SettlementRecord, step_index: int) -> SettlementStep | _StepRefusal:
+    """The settled step a dispute may be raised against, or why not — decided, never logged.
 
     Rules 4 to 6 of `open_dispute` — the window, the step, the money — stated
-    once and asked twice: by `open_dispute` behind the signature, and by
-    `issue_dispute_challenge` before a challenge slot is spent. None of them is
-    private: `SettlementView` publishes the window, each step's delivery and
-    each step's price to anyone who can name the task, and the job id is public
-    in the escrow's `charged` event.
+    once and asked three times: by `open_dispute` behind the signature, by
+    `issue_dispute_challenge` before a challenge slot is spent (both through
+    `_disputable_step`, which raises and logs), and by `could_still_be_disputed`,
+    which asks every step of a settlement and must not log a refusal per step.
+    None of them is private: `SettlementView` publishes the window, each step's
+    delivery and each step's price to anyone who can name the task, and the job
+    id is public in the escrow's `charged` event.
     """
-    job_id_hex = settlement.job_id_hex
     if time.time() > settlement.window_closes_at:
         # `>` rather than `>=`: a dispute arriving on the exact stamped second
         # is inside the window the buyer was promised. The record's own value,
         # and never `settled_at + settings.dispute_window_seconds` — a promise
         # that a configuration change can retroactively shorten is not one.
         closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
-        raise _refuse(
-            "dispute_window_closed",
-            409,
-            f"the dispute window for this workflow closed at {closed_at}",
-            job_id_hex,
-            step_index,
-        )
+        return _StepRefusal("dispute_window_closed", 409, f"the dispute window for this workflow closed at {closed_at}")
 
     step = settlement.step(step_index)
     if step is None:
-        raise _refuse("step_not_settled", 409, f"that workflow has no step {step_index}", job_id_hex, step_index)
+        return _StepRefusal("step_not_settled", 409, f"that workflow has no step {step_index}")
     if not step.delivered:
-        raise _refuse(
-            "step_not_settled",
-            409,
-            f"step {step_index} produced no output, so nothing was charged for it",
-            job_id_hex,
-            step_index,
+        return _StepRefusal(
+            "step_not_settled", 409, f"step {step_index} produced no output, so nothing was charged for it"
         )
 
     if settlement.settled_usdc <= 0:
@@ -428,25 +429,37 @@ def _disputable_step(settlement: SettlementRecord, step_index: int) -> Settlemen
         # transfer never landed leaves nothing to credit back. Judged on the
         # settlement rather than the step because this is a fact about the
         # payment, and the payment is one transfer for the whole workflow.
-        raise _refuse(
+        return _StepRefusal(
             "nothing_was_charged",
             409,
             "this workflow settled without charging anything, so there is nothing to credit",
-            job_id_hex,
-            step_index,
         )
     if step.price_usdc <= 0:
         # Same rule at step granularity, and the same code: a free step is not
         # a cheap one to dispute, it is one with no charge to credit back.
-        raise _refuse(
-            "nothing_was_charged",
-            409,
-            f"step {step_index} was free, so there is nothing to credit",
-            job_id_hex,
-            step_index,
-        )
+        return _StepRefusal("nothing_was_charged", 409, f"step {step_index} was free, so there is nothing to credit")
 
     return step
+
+
+def _disputable_step(settlement: SettlementRecord, step_index: int) -> SettlementStep:
+    """The settled step a dispute may be raised against, or the logged refusal that says why not."""
+    answer = _step_refusal(settlement, step_index)
+    if isinstance(answer, _StepRefusal):
+        raise _refuse(answer.code, answer.status_code, answer.message, settlement.job_id_hex, step_index)
+    return answer
+
+
+def could_still_be_disputed(settlement: SettlementRecord) -> bool:
+    """Whether a dispute could be opened on ANY step of `settlement` right now.
+
+    Exactly the set of (job, step) pairs `issue_dispute_challenge` will mint
+    for, collapsed to the settlement: the window is open and at least one step
+    delivered and was paid for. Judged on the stamped record alone, so it
+    answers the same in a process that has never seen the task — which is the
+    point of asking it (`dispute_read.issue_read_challenge`).
+    """
+    return any(not isinstance(_step_refusal(settlement, s.step_index), _StepRefusal) for s in settlement.steps)
 
 
 async def open_dispute(

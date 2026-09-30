@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 
+from ..config import settings
 from ..state import state
 from ..task_auth import mint_read_grant
 from . import dispute_svc
@@ -79,14 +80,37 @@ async def issue_read_challenge(task_id: str) -> tuple[str, float]:
         read. A dispute takes the payer's own signature to open, so a stranger
         cannot conjure the tasks this now mints for.
 
+    ONE exception to the second rule, and only while TASK_AUTH_REQUIRED is on
+    (`_first_dispute_needs_a_grant`): a task with no dispute YET that could
+    still be disputed. Under enforcement the listing is where a payer finds
+    the job id to raise a FIRST dispute, and it admits them on a task token or
+    a grant. The token lives in process memory and dies with a restart, so
+    without this a payer inside their window, after a restart, could reach
+    neither the listing nor a grant for it — the one hole a restart made in
+    5.01 AC4. It does not reopen the budget: under enforcement `GET /api/tasks`
+    lists nothing, so the task ids a stranger would spend the budget with are
+    not handed out, and the set is bounded by the window exactly as the
+    dispute mint's own is (`dispute_svc.could_still_be_disputed`).
+
     Raises `ChallengeBudgetExhausted("dispute_read")` when that budget is full
     of live challenges, which `main.py` answers as 503
     `challenge_capacity_dispute_read`.
     """
-    await _settlement(task_id)
-    if not await dispute_svc.list_for_task(task_id):
+    settlement = await _settlement(task_id)
+    if not await dispute_svc.list_for_task(task_id) and not _first_dispute_needs_a_grant(settlement):
         raise dispute_svc.DisputeError("no_disputes", "that task has no disputes to read", 404)
     return eb.issue_dispute_read_challenge(task_id)
+
+
+def _first_dispute_needs_a_grant(settlement: SettlementRecord) -> bool:
+    """Whether the payer needs a grant to START disputing this task (see `issue_read_challenge`).
+
+    Only under enforcement, where the listing is gated; with it off the listing
+    is open and a grant for an undisputed task would buy nothing. And only
+    while a dispute could still be opened, judged on the stamped settlement
+    alone — the record that survives the restart this exists for.
+    """
+    return settings.task_auth_required and dispute_svc.could_still_be_disputed(settlement)
 
 
 async def grant_read(task_id: str, nonce: str, signature_b64: str) -> tuple[str, float]:
