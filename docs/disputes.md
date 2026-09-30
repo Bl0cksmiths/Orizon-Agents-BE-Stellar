@@ -176,7 +176,15 @@ Why the credit cannot be a reversal:
 The full reasoning and the rejected alternatives are in
 `docs/decisions/0002-partial-credit-refund.md`. Its testnet proof, `9b8ffaa4…`,
 is an operator-script transfer from the admin key to a team key, tied to no
-dispute: it proves the transfer mechanism only (its 2026-09-29 amendment).
+dispute: it proves the transfer mechanism only (its 2026-09-29 amendment). The
+first credit tied to a real dispute landed on 2026-09-30: dispute
+`dsp_15acee279ac02852a5877ac1696ec4b5`, on a disclosed team run on escrow v2,
+was upheld with the adjudicator key, and the platform's signing key paid the
+buyer 0.01 XLM in
+`cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f`; its
+dispute rating followed in
+`b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49`. The
+evidence is in `docs/evidence/5.01/v2-team-runs/`. *(Updated 2026-09-30.)*
 
 ## How a dispute is adjudicated, and how the credit is paid
 

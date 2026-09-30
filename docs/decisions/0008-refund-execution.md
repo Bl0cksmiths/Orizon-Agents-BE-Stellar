@@ -454,6 +454,18 @@ for ADR 0007 D5's reason, and nothing here writes a rating. A dispute may reach
 > mechanism only, not that a dispute was credited (ADR 0002's 2026-09-29
 > amendment).
 
+> **Amended 2026-09-30: the first credit paid through this route.** Dispute
+> `dsp_15acee279ac02852a5877ac1696ec4b5` (a disclosed team run on escrow v2)
+> was upheld on 2026-09-30 with the adjudicator key, and the route paid it:
+> the platform's signing key (`GDB4N25…CDHP`) sent the buyer a 0.01 XLM credit
+> in `cb2c57929006470f9f554989dd8071e8539d245df529df956693944a78e1e25f`, and
+> the dispute rating followed in
+> `b512135ffade2d6518fd8cf1628f20787846ed0e311750043b87723dee453a49` (ADR
+> 0009). Both re-verified `SUCCESS`; the evidence is in
+> [`docs/evidence/5.01/v2-team-runs/`](../evidence/5.01/v2-team-runs/). This is
+> the first credit tied to a dispute; Context's "ADR 0002 proved a credit can
+> be paid" now has one. Every decision here stands.
+
 Related: ADR 0002 (the credit mechanism and the trust model), ADR 0007 (the
 window, the proof of payer and the settlement record), `docs/disputes.md` (the
 buyer- and operator-facing version, including the reconciliation procedure),
