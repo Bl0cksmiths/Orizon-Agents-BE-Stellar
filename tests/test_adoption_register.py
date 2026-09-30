@@ -38,6 +38,7 @@ DECLARED = {
     "GA5LEGIRHKZGDKGQ4XHBEMU2Z7BGDX7AE2XUWDXB3V6TCOVTD2LZMQ2M",
     "GDWE6IDZ73VSMH6F75IDVA5BDAC7UJI3TOZC23VGAOXNYYHC6NDCIWRX",
     "GB4K6YRHDHB2HHNM3E7UUZJU5JP3MSQE3GXKMEA5IT4AM45D23YKAYKK",
+    "GCNQAJE6K7LORS7CQTI7RVJTB2TZG5QADTNFDKS5H7QQKRFTRFNLA2GP",
 }
 
 GOOD = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -58,7 +59,7 @@ def test_the_committed_register_loads_and_holds_every_declared_wallet() -> None:
     wallets = load_team_register()
 
     assert {w.address for w in wallets} == DECLARED
-    assert len(wallets) == len(DECLARED) == 9
+    assert len(wallets) == len(DECLARED) == 10
     assert all(w.role and w.evidence for w in wallets)
     assert adoption_svc.TEAM_REGISTER == wallets
 
