@@ -285,6 +285,15 @@ agent's first step of a workflow and hangs on its second, for a plan that
 hires it twice. For a control run, point the same two `--agent` flags at two
 healthy agents: `failed_steps_rated_20` then reads "every step delivered".
 
+**Proven on 2026-10-01** in a disclosed team run: `calculatorai` (healthy),
+then `keyboardai` deployed with `FAULT_MODE=hang_after:0`, both reference
+agents owned by the admin wallet rather than their own. The settle
+`0ada0708…dc556b` paid only the delivered step (0.01 XLM) and returned 0.2 XLM
+to the buyer; the seal `41a159ff…56fd64` carries only the delivered step's
+receipt; `keyboardai` took a 20/100; all 16 checks passed. The evidence is
+[`docs/evidence/5.01/ac5/`](../evidence/5.01/ac5/lifecycle.md), and the
+re-verified sheet is in [`docs/evidence/5.01/ac4-ac5/`](../evidence/5.01/ac4-ac5/evidence-sheet.md).
+
 ## Feeding story 5.05
 
 Each run directory holds:
