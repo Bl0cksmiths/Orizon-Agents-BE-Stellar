@@ -169,8 +169,8 @@ settler key can be rotated (it cannot — write-once).
 > the deploy read `settler()` back as `GDB4N25…CDHP` and `admin()` as
 > `GA7AI5…5OQV`, and the backend settles through it (`/readiness`
 > `escrow.version` 2). So the platform's signing key is now the live escrow's
-> settler as well, and the admin key is v1's settler only. Refunds are switched on in that deployment too. The first
-> dispute on v2,
+> settler as well, and the admin key is v1's settler only. Refunds are
+> switched on in that deployment too. The first dispute on v2,
 > `dsp_15acee279ac02852a5877ac1696ec4b5`, is open and not yet upheld, so no
 > credit has yet been paid for a real dispute, and the Proof amendment below
 > still stands. The decision is unchanged.
