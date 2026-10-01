@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -293,13 +293,63 @@ class Flow(BaseModel):
 
 
 # ───── Metrics ─────────────────────────────────────────────
+# GET /api/metrics/overview. Every number is measured; a part that could not be
+# read is null (or []) and sets `degraded`, never a stand-in value. The
+# frontend codes against this shape (docs/decisions/0013-overview-measured-only.md).
+class OverviewAgents(BaseModel):
+    registered: int  # every agent GET /api/agents lists
+    onchain: int  # source == "onchain": registered on the AgentRegistry
+    seeded: int  # source == "seeded": the platform's own catalog
+    # On-chain agents whose owner is outside operator, by adoption_svc's rule.
+    # None only when the rule itself could not be built.
+    external: int | None
+    # On-chain agents with an endpoint bound. None while the bound set has not
+    # been loaded, because an unloaded set says nothing about any agent.
+    bound: int | None
+    online: int  # status == "online"
+
+
+class OverviewOperators(BaseModel):
+    external_wallets: int | None  # distinct owners of the external agents
+
+
+class SettledDay(BaseModel):
+    date: str  # UTC calendar day, YYYY-MM-DD
+    settled: int
+
+
+class OverviewWorkflows(BaseModel):
+    settled: int | None  # settled workflows in the durable settlement store
+    series: list[SettledDay]  # the last 14 UTC days, oldest first; [] if unreadable
+
+
+class OverviewTasks(BaseModel):
+    recent: int  # tasks held by the in-memory task store
+    complete: int
+    failed: int
+    completion_rate: float | None  # complete / (complete + failed); None with no terminal task
+
+
+class OverviewTrust(BaseModel):
+    avg: float | None  # mean smoothed on-chain reputation, 0..5; None with no on-chain evidence
+    rated_agents: int | None  # agents with on-chain rating evidence; None if the read failed
+
+
+class SkillShare(BaseModel):
+    name: str  # a skill, or "other" for everything outside the top five
+    agents: int  # agents carrying it
+    pct: int  # share of all skill tags; the list sums to 100
+
+
 class OverviewMetrics(BaseModel):
-    agents_online: int
-    tasks_per_sec: float
-    avg_completion: float  # 0..1
-    avg_trust: float  # 0..5
-    throughput: list[int]  # sparkline
-    skills: list[dict[str, Any]]  # [{name, pct, tone}]
+    generated_at: float  # epoch seconds the numbers were computed at
+    agents: OverviewAgents
+    operators: OverviewOperators
+    workflows: OverviewWorkflows
+    tasks: OverviewTasks
+    trust: OverviewTrust
+    skills: list[SkillShare]
+    degraded: bool  # True when any part above could not be fully read
 
 
 # ───── Requests ────────────────────────────────────────────
