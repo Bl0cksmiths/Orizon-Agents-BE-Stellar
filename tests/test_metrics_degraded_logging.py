@@ -1,22 +1,26 @@
-"""avg_trust must say which number it served.
+"""A degraded overview part must say so in the log, and say which part.
 
-/api/metrics/overview blends a live on-chain trust average with a seeded
-presentation baseline (4.86). The swap used to happen in total silence — a
-bare `except Exception: return seeded` plus an unlogged "no on-chain
-evidence" path — so the dashboard could alternate between measured truth and
-a demo constant with nothing in the log to say which. These tests pin the
-logging, and pin that it stays rate-limited: the frontend polls this route
-every few seconds.
+/api/metrics/overview reports an unreadable source as null and sets
+`degraded`. That flag tells the dashboard; these tests pin what tells the
+operator: one WARNING naming the part when it degrades, nothing more while it
+stays degraded (the dashboard polls every few seconds), a repeat on the duty
+cycle so a long outage leaves periodic evidence, and an INFO line when the
+part is measured again. A benign state — nothing rated yet — is not an outage
+and logs nothing.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import pytest
 
 from app.routers import metrics as metrics_router
 from app.seed import seed_registry
+from app.services.dispute_store import InMemoryDisputeStore
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
@@ -24,18 +28,18 @@ LOGGER_NAME = "app.routers.metrics"
 
 
 @pytest.fixture(autouse=True)
-def seeded_registry():
-    """These tests call _avg_trust directly, so nothing else populates the
-    registry (the app lifespan seeds it for the TestClient fixture)."""
+def seeded_registry() -> None:
+    """These tests call the part readers directly, so nothing else populates
+    the registry (the app lifespan seeds it for the TestClient fixture)."""
     seed_registry()
 
 
 @pytest.fixture(autouse=True)
-def reset_trust_log_state(monkeypatch):
+def fresh_notes(monkeypatch: pytest.MonkeyPatch) -> None:
     """The duty-cycle state is module-global and lives for the whole pytest
-    process — reset it so each test observes a first transition."""
-    monkeypatch.setattr(metrics_router, "_trust_degraded", None, raising=False)
-    monkeypatch.setattr(metrics_router, "_trust_logged_at", 0.0, raising=False)
+    process — fresh notes so each test observes a first transition."""
+    for name, part in (("_trust_note", "trust"), ("_workflows_note", "workflows")):
+        monkeypatch.setattr(metrics_router, name, metrics_router._SourceNote(part))
 
 
 def _info(agent_id: str, *, source: str, degraded: bool = False) -> RepInfo:
@@ -54,73 +58,82 @@ def _info(agent_id: str, *, source: str, degraded: bool = False) -> RepInfo:
     )
 
 
-def _patch_reps(monkeypatch, builder) -> None:
-    async def fake(agent_ids: list[str], timeout_seconds: float = 2.5) -> dict[str, RepInfo]:
+def _patch_reps(monkeypatch: pytest.MonkeyPatch, builder: Callable[[str], RepInfo]) -> None:
+    async def fake(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
         return {a: builder(a) for a in agent_ids}
 
     monkeypatch.setattr("app.services.reputation_svc.fetch_reps", fake)
 
 
-def _records(caplog) -> list[logging.LogRecord]:
+def _records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name == LOGGER_NAME]
 
 
-def _run(caplog, coro_fn):
-    import asyncio
-
+def _run(caplog: pytest.LogCaptureFixture, coro: Coroutine[Any, Any, Any]) -> Any:
     with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
-        return asyncio.run(coro_fn())
+        return asyncio.run(coro)
 
 
-# ── the fallback is logged ──────────────────────────────────────
+async def _trust_polls(times: int) -> None:
+    for _ in range(times):
+        await metrics_router._trust(state.list_agents())
 
 
-def test_degraded_reads_log_a_warning(monkeypatch, caplog):
+# ── the degradation is logged, naming the part ──────────────────
+
+
+def test_a_degraded_trust_read_logs_one_warning_naming_the_part(monkeypatch, caplog):
     _patch_reps(monkeypatch, lambda a: _info(a, source="prior", degraded=True))
     agents = state.list_agents()
 
-    value = _run(caplog, lambda: metrics_router._avg_trust(agents))
+    result = _run(caplog, metrics_router._trust(agents))
 
-    assert value == pytest.approx(sum(a.rep for a in agents) / len(agents))
+    assert result.degraded is True
+    assert result.trust.avg is None
     records = _records(caplog)
     assert len(records) == 1
     assert records[0].levelno == logging.WARNING
-    assert f"{len(agents)}/{len(agents)} reputation reads degraded" in records[0].getMessage()
-    assert "not measured trust" in records[0].getMessage()
+    message = records[0].getMessage()
+    assert message.startswith("overview trust degraded:")
+    assert f"{len(agents)}/{len(agents)} reputation reads degraded" in message
+    assert "never as a stand-in value" in message
 
 
-def test_unrated_network_is_reported_as_such_not_as_an_outage(monkeypatch, caplog):
-    """Nothing rated on-chain yet is a benign state; the message must not
-    claim reads degraded, or an operator cannot tell the two apart."""
-    _patch_reps(monkeypatch, lambda a: _info(a, source="prior"))
+def test_an_unreadable_settlement_store_logs_naming_workflows(monkeypatch, caplog):
+    class Down(InMemoryDisputeStore):
+        async def count_settled_by_day(self) -> dict[int, int]:
+            raise ConnectionError("database unreachable")
 
-    _run(caplog, lambda: metrics_router._avg_trust(state.list_agents()))
+    monkeypatch.setattr(metrics_router, "get_dispute_store", Down)
+
+    _run(caplog, metrics_router._workflows(1_790_000_000.0))
 
     message = _records(caplog)[0].getMessage()
-    assert "no agent has on-chain rating evidence yet" in message
-    assert "degraded" not in message
+    assert message.startswith("overview workflows degraded:")
+    assert "ConnectionError: database unreachable" in message
 
 
-def test_empty_registry_is_logged(caplog):
-    value = _run(caplog, lambda: metrics_router._avg_trust([]))
+def test_an_unrated_network_is_not_an_outage(monkeypatch, caplog):
+    """Nothing rated on-chain yet is measured (avg null), not degraded."""
+    _patch_reps(monkeypatch, lambda a: _info(a, source="prior"))
 
-    assert value == metrics_router.DEMO_FALLBACK_TRUST
-    assert "registry is empty" in _records(caplog)[0].getMessage()
+    result = _run(caplog, metrics_router._trust(state.list_agents()))
+
+    assert result.degraded is False
+    assert _records(caplog) == []
 
 
-def test_unexpected_raise_logs_a_traceback(monkeypatch, caplog):
+def test_an_unexpected_raise_logs_a_traceback(monkeypatch, caplog):
     """fetch_reps is documented never to raise; if it does, that is a bug and
-    must not be swallowed the way the old bare `except` swallowed it."""
+    must not be swallowed."""
 
-    async def boom(agent_ids: list[str], timeout_seconds: float = 2.5) -> dict[str, RepInfo]:
+    async def boom(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
         raise RuntimeError("should never happen")
 
     monkeypatch.setattr("app.services.reputation_svc.fetch_reps", boom)
-    agents = state.list_agents()
 
-    value = _run(caplog, lambda: metrics_router._avg_trust(agents))
+    _run(caplog, metrics_router._trust(state.list_agents()))
 
-    assert value == pytest.approx(sum(a.rep for a in agents) / len(agents))
     record = _records(caplog)[0]
     assert record.levelno == logging.WARNING
     assert "RuntimeError" in record.getMessage()
@@ -130,9 +143,9 @@ def test_unexpected_raise_logs_a_traceback(monkeypatch, caplog):
 def test_measured_trust_logs_nothing(monkeypatch, caplog):
     _patch_reps(monkeypatch, lambda a: _info(a, source="onchain"))
 
-    value = _run(caplog, lambda: metrics_router._avg_trust(state.list_agents()))
+    result = _run(caplog, metrics_router._trust(state.list_agents()))
 
-    assert value == 4.5  # 9000 bps / 2000
+    assert result.trust.avg == 4.5  # 9000 bps / 2000
     assert _records(caplog) == []
 
 
@@ -141,73 +154,41 @@ def test_measured_trust_logs_nothing(monkeypatch, caplog):
 
 def test_steady_degradation_logs_once_not_once_per_poll(monkeypatch, caplog):
     _patch_reps(monkeypatch, lambda a: _info(a, source="prior", degraded=True))
-    agents = state.list_agents()
 
-    def poll_ten_times():
-        async def run():
-            for _ in range(10):
-                await metrics_router._avg_trust(agents)
-
-        return run()
-
-    _run(caplog, lambda: poll_ten_times())
+    _run(caplog, _trust_polls(10))
 
     assert len(_records(caplog)) == 1, "the dashboard polls constantly; one outage is one line"
 
 
 def test_the_repeat_interval_re_arms(monkeypatch, caplog):
     _patch_reps(monkeypatch, lambda a: _info(a, source="prior", degraded=True))
-    monkeypatch.setattr(metrics_router, "_TRUST_LOG_INTERVAL_SECONDS", 0.0)
-    agents = state.list_agents()
+    monkeypatch.setattr(metrics_router, "_DEGRADED_LOG_INTERVAL_SECONDS", 0.0)
 
-    async def run():
-        await metrics_router._avg_trust(agents)
-        await metrics_router._avg_trust(agents)
-
-    _run(caplog, lambda: run())
+    _run(caplog, _trust_polls(2))
 
     # A long outage still leaves periodic evidence rather than one line at
     # the very start and then silence.
     assert len(_records(caplog)) == 2
 
 
-def test_recovery_is_logged(monkeypatch, caplog):
-    agents = state.list_agents()
+def test_recovery_is_logged_once(monkeypatch, caplog):
     mode = {"degraded": True}
 
-    async def fake(agent_ids: list[str], timeout_seconds: float = 2.5) -> dict[str, RepInfo]:
+    async def fake(agent_ids: list[str], timeout_seconds: float | None = None) -> dict[str, RepInfo]:
         if mode["degraded"]:
             return {a: _info(a, source="prior", degraded=True) for a in agent_ids}
         return {a: _info(a, source="onchain") for a in agent_ids}
 
     monkeypatch.setattr("app.services.reputation_svc.fetch_reps", fake)
 
-    async def run():
-        await metrics_router._avg_trust(agents)
+    async def run() -> None:
+        await _trust_polls(1)
         mode["degraded"] = False
-        await metrics_router._avg_trust(agents)
+        await _trust_polls(3)
 
-    _run(caplog, lambda: run())
+    _run(caplog, run())
 
     levels = [(r.levelno, r.getMessage()) for r in _records(caplog)]
     assert len(levels) == 2
     assert levels[0][0] == logging.WARNING
-    assert levels[1][0] == logging.INFO
-    assert "recovered" in levels[1][1]
-
-
-# ── the wire contract is unchanged ──────────────────────────────
-
-
-def test_overview_body_shape_is_untouched_by_the_logging(client):
-    """The frontend's `Overview` type is the contract; logging the fallback
-    must not have added or removed a key."""
-    body = client.get("/api/metrics/overview").json()
-    assert set(body) == {
-        "agents_online",
-        "tasks_per_sec",
-        "avg_completion",
-        "avg_trust",
-        "throughput",
-        "skills",
-    }
+    assert levels[1] == (logging.INFO, "overview trust recovered: measured again")
