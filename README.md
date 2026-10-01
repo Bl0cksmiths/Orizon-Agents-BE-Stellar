@@ -60,7 +60,7 @@ cp .env.example .env
 | GET  | `/api/tasks/{id}/artifact`           | task deliverable (the actual artifact) |
 | GET  | `/api/trace/{task_id}`               | full trace snapshot |
 | GET  | `/api/trace/{task_id}/stream`        | SSE live trace |
-| GET  | `/api/metrics/overview`              | dashboard overview |
+| GET  | `/api/metrics/overview`              | dashboard overview — measured values only: registered / on-chain / seeded / external / bound / online agents, distinct external operator wallets, settled workflows from the settlement store with a 14-day UTC series, task completion, mean on-chain trust and the registry's skill mix; an unreadable part is `null` with `degraded: true`, never a stand-in (ADR 0013). Cached 15 s |
 | GET  | `/api/flow/default`                  | default DAG |
 | POST | `/api/payments/x402`                 | simulated HTTP 402 flow |
 | GET  | `/api/stellar/network`               | configured-network contract IDs the FE renders |

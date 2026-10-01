@@ -83,6 +83,10 @@ DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
 # at ERROR rather than forget what is still owed.
 _MAX_IN_MEMORY = 500
 
+# Seconds in a UTC day: epoch seconds divided by this, floored, is the UTC
+# calendar day a settlement landed on (`count_settled_by_day`).
+SECONDS_PER_DAY = 86_400
+
 # The dispute states that still owe something, and so pin their settlement in
 # the in-memory store past its cap (see `InMemoryDisputeStore._is_pinned`).
 _UNFINISHED: frozenset[DisputeStatus] = frozenset({"open", "upheld", "crediting"})
@@ -388,6 +392,26 @@ FROM workflow_settlements
 WHERE task_id = $1
 ORDER BY id DESC
 LIMIT 1
+"""
+
+
+# Settled workflows per UTC day, for the dashboard overview. One workflow is one
+# job: a job that wrote a second row (the seal's proof_tx) is still one
+# settlement, so the newest row per job is taken first — the same "newest row
+# wins" every other read here applies, served by workflow_settlements_job_idx.
+# `settled_at` is epoch seconds and epoch days are UTC days (POSIX time has no
+# leap seconds), so `floor(settled_at / 86400)` is the UTC calendar day with no
+# timezone in the database involved. One row per day that saw a settlement:
+# the result grows by at most one row a day, never with the table.
+_COUNT_SETTLED_BY_DAY_SQL = """
+SELECT floor(settled_at / 86400)::bigint AS day, count(*) AS settled
+FROM (
+    SELECT DISTINCT ON (job_id_hex) settled_at
+    FROM workflow_settlements
+    ORDER BY job_id_hex, id DESC
+) AS jobs
+GROUP BY day
+ORDER BY day
 """
 
 
@@ -1057,6 +1081,11 @@ class DisputeStore(Protocol):
 
     async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None: ...
 
+    async def count_settled_by_day(self) -> dict[int, int]:
+        """Settled workflows (distinct jobs) per UTC day, keyed by epoch day
+        (`settled_at // SECONDS_PER_DAY`). Days with none are absent."""
+        ...
+
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord: ...
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None: ...
@@ -1206,6 +1235,18 @@ class InMemoryDisputeStore:
             (r for r in reversed(self._settlements.values()) if r.task_id == task_id),
             None,
         )
+
+    async def count_settled_by_day(self) -> dict[int, int]:
+        """What this store still holds — a floor once the cap has shed a job.
+
+        Keyed by job already, so a job that recorded its seal in a second write
+        is counted once, as Postgres counts it.
+        """
+        days: dict[int, int] = {}
+        for record in self._settlements.values():
+            day = int(record.settled_at // SECONDS_PER_DAY)
+            days[day] = days.get(day, 0) + 1
+        return days
 
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
         existing = await self.find_dispute(record.job_id_hex, record.step_index)
@@ -1614,6 +1655,11 @@ class PostgresDisputeStore:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
+
+    async def count_settled_by_day(self) -> dict[int, int]:
+        pool = await self._ready_pool()
+        rows = await pool.fetch(_COUNT_SETTLED_BY_DAY_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+        return {int(row["day"]): int(row["settled"]) for row in rows}
 
     @staticmethod
     def _to_settlement(row: Any) -> SettlementRecord:

@@ -36,7 +36,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -366,6 +366,52 @@ async def _escrow_admin(escrow_id: str) -> str | None:
     return await _read_view("escrowadmin", escrow_id, "admin")
 
 
+# ── the rule: who counts as an outside operator ───────────────────────────
+@dataclass(frozen=True)
+class OwnerRule:
+    """The one definition of "external", shared by every number that uses it.
+
+    An owner is external only when it is in NEITHER the committed team register
+    NOR the keys this deployment holds at runtime. `GET /api/metrics/overview`
+    counts external agents with this same object, so the dashboard and the
+    adoption report cannot disagree about who is an outside operator.
+    """
+
+    register: Mapping[str, TeamWallet]
+    platform: _PlatformKeys
+
+    def classify(self, owner: str) -> tuple[ExclusionReason, str] | None:
+        """Why `owner` is ours, or None when it is an outside operator."""
+        if owner in self.register:
+            return "team_wallet", self.register[owner].role
+        if owner in self.platform.roles:
+            return "platform_key", self.platform.roles[owner]
+        return None
+
+    @property
+    def team_roles(self) -> dict[str, str]:
+        """Every account that is ours, with its role; the register wins a tie."""
+        return {**self.platform.roles, **{a: w.role for a, w in self.register.items()}}
+
+    @property
+    def unreadable(self) -> list[str]:
+        """Platform-key reads that failed. Any of them could have named an owner
+        that is ours, so a non-empty list means "external" may be too high."""
+        return self.platform.unreadable
+
+
+async def owner_rule() -> OwnerRule:
+    """The register and this deployment's runtime keys, read now. Never raises
+    for a failed read: those land in `OwnerRule.unreadable`."""
+    return OwnerRule(register={w.address: w for w in TEAM_REGISTER}, platform=await _platform_keys())
+
+
+def onchain_mirror() -> dict[str, Agent]:
+    """The registry-synced on-chain agents, by id — never the seeded catalog,
+    whatever the registry holds under the seeded prefix."""
+    return {a.id: a for a in state.list_agents() if a.source == "onchain" and not a.id.startswith(SEEDED_PREFIX)}
+
+
 # ── the agent list ────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class _Unmirrored:
@@ -504,20 +550,13 @@ async def build_report() -> AdoptionReport:
     in for a lookup that did not happen.
     """
     started = time.monotonic()
-    register = {w.address: w for w in TEAM_REGISTER}
-    platform = await _platform_keys()
-    team_roles = {**platform.roles, **{a: w.role for a, w in register.items()}}
-    degraded = bool(platform.unreadable)
+    rule = await owner_rule()
+    classify = rule.classify
+    team_roles = rule.team_roles
+    degraded = bool(rule.unreadable)
     unreadable: set[str] = set()
 
-    def classify(owner: str) -> tuple[ExclusionReason, str] | None:
-        if owner in register:
-            return "team_wallet", register[owner].role
-        if owner in platform.roles:
-            return "platform_key", platform.roles[owner]
-        return None
-
-    mirrored = {a.id: a for a in state.list_agents() if a.source == "onchain" and not a.id.startswith(SEEDED_PREFIX)}
+    mirrored = onchain_mirror()
     owners: dict[str, str] = {}
     for agent in mirrored.values():
         if agent.owner:
@@ -603,7 +642,7 @@ async def build_report() -> AdoptionReport:
         len(report.excluded),
         len(report.unreadable_agents),
         degraded,
-        ",".join(platform.unreadable) or "-",
+        ",".join(rule.unreadable) or "-",
         gap.listed,
         int((time.monotonic() - started) * 1000),
     )
