@@ -1,7 +1,7 @@
 """GET /api/metrics/overview — the dashboard's network numbers, all measured.
 
 Every value here is read from a source a reviewer can check: the agent
-registry mirror, the adoption report's owner rule, the binding set, the
+registry mirror (and whether it is complete, `registry_synced`), the adoption report's owner rule, the binding set, the
 durable settlement store, the in-memory task store and on-chain reputation.
 Nothing is invented. A part whose source cannot be read is reported as null
 (or an empty list) and sets `degraded`, and the part is named in a
@@ -35,7 +35,7 @@ from ..schemas import (
     SettledDay,
     SkillShare,
 )
-from ..services import adoption_svc, binding_registry, reputation_svc
+from ..services import adoption_svc, binding_registry, registry_sync, reputation_svc
 from ..services.dispute_store import SECONDS_PER_DAY, get_dispute_store
 from ..state import state
 from ..stellar import cache as rcache
@@ -105,6 +105,7 @@ _external_note = _SourceNote("agents.external")
 _bound_note = _SourceNote("agents.bound")
 _workflows_note = _SourceNote("workflows")
 _trust_note = _SourceNote("trust")
+_registry_note = _SourceNote("agents (registry mirror)")
 
 
 # ── agents and operators ──────────────────────────────────────────────────
@@ -300,9 +301,17 @@ def _skills(agents: list[Agent]) -> list[SkillShare]:
 
 # ── the overview ──────────────────────────────────────────────────────────
 async def build_overview() -> OverviewMetrics:
-    """Compute the overview from its sources. Never raises for a failed read."""
+    """Compute the overview from its sources. Never raises for a failed read.
+
+    The mirror's sync status is read with the agent list, no await between, so
+    `registry_synced` describes exactly the agents every count is taken over.
+    A mirror still filling after a restart is not a failed read: its counts are
+    served, as the partial counts they are, and `degraded` says so.
+    """
     now = time.time()
+    synced = registry_sync.status().synced
     agents = state.list_agents()
+    _registry_note.note(not synced, f"the registry mirror has not finished a full pass; {len(agents)} agents so far")
     external, workflows, trust = await asyncio.gather(_external(), _workflows(now), _trust(agents))
     bound = _bound(agents)
     return OverviewMetrics(
@@ -320,7 +329,8 @@ async def build_overview() -> OverviewMetrics:
         tasks=_tasks(),
         trust=trust.trust,
         skills=_skills(agents),
-        degraded=external.degraded or bound is None or workflows.degraded or trust.degraded,
+        registry_synced=synced,
+        degraded=not synced or external.degraded or bound is None or workflows.degraded or trust.degraded,
     )
 
 

@@ -207,7 +207,17 @@ def _add_tasks(statuses: list[str]) -> None:
 # ── the shape ─────────────────────────────────────────────────────────────
 def test_overview_response_shape_is_stable(client) -> None:
     body = _overview(client)
-    assert set(body) == {"generated_at", "agents", "operators", "workflows", "tasks", "trust", "skills", "degraded"}
+    assert set(body) == {
+        "generated_at",
+        "agents",
+        "operators",
+        "workflows",
+        "tasks",
+        "trust",
+        "skills",
+        "registry_synced",
+        "degraded",
+    }
     assert set(body["agents"]) == {"registered", "onchain", "seeded", "external", "bound", "online"}
     assert set(body["operators"]) == {"external_wallets"}
     assert set(body["workflows"]) == {"settled", "series"}
@@ -217,6 +227,7 @@ def test_overview_response_shape_is_stable(client) -> None:
     assert set(body["trust"]) == {"avg", "rated_agents"}
     assert all(set(s) == {"name", "agents", "pct"} for s in body["skills"])
     assert isinstance(body["generated_at"], float)
+    assert body["registry_synced"] is True
     assert body["degraded"] is False
 
 
