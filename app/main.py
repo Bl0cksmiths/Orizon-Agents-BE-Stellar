@@ -691,6 +691,24 @@ class EscrowReadiness(BaseModel):
     version: int | None
 
 
+class RegistryReadiness(BaseModel):
+    """Whether the on-chain registry mirror is complete (services/registry_sync.py).
+
+    After a restart the mirror fills one read at a time, and GET /api/agents
+    serves whatever it holds so far, so a count taken then is a prefix of the
+    registry. `synced` is false until the first full pass since boot has
+    finished, and stays true after it. `agents` is the mirror's size at the
+    latest full pass and `last_full_sync_at` its epoch seconds, both null
+    before one; `syncing` is true while a pass is running. Informational,
+    like the rest: a partial mirror still serves every request.
+    """
+
+    synced: bool
+    syncing: bool
+    agents: int | None
+    last_full_sync_at: float | None  # epoch seconds, this process's clock
+
+
 _escrow_version_probe: asyncio.Task | None = None
 
 
@@ -725,6 +743,7 @@ class ReadinessResponse(BaseModel):
     ratings: RatingsReadiness  # informational, never gates readiness
     disputes: DisputesReadiness  # informational, never gates readiness
     escrow: EscrowReadiness  # informational, never gates readiness
+    registry: RegistryReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -768,6 +787,7 @@ async def readiness(response: Response) -> ReadinessResponse:
     # RatingsReadiness.
     writer = rating_writer.verdict()
     rating_writer.refresh_if_stale()
+    sync = registry_sync.status()
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         llm=llm,
@@ -786,4 +806,10 @@ async def readiness(response: Response) -> ReadinessResponse:
             reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
         ),
         escrow=_escrow_readiness(),
+        registry=RegistryReadiness(
+            synced=sync.synced,
+            syncing=sync.syncing,
+            agents=sync.agents,
+            last_full_sync_at=sync.last_full_sync_at,
+        ),
     )
