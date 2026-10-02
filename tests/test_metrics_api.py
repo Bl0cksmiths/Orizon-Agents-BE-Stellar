@@ -691,3 +691,63 @@ def test_concurrent_polls_are_single_flight(registry, monkeypatch) -> None:
     results = asyncio.run(go())
     assert len(calls) == 1
     assert all(r is results[0] for r in results)
+
+
+def test_a_slow_build_never_delays_a_poll_with_a_recent_overview(registry, monkeypatch) -> None:
+    """The latency path: a rebuild that runs to the reputation deadline must not
+    be what a dashboard poll waits on once there is an overview to serve."""
+    calls = _counting_build(monkeypatch, delay=0.5)
+    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.05)
+    registry(_seeded("agt_a"))
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics, float]:
+        first = await metrics_router.fetch_overview()  # nothing to serve: this one waits
+        await asyncio.sleep(0.1)
+        started = time.perf_counter()
+        polled = await metrics_router.fetch_overview()
+        elapsed = time.perf_counter() - started
+        await asyncio.gather(*metrics_router._refreshes)
+        return first, polled, elapsed
+
+    first, polled, elapsed = asyncio.run(go())
+    assert polled is first
+    assert elapsed < 0.1
+    assert len(calls) == 2  # and the refresh did run, behind the poll
+
+
+def test_an_overview_too_old_to_serve_waits_for_a_fresh_one(registry, monkeypatch) -> None:
+    calls = _counting_build(monkeypatch)
+    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.05)
+    monkeypatch.setattr(metrics_router, "OVERVIEW_STALE_SERVE_SECONDS", 0.05)
+    registry(_seeded("agt_a"))
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics]:
+        first = await metrics_router.fetch_overview()
+        registry(_seeded("agt_a"), _seeded("agt_b"))
+        await asyncio.sleep(0.2)
+        return first, await metrics_router.fetch_overview()
+
+    first, later = asyncio.run(go())
+    assert len(calls) == 2
+    assert later is not first
+    assert later.agents.registered == 2
+
+
+def test_the_first_full_pass_replaces_a_partial_overview_at_once(registry, monkeypatch) -> None:
+    """Inside the TTL, and not served stale: the cached counts were a prefix,
+    and the registry total is the number its readers are waiting for."""
+    calls = _counting_build(monkeypatch)
+    registry(_seeded("agt_a"))
+    _unsynced(monkeypatch)
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics]:
+        partial = await metrics_router.fetch_overview()
+        registry(_seeded("agt_a"), _agent("ext1", owner=EXT_A))
+        monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True, agents=2))
+        return partial, await metrics_router.fetch_overview()
+
+    partial, full = asyncio.run(go())
+    assert partial.registry_synced is False
+    assert full.registry_synced is True
+    assert full.agents.registered == 2
+    assert len(calls) == 2
