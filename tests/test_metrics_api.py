@@ -33,7 +33,7 @@ from app.main import app
 from app.routers import metrics as metrics_router
 from app.schemas import Agent, OverviewMetrics, Task
 from app.security import EXEMPT_PATHS, RateLimitMiddleware
-from app.services import adoption_svc, binding_registry
+from app.services import adoption_svc, binding_registry, registry_sync, settlement_svc
 from app.services.dispute_store import SECONDS_PER_DAY, InMemoryDisputeStore
 from app.services.reputation_svc import RepInfo
 from app.state import state
@@ -125,6 +125,22 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryDisputeStore:
 def unrated(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every agent on the flat prior, read cleanly: nothing rated yet."""
     _patch_reps(monkeypatch, lambda a: _info(a, 7000, "prior"))
+
+
+@pytest.fixture(autouse=True)
+def registry_synced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mirror that has finished its first full pass. The latch is process-wide
+    and set by whichever pass ran last, so it is pinned rather than inherited;
+    a test of the unsynced overview pins `status` itself."""
+    monkeypatch.setattr(
+        registry_sync, "_status", registry_sync.SyncStatus(synced=True, agents=0, last_full_sync_at=1.0)
+    )
+
+
+def _unsynced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mirror still filling after a restart. `status` itself is replaced, so a
+    pass the TestClient's lifespan runs cannot complete it under the test."""
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(syncing=True))
 
 
 @pytest.fixture
@@ -371,6 +387,59 @@ def test_bound_is_null_while_the_binding_set_is_unloaded(client, registry, monke
     body = _overview(client)
     assert body["agents"]["bound"] is None
     assert body["degraded"] is True
+
+
+# ── the registry mirror ───────────────────────────────────────────────────
+def test_a_mirror_still_filling_serves_its_counts_as_partial(client, registry, monkeypatch) -> None:
+    """After a restart the mirror holds a prefix of the registry. Its counts are
+    real and are served, but they are not the registry's: the flag says so."""
+    _unsynced(monkeypatch)
+    registry(_seeded("agt_a"), _agent("ext1", owner=EXT_A), _agent("ext2", owner=EXT_B))
+    body = _overview(client)
+    assert body["registry_synced"] is False
+    assert body["degraded"] is True
+    assert body["agents"]["registered"] == 3  # still returned, not nulled
+    assert body["agents"]["onchain"] == 2
+    assert body["agents"]["external"] == 2
+    assert body["operators"]["external_wallets"] == 2
+
+
+def test_a_synced_mirror_is_not_degraded_by_the_registry(client, registry) -> None:
+    registry(_seeded("agt_a"), _agent("ext1", owner=EXT_A))
+    body = _overview(client)
+    assert body["registry_synced"] is True
+    assert body["degraded"] is False
+
+
+def test_the_overview_never_runs_the_adoption_settlement_scan(registry, monkeypatch) -> None:
+    """External agents and wallets need owners, not charges. The settlement
+    scans behind /api/ecosystem/adoption take 13-40 s; any of them reached from
+    here would make the dashboard that slow, so each one raises if touched."""
+
+    def scan(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the overview reached a settlement scan")
+
+    async def ascan(*args: object, **kwargs: object) -> None:
+        scan()
+
+    for owner, name, fake in (
+        (settlement_svc, "fetch_settlement", ascan),
+        (settlement_svc, "_scan_sync", scan),
+        (adoption_svc, "_settlement", ascan),
+        (adoption_svc, "_unmirrored", ascan),
+        (adoption_svc, "build_report", ascan),
+        (adoption_svc, "fetch_report", ascan),
+    ):
+        monkeypatch.setattr(owner, name, fake)
+    registry(_agent("ext1", owner=EXT_A), _agent("ext2", owner=EXT_B), _agent("ours", owner=TEAM))
+
+    started = time.perf_counter()
+    overview = asyncio.run(metrics_router.build_overview())
+
+    assert time.perf_counter() - started < 2.0
+    assert overview.agents.external == 2
+    assert overview.operators.external_wallets == 2
+    assert overview.degraded is False
 
 
 # ── workflows ─────────────────────────────────────────────────────────────
