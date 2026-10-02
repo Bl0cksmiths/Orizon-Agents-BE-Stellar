@@ -26,7 +26,8 @@ import pytest
 from stellar_sdk import scval
 
 from app.config import settings
-from app.services import registry_sync
+from app.schemas import Agent
+from app.services import binding_registry, registry_sync
 from app.state import state
 
 REGISTRY_ID = "CFAKEREGISTRY"
@@ -264,3 +265,71 @@ def test_readiness_reports_a_partial_mirror_as_unsynced(client, monkeypatch: pyt
     # Informational: a partial mirror never moves the verdict.
     monkeypatch.setattr(registry_sync, "_status", registry_sync.SyncStatus(synced=True, agents=1))
     assert client.get("/readiness").status_code == r.status_code
+
+
+# ── GET /api/agents ───────────────────────────────────────────────────────
+# The body contract is frozen: a bare list of exactly these objects.
+_AGENTS_SNAPSHOT = [
+    {
+        "id": "agt_one",
+        "name": "copy.v1",
+        "skills": ["copy"],
+        "price": 0.012,
+        "rep": 4.5,
+        "status": "online",
+        "runs": 7,
+        "real": False,
+        "owner": None,
+        "source": "seeded",
+        "bound": None,
+    },
+    {
+        "id": "ext_a",
+        "name": "ext_a.worker",
+        "skills": ["translate"],
+        "price": 0.05,
+        "rep": 3.5,
+        "status": "online",
+        "runs": 0,
+        "real": False,
+        "owner": OWNER,
+        "source": "onchain",
+        "bound": True,
+    },
+]
+
+
+@pytest.fixture()
+def two_agents(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One seeded and one bound on-chain agent, after the lifespan has seeded."""
+    monkeypatch.setattr(binding_registry, "_bound_ids", {"ext_a"})
+    monkeypatch.setattr(binding_registry, "_loaded", True)
+    state.agents.clear()
+    state.add_agent(Agent(id="agt_one", name="copy.v1", skills=["copy"], price=0.012, rep=4.5, status="online", runs=7))
+    state.add_agent(registry_sync._to_agent(_raw("ext_a")))
+
+
+@pytest.mark.parametrize("synced", [True, False])
+def test_the_agent_list_says_whether_it_is_the_whole_registry(
+    client, two_agents: None, monkeypatch: pytest.MonkeyPatch, synced: bool
+) -> None:
+    monkeypatch.setattr(registry_sync, "_status", registry_sync.SyncStatus(synced=synced))
+
+    r = client.get("/api/agents")
+
+    assert r.status_code == 200
+    assert r.headers["X-Registry-Synced"] == ("true" if synced else "false")
+    assert r.headers["X-Registry-Count"] == "2"
+    assert r.json() == _AGENTS_SNAPSHOT  # the body is the same list either way
+
+
+def test_the_count_header_is_the_length_of_the_list(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = client.get("/api/agents")
+    assert int(r.headers["X-Registry-Count"]) == len(r.json()) == len(state.agents)
+
+
+def test_a_cross_origin_caller_may_read_the_registry_headers(client, two_agents: None) -> None:
+    r = client.get("/api/agents", headers={"Origin": "https://orizon-agents-fe-stellar.vercel.app"})
+    assert r.headers["access-control-allow-origin"] == "https://orizon-agents-fe-stellar.vercel.app"
+    exposed = {h.strip().lower() for h in r.headers["access-control-expose-headers"].split(",")}
+    assert {"x-registry-synced", "x-registry-count"} <= exposed
