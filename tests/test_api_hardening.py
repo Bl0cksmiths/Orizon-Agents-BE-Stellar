@@ -9,6 +9,7 @@ from starlette.routing import Route
 
 from app.config import settings
 from app.security import RateLimitMiddleware
+from app.services import registry_sync
 
 VALID_G = "G" + "A" * 55
 CHARGE_BODY = {
@@ -37,6 +38,15 @@ _CONTRACT_ID_FIELDS = (
 # pass through the app: off, not running, never run.
 _RECONCILE_OFF = {"enabled": False, "running": False, "last_run_at": None, "last_skipped": None, "last_outcomes": {}}
 
+# The registry mirror's status is whatever passes this process has run, which
+# the lifespan's loop and every earlier test decide; pinned so the exact
+# payloads below do not depend on test order.
+_REGISTRY_SYNCED = {"synced": True, "syncing": False, "agents": 12, "last_full_sync_at": 1_790_000_000.0}
+
+
+def _pin_registry_status(monkeypatch) -> None:
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(**_REGISTRY_SYNCED))
+
 
 def _configure_stellar(monkeypatch) -> None:
     for field in _CONTRACT_ID_FIELDS:
@@ -62,6 +72,7 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
     monkeypatch.setattr(settings, "openai_api_key", "sk-test")
     monkeypatch.setattr(settings, "pdax_username", "")
     monkeypatch.setattr(settings, "pdax_password", "")
+    _pin_registry_status(monkeypatch)
     r = client.get("/readiness")
     assert r.status_code == 200
     # Exact equality on purpose: a field added to this probe has to be added
@@ -81,6 +92,7 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
+        "registry": _REGISTRY_SYNCED,
     }
 
 
@@ -96,6 +108,7 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
     monkeypatch.setattr(settings, "pdax_username", "")
     monkeypatch.setattr(settings, "pdax_password", "")
     monkeypatch.setattr(settings, "reputation_floor_bps", 6000)
+    _pin_registry_status(monkeypatch)
     r = client.get("/readiness")
     assert r.status_code == 200
     assert r.json() == {
@@ -110,6 +123,7 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
+        "registry": _REGISTRY_SYNCED,
     }
 
 
