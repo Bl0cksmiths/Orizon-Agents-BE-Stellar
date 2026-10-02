@@ -50,8 +50,8 @@ cp .env.example .env
 | --- | --- | --- |
 | GET  | `/health`                            | liveness probe |
 | GET  | `/api/health`                        | the same liveness probe under the `/api` prefix |
-| GET  | `/readiness`                         | readiness probe — per-dependency config status, plus two informational blocks: `cold_start` (can a brand-new agent clear the floor?) and `ratings` (can this deployment write ratings — is its signer the ledger's scorer?) |
-| GET  | `/api/agents`                        | registry listing |
+| GET  | `/readiness`                         | readiness probe — per-dependency config status, plus informational blocks including `cold_start` (can a brand-new agent clear the floor?), `ratings` (can this deployment write ratings — is its signer the ledger's scorer?) and `registry` (`synced`, `syncing`, `agents`, `last_full_sync_at`: has the on-chain mirror finished a full pass since boot?) |
+| GET  | `/api/agents`                        | registry listing — a bare list; `X-Registry-Synced: true\|false` says whether the on-chain mirror has finished a full pass since boot (false: the list is a prefix still filling after a restart), `X-Registry-Count` is the list's length |
 | GET  | `/api/agents/{id}`                   | agent detail |
 | POST | `/api/orchestrator/decompose`        | intent → plan (real LLM) |
 | POST | `/api/orchestrator/execute`          | run a plan → `{task_id}` |
@@ -60,7 +60,7 @@ cp .env.example .env
 | GET  | `/api/tasks/{id}/artifact`           | task deliverable (the actual artifact) |
 | GET  | `/api/trace/{task_id}`               | full trace snapshot |
 | GET  | `/api/trace/{task_id}/stream`        | SSE live trace |
-| GET  | `/api/metrics/overview`              | dashboard overview — measured values only: registered / on-chain / seeded / external / bound / online agents, distinct external operator wallets, settled workflows from the settlement store with a 14-day UTC series, task completion, mean on-chain trust and the registry's skill mix; an unreadable part is `null` with `degraded: true`, never a stand-in (ADR 0013). Cached 15 s |
+| GET  | `/api/metrics/overview`              | dashboard overview — measured values only: registered / on-chain / seeded / external / bound / online agents, distinct external operator wallets, settled workflows from the settlement store with a 14-day UTC series, task completion, mean on-chain trust and the registry's skill mix; an unreadable part is `null` with `degraded: true`, never a stand-in (ADR 0013). `registry_synced: false` means the registry mirror is still filling, so the agent counts are partial (and `degraded` is true). Cached 15 s; a recently expired overview is served while it refreshes in the background |
 | GET  | `/api/flow/default`                  | default DAG |
 | POST | `/api/payments/x402`                 | simulated HTTP 402 flow |
 | GET  | `/api/stellar/network`               | configured-network contract IDs the FE renders |
