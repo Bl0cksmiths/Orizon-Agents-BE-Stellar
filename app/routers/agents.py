@@ -17,13 +17,26 @@ an endpoint the client would have to call once per agent.
 Stamping is a COPY, never a mutation: `state.list_agents()` hands out the live
 objects, so assigning to them would write this response's view back into
 application state and recreate the staleness this avoids.
+
+The list says whether it is the whole registry in two response headers, never
+in the body, which stays the bare list its clients parse:
+
+  - `X-Registry-Synced: true|false`: whether the on-chain mirror has finished
+    a full pass since boot (`registry_sync.status()`). False means the list
+    is a prefix of the registry still filling after a restart, and a count
+    taken from it must not be cached or shown as the total.
+  - `X-Registry-Count: <n>`: how many agents this response holds.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from ..schemas import Agent
+from ..services import registry_sync
 from ..services.binding_registry import is_bound
 from ..state import state
+
+REGISTRY_SYNCED_HEADER = "X-Registry-Synced"
+REGISTRY_COUNT_HEADER = "X-Registry-Count"
 
 router = APIRouter(tags=["agents"])
 
@@ -43,8 +56,16 @@ def _with_bound(agent: Agent) -> Agent:
 
 
 @router.get("/agents", response_model=list[Agent], summary="List registered agents")
-async def list_agents() -> list[Agent]:
-    return [_with_bound(a) for a in state.list_agents()]
+async def list_agents(response: Response) -> list[Agent]:
+    """Every agent in the marketplace mirror. `X-Registry-Synced` says whether
+    that mirror is complete; `X-Registry-Count` is the length of this list."""
+    # Status and list read with no await between them, so the header describes
+    # exactly the list it rides on.
+    synced = registry_sync.status().synced
+    agents = [_with_bound(a) for a in state.list_agents()]
+    response.headers[REGISTRY_SYNCED_HEADER] = "true" if synced else "false"
+    response.headers[REGISTRY_COUNT_HEADER] = str(len(agents))
+    return agents
 
 
 @router.get("/agents/{agent_id}", response_model=Agent, summary="Get one agent by id")

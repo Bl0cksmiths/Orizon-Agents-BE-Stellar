@@ -42,6 +42,7 @@ from .routers import (
 # Imported by symbol, not as a module: the root `/health` handler defined
 # below rebinds the name `health` at module scope, which would shadow a
 # `from .routers import health` module import at call time.
+from .routers.agents import REGISTRY_COUNT_HEADER, REGISTRY_SYNCED_HEADER
 from .routers.health import HealthResponse, health_payload
 from .routers.health import router as health_router
 
@@ -409,6 +410,10 @@ app.add_middleware(
     # is precisely why it would have been found the first time it mattered.
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-api-key", "x-task-token", "x-dispute-read-grant"],
+    # Response headers a cross-origin caller may read. GET /api/agents says in
+    # these whether its list is the whole registry (routers/agents.py); a
+    # browser hides any header not listed here from cross-origin script.
+    expose_headers=[REGISTRY_SYNCED_HEADER, REGISTRY_COUNT_HEADER],
 )
 
 # Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
@@ -691,6 +696,24 @@ class EscrowReadiness(BaseModel):
     version: int | None
 
 
+class RegistryReadiness(BaseModel):
+    """Whether the on-chain registry mirror is complete (services/registry_sync.py).
+
+    After a restart the mirror fills one read at a time, and GET /api/agents
+    serves whatever it holds so far, so a count taken then is a prefix of the
+    registry. `synced` is false until the first full pass since boot has
+    finished, and stays true after it. `agents` is the mirror's size at the
+    latest full pass and `last_full_sync_at` its epoch seconds, both null
+    before one; `syncing` is true while a pass is running. Informational,
+    like the rest: a partial mirror still serves every request.
+    """
+
+    synced: bool
+    syncing: bool
+    agents: int | None
+    last_full_sync_at: float | None  # epoch seconds, this process's clock
+
+
 _escrow_version_probe: asyncio.Task | None = None
 
 
@@ -725,6 +748,7 @@ class ReadinessResponse(BaseModel):
     ratings: RatingsReadiness  # informational, never gates readiness
     disputes: DisputesReadiness  # informational, never gates readiness
     escrow: EscrowReadiness  # informational, never gates readiness
+    registry: RegistryReadiness  # informational, never gates readiness
 
 
 @app.get(
@@ -768,6 +792,7 @@ async def readiness(response: Response) -> ReadinessResponse:
     # RatingsReadiness.
     writer = rating_writer.verdict()
     rating_writer.refresh_if_stale()
+    sync = registry_sync.status()
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         llm=llm,
@@ -786,4 +811,10 @@ async def readiness(response: Response) -> ReadinessResponse:
             reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
         ),
         escrow=_escrow_readiness(),
+        registry=RegistryReadiness(
+            synced=sync.synced,
+            syncing=sync.syncing,
+            agents=sync.agents,
+            last_full_sync_at=sync.last_full_sync_at,
+        ),
     )

@@ -39,13 +39,22 @@ Design notes, each deliberate:
     next tick. Failures coalesce to ONE warning per outage (then DEBUG, then
     an INFO on recovery) — the `reputation_svc._log_degraded` discipline; a
     15s loop against a downed RPC must not flood the log with warnings.
+  - The mirror says when it is COMPLETE (`status()`). After a restart it
+    fills one sequential read at a time, so for minutes `state.agents` holds
+    a growing prefix of the registry, and every consumer that counts it would
+    otherwise publish that prefix as the truth. `synced` latches only when a
+    pass has walked the whole of `list_ids` and every id in it has answered a
+    `get` at least once since boot; a pass that raises, is cancelled, or
+    leaves an id never read, never sets it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
+import time
 from typing import Any
 
 from ..agents.workers.prompt_safety import sanitize_untrusted
@@ -156,6 +165,55 @@ _first_pass: asyncio.Event | None = None
 _disabled_logged = False
 _skipped_agt_ids: set[str] = set()
 _refused_price_ids: set[str] = set()
+
+
+@dataclasses.dataclass
+class SyncStatus:
+    """Whether the mirror holds the whole registry, as of this process's passes.
+
+    `synced` is a latch, false from boot until the first FULL pass (see
+    `_complete`) and true from then on: a later pass that fails leaves the
+    mirror as complete as the last full one made it, which is not partial.
+    `agents` is the mirror's size (`state.agents`, the list GET /api/agents
+    serves) when the latest full pass finished, and `last_full_sync_at` that
+    moment in epoch seconds; both null until a first full pass. `syncing` is
+    true while a pass holds the single-flight lock.
+    """
+
+    synced: bool = False
+    syncing: bool = False
+    agents: int | None = None
+    last_full_sync_at: float | None = None
+
+
+_status = SyncStatus()
+
+# Every id whose `get` has answered since boot, refused or not. A pass is full
+# only when every id `list_ids` returned is in here: an id that has never
+# answered is missing from the mirror, however many others the pass indexed.
+# Cumulative rather than per pass, so a transient failure of an id read
+# earlier (still mirrored, from that read) cannot hold `synced` false.
+_answered_ids: set[str] = set()
+
+
+def status() -> SyncStatus:
+    """A copy of the mirror's sync status — callers can never write it back."""
+    return dataclasses.replace(_status)
+
+
+def _record_full_pass() -> None:
+    """Latch `synced` and stamp the full pass that just finished."""
+    first = not _status.synced
+    _status.synced = True
+    _status.agents = len(state.agents)
+    _status.last_full_sync_at = time.time()
+    if first:
+        logger.info(
+            "registry sync: first full pass complete — %d agents mirrored, %.1f s after boot",
+            _status.agents,
+            _status.last_full_sync_at - state.started_at,
+        )
+
 
 # True while the loop is inside a failing streak — flips the pass-failure
 # log level from WARNING (first failure) to DEBUG (consecutive), and arms
@@ -272,48 +330,78 @@ async def sync_once() -> int:
     has nothing to iterate, and the caller owns the failure policy (the loop
     coalesces and survives; an on-demand caller gets the error). A failed
     `get` for ONE id is logged and skipped so a single bad record never
-    kills the rest of the pass.
+    kills the rest of the pass — but a pass that leaves an id unanswered is
+    not a full pass, and does not set `status().synced`.
+    """
+    async with _lock:
+        _status.syncing = True
+        try:
+            return await _pass()
+        finally:
+            _status.syncing = False
+
+
+async def _pass() -> int:
+    """One pass under the lock; records it in `_status` when it was full.
+
+    Full means: `list_ids` answered, the loop below ran to its end without
+    raising or being cancelled, and every id it listed has answered a `get`
+    (this pass or an earlier one) — the seeded `agt_` ids excepted, which are
+    never mirrored. A blank STELLAR_AGENT_REGISTRY is full by definition:
+    there is no chain to mirror, so the seeded catalog is the whole registry.
     """
     global _disabled_logged
-    async with _lock:
-        contract_id = settings.stellar_agent_registry
-        if not contract_id:
-            if not _disabled_logged:
-                _disabled_logged = True
-                logger.info("registry sync disabled — STELLAR_AGENT_REGISTRY not set")
-            return 0
+    contract_id = settings.stellar_agent_registry
+    if not contract_id:
+        if not _disabled_logged:
+            _disabled_logged = True
+            logger.info("registry sync disabled — STELLAR_AGENT_REGISTRY not set")
+        _record_full_pass()
+        return 0
 
-        ids = await asyncio.to_thread(sc.simulate_read, contract_id, "list_ids", [])
-        synced = 0
-        for agent_id in ids:
-            if agent_id.startswith("agt_"):
-                # Seeded namespace: add_agent is an upsert, so indexing this
-                # id would clobber a worker-backed catalog agent.
-                if agent_id not in _skipped_agt_ids:
-                    _skipped_agt_ids.add(agent_id)
-                    logger.warning(
-                        "registry sync: skipping on-chain id %r — the agt_ namespace is the "
-                        "seeded catalog, and upserting it would clobber a worker-backed agent",
-                        agent_id,
-                    )
-                continue
-            try:
-                raw = await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
-                agent = _to_agent(raw)
-            except UnbelievablePrice as e:
-                # Must precede the catch-all: UnbelievablePrice is a ValueError,
-                # and a refusal is a policy decision, not a read failure.
-                _refuse_price(agent_id, e)
-                continue
-            except Exception as e:
-                logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
-                continue
-            # Believable again after a refusal — re-arm the warning so an
-            # operator flip-flopping across the cap stays visible in the log.
-            _refused_price_ids.discard(agent_id)
-            state.add_agent(agent)
-            synced += 1
-        return synced
+    ids = await asyncio.to_thread(sc.simulate_read, contract_id, "list_ids", [])
+    synced = 0
+    for agent_id in ids:
+        if agent_id.startswith("agt_"):
+            # Seeded namespace: add_agent is an upsert, so indexing this
+            # id would clobber a worker-backed catalog agent.
+            if agent_id not in _skipped_agt_ids:
+                _skipped_agt_ids.add(agent_id)
+                logger.warning(
+                    "registry sync: skipping on-chain id %r — the agt_ namespace is the "
+                    "seeded catalog, and upserting it would clobber a worker-backed agent",
+                    agent_id,
+                )
+            continue
+        try:
+            raw = await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+            # Answered: whatever the mapper makes of it, the chain has told
+            # us about this id, so it no longer holds the mirror partial.
+            _answered_ids.add(agent_id)
+            agent = _to_agent(raw)
+        except UnbelievablePrice as e:
+            # Must precede the catch-all: UnbelievablePrice is a ValueError,
+            # and a refusal is a policy decision, not a read failure.
+            _refuse_price(agent_id, e)
+            continue
+        except Exception as e:
+            logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+            continue
+        # Believable again after a refusal — re-arm the warning so an
+        # operator flip-flopping across the cap stays visible in the log.
+        _refused_price_ids.discard(agent_id)
+        state.add_agent(agent)
+        synced += 1
+    unanswered = [i for i in ids if not i.startswith("agt_") and i not in _answered_ids]
+    if unanswered:
+        logger.debug(
+            "registry sync: pass not full — %d listed id(s) have never answered a read: %s",
+            len(unanswered),
+            ", ".join(unanswered[:5]),
+        )
+    else:
+        _record_full_pass()
+    return synced
 
 
 async def _sync_loop() -> None:

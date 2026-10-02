@@ -349,7 +349,12 @@ class OverviewMetrics(BaseModel):
     tasks: OverviewTasks
     trust: OverviewTrust
     skills: list[SkillShare]
-    degraded: bool  # True when any part above could not be fully read
+    # Whether the on-chain registry mirror had finished a full pass when these
+    # numbers were computed. False after a restart while the mirror is still
+    # filling: the agent counts (and the skill mix) are then a prefix of the
+    # registry, served as measured but partial, and `degraded` is true.
+    registry_synced: bool
+    degraded: bool  # True when any part above could not be fully read, or the registry is not synced
 
 
 # ───── Requests ────────────────────────────────────────────

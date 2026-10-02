@@ -33,7 +33,7 @@ from app.main import app
 from app.routers import metrics as metrics_router
 from app.schemas import Agent, OverviewMetrics, Task
 from app.security import EXEMPT_PATHS, RateLimitMiddleware
-from app.services import adoption_svc, binding_registry
+from app.services import adoption_svc, binding_registry, registry_sync, settlement_svc
 from app.services.dispute_store import SECONDS_PER_DAY, InMemoryDisputeStore
 from app.services.reputation_svc import RepInfo
 from app.state import state
@@ -127,6 +127,22 @@ def unrated(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_reps(monkeypatch, lambda a: _info(a, 7000, "prior"))
 
 
+@pytest.fixture(autouse=True)
+def registry_synced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mirror that has finished its first full pass. The latch is process-wide
+    and set by whichever pass ran last, so it is pinned rather than inherited;
+    a test of the unsynced overview pins `status` itself."""
+    monkeypatch.setattr(
+        registry_sync, "_status", registry_sync.SyncStatus(synced=True, agents=0, last_full_sync_at=1.0)
+    )
+
+
+def _unsynced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mirror still filling after a restart. `status` itself is replaced, so a
+    pass the TestClient's lifespan runs cannot complete it under the test."""
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(syncing=True))
+
+
 @pytest.fixture
 def registry() -> Iterator[Callable[..., None]]:
     """Replace the registry's agents for one test; restored afterwards."""
@@ -207,7 +223,17 @@ def _add_tasks(statuses: list[str]) -> None:
 # ── the shape ─────────────────────────────────────────────────────────────
 def test_overview_response_shape_is_stable(client) -> None:
     body = _overview(client)
-    assert set(body) == {"generated_at", "agents", "operators", "workflows", "tasks", "trust", "skills", "degraded"}
+    assert set(body) == {
+        "generated_at",
+        "agents",
+        "operators",
+        "workflows",
+        "tasks",
+        "trust",
+        "skills",
+        "registry_synced",
+        "degraded",
+    }
     assert set(body["agents"]) == {"registered", "onchain", "seeded", "external", "bound", "online"}
     assert set(body["operators"]) == {"external_wallets"}
     assert set(body["workflows"]) == {"settled", "series"}
@@ -217,6 +243,7 @@ def test_overview_response_shape_is_stable(client) -> None:
     assert set(body["trust"]) == {"avg", "rated_agents"}
     assert all(set(s) == {"name", "agents", "pct"} for s in body["skills"])
     assert isinstance(body["generated_at"], float)
+    assert body["registry_synced"] is True
     assert body["degraded"] is False
 
 
@@ -360,6 +387,59 @@ def test_bound_is_null_while_the_binding_set_is_unloaded(client, registry, monke
     body = _overview(client)
     assert body["agents"]["bound"] is None
     assert body["degraded"] is True
+
+
+# ── the registry mirror ───────────────────────────────────────────────────
+def test_a_mirror_still_filling_serves_its_counts_as_partial(client, registry, monkeypatch) -> None:
+    """After a restart the mirror holds a prefix of the registry. Its counts are
+    real and are served, but they are not the registry's: the flag says so."""
+    _unsynced(monkeypatch)
+    registry(_seeded("agt_a"), _agent("ext1", owner=EXT_A), _agent("ext2", owner=EXT_B))
+    body = _overview(client)
+    assert body["registry_synced"] is False
+    assert body["degraded"] is True
+    assert body["agents"]["registered"] == 3  # still returned, not nulled
+    assert body["agents"]["onchain"] == 2
+    assert body["agents"]["external"] == 2
+    assert body["operators"]["external_wallets"] == 2
+
+
+def test_a_synced_mirror_is_not_degraded_by_the_registry(client, registry) -> None:
+    registry(_seeded("agt_a"), _agent("ext1", owner=EXT_A))
+    body = _overview(client)
+    assert body["registry_synced"] is True
+    assert body["degraded"] is False
+
+
+def test_the_overview_never_runs_the_adoption_settlement_scan(registry, monkeypatch) -> None:
+    """External agents and wallets need owners, not charges. The settlement
+    scans behind /api/ecosystem/adoption take 13-40 s; any of them reached from
+    here would make the dashboard that slow, so each one raises if touched."""
+
+    def scan(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the overview reached a settlement scan")
+
+    async def ascan(*args: object, **kwargs: object) -> None:
+        scan()
+
+    for owner, name, fake in (
+        (settlement_svc, "fetch_settlement", ascan),
+        (settlement_svc, "_scan_sync", scan),
+        (adoption_svc, "_settlement", ascan),
+        (adoption_svc, "_unmirrored", ascan),
+        (adoption_svc, "build_report", ascan),
+        (adoption_svc, "fetch_report", ascan),
+    ):
+        monkeypatch.setattr(owner, name, fake)
+    registry(_agent("ext1", owner=EXT_A), _agent("ext2", owner=EXT_B), _agent("ours", owner=TEAM))
+
+    started = time.perf_counter()
+    overview = asyncio.run(metrics_router.build_overview())
+
+    assert time.perf_counter() - started < 2.0
+    assert overview.agents.external == 2
+    assert overview.operators.external_wallets == 2
+    assert overview.degraded is False
 
 
 # ── workflows ─────────────────────────────────────────────────────────────
@@ -577,23 +657,28 @@ def test_polls_within_the_ttl_share_one_computation(client, registry, monkeypatc
     assert second["agents"]["registered"] == 1
 
 
-def test_the_cache_expires_after_the_ttl(registry, monkeypatch) -> None:
+def test_an_expired_overview_is_served_once_while_it_refreshes(registry, monkeypatch) -> None:
+    """Past the TTL the next poll gets the last overview at once and starts one
+    refresh behind it; the poll after that sees the refreshed numbers."""
     calls = _counting_build(monkeypatch)
     monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.2)
     registry(_seeded("agt_a"))
 
-    async def go() -> tuple[OverviewMetrics, OverviewMetrics, OverviewMetrics]:
+    async def go() -> tuple[OverviewMetrics, ...]:
         first = await metrics_router.fetch_overview()
         cached = await metrics_router.fetch_overview()
         registry(_seeded("agt_a"), _seeded("agt_b"))
         await asyncio.sleep(0.3)
-        return first, cached, await metrics_router.fetch_overview()
+        stale = await metrics_router.fetch_overview()
+        await asyncio.gather(*metrics_router._refreshes)
+        return first, cached, stale, await metrics_router.fetch_overview()
 
-    first, cached, expired = asyncio.run(go())
+    first, cached, stale, refreshed = asyncio.run(go())
     assert len(calls) == 2
     assert cached is first
-    assert expired.agents.registered == 2
-    assert expired.generated_at > first.generated_at
+    assert stale is first
+    assert refreshed.agents.registered == 2
+    assert refreshed.generated_at > first.generated_at
 
 
 def test_concurrent_polls_are_single_flight(registry, monkeypatch) -> None:
@@ -606,3 +691,63 @@ def test_concurrent_polls_are_single_flight(registry, monkeypatch) -> None:
     results = asyncio.run(go())
     assert len(calls) == 1
     assert all(r is results[0] for r in results)
+
+
+def test_a_slow_build_never_delays_a_poll_with_a_recent_overview(registry, monkeypatch) -> None:
+    """The latency path: a rebuild that runs to the reputation deadline must not
+    be what a dashboard poll waits on once there is an overview to serve."""
+    calls = _counting_build(monkeypatch, delay=0.5)
+    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.05)
+    registry(_seeded("agt_a"))
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics, float]:
+        first = await metrics_router.fetch_overview()  # nothing to serve: this one waits
+        await asyncio.sleep(0.1)
+        started = time.perf_counter()
+        polled = await metrics_router.fetch_overview()
+        elapsed = time.perf_counter() - started
+        await asyncio.gather(*metrics_router._refreshes)
+        return first, polled, elapsed
+
+    first, polled, elapsed = asyncio.run(go())
+    assert polled is first
+    assert elapsed < 0.1
+    assert len(calls) == 2  # and the refresh did run, behind the poll
+
+
+def test_an_overview_too_old_to_serve_waits_for_a_fresh_one(registry, monkeypatch) -> None:
+    calls = _counting_build(monkeypatch)
+    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.05)
+    monkeypatch.setattr(metrics_router, "OVERVIEW_STALE_SERVE_SECONDS", 0.05)
+    registry(_seeded("agt_a"))
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics]:
+        first = await metrics_router.fetch_overview()
+        registry(_seeded("agt_a"), _seeded("agt_b"))
+        await asyncio.sleep(0.2)
+        return first, await metrics_router.fetch_overview()
+
+    first, later = asyncio.run(go())
+    assert len(calls) == 2
+    assert later is not first
+    assert later.agents.registered == 2
+
+
+def test_the_first_full_pass_replaces_a_partial_overview_at_once(registry, monkeypatch) -> None:
+    """Inside the TTL, and not served stale: the cached counts were a prefix,
+    and the registry total is the number its readers are waiting for."""
+    calls = _counting_build(monkeypatch)
+    registry(_seeded("agt_a"))
+    _unsynced(monkeypatch)
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics]:
+        partial = await metrics_router.fetch_overview()
+        registry(_seeded("agt_a"), _agent("ext1", owner=EXT_A))
+        monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True, agents=2))
+        return partial, await metrics_router.fetch_overview()
+
+    partial, full = asyncio.run(go())
+    assert partial.registry_synced is False
+    assert full.registry_synced is True
+    assert full.agents.registered == 2
+    assert len(calls) == 2

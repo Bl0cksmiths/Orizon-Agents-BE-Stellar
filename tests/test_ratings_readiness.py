@@ -18,6 +18,7 @@ from stellar_sdk import Keypair
 
 from app.config import settings
 from app.services import rating_writer as rw
+from app.services import registry_sync
 from app.stellar import client as sc
 
 SIGNER = Keypair.from_raw_ed25519_seed(b"\x0a" * 32).public_key
@@ -76,6 +77,9 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
     """Exact equality, like the hardening suite's: a field on an
     unauthenticated route is reviewed, never accreted."""
     _chain_says(monkeypatch, scorer=SIGNER)
+    # Pinned: the mirror's status is whatever passes this process has run.
+    synced = {"synced": True, "syncing": False, "agents": 12, "last_full_sync_at": 1_790_000_000.0}
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(**synced))
     r = client.get("/readiness")
     assert r.status_code == 200
     assert r.json() == {
@@ -100,6 +104,7 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
         },
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
+        "registry": synced,
     }
 
 

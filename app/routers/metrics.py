@@ -1,7 +1,7 @@
 """GET /api/metrics/overview — the dashboard's network numbers, all measured.
 
 Every value here is read from a source a reviewer can check: the agent
-registry mirror, the adoption report's owner rule, the binding set, the
+registry mirror (and whether it is complete, `registry_synced`), the adoption report's owner rule, the binding set, the
 durable settlement store, the in-memory task store and on-chain reputation.
 Nothing is invented. A part whose source cannot be read is reported as null
 (or an empty list) and sets `degraded`, and the part is named in a
@@ -12,6 +12,16 @@ The whole overview is computed at most once per OVERVIEW_CACHE_TTL_SECONDS and
 shared by every concurrent caller (single-flight, `app.stellar.cache`), so the
 dashboard's polling cannot turn into a chain read and a database query per
 request. The app-wide rate limit (`RateLimitMiddleware`) still applies.
+
+A poll never waits on a computation when there is a recent one to serve. A
+build is slow by construction: the trust part reads every agent's reputation,
+whose cache expires on the same 15 s as this one, so each rebuild of a ~300
+agent registry runs to the reputation batch deadline (2.5 s shipped), and the
+platform-key reads behind the owner rule go to the chain every few minutes. An
+expired overview younger than OVERVIEW_STALE_SERVE_SECONDS is therefore served
+at once while one refresh runs in the background (`generated_at` dates it);
+only a process with nothing recent to serve, or a cached overview taken from a
+registry mirror that has since completed, waits for the computation.
 """
 
 from __future__ import annotations
@@ -35,7 +45,7 @@ from ..schemas import (
     SettledDay,
     SkillShare,
 )
-from ..services import adoption_svc, binding_registry, reputation_svc
+from ..services import adoption_svc, binding_registry, registry_sync, reputation_svc
 from ..services.dispute_store import SECONDS_PER_DAY, get_dispute_store
 from ..state import state
 from ..stellar import cache as rcache
@@ -49,6 +59,11 @@ router = APIRouter(tags=["metrics"])
 # open in several tabs costs one set of reads, not one per tab per poll.
 OVERVIEW_CACHE_KEY = "metrics:overview"
 OVERVIEW_CACHE_TTL_SECONDS = 15.0
+
+# How long past its expiry an overview may still be served while a refresh runs
+# behind it. A dashboard that is being polled never gets near this; it bounds
+# what the first poll after a quiet spell is shown before it waits instead.
+OVERVIEW_STALE_SERVE_SECONDS = 300.0
 
 # The settled-workflow sparkline: one point per UTC day, today included.
 SERIES_DAYS = 14
@@ -105,6 +120,7 @@ _external_note = _SourceNote("agents.external")
 _bound_note = _SourceNote("agents.bound")
 _workflows_note = _SourceNote("workflows")
 _trust_note = _SourceNote("trust")
+_registry_note = _SourceNote("agents (registry mirror)")
 
 
 # ── agents and operators ──────────────────────────────────────────────────
@@ -300,9 +316,17 @@ def _skills(agents: list[Agent]) -> list[SkillShare]:
 
 # ── the overview ──────────────────────────────────────────────────────────
 async def build_overview() -> OverviewMetrics:
-    """Compute the overview from its sources. Never raises for a failed read."""
+    """Compute the overview from its sources. Never raises for a failed read.
+
+    The mirror's sync status is read with the agent list, no await between, so
+    `registry_synced` describes exactly the agents every count is taken over.
+    A mirror still filling after a restart is not a failed read: its counts are
+    served, as the partial counts they are, and `degraded` says so.
+    """
     now = time.time()
+    synced = registry_sync.status().synced
     agents = state.list_agents()
+    _registry_note.note(not synced, f"the registry mirror has not finished a full pass; {len(agents)} agents so far")
     external, workflows, trust = await asyncio.gather(_external(), _workflows(now), _trust(agents))
     bound = _bound(agents)
     return OverviewMetrics(
@@ -320,17 +344,58 @@ async def build_overview() -> OverviewMetrics:
         tasks=_tasks(),
         trust=trust.trust,
         skills=_skills(agents),
-        degraded=external.degraded or bound is None or workflows.degraded or trust.degraded,
+        registry_synced=synced,
+        degraded=not synced or external.degraded or bound is None or workflows.degraded or trust.degraded,
     )
 
 
 async def fetch_overview() -> OverviewMetrics:
     """The cached overview: one computation per OVERVIEW_CACHE_TTL_SECONDS,
-    shared by every concurrent caller (the cache is single-flight)."""
+    shared by every concurrent caller (the cache is single-flight).
+
+    Stale-while-revalidate: an expired overview younger than
+    OVERVIEW_STALE_SERVE_SECONDS is returned at once and refreshed in the
+    background. Two cases wait for a fresh computation instead: nothing recent
+    to serve, and a cached overview whose `registry_synced` is false when the
+    mirror has since finished its full pass. That one's counts are a prefix
+    now known to be one, and the registry total is the number its readers are
+    waiting for.
+    """
+    stored = rcache.last_stored(OVERVIEW_CACHE_KEY)
+    if stored is not None and isinstance(stored.value, OverviewMetrics):
+        now = time.monotonic()
+        if not stored.value.registry_synced and registry_sync.status().synced:
+            rcache.invalidate(OVERVIEW_CACHE_KEY)
+        elif stored.expiry <= now < stored.expiry + OVERVIEW_STALE_SERVE_SECONDS:
+            _refresh_in_background()
+            return stored.value
     result = await rcache.get_or_set(OVERVIEW_CACHE_KEY, OVERVIEW_CACHE_TTL_SECONDS, build_overview)
     if not isinstance(result, OverviewMetrics):
         raise RuntimeError(f"overview cache held {type(result).__name__}")
     return result
+
+
+# Background refreshes in flight, held so the loop cannot collect them early.
+_refreshes: set[asyncio.Task[object]] = set()
+
+
+def _refresh_in_background() -> None:
+    """Start a refresh of the cached overview without awaiting it. Concurrent
+    starts join one computation: `get_or_set` is single-flight."""
+    task = asyncio.get_running_loop().create_task(
+        rcache.get_or_set(OVERVIEW_CACHE_KEY, OVERVIEW_CACHE_TTL_SECONDS, build_overview)
+    )
+    _refreshes.add(task)
+    task.add_done_callback(_on_refresh_done)
+
+
+def _on_refresh_done(task: asyncio.Task[object]) -> None:
+    # Nothing awaits a background refresh, so its failure is logged here or
+    # nowhere. build_overview is documented never to raise; reaching this is
+    # a bug, and the stale overview keeps being served until it is fixed.
+    _refreshes.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("overview background refresh failed: %s", task.exception())
 
 
 @router.get("/metrics/overview", response_model=OverviewMetrics, summary="Dashboard overview metrics")
@@ -342,6 +407,8 @@ async def overview() -> OverviewMetrics:
     store with a 14-day UTC series, task completion over the in-memory task
     store, mean on-chain trust, and the registry's skill mix. Nothing is a
     baseline or a fallback: a part that could not be read is null (or []) and
-    `degraded` is true. Cached for 15 s and shared across callers.
+    `degraded` is true, as it is while `registry_synced` is false. Cached for
+    15 s and shared across callers; a recently expired overview is served
+    while it refreshes in the background.
     """
     return await fetch_overview()
