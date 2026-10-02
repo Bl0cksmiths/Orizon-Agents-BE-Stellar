@@ -242,3 +242,25 @@ def test_a_later_failing_pass_keeps_the_latch_and_its_count(
 def test_status_is_a_copy() -> None:
     registry_sync.status().synced = True
     assert registry_sync.status().synced is False
+
+
+# ── /readiness ────────────────────────────────────────────────────────────
+def test_readiness_reports_the_registry_block(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lifespan's first pass over a blank registry is full by definition,
+    so a booted test app reports a synced mirror of the seeded catalog."""
+    body = client.get("/readiness").json()
+    registry = body["registry"]
+    assert set(registry) == {"synced", "syncing", "agents", "last_full_sync_at"}
+    assert registry["synced"] is True
+    assert registry["syncing"] is False
+    assert registry["agents"] == len(state.agents)
+    assert isinstance(registry["last_full_sync_at"], float)
+
+
+def test_readiness_reports_a_partial_mirror_as_unsynced(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry_sync, "_status", registry_sync.SyncStatus(syncing=True))
+    r = client.get("/readiness")
+    assert r.json()["registry"] == {"synced": False, "syncing": True, "agents": None, "last_full_sync_at": None}
+    # Informational: a partial mirror never moves the verdict.
+    monkeypatch.setattr(registry_sync, "_status", registry_sync.SyncStatus(synced=True, agents=1))
+    assert client.get("/readiness").status_code == r.status_code
