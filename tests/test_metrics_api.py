@@ -657,23 +657,28 @@ def test_polls_within_the_ttl_share_one_computation(client, registry, monkeypatc
     assert second["agents"]["registered"] == 1
 
 
-def test_the_cache_expires_after_the_ttl(registry, monkeypatch) -> None:
+def test_an_expired_overview_is_served_once_while_it_refreshes(registry, monkeypatch) -> None:
+    """Past the TTL the next poll gets the last overview at once and starts one
+    refresh behind it; the poll after that sees the refreshed numbers."""
     calls = _counting_build(monkeypatch)
     monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.2)
     registry(_seeded("agt_a"))
 
-    async def go() -> tuple[OverviewMetrics, OverviewMetrics, OverviewMetrics]:
+    async def go() -> tuple[OverviewMetrics, ...]:
         first = await metrics_router.fetch_overview()
         cached = await metrics_router.fetch_overview()
         registry(_seeded("agt_a"), _seeded("agt_b"))
         await asyncio.sleep(0.3)
-        return first, cached, await metrics_router.fetch_overview()
+        stale = await metrics_router.fetch_overview()
+        await asyncio.gather(*metrics_router._refreshes)
+        return first, cached, stale, await metrics_router.fetch_overview()
 
-    first, cached, expired = asyncio.run(go())
+    first, cached, stale, refreshed = asyncio.run(go())
     assert len(calls) == 2
     assert cached is first
-    assert expired.agents.registered == 2
-    assert expired.generated_at > first.generated_at
+    assert stale is first
+    assert refreshed.agents.registered == 2
+    assert refreshed.generated_at > first.generated_at
 
 
 def test_concurrent_polls_are_single_flight(registry, monkeypatch) -> None:
