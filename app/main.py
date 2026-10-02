@@ -42,6 +42,7 @@ from .routers import (
 # Imported by symbol, not as a module: the root `/health` handler defined
 # below rebinds the name `health` at module scope, which would shadow a
 # `from .routers import health` module import at call time.
+from .routers.agents import REGISTRY_COUNT_HEADER, REGISTRY_SYNCED_HEADER
 from .routers.health import HealthResponse, health_payload
 from .routers.health import router as health_router
 
@@ -409,6 +410,10 @@ app.add_middleware(
     # is precisely why it would have been found the first time it mattered.
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-api-key", "x-task-token", "x-dispute-read-grant"],
+    # Response headers a cross-origin caller may read. GET /api/agents says in
+    # these whether its list is the whole registry (routers/agents.py); a
+    # browser hides any header not listed here from cross-origin script.
+    expose_headers=[REGISTRY_SYNCED_HEADER, REGISTRY_COUNT_HEADER],
 )
 
 # Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
