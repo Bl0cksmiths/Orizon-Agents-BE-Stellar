@@ -207,9 +207,10 @@ def _patch_reps(monkeypatch: pytest.MonkeyPatch, builder: Callable[[str], RepInf
 
 
 def _overview(client) -> dict:
-    """A fresh computation: the cache is cleared first so state set up by the
-    test is what is measured."""
+    """A fresh computation: the cache and the snapshot are cleared first so
+    state set up by the test is what is measured."""
     rcache.clear()
+    metrics_router.overview_cell.reset()
     r = client.get("/api/metrics/overview")
     assert r.status_code == 200, r.text
     return r.json()
@@ -642,6 +643,13 @@ def _counting_build(monkeypatch: pytest.MonkeyPatch, delay: float = 0.0) -> list
     return calls
 
 
+async def _refresh_behind() -> None:
+    """Wait for the rebuild a stale read started behind itself."""
+    task = metrics_router.overview_cell._live_task()
+    assert task is not None, "a stale read must start a rebuild"
+    await task
+
+
 def test_the_cache_ttl_is_short() -> None:
     assert 5.0 <= metrics_router.OVERVIEW_CACHE_TTL_SECONDS <= 30.0
 
@@ -661,7 +669,7 @@ def test_an_expired_overview_is_served_once_while_it_refreshes(registry, monkeyp
     """Past the TTL the next poll gets the last overview at once and starts one
     refresh behind it; the poll after that sees the refreshed numbers."""
     calls = _counting_build(monkeypatch)
-    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.2)
+    monkeypatch.setattr(metrics_router.overview_cell, "fresh_seconds", 0.2)
     registry(_seeded("agt_a"))
 
     async def go() -> tuple[OverviewMetrics, ...]:
@@ -670,7 +678,7 @@ def test_an_expired_overview_is_served_once_while_it_refreshes(registry, monkeyp
         registry(_seeded("agt_a"), _seeded("agt_b"))
         await asyncio.sleep(0.3)
         stale = await metrics_router.fetch_overview()
-        await asyncio.gather(*metrics_router._refreshes)
+        await _refresh_behind()
         return first, cached, stale, await metrics_router.fetch_overview()
 
     first, cached, stale, refreshed = asyncio.run(go())
@@ -697,7 +705,7 @@ def test_a_slow_build_never_delays_a_poll_with_a_recent_overview(registry, monke
     """The latency path: a rebuild that runs to the reputation deadline must not
     be what a dashboard poll waits on once there is an overview to serve."""
     calls = _counting_build(monkeypatch, delay=0.5)
-    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.05)
+    monkeypatch.setattr(metrics_router.overview_cell, "fresh_seconds", 0.05)
     registry(_seeded("agt_a"))
 
     async def go() -> tuple[OverviewMetrics, OverviewMetrics, float]:
@@ -706,7 +714,7 @@ def test_a_slow_build_never_delays_a_poll_with_a_recent_overview(registry, monke
         started = time.perf_counter()
         polled = await metrics_router.fetch_overview()
         elapsed = time.perf_counter() - started
-        await asyncio.gather(*metrics_router._refreshes)
+        await _refresh_behind()
         return first, polled, elapsed
 
     first, polled, elapsed = asyncio.run(go())
@@ -717,8 +725,8 @@ def test_a_slow_build_never_delays_a_poll_with_a_recent_overview(registry, monke
 
 def test_an_overview_too_old_to_serve_waits_for_a_fresh_one(registry, monkeypatch) -> None:
     calls = _counting_build(monkeypatch)
-    monkeypatch.setattr(metrics_router, "OVERVIEW_CACHE_TTL_SECONDS", 0.05)
-    monkeypatch.setattr(metrics_router, "OVERVIEW_STALE_SERVE_SECONDS", 0.05)
+    monkeypatch.setattr(metrics_router.overview_cell, "fresh_seconds", 0.05)
+    monkeypatch.setattr(metrics_router.overview_cell, "max_serve_seconds", 0.1)
     registry(_seeded("agt_a"))
 
     async def go() -> tuple[OverviewMetrics, OverviewMetrics]:
@@ -751,3 +759,4 @@ def test_the_first_full_pass_replaces_a_partial_overview_at_once(registry, monke
     assert full.registry_synced is True
     assert full.agents.registered == 2
     assert len(calls) == 2
+
