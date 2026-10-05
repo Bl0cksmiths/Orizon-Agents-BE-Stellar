@@ -115,7 +115,7 @@ async def _emit(
     if settlement is not None:
         task = state.tasks.get(task_id)
         if task is not None:
-            state.tasks[task_id] = task.model_copy(update={"settlement": settlement})
+            state.put_task(task.model_copy(update={"settlement": settlement}))
     line = TraceLine(t=_now_ts(start), level=level, msg=msg, settlement=settlement)
     state.append_trace(task_id, line)
     await bus.publish(task_id, line)
@@ -402,8 +402,9 @@ async def execute_plan(
 
     task_id = f"tsk_{secrets.token_hex(8)}"
     # Capability token for reading this task (status/artifact/trace). Lives
-    # in state.task_tokens — never on the Task response model — and is only
-    # enforced when settings.task_auth_required is on.
+    # in state.task_tokens — never on the Task response model; the durable
+    # store keeps only its digest — and is only enforced when
+    # settings.task_auth_required is on.
     read_token = secrets.token_urlsafe(24)
     task = Task(
         id=task_id,
@@ -413,8 +414,7 @@ async def execute_plan(
         status="running",
         # started_at defaults to now; `started` is derived from it per response.
     )
-    state.add_task(task)
-    state.task_tokens[task_id] = read_token
+    state.add_task(task, read_token=read_token)
 
     _track_background_task(
         asyncio.create_task(_run(plan, task_id, auth_id_hex=auth_id_hex, payer=payer, authorized_max=authorized_max))
@@ -988,14 +988,16 @@ def _finalize_task(
     task = state.tasks.get(task_id)
     if task is None:
         return
-    state.tasks[task_id] = task.model_copy(
-        update={
-            "status": status,
-            "spent": round(spent, 4),
-            "artifact": artifact,
-            "charge_tx": charge_tx,
-            "proof_tx": proof_tx,
-        }
+    state.put_task(
+        task.model_copy(
+            update={
+                "status": status,
+                "spent": round(spent, 4),
+                "artifact": artifact,
+                "charge_tx": charge_tx,
+                "proof_tx": proof_tx,
+            }
+        )
     )
 
 
