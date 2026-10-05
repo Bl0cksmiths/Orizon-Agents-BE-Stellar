@@ -209,3 +209,48 @@ def test_a_run_whose_settle_did_not_confirm_is_final_before_its_ratings(
         await run
 
     _run(scenario)
+
+
+def test_a_stream_opened_after_settlement_follows_the_run_to_its_end(
+    monkeypatch: pytest.MonkeyPatch, store: _Store
+) -> None:
+    """The task is `complete` from the settle on, but the run is still writing
+    — the seal, the ratings. A viewer who opens the stream in that stretch gets
+    the history AND the lines still to come, and `done` only when the run
+    closes the stream, not the moment the status turned terminal."""
+    from app.routers import trace as trace_router
+
+    async def scenario() -> None:
+        _install(monkeypatch, _Chain(auth=_auth()))
+        _workers(monkeypatch)
+        rating, release, _submitted = _held_ratings(monkeypatch)
+        run = _start("tsk_fin_stream")
+        await _until(rating, "the first rating submit")
+        assert state.tasks["tsk_fin_stream"].status == "complete"
+
+        response = await trace_router.stream_trace("tsk_fin_stream")
+        events = response.body_iterator
+        history = len(state.traces["tsk_fin_stream"])
+        received: list[dict[str, str]] = [await anext(events) for _ in range(history)]
+        release.set()
+        async for event in events:
+            received.append(event)
+            if event["event"] == "done":
+                break
+        await run
+        kinds = [e["event"] for e in received]
+        assert kinds[-1] == "done"
+        after_history = [e["data"] for e in received[history:] if e["event"] == "trace"]
+        assert any("reputation →" in data for data in after_history)
+
+    _run(scenario)
+
+
+def test_a_finished_task_no_run_here_is_writing_still_replays_and_ends(client: Any) -> None:
+    """The other half of the rule: a terminal task with no live run in this
+    process — finished long ago, or read back from the store — has no producer,
+    so its stream must end rather than ping forever."""
+    state.add_task(Task(id="tsk_fin_old", intent="x", agents=1, spent=0.0, status="complete"))
+    with client.stream("GET", "/api/trace/tsk_fin_old/stream") as r:
+        lines = [line for line in r.iter_lines() if line.startswith("event:")]
+    assert lines == ["event: done"]
