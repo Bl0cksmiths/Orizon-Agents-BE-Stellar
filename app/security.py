@@ -1066,10 +1066,8 @@ class KeyedRateLimiter:
     dashboard polling. That is the wrong budget for a route whose every call
     buys an LLM completion: 1200 cheap reads a minute is a usable console, 1200
     planner calls a minute is a bill. A route that costs real money takes one
-    of these on top, keyed by the same `client_key()` so "per client" means
-    exactly what it means for the global limiter — including its caveat: at
-    TRUSTED_PROXY_HOPS=0 every caller that shares the last forwarded hop
-    shares a budget here too.
+    of these on top, keyed by the same `client_identity()` so "per client" means
+    exactly what it means for the global limiter.
 
     `limit` is read on every hit, so a deployment or a test can tune it
     without rebuilding the limiter; 0 or less switches it off. Same
@@ -1084,10 +1082,16 @@ class KeyedRateLimiter:
         self._hits: dict[str, deque[float]] = {}
         self._since_sweep = 0
 
-    def hit(self, key: str, now: float | None = None) -> int | None:
-        """Spend one unit of `key`'s budget: None if admitted, else the Retry-After seconds."""
+    def hit(self, key: str | None, now: float | None = None) -> int | None:
+        """Spend one unit of `key`'s budget: None if admitted, else the Retry-After seconds.
+
+        A None key — `client_identity` could not attribute the caller — is
+        admitted: there is no client to hold to a budget, and one shared bucket
+        would let any such caller starve the rest. The route's own ceiling
+        (a concurrency gate, a capped challenge budget) still holds them.
+        """
         limit = self._limit()
-        if limit <= 0:
+        if limit <= 0 or key is None:
             return None
         now = time.monotonic() if now is None else now
         cutoff = now - self.window

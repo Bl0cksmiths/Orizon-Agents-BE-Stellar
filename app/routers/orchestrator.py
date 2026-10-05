@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse, StoredPlan
-from ..security import CodedHTTPException, KeyedRateLimiter, client_key, request_id_var
+from ..security import CodedHTTPException, KeyedRateLimiter, client_identity, request_id_var
 from ..services import authorization_guard as guard
 from ..services import task_persistence
 from ..services.execution_svc import CapacityExhaustedError, PlanExpiredError, execute_plan, plan_expired
@@ -42,7 +42,7 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
     # the demo path and makes no LLM call, so throttling it would cost a demo
     # its safety net to save nothing; `decompose` makes the same call.
     if detect_kit(req.intent) is None:
-        retry_after = _planner_limiter.hit(client_key(dict(request.scope)))
+        retry_after = _planner_limiter.hit(client_identity(dict(request.scope)))
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:

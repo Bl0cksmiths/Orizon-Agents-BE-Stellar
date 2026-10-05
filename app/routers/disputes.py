@@ -52,7 +52,7 @@ from ..security import (
     CodedHTTPException,
     ErrorEnvelope,
     KeyedRateLimiter,
-    client_key,
+    client_identity,
     request_id_var,
     require_adjudicator,
 )
@@ -664,7 +664,7 @@ async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> Disp
     (`_challenge_limiter`); past it, 429 `dispute_challenge_rate_limited` with
     Retry-After, before the settlement is read.
     """
-    retry_after = _challenge_limiter.hit(client_key(dict(request.scope)))
+    retry_after = _challenge_limiter.hit(client_identity(dict(request.scope)))
     if retry_after is not None:
         raise HTTPException(429, "dispute_challenge_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
