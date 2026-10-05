@@ -341,6 +341,62 @@ def test_a_step_whose_agent_has_no_onchain_owner_is_not_paid(monkeypatch, store)
     with pytest.raises(dispute_svc.DisputeError) as refused:
         dispute_svc._disputable_step(record, 0)
     assert refused.value.code == "nothing_was_charged"
+    # D-086: the attestation names the agent that was paid, and nobody else.
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[4]) == ["ext_op"]
+    assert scval.to_native(seal[5]) == [_receipt(0)]
+
+
+# ── the seal attests to what was paid (D-086) ───────────────────────────
+def test_the_seal_names_each_paid_payout_beside_its_receipt(monkeypatch, store):
+    """One agent hired for two steps and paid for both is named once per
+    payout, so `agents[i]` and `receipts[i]` describe the same payment; the
+    step that failed between them is named nowhere."""
+    chain = _install(monkeypatch, _Chain(auth=_auth()))
+    monkeypatch.setattr(execution_svc, "STEP_TIMEOUT_SECONDS", 0.05)
+    by_step = iter([_Ok(), _Hangs(), _Ok()])
+
+    async def _resolve(agent_id):
+        return next(by_step)
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
+
+    async def _no_ratings(*a, **k):
+        return None
+
+    monkeypatch.setattr(execution_svc, "_submit_ratings", _no_ratings)
+
+    _run(_plan((0.01, 0.02, 0.03), ("ext_a", "ext_b", "ext_a")), "tsk_v2_seal_paid")
+
+    [settle] = chain.named("settle")
+    assert _payouts(settle) == [{"agent_id": "ext_a", "amount": 100_000}, {"agent_id": "ext_a", "amount": 300_000}]
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[4]) == ["ext_a", "ext_a"]
+    assert scval.to_native(seal[5]) == [_receipt(0), _receipt(1)]
+    assert scval.to_native(seal[6]) == 400_000
+
+
+def test_a_run_that_delivered_but_paid_nobody_is_not_sealed(monkeypatch, store):
+    """Every delivered step's agent has no on-chain owner, so the settle pays
+    nobody and releases the custody. An attestation naming no agent, no
+    receipt and zero spent attests to nothing — and one naming the unpaid
+    agents would attest to payments that never happened — so no seal is
+    submitted and the task carries no proof hash."""
+    chain = _install(monkeypatch, _Chain(auth=_auth(), owners={"agt_0": None, "agt_1": None}))
+    _workers(monkeypatch, {"agt_0": _Ok(), "agt_1": _Ok()})
+
+    _run(_plan((0.01, 0.02)), "tsk_v2_paid_nobody")
+
+    [settle] = chain.named("settle")
+    assert _payouts(settle) == []
+    assert chain.named("seal") == []
+    task = state.tasks["tsk_v2_paid_nobody"]
+    assert (task.charge_tx, task.proof_tx, task.settlement) == (SETTLE_TX, None, "released")
+    record = store.recorded[-1]
+    assert record.proof_tx is None and all(s.delivered and not s.paid_usdc for s in record.steps)
+    messages = [line.msg for line in state.traces["tsk_v2_paid_nobody"]]
+    assert "no agent was paid — nothing to attest, no seal submitted" in messages
+    assert not any(m.startswith("workflow sealed") for m in messages)
 
 
 def test_owner_reads_are_cached_per_agent(monkeypatch):
