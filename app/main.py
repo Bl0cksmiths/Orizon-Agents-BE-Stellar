@@ -24,6 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import SERVICE_VERSION, settings
 from .pdax.client import aclose_pdax_client
+from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
     agents,
     binding,
@@ -368,6 +369,11 @@ app = FastAPI(
 # router, while the 413 still passes through the header/CORS/request-id
 # layers wrapping it.
 app.add_middleware(BodyLimitMiddleware)
+
+# Per-route budgets for the write and expensive routes (app/rate_limit.py).
+# Inside the global limiter, so a request it refused never spends one, and
+# outside the body limiter, which still meters the body this layer replays.
+app.add_middleware(RouteRateLimitMiddleware)
 
 # Registered before CORS so CORS wraps it and 429 responses still carry
 # the Access-Control-Allow-Origin header the browser needs to read them.
