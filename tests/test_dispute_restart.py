@@ -20,18 +20,19 @@ What each test pins is what the buyer needs AFTER the restart, read from what
 survived it:
 
   * the receipt: `GET /api/tasks/{id}/disputes` serves the settlement, the job
-    id and the window from Postgres, while the task itself is gone;
+    id and the window from Postgres, and since D-090 the task itself is read
+    back from Postgres too (`tests/test_task_restart.py` pins that half);
   * the dispute: the challenge and the open are judged against the settlement
     record — its payer, its stamped window, its steps — and never against the
-    task state or the task token, which the restart took;
+    task state or the task token;
   * the outcome: the uphold credits the payer and writes the dispute rating;
-  * the privacy rule: the buyer's reason stays behind a proof, and the token
-    from before the restart is no longer one; the payer's read grant is.
+  * the privacy rule: the buyer's reason stays behind a proof — the token from
+    before the restart, which survives it, or the payer's read grant.
 
-Under TASK_AUTH_REQUIRED the listing is gated, and the restart took the token
-it admits. `test_under_enforcement_the_payer_reaches_the_listing_by_signature`
-pins the way back in: a read grant the payer earns from the durable
-settlement, before any dispute exists.
+Under TASK_AUTH_REQUIRED the listing is gated. A payer who no longer holds the
+token has a way back in, which
+`test_under_enforcement_the_payer_reaches_the_listing_by_signature` pins: a
+read grant earned from the durable settlement, before any dispute exists.
 
 The in-memory store cannot keep this promise, and the last test says so, with
 the boot line that tells an operator.
@@ -286,9 +287,13 @@ def test_a_dispute_raised_after_a_restart_is_accepted_upheld_and_credited(
     assert recorded["task_id"] == task_id and recorded["payer"] == BUYER.public_key
 
     with _process(monkeypatch) as client:
-        # The restart took the task: this process never ran it.
-        assert client.get(f"/api/tasks/{task_id}", headers={"X-Task-Token": token}).status_code == 404
-        assert task_id not in state.tasks and task_id not in state.task_tokens
+        # The restart did not take the task (D-090): this process never ran
+        # it, and serves it from Postgres, its token checked against the
+        # digest the store keeps — never the token itself.
+        assert task_id not in state.tasks
+        survived = client.get(f"/api/tasks/{task_id}", headers={"X-Task-Token": token})
+        assert (survived.status_code, survived.json()["status"]) == (200, "complete")
+        assert task_id not in state.task_tokens and task_id in state.task_token_digests
 
         # The receipt is read from what survived: the settlement in Postgres.
         listing = client.get(f"/api/tasks/{task_id}/disputes").json()
@@ -324,9 +329,9 @@ def test_a_dispute_raised_after_a_restart_is_accepted_upheld_and_credited(
 def test_the_payer_reads_their_receipt_after_the_restart_and_a_stranger_does_not(
     monkeypatch: pytest.MonkeyPatch, deployment: dict[str, Any]
 ) -> None:
-    """The reason stays behind a proof. The token from before the restart is not
-    one any more; the payer's signature, checked against the durable settlement,
-    is."""
+    """The reason stays behind a proof. The token from before the restart is
+    still one — the task and its token digest are durable (D-090) — and so is
+    the payer's signature, checked against the durable settlement."""
     task_id, token, _job = _before_the_restart(monkeypatch)
     with _process(monkeypatch) as client:
         job = client.get(f"/api/tasks/{task_id}/disputes").json()["settlement"]["job_id_hex"]
@@ -343,8 +348,9 @@ def test_the_payer_reads_their_receipt_after_the_restart_and_a_stranger_does_not
         one = client.get(f"/api/disputes/{dispute_id}", headers=grant).json()
         one_anonymous = client.get(f"/api/disputes/{dispute_id}").json()
 
-    for withheld in (anonymous["disputes"][0], stale_token["disputes"][0], one_anonymous):
+    for withheld in (anonymous["disputes"][0], one_anonymous):
         assert (withheld["reason"], withheld["reason_withheld"], withheld["status"]) == ("", True, "open")
+    assert (stale_token["disputes"][0]["reason"], stale_token["disputes"][0]["reason_withheld"]) == (REASON, False)
     assert (stranger.status_code, stranger.json()["error"]["code"]) == (403, "not_the_payer")
     assert (listing["disputes"][0]["reason"], listing["disputes"][0]["reason_withheld"]) == (REASON, False)
     assert (one["reason"], one["reason_withheld"]) == (REASON, False)
@@ -406,16 +412,17 @@ def test_after_a_restart_the_stamped_window_still_closes(
     assert _rows(deployment["dsn"]) == []
 
 
-# ── TASK_AUTH_REQUIRED: the token died with the process ─────────
+# ── TASK_AUTH_REQUIRED: the token survives; a grant needs none ──
 
 
 def test_under_enforcement_the_payer_reaches_the_listing_by_signature(
     monkeypatch: pytest.MonkeyPatch, deployment: dict[str, Any]
 ) -> None:
     """The listing is where the console finds the job id for a FIRST dispute,
-    and under enforcement it admits a task token or a read grant. The restart
-    took the token, and no dispute exists yet — so the payer earns a grant from
-    the durable settlement and goes on to dispute."""
+    and under enforcement it admits a task token or a read grant. The token
+    survives the restart (D-090); a payer who no longer has it — a new device,
+    a cleared browser — earns a grant from the durable settlement instead and
+    goes on to dispute."""
     monkeypatch.setattr(settings, "task_auth_required", True)
     task_id, token, _job = _before_the_restart(monkeypatch)
     with _process(monkeypatch) as client:
@@ -430,8 +437,8 @@ def test_under_enforcement_the_payer_reaches_the_listing_by_signature(
         assert listing.status_code == 200, listing.text
         opened = _dispute(client, listing.json()["settlement"]["job_id_hex"], 1, BUYER, BUYER.public_key)
 
-    for refused in (anonymous, stale_token):
-        assert (refused.status_code, refused.json()["error"]["code"]) == (404, "unknown_task")
+    assert (anonymous.status_code, anonymous.json()["error"]["code"]) == (404, "unknown_task")
+    assert stale_token.status_code == 200, stale_token.text
     assert (stranger.status_code, stranger.json()["error"]["code"]) == (403, "not_the_payer")
     assert opened.status_code == 200, opened.text
     assert opened.json()["status"] == "open"
