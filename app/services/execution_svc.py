@@ -2421,8 +2421,13 @@ async def _settle_and_record(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None = None,
+    on_money_moved: Callable[[str], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Charge, record the settlement, seal, then record the seal — in that order.
+
+    `on_money_moved(tx)` is called once, the moment the charge or settle
+    CONFIRMS and its settlement is recorded — before the seal is submitted —
+    so the run can make its receipt final without waiting on the seal.
 
     Against a v2 escrow the charge is `_settle_v2`'s one `settle`, paying each
     delivered step its own amount, and the record keeps those per-step
@@ -2450,6 +2455,7 @@ async def _settle_and_record(
             delivered_steps=delivered_steps,
             output_summaries=output_summaries,
             authorized_max=authorized_max,
+            on_money_moved=on_money_moved,
         )
 
     recorded: list[SettlementRecord] = []
@@ -2470,6 +2476,8 @@ async def _settle_and_record(
         )
         if record is not None:
             recorded.append(record)
+        if on_money_moved is not None:
+            on_money_moved(charge_tx)
 
     charge_tx, proof_tx, job_id = await _settle_onchain(
         task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=total_usdc, on_charged=_on_charged
@@ -2504,6 +2512,7 @@ async def _settle_and_record_v2(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None,
+    on_money_moved: Callable[[str], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """`_settle_and_record`'s order over `_settle_v2`: settle, record, seal, record the seal."""
     recorded: list[SettlementRecord] = []
@@ -2532,6 +2541,8 @@ async def _settle_and_record_v2(
         )
         if record is not None:
             recorded.append(record)
+        if on_money_moved is not None:
+            on_money_moved(settle_tx)
 
     settle_tx, proof_tx, job_id = await _settle_v2(
         task_id,
