@@ -430,7 +430,7 @@ def test_the_overview_never_runs_the_adoption_settlement_scan(registry, monkeypa
         (adoption_svc, "_settlement", ascan),
         (adoption_svc, "_unmirrored", ascan),
         (adoption_svc, "build_report", ascan),
-        (adoption_svc, "fetch_report", ascan),
+        (adoption_svc, "report_snapshot", ascan),
     ):
         monkeypatch.setattr(owner, name, fake)
     registry(_agent("ext1", owner=EXT_A), _agent("ext2", owner=EXT_B), _agent("ours", owner=TEAM))

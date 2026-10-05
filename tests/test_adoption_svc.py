@@ -649,13 +649,15 @@ def test_concurrent_callers_share_one_computation(world: _World, monkeypatch: py
     rcache.clear()
 
     async def many() -> list[adoption_svc.AdoptionReport]:
-        first = await asyncio.gather(*(adoption_svc.fetch_report() for _ in range(8)))
-        again = await adoption_svc.fetch_report()  # inside the TTL: a hit
-        return [*first, again]
+        cell = adoption_svc.report_cell
+        first = await asyncio.gather(*(cell.get(wait_seconds=None) for _ in range(8)))
+        again = await adoption_svc.report_snapshot()  # inside the refresh interval: a hit
+        return [snap.value for snap in (*first, again) if snap is not None]
 
     reports = asyncio.run(many())
 
     assert builds == 1
+    assert len(reports) == 9
     assert world.settlement_calls == ["ext_a"]
     assert all(r is reports[0] for r in reports)
 
