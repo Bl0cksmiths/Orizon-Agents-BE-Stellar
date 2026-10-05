@@ -35,6 +35,17 @@ STEP_TIMEOUT_SECONDS = 120.0
 # collected mid-run. Tasks remove themselves on completion.
 _background_tasks: set[asyncio.Task] = set()
 
+# Task ids whose run is executing in THIS process, from its first line to its
+# stream's close. A task goes terminal at settlement, while its run still has
+# the seal reconciliation and the ratings to write, so the status cannot say
+# whether a producer still feeds the task's stream; this can (`is_live`).
+_live_runs: set[str] = set()
+
+
+def is_live(task_id: str) -> bool:
+    """True while this process's run of `task_id` may still write trace lines."""
+    return task_id in _live_runs
+
 
 class CapacityExhaustedError(RuntimeError):
     """execute_plan refused to start: the concurrent-workflow ceiling
@@ -434,6 +445,7 @@ async def _run(
     payer: str | None = None,
     authorized_max: int | None = None,
 ) -> None:
+    _live_runs.add(task_id)
     start = time.monotonic()
     spent = 0.0
     succeeded = 0  # steps that returned output; drives the terminal status
@@ -954,6 +966,7 @@ async def _run(
         # (a bare `await asyncio.sleep` here would swallow the close when a
         # CancelledError landed on it).
         await asyncio.shield(_finish_stream(task_id))
+        _live_runs.discard(task_id)
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
