@@ -397,6 +397,9 @@ def test_a_run_that_delivered_but_paid_nobody_is_not_sealed(monkeypatch, store):
     messages = [line.msg for line in state.traces["tsk_v2_paid_nobody"]]
     assert "no agent was paid — nothing to attest, no seal submitted" in messages
     assert not any(m.startswith("workflow sealed") for m in messages)
+    # Nothing was charged, so no step can be disputed (`nothing_was_charged`):
+    # the trace must not promise the buyer a window they cannot use.
+    assert not any(m.startswith("dispute window open") for m in messages)
 
 
 def test_owner_reads_are_cached_per_agent(monkeypatch):
