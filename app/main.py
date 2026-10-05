@@ -86,16 +86,18 @@ class JsonLogFormatter(logging.Formatter):
         msg = record.getMessage()
         if record.exc_info:
             msg = f"{msg}\n{self.formatException(record.exc_info)}"
-        return json.dumps(
-            {
-                "ts": f"{self.formatTime(record, '%Y-%m-%dT%H:%M:%S')}.{int(record.msecs):03d}Z",
-                "level": record.levelname,
-                "logger": record.name,
-                "msg": msg,
-                "request_id": getattr(record, "request_id", "-"),
-            },
-            ensure_ascii=False,
-        )
+        line = {
+            "ts": f"{self.formatTime(record, '%Y-%m-%dT%H:%M:%S')}.{int(record.msecs):03d}Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": msg,
+            "request_id": getattr(record, "request_id", "-"),
+        }
+        # Structured fields a record carries (the access log's `http`).
+        http = getattr(record, "http", None)
+        if isinstance(http, dict):
+            line["http"] = http
+        return json.dumps(line, ensure_ascii=False, default=str)
 
 
 # Root logging: everything the app emits leaves as one JSON line carrying the

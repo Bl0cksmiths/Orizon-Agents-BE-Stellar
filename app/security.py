@@ -673,19 +673,32 @@ class RequestContextMiddleware:
                 ]
                 if path not in EXEMPT_PATHS:
                     duration_ms = (time.monotonic() - started) * 1000.0
+                    # Path + query with token values masked: SSE auth tokens
+                    # ride in the query string and must not be recoverable
+                    # from logs.
+                    target = _redacted_target(scope)
+                    # Same key the rate limiter buckets on, so a 429 in the
+                    # log can be traced to the client that caused it.
+                    client = client_key(scope)
                     logger.info(
                         "%s %s -> %s in %.1fms [%s] client=%s",
                         method,
-                        # Path + query with token values masked: SSE auth
-                        # tokens ride in the query string and must not be
-                        # recoverable from logs.
-                        _redacted_target(scope),
+                        target,
                         message.get("status"),
                         duration_ms,
                         request_id,
-                        # Same key the rate limiter buckets on, so a 429 in
-                        # the log can be traced to the client that caused it.
-                        client_key(scope),
+                        client,
+                        # The same facts as data, for a log platform to filter
+                        # on; the JSON formatter emits them under "http".
+                        extra={
+                            "http": {
+                                "method": method,
+                                "target": target,
+                                "status": message.get("status"),
+                                "duration_ms": round(duration_ms, 1),
+                                "client": client,
+                            }
+                        },
                     )
             await send(message)
 
