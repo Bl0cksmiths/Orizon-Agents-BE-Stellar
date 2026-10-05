@@ -310,3 +310,63 @@ def test_the_validity_window_reasoned_about_is_the_one_the_client_builds() -> No
 
     source = inspect.getsource(sc._send_server_signed)
     assert f".set_timeout({execution_svc.SEAL_TX_TIMEOUT_SECONDS})" in source
+
+
+# ── the receipt the console reads (`GET /api/tasks/{id}/disputes`) ──────
+def test_the_receipt_carries_the_seal_state_and_the_proof_it_found(
+    monkeypatch: pytest.MonkeyPatch, store: _Store, client: Any
+) -> None:
+    now = time.time()
+    _install_seal(
+        monkeypatch,
+        _SealChain(
+            [{"hash": H1, "status": "FAILED"}, {"hash": H2, "status": "SUCCESS"}],
+            lookups={H1: [_found(H1, "FAILED", latest_close=now)]},
+        ),
+    )
+    _run(_plan((0.01, 0.02)), "tsk_v2_seal_receipt")
+
+    receipt = client.get("/api/tasks/tsk_v2_seal_receipt/disputes").json()
+
+    assert (receipt["seal"], receipt["proof_tx"]) == ("sealed", H2)
+    assert receipt["settlement"]["proof_tx"] == H2
+
+
+def test_the_receipt_says_when_the_seal_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch, store: _Store, client: Any
+) -> None:
+    now = time.time()
+    _install_seal(
+        monkeypatch,
+        _SealChain([{"hash": H1, "status": "timeout"}], lookups={H1: [_found(H1, "NOT_FOUND", latest_close=now)]}),
+    )
+    _run(_plan((0.01, 0.02)), "tsk_v2_seal_receipt_open")
+
+    receipt = client.get("/api/tasks/tsk_v2_seal_receipt_open/disputes").json()
+
+    assert (receipt["seal"], receipt["proof_tx"], receipt["settlement_state"]) == ("unconfirmed", None, "settled")
+
+
+def test_without_the_task_the_receipt_reads_the_seal_off_the_settlement() -> None:
+    """After a restart without the task (no DATABASE_URL), the settlement
+    record is all there is: a proof hash on it IS a confirmed seal."""
+    from dataclasses import replace
+
+    from app.routers import disputes
+    from app.services.dispute_store import SettlementRecord, SettlementStep
+
+    record = SettlementRecord(
+        task_id="tsk_v2_seal_gone",
+        payer="G" + "A" * 55,
+        auth_id_hex="ab" * 16,
+        job_id_hex="cd" * 16,
+        charge_tx="ef" * 32,
+        proof_tx=H1,
+        settled_usdc=0.01,
+        steps=(SettlementStep(0, "agt_0", "w.agt_0", 0.01, True),),
+        settled_at=1.0,
+        window_closes_at=2.0,
+    )
+    assert disputes._receipt_seal("tsk_v2_seal_gone", record) == ("sealed", H1)
+    assert disputes._receipt_seal("tsk_v2_seal_gone", replace(record, proof_tx=None)) == (None, None)
+    assert disputes._receipt_seal("tsk_v2_seal_gone", None) == (None, None)
