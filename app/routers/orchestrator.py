@@ -102,7 +102,15 @@ def _refused_after_release(status: int, detail: str, code: str, message: str, re
     )
 
 
-def _response(task_id: str) -> ExecuteResponse:
+async def _response(task_id: str) -> ExecuteResponse:
+    # Write-through for the receipt: the task id and read token this hands out
+    # must outlive a restart that lands a moment later (D-090). Here, after the
+    # authorization is claimed for the task, so a cancelled wait cannot unclaim
+    # an authorization the run is spending. Bounded — a slow database delays
+    # durability, not the buyer's answer — and the write keeps retrying in the
+    # background if this gives up on it.
+    if not await task_persistence.flush(task_persistence.RESPONSE_FLUSH_SECONDS):
+        logger.warning("task %s: not yet durable when /execute answered; its write is still queued", task_id)
     return ExecuteResponse(task_id=task_id, read_token=state.task_tokens.get(task_id))
 
 
@@ -137,7 +145,7 @@ async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONRes
             # No task was minted; the client should retry once a slot frees up.
             logger.warning("execute rejected for plan %s: %s", req.plan_id, e)
             raise HTTPException(503, "capacity_exhausted") from e
-        return _response(task_id)
+        return await _response(task_id)
     return await _execute_paid(req, plan, req.auth_id_hex, req.payer)
 
 
@@ -198,7 +206,7 @@ async def _execute_paid(
             raise
         if enforced:
             guard.claim(auth_id_hex, task_id)
-    return _response(task_id)
+    return await _response(task_id)
 
 
 async def _refuse_expired(plan: StoredPlan, auth_id_hex: str, payer: str) -> JSONResponse:
