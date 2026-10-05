@@ -17,6 +17,7 @@ No pytest-asyncio, so async entry points run under a bare `asyncio.run`.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
@@ -677,3 +678,41 @@ def test_the_settlement_reads_fan_out_with_bounded_concurrency(world: _World, mo
     world.report()
 
     assert peak == adoption_svc.READ_CONCURRENCY
+
+
+# ── probe bounds ────────────────────────────────────────────────────────────
+def test_a_stalled_binding_probe_costs_that_agent_its_answer_not_the_build(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Hung:
+        async def get(self, agent_id: str) -> Any:
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(adoption_svc, "PROBE_TIMEOUT_SECONDS", 0.05)
+    world.store = _Hung()  # type: ignore[assignment]
+    world.agent("ext_a", EXT_A, _entry(1))
+
+    started = time.perf_counter()
+    report = world.report()
+
+    assert time.perf_counter() - started < 2.0
+    assert report.operators[0].agents[0].bound is None
+    assert _totals(report) == (1, 1, 1)
+
+
+def test_a_stalled_owner_probe_leaves_the_agent_unreadable(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def hung(agent_id: str) -> str | None:
+        await asyncio.sleep(30)
+        return None
+
+    monkeypatch.setattr(adoption_svc, "PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(adoption_svc.external_binding, "resolve_owner", hung)
+    world.agent("ext_a", EXT_A, _entry(1))
+    world.chain.list_ids.append("unmirrored_one")
+
+    started = time.perf_counter()
+    report = world.report()
+
+    assert time.perf_counter() - started < 2.0
+    assert report.unreadable_agents == ["unmirrored_one"]
+    assert report.degraded is True
