@@ -487,6 +487,9 @@ def test_every_payout_receipt_reaches_the_seal_and_the_record(monkeypatch, store
 
 def test_a_seal_that_did_not_confirm_is_not_kept_as_the_proof(monkeypatch, store):
     """S7: a rejected hash is evidence of nothing."""
+    # What the run does next — reconcile the seal — is test_seal_reconcile's;
+    # here it only must not wait out its real delays.
+    monkeypatch.setattr(execution_svc, "SEAL_RECONCILE_DELAYS", (0.0,))
     _install(monkeypatch, _Chain(auth=_auth(), seal={"hash": SEAL_TX, "status": "FAILED"}))
     _workers(monkeypatch, {"agt_0": _Ok()})
 
