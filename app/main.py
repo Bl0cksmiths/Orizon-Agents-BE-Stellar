@@ -23,6 +23,11 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import SERVICE_VERSION, settings
+
+# Imported by symbol, not as a module: the root `/health` handler defined
+# below rebinds the name `health` at module scope, which would shadow a
+# `from .routers import health` module import at call time.
+from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -39,11 +44,7 @@ from .routers import (
     tasks,
     trace,
 )
-
-# Imported by symbol, not as a module: the root `/health` handler defined
-# below rebinds the name `health` at module scope, which would shadow a
-# `from .routers import health` module import at call time.
-from .routers.agents import REGISTRY_COUNT_HEADER, REGISTRY_SYNCED_HEADER
+from .routers.agents import NEXT_CURSOR_HEADER, REGISTRY_COUNT_HEADER, REGISTRY_SYNCED_HEADER, TOTAL_COUNT_HEADER
 from .routers.health import HealthResponse, health_payload
 from .routers.health import router as health_router
 
@@ -445,9 +446,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-api-key", "x-task-token", "x-dispute-read-grant"],
     # Response headers a cross-origin caller may read. GET /api/agents says in
-    # these whether its list is the whole registry (routers/agents.py); a
+    # these whether its list is the whole registry, how long it is and where
+    # the next page starts (routers/agents.py); the snapshot reads say how old
+    # they are (app/http_cache.py); ETag is what a client revalidates with. A
     # browser hides any header not listed here from cross-origin script.
-    expose_headers=[REGISTRY_SYNCED_HEADER, REGISTRY_COUNT_HEADER],
+    expose_headers=[
+        REGISTRY_SYNCED_HEADER,
+        REGISTRY_COUNT_HEADER,
+        TOTAL_COUNT_HEADER,
+        NEXT_CURSOR_HEADER,
+        SNAPSHOT_AGE_HEADER,
+        SNAPSHOT_SOURCE_HEADER,
+        "ETag",
+        "Retry-After",
+    ],
 )
 
 # Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the

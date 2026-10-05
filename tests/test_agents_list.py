@@ -213,3 +213,17 @@ def test_an_unknown_field_is_422_naming_the_allowed_ones(client: TestClient, reg
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "invalid_fields"
     assert "allowed: id, name" in r.json()["error"]["message"]
+
+
+def test_a_cross_origin_caller_may_read_the_paging_and_snapshot_headers(client: TestClient, registry) -> None:
+    registry(3)
+    r = client.get(URL, params={"limit": 1}, headers={"Origin": "https://orizon-agents-fe-stellar.vercel.app"})
+    exposed = {h.strip().lower() for h in r.headers["access-control-expose-headers"].split(",")}
+    assert {
+        "x-total-count",
+        "x-next-cursor",
+        "x-snapshot-age",
+        "x-snapshot-source",
+        "etag",
+        "retry-after",
+    } <= exposed
