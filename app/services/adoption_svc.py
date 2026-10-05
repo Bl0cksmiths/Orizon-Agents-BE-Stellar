@@ -148,6 +148,11 @@ READ_CONCURRENCY = 4
 # itself keeps running (the cache shields it) and lands for the next request.
 AGENT_READ_BUDGET_SECONDS = 45.0
 
+# Ceiling on each of the smaller probes: one `owner_of` read, one binding-store
+# lookup. Each has its own transport timeouts; this is the bound the report
+# relies on, so one stalled probe costs one agent's answer, not the build.
+PROBE_TIMEOUT_SECONDS = 20.0
+
 # Contract `admin()` views. v2's settler and admin can be rotated, so these
 # are not cached for as long as settlement_svc caches values that never move.
 PLATFORM_READ_TTL_SECONDS = 300.0
@@ -448,8 +453,8 @@ async def _unmirrored(mirrored: set[str]) -> _Unmirrored:
 async def _owner_or_none(agent_id: str) -> str | None:
     """The live `owner_of`, or None when it could not be established."""
     try:
-        return await external_binding.resolve_owner(agent_id)
-    except external_binding.OwnerLookupError as e:
+        return await asyncio.wait_for(external_binding.resolve_owner(agent_id), timeout=PROBE_TIMEOUT_SECONDS)
+    except (external_binding.OwnerLookupError, TimeoutError) as e:
         logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
         return None
 
@@ -462,7 +467,7 @@ async def _bound(agent_id: str) -> bool | None:
     public route never exposes in any form.
     """
     try:
-        return await get_binding_store().get(agent_id) is not None
+        return await asyncio.wait_for(get_binding_store().get(agent_id), timeout=PROBE_TIMEOUT_SECONDS) is not None
     except Exception as e:
         logger.warning("[adoption] binding store unreadable for %s: %s", agent_id, _describe(e))
         return None
