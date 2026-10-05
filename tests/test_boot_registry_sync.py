@@ -279,6 +279,37 @@ def test_a_hung_registry_pass_does_not_hold_boot_past_its_bound(chain, monkeypat
     assert any("did not finish within 0.3 s" in line for line in _warnings(caplog))
 
 
+def test_a_slow_binding_store_holds_boot_no_longer_than_its_budget(monkeypatch, caplog):
+    """A waking database is worth a second or two of the first request, and no
+    more. Past the budget boot serves without the bound set; the load carries
+    on and lands."""
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+    from app.services import binding_registry
+
+    loaded: list[str] = []
+
+    async def slow_load() -> bool:
+        await asyncio.sleep(0.6)
+        loaded.append("bindings")
+        return True
+
+    monkeypatch.setattr(main, "BOOT_BINDING_LOAD_BUDGET_SECONDS", 0.1)
+    monkeypatch.setattr(main, "refresh_bound_ids", slow_load)
+    monkeypatch.setattr(binding_registry, "_loaded", True)
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        started = time.monotonic()
+        with TestClient(main.app) as client:
+            booted = time.monotonic() - started
+            assert loaded == []
+            client.portal.call(asyncio.sleep, 0.8)
+            assert loaded == ["bindings"]  # not cancelled: it finished behind boot
+
+    assert booted < 0.5
+    assert any("did not load within 0.1 s of boot" in r.getMessage() for r in caplog.records)
+
+
 def test_shutdown_keeps_its_order(monkeypatch):
     """The boot wait changed startup only. Shutdown still stops every
     background loop before the drains and closes the stores last, with the

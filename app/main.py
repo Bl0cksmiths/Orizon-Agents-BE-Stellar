@@ -196,6 +196,27 @@ def _report_cold_start_routability() -> None:
     )
 
 
+# How long boot holds the first request for the bound-id set (see lifespan).
+BOOT_BINDING_LOAD_BUDGET_SECONDS = 3.0
+
+# Boot work that runs on past startup, held so shutdown can stop it.
+_boot_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _load_bindings() -> None:
+    """The bound-id load, then its background retry if the load failed."""
+    await refresh_bound_ids()
+    start_refresh_retry()
+
+
+async def _stop_boot_tasks() -> None:
+    tasks = [t for t in _boot_tasks if not t.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=5)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # First thing in the boot sequence: whether this config admits new agents
@@ -236,15 +257,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Seed the planner's routability set from the binding store. Without this a
     # binding made before this process started would stay unroutable until the
     # operator bound it again — which is precisely the restart AC-5 is about.
-    await refresh_bound_ids()
     # ...and if that read failed, keep trying in the background. The load
     # swallows its own failure so an unreadable store cannot stop the service,
     # which used to mean a store that was merely SLOW to wake — a cold
     # serverless Postgres, exactly what the min_size=0 pool is built for — left
     # every externally operated agent unroutable for the whole process
     # lifetime, with nothing but a redeploy to fix it. A no-op on the healthy
-    # path: the load above has already set `_loaded` and no task is created.
-    start_refresh_retry()
+    # path: the load has already set `_loaded` and no task is created.
+    #
+    # Boot waits for the load only up to BOOT_BINDING_LOAD_BUDGET_SECONDS. A
+    # Neon compute waking from suspend answers in a second or two, and that is
+    # worth holding the first request for; a store that takes longer is not —
+    # the request that woke the instance would wait on it, the health check
+    # with it. Past the budget the load is NOT cancelled: it finishes in the
+    # background, and its retry is scheduled when it does.
+    bindings = asyncio.get_running_loop().create_task(_load_bindings(), name="boot-bindings")
+    _boot_tasks.add(bindings)
+    bindings.add_done_callback(_boot_tasks.discard)
+    _done, pending_load = await asyncio.wait({bindings}, timeout=BOOT_BINDING_LOAD_BUDGET_SECONDS)
+    if pending_load:
+        logger.warning(
+            "binding store: the bound-id set did not load within %.1f s of boot — serving without it; external "
+            "agents are unroutable until the load, still running in the background, lands",
+            BOOT_BINDING_LOAD_BUDGET_SECONDS,
+        )
     # Wait, bounded, for the registry sync's first pass — started above, so it
     # has been running alongside the binding load — before the pre-warm reads
     # the registry. Without this the pre-warm read the seeded catalog alone,
@@ -264,8 +300,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # last adoption report from the database. Background only.
     snapshots.start()
     yield
-    # The snapshot builds first: each may still be reading through the stores
-    # and the read pool that the steps below close.
+    # The boot tasks and the snapshot builds first: each may still be reading
+    # through the stores and the read pool that the steps below close.
+    await _stop_boot_tasks()
     await snapshots.stop()
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
     # would otherwise still be pending when the loop closes.
