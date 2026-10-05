@@ -39,6 +39,11 @@ DECLARED = {
     "GDWE6IDZ73VSMH6F75IDVA5BDAC7UJI3TOZC23VGAOXNYYHC6NDCIWRX",
     "GB4K6YRHDHB2HHNM3E7UUZJU5JP3MSQE3GXKMEA5IT4AM45D23YKAYKK",
     "GCNQAJE6K7LORS7CQTI7RVJTB2TZG5QADTNFDKS5H7QQKRFTRFNLA2GP",
+    # UAT story 6.07's own keys (BE#112): the operator that owns qa607_ok and
+    # qa607_hang, and the buyer that paid for its escrow v2 runs. Left out, the
+    # QA test agents counted as outside operators.
+    "GBE6AUTEQDC7HN2453JY4SCPMMGDVAXIX7IOXLQM7K3KTVLL5R3UOQ4J",
+    "GAGOZVEZ43HDMIU367HADCNRD6O425JUX3PQOEZEDYZP5HFKXXJ7HJNC",
 }
 
 GOOD = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -59,7 +64,7 @@ def test_the_committed_register_loads_and_holds_every_declared_wallet() -> None:
     wallets = load_team_register()
 
     assert {w.address for w in wallets} == DECLARED
-    assert len(wallets) == len(DECLARED) == 10
+    assert len(wallets) == len(DECLARED) == 12
     assert all(w.role and w.evidence for w in wallets)
     assert adoption_svc.TEAM_REGISTER == wallets
 
