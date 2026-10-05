@@ -44,8 +44,18 @@ ACCOUNT = "https://stellar.expert/explorer/testnet/account/"
 ADMIN = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
 
 
+async def _build() -> None:
+    """Run one report build to completion, as the background refresher would."""
+    task = adoption_svc.report_cell.refresh(force=True)
+    assert task is not None
+    await task
+
+
 def _get(client: TestClient) -> Any:
+    """The route as it answers once a report has been built."""
     rcache.clear()
+    adoption_svc.report_cell.reset()
+    asyncio.run(_build())
     return client.get("/api/ecosystem/adoption")
 
 
@@ -183,12 +193,14 @@ def test_a_report_that_cannot_be_produced_is_503_never_a_zero(
     async def broken() -> adoption_svc.AdoptionReport:
         raise RuntimeError("cache layer failed")
 
-    monkeypatch.setattr(adoption_svc, "fetch_report", broken)
+    monkeypatch.setattr(adoption_svc, "build_report", broken)
+    asyncio.run(_build())  # fails, and the cell backs off before the next attempt
 
     response = TestClient(app).get("/api/ecosystem/adoption")
 
     assert response.status_code == 503
     assert response.json()["detail"] == "adoption_unavailable"
+    assert response.headers["retry-after"] == str(int(adoption_svc.REPORT_RETRY_AFTER_FAILURE_SECONDS))
     assert "totals" not in response.text
 
 

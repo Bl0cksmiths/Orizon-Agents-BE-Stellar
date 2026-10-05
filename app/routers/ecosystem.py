@@ -12,22 +12,44 @@ sits under the service-wide RateLimitMiddleware like every other public read.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel
 
+from .. import http_cache
 from ..services import adoption_svc
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ecosystem", tags=["ecosystem"])
 
+# How long a shared cache may hold the report past its freshness while it
+# fetches the next one. The report is rebuilt every 15 minutes; a CDN copy a
+# minute old says nothing a fresher one would not.
+ADOPTION_SHARED_MAX_AGE_SECONDS = 60.0
+ADOPTION_STALE_WHILE_REVALIDATE_SECONDS = 600
+
+
+class AdoptionPending(BaseModel):
+    """The 202 answer while the first report since boot is being computed."""
+
+    status: Literal["computing"]
+    message: str
+    retry_after_seconds: int
+
 
 @router.get(
     "/adoption",
     response_model=adoption_svc.AdoptionReport,
     summary="External operator adoption against SOW §6.3, from on-chain facts",
+    responses={
+        202: {"model": AdoptionPending, "description": "The first report since boot is still being computed."},
+        304: {"description": "Not modified: the `If-None-Match` ETag is current."},
+        503: {"description": "No report could be produced; the next attempt is scheduled."},
+    },
 )
-async def adoption() -> adoption_svc.AdoptionReport:
+async def adoption(request: Request) -> Response:
     """Externally operated agents, their owners, and their verified settlements.
 
     Every owner and every charge links to Stellar Expert. Agents owned by a
@@ -37,13 +59,44 @@ async def adoption() -> adoption_svc.AdoptionReport:
     a zero. Settlements are read from Soroban RPC events, which the node keeps
     for about seven days: `window_days` is the span the scans actually covered
     (the smallest, when agents' scans differ; 0 when none ran), and a
-    settlement older than that is not counted. Cached for about 30 s.
+    settlement older than that is not counted.
 
-    503 only when no report could be produced at all — the per-read failures
-    above are answered in the report itself.
+    Computed in the background — one settlement scan per external agent takes
+    minutes — and rebuilt every 15 minutes and when the registry's agents
+    change. The last report is served at once: `generated_at` dates it, and so
+    do `Last-Modified` and `X-Snapshot-Age`; `X-Snapshot-Source: persisted`
+    marks one restored from the database after a restart. With no report yet
+    the answer is 202 with `Retry-After`; 503 only when the last attempt
+    failed and there is nothing to serve.
     """
-    try:
-        return await adoption_svc.fetch_report()
-    except Exception as e:
-        logger.error("[adoption] report could not be produced: %s: %s", type(e).__name__, e)
-        raise HTTPException(503, "adoption_unavailable") from e
+    snap = await adoption_svc.report_snapshot()
+    if snap is not None:
+        return http_cache.snapshot_response(
+            request,
+            snap,
+            fresh_seconds=ADOPTION_SHARED_MAX_AGE_SECONDS,
+            stale_while_revalidate=ADOPTION_STALE_WHILE_REVALIDATE_SECONDS,
+        )
+    status = adoption_svc.report_cell.status()
+    if status.building:
+        retry = adoption_svc.REPORT_PENDING_RETRY_AFTER_SECONDS
+        pending = AdoptionPending(
+            status="computing",
+            message=(
+                "The adoption report is being computed from on-chain data "
+                "(a settlement scan per external agent). Ask again shortly."
+            ),
+            retry_after_seconds=retry,
+        )
+        return Response(
+            content=pending.model_dump_json(),
+            status_code=202,
+            media_type=http_cache.JSON,
+            headers={"Retry-After": str(retry), "Cache-Control": "no-store"},
+        )
+    logger.error("[adoption] no report to serve: %s", status.last_error)
+    raise HTTPException(
+        503,
+        "adoption_unavailable",
+        headers={"Retry-After": str(int(adoption_svc.REPORT_RETRY_AFTER_FAILURE_SECONDS))},
+    )
