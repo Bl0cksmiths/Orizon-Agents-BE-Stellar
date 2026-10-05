@@ -356,6 +356,26 @@ def test_the_payer_reads_their_receipt_after_the_restart_and_a_stranger_does_not
     assert (one["reason"], one["reason_withheld"]) == (REASON, False)
 
 
+def test_a_token_from_before_the_restart_reads_its_dispute_by_id_first_thing(
+    monkeypatch: pytest.MonkeyPatch, deployment: dict[str, Any]
+) -> None:
+    """`GET /api/disputes/{id}` names no task in its path, so nothing else has
+    read the task back when it asks the proof. It must hold the task itself:
+    the receipt link a buyer opens first after a restart is often this one."""
+    task_id, token, _job = _before_the_restart(monkeypatch)
+    with _process(monkeypatch) as client:
+        job = client.get(f"/api/tasks/{task_id}/disputes").json()["settlement"]["job_id_hex"]
+        dispute_id = _dispute(client, job, 0, BUYER, BUYER.public_key).json()["id"]
+
+    with _process(monkeypatch) as client:
+        assert task_id not in state.tasks
+        with_token = client.get(f"/api/disputes/{dispute_id}", headers={"X-Task-Token": token}).json()
+        wrong_token = client.get(f"/api/disputes/{dispute_id}", headers={"X-Task-Token": token + "x"}).json()
+
+    assert (with_token["reason"], with_token["reason_withheld"]) == (REASON, False)
+    assert (wrong_token["reason"], wrong_token["reason_withheld"]) == ("", True)
+
+
 # ── what the restart must not loosen ────────────────────────────
 
 
