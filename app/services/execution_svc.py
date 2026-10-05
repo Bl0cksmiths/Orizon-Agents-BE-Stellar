@@ -2366,6 +2366,12 @@ async def _record_settlement(
         await _emit(task_id, start, "error", "settlement not recorded — this run cannot be disputed")
         return None
 
+    if record.settled_usdc <= 0:
+        # A v2 settle that paid nobody (every delivered step free or unowned):
+        # every step is refused as `nothing_was_charged`, so there is no window
+        # to promise — announcing one would send the buyer to a door that
+        # cannot open.
+        return record
     # The window is a promise, so it is made in the buyer's own record of the
     # run. The job id stays OUT of it: trace lines are world-readable when
     # TASK_AUTH_REQUIRED is off, and the dispute is filed against that id.
