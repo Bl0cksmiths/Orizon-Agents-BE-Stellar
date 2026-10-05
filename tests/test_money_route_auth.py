@@ -34,6 +34,7 @@ switch being off is a refusal, independently of each other.
 from __future__ import annotations
 
 import base64
+import logging
 
 import pytest
 
@@ -277,3 +278,63 @@ def test_an_undecodable_body_is_answered_before_the_guard_and_tells_nobody_anyth
     # A route that does not exist still answers 404, so nothing above is the
     # only way to tell a real path from a made-up one.
     assert absent_route.status_code == 404
+
+
+# ── /server/seal fails closed ───────────────────────────────────
+# A seal makes the platform's sealer sign an attestation with whatever the
+# caller sends: anonymous, it would let anyone write records under our
+# signature. So unlike /server/charge (which can only spend an allowance a
+# payer already authorised on-chain) it is refused while API_KEY is unset,
+# unless a local or CI run opts out with ALLOW_KEYLESS_SERVER_SEAL.
+
+SEAL_BODY = {
+    "job_id_hex": "ab" * 16,
+    "orchestrator": "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
+    "intent_hash_hex": "cd" * 32,
+    "agents": ["agt_01h8"],
+    "receipts_hex": ["ef" * 16],
+    "total_spent_usdc": 1.0,
+}
+
+
+def test_seal_is_refused_while_no_operator_key_is_configured(client, hermetic_settings, caplog) -> None:
+    hermetic_settings.api_key = ""
+    with caplog.at_level(logging.ERROR, logger="app.security"):
+        r = client.post("/api/stellar/server/seal", json=SEAL_BODY)
+
+    assert r.status_code == 503
+    assert r.json()["detail"] == "operator_key_not_configured"
+    assert "ALLOW_KEYLESS_SERVER_SEAL" in caplog.text
+
+
+def test_seal_opens_without_a_key_only_on_the_explicit_opt_out(client, hermetic_settings, monkeypatch) -> None:
+    hermetic_settings.api_key = ""
+    monkeypatch.setattr(hermetic_settings, "allow_keyless_server_seal", True)
+
+    r = client.post("/api/stellar/server/seal", json=SEAL_BODY)
+
+    # Past the guard: refused further in, for the (hermetically unset) signer.
+    assert r.status_code == 503
+    assert r.json()["detail"] == "backend signing key not configured"
+
+
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_seal_with_a_key_configured_wants_that_key_whatever_the_opt_out(
+    client, hermetic_settings, monkeypatch, opt_out
+) -> None:
+    hermetic_settings.api_key = "secret-key"
+    monkeypatch.setattr(hermetic_settings, "allow_keyless_server_seal", opt_out)
+
+    assert client.post("/api/stellar/server/seal", json=SEAL_BODY).status_code == 401
+    passed = client.post("/api/stellar/server/seal", json=SEAL_BODY, headers={"X-API-Key": "secret-key"})
+    assert passed.json()["detail"] == "backend signing key not configured"
+
+
+def test_charge_keeps_its_documented_open_posture(client, hermetic_settings) -> None:
+    # Unchanged on purpose: it can only spend what a payer authorised on-chain.
+    hermetic_settings.api_key = ""
+    r = client.post(
+        "/api/stellar/server/charge",
+        json={"auth_id_hex": "ab" * 16, "job_id_hex": "cd" * 16, "amount_usdc": 1.0},
+    )
+    assert r.json()["detail"] != "operator_key_not_configured"

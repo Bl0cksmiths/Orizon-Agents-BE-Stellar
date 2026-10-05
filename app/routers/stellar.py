@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key
+from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key, require_seal_key
 from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc
 from ..services.dispatch_signing import dispatch_signer_address
 from ..state import state
@@ -911,7 +911,7 @@ class SealReq(BaseModel):
     total_spent_usdc: float = Field(..., ge=0, le=100_000, allow_inf_nan=False)
 
 
-@router.post("/server/seal", dependencies=[Depends(require_api_key)])
+@router.post("/server/seal", dependencies=[Depends(require_seal_key)])
 async def server_seal(req: SealReq) -> dict:
     """Backend-signed AttestationRegistry.seal (backend is the `sealer` role)."""
     if not settings.stellar_signing_key:

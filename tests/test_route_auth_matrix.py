@@ -52,7 +52,7 @@ AUTH: dict[tuple[str, str], str] = {
     ("POST", "/api/stellar/build/reclaim"): PUBLIC_UNSIGNED,
     ("POST", "/api/stellar/submit"): "public: relays an envelope the caller already signed; the chain verifies it",
     ("POST", "/api/stellar/server/charge"): OPERATOR_KEY,
-    ("POST", "/api/stellar/server/seal"): OPERATOR_KEY,
+    ("POST", "/api/stellar/server/seal"): OPERATOR_KEY_FAIL_CLOSED,
     ("POST", "/api/pdax/webhooks/receive"): "HMAC over the body with PDAX_WEBHOOK_SECRET",
     ("POST", "/api/pdax/trade/quote"): OPERATOR_KEY,
     ("POST", "/api/pdax/trade/quote/v2"): OPERATOR_KEY,
@@ -71,7 +71,7 @@ AUTH: dict[tuple[str, str], str] = {
 
 _KEY_GUARDS = {
     OPERATOR_KEY: {"require_api_key"},
-    OPERATOR_KEY_FAIL_CLOSED: {"require_adjudicator", "require_operator_key"},
+    OPERATOR_KEY_FAIL_CLOSED: {"require_adjudicator", "require_operator_key", "require_seal_key"},
 }
 
 
@@ -113,4 +113,9 @@ def test_a_route_not_behind_the_key_is_not_silently_put_behind_it(key: tuple[str
     # buyer out of it; that has to be a decision made in AUTH, not a side effect.
     route = _write_routes()[key]
 
-    assert not _guards(route.dependant) & {"require_api_key", "require_adjudicator", "require_operator_key"}
+    assert not _guards(route.dependant) & {
+        "require_api_key",
+        "require_adjudicator",
+        "require_operator_key",
+        "require_seal_key",
+    }

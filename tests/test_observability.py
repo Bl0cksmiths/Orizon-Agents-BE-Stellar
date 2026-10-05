@@ -270,7 +270,10 @@ def test_charge_failure_log_carries_transaction_ids(client, server_signing_key, 
     assert server_signing_key.secret not in caplog.text
 
 
-def test_seal_failure_log_carries_transaction_ids(client, server_signing_key, failing_invoke, caplog):
+def test_seal_failure_log_carries_transaction_ids(client, server_signing_key, failing_invoke, caplog, monkeypatch):
+    # The seal fails closed without an operator key; this is the opted-out
+    # local testnet shape, so the signing path itself is what is exercised.
+    monkeypatch.setattr(settings, "allow_keyless_server_seal", True)
     with caplog.at_level(logging.ERROR, logger=ROUTER_LOGGER):
         r = client.post("/api/stellar/server/seal", json=SEAL_BODY)
     assert r.status_code == 400

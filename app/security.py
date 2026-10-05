@@ -606,6 +606,31 @@ def check_operator_key(supplied: str | None, *, unconfigured: str, log_unconfigu
     raise HTTPException(status_code=503, detail=unconfigured)
 
 
+async def require_seal_key(
+    x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
+) -> None:
+    """The operator key for /api/stellar/server/seal — FAIL CLOSED unless opted out.
+
+    A seal makes the platform's sealer sign an attestation with whatever the
+    caller sends, so an anonymous seal is a record written under our
+    signature by anyone. `require_api_key`'s open-while-unset posture is
+    therefore wrong here, as it is for the adjudication routes: with API_KEY
+    empty the route answers 503 `operator_key_not_configured`, unless a local
+    or CI testnet run sets ALLOW_KEYLESS_SERVER_SEAL (which config refuses on
+    mainnet). With a key configured the opt-out changes nothing.
+    """
+    if not settings.api_key and settings.allow_keyless_server_seal:
+        return
+    check_operator_key(
+        x_api_key,
+        unconfigured="operator_key_not_configured",
+        log_unconfigured=(
+            "server seal refused: API_KEY is empty, so /api/stellar/server/seal stays closed; set API_KEY, "
+            "or ALLOW_KEYLESS_SERVER_SEAL=true on a local or CI testnet run"
+        ),
+    )
+
+
 async def require_adjudicator(
     x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
 ) -> None:

@@ -164,7 +164,7 @@ def test_every_unguarded_state_changing_route_has_a_budget() -> None:
     """
     from fastapi.routing import APIRoute
 
-    operator_guards = {"require_api_key", "require_adjudicator", "require_operator_key"}
+    operator_guards = {"require_api_key", "require_adjudicator", "require_operator_key", "require_seal_key"}
     own_limiter = {"/api/orchestrator/decompose", "/api/pdax/webhooks/receive"}
 
     def guards(dependant) -> set[str]:
