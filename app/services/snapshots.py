@@ -182,6 +182,9 @@ class SnapshotCell(Generic[T]):
         self._failure_logged_at = 0.0
         self._last_error: str | None = None
         self._last_build_ms: int | None = None
+        # `expire` marks; a build that STARTED after the latest mark clears it.
+        self._expired = False
+        self._expire_seq = 0
 
     def current(self) -> Snapshot[T] | None:
         """The snapshot held now, whatever its age. Never starts work."""
@@ -195,7 +198,7 @@ class SnapshotCell(Generic[T]):
         return time.monotonic() - snap.stored_monotonic
 
     def is_fresh(self, snap: Snapshot[T]) -> bool:
-        return self.age_monotonic(snap) <= self.fresh_seconds and not self._retired(snap)
+        return not self._expired and self.age_monotonic(snap) <= self.fresh_seconds and not self._retired(snap)
 
     def _retired(self, snap: Snapshot[T]) -> bool:
         """Whether `snap` may not be served without first trying for a newer one."""
@@ -246,7 +249,7 @@ class SnapshotCell(Generic[T]):
         """
         snap = self._snap
         if snap is not None and not self._retired(snap):
-            if self.age_monotonic(snap) > self.fresh_seconds:
+            if self._expired or self.age_monotonic(snap) > self.fresh_seconds:
                 self.refresh()
             return snap
         task = self.refresh()
@@ -266,6 +269,17 @@ class SnapshotCell(Generic[T]):
         already running read the old state, so it goes round once more.
         """
         self._generation += 1
+
+    def expire(self) -> None:
+        """Mark the held snapshot stale without retiring it.
+
+        For a change that makes the snapshot out of date but not wrong to show
+        for one more poll: the next read is still answered from it at once,
+        and starts the rebuild. Nothing is built here, so it is safe to call
+        from any path, with or without a running loop.
+        """
+        self._expired = True
+        self._expire_seq += 1
 
     def seed(self, snap: Snapshot[T]) -> bool:
         """Install a snapshot restored from elsewhere, unless a build has
@@ -299,6 +313,7 @@ class SnapshotCell(Generic[T]):
         is recorded and the previous snapshot stays in service."""
         for _ in range(_MAX_ROUNDS):
             generation = self._generation
+            expire_seq = self._expire_seq
             started = time.monotonic()
             try:
                 value = await asyncio.wait_for(self._build(), timeout=self.build_timeout_seconds)
@@ -308,11 +323,11 @@ class SnapshotCell(Generic[T]):
             except Exception as e:
                 self._record_failure(e, started)
                 return
-            self._store(snap, started)
+            self._store(snap, started, expire_seq)
             if self._generation == generation:
                 return
 
-    def _store(self, snap: Snapshot[T], started: float) -> None:
+    def _store(self, snap: Snapshot[T], started: float, expire_seq: int) -> None:
         current = self._snap
         # A build can only ever move the cell forward: one that started under
         # an older generation than the held snapshot's would put back a value
@@ -320,6 +335,8 @@ class SnapshotCell(Generic[T]):
         if current is not None and current.source == "live" and current.generation > snap.generation:
             return
         self._snap = snap
+        if expire_seq == self._expire_seq:
+            self._expired = False
         self._last_build_ms = int((time.monotonic() - started) * 1000)
         if self._failed_monotonic is not None:
             logger.info("snapshot %s recovered: rebuilt in %d ms", self.name, self._last_build_ms)
@@ -383,7 +400,7 @@ class KeepWarm:
             self._kick()
             return
         age = cell.age_monotonic(snap)
-        if age >= self.every_seconds or cell._retired(snap):
+        if age >= self.every_seconds or cell._retired(snap) or cell._expired:
             self._kick()
             return
         if self.fingerprint is not None and age >= self.min_change_rebuild_seconds:
