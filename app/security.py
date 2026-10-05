@@ -555,6 +555,10 @@ async def require_adjudicator(
         raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
 
 
+# A caller-supplied X-Request-ID is kept only in this shape (see below).
+_REQUEST_ID_SHAPE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+
+
 class RequestContextMiddleware:
     """Request-id + access-log middleware (pure ASGI, no external deps).
 
@@ -579,9 +583,13 @@ class RequestContextMiddleware:
             return
 
         headers = dict(scope.get("headers") or [])
-        request_id = (headers.get(b"x-request-id") or b"").decode("latin-1").strip()[:64]
-        if not request_id:
-            request_id = uuid.uuid4().hex[:16]
+        # Taken from the caller only when it is a plain token. The id is echoed
+        # in a header, stamped on every log line of the request and quoted in
+        # every error body, so anything else — markup, spaces, encoded CRLF,
+        # non-ASCII, or a value longer than the cap — is replaced outright
+        # rather than trimmed into something that still carries part of it.
+        supplied = (headers.get(b"x-request-id") or b"").decode("latin-1").strip()
+        request_id = supplied if _REQUEST_ID_SHAPE.fullmatch(supplied) else uuid.uuid4().hex[:16]
 
         # Deliberately never reset: the 500 handler runs on the outermost
         # ServerErrorMiddleware layer AFTER this frame has unwound, so a
