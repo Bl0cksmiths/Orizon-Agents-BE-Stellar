@@ -64,11 +64,12 @@ from .security import (
     strict_cors_origins,
 )
 from .seed import seed_registry
-from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc
+from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc, snapshots
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
+from .services.snapshot_store import close_snapshot_store
 from .stellar import client as sc
 
 
@@ -258,7 +259,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # the reads it queues cannot delay anything above; after the registry
     # wait, so the on-chain agents that pass indexed are read too.
     reputation_svc.start_prewarm()
+    # The read snapshots behind the dashboard (overview, reputation batch,
+    # adoption report): their keep-warm refresher, and the restore of the
+    # last adoption report from the database. Background only.
+    snapshots.start()
     yield
+    # The snapshot builds first: each may still be reading through the stores
+    # and the read pool that the steps below close.
+    await snapshots.stop()
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
     # would otherwise still be pending when the loop closes.
     await stop_refresh_retry()
@@ -292,6 +300,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # is written on the execution path, so this store is live on any deployment
     # that has settled a workflow, not only one an operator has bound.
     await close_dispute_store()
+    await close_snapshot_store()
     executor.shutdown(wait=False)
 
 
