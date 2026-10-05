@@ -40,10 +40,11 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException, Query
+from fastapi import Header, HTTPException, Query, Request
 
 from .config import settings
 from .security import header_secret_matches
+from .services import task_persistence
 from .state import read_token_digest, state
 
 
@@ -72,6 +73,20 @@ def _token_proves(task_id: str, supplied: str | None) -> bool:
         return _matches(supplied, expected)
     digest = state.task_token_digests.get(task_id)
     return digest is not None and _matches(read_token_digest(supplied), digest)
+
+
+async def _held(task_id: str) -> None:
+    """Hold `task_id` in memory before its token is checked or it is served.
+
+    A task this process does not hold — after a restart, or past the 200-task
+    window — is read back from the durable store here, with the digest its
+    token is checked against. A store that cannot answer is a 503: the task
+    may well exist, and a 404 would tell a buyer their paid run does not.
+    """
+    try:
+        await task_persistence.ensure_task(task_id)
+    except task_persistence.TaskStoreUnavailable as exc:
+        raise HTTPException(503, "task_store_unavailable", headers={"Retry-After": "5"}) from exc
 
 
 # ── the dispute read grant (D-067) ──────────────────────────────
@@ -245,6 +260,7 @@ class TaskReadProof:
 
 
 async def task_read_proof(
+    request: Request,
     x_task_token: str | None = Header(default=None, alias="X-Task-Token"),
     token: str | None = Query(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
@@ -255,7 +271,19 @@ async def task_read_proof(
     Accepts the token from the query as well as the header, for
     `require_task_read`'s reason — EventSource cannot set headers — so a route
     reachable from a stream is not a route with a second, weaker answer.
+
+    On a route scoped to a `{task_id}` the task is held first, as
+    `require_task_read` holds it, so a token from before a restart still
+    proves. Best effort here: the proof only decides how much of a response
+    to show, so a store that cannot answer leaves the token unproven rather
+    than failing the read.
     """
+    task_id = request.path_params.get("task_id")
+    if isinstance(task_id, str):
+        try:
+            await task_persistence.ensure_task(task_id)
+        except task_persistence.TaskStoreUnavailable:
+            pass
     return TaskReadProof(
         task_token=x_task_token if x_task_token is not None else token,
         api_key=x_api_key,
@@ -269,7 +297,12 @@ async def require_task_read(
     token: str | None = Query(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
-    """FastAPI dependency guarding a `{task_id}`-scoped read route."""
+    """FastAPI dependency guarding a `{task_id}`-scoped read route.
+
+    Also what puts the task in memory for the route behind it (`_held`), so
+    every `{task_id}` read serves a task this process did not run.
+    """
+    await _held(task_id)
     if not settings.task_auth_required:
         return
     # A valid operator API key sees everything (ops visibility). Through
