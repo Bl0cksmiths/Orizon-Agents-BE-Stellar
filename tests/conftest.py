@@ -98,6 +98,22 @@ def fresh_planner_limiter(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def fresh_route_limits():
+    """Every test starts with full per-route budgets (app/rate_limit.py).
+
+    Same reason as the planner limiter above: the backend is module-global and
+    every TestClient is one client, so without this the suite's writes would
+    accumulate across tests until a late one is answered 429.
+    """
+    from app import rate_limit
+
+    previous = rate_limit.get_backend()
+    rate_limit.set_backend(rate_limit.InMemoryTokenBucket())
+    yield
+    rate_limit.set_backend(previous)
+
+
 @pytest.fixture()
 def client():
     with TestClient(app) as c:
