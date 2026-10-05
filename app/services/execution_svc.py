@@ -419,12 +419,10 @@ async def execute_plan(
     _track_background_task(
         asyncio.create_task(_run(plan, task_id, auth_id_hex=auth_id_hex, payer=payer, authorized_max=authorized_max))
     )
-    # Write-through for the receipt: the id and token this returns must outlive
-    # a restart that lands a moment later (D-090). Bounded — a slow database
-    # delays durability, not the buyer's answer — and the write keeps retrying
-    # in the background if this gives up on it.
-    if not await task_persistence.flush(task_persistence.RESPONSE_FLUSH_SECONDS):
-        logger.warning("task %s: not yet durable when /execute answered; its write is still queued", task_id)
+    # Nothing awaits between starting the run and returning: the router claims
+    # the authorization for this task only once this returns, and a wait here
+    # that was cancelled would unclaim an authorization the run is already
+    # spending. The receipt's write-through wait is the router's, after that.
     return task_id
 
 
