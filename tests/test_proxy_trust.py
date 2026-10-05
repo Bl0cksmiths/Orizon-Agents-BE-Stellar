@@ -134,28 +134,33 @@ def _limited_client(limit: int = 1) -> TestClient:
     return TestClient(RateLimitMiddleware(inner, limit=limit, window_seconds=60))
 
 
-def test_tuned_hops_give_distinct_visitors_distinct_buckets(monkeypatch):
-    """The point of the setting: once the infrastructure hops are skipped, two
-    visitors behind the same edge stop sharing one budget."""
-    monkeypatch.setattr(settings, "trusted_proxy_hops", 2)
+# The limiter keys on `client_identity`, not on the hop count above: Render's
+# own hops (non-public, then one Cloudflare edge) are recognised by address.
+_EDGE = "172.70.81.12, 10.201.3.4"
+
+
+@pytest.mark.parametrize("hops", [0, 2])
+def test_visitors_behind_our_edge_get_their_own_buckets_whatever_the_hop_count(monkeypatch, hops):
+    """The point of the identity: two visitors behind Render's proxies stop
+    sharing one budget, with no tuning — and no TRUSTED_PROXY_HOPS value can
+    make the limiter read an entry the caller wrote."""
+    monkeypatch.setattr(settings, "trusted_proxy_hops", hops)
     limited = _limited_client()
-    edge = "76.76.21.9, 10.201.3.4"
-    assert limited.get("/hit", headers={"X-Forwarded-For": f"1.1.1.1, 198.51.100.7, {edge}"}).status_code == 200
+    assert limited.get("/hit", headers={"X-Forwarded-For": f"1.1.1.1, 81.2.69.160, {_EDGE}"}).status_code == 200
     # Same visitor, rotated spoof prefix — still the same bucket.
-    assert limited.get("/hit", headers={"X-Forwarded-For": f"2.2.2.2, 198.51.100.7, {edge}"}).status_code == 429
+    assert limited.get("/hit", headers={"X-Forwarded-For": f"2.2.2.2, 81.2.69.160, {_EDGE}"}).status_code == 429
     # A different visitor behind the same edge gets its own.
-    assert limited.get("/hit", headers={"X-Forwarded-For": f"1.1.1.1, 198.51.100.99, {edge}"}).status_code == 200
+    assert limited.get("/hit", headers={"X-Forwarded-For": f"1.1.1.1, 2.125.160.216, {_EDGE}"}).status_code == 200
 
 
-def test_untuned_default_leaves_one_shared_bucket(monkeypatch):
-    """The problem this change makes configurable, pinned as behaviour: while
-    the last entry is a constant our edge wrote, unrelated visitors share a
-    single budget. Tuning TRUSTED_PROXY_HOPS is what fixes it."""
-    monkeypatch.setattr(settings, "trusted_proxy_hops", 0)
+def test_requests_nobody_can_be_told_apart_share_only_the_service_ceiling(monkeypatch):
+    """A chain of infrastructure alone names nobody. Those requests are held by
+    one service-wide ceiling bucket rather than by a per-client budget, and
+    never spend an identified visitor's."""
     limited = _limited_client()
-    edge = "76.76.21.9, 10.201.3.4"
-    assert limited.get("/hit", headers={"X-Forwarded-For": f"1.1.1.1, 198.51.100.7, {edge}"}).status_code == 200
-    assert limited.get("/hit", headers={"X-Forwarded-For": f"2.2.2.2, 198.51.100.99, {edge}"}).status_code == 429
+    assert limited.get("/hit", headers={"X-Forwarded-For": _EDGE}).status_code == 200
+    assert limited.get("/hit", headers={"X-Forwarded-For": "10.0.0.9"}).status_code == 429
+    assert limited.get("/hit", headers={"X-Forwarded-For": f"81.2.69.160, {_EDGE}"}).status_code == 200
 
 
 # ── the forwarded-chain sample ─────────────────────────────────────────

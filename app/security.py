@@ -950,19 +950,23 @@ class BodyLimitMiddleware:
             await self._send_413(send)
 
 
+# The global limiter's bucket for requests `client_identity` cannot attribute.
+# Not an address, so no real client can collide with it.
+UNIDENTIFIED_KEY = "unidentified"
+
+
 class RateLimitMiddleware:
-    """Sliding-window limiter, keyed by client_key(). In-process (1 worker).
+    """Sliding-window limiter, keyed by client_identity(). In-process (1 worker).
 
     Timestamps per key live in a dict of deques; old entries are pruned on
     each hit and the whole table is swept periodically so idle keys don't
     accumulate. All mutation happens synchronously between awaits, so it is
     safe under a single asyncio event loop without locks.
 
-    How much this limits *per visitor* rather than *in total* is entirely
-    decided by TRUSTED_PROXY_HOPS — see client_key(). At the default of 0 the
-    key is a constant this deployment's edge wrote, so `rate_limit_per_minute`
-    is one budget for the whole service; the default limit is sized for that
-    reading.
+    Per visitor: `client_identity` finds the caller behind Render's proxies
+    and our frontend. Requests it cannot attribute share one bucket,
+    UNIDENTIFIED_KEY, at the same limit — a service-wide ceiling for them
+    alone, which no identified visitor's budget is ever spent on.
     """
 
     _SWEEP_EVERY = 1024  # requests between full-table sweeps
@@ -996,7 +1000,7 @@ class RateLimitMiddleware:
             return
 
         now = time.monotonic()
-        key = client_key(scope)
+        key = client_identity(scope) or UNIDENTIFIED_KEY
         dq = self._hits.setdefault(key, deque())
         cutoff = now - self.window
         while dq and dq[0] <= cutoff:
