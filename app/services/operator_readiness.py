@@ -80,7 +80,7 @@ from ..config import settings
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
-from . import external_binding, registry_sync, reputation_svc, settlement_svc
+from . import external_binding, reachability, registry_sync, reputation_svc, settlement_svc
 from .binding_store import BindingRecord, get_binding_store
 from .endpoint_policy import EndpointPolicyError, validate_endpoint_url
 
@@ -747,6 +747,9 @@ async def _compute(agent_id: str) -> Readiness:
         first_run_step(owner, rep),
         first_settlement_step(owner, settlement),
     )
+    # The planner reads this verdict (D-084): an endpoint this check just found
+    # dead is left out of plans until a fresh probe says otherwise.
+    reachability.record(agent_id, steps[STEP_KEYS.index("reachable")].status)
     ready = is_ready(steps)
     logger.info(
         "readiness: agent_id=%s ready=%s %s",
