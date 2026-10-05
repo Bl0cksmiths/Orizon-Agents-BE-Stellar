@@ -73,6 +73,10 @@ def listing(store: FakeStore, monkeypatch: pytest.MonkeyPatch) -> _ListingStore:
 
 
 def _seed(listing: _ListingStore, n: int) -> list[str]:
+    """`n` tasks a previous process stored, and a fresh process's empty cache
+    (the `store` fixture restores whatever the suite held before)."""
+    state.tasks.clear()
+    state.task_order.clear()
     ids = []
     for i in range(n):
         task = _task(100 + i).model_copy(update={"started_at": time.time() - 1000 + i})
