@@ -157,6 +157,7 @@ class SnapshotCell(Generic[T]):
         retry_after_failure_seconds: float,
         max_serve_seconds: float | None = None,
         must_rebuild: Callable[[T], bool] | None = None,
+        may_build: Callable[[], bool] | None = None,
     ) -> None:
         self.name = name
         self._build = build
@@ -168,6 +169,9 @@ class SnapshotCell(Generic[T]):
         self.retry_after_failure_seconds = retry_after_failure_seconds
         self.max_serve_seconds = max_serve_seconds
         self._must_rebuild = must_rebuild
+        # A gate on starting builds at all: the adoption report must not be
+        # built from a registry mirror still filling after a restart.
+        self._may_build = may_build
         self._listeners: list[Callable[[Snapshot[T]], None]] = []
         self.reset()
 
@@ -292,12 +296,15 @@ class SnapshotCell(Generic[T]):
     def refresh(self, *, force: bool = False) -> asyncio.Task[None] | None:
         """Start a build unless one is running; return the running build.
 
-        None — nothing started — while the cell is backing off a failed build,
-        unless `force`. Requires a running event loop.
+        None — nothing started — while the cell is backing off a failed build
+        or its `may_build` gate is shut, unless `force`. Requires a running
+        event loop.
         """
         running = self._live_task()
         if running is not None:
             return running
+        if not force and self._may_build is not None and not self._may_build():
+            return None
         if (
             not force
             and self._failed_monotonic is not None
@@ -379,21 +386,17 @@ class KeepWarm:
     It rebuilds the cell when it holds nothing, every `every_seconds`, and —
     when `fingerprint` is given — whenever the fingerprint changes (the
     registry mirror gained, lost or changed an agent), but not more often than
-    `min_change_rebuild_seconds`. `ready` gates all of it: a cell that should
-    not be built yet (the adoption report before the registry's first full
-    pass) says so there.
+    `min_change_rebuild_seconds`. A cell that should not be built yet says so
+    through its own `may_build` gate, which this respects like any reader.
     """
 
     cell: SnapshotCell[Any]
     every_seconds: float
     fingerprint: Callable[[], Hashable] | None = None
     min_change_rebuild_seconds: float = 0.0
-    ready: Callable[[], bool] = lambda: True
     _built_fingerprint: Hashable | None = field(default=None, init=False)
 
     def tick(self) -> None:
-        if not self.ready():
-            return
         cell = self.cell
         snap = cell.current()
         if snap is None or snap.source != "live":
@@ -410,9 +413,11 @@ class KeepWarm:
     def _kick(self) -> None:
         if self.cell.building():
             return
-        if self.fingerprint is not None:
-            self._built_fingerprint = self.fingerprint()
-        self.cell.refresh()
+        # Read before the build starts, so a change landing during it is seen
+        # as a change at the next tick; recorded only for a build that started.
+        fingerprint = self.fingerprint() if self.fingerprint is not None else None
+        if self.cell.refresh() is not None:
+            self._built_fingerprint = fingerprint
 
 
 # Registered by the modules that own each cell, at import.

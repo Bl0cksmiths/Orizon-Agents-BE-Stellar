@@ -427,22 +427,50 @@ def test_keep_warm_rebuilds_on_a_fingerprint_change_but_not_too_often() -> None:
     assert _run(go) == [1, 2, 2]
 
 
-def test_keep_warm_waits_while_not_ready() -> None:
+def test_a_shut_build_gate_holds_every_reader_and_the_schedule() -> None:
     builder = _Builder()
-    cell = _cell(builder)
-    ready = {"v": False}
-    schedule = KeepWarm(cell=cell, every_seconds=0.0, ready=lambda: ready["v"])
+    gate = {"open": False}
+    cell = _cell(builder, may_build=lambda: gate["open"])
+    schedule = KeepWarm(cell=cell, every_seconds=0.0)
 
-    async def go() -> list[int]:
+    async def go() -> list[object]:
+        held = [await cell.get(wait_seconds=0), cell.refresh()]
         schedule.tick()
         await asyncio.sleep(0.01)
-        first = builder.calls
-        ready["v"] = True
+        held.append(builder.calls)
+        forced = cell.refresh(force=True)  # an explicit build still runs
+        assert forced is not None
+        await forced
+        held.append(builder.calls)
+        gate["open"] = True
+        cell.invalidate()
+        await cell.get(wait_seconds=None)
+        held.append(builder.calls)
+        return held
+
+    assert _run(go) == [None, None, 0, 1, 2]
+
+
+def test_a_change_seen_while_the_gate_is_shut_is_not_lost() -> None:
+    builder = _Builder()
+    gate = {"open": True}
+    fp = {"v": 1}
+    cell = _cell(builder, may_build=lambda: gate["open"])
+    schedule = KeepWarm(cell=cell, every_seconds=60.0, fingerprint=lambda: fp["v"])
+
+    async def go() -> int:
         schedule.tick()
         await asyncio.sleep(0.01)
-        return [first, builder.calls]
+        gate["open"] = False
+        fp["v"] = 2
+        schedule.tick()  # due, but shut: nothing starts, the change stays pending
+        await asyncio.sleep(0.01)
+        gate["open"] = True
+        schedule.tick()
+        await asyncio.sleep(0.01)
+        return builder.calls
 
-    assert _run(go) == [0, 1]
+    assert _run(go) == 2
 
 
 def test_start_runs_the_refresher_and_boot_hooks_and_stop_ends_them(monkeypatch: pytest.MonkeyPatch) -> None:
