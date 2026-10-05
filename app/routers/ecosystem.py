@@ -78,7 +78,9 @@ async def adoption(request: Request) -> Response:
             stale_while_revalidate=ADOPTION_STALE_WHILE_REVALIDATE_SECONDS,
         )
     status = adoption_svc.report_cell.status()
-    if status.building:
+    if status.building or status.last_error is None:
+        # Building, or about to: the gate holds the first build until the
+        # registry mirror is complete, and the schedule starts it then.
         retry = adoption_svc.REPORT_PENDING_RETRY_AFTER_SECONDS
         pending = AdoptionPending(
             status="computing",

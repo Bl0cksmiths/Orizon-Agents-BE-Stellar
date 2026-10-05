@@ -28,7 +28,7 @@ from test_settlement_svc import _auth_id, _charged_event, _FakeRpc, _job_id
 
 from app.config import settings
 from app.schemas import Agent
-from app.services import adoption_svc, settlement_svc
+from app.services import adoption_svc, registry_sync, settlement_svc
 from app.services.settlement_svc import SettlementEntry, SettlementEvidence
 from app.state import state
 from app.stellar import cache as rcache
@@ -645,6 +645,7 @@ def test_concurrent_callers_share_one_computation(world: _World, monkeypatch: py
         return await real_build()
 
     monkeypatch.setattr(adoption_svc, "build_report", slow_build)
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True))
     world.agent("ext_a", EXT_A, _entry(1))
     rcache.clear()
 

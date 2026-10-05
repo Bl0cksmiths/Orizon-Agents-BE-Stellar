@@ -683,16 +683,17 @@ def registry_fingerprint() -> int:
     return hash(tuple(sorted((a.id, a.owner or "", a.status) for a in onchain_mirror().values())))
 
 
-def _first_build_ready() -> bool:
-    """Whether the first build may start: the registry mirror is complete, or
-    boot was long enough ago that waiting longer only means serving nothing."""
+def _may_build() -> bool:
+    """Whether a build may start: the registry mirror is complete, or boot was
+    long enough ago that waiting longer only means serving nothing. Gates the
+    requests and the schedule alike."""
     return registry_sync.status().synced or time.time() - state.started_at >= REPORT_BOOT_GRACE_SECONDS
 
 
 # The report, built behind the request. Never retired by age (a request never
 # waits on a scan): the keep-warm schedule below rebuilds it, and a request
 # that finds it older than REPORT_REFRESH_SECONDS starts a rebuild behind the
-# one it serves.
+# one it serves — once the registry gate is open.
 report_cell: SnapshotCell[AdoptionReport] = SnapshotCell(
     "adoption",
     lambda: build_report(),
@@ -701,6 +702,7 @@ report_cell: SnapshotCell[AdoptionReport] = SnapshotCell(
     fresh_seconds=REPORT_REFRESH_SECONDS,
     build_timeout_seconds=REPORT_BUILD_BUDGET_SECONDS,
     retry_after_failure_seconds=REPORT_RETRY_AFTER_FAILURE_SECONDS,
+    may_build=_may_build,
 )
 snapshots.keep_warm(
     KeepWarm(
@@ -708,7 +710,6 @@ snapshots.keep_warm(
         every_seconds=REPORT_REFRESH_SECONDS,
         fingerprint=registry_fingerprint,
         min_change_rebuild_seconds=REPORT_REGISTRY_REBUILD_SECONDS,
-        ready=_first_build_ready,
     )
 )
 

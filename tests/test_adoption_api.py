@@ -35,8 +35,9 @@ from test_adoption_svc import (
 from test_adoption_svc import world as world  # noqa: F401 — the shared fixture
 
 from app.main import app
-from app.services import adoption_svc
+from app.services import adoption_svc, registry_sync, snapshots
 from app.services.binding_store import InMemoryBindingStore
+from app.state import state
 from app.stellar import cache as rcache
 
 GENERATED_AT = 1_759_046_400
@@ -234,6 +235,7 @@ def _slow_build(monkeypatch: pytest.MonkeyPatch, seconds: float = 30.0) -> list[
         raise AssertionError("a request waited for the build")
 
     monkeypatch.setattr(adoption_svc, "build_report", slow)
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True))
     return started
 
 
@@ -329,8 +331,6 @@ def test_the_report_carries_validators_and_revalidates_to_304(world: _World) -> 
 
 # ── the schedule ────────────────────────────────────────────────────────────
 def _schedule() -> Any:
-    from app.services import snapshots
-
     return next(s for s in snapshots._schedules if s.cell is adoption_svc.report_cell)
 
 
@@ -348,16 +348,19 @@ def test_the_report_is_rebuilt_on_a_schedule_and_when_the_registry_changes(world
     assert adoption_svc.registry_fingerprint() != changed_owner
 
 
-def test_the_first_build_waits_for_the_registry_but_not_forever(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.services import registry_sync
-    from app.state import state
-
-    ready = _schedule().ready
+def test_no_build_starts_from_a_mirror_still_filling_but_boot_does_not_wait_forever(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = _slow_build(monkeypatch)
     monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=False))
     monkeypatch.setattr(state, "started_at", time.time())
-    assert ready() is False
+
+    response = TestClient(app).get("/api/ecosystem/adoption")
+    assert response.status_code == 202  # nothing to serve yet: computing, not an error
+    assert started == []  # and nothing was built from a partial mirror
+
     monkeypatch.setattr(state, "started_at", time.time() - adoption_svc.REPORT_BOOT_GRACE_SECONDS - 1)
-    assert ready() is True
+    assert adoption_svc._may_build() is True
     monkeypatch.setattr(state, "started_at", time.time())
     monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True))
-    assert ready() is True
+    assert adoption_svc._may_build() is True
