@@ -535,3 +535,42 @@ def test_app_orders_header_middleware_outside_limiter():
     assert names.index("RateLimitMiddleware") < names.index("BodyLimitMiddleware")
     # Request-id context is outermost, so 413/429 short-circuits carry it.
     assert names.index("RequestContextMiddleware") == 0
+
+
+def test_cors_keeps_only_exact_secure_origins(caplog):
+    """A wildcard, `null`, a plain-http public host or a URL with a path in
+    CORS_ORIGINS would each widen who may drive this API from a browser; they
+    are dropped (and logged) rather than handed to the CORS middleware."""
+    from app.security import strict_cors_origins
+
+    configured = [
+        "https://orizons.xyz",
+        "https://www.orizons.xyz",
+        "*",
+        "null",
+        "http://evil.example",
+        "https://orizons.xyz/app",
+        "https://*.orizons.xyz",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+    with caplog.at_level("WARNING", logger="app.security"):
+        kept = strict_cors_origins(configured)
+
+    assert kept == ["https://orizons.xyz", "https://www.orizons.xyz", "http://localhost:3000", "http://127.0.0.1:3000"]
+    assert "http://evil.example" in caplog.text
+
+
+def test_the_app_registers_the_strict_origin_list(monkeypatch):
+    import app.main as main
+    from app.security import strict_cors_origins
+
+    [cors] = [m for m in main.app.user_middleware if m.cls.__name__ == "CORSMiddleware"]
+    assert cors.kwargs["allow_origins"] == strict_cors_origins(main.settings.cors_origin_list)
+
+    # The 500 handler's hand-rolled check applies the same filter.
+    monkeypatch.setattr(main.settings, "cors_origins", "https://orizons.xyz,*,http://evil.example")
+    assert main._cors_allows("https://orizons.xyz")
+    assert not main._cors_allows("*")
+    assert not main._cors_allows("http://evil.example")

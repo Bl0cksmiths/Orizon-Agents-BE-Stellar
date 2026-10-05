@@ -61,6 +61,7 @@ from .security import (
     SecurityHeadersMiddleware,
     request_id_var,
     security_headers,
+    strict_cors_origins,
 )
 from .seed import seed_registry
 from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc
@@ -369,12 +370,12 @@ def _cors_allows(origin: str) -> bool:
     """Mirror the CORS middleware's decision — the exact allow-list OR the
     compiled origin regex — for handlers that must stamp CORS headers by
     hand (the 500 handler runs outside the middleware stack)."""
-    return origin in settings.cors_origin_list or _CORS_ORIGIN_REGEX.fullmatch(origin) is not None
+    return origin in strict_cors_origins(settings.cors_origin_list) or _CORS_ORIGIN_REGEX.fullmatch(origin) is not None
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=strict_cors_origins(settings.cors_origin_list),
     allow_origin_regex=_CORS_ORIGIN_REGEX.pattern,
     # The API is token/header-based — no cookies — so credentials stay off,
     # and only the methods/headers the frontend actually sends are allowed.

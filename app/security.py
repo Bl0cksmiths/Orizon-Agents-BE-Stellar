@@ -555,6 +555,33 @@ async def require_adjudicator(
         raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
 
 
+# ── CORS origins ────────────────────────────────────────────────
+
+# An exact origin: https with a host (and optional port), or plain http to the
+# loopback only, for local development. No path, no wildcard, no `null`.
+_SECURE_ORIGIN = re.compile(r"https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?")
+_LOOPBACK_ORIGIN = re.compile(r"http://(localhost|127\.0\.0\.1)(:\d{1,5})?")
+
+
+def strict_cors_origins(origins: list[str]) -> list[str]:
+    """The configured CORS origins, less any that would widen who may call us.
+
+    `*` would admit every site, `null` admits sandboxed frames and `file:`
+    pages, a plain-http public origin can be spoofed on the wire, and a value
+    with a path never matches a browser's Origin header at all, so it is a
+    typo that silently allows nothing. Each is dropped with a warning naming
+    it — an origin is configuration, not a secret — so a mistyped
+    CORS_ORIGINS shows up in the boot log instead of as a wide-open API.
+    """
+    kept: list[str] = []
+    for origin in origins:
+        if _SECURE_ORIGIN.fullmatch(origin) or _LOOPBACK_ORIGIN.fullmatch(origin):
+            kept.append(origin)
+        else:
+            logger.warning("CORS_ORIGINS entry %r dropped: not an exact https (or loopback http) origin", origin)
+    return kept
+
+
 # ── hardening headers ───────────────────────────────────────────
 
 # On every response. HSTS is ours to send: Render's edge does not add it (a
