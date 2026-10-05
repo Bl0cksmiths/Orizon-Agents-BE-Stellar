@@ -648,6 +648,16 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _keyless_seal_is_never_mainnet(self) -> "Settings":
+        """The keyless-seal opt-out is for local and CI testnet runs, never for real money."""
+        if self.allow_keyless_server_seal and self.is_mainnet():
+            raise ValueError(
+                "ALLOW_KEYLESS_SERVER_SEAL must not be set on mainnet: it lets anyone have the platform's "
+                "sealer sign an attestation. Unset it and set API_KEY."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _frontend_proxy_token_is_strong(self) -> "Settings":
         """Refuse a frontend token a caller could guess, or one that would print itself.
 

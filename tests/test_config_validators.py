@@ -808,3 +808,9 @@ def test_the_frontend_proxy_token_is_masked_in_logs(monkeypatch):
     monkeypatch.setattr(live_settings, "frontend_proxy_token", token)
 
     assert redact_secrets(f"header was {token}") == f"header was {REDACTED}"
+
+
+def test_the_keyless_seal_opt_out_is_refused_on_mainnet():
+    with pytest.raises(ValidationError, match="ALLOW_KEYLESS_SERVER_SEAL"):
+        _settings(**_MAINNET, allow_keyless_server_seal=True)
+    assert _settings(allow_keyless_server_seal=True).allow_keyless_server_seal is True
