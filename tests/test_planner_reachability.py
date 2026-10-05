@@ -249,6 +249,17 @@ def test_the_exclusion_lapses_with_the_freshness_window(world, monkeypatch: pyte
     assert DEAD not in _codes(resp)
 
 
+def test_a_failure_that_lands_while_the_planner_thinks_still_keeps_the_step_out(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Offered (no verdict yet), then the background probe lands during the
+    # planning call: the clamp asks again at the point of use.
+    resp = _free_form(monkeypatch, [DEAD, ALIVE], during=lambda: reachability.record(DEAD, "failed"))
+
+    assert [s.agent_id for s in resp.steps] == [ALIVE]
+    assert _codes(resp)[DEAD] == "unreachable_endpoint"
+
+
 def test_the_fallback_never_lands_on_the_dead_agent(world, monkeypatch: pytest.MonkeyPatch) -> None:
     # The model picks only the dead agent, so the clamp empties the plan:
     # the fallback still draws from the offered set, never from the dead one.

@@ -26,6 +26,7 @@ from .plan_notices import (
     relaxation,
     substitution,
     unbound_exclusions,
+    unreachable_exclusion,
     unreachable_exclusions,
 )
 from .registry_sync import MAX_AGENT_NAME_CHARS
@@ -1071,6 +1072,11 @@ async def decompose(intent: str) -> DecomposeResponse:
     # (agent, rationale) pairs already kept. A repeated pair is the same paid
     # work bought twice — whitespace and case are the model's, not the task's.
     seen: set[tuple[str, str]] = set()
+    # Offered agents whose endpoint was found dead WHILE the planner ran — a
+    # background probe (`reachability.refresh_stale`) landing mid-call. Their
+    # steps are dropped like any other no-longer-routable pick, and the buyer
+    # is told, so the card accounts for every agent it lost (D-084).
+    went_unreachable: dict[str, Agent] = {}
     for step in proposed:
         if len(cleaned) >= _MAX_PLAN_STEPS:
             # Capped on the steps KEPT, so an invented id the clamp drops
@@ -1099,6 +1105,9 @@ async def decompose(intent: str) -> DecomposeResponse:
             # again here rather than trusted from the snapshot: a delisted
             # agent reaching /execute is the whole bug, and a step with nothing
             # to execute it would only reach /execute's unknown-agent skip.
+            continue
+        if reachability.is_failing(agent.id):
+            went_unreachable[agent.id] = agent
             continue
         rationale = step.rationale.strip()
         if (agent.id, rationale.casefold()) in seen:
@@ -1155,6 +1164,8 @@ async def decompose(intent: str) -> DecomposeResponse:
             )
         ]
 
+    notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(went_unreachable.items())]
+
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in cleaned)
     total_eta = sum(s.est_eta_seconds for s in cleaned)
@@ -1165,7 +1176,7 @@ async def decompose(intent: str) -> DecomposeResponse:
         plan=Plan(steps=cleaned),
         total_usdc=total_price,
         total_eta=total_eta,
-        notices=shortlist.notices,
+        notices=notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
         planner_fallback=planner_fallback,
@@ -1181,8 +1192,10 @@ async def decompose(intent: str) -> DecomposeResponse:
         # The floor acted BEFORE the planner was asked anything, so these
         # describe the shortlist the model chose from, not the model's choice.
         # An agent that cleared the floor and simply was not picked is absent
-        # from `notices` by construction — see `_routable_registry`.
-        notices=shortlist.notices,
+        # from `notices` by construction — see `_routable_registry`. The one
+        # addition is an offered agent whose endpoint was found dead during
+        # the call, which the clamp dropped.
+        notices=notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
         planner_fallback=planner_fallback,
