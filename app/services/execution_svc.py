@@ -19,7 +19,7 @@ from ..schemas import PlanStep, SettlementState, StoredPlan, Task, TaskStatus, T
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer, reputation_svc
+from . import failure_tracker, rating_writer, reputation_svc, task_persistence
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 from .orchestrator_svc import _is_listed
@@ -419,6 +419,12 @@ async def execute_plan(
     _track_background_task(
         asyncio.create_task(_run(plan, task_id, auth_id_hex=auth_id_hex, payer=payer, authorized_max=authorized_max))
     )
+    # Write-through for the receipt: the id and token this returns must outlive
+    # a restart that lands a moment later (D-090). Bounded — a slow database
+    # delays durability, not the buyer's answer — and the write keeps retrying
+    # in the background if this gives up on it.
+    if not await task_persistence.flush(task_persistence.RESPONSE_FLUSH_SECONDS):
+        logger.warning("task %s: not yet durable when /execute answered; its write is still queued", task_id)
     return task_id
 
 
@@ -930,6 +936,9 @@ async def _run(
         # (a bare `await asyncio.sleep` here would swallow the close when a
         # CancelledError landed on it).
         await asyncio.shield(_finish_stream(task_id))
+        # The run's terminal state, durably, before the run is gone — shielded
+        # for the same reason: it is the write a receipt reads after a restart.
+        await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
 
 
 async def _release_on_exit(task_id: str, start: float, auth_id_hex: str, reason: str) -> None:
