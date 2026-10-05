@@ -339,7 +339,7 @@ def test_shutdown_keeps_its_order(monkeypatch):
     from fastapi.testclient import TestClient
 
     import app.main as main
-    from app.services import rating_writer, refund_reconcile, reputation_svc
+    from app.services import rating_writer, refund_reconcile, reputation_svc, task_persistence
 
     order: list[str] = []
 
@@ -366,6 +366,7 @@ def test_shutdown_keeps_its_order(monkeypatch):
         (reputation_svc, "shutdown_read_pool"),
         (registry_sync, "stop"),
         (refund_reconcile, "stop"),
+        (task_persistence, "close"),
         (main, "aclose_pdax_client"),
         (main, "close_binding_store"),
         (main, "close_dispute_store"),
@@ -384,6 +385,7 @@ def test_shutdown_keeps_its_order(monkeypatch):
         "reputation_svc.shutdown_read_pool",
         "registry_sync.stop",
         "refund_reconcile.stop",
+        "task_persistence.close",
         "main.aclose_pdax_client",
         "main.close_binding_store",
         "main.close_dispute_store",

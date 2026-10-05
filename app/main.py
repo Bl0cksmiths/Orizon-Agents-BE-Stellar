@@ -65,7 +65,15 @@ from .security import (
     strict_cors_origins,
 )
 from .seed import seed_registry
-from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc, snapshots
+from .services import (
+    execution_svc,
+    rating_writer,
+    refund_reconcile,
+    registry_sync,
+    reputation_svc,
+    snapshots,
+    task_persistence,
+)
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
@@ -335,6 +343,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task.cancel()
     if pending:
         await asyncio.wait(pending, timeout=5)
+    # After the drain, so the runs' final states are among what is flushed:
+    # the task journal's queued writes go to the store (bounded), then its
+    # pool is released. Before the dispute store closes, like every store.
+    await task_persistence.close()
     await aclose_pdax_client()
     # Release the binding store's connection pool. A no-op for the in-memory
     # store, which is what runs whenever DATABASE_URL is unset.
