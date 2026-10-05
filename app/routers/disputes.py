@@ -47,7 +47,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..schemas import SettlementState
+from ..schemas import SealState, SettlementState
 from ..security import (
     CodedHTTPException,
     ErrorEnvelope,
@@ -582,6 +582,14 @@ class TaskDisputesResponse(BaseModel):
     # settlement failed or is unconfirmed says so here rather than reading as
     # merely "not settled yet". Null when neither is known.
     settlement_state: SettlementState | None = None
+    # What became of the run's attestation seal — `Task.seal`'s vocabulary:
+    # sealed, pending (being reconciled), unconfirmed, failed — and the hash
+    # that proves it when there is one. The task's word while this process
+    # holds the task (it may be newer than the record: a reconciled seal); the
+    # settlement record's otherwise, where a proof hash IS a confirmed seal.
+    # Null when no seal was submitted, or nothing is known of it.
+    seal: SealState | None = None
+    proof_tx: str | None = None
 
 
 def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
@@ -998,6 +1006,7 @@ async def list_task_disputes(
     # no payer, and a grant buys nothing.
     free_text = proof.proves_free_text(task_id, settlement.payer if settlement is not None else None)
     disputes = await dispute_svc.list_for_task(task_id)
+    seal, proof_tx = _receipt_seal(task_id, settlement)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
@@ -1007,7 +1016,20 @@ async def list_task_disputes(
         settlement=SettlementView.of(settlement) if settlement is not None else None,
         disputes=[DisputeResponse.of(d, free_text=free_text) for d in disputes],
         settlement_state=_settlement_state(task_id, settlement),
+        seal=seal,
+        proof_tx=proof_tx,
     )
+
+
+def _receipt_seal(task_id: str, settlement: SettlementRecord | None) -> tuple[SealState | None, str | None]:
+    """The receipt's seal: (state, proof hash), the task's word first, then the record's."""
+    record_proof = settlement.proof_tx if settlement is not None else None
+    task = state.tasks.get(task_id)
+    if task is not None and task.seal is not None:
+        return task.seal, task.proof_tx or record_proof
+    if record_proof is not None:
+        return "sealed", record_proof
+    return None, None
 
 
 def _settlement_state(task_id: str, settlement: SettlementRecord | None) -> SettlementState | None:
