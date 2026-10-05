@@ -485,3 +485,64 @@ def test_start_does_nothing_when_disabled(monkeypatch: pytest.MonkeyPatch) -> No
 
     _run(go)
     assert builder.calls == 0
+
+
+# ── soft expiry ─────────────────────────────────────────────────────────────
+def test_expire_serves_the_snapshot_once_more_and_rebuilds_behind_it() -> None:
+    builder = _Builder()
+    cell = _cell(builder)
+
+    async def go() -> tuple[int, int, bool, bool]:
+        first = await cell.get(wait_seconds=None)
+        cell.expire()
+        assert cell.is_fresh(first) is False  # type: ignore[arg-type]
+        served = await cell.get(wait_seconds=None)
+        assert served is first
+        task = cell._live_task()
+        assert task is not None
+        await task
+        latest = cell.current()
+        assert latest is not None
+        return served.value.n, latest.value.n, cell.is_fresh(latest), cell._expired  # type: ignore[union-attr]
+
+    assert _run(go) == (1, 2, True, False)
+
+
+def test_an_expire_during_a_build_survives_that_build() -> None:
+    """The build in flight started before the change it would otherwise clear."""
+    builder = _Builder(delay=0.05)
+    cell = _cell(builder)
+
+    async def go() -> bool:
+        task = cell.refresh()
+        assert task is not None
+        await asyncio.sleep(0.01)
+        cell.expire()
+        await task
+        latest = cell.current()
+        assert latest is not None
+        return cell.is_fresh(latest)
+
+    assert _run(go) is False
+
+
+def test_expire_needs_no_event_loop() -> None:
+    cell = _cell(_Builder())
+    cell.expire()  # no loop running here: nothing is started, nothing raises
+    assert cell.building() is False
+
+
+def test_keep_warm_rebuilds_an_expired_cell() -> None:
+    builder = _Builder()
+    cell = _cell(builder)
+    schedule = KeepWarm(cell=cell, every_seconds=60.0)
+
+    async def go() -> int:
+        schedule.tick()
+        await asyncio.sleep(0.01)
+        cell.expire()
+        schedule.tick()
+        await asyncio.sleep(0.01)
+        return builder.calls
+
+    assert _run(go) == 2
