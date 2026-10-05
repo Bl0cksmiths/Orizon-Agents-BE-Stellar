@@ -318,13 +318,16 @@ async def check_reclaimable(auth_id_hex: str, payer: str) -> OnChainAuthorizatio
         raise AuthorizationRefused(
             403, "authorization_payer_mismatch", "only the wallet that made this authorization can reclaim it"
         )
-    # One code for both, the settle lane's; the message says which it was.
+    # A code each, as the route documents and the console maps them ("already
+    # settled" / "already reclaimed" — answers, not errors). Execute keeps the
+    # settle lane's shared `authorization_spent`: there both mean "authorize
+    # again", and its clients already speak that code.
     if auth.settled:
         raise AuthorizationRefused(
-            409, "authorization_spent", "this authorization was already settled — anything unspent was returned"
+            409, "authorization_settled", "this authorization was already settled — anything unspent was returned"
         )
     if auth.revoked:
-        raise AuthorizationRefused(409, "authorization_spent", "this authorization was already reclaimed")
+        raise AuthorizationRefused(409, "authorization_revoked", "this authorization was already reclaimed")
     if _wall_clock() <= auth.expires_at + LEDGER_CLOCK_ALLOWANCE_SECONDS:
         # The instant is public on-chain, so saying it discloses nothing.
         raise AuthorizationRefused(
