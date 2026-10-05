@@ -112,11 +112,14 @@ class Settings(BaseSettings):
     # require the per-task read token minted at execute (or a valid API key).
     task_auth_required: bool = False
     # Sliding-window request budget (in-process, per worker), spent per key
-    # resolved by app/security.py client_key().
+    # resolved by app/security.py client_identity(); requests it cannot
+    # attribute share one bucket of the same size.
     #
-    # Sized as a WHOLE-SERVICE budget, because that is what it currently is:
-    # trusted_proxy_hops defaults to 0, so the key is the constant address our
-    # own edge appends and every visitor draws on one bucket. The console's
+    # Sized as a WHOLE-SERVICE budget, because that is what it was until the
+    # identity existed: the limiter keyed on the last forwarded entry, which
+    # on Render is an address from the platform's own pool, so every visitor
+    # drew on a couple of buckets. It is now per visitor and could come down;
+    # it stays a coarse flood cut until production traffic says where. The console's
     # real cost drives the number — an open dashboard tab polls two endpoints
     # every 5 s (24 req/min), /app/reputation adds a 4-request burst on mount
     # and 3 more on every window focus, and both liveness probes are exempt
@@ -135,20 +138,17 @@ class Settings(BaseSettings):
     # route whose key a caller chooses must bound the key space itself —
     # /api/stellar/reputation/{agent_id} answers only registered ids, and 404s
     # the rest before any RPC. This limit alone does not make a flood cheap.
-    # Once trusted_proxy_hops is tuned this becomes per-visitor and can come
-    # back down; the frontend backs off on 429 and honours Retry-After, so a
-    # tightened limit degrades cadence rather than breaking the console.
+    # The frontend backs off on 429 and honours Retry-After, so a tightened
+    # limit degrades cadence rather than breaking the console.
     rate_limit_per_minute: int = 1200
-    # How many TRAILING X-Forwarded-For entries belong to this deployment's own
-    # infrastructure, and are therefore dropped when app/security.py resolves
-    # the caller. 0 — the default — keys on the LAST entry, exactly as this
-    # service always has, so nothing changes until the value is deliberately
-    # tuned. Both directions of error are silent and opposite (too low: the key
-    # is a constant our edge wrote, so every visitor shares one rate-limit
-    # bucket and the access log's client= cannot attribute abuse; too high: the
-    # key is one the CALLER wrote, so the limiter is bypassed by sending a
-    # header). Only tune it against a chain actually observed from this edge —
-    # see forwarded_chain_samples below and client_key()'s docstring.
+    # How many TRAILING X-Forwarded-For entries the ACCESS LOG's `client=`
+    # drops (app/security.py client_key). The rate limiters no longer read it:
+    # they key on client_identity(), which recognises Render's own hops by
+    # address (non-public, then one Cloudflare edge) and so needs no count —
+    # 0, the default, is correct for this deployment, and no stale dashboard
+    # value can make a limiter read an entry the caller wrote. For the log,
+    # too low names our own edge and too high names whatever the caller wrote;
+    # the chain samples below print both views side by side.
     trusted_proxy_hops: int = 0
     # Diagnostic budget for that tuning: log the raw X-Forwarded-For chain and
     # the key it resolves to for the first N non-exempt requests after each
@@ -425,24 +425,23 @@ class Settings(BaseSettings):
     # with 503 "planner_busy" instead of joining the queue.
     decompose_max_queued: int = 16
     # Free-form (LLM) decompose calls one client may make per minute, on top
-    # of the global rate_limit_per_minute, keyed by the same client_key(). A
-    # breach is 429 "decompose_rate_limited" with Retry-After; kit intents
-    # make no LLM call and are not counted. 0 disables it. At
-    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this —
-    # and browser traffic arrives through the frontend's /api rewrite, most
-    # likely from one shared egress address, so until the hop count is
-    # confirmed from the deploy's forwarded_chain_samples this is probably one
-    # budget for every visitor. 30 keeps a demo or a QA run clear of it while
-    # still bounding spend; tune it down once the key is truly per-visitor.
+    # of the global rate_limit_per_minute, keyed by security.client_identity()
+    # (the visitor behind Render's proxies, or the one our frontend names with
+    # FRONTEND_PROXY_TOKEN). A breach is 429 "decompose_rate_limited" with
+    # Retry-After; kit intents make no LLM call and are not counted. 0 disables
+    # it. A caller with no identity has no budget here; the planner's
+    # concurrency gate and bounded queue hold those. Browser traffic through
+    # the frontend's plain /api rewrite arrives from Vercel's shared egress, so
+    # it shares one budget until the frontend sends the token and the visitor.
     decompose_rate_limit_per_minute: int = 30
     # Dispute challenges one client may mint per minute (POST
-    # /api/disputes/challenge), keyed by the same client_key(). Every mint that
+    # /api/disputes/challenge), keyed by the same client_identity(). Every mint that
     # takes a slot holds it for five minutes out of a 200-slot `dispute` budget,
     # so an unbounded client could fill that budget alone; at 20 a minute one
     # client holds at most 100. A buyer disputes one step at a time, and a
     # re-mint of a live challenge returns the same nonce, so no honest flow
     # comes near it. A breach is 429 "dispute_challenge_rate_limited" with
-    # Retry-After; 0 disables it. Same TRUSTED_PROXY_HOPS caveat as above.
+    # Retry-After; 0 disables it. No identity, no budget, as above.
     dispute_challenge_rate_limit_per_minute: int = 20
     # Most agents listed in the planning prompt. Prompt tokens per planner call
     # grew with every bound agent; past this many that cleared the floor, the
