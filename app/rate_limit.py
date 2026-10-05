@@ -6,17 +6,21 @@ budget for a route whose every call costs something real — a paid run, an
 RPC simulation, a chain scan, an outbound probe — so those routes take a
 budget of their own here, on top of it:
 
-  * per CLIENT (`security.client_key`, the same key the global limiter and the
-    access log use, with the same TRUSTED_PROXY_HOPS caveat: at the default of
-    0 every caller behind one edge address shares it, so the numbers below are
-    sized as service-wide ceilings until the hop count is tuned);
+  * per CLIENT, as `security.client_identity` resolves one — the visitor
+    behind Render's proxies, or the one our frontend names. A request it
+    cannot attribute has no per-client budget at all: one shared bucket would
+    let any such caller starve every other;
   * and, where the request names one, per WALLET — the G-address in the body
     that the route builds for, pays from, or signs as. That is the fairness
     half: one wallet cannot spend everyone's budget for a route, however many
     addresses it sends from. The wallet is read before the route has verified
     it, so anyone naming a wallet spends that wallet's budget too; the budgets
     are sized well above what one honest wallet does in a minute so that
-    costs a griefer far more than it costs the wallet.
+    costs a griefer far more than it costs the wallet;
+  * and a CEILING per route, across every caller, sized for real traffic with
+    room to spare: the cap on what the route can cost in a minute however the
+    callers are spread, which is what still holds the requests no identity
+    could be found for.
 
 The backend is a `RateLimitBackend`: an in-process token bucket by default —
 the deployment is one uvicorn worker on one instance, so that is the whole
@@ -36,7 +40,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .security import client_key, request_id_var
+from .security import client_identity, request_id_var
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,8 @@ class RoutePolicy:
     per_wallet: int = 0
     # JSON body fields that may hold the request's wallet (a G-address).
     wallet_fields: tuple[str, ...] = ()
+    # Every caller together, per minute.
+    ceiling: int = 0
 
 
 _WINDOW_SECONDS = 60.0
@@ -122,31 +128,69 @@ _WALLET = re.compile(r"^G[A-Z2-7]{55}$")
 
 
 def _policy(
-    name: str, methods: set[str], path: str, per_client: int, per_wallet: int = 0, wallet_fields: tuple[str, ...] = ()
+    name: str,
+    methods: set[str],
+    path: str,
+    *,
+    per_client: int,
+    ceiling: int,
+    per_wallet: int = 0,
+    wallet_fields: tuple[str, ...] = (),
 ) -> RoutePolicy:
-    return RoutePolicy(name, frozenset(methods), re.compile(path), per_client, per_wallet, wallet_fields)
+    return RoutePolicy(name, frozenset(methods), re.compile(path), per_client, per_wallet, wallet_fields, ceiling)
 
 
-# Per minute. Sized as SERVICE-WIDE ceilings, because at TRUSTED_PROXY_HOPS=0
-# every browser behind the frontend's proxy is one client (see the module
-# docstring); each is still several times what a busy demo does.
+# Per minute. `per_client` is one visitor (several times what a busy demo
+# session does); `ceiling` is everyone together, sized for a demo that gets
+# linked somewhere, and is the cost cap.
 POLICIES: tuple[RoutePolicy, ...] = (
     # A paid or simulated run: every step a dispatch, some an LLM call.
-    _policy("execute", {"POST"}, r"/api/orchestrator/execute", 30, 6, ("payer",)),
+    _policy(
+        "execute",
+        {"POST"},
+        r"/api/orchestrator/execute",
+        per_client=10,
+        per_wallet=6,
+        wallet_fields=("payer",),
+        ceiling=120,
+    ),
     # Each build is a Soroban simulation (and the reclaim one a chain read).
-    _policy("stellar_build", {"POST"}, r"/api/stellar/build/[a-z-]+", 60, 20, ("payer", "owner")),
-    _policy("stellar_submit", {"POST"}, r"/api/stellar/submit", 30),
+    _policy(
+        "stellar_build",
+        {"POST"},
+        r"/api/stellar/build/[a-z-]+",
+        per_client=30,
+        per_wallet=20,
+        wallet_fields=("payer", "owner"),
+        ceiling=600,
+    ),
+    _policy("stellar_submit", {"POST"}, r"/api/stellar/submit", per_client=20, ceiling=300),
     # A full registry scan, however single-flight it is inside.
-    _policy("registry_sync", {"POST"}, r"/api/stellar/agents/sync", 6),
+    _policy("registry_sync", {"POST"}, r"/api/stellar/agents/sync", per_client=3, ceiling=12),
     # Challenge mints hold a slot of a shared budget for minutes; a bind or an
     # unbind reads the chain and writes the store.
-    _policy("binding", {"POST", "DELETE"}, r"/api/agents/[^/]+/(bind|bind/challenge|unbind/challenge)", 30),
-    _policy("disputes", {"POST"}, r"/api/disputes(/challenge|/read-challenge|/read-grant)?", 30, 10, ("payer",)),
-    _policy("x402", {"POST"}, r"/api/payments/x402", 30),
+    _policy(
+        "binding",
+        {"POST", "DELETE"},
+        r"/api/agents/[^/]+/(bind|bind/challenge|unbind/challenge)",
+        per_client=20,
+        ceiling=120,
+    ),
+    _policy(
+        "disputes",
+        {"POST"},
+        r"/api/disputes(/challenge|/read-challenge|/read-grant)?",
+        per_client=20,
+        per_wallet=10,
+        wallet_fields=("payer",),
+        ceiling=120,
+    ),
+    _policy("x402", {"POST"}, r"/api/payments/x402", per_client=30, ceiling=300),
     # Reads that reach outside: an outbound probe of an operator's endpoint,
-    # and a DNS resolution of a caller's URL.
-    _policy("readiness", {"GET"}, r"/api/agents/[^/]+/readiness", 30),
-    _policy("endpoint_check", {"GET"}, r"/api/agents/bind/endpoint-check", 30),
+    # and a DNS resolution of a caller's URL. Our frontend's cached handlers
+    # read readiness on nobody's behalf, so only the ceiling holds them.
+    _policy("readiness", {"GET"}, r"/api/agents/[^/]+/readiness", per_client=30, ceiling=600),
+    _policy("endpoint_check", {"GET"}, r"/api/agents/bind/endpoint-check", per_client=30, ceiling=300),
 )
 
 
@@ -251,7 +295,7 @@ async def _refuse(send: Any, wait_seconds: float) -> None:
 
 
 class RouteRateLimitMiddleware:
-    """Spend the matching `POLICIES` budget, per client then per wallet (pure ASGI).
+    """Spend the matching `POLICIES` budgets: ceiling, client, then wallet (pure ASGI).
 
     Registered inside the global limiter and outside BodyLimitMiddleware: a
     request the global limiter refused never spends a route budget, and the
@@ -269,11 +313,18 @@ class RouteRateLimitMiddleware:
             await self.app(scope, receive, send)
             return
         backend = get_backend()
-        wait = await backend.take(f"{policy.name}:client:{client_key(scope)}", policy.per_client, _WINDOW_SECONDS)
+        wait = await backend.take(f"{policy.name}:ceiling", policy.ceiling, _WINDOW_SECONDS)
         if wait is not None:
-            logger.warning("route rate limit: policy=%s scope=client", policy.name)
+            logger.warning("route rate limit: policy=%s scope=ceiling", policy.name)
             await _refuse(send, wait)
             return
+        client = client_identity(scope)
+        if client is not None:
+            wait = await backend.take(f"{policy.name}:client:{client}", policy.per_client, _WINDOW_SECONDS)
+            if wait is not None:
+                logger.warning("route rate limit: policy=%s scope=client", policy.name)
+                await _refuse(send, wait)
+                return
         if policy.per_wallet > 0 and policy.wallet_fields:
             body, receive = await _sniff(scope, receive)
             wallet = _wallet(body, policy.wallet_fields) if body is not None else None

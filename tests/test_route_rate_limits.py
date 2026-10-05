@@ -31,18 +31,26 @@ def client():
         yield c
 
 
-def _shrink(monkeypatch: pytest.MonkeyPatch, name: str, *, per_client: int, per_wallet: int = 0) -> None:
+def _shrink(
+    monkeypatch: pytest.MonkeyPatch, name: str, *, per_client: int, per_wallet: int = 0, ceiling: int = 10_000
+) -> None:
     """Tighten one policy so a test can cross it in a few requests."""
     policies = []
     for p in rate_limit.POLICIES:
         if p.name == name:
-            p = RoutePolicy(p.name, p.methods, p.path, per_client, per_wallet, p.wallet_fields)
+            p = RoutePolicy(p.name, p.methods, p.path, per_client, per_wallet, p.wallet_fields, ceiling)
         policies.append(p)
     monkeypatch.setattr(rate_limit, "POLICIES", tuple(policies))
 
 
+# Render's own hops, as `security.client_identity` recognises them: one
+# Cloudflare edge, then an internal address.
+EDGE = "172.70.81.12, 10.201.3.4"
+
+
 def _from(ip: str) -> dict[str, str]:
-    return {"x-forwarded-for": ip}
+    """A request from visitor `ip`, as it reaches us through Render's proxies."""
+    return {"x-forwarded-for": f"{ip}, {EDGE}"}
 
 
 def test_a_route_budget_refuses_past_its_limit_in_the_envelope(client, monkeypatch) -> None:
@@ -75,9 +83,9 @@ def test_budgets_are_per_client(client, monkeypatch) -> None:
     _shrink(monkeypatch, "execute", per_client=1)
     body = {"plan_id": "pln_00000000"}
 
-    assert client.post("/api/orchestrator/execute", json=body, headers=_from("198.51.100.1")).status_code == 404
-    assert client.post("/api/orchestrator/execute", json=body, headers=_from("198.51.100.1")).status_code == 429
-    assert client.post("/api/orchestrator/execute", json=body, headers=_from("198.51.100.2")).status_code == 404
+    assert client.post("/api/orchestrator/execute", json=body, headers=_from("81.2.69.1")).status_code == 404
+    assert client.post("/api/orchestrator/execute", json=body, headers=_from("81.2.69.1")).status_code == 429
+    assert client.post("/api/orchestrator/execute", json=body, headers=_from("81.2.69.2")).status_code == 404
 
 
 def test_a_wallet_cannot_spread_its_spend_across_clients(client, monkeypatch) -> None:
@@ -85,7 +93,7 @@ def test_a_wallet_cannot_spread_its_spend_across_clients(client, monkeypatch) ->
     body = {"payer": PAYER, "auth_id_hex": AUTH}
 
     codes = [
-        client.post("/api/stellar/build/reclaim", json=body, headers=_from(f"198.51.100.{i}")).status_code
+        client.post("/api/stellar/build/reclaim", json=body, headers=_from(f"81.2.69.{i + 1}")).status_code
         for i in range(3)
     ]
 
@@ -179,3 +187,83 @@ def test_every_unguarded_state_changing_route_has_a_budget() -> None:
                 unbudgeted.append(f"{method} {route.path}")
 
     assert unbudgeted == []
+
+
+# ── who counts as a client ──────────────────────────────────────
+
+
+def test_a_caller_nobody_can_attribute_spends_only_the_ceiling(client, monkeypatch) -> None:
+    # No per-client budget applies to a chain of infrastructure alone (one
+    # shared bucket would let any such caller starve the rest); the route's
+    # service-wide ceiling still does.
+    _shrink(monkeypatch, "execute", per_client=1, ceiling=3)
+    body = {"plan_id": "pln_00000000"}
+    anonymous = {"x-forwarded-for": EDGE}
+
+    codes = [client.post("/api/orchestrator/execute", json=body, headers=anonymous).status_code for _ in range(4)]
+
+    assert codes == [404, 404, 404, 429]
+
+
+def test_the_ceiling_holds_across_every_client(client, monkeypatch) -> None:
+    _shrink(monkeypatch, "execute", per_client=100, ceiling=2)
+    body = {"plan_id": "pln_00000000"}
+
+    codes = [
+        client.post("/api/orchestrator/execute", json=body, headers=_from(f"81.2.69.{i}")).status_code
+        for i in range(1, 4)
+    ]
+
+    assert codes == [404, 404, 429]
+
+
+def test_many_visitors_behind_our_frontend_do_not_starve_each_other(client, monkeypatch) -> None:
+    # Vercel's egress addresses are shared: the frontend proves itself with
+    # FRONTEND_PROXY_TOKEN and names each visitor, so fifty of them polling
+    # readiness through it each keep their own budget.
+    from app.config import settings
+
+    token = "frontend-proxy-token-" + "k" * 24
+    monkeypatch.setattr(settings, "frontend_proxy_token", token)
+    _shrink(monkeypatch, "readiness", per_client=1)
+
+    def visit(i: int) -> int:
+        headers = {
+            "x-forwarded-for": f"76.76.21.9, {EDGE}",
+            "x-frontend-proxy-token": token,
+            "x-orizon-client-ip": f"81.2.69.{i}",
+        }
+        return client.get("/api/agents/agt_01h8/readiness", headers=headers).status_code
+
+    assert [visit(i) for i in range(1, 51)] == [200] * 50
+    # Each visitor is still held to their own budget.
+    assert visit(1) == 429
+
+
+def test_the_frontends_shared_reads_are_never_held_to_a_client_budget(client, monkeypatch) -> None:
+    # A cached route handler reads on everyone's behalf and names no visitor.
+    from app.config import settings
+
+    token = "frontend-proxy-token-" + "k" * 24
+    monkeypatch.setattr(settings, "frontend_proxy_token", token)
+    _shrink(monkeypatch, "readiness", per_client=1)
+    headers = {"x-forwarded-for": f"76.76.21.9, {EDGE}", "x-frontend-proxy-token": token}
+
+    assert [client.get("/api/agents/agt_01h8/readiness", headers=headers).status_code for _ in range(5)] == [200] * 5
+
+
+def test_a_wrong_token_is_just_another_caller(client, monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "frontend_proxy_token", "frontend-proxy-token-" + "k" * 24)
+    _shrink(monkeypatch, "readiness", per_client=1)
+    headers = {
+        "x-forwarded-for": f"76.76.21.9, {EDGE}",
+        "x-frontend-proxy-token": "guess-" + "k" * 40,
+        "x-orizon-client-ip": "81.2.69.7",
+    }
+
+    client.get("/api/agents/agt_01h8/readiness", headers=headers)
+    headers["x-orizon-client-ip"] = "81.2.69.8"
+    # Keyed on Vercel's egress, not on the named visitor: the same client twice.
+    assert client.get("/api/agents/agt_01h8/readiness", headers=headers).status_code == 429
