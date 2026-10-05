@@ -2007,9 +2007,23 @@ async def _settle_v2(
 
         if not delivered_steps:
             return (settle_tx, None, settled_job_id)
+        if release:
+            # Delivered, but nobody could be paid (no confirmed on-chain owner,
+            # free, or the cap was spent), so the settle moved nothing to any
+            # operator. An attestation needs a payment to attest to: one naming
+            # no agent and no receipt says nothing, and one naming the unpaid
+            # agents would claim payments that never happened (D-086).
+            await _emit(task_id, start, "exec", "no agent was paid — nothing to attest, no seal submitted")
+            return (settle_tx, None, settled_job_id)
 
         # Seal, exactly as v1 does, with one receipt per payout rather than one
         # for the run: the attestation's link to every payment that funded it.
+        # The agents are the PAID ones, one per payout, so `agents[i]` and
+        # `receipts[i]` name the same payment (D-086). Sealing every plan step
+        # attested work to an agent that timed out, failed or was refused —
+        # and the seal is permanent on-chain evidence a buyer or an indexer
+        # reads as "this agent delivered and was paid for this job".
+        sealed_agents = [payout.agent_id for payout in payout_plan.payouts]
         if receipts is None and payout_plan.payouts:
             logger.error(
                 "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
@@ -2034,7 +2048,7 @@ async def _settle_v2(
                 sc.bytes16(job_id),
                 sc.addr(payer),
                 sc.bytes32(intent_hash),
-                _sv.to_vec([sc.sym(s.agent_id) for s in plan.plan.steps]),
+                _sv.to_vec([sc.sym(agent_id) for agent_id in sealed_agents]),
                 _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
                 sc.i128(total),
             ],
@@ -2047,7 +2061,7 @@ async def _settle_v2(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {len(plan.plan.steps)} agents · {total_usdc:.3f} USDC · "
+                f"workflow sealed — {len(sealed_agents)} agents · {total_usdc:.3f} USDC · "
                 f"{time.monotonic() - start:.2f}s",
             )
         else:
