@@ -12,6 +12,7 @@ the world under test is exactly the one the `world` fixture builds.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -220,3 +221,143 @@ def test_the_platform_admin_owning_agents_is_listed_not_hidden(world: _World) ->
             "agent_ids": ["algorex", "keyboardai"],
         }
     ]
+
+
+# ── never a multi-minute request (D-091) ────────────────────────────────────
+def _slow_build(monkeypatch: pytest.MonkeyPatch, seconds: float = 30.0) -> list[int]:
+    """A build as slow as the live one: a settlement scan per external agent."""
+    started: list[int] = []
+
+    async def slow() -> adoption_svc.AdoptionReport:
+        started.append(1)
+        await asyncio.sleep(seconds)
+        raise AssertionError("a request waited for the build")
+
+    monkeypatch.setattr(adoption_svc, "build_report", slow)
+    return started
+
+
+def test_the_first_request_after_boot_is_a_prompt_202_never_the_scan(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = _slow_build(monkeypatch)
+
+    t0 = time.perf_counter()
+    response = TestClient(app).get("/api/ecosystem/adoption")
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 1.0, f"the request was held {elapsed:.2f} s"
+    assert response.status_code == 202
+    assert response.json() == {
+        "status": "computing",
+        "message": (
+            "The adoption report is being computed from on-chain data "
+            "(a settlement scan per external agent). Ask again shortly."
+        ),
+        "retry_after_seconds": adoption_svc.REPORT_PENDING_RETRY_AFTER_SECONDS,
+    }
+    assert response.headers["retry-after"] == str(adoption_svc.REPORT_PENDING_RETRY_AFTER_SECONDS)
+    assert response.headers["cache-control"] == "no-store"
+    assert started == [1]
+
+
+def test_requests_during_a_build_never_wait_on_it_or_start_another(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = _slow_build(monkeypatch)
+
+    async def go() -> tuple[list[int], float]:
+        t0 = time.perf_counter()
+        answers = []
+        for _ in range(5):
+            snap = await adoption_svc.report_snapshot()
+            answers.append(0 if snap is None else 1)
+        return answers, time.perf_counter() - t0
+
+    answers, elapsed = asyncio.run(go())
+    assert answers == [0] * 5
+    assert elapsed < 0.5
+    assert started == [1]
+
+
+def test_a_built_report_is_served_from_memory_well_inside_the_budget(world: _World) -> None:
+    for i in range(50):
+        world.agent(f"ext_{i}", EXT_A if i % 2 else EXT_B, _entry(i + 1))
+    client = TestClient(app)
+    assert _get(client).status_code == 200
+
+    t0 = time.perf_counter()
+    for _ in range(10):
+        assert client.get("/api/ecosystem/adoption").status_code == 200
+    assert (time.perf_counter() - t0) / 10 < 0.2
+
+
+def test_a_failed_rebuild_keeps_serving_the_last_report_with_its_age(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.agent("ext_a1", EXT_A, _entry(1))
+    client = TestClient(app)
+    first = _get(client)
+    assert first.status_code == 200
+
+    async def broken() -> adoption_svc.AdoptionReport:
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(adoption_svc, "build_report", broken)
+    asyncio.run(_build())  # the scheduled rebuild fails
+
+    again = client.get("/api/ecosystem/adoption")
+    assert again.status_code == 200
+    assert again.json() == first.json()
+    assert int(again.headers["x-snapshot-age"]) >= 0
+    assert again.headers["x-snapshot-source"] == "live"
+    assert adoption_svc.report_cell.status().last_error == "RuntimeError: rpc down"
+
+
+def test_the_report_carries_validators_and_revalidates_to_304(world: _World) -> None:
+    world.agent("ext_a1", EXT_A, _entry(1))
+    client = TestClient(app)
+    first = _get(client)
+    assert first.headers["etag"].startswith('W/"')
+    assert first.headers["last-modified"].endswith("GMT")
+    assert first.headers["cache-control"].startswith("public, max-age=")
+    assert first.headers["cache-control"].endswith("stale-while-revalidate=600")
+    again = client.get("/api/ecosystem/adoption", headers={"If-None-Match": first.headers["etag"]})
+    assert again.status_code == 304
+    assert again.content == b""
+
+
+# ── the schedule ────────────────────────────────────────────────────────────
+def _schedule() -> Any:
+    from app.services import snapshots
+
+    return next(s for s in snapshots._schedules if s.cell is adoption_svc.report_cell)
+
+
+def test_the_report_is_rebuilt_on_a_schedule_and_when_the_registry_changes(world: _World) -> None:
+    schedule = _schedule()
+    assert schedule.every_seconds == adoption_svc.REPORT_REFRESH_SECONDS <= 1800
+    assert schedule.min_change_rebuild_seconds == adoption_svc.REPORT_REGISTRY_REBUILD_SECONDS
+    world.agent("ext_a1", EXT_A)
+    before = adoption_svc.registry_fingerprint()
+    assert adoption_svc.registry_fingerprint() == before
+    world.agent("ext_b1", EXT_B)
+    assert adoption_svc.registry_fingerprint() != before
+    changed_owner = adoption_svc.registry_fingerprint()
+    world.agent("ext_b1", EXT_A)  # re-registered under another owner
+    assert adoption_svc.registry_fingerprint() != changed_owner
+
+
+def test_the_first_build_waits_for_the_registry_but_not_forever(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import registry_sync
+    from app.state import state
+
+    ready = _schedule().ready
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=False))
+    monkeypatch.setattr(state, "started_at", time.time())
+    assert ready() is False
+    monkeypatch.setattr(state, "started_at", time.time() - adoption_svc.REPORT_BOOT_GRACE_SECONDS - 1)
+    assert ready() is True
+    monkeypatch.setattr(state, "started_at", time.time())
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True))
+    assert ready() is True
