@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from stellar_sdk import Keypair
 from test_dispute_store import a_settlement
 
@@ -33,7 +34,7 @@ from app.main import app
 from app.routers import metrics as metrics_router
 from app.schemas import Agent, OverviewMetrics, Task
 from app.security import EXEMPT_PATHS, RateLimitMiddleware
-from app.services import adoption_svc, binding_registry, registry_sync, settlement_svc
+from app.services import adoption_svc, binding_registry, registry_sync, settlement_svc, snapshots
 from app.services.dispute_store import SECONDS_PER_DAY, InMemoryDisputeStore
 from app.services.reputation_svc import RepInfo
 from app.state import state
@@ -760,3 +761,92 @@ def test_the_first_full_pass_replaces_a_partial_overview_at_once(registry, monke
     assert full.agents.registered == 2
     assert len(calls) == 2
 
+
+# ── HTTP caching ──────────────────────────────────────────────────────────
+def test_the_overview_carries_validators_and_a_shared_cache_lifetime(client, registry) -> None:
+    registry(_seeded("agt_a"))
+    r = client.get("/api/metrics/overview")
+    assert r.status_code == 200
+    assert r.headers["etag"].startswith('W/"')
+    assert r.headers["last-modified"].endswith("GMT")
+    assert r.headers["cache-control"].startswith("public, max-age=")
+    assert "s-maxage=" in r.headers["cache-control"]
+    assert "stale-while-revalidate=60" in r.headers["cache-control"]
+    assert int(r.headers["x-snapshot-age"]) >= 0
+    assert OverviewMetrics.model_validate(r.json()).agents.registered == 1
+
+
+def test_a_current_etag_is_answered_304_without_a_body(client, registry) -> None:
+    registry(_seeded("agt_a"))
+    first = client.get("/api/metrics/overview")
+    again = client.get("/api/metrics/overview", headers={"If-None-Match": first.headers["etag"]})
+    assert again.status_code == 304
+    assert again.content == b""
+    assert again.headers["etag"] == first.headers["etag"]
+
+
+def test_a_gzip_client_gets_the_same_overview(client, registry) -> None:
+    registry(_seeded("agt_a"))
+    plain = client.get("/api/metrics/overview", headers={"Accept-Encoding": "identity"})
+    zipped = client.get("/api/metrics/overview", headers={"Accept-Encoding": "gzip"})
+    assert zipped.headers["content-encoding"] == "gzip"
+    assert zipped.json() == plain.json()
+
+
+def test_a_partial_overview_is_never_held_by_a_shared_cache(client, registry, monkeypatch) -> None:
+    registry(_seeded("agt_a"))
+    _unsynced(monkeypatch)
+    r = client.get("/api/metrics/overview")
+    assert r.json()["registry_synced"] is False
+    assert r.headers["cache-control"] == "no-cache"
+
+
+def test_a_failed_rebuild_keeps_serving_the_last_overview(registry, monkeypatch) -> None:
+    """Stale on failure: an overview that cannot be rebuilt is not replaced by
+    an error while there is one to serve, and the failure is recorded."""
+    registry(_seeded("agt_a"))
+    monkeypatch.setattr(metrics_router.overview_cell, "fresh_seconds", 0.01)
+
+    async def broken() -> OverviewMetrics:
+        raise RuntimeError("store exploded")
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics]:
+        first = await metrics_router.fetch_overview()
+        monkeypatch.setattr(metrics_router, "build_overview", broken)
+        await asyncio.sleep(0.05)
+        served = await metrics_router.fetch_overview()
+        await _refresh_behind()
+        return first, served
+
+    first, served = asyncio.run(go())
+    assert served is first
+    assert metrics_router.overview_cell.status().last_error == "RuntimeError: store exploded"
+
+
+def test_no_overview_at_all_is_503_never_a_fabricated_one(registry, monkeypatch) -> None:
+    async def broken() -> OverviewMetrics:
+        raise RuntimeError("store exploded")
+
+    monkeypatch.setattr(metrics_router, "build_overview", broken)
+    r = TestClient(app).get("/api/metrics/overview")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "overview_unavailable"
+
+
+def test_the_overview_is_kept_warm_and_rebuilt_on_a_registry_pass() -> None:
+    schedule = next(s for s in snapshots._schedules if s.cell is metrics_router.overview_cell)
+    assert schedule.every_seconds <= 60
+    assert schedule.fingerprint is not None
+    assert schedule.fingerprint() == registry_sync.status().last_full_sync_at
+
+
+def test_a_warm_overview_answers_well_inside_the_latency_budget(client, registry, monkeypatch) -> None:
+    """The point of the snapshot: once one exists, a poll is a memory read,
+    however slow the build behind it is."""
+    registry(*(_agent(f"ext{i}", owner=EXT_A) for i in range(600)))
+    _counting_build(monkeypatch, delay=1.0)
+    client.get("/api/metrics/overview")  # the first one waits for its build
+    started = time.perf_counter()
+    for _ in range(10):
+        assert client.get("/api/metrics/overview").status_code == 200
+    assert (time.perf_counter() - started) / 10 < 0.2
