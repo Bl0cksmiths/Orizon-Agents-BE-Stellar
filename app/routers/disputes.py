@@ -56,7 +56,7 @@ from ..security import (
     request_id_var,
     require_adjudicator,
 )
-from ..services import dispute_read, dispute_svc, refund_svc
+from ..services import dispute_read, dispute_svc, refund_svc, task_persistence
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
 from ..state import state
@@ -884,6 +884,15 @@ async def get_dispute(
     record = await dispute_svc.get_dispute(dispute_id)
     if record is None:
         raise HTTPException(404, "unknown_dispute")
+    # The path names no task, so nothing has read this dispute's task back from
+    # the durable store yet: after a restart its token could not prove until
+    # something else had (D-090). Held here first, best effort, exactly as
+    # `task_read_proof` holds a `{task_id}` route's — a store that cannot answer
+    # leaves the token unproven and the free text withheld, never a failed read.
+    try:
+        await task_persistence.ensure_task(record.task_id)
+    except task_persistence.TaskStoreUnavailable:
+        pass
     # Against the payer the DISPUTE names, never one the caller supplies: a read
     # grant is honoured only for the party whose signature earned it.
     return DisputeResponse.of(record, free_text=proof.proves_free_text(record.task_id, record.payer))
