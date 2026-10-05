@@ -447,6 +447,11 @@ async def _run(
     # until expiry (S4). One that ends after it never does: that settle may
     # still land, and a second one is a replay at best and a race at worst.
     settle_attempted = False
+    # Set the moment the task is written terminal. From then on the task is
+    # the buyer's receipt of what happened — a settle that moved money above
+    # all — and nothing later (a cancel during the seal or the ratings, a bug
+    # after the settle) may rewrite it as `failed` with no hash.
+    finalized = False
 
     # Accumulate prior step outputs so later steps can build on them.
     # The kit (if any) is seeded into context up-front so EVERY worker
@@ -769,6 +774,21 @@ async def _run(
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
+        # The job id this run's ratings are written under, once the settlement
+        # is over. Ratings are FOLLOW-UP work: one on-chain submit per step, in
+        # sequence, each polling up to ~30s, and the receipt used to read
+        # `running` for all of it after the buyer's money had moved. Now the
+        # task is final first and the ratings follow it, still the run's own
+        # work — still traced, still holding its capacity slot until done.
+        rate_under: bytes | None = None
+
+        def _money_moved(settle_tx: str) -> None:
+            # Called the moment the settle (v2) or charge (v1) CONFIRMS, before
+            # the seal's own poll: the receipt is final, with the hash of what
+            # moved, from that instant. The seal's hash is added when it lands.
+            nonlocal finalized
+            _finalize_task(task_id, status, spent, last_artifact, settle_tx, None)
+            finalized = True
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
             if succeeded == 0 and await _escrow_version() >= 2:
@@ -787,16 +807,7 @@ async def _run(
                     delivered_steps=frozenset(),
                     authorized_max=authorized_max,
                 )
-                await _submit_ratings(
-                    task_id,
-                    start,
-                    plan,
-                    delivered,
-                    payer=payer,
-                    job_id=unsettled_job_id(task_id),
-                    undispatched=frozenset(undispatched),
-                    first_party_ids=frozenset(first_party_ids),
-                )
+                rate_under = unsettled_job_id(task_id)
             elif succeeded == 0:
                 # Same rule as the simulated branch below — a workflow that
                 # produced nothing has nothing to attest to, and nothing to
@@ -823,16 +834,7 @@ async def _run(
                 # routing floor needs, and withholding it meant the canonical
                 # broken endpoint — down, failing everything — accumulated no
                 # negative evidence at all and stayed routable forever.
-                await _submit_ratings(
-                    task_id,
-                    start,
-                    plan,
-                    delivered,
-                    payer=payer,
-                    job_id=unsettled_job_id(task_id),
-                    undispatched=frozenset(undispatched),
-                    first_party_ids=frozenset(first_party_ids),
-                )
+                rate_under = unsettled_job_id(task_id)
             else:
                 # The settlement is recorded inside this, the moment the charge
                 # confirms and before the seal — and so before the ratings
@@ -853,6 +855,7 @@ async def _run(
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
                     authorized_max=authorized_max,
+                    on_money_moved=_money_moved,
                 )
                 # Rated whether or not the money moved, exactly as the
                 # no-success branch above is (ADR 0005 D2). This used to sit
@@ -867,21 +870,13 @@ async def _run(
                 # asymmetry the story exists to remove. Settlement answers
                 # "who gets paid"; a rating answers "who delivered", and the
                 # second does not depend on the first.
-                await _submit_ratings(
-                    task_id,
-                    start,
-                    plan,
-                    delivered,
-                    payer=payer,
-                    # The job id is minted by the charge, so a run that did not
-                    # settle has none. Falling back to the task-derived id is
-                    # what lets the evidence land anyway, and it is derived
-                    # rather than random so the ledger's (agent_id, job_id)
-                    # replay guard still counts one run exactly once.
-                    job_id=job_id or unsettled_job_id(task_id),
-                    undispatched=frozenset(undispatched),
-                    first_party_ids=frozenset(first_party_ids),
-                )
+                #
+                # The job id is minted by the charge, so a run that did not
+                # settle has none. Falling back to the task-derived id is what
+                # lets the evidence land anyway, and it is derived rather than
+                # random so the ledger's (agent_id, job_id) replay guard still
+                # counts one run exactly once.
+                rate_under = job_id or unsettled_job_id(task_id)
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
             # workflow that produced nothing has nothing to attest to — and it
@@ -912,19 +907,35 @@ async def _run(
             )
 
         _finalize_task(task_id, status, spent, last_artifact, charge_tx, proof_tx)
+        finalized = True
+
+        if rate_under is not None and payer:
+            await _submit_ratings(
+                task_id,
+                start,
+                plan,
+                delivered,
+                payer=payer,
+                job_id=rate_under,
+                undispatched=frozenset(undispatched),
+                first_party_ids=frozenset(first_party_ids),
+            )
 
     except asyncio.CancelledError:
         # Shutdown or external cancel: leave the task terminal instead of
         # "running" forever, tell the stream, and keep the cancellation
         # propagating. shield: a second cancel must not kill the trace line.
-        _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+        # A task already final keeps what it says (see `finalized`).
+        if not finalized:
+            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
         raise
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
-        _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+        if not finalized:
+            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
