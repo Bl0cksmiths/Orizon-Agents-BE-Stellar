@@ -50,7 +50,7 @@ from ..schemas import Agent
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
-from . import external_binding, registry_sync, settlement_svc, snapshots
+from . import external_binding, registry_sync, settlement_svc, snapshot_store, snapshots
 from .binding_store import get_binding_store
 from .dispatch_signing import dispatch_signer_address
 from .snapshots import KeepWarm, Snapshot, SnapshotCell
@@ -156,6 +156,9 @@ REPORT_RETRY_AFTER_FAILURE_SECONDS = 120.0
 REPORT_BOOT_GRACE_SECONDS = 600.0
 # What a 202 asks the client to wait before asking again.
 REPORT_PENDING_RETRY_AFTER_SECONDS = 30
+# A report restored from the database after a restart is served only when it
+# is younger than this. Older, "computing" is the more honest answer.
+REPORT_RESTORE_MAX_AGE_SECONDS = 86_400.0
 
 # How many per-agent reads run at once. Each settlement scan pins a thread of
 # the bounded pool app/main.py hands to asyncio.to_thread, so this stays well
@@ -711,6 +714,12 @@ snapshots.keep_warm(
         fingerprint=registry_fingerprint,
         min_change_rebuild_seconds=REPORT_REGISTRY_REBUILD_SECONDS,
     )
+)
+# Every build is saved, and the next process serves it until its own lands.
+snapshot_store.persist(
+    report_cell,
+    AdoptionReport.model_validate_json,
+    max_restore_age_seconds=REPORT_RESTORE_MAX_AGE_SECONDS,
 )
 
 

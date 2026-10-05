@@ -285,6 +285,15 @@ class SnapshotCell(Generic[T]):
         self._expired = True
         self._expire_seq += 1
 
+    def restore(self, value: T, generated_at: float) -> bool:
+        """Seed the cell with a value restored from storage, encoded the way
+        this cell encodes, marked `persisted` and as old as `generated_at`."""
+        body = self._serialize(value)
+        age = time.time() - generated_at
+        return self.seed(
+            encode(value, body, generated_at, source="persisted", generation=self._generation, age_seconds=age)
+        )
+
     def seed(self, snap: Snapshot[T]) -> bool:
         """Install a snapshot restored from elsewhere, unless a build has
         already stored one. True when it was installed."""
