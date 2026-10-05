@@ -73,6 +73,7 @@ from .services import (
     reputation_svc,
     snapshots,
     task_persistence,
+    task_warmup,
 )
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
@@ -226,6 +227,13 @@ async def _warm_reputation() -> None:
     reputation_svc.start_prewarm()
 
 
+async def _warm_tasks() -> None:
+    """Load the newest tasks from the durable store, then let the overview's
+    completion rate pick them up on its next poll."""
+    if await task_warmup.warm_recent_tasks():
+        metrics.overview_cell.expire()
+
+
 async def _stop_boot_tasks() -> None:
     tasks = [t for t in _boot_tasks if not t.done()]
     for task in tasks:
@@ -310,6 +318,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     warmup = asyncio.get_running_loop().create_task(_warm_reputation(), name="boot-reputation-warmup")
     _boot_tasks.add(warmup)
     warmup.add_done_callback(_boot_tasks.discard)
+    # The newest tasks from the durable store, so the task list and the
+    # overview's completion rate are not empty after a restart. Background
+    # and bounded (services/task_warmup.py): boot never waits on it.
+    tasks_warmup = asyncio.get_running_loop().create_task(_warm_tasks(), name="boot-task-warmup")
+    _boot_tasks.add(tasks_warmup)
+    tasks_warmup.add_done_callback(_boot_tasks.discard)
     # The read snapshots behind the dashboard (overview, reputation batch,
     # adoption report): their keep-warm refresher, and the restore of the
     # last adoption report from the database. Background only.
