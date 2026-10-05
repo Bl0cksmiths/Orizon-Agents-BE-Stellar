@@ -158,6 +158,20 @@ class Settings(BaseSettings):
     # deployments so a route could not be reliably gated. Changing any env var
     # on Render redeploys the service, which re-arms the sample.
     forwarded_chain_samples: int = 5
+    # Shared secret our own frontend's server-side route handlers send as the
+    # X-Frontend-Proxy-Token header. Empty — the default — trusts nobody. With
+    # it set, a request carrying it (compared in constant time, never logged)
+    # is our frontend: its X-Orizon-Client-Ip header, the visitor's address as
+    # Vercel saw it, becomes the rate-limit client, so visitors behind
+    # Vercel's shared egress addresses keep budgets of their own; without that
+    # header (a cached, shared read) no per-client budget applies at all. See
+    # `security.client_identity`. At least 32 characters, random.
+    frontend_proxy_token: str = ""
+    # /api/stellar/server/seal makes the platform's sealer sign an attestation
+    # with whatever the caller sends, so it FAILS CLOSED while API_KEY is
+    # empty. A local or CI testnet run that wants it open without a key sets
+    # this to true, deliberately; never on a deployment.
+    allow_keyless_server_seal: bool = False
     # Ceiling on concurrently running workflows (each fans out LLM calls).
     # execute returns 503 "capacity_exhausted" once this many are in flight.
     orchestrator_max_concurrent: int = 8
@@ -631,6 +645,22 @@ class Settings(BaseSettings):
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _frontend_proxy_token_is_strong(self) -> "Settings":
+        """Refuse a frontend token a caller could guess, or one that would print itself.
+
+        It lifts per-client rate limits for whoever sends it, so a short one is
+        a bypass, and below `security._MIN_MASKED_SECRET_CHARS` the log
+        redaction would not mask it by value either.
+        """
+        token = self.frontend_proxy_token
+        if token and (len(token) < 32 or token != token.strip() or not token.isascii()):
+            raise ValueError(
+                "FRONTEND_PROXY_TOKEN must be at least 32 ascii characters with no surrounding whitespace "
+                "(generate one with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`), or be unset."
             )
         return self
 

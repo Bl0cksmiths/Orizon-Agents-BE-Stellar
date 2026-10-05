@@ -177,6 +177,7 @@ def _configured_secrets() -> tuple[str, ...]:
         settings.pdax_password,
         settings.pdax_otp_secret,
         settings.pdax_webhook_secret,
+        settings.frontend_proxy_token,
     )
     unique = {v.strip() for v in values if v and len(v.strip()) >= _MIN_MASKED_SECRET_CHARS}
     return tuple(sorted(unique, key=len, reverse=True))
