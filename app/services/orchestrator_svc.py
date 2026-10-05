@@ -1006,6 +1006,10 @@ async def decompose(intent: str) -> DecomposeResponse:
     # the batch deadline on agents no plan could use, so enough spam
     # registrations timed out every read and pushed every plan onto the prior.
     registry = _snapshot_registry()
+    # Ask, in the background, after every bound endpoint this plan could route
+    # to that has no fresh health verdict (D-084). It never delays this plan;
+    # it is what lets the next one leave a dead endpoint out.
+    reachability.refresh_stale([a.id for a in registry.routable if a.source == "onchain"])
     reps = await reputation_svc.fetch_reps([a.id for a in registry.routable])
 
     # ── Demo-kit short circuit ─────────────────────────────────────────────

@@ -355,3 +355,15 @@ def test_refresh_survives_a_probe_that_raises(probes, monkeypatch: pytest.Monkey
     asyncio.run(_go())
 
     assert not reachability.has_fresh_verdict(DEAD)
+
+
+def test_decompose_asks_after_the_bound_agents_it_could_route_to(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only external agents: a seeded agent runs on a local worker, so there is
+    # no endpoint to probe. A fresh failure is not re-asked until it lapses.
+    asked: list[str] = []
+    monkeypatch.setattr(reachability, "refresh_stale", lambda ids: asked.extend(ids))
+    reachability.record(DEAD, "failed")
+
+    _free_form(monkeypatch, [ALIVE])
+
+    assert asked == [ALIVE]
