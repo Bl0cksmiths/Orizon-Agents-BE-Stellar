@@ -34,7 +34,7 @@ from app.main import app
 from app.routers import metrics as metrics_router
 from app.schemas import Agent, OverviewMetrics, Task
 from app.security import EXEMPT_PATHS, RateLimitMiddleware
-from app.services import adoption_svc, binding_registry, registry_sync, settlement_svc, snapshots
+from app.services import adoption_svc, binding_registry, registry_sync, reputation_svc, settlement_svc, snapshots
 from app.services.dispute_store import SECONDS_PER_DAY, InMemoryDisputeStore
 from app.services.reputation_svc import RepInfo
 from app.state import state
@@ -850,3 +850,24 @@ def test_a_warm_overview_answers_well_inside_the_latency_budget(client, registry
     for _ in range(10):
         assert client.get("/api/metrics/overview").status_code == 200
     assert (time.perf_counter() - started) / 10 < 0.2
+
+
+def test_a_landed_rating_expires_the_overview_for_the_next_poll(registry, monkeypatch) -> None:
+    """Trust is an average of ratings: one landing is served once more from
+    the snapshot, which rebuilds behind that poll and shows it."""
+    registry(_agent("ext1", owner=EXT_A))
+    calls = _counting_build(monkeypatch)
+
+    async def go() -> tuple[OverviewMetrics, OverviewMetrics, OverviewMetrics]:
+        first = await metrics_router.fetch_overview()
+        _patch_reps(monkeypatch, lambda a: _info(a, 9000, "onchain"))
+        reputation_svc.invalidate_rep("ext1")
+        served = await metrics_router.fetch_overview()
+        await _refresh_behind()
+        return first, served, await metrics_router.fetch_overview()
+
+    first, served, rebuilt = asyncio.run(go())
+    assert served is first
+    assert first.trust.avg is None
+    assert rebuilt.trust.avg == 4.5
+    assert len(calls) == 2
