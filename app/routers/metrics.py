@@ -408,6 +408,11 @@ snapshots.keep_warm(
 )
 
 
+# A landed rating moves the trust average: the next poll is still answered from
+# the snapshot, and starts the rebuild that picks the rating up.
+reputation_svc.on_change(lambda _agent_id: overview_cell.expire())
+
+
 async def overview_snapshot() -> Snapshot[OverviewMetrics]:
     """The overview to serve now. Waits only when there is nothing recent
     enough to serve; 503 when no overview could be produced at all."""
