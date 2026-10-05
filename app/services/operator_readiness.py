@@ -580,6 +580,15 @@ def reachable_step(endpoint: _Endpoint) -> Step:
     return Step("reachable", "failed", detail + warning, action)
 
 
+async def check_reachable(agent_id: str) -> Step:
+    """The `reachable` step alone: the binding read and one probe of its URL.
+
+    For the planner's background re-probe (`reachability.refresh_stale`),
+    which needs this verdict and none of the chain reads around it.
+    """
+    return reachable_step(await _check_endpoint(agent_id))
+
+
 def _rep_unreadable(key: StepKey, rep: _Read[reputation_svc.RepInfo]) -> Step | None:
     """`unknown` for a read that timed out, or degraded to the prior."""
     if not rep.ok or rep.value is None:

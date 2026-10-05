@@ -35,10 +35,12 @@ unknown, offered, and re-probed on first use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ..schemas import AGENT_ID_PATTERN
@@ -59,6 +61,11 @@ SUCCESS_FRESH_SECONDS = 300.0
 # Hard cap on tracked agents. A few tens of KB at capacity.
 MAX_TRACKED = 512
 
+# Background probes running at once, across every plan. Each is one bounded GET
+# (`operator_readiness.PROBE_TIMEOUT_SECONDS`), so this caps the outbound
+# requests the planner can cause; agents past the cap are asked on a later plan.
+MAX_IN_FLIGHT = 8
+
 _ID_SHAPE = re.compile(AGENT_ID_PATTERN)
 
 
@@ -69,6 +76,7 @@ class Verdict:
 
 
 _verdicts: OrderedDict[str, Verdict] = OrderedDict()
+_in_flight: dict[str, asyncio.Task[None]] = {}
 
 
 def _now() -> float:
@@ -116,10 +124,63 @@ def has_fresh_verdict(agent_id: str) -> bool:
     return _now() - verdict.at < window
 
 
+async def _probe(agent_id: str) -> None:
+    """One readiness-grade probe of `agent_id`'s bound endpoint, recorded. Never raises.
+
+    The probe is `operator_readiness`'s own — the stored URL only, through the
+    dispatch path's SSRF guard, bounded, nothing about the URL logged — so the
+    planner's verdict and the operator's self-check can never disagree about
+    what "reachable" means. Imported here, not at module level, because that
+    module records into this one.
+    """
+    from . import operator_readiness
+
+    try:
+        record(agent_id, (await operator_readiness.check_reachable(agent_id)).status)
+    except Exception as e:
+        logger.warning("reachability: agent_id=%s probe outcome=error error=%s", agent_id, type(e).__name__)
+
+
+def refresh_stale(agent_ids: Iterable[str]) -> None:
+    """Probe, in the background, each agent the planner has no fresh verdict on.
+
+    Called by the planner with the bound agents it could route to, so the
+    memory stays warm without anyone running the readiness check: a dead
+    endpoint is found within one plan of going stale, and a recovered one is
+    re-admitted the same way. Never blocks the plan and never raises; at most
+    `MAX_IN_FLIGHT` probes run at once, one per agent (single-flight). Outside
+    a running event loop there is nothing to schedule on, so it does nothing.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for agent_id in agent_ids:
+        if len(_in_flight) >= MAX_IN_FLIGHT:
+            return
+        if agent_id in _in_flight or not _ID_SHAPE.fullmatch(agent_id) or has_fresh_verdict(agent_id):
+            continue
+        task = loop.create_task(_probe(agent_id))
+        _in_flight[agent_id] = task
+        task.add_done_callback(_forget_flight)
+
+
+def _forget_flight(task: asyncio.Task[None]) -> None:
+    """Release a finished probe's single-flight slot (cancelled ones too)."""
+    for agent_id, running in list(_in_flight.items()):
+        if running is task:
+            del _in_flight[agent_id]
+
+
+def in_flight() -> int:
+    return len(_in_flight)
+
+
 def tracked() -> int:
     return len(_verdicts)
 
 
 def reset() -> None:
-    """Forget every verdict. For tests."""
+    """Forget every verdict and in-flight probe. For tests."""
     _verdicts.clear()
+    _in_flight.clear()

@@ -269,3 +269,89 @@ def test_the_fallback_never_lands_on_the_dead_agent(world, monkeypatch: pytest.M
 
     assert DEAD not in {s.agent_id for s in resp.steps}
     assert resp.planner_fallback
+
+
+# ── the planner keeps the memory warm ───────────────────────────
+
+
+@pytest.fixture()
+def probes(monkeypatch: pytest.MonkeyPatch):
+    """Replace the endpoint check under `refresh_stale` with a scripted one."""
+    script: dict[str, readiness.ProbeResult | None] = {}
+    calls: list[str] = []
+
+    async def _check(agent_id: str) -> readiness._Endpoint:
+        calls.append(agent_id)
+        await asyncio.sleep(0)
+        return _endpoint(script.get(agent_id))
+
+    monkeypatch.setattr(readiness, "_check_endpoint", _check)
+    reachability.reset()
+    yield SimpleNamespace(script=script, calls=calls)
+    reachability.reset()
+
+
+async def _drain() -> None:
+    while reachability.in_flight():
+        await asyncio.sleep(0)
+
+
+def test_refresh_probes_an_unknown_agent_and_remembers_the_verdict(probes) -> None:
+    probes.script[DEAD] = readiness.ProbeResult("http_status", status_code=301)
+    probes.script[ALIVE] = readiness.ProbeResult("ok", status_code=200)
+
+    async def _go() -> None:
+        reachability.refresh_stale([DEAD, ALIVE])
+        await _drain()
+
+    asyncio.run(_go())
+
+    assert sorted(probes.calls) == [ALIVE, DEAD]
+    assert reachability.is_failing(DEAD)
+    assert not reachability.is_failing(ALIVE) and reachability.has_fresh_verdict(ALIVE)
+
+
+def test_refresh_skips_fresh_verdicts_and_never_doubles_a_probe(probes) -> None:
+    reachability.record(ALIVE, "done")
+
+    async def _go() -> None:
+        reachability.refresh_stale([DEAD, ALIVE])
+        reachability.refresh_stale([DEAD])
+        await _drain()
+
+    asyncio.run(_go())
+
+    assert probes.calls == [DEAD]
+
+
+def test_refresh_is_bounded(probes) -> None:
+    ids = [f"ext_{i}" for i in range(reachability.MAX_IN_FLIGHT * 3)]
+
+    async def _go() -> int:
+        reachability.refresh_stale(ids)
+        started = reachability.in_flight()
+        await _drain()
+        return started
+
+    assert asyncio.run(_go()) == reachability.MAX_IN_FLIGHT
+
+
+def test_refresh_outside_an_event_loop_is_a_no_op(probes) -> None:
+    reachability.refresh_stale([DEAD])
+
+    assert probes.calls == []
+
+
+def test_refresh_survives_a_probe_that_raises(probes, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom(_agent_id: str) -> readiness._Endpoint:
+        raise RuntimeError("binding store down")
+
+    monkeypatch.setattr(readiness, "_check_endpoint", _boom)
+
+    async def _go() -> None:
+        reachability.refresh_stale([DEAD])
+        await _drain()
+
+    asyncio.run(_go())
+
+    assert not reachability.has_fresh_verdict(DEAD)
