@@ -555,6 +555,58 @@ async def require_adjudicator(
         raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
 
 
+# ── hardening headers ───────────────────────────────────────────
+
+# On every response. HSTS is ours to send: Render's edge does not add it (a
+# live response from the deployment carried none, 2026-10-06), and a browser
+# ignores it over plain http, so local runs are unaffected. Two years with
+# subdomains is the preload-list floor.
+_BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-frame-options", b"DENY"),
+    (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
+)
+# This API renders nothing, so nothing in a response may load, run or frame:
+# a body a browser is tricked into rendering stays inert text.
+_API_CSP = b"default-src 'none'; frame-ancestors 'none'"
+# Swagger UI and ReDoc are pages that load their own scripts and styles, so
+# they keep only the framing ban.
+_DOCS_CSP = b"frame-ancestors 'none'"
+_DOCS_PREFIXES = ("/docs", "/redoc")
+
+
+def security_headers(path: str) -> list[tuple[bytes, bytes]]:
+    """The hardening headers for a response to `path`."""
+    csp = _DOCS_CSP if path.startswith(_DOCS_PREFIXES) else _API_CSP
+    return [*_BASE_SECURITY_HEADERS, (b"content-security-policy", csp)]
+
+
+class SecurityHeadersMiddleware:
+    """Pure-ASGI middleware stamping the hardening headers on every response.
+
+    Registered outside the limiters and the body cap, so their short-circuit
+    429s and 413s carry the headers too. The 500 handler runs outside every
+    middleware and stamps the same set itself, from `security_headers`.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        extra = security_headers(scope.get("path", ""))
+
+        async def send_with_headers(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = list(message.get("headers") or []) + extra
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 # A caller-supplied X-Request-ID is kept only in this shape (see below).
 _REQUEST_ID_SHAPE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 

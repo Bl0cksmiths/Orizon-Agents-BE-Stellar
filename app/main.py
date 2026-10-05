@@ -58,7 +58,9 @@ from .security import (
     RequestContextMiddleware,
     RequestIdLogFilter,
     SecretRedactionLogFilter,
+    SecurityHeadersMiddleware,
     request_id_var,
+    security_headers,
 )
 from .seed import seed_registry
 from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc
@@ -290,35 +292,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     executor.shutdown(wait=False)
 
 
-class SecurityHeadersMiddleware:
-    """Pure-ASGI middleware stamping baseline hardening headers on responses.
-
-    Deliberately minimal for a JSON API: no CSP (nothing is rendered) and no
-    HSTS (TLS terminates at Render's edge, which sets it).
-    """
-
-    _HEADERS = [
-        (b"x-content-type-options", b"nosniff"),
-        (b"referrer-policy", b"no-referrer"),
-        (b"x-frame-options", b"DENY"),
-    ]
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        async def send_with_headers(message: dict) -> None:
-            if message["type"] == "http.response.start":
-                message["headers"] = list(message.get("headers") or []) + self._HEADERS
-            await send(message)
-
-        await self.app(scope, receive, send_with_headers)
-
-
 # DOCS_ENABLED=false hides /docs, /redoc, and the schema on locked-down
 # deployments. Read via getattr — config.py declares the field separately —
 # so the public-demo default (docs on) holds either way.
@@ -533,11 +506,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     # Stamp the hardening headers — and the CORS header for known origins —
     # by hand, or browsers report an opaque CORS failure instead of letting
     # the frontend read this JSON envelope.
-    headers = {
-        "x-content-type-options": "nosniff",
-        "referrer-policy": "no-referrer",
-        "x-frame-options": "DENY",
-    }
+    headers = {name.decode(): value.decode() for name, value in security_headers(request.url.path)}
     # RequestContextMiddleware's send wrapper never sees this response (the
     # exception unwound past it), so echo the id header here as well.
     request_id = request_id_var.get()
