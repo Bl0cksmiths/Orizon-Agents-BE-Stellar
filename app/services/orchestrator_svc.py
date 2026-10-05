@@ -19,9 +19,15 @@ from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from ..security import redact_secrets
 from ..state import state
-from . import reputation_svc
+from . import reachability, reputation_svc
 from .binding_registry import is_dispatchable
-from .plan_notices import below_floor_exclusion, relaxation, substitution, unbound_exclusions
+from .plan_notices import (
+    below_floor_exclusion,
+    relaxation,
+    substitution,
+    unbound_exclusions,
+    unreachable_exclusions,
+)
 from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
@@ -202,16 +208,28 @@ class _RegistrySnapshot(NamedTuple):
     The two point-of-use checks — the clamp and `_fallback_agent` — still ask
     the live registry, deliberately: they only ever NARROW this set, dropping
     an agent delisted or unbound while the planner ran, and never widen it.
+
+    `unreachable` is the listed, dispatchable agents a FRESH failed health
+    check stands against (D-084): bound, so not unbound, but with nothing
+    answering at the endpoint. They are kept out of `routable` — no backstop
+    may re-admit them, since relaxing a rule cannot make a dead endpoint
+    answer — and reported under their own reason code.
     """
 
     agents: tuple[Agent, ...]
     routable: tuple[Agent, ...]
+    unreachable: tuple[Agent, ...] = ()
 
 
 def _snapshot_registry() -> _RegistrySnapshot:
     """Read the registry once and split out what planning may route to."""
     agents = tuple(state.list_agents())
-    return _RegistrySnapshot(agents, tuple(a for a in agents if _is_listed(a) and is_dispatchable(a.id)))
+    dispatchable = [a for a in agents if _is_listed(a) and is_dispatchable(a.id)]
+    return _RegistrySnapshot(
+        agents,
+        tuple(a for a in dispatchable if not reachability.is_failing(a.id)),
+        tuple(a for a in dispatchable if reachability.is_failing(a.id)),
+    )
 
 
 def _still_routable(agent_id: str) -> bool:
@@ -224,7 +242,9 @@ def _still_routable(agent_id: str) -> bool:
     planning call.
     """
     agent = state.agents.get(agent_id)
-    return agent is not None and _is_listed(agent) and is_dispatchable(agent_id)
+    return (
+        agent is not None and _is_listed(agent) and is_dispatchable(agent_id) and not reachability.is_failing(agent_id)
+    )
 
 
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
@@ -477,10 +497,14 @@ def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     the same registry yields the same notices.
 
     Listed and not routable is listed and not dispatchable, read off the same
-    snapshot the plan was built from.
+    snapshot the plan was built from — less the agents left out for a dead
+    endpoint, which ARE bound and are reported first, under their own code
+    (D-084). Calling one "unbound" would send its operator to fix the wrong
+    thing.
     """
-    routable = {a.id for a in registry.routable}
-    return unbound_exclusions(
+    unreachable = {a.id for a in registry.unreachable}
+    routable = {a.id for a in registry.routable} | unreachable
+    return unreachable_exclusions(registry.unreachable) + unbound_exclusions(
         a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
     )
 
@@ -861,7 +885,7 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
 
     None when nothing offered is still routable; the caller refuses the plan.
     """
-    candidates = [a for a in state.list_agents() if a.id in offered and _is_listed(a) and is_dispatchable(a.id)]
+    candidates = [a for a in state.list_agents() if a.id in offered and _still_routable(a.id)]
     if not candidates:
         return None
     return min(

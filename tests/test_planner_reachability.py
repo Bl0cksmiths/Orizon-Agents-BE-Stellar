@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import settings
 from app.schemas import Agent, DecomposeResponse, Plan, PlanStep
 from app.seed import seed_registry
 from app.services import binding_registry, orchestrator_svc, reachability
@@ -171,3 +172,89 @@ def test_a_probe_that_could_not_run_is_not_a_verdict(world, monkeypatch: pytest.
 
     assert not reachability.is_failing(DEAD)
     assert not reachability.has_fresh_verdict(DEAD)
+
+
+# ── the planner leaves a dead endpoint out ──────────────────────
+
+
+def test_the_free_form_planner_never_routes_to_a_fresh_failure(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model names the dead agent anyway — it knows it from an earlier turn
+    # or just invents the choice. The clamp holds it to the offered set.
+    reachability.record(DEAD, "failed")
+
+    resp = _free_form(monkeypatch, [DEAD, ALIVE])
+
+    assert [s.agent_id for s in resp.steps] == [ALIVE]
+    assert _codes(resp)[DEAD] == "unreachable_endpoint"
+    stored = state.plans.get(resp.plan_id)
+    assert stored is not None and [n.reason_code for n in stored.notices] == [n.reason_code for n in resp.notices]
+
+
+def test_a_dead_endpoint_is_never_offered_to_the_planner(world) -> None:
+    # Not merely clamped after the fact: an agent the model is shown is one it
+    # will plan around, and a plan built around a step that is then dropped
+    # is a worse plan than one built without it.
+    reachability.record(DEAD, "failed")
+    reps = {a.id: _rep(a.id) for a in state.list_agents()}
+
+    shortlist = orchestrator_svc._routable_registry(reps)
+
+    assert DEAD not in shortlist.offered
+    assert f"id={DEAD} " not in shortlist.block
+    assert ALIVE in shortlist.offered
+
+
+def test_a_dead_endpoint_is_never_called_unbound(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    # It is bound: "no endpoint bound" would send its operator to fix the
+    # wrong thing. One notice, with the right code.
+    reachability.record(DEAD, "failed")
+
+    resp = _free_form(monkeypatch, [ALIVE])
+
+    assert [n.reason_code for n in resp.notices if n.agent_id == DEAD] == ["unreachable_endpoint"]
+
+
+def test_the_kit_path_reports_it_the_same_way(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    reachability.record(DEAD, "failed")
+
+    async def _no_llm(*_a: object, **_k: object) -> None:
+        raise AssertionError("the kit path must never call the LLM")
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _no_llm)
+    kit = asyncio.run(orchestrator_svc.decompose(KIT_INTENT))
+    free_form = _free_form(monkeypatch, [ALIVE])
+
+    def _unreachable(resp: DecomposeResponse) -> list[tuple[str, str, str, int | None]]:
+        return [
+            (n.kind, n.agent_id, n.reason, n.floor_bps) for n in resp.notices if n.reason_code == "unreachable_endpoint"
+        ]
+
+    assert (
+        _unreachable(kit)
+        == _unreachable(free_form)
+        == [("excluded", DEAD, _unreachable(kit)[0][2], settings.reputation_floor_bps)]
+    )
+    assert DEAD not in {s.agent_id for s in kit.steps}
+
+
+def test_the_exclusion_lapses_with_the_freshness_window(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 5_000.0}
+    monkeypatch.setattr(reachability, "_now", lambda: clock["now"])
+    reachability.record(DEAD, "failed")
+    clock["now"] += reachability.FAILURE_FRESH_SECONDS + 1
+
+    resp = _free_form(monkeypatch, [DEAD])
+
+    assert [s.agent_id for s in resp.steps] == [DEAD]
+    assert DEAD not in _codes(resp)
+
+
+def test_the_fallback_never_lands_on_the_dead_agent(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model picks only the dead agent, so the clamp empties the plan:
+    # the fallback still draws from the offered set, never from the dead one.
+    reachability.record(DEAD, "failed")
+
+    resp = _free_form(monkeypatch, [DEAD])
+
+    assert DEAD not in {s.agent_id for s in resp.steps}
+    assert resp.planner_fallback
