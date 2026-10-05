@@ -85,6 +85,7 @@ import asyncio
 import logging
 import math
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Literal
@@ -902,6 +903,10 @@ async def _refresh(agent_id: str) -> None:
             # Nobody is waiting on this read, so it is not a batch to warn
             # about: the next reader retries it and reports it if it still fails.
             logger.debug("post-rating reputation refresh for %s failed: %s", agent_id, failure)
+        else:
+            # The post-rating score is in the cache now; the read models built
+            # over it can pick it up instead of the superseded one.
+            _notify_change(agent_id)
         if agent_id not in _refresh_again:
             return
 
@@ -958,6 +963,33 @@ async def stop_refreshes() -> None:
         await asyncio.wait(tasks)
 
 
+# Called with an agent id whenever that agent's on-chain reputation is known to
+# have moved: a rating landed (`invalidate_rep`) and, again, when the read
+# taken after it answers (`_refresh`). For the read models built OVER this
+# service — the reputation batch snapshot, the dashboard overview — which keep
+# their own copy of every agent's score and would otherwise go on serving the
+# pre-rating one until their next scheduled rebuild.
+_change_listeners: list[Callable[[str], None]] = []
+
+
+def on_change(listener: Callable[[str], None]) -> None:
+    """Call `listener(agent_id)` each time an agent's reputation moves.
+
+    A listener runs synchronously on the rating path, so it must be cheap and
+    must not block; one that raises is logged and skipped, never allowed to
+    fail the rating that triggered it.
+    """
+    _change_listeners.append(listener)
+
+
+def _notify_change(agent_id: str) -> None:
+    for listener in _change_listeners:
+        try:
+            listener(agent_id)
+        except Exception as e:
+            logger.warning("reputation change listener failed for %s: %s", agent_id, _describe(e))
+
+
 def invalidate_rep(agent_id: str) -> None:
     """Retire the cached rep_state for one agent, so the next read goes back
     to the ledger.
@@ -1000,3 +1032,4 @@ def invalidate_rep(agent_id: str) -> None:
 
     rcache.invalidate(_rep_cache_key(agent_id))
     _schedule_refresh(agent_id)
+    _notify_change(agent_id)
