@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from .common import BoundedRequest
 
-class WebhookRegisterRequest(BaseModel):
+
+class WebhookRegisterRequest(BoundedRequest):
     event_type: str = Field(..., description="crypto | fiat")
     webhook_endpoint: str
 

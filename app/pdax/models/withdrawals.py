@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from .common import BoundedRequest
+
 # Field bounds, matching the ramp models (app/pdax/models/ramp.py): 200 for a
 # name-or-address-sized field, 64 for an enum-ish channel token. Without them
 # these fields are capped only by the 1 MiB body limit.
@@ -23,7 +25,7 @@ _IDENTIFIER = 160
 _INSTRUCTIONS = 500
 
 
-class FiatWithdrawRequest(BaseModel):
+class FiatWithdrawRequest(BoundedRequest):
     """Body for POST /v1/fiat/withdraw."""
 
     identifier: str = Field(..., max_length=_IDENTIFIER)
@@ -100,7 +102,7 @@ class FiatWithdrawResult(BaseModel):
     fee: float = 0
 
 
-class CryptoOutRequest(BaseModel):
+class CryptoOutRequest(BoundedRequest):
     """Body for POST /v1/crypto/withdraw."""
 
     identifier: str

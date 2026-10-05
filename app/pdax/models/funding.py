@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from .common import BoundedRequest
+
 
 class CryptoDepositAddress(BaseModel):
     """Payload for GET /v1/crypto/deposit?currency=USDCXLM."""
@@ -19,7 +21,7 @@ class CryptoDepositAddress(BaseModel):
     tag: str | None = None
 
 
-class FiatDepositRequest(BaseModel):
+class FiatDepositRequest(BoundedRequest):
     """Body for POST /v1/fiat/deposit. Many sender fields are conditionally
     required for amounts ≥ 50,000 PHP (travel rule); kept optional here and
     enforced by the service layer."""
