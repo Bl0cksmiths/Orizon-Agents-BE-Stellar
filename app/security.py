@@ -29,6 +29,7 @@ Lightweight, dependency-free hardening primitives.
 from __future__ import annotations
 
 import contextvars
+import ipaddress
 import json
 import logging
 import math
@@ -318,6 +319,125 @@ def client_key(scope: dict, hops: int | None = None) -> str:
             return chain[index] if index >= 0 else CHAIN_TOO_SHORT_KEY
     client = scope.get("client")
     return client[0] if client else "unknown"
+
+
+# ── rate-limit identity ─────────────────────────────────────────
+
+# Cloudflare's published edge ranges (https://www.cloudflare.com/ips/). Render
+# serves every *.onrender.com service through Cloudflare, so the hop Render's
+# proxy appends to X-Forwarded-For is a Cloudflare edge. They change rarely;
+# a missing range degrades to "no identity" (see below), never to a spoofable one.
+_CLOUDFLARE_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        "2400:cb00::/32",
+        "2606:4700::/32",
+        "2803:f800::/32",
+        "2405:b500::/32",
+        "2405:8100::/32",
+        "2a06:98c0::/29",
+        "2c0f:f248::/32",
+    )
+)
+
+FRONTEND_TOKEN_HEADER = b"x-frontend-proxy-token"
+FRONTEND_CLIENT_IP_HEADER = b"x-orizon-client-ip"
+
+
+def _ip(entry: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(entry.strip())
+    except ValueError:
+        return None
+
+
+def _is_cloudflare(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(ip in net for net in _CLOUDFLARE_NETWORKS if net.version == ip.version)
+
+
+def _visitor(ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None) -> str | None:
+    """`ip` as an identity if it can be a visitor: public, and not a Cloudflare edge."""
+    if ip is None or not ip.is_global or _is_cloudflare(ip):
+        return None
+    return str(ip)
+
+
+def is_frontend(scope: dict) -> bool:
+    """Whether the request carries our frontend's FRONTEND_PROXY_TOKEN. Constant time.
+
+    False whenever no token is configured, so an empty header can never match.
+    The token itself is never logged (and is masked by the redaction filter
+    if anything ever tries).
+    """
+    expected = settings.frontend_proxy_token
+    if not expected:
+        return False
+    supplied = dict(scope.get("headers") or []).get(FRONTEND_TOKEN_HEADER)
+    return header_secret_matches(supplied.decode("latin-1") if supplied is not None else None, expected)
+
+
+def client_identity(scope: dict) -> str | None:
+    """The client a request's rate-limit budgets belong to, or None when nobody trustworthy is named.
+
+    Unlike `client_key` (the access log's view, governed by TRUSTED_PROXY_HOPS),
+    this needs no hop count, so no stale or mistuned value can make it read an
+    entry the caller wrote:
+
+      1. Our frontend (`is_frontend`) names the visitor in X-Orizon-Client-Ip;
+         Vercel's egress addresses are shared and unpublished, so without this
+         every visitor of the console would be one client. No usable address
+         there — a cached read serving everyone — is no identity.
+      2. Otherwise X-Forwarded-For is read from the RIGHT: entries that are not
+         publicly routable (Render's internal hops) are skipped, then at most
+         ONE Cloudflare edge (the hop Render appends). The next entry was
+         written by Cloudflare itself — the address it accepted the connection
+         from — and is the caller. Everything further left is the caller's own
+         writing and is never read.
+      3. No forwarded header at all (a local run, a test) is the socket peer.
+
+    None — a chain of infrastructure only, an unparseable entry, a second
+    Cloudflare hop (a Cloudflare Worker calling us, which could put anything
+    to its left), or the frontend reading on nobody's behalf — means the
+    caller cannot be told apart. Limiters then apply no per-client budget:
+    lumping such requests into one bucket would let any one of them starve the
+    rest, so per-wallet budgets and service-wide ceilings hold them instead.
+    """
+    headers = dict(scope.get("headers") or [])
+    if is_frontend(scope):
+        named = headers.get(FRONTEND_CLIENT_IP_HEADER)
+        return _visitor(_ip(named.decode("latin-1"))) if named is not None else None
+    raw = headers.get(b"x-forwarded-for")
+    chain = [entry.strip() for entry in raw.decode("latin-1").split(",")] if raw else []
+    chain = [entry for entry in chain if entry]
+    if not raw:
+        peer = scope.get("client")
+        return peer[0] if peer else None
+    index = len(chain) - 1
+    while index >= 0:
+        ip = _ip(chain[index])
+        if ip is None or ip.is_global:
+            break
+        index -= 1
+    if index >= 0:
+        ip = _ip(chain[index])
+        if ip is not None and _is_cloudflare(ip):
+            index -= 1
+    return _visitor(_ip(chain[index])) if index >= 0 else None
 
 
 class ForwardedChainSampler:
