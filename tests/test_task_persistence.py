@@ -169,37 +169,66 @@ def test_a_burst_of_writes_lands_as_one_batch_holding_the_latest_snapshot(store:
     assert [p.plan_id for p in batch.plans] == ["pln_0a0b0c0d"]
 
 
-def test_execute_answers_only_once_its_task_and_token_are_durable(
-    store: FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Write-through for the receipt: the id and token `/execute` returns are
-    already in the store when it returns."""
+class _Slow:
+    name = "w.slow"
+
+    async def run(self, intent: str, rationale: str, context: Any = None) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {"summary": "done"}
+
+
+@pytest.fixture()
+def slow_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
-
-    class _Slow:
-        name = "w.slow"
-
-        async def run(self, intent: str, rationale: str, context: Any = None) -> dict[str, Any]:
-            await asyncio.sleep(0.2)
-            return {"summary": "done"}
 
     async def _resolve(agent_id: str) -> _Slow:
         return _Slow()
 
     monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
 
-    async def run() -> tuple[str, str | None, str]:
-        task_id = await execution_svc.execute_plan(_plan())
-        durable = store.tasks[task_id]
-        token = state.task_tokens[task_id]
-        loop = asyncio.get_running_loop()
-        await asyncio.gather(*(t for t in execution_svc._background_tasks if t.get_loop() is loop))
-        return task_id, durable.read_token_sha256, read_token_digest(token)
 
-    task_id, durable_digest, expected = asyncio.run(run())
-    assert durable_digest == expected
-    # ...and once the run is over, its terminal state is durable too.
+def test_execute_answers_only_once_its_task_and_token_are_durable(
+    store: FakeStore, client: Any, slow_runs: None
+) -> None:
+    """Write-through for the receipt: the id and token `/execute` returns are
+    already in the store when the response arrives, and once the run is over
+    its terminal state is too."""
+    state.add_plan(_plan())
+
+    r = client.post("/api/orchestrator/execute", json={"plan_id": "pln_0a0b0c0d"})
+
+    task_id, token = r.json()["task_id"], r.json()["read_token"]
+    assert store.tasks[task_id].read_token_sha256 == read_token_digest(token)
+    deadline = time.monotonic() + 5
+    while Task.model_validate_json(store.tasks[task_id].body).status == "running":
+        assert time.monotonic() < deadline, "the run's terminal state never became durable"
+        time.sleep(0.02)
     assert Task.model_validate_json(store.tasks[task_id].body).status == "complete"
+
+
+def test_execute_plan_itself_never_waits_on_the_database(
+    store: FakeStore, slow_runs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-through wait belongs to the route, after the authorization is
+    claimed for the task. Inside `execute_plan` — between starting the run and
+    the router's claim — a cancelled wait would unclaim an authorization whose
+    run is already spending it."""
+
+    async def _hangs(batch: WriteBatch) -> None:
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(store, "write", _hangs)
+
+    async def run() -> float:
+        began = time.monotonic()
+        await execution_svc.execute_plan(_plan())
+        took = time.monotonic() - began
+        for t in execution_svc._background_tasks:
+            if t.get_loop() is asyncio.get_running_loop():
+                t.cancel()
+        return took
+
+    assert asyncio.run(run()) < 0.5
 
 
 def test_a_database_that_fails_is_retried_until_it_takes_the_write(
