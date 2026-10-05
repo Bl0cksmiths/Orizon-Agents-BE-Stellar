@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from ..schemas import TraceLine
+from ..services import execution_svc
 from ..state import state
 from ..task_auth import require_task_read
 from ..trace_bus import bus
@@ -58,7 +59,15 @@ async def stream_trace(task_id: str) -> EventSourceResponse:
         raise HTTPException(404, "unknown_task")  # `get_trace`'s rule
 
     task = state.tasks.get(task_id)
-    running = task is not None and task.status in ("pending", "running") and not bus.is_closed(task_id)
+    # Live while a producer may still write, and the bus has not been closed.
+    # Not the status alone: a paid run's task is terminal from its settlement
+    # on, while the run still writes its seal reconciliation and its ratings,
+    # and a viewer arriving in that stretch must see them (`execution_svc.is_live`).
+    # Not the bus alone either: a terminal task no run here is writing — done
+    # long ago, or read back from the durable store — was never closed on this
+    # process's bus, and subscribing to it would ping forever.
+    producing = execution_svc.is_live(task_id) or (task is not None and task.status in ("pending", "running"))
+    running = producing and not bus.is_closed(task_id)
 
     if not running:
         # Finished (or never started) — replay history and end the stream.
