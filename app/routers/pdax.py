@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from ..config import settings
 from ..pdax import (
@@ -477,8 +477,8 @@ async def reference_countries() -> dict:
 @secured.post("/ramp/estimate")
 async def ramp_estimate(
     direction: Literal["onramp", "offramp"],
-    amount: str,
-    currency: str | None = None,
+    amount: str = Query(..., max_length=32),
+    currency: str | None = Query(default=None, max_length=16),
 ) -> RampEstimate:
     """Indicative conversion preview. `currency` denominates `amount`; pass
     currency=USDC on an on-ramp to price a target USDC amount (workflow cost)."""
@@ -493,7 +493,7 @@ async def ramp_estimate(
 
 
 @secured.post("/ramp/funding-quote")
-async def ramp_funding_quote(usdc: str) -> FundingQuote:
+async def ramp_funding_quote(usdc: str = Query(..., max_length=32)) -> FundingQuote:
     """Pesos to pay to fund a workflow costing `usdc` USDC — buffered + rounded
     up so the amount always covers it."""
     try:
@@ -568,7 +568,7 @@ async def ramp_status(ramp_id: str) -> RampRecord:
 
 
 @secured.post("/ramp/{ramp_id}/reconcile")
-async def ramp_reconcile(ramp_id: str) -> RampRecord:
+async def ramp_reconcile(ramp_id: str = Path(..., max_length=64)) -> RampRecord:
     """Check PDAX for settlement and advance the ramp — used by the UI to track
     progress without relying on PDAX's redirect page."""
     try:
