@@ -46,7 +46,7 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
-        return await decompose(req.intent)
+        plan = await decompose(req.intent)
     except TimeoutError as e:
         # asyncio.wait_for tripped decompose_timeout_seconds — the LLM hung,
         # nothing else failed. Distinct from the blanket 502 below.
@@ -70,6 +70,13 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
         # is left is a fault nothing anticipated, so it keeps its traceback.
         logger.exception("decompose failed for intent %s", _intent_ref(req.intent))
         raise HTTPException(502, "decompose_failed") from e
+    # Write-through for the plan id this hands out: the buyer reads the card
+    # and signs against it, and a restart in that minute must not turn their
+    # authorisation into a `plan_unknown` release (D-090). Bounded; the write
+    # keeps retrying in the background if this gives up on it.
+    if not await task_persistence.flush(task_persistence.RESPONSE_FLUSH_SECONDS):
+        logger.warning("plan %s: not yet durable when /decompose answered; its write is still queued", plan.plan_id)
+    return plan
 
 
 def _refused_after_release(status: int, detail: str, code: str, message: str, released: guard.Release) -> JSONResponse:
