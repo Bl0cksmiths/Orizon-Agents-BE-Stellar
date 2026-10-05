@@ -9,6 +9,7 @@ from ..demo_kits import detect_kit
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse, StoredPlan
 from ..security import CodedHTTPException, KeyedRateLimiter, client_key, request_id_var
 from ..services import authorization_guard as guard
+from ..services import task_persistence
 from ..services.execution_svc import CapacityExhaustedError, PlanExpiredError, execute_plan, plan_expired
 from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
@@ -108,7 +109,15 @@ async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONRes
             "authorization_incomplete",
             "send both auth_id_hex and payer for a paid run, or neither for a simulated one",
         )
-    plan = state.plans.get(req.plan_id)
+    try:
+        # From memory, or read back from the durable store after a restart
+        # (D-090) — a plan the buyer authorised moments before one must still
+        # execute. A store that cannot answer is a retryable 503, and nothing
+        # below runs: on the paid path a missing plan RELEASES the buyer's
+        # custody, which a plan that merely could not be read must never do.
+        plan = await task_persistence.load_plan(req.plan_id)
+    except task_persistence.TaskStoreUnavailable as e:
+        raise HTTPException(503, "plan_store_unavailable", headers={"Retry-After": "5"}) from e
     if req.auth_id_hex is None or req.payer is None:
         # The simulated run: no authorization, no charge, no seal — and no
         # on-chain rating, which `execute_plan` writes only on the paid path
