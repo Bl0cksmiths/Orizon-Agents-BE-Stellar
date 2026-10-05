@@ -880,14 +880,15 @@ async def _run(
                 )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
-            # workflow that produced nothing has nothing to attest to.
+            # workflow that produced nothing has nothing to attest to — and it
+            # counts the agents that delivered, never the plan's (D-086).
             sim_hash = "0x" + secrets.token_hex(16)
             await _emit(task_id, start, "proof", f"ERC-8004 attestation: {sim_hash} (simulated)")
             await _emit(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {total_steps} agents · {spent:.3f} USDC · {time.monotonic() - start:.2f}s",
+                f"workflow sealed — {succeeded} agents · {spent:.3f} USDC · {time.monotonic() - start:.2f}s",
             )
 
         if status != "complete":
