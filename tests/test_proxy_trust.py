@@ -201,6 +201,9 @@ def test_sample_reports_the_raw_chain_and_the_resolved_key(client, armed_sampler
     # And what the current setting makes of it, so the two can be compared.
     assert f"TRUSTED_PROXY_HOPS={settings.trusted_proxy_hops}" in line
     assert "client=10.201.3.4" in line
+    # And the identity the rate limiters actually key on, read past our own
+    # hops by address — here the first public entry from the right.
+    assert "identity=76.76.21.9" in line
 
 
 def test_sample_stops_after_the_budget(client, armed_sampler, caplog):

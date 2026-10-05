@@ -488,8 +488,8 @@ class ForwardedChainSampler:
         peer = scope.get("client")
         logger.info(
             "forwarded chain sample %d/%d on %s %s: entries=%d chain=%s peer=%s "
-            "TRUSTED_PROXY_HOPS=%d resolves client=%s — set TRUSTED_PROXY_HOPS to the number of "
-            "TRAILING entries this edge appends, so the one to their left is the visitor",
+            "TRUSTED_PROXY_HOPS=%d resolves client=%s identity=%s — the rate limiters key on identity "
+            "(our hops skipped by address); client= is the access log's view, tuned by TRUSTED_PROXY_HOPS",
             self.budget - self.remaining,
             self.budget,
             scope.get("method", "-"),
@@ -499,6 +499,7 @@ class ForwardedChainSampler:
             peer[0] if peer else "-",
             _trusted_hops(),
             client_key(scope),
+            client_identity(scope) or "-",
         )
 
 
@@ -845,6 +846,7 @@ class RequestContextMiddleware:
                                 "status": message.get("status"),
                                 "duration_ms": round(duration_ms, 1),
                                 "client": client,
+                                "identity": client_identity(scope) or "-",
                             }
                         },
                     )

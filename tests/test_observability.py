@@ -49,6 +49,8 @@ def test_the_access_record_carries_its_facts_as_structured_fields(client, caplog
     assert http["status"] == 200
     assert isinstance(http["duration_ms"], float)
     assert http["client"]
+    # The key the rate limiters used, so a 429 is traceable to its bucket.
+    assert http["identity"] == "testclient"
     assert "sekrit" not in repr(http)
 
 
