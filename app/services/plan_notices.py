@@ -59,6 +59,12 @@ _UNBOUND_REASON = (
 )
 
 
+_UNREACHABLE_REASON = (
+    "its bound endpoint failed its latest health check (nothing would answer the step, so the planner passed it "
+    "over until it answers again)"
+)
+
+
 def _floor_reason(info: RepInfo | None) -> str:
     """Why the floor acted on an agent, with the deciding lower-bound bps.
 
@@ -166,6 +172,27 @@ def unbound_exclusion(agent: Agent) -> PlanFloorNotice:
     )
 
 
+def unreachable_exclusion(agent: Agent) -> PlanFloorNotice:
+    """A bound agent left out because its endpoint failed its latest health check (D-084).
+
+    Like `unbound_exclusion`, not a reputation verdict, so `lower_bound_bps`
+    stays None. Unlike it, the agent HAS failed something — the probe — and the
+    sentence says so plainly, because a buyer comparing the marketplace with
+    the plan should be able to tell "not set up yet" from "set up and down".
+    The probe's own detail (status code, rule) stays on the operator's
+    readiness check: it is about their infrastructure, not the buyer's plan.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_UNREACHABLE_REASON,
+        reason_code="unreachable_endpoint",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
 def substitution(designated: Agent, replacement: Agent, info: RepInfo | None) -> PlanFloorNotice:
     """A sub-floor agent whose step a floor-clearing agent took over.
 
@@ -230,3 +257,14 @@ def unbound_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
     """
     ordered = sorted(agents, key=lambda a: a.id)
     return [unbound_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]
+
+
+def unreachable_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
+    """Unreachable-endpoint notices for `agents`, ordered by id and capped.
+
+    The same sort-then-cap as `unbound_exclusions`, for the same reasons: the
+    set is bounded only by how many registrants bind an endpoint and let it
+    die, and which agents a plan names must be a function of its input alone.
+    """
+    ordered = sorted(agents, key=lambda a: a.id)
+    return [unreachable_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]

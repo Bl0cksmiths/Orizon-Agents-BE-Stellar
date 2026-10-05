@@ -311,3 +311,30 @@ def test_an_ordinary_verdict_is_not_flagged():
     assert plan_notices.substitution(_agent("agt_02k2"), _agent("agt_01h8"), info).awaiting_fresh_read is False
     assert plan_notices.below_floor_exclusion(_agent("agt_02k2"), None).awaiting_fresh_read is False
     assert plan_notices.unbound_exclusion(_agent("ext_9")).awaiting_fresh_read is False
+
+
+def test_unreachable_exclusion_is_an_exclusion_for_its_own_reason():
+    """D-084: a bound agent whose endpoint failed its latest health check.
+
+    Same `kind` as the other two exclusions, its own `reason_code`, and no
+    deciding bound — reputation had no part in it."""
+    n = plan_notices.unreachable_exclusion(_agent("ext_dead"))
+
+    assert (n.kind, n.reason_code) == ("excluded", "unreachable_endpoint")
+    assert n.agent_id == "ext_dead"
+    assert n.reason == (
+        "its bound endpoint failed its latest health check (nothing would answer the step, so the planner "
+        "passed it over until it answers again)"
+    )
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
+
+
+def test_unreachable_exclusions_order_by_id_and_cap():
+    many = [_agent(f"ext_{i:02d}") for i in reversed(range(40))]
+
+    notices = plan_notices.unreachable_exclusions(many)
+
+    assert [n.agent_id for n in notices] == [f"ext_{i:02d}" for i in range(plan_notices.UNBOUND_REPORT_CAP)]
+    assert all(n.reason_code == "unreachable_endpoint" for n in notices)
+    assert plan_notices.unreachable_exclusions([]) == []

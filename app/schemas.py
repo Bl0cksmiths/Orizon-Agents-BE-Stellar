@@ -218,7 +218,12 @@ class StoredPlan(BaseModel):
 #   * `not_selected_by_planner` — the story's own product rules forbid listing
 #     every unpicked agent, which would drown the signal this exists to create.
 #     A plan that simply did not choose an agent is not an exclusion.
-ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed"]
+#
+# `unreachable_endpoint` (D-084) is the one value added since: a bound agent
+# whose endpoint failed its latest health check, left out of the plan while
+# that failure is fresh (`app/services/reachability.py`). Appended, so the
+# existing three keep their positions for any client that indexes them.
+ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed", "unreachable_endpoint"]
 
 
 class PlanFloorNotice(BaseModel):
