@@ -27,7 +27,6 @@ from .code_gen import (  # reuse schema + JSON-string coercion + the tagged repl
     parse_tagged_artifact,
     swap_section,
 )
-from .code_gen import MAX_TOKENS as CODE_GEN_MAX_TOKENS
 from .prompt_safety import fence_untrusted, worker_prompt
 
 if TYPE_CHECKING:
@@ -114,9 +113,11 @@ _CLAUDE_LENGTH = """- **Length**: keep it a single self-contained HTML file of a
 # summary names the improved edge).
 CLAUDE_INSTRUCTIONS = swap_section(_BRIEF, _AGNO_LENGTH, _CLAUDE_LENGTH) + TAGGED_SHAPE
 
-# Output ceiling and effort for the Claude path — code.gen's, for the same
-# deadline.
-MAX_TOKENS = CODE_GEN_MAX_TOKENS
+# Output ceiling for the Claude path. Larger than code.gen's: the critic reads
+# the whole draft and rewrites it whole, and used 8 383 of the old 9 000 in the
+# live re-measure. 14 000 tokens at the slowest measured ~180 tokens/s is ~78 s,
+# inside the 100 s stream budget (see code_gen.MAX_TOKENS).
+MAX_TOKENS = 14_000
 
 
 # The critic rewrites a whole app, so a step with no tier runs where code.gen's
