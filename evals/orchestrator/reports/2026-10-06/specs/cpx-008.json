@@ -1,0 +1,43 @@
+{
+  "id": "cpx-008",
+  "intent": "Crea una plataforma de cursos en línea con registro de usuarios, lecciones en video, cuestionarios y panel de progreso.",
+  "spec": {
+    "goal": "Crear una plataforma de cursos en línea donde los usuarios puedan registrarse, ver lecciones en video, responder cuestionarios y seguir su progreso.",
+    "deliverable": "Una aplicación web de cursos en línea que incluya registro de usuarios, lecciones en video, cuestionarios y un panel de progreso.",
+    "constraints": [
+      "Debe incluir registro de usuarios.",
+      "Debe ofrecer lecciones en formato de video.",
+      "Debe incluir cuestionarios.",
+      "Debe incluir un panel donde se vea el progreso del usuario.",
+      "No se añaden funciones adicionales que la solicitud no mencione, como pagos o certificados."
+    ],
+    "done_criteria": [
+      "Un usuario nuevo puede registrarse en la plataforma.",
+      "Un usuario puede ver al menos una lección en video dentro de un curso.",
+      "Un usuario puede responder un cuestionario y ver su resultado.",
+      "El panel de progreso muestra las lecciones y cuestionarios que el usuario ha completado."
+    ],
+    "summary": "Entendemos que quieres una plataforma web de cursos en línea con registro de usuarios, lecciones en video, cuestionarios y un panel para seguir el progreso."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.01,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 293,
+    "output_tokens": 407,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.004849600000000001,
+    "latency_ms": 3909.8852839961182,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.004849600000000001
+  }
+}

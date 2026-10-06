@@ -1,0 +1,43 @@
+{
+  "id": "low-013",
+  "intent": "我的花店需要一句简短的广告语，突出新鲜和平价。",
+  "spec": {
+    "goal": "为我的花店写一句简短的广告语，突出花卉新鲜和价格平价。",
+    "deliverable": "一句简短的中文广告语（可附少量备选版本供挑选）",
+    "constraints": [
+      "广告语必须简短",
+      "必须突出“新鲜”这一卖点",
+      "必须突出“平价”这一卖点",
+      "适用于花店的宣传",
+      "使用中文撰写"
+    ],
+    "done_criteria": [
+      "交付内容是一句简短、可直接使用的广告语",
+      "广告语明确体现花卉新鲜",
+      "广告语明确体现价格平价",
+      "语言为中文，表达通顺自然"
+    ],
+    "summary": "你需要一句简短的中文花店广告语，同时突出花的新鲜和价格的平价。"
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 273,
+    "output_tokens": 242,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0031596,
+    "latency_ms": 6366.545977994974,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0031596
+  }
+}

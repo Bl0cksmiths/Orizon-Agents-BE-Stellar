@@ -1,0 +1,41 @@
+{
+  "id": "low-004",
+  "intent": "Pa-help naman gumawa ng 3 tagline para sa online ukay-ukay shop ko.",
+  "spec": {
+    "goal": "Gusto ng user na magkaroon ng 3 tagline para sa kanyang online ukay-ukay shop.",
+    "deliverable": "Isang listahan ng 3 magkakaibang tagline para sa online ukay-ukay shop.",
+    "constraints": [
+      "Eksaktong 3 tagline ang ibibigay.",
+      "Para sa isang online na ukay-ukay (segunda-manong damit) shop ang mga tagline.",
+      "Isulat sa Filipino/Tagalog, ang wika ng request."
+    ],
+    "done_criteria": [
+      "May eksaktong 3 tagline.",
+      "Malinaw na tumutukoy ang bawat tagline sa online ukay-ukay shop.",
+      "Magkakaiba ang bawat tagline at maikli ang pagkakasulat.",
+      "Nakasulat ang mga ito sa Filipino/Tagalog."
+    ],
+    "summary": "Gusto mo ng 3 tagline para sa iyong online ukay-ukay shop."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 283,
+    "output_tokens": 326,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0040196,
+    "latency_ms": 4785.608050995506,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0040196
+  }
+}

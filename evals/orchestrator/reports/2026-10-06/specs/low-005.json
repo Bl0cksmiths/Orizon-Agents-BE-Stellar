@@ -1,0 +1,41 @@
+{
+  "id": "low-005",
+  "intent": "Make a simple countdown timer web page that counts down from 60 seconds.",
+  "spec": {
+    "goal": "Have a simple web page with a countdown timer that counts down from 60 seconds.",
+    "deliverable": "A single simple web page that displays a countdown timer starting at 60 seconds.",
+    "constraints": [
+      "The page must be a web page.",
+      "The timer must start at 60 seconds and count down.",
+      "Keep the design and functionality simple, with no extra features beyond the countdown."
+    ],
+    "done_criteria": [
+      "The page opens in a web browser and shows a timer set to 60 seconds.",
+      "The displayed time counts down one second at a time.",
+      "The countdown ends at zero.",
+      "The page is simple and contains no features beyond the countdown timer."
+    ],
+    "summary": "You want a simple web page with a timer that counts down from 60 seconds."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 272,
+    "output_tokens": 233,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0030675999999999998,
+    "latency_ms": 4228.165271997568,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0030675999999999998
+  }
+}

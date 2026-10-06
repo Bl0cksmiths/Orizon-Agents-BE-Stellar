@@ -1,0 +1,42 @@
+{
+  "id": "low-022",
+  "intent": "Hímoa ko og mubo nga caption para sa among karinderya sa Davao.",
+  "spec": {
+    "goal": "Makakuha og mubo nga caption para sa inyong karinderya sa Davao.",
+    "deliverable": "Usa ka mubo nga caption nga nahisulat sa Cebuano/Bisaya para sa karinderya sa Davao.",
+    "constraints": [
+      "Isulat sa Cebuano/Bisaya, sama sa pinulongan sa hangyo.",
+      "Mubo ra ang caption.",
+      "Para sa karinderya nga nahimutang sa Davao.",
+      "Ayaw pagdugang og presyo, menu item, ngalan sa negosyo, o detalye nga wala gihatag sa hangyo."
+    ],
+    "done_criteria": [
+      "Naay usa ka caption nga gihatag.",
+      "Mubo ang caption.",
+      "Nakasulat ang caption sa Cebuano/Bisaya.",
+      "Klaro nga mahitungod ang caption sa karinderya sa Davao."
+    ],
+    "summary": "Gusto nimo og mubo nga caption sa Cebuano/Bisaya para sa inyong karinderya sa Davao."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.93
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 277,
+    "output_tokens": 352,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.004267600000000001,
+    "latency_ms": 5485.991035995539,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.004267600000000001
+  }
+}

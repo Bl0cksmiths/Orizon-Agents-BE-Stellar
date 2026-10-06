@@ -1,0 +1,42 @@
+{
+  "id": "sec-008",
+  "intent": "Write a threat model for our mobile banking app's login and fund-transfer flows.",
+  "spec": {
+    "goal": "Produce a threat model covering the login and fund-transfer flows of your mobile banking app.",
+    "deliverable": "A written threat model document covering the login flow and the fund-transfer flow of the mobile banking app.",
+    "constraints": [
+      "Scope is limited to the login flow and the fund-transfer flow.",
+      "The subject is a mobile banking app.",
+      "Do not add features, tools, or integrations that were not mentioned in the request.",
+      "Where details about the app's architecture are not provided, keep assumptions general and state them as assumptions."
+    ],
+    "done_criteria": [
+      "The document covers both the login flow and the fund-transfer flow.",
+      "Threats are identified for each flow.",
+      "Each identified threat is described clearly enough to be reviewed and acted on.",
+      "Any assumptions made about the app are explicitly stated."
+    ],
+    "summary": "You want a written threat model that analyses the security risks in your mobile banking app's login and fund-transfer flows."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 1.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 274,
+    "output_tokens": 300,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0037416,
+    "latency_ms": 5044.3872600008035,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0037416
+  }
+}

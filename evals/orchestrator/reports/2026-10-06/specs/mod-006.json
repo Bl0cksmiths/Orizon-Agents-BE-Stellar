@@ -1,0 +1,41 @@
+{
+  "id": "mod-006",
+  "intent": "Design a set of design tokens and a style guide page for a fintech brand that feels trustworthy.",
+  "spec": {
+    "goal": "Create a set of design tokens and a style guide page that give a fintech brand a trustworthy visual feel.",
+    "deliverable": "A set of design tokens (such as colour, typography and spacing) plus a style guide page that documents them.",
+    "constraints": [
+      "The visual style must convey trustworthiness appropriate to a fintech brand.",
+      "The style guide page must document the design tokens that are delivered.",
+      "Do not invent a brand name, audience or tech stack that was not given."
+    ],
+    "done_criteria": [
+      "A set of design tokens is provided covering the core visual foundations of the style.",
+      "A style guide page presents and explains the tokens.",
+      "The overall look and feel reads as trustworthy and suited to fintech.",
+      "The style guide page and the tokens are consistent with each other."
+    ],
+    "summary": "You want design tokens and a style guide page that make a fintech brand look and feel trustworthy."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.27,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 279,
+    "output_tokens": 282,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0035716,
+    "latency_ms": 3063.243661999877,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0035716
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "id": "low-003",
+  "intent": "Gawan mo ako ng maikling caption para sa Facebook post ng bakery namin sa Cebu.",
+  "spec": {
+    "goal": "Gumawa ng maikling caption para sa Facebook post ng bakery ng user sa Cebu.",
+    "deliverable": "Isang maikling caption na handang i-post sa Facebook para sa bakery sa Cebu.",
+    "constraints": [
+      "Maikli lang ang caption.",
+      "Para sa Facebook post.",
+      "Para sa bakery na nasa Cebu.",
+      "Nakasulat sa Tagalog, ang wika ng request."
+    ],
+    "done_criteria": [
+      "Ang caption ay maikli at madaling basahin.",
+      "Angkop ang caption sa Facebook post ng isang bakery.",
+      "Nabanggit o malinaw na may kaugnayan sa bakery at sa Cebu, nang hindi nag-iimbento ng mga detalyeng hindi ibinigay.",
+      "Handa na itong i-copy at i-post."
+    ],
+    "summary": "Ang naiintindihan namin: gusto mo ng maikling caption para sa Facebook post ng bakery ninyo sa Cebu."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 285,
+    "output_tokens": 336,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.004123600000000001,
+    "latency_ms": 4609.897671005456,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.004123600000000001
+  }
+}

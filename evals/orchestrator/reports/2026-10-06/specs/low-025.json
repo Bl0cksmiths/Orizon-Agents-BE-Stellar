@@ -1,0 +1,41 @@
+{
+  "id": "low-025",
+  "intent": "Create a dark-mode toggle button component in HTML/CSS/JS.",
+  "spec": {
+    "goal": "Get a reusable dark-mode toggle button component that lets a user switch a page between light and dark appearance.",
+    "deliverable": "A dark-mode toggle button component built with HTML, CSS and JavaScript, including the code needed to use it on a web page.",
+    "constraints": [
+      "Must be written in plain HTML, CSS and JavaScript.",
+      "Must be a button component that toggles dark mode.",
+      "Must be self-contained so it can be dropped into a page."
+    ],
+    "done_criteria": [
+      "The component is delivered as HTML, CSS and JavaScript code.",
+      "Clicking the button switches the page between light mode and dark mode.",
+      "The button is visible and clearly shows or indicates the current mode.",
+      "The code runs in a browser without additional setup."
+    ],
+    "summary": "You want a dark-mode toggle button component built with HTML, CSS and JavaScript that switches a page between light and dark mode."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.92
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 273,
+    "output_tokens": 287,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0036095999999999997,
+    "latency_ms": 3532.6729029984563,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0036095999999999997
+  }
+}

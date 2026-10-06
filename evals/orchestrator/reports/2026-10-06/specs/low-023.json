@@ -1,0 +1,41 @@
+{
+  "id": "low-023",
+  "intent": "Schreib mir drei kurze Produktnamen für eine nachhaltige Zahnbürste.",
+  "spec": {
+    "goal": "Drei kurze Produktnamen für eine nachhaltige Zahnbürste erhalten.",
+    "deliverable": "Eine Liste mit drei kurzen Produktnamen für eine nachhaltige Zahnbürste.",
+    "constraints": [
+      "Genau drei Namen",
+      "Die Namen sind kurz",
+      "Die Namen passen zu einer nachhaltigen Zahnbürste",
+      "Die Antwort ist auf Deutsch"
+    ],
+    "done_criteria": [
+      "Es werden genau drei Produktnamen geliefert",
+      "Jeder Name ist kurz",
+      "Jeder Name passt erkennbar zu einer nachhaltigen Zahnbürste"
+    ],
+    "summary": "Du möchtest drei kurze Produktnamen für eine nachhaltige Zahnbürste von uns bekommen."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 282,
+    "output_tokens": 273,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0034876,
+    "latency_ms": 2926.014413998928,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0034876
+  }
+}

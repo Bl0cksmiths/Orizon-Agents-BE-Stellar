@@ -1,0 +1,44 @@
+{
+  "id": "cpx-019",
+  "intent": "Develop a recipe app with ingredient search, meal planning, shopping list generation, and nutrition estimates, then write the App Store listing copy.",
+  "spec": {
+    "goal": "Build a recipe app that supports ingredient search, meal planning, shopping list generation and nutrition estimates, and write the App Store listing copy for it.",
+    "deliverable": "A working recipe app with the four requested features, plus written App Store listing copy for that app.",
+    "constraints": [
+      "The app must include ingredient search.",
+      "The app must include meal planning.",
+      "The app must generate shopping lists.",
+      "The app must provide nutrition estimates.",
+      "The App Store listing copy must describe the app and its features as built.",
+      "No features, integrations or data sources beyond those requested should be added."
+    ],
+    "done_criteria": [
+      "A user can search for recipes by ingredient.",
+      "A user can plan meals and generate a shopping list from the plan.",
+      "Recipes show nutrition estimates.",
+      "App Store listing copy is delivered and accurately reflects the app's features."
+    ],
+    "summary": "You want a recipe app with ingredient search, meal planning, shopping list generation and nutrition estimates, along with App Store listing copy to promote it."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.22,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 295,
+    "output_tokens": 321,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0039936,
+    "latency_ms": 3722.705442000006,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0039936
+  }
+}

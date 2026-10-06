@@ -1,0 +1,43 @@
+{
+  "id": "cpx-020",
+  "intent": "Gumawa ng full website para sa barangay namin: announcements, document request form, emergency hotlines, at events calendar, may English at Tagalog na version.",
+  "spec": {
+    "goal": "Gumawa ng kumpletong website para sa barangay na may announcements, document request form, emergency hotlines, at events calendar, sa English at Tagalog.",
+    "deliverable": "Isang multi-section na website para sa barangay na may mga pahina o seksyon para sa announcements, document request form, emergency hotlines, at events calendar, na available sa English at Tagalog.",
+    "constraints": [
+      "Dapat may announcements section.",
+      "Dapat may document request form.",
+      "Dapat may listahan ng emergency hotlines.",
+      "Dapat may events calendar.",
+      "Dapat available ang buong nilalaman sa parehong English at Tagalog."
+    ],
+    "done_criteria": [
+      "May hiwalay na seksyon o pahina para sa announcements, document request form, emergency hotlines, at events calendar.",
+      "Gumagana ang document request form na may mga field para sa paghiling ng dokumento.",
+      "Makikita at mababasa ang lahat ng nilalaman sa parehong English at Tagalog.",
+      "Nakakapagpalit ang bisita sa pagitan ng English at Tagalog na bersyon."
+    ],
+    "summary": "Naiintindihan namin na gusto mong gumawa ng kumpletong website para sa inyong barangay na may announcements, document request form, emergency hotlines, at events calendar, sa English at Tagalog."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.19,
+    "same_request": 0.91
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 299,
+    "output_tokens": 443,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.005221600000000001,
+    "latency_ms": 5192.439548998664,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.005221600000000001
+  }
+}

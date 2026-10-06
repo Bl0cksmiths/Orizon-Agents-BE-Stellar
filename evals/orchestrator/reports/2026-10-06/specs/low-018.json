@@ -1,0 +1,42 @@
+{
+  "id": "low-018",
+  "intent": "Summarize the key benefits of solar panels for homeowners in 5 bullet points.",
+  "spec": {
+    "goal": "Get a concise summary of the key benefits of solar panels for homeowners.",
+    "deliverable": "A written summary consisting of exactly 5 bullet points.",
+    "constraints": [
+      "Exactly 5 bullet points",
+      "Focus on the key benefits of solar panels",
+      "Written from the perspective of homeowners as the audience",
+      "Written in English"
+    ],
+    "done_criteria": [
+      "The summary contains exactly 5 bullet points",
+      "Each bullet describes a distinct benefit of solar panels for homeowners",
+      "The content stays on benefits and does not add unrelated topics",
+      "Each bullet is brief and clear"
+    ],
+    "summary": "You want a summary of the key benefits of solar panels for homeowners, presented as exactly 5 bullet points."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 276,
+    "output_tokens": 237,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0031156,
+    "latency_ms": 3172.5991499988595,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0031156
+  }
+}

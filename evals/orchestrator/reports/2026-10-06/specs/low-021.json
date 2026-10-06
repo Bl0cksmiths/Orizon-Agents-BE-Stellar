@@ -1,0 +1,42 @@
+{
+  "id": "low-021",
+  "intent": "Translate our return policy paragraph into Cebuano: 'Items can be returned within 14 days with receipt.'",
+  "spec": {
+    "goal": "Translate the return policy sentence 'Items can be returned within 14 days with receipt.' into Cebuano.",
+    "deliverable": "A Cebuano translation of the given return policy sentence.",
+    "constraints": [
+      "The source text is exactly: 'Items can be returned within 14 days with receipt.'",
+      "The target language is Cebuano.",
+      "The meaning must be preserved: items can be returned within 14 days, and a receipt is required.",
+      "The translation should read as a return policy statement."
+    ],
+    "done_criteria": [
+      "The translation is written in Cebuano.",
+      "It states that items can be returned within 14 days.",
+      "It states that a receipt is required for the return.",
+      "It adds no new terms, conditions or information beyond the original sentence."
+    ],
+    "summary": "You want the return policy sentence 'Items can be returned within 14 days with receipt.' translated into Cebuano."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.01,
+    "same_request": 0.97
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 285,
+    "output_tokens": 274,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0035036,
+    "latency_ms": 3320.1371260001906,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0035036
+  }
+}

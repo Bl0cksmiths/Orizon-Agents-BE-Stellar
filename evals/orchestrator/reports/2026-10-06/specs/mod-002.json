@@ -1,0 +1,41 @@
+{
+  "id": "mod-002",
+  "intent": "Research the top 5 competitors of a meal-prep delivery startup in Manila and write a one-page comparison.",
+  "spec": {
+    "goal": "Identify the top 5 competitors of a meal-prep delivery startup in Manila and compare them in a one-page write-up.",
+    "deliverable": "A one-page written comparison of the top 5 meal-prep delivery competitors in Manila.",
+    "constraints": [
+      "Cover exactly 5 competitors.",
+      "Competitors must operate in the meal-prep delivery market in Manila.",
+      "The comparison must fit on one page."
+    ],
+    "done_criteria": [
+      "Exactly 5 competitors are named and are meal-prep delivery businesses serving Manila.",
+      "The write-up compares the competitors side by side on the same points.",
+      "The comparison fits on a single page.",
+      "The findings come from research rather than guesswork."
+    ],
+    "summary": "You want research on the top 5 meal-prep delivery competitors in Manila, presented as a one-page comparison."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 284,
+    "output_tokens": 269,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0034516,
+    "latency_ms": 3278.912825997395,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0034516
+  }
+}

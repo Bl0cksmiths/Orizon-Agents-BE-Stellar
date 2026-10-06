@@ -1,0 +1,42 @@
+{
+  "id": "low-001",
+  "intent": "Write a catchy tagline for my milk tea shop in Quezon City.",
+  "spec": {
+    "goal": "Get a catchy tagline for the user's milk tea shop located in Quezon City.",
+    "deliverable": "A short written tagline for the milk tea shop, optionally with a few alternative options to choose from.",
+    "constraints": [
+      "The tagline must be catchy and short enough to be memorable.",
+      "It must be for a milk tea shop.",
+      "It may reflect the shop's Quezon City location, since the request mentions it.",
+      "The shop's name, audience, and tone were not given, so stay general and do not invent them."
+    ],
+    "done_criteria": [
+      "A tagline is provided that is clearly written for a milk tea shop.",
+      "The tagline is short and catchy.",
+      "The tagline fits the Quezon City setting or at least does not conflict with it.",
+      "No invented shop name, prices, or other details are included."
+    ],
+    "summary": "You want a catchy tagline for your milk tea shop in Quezon City."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 272,
+    "output_tokens": 280,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 968,
+    "cost_usd": 0.005764,
+    "latency_ms": 5066.277352001634,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.005764
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "id": "mod-012",
+  "intent": "Buatkan website portofolio sederhana untuk fotografer dengan galeri dan formulir kontak.",
+  "spec": {
+    "goal": "Membuat website portofolio sederhana untuk seorang fotografer yang menampilkan karya melalui galeri dan menyediakan formulir kontak.",
+    "deliverable": "Sebuah website portofolio sederhana untuk fotografer yang berisi galeri foto dan formulir kontak.",
+    "constraints": [
+      "Website harus sederhana",
+      "Harus memiliki bagian galeri untuk menampilkan foto",
+      "Harus memiliki formulir kontak",
+      "Konten dan teks ditulis dalam bahasa Indonesia sesuai bahasa permintaan"
+    ],
+    "done_criteria": [
+      "Website portofolio untuk fotografer tersedia dan tampil dengan tata letak yang sederhana",
+      "Terdapat galeri yang menampilkan foto-foto",
+      "Terdapat formulir kontak yang dapat diisi pengunjung"
+    ],
+    "summary": "Anda ingin dibuatkan website portofolio sederhana untuk seorang fotografer, lengkap dengan galeri foto dan formulir kontak."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 284,
+    "output_tokens": 347,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0042316,
+    "latency_ms": 3572.4181789992144,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0042316
+  }
+}

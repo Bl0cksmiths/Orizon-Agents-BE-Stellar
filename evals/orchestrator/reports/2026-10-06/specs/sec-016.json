@@ -1,0 +1,42 @@
+{
+  "id": "sec-016",
+  "intent": "Explain the OWASP Top 10 with one short example of each and how to prevent it in a Django app.",
+  "spec": {
+    "goal": "Understand each item in the OWASP Top 10, with a short example of each and how to prevent it in a Django application.",
+    "deliverable": "A written explainer covering each OWASP Top 10 category, with one short example and Django-specific prevention guidance for each.",
+    "constraints": [
+      "Cover all ten OWASP Top 10 categories",
+      "Give exactly one short example for each category",
+      "Prevention advice must be specific to Django apps",
+      "Keep each entry brief and easy to follow"
+    ],
+    "done_criteria": [
+      "All ten OWASP Top 10 categories are explained",
+      "Each category has one short example",
+      "Each category has prevention guidance that applies to Django",
+      "The explanation is clear and concise"
+    ],
+    "summary": "You want an explanation of the OWASP Top 10, with one short example for each and how to prevent it in a Django app."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.79,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 280,
+    "output_tokens": 261,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0033636,
+    "latency_ms": 3036.7597349977586,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0033636
+  }
+}
