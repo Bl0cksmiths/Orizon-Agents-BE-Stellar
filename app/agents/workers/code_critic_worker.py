@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from .base import ModelWorker
 from .claude_step import ModelStepError
 from .code_critic import CRITIC_DEFAULT_TIER, CodeCritic
+from .code_gen import carry_deferred
 from .code_validator import harden_artifact, validate_html
 
 if TYPE_CHECKING:
@@ -148,7 +149,13 @@ class CodeCriticWorker(ModelWorker):
                     critic_notes.append(
                         f"applied {len(kit_required)} kit requirement{'s' if len(kit_required) != 1 else ''}"
                     )
-                final_artifact = revised
+                # The draft's "Deferred: …" list survives the rewrite: the
+                # critic writes its own summary, and the buyer must still be
+                # told what was left out (merged with any list it adds).
+                final_artifact = {
+                    **revised,
+                    "summary": carry_deferred(str(revised.get("summary", "")), str(draft_artifact.get("summary", ""))),
+                }
         except ModelStepError:
             # On Claude, a polish the model did not deliver (declined, cut off,
             # unreachable, over the spend cap, unreadable) is this STEP's
