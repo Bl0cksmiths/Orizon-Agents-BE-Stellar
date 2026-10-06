@@ -158,3 +158,17 @@ def test_the_fallback_guard_is_priced_as_haiku():
     haiku = cost.estimate(cases, stages="guard", fallback=True)
     assert haiku.expected_usd > jev_only.expected_usd * 20
     assert cost.reservation(cases[0], stages="guard", fallback=True) > cost.reservation(cases[0], stages="guard")
+
+
+def test_the_worker_sample_is_refused_without_live_and_a_cap(tmp_path, capsys):
+    assert cli.main(["workers", "--out", str(tmp_path)]) == cli.EXIT_REFUSED
+    assert cli.main(["workers", "--live", "--max-usd", "0.1", "--out", str(tmp_path)]) == cli.EXIT_REFUSED
+    assert "ceiling" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+
+def test_the_sample_contract_fits_the_intent_bound():
+    from evals.orchestrator.workers_sample import JOBS
+
+    assert all(3 <= len(j.intent) <= 500 and len(j.rationale) <= 500 for j in JOBS)
+    assert len({j.agent_id for j in JOBS}) == 7
