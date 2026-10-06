@@ -2,7 +2,8 @@
 
 Wraps the existing CodeCritic Agno agent (defined in code_critic.py) as a
 first-class Worker so it appears as its own step in the pipeline trace. Reads
-the prior `code.gen` artifact from `context`, runs the validator to surface any structural violations,
+the latest code step's artifact (code.gen, code.next or an earlier critic pass)
+from `context`, runs the validator to surface any structural violations,
 prepends the demo-kit critic_checklist as non-negotiable requirements, and asks
 the critic to refine the HTML against the copy and design intent upstream of it.
 
@@ -20,15 +21,17 @@ from .claude_step import ModelStepError
 from .code_critic import CRITIC_DEFAULT_TIER, CodeCritic
 from .code_gen import carry_deferred
 from .code_validator import harden_artifact, validate_html
-from .context import CODE_GEN, latest_output
+from .context import CODE_CRITIC, CODE_GEN, CODE_NEXT, latest_output
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
 
 logger = logging.getLogger(__name__)
 
-# The steps whose artifact the critic reviews.
-DRAFT_ROLES = (CODE_GEN,)
+# The steps whose artifact the critic reviews: the latest delivered of them,
+# so it refines code.next's build as readily as code.gen's, and a second
+# critic pass refines the first one's.
+DRAFT_ROLES = (CODE_GEN, CODE_NEXT, CODE_CRITIC)
 
 UPSTREAM_GUIDANCE = (
     "They are the intent the draft was built from: check the app uses this "
