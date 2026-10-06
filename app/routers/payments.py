@@ -4,6 +4,7 @@ import secrets
 
 from fastapi import APIRouter, Header, Response
 
+from .. import money
 from ..schemas import X402Request, X402Response
 
 router = APIRouter(tags=["payments"])
@@ -22,7 +23,12 @@ async def x402(
     """
     if not x_orizon_payment:
         response.status_code = 402
-        response.headers["X-Orizon-Payment-Required"] = f"amount={req.amount_usdc:.3f};agent={req.agent_id};token=USDC"
+        # The amount exact and the token the asset the escrow actually moves
+        # (native XLM on testnet) — never an assumed "USDC" (ADR 0015).
+        amount = money.format_amount(money.to_stroops(req.amount_usdc))
+        response.headers["X-Orizon-Payment-Required"] = (
+            f"amount={amount};agent={req.agent_id};token={money.asset_code()}"
+        )
         return X402Response(status="402")
 
     return X402Response(status="paid", receipt="0x" + secrets.token_hex(10))
