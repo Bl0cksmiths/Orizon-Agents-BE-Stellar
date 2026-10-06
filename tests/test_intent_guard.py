@@ -208,12 +208,15 @@ def test_block_outranks_needs_detail(fake_jev):
     ("complexity", "confidence", "tier", "rounded"),
     [
         ("low", 0.49, "moderate", True),
-        ("moderate", 0.49, "complex", True),
-        ("complex", 0.2, "complex", False),  # saturates; nothing was rounded
+        ("low", 0.05, "moderate", True),  # one step, never two
         ("low", 0.50, "low", False),
+        ("moderate", 0.49, "moderate", False),  # never lifted onto Opus
+        ("moderate", 0.05, "moderate", False),
+        ("complex", 0.2, "complex", False),
+        ("complex", 0.9, "complex", False),
     ],
 )
-def test_low_confidence_rounds_the_tier_up(fake_jev, complexity, confidence, tier, rounded):
+def test_only_an_unsure_low_is_rounded_up(fake_jev, complexity, confidence, tier, rounded):
     fake_jev.answer(battery(complexity=complexity, confidence=confidence), purpose="guard.intent")
     decision = check()
     assert decision.tier == tier

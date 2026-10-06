@@ -12,9 +12,13 @@ below turn those probabilities into a verdict:
                    clean (see ``prompt_improver.resolve``)
 * ``unavailable``  jev AND the fallback are down — fail closed, never open
 
-The tier is jev's complexity choice, rounded up one step when its confidence is
-below 0.5: under-provisioning a hard task costs a failed run, over-provisioning
-an easy one costs a few cents.
+The tier is jev's complexity choice, with one correction: a "low" whose
+confidence is below 0.5 runs as "moderate", because a small model failing a
+task it was under-sized for costs a whole run. Nothing is ever lifted to
+"complex" — that tier (Claude Opus 5.5, measured ~7.6× slower and ~9.7×
+dearer for code generation) is reserved for requests jev itself calls
+complex. In the 2026-10-06 live eval this rule scored 83.7% tier accuracy
+against 77.1% for "round any tier up below 0.5".
 
 When jev cannot answer (timeout, error, missing key, malformed answer) the same
 questions go to Claude Haiku 4.5 with structured output. The fallback reads the
@@ -42,7 +46,7 @@ from pydantic import BaseModel, ConfigDict
 from app.agents.workers.prompt_safety import fence_untrusted
 from app.llm import claude, jev
 from app.llm.errors import JevUnavailable, LLMError, LLMRefused, SpendCapReached
-from app.llm.tiers import Tier, guard_fallback_model, tier_up
+from app.llm.tiers import Tier, guard_fallback_model
 
 from . import intent_guard_prompts as prompts
 
@@ -80,6 +84,7 @@ class GuardPolicy:
     harmful_block: float = 0.70
     severity_block: float = 2.0
     real_request_min: float = 0.30
+    # Below this, an unsure "low" is lifted to "moderate" (never higher).
     complexity_confidence_min: float = 0.5
     same_request_min: float = 0.5
 
@@ -232,11 +237,11 @@ def decide(
 
     reasons = list(base_reasons)
     tier: Tier = scores.complexity
-    if scores.complexity_confidence < policy.complexity_confidence_min:
-        rounded = tier_up(tier)
-        if rounded != tier:
-            reasons.append("tier_rounded_up")
-        tier = rounded
+    # Only an unsure "low" is lifted. An unsure "moderate" stays moderate:
+    # complex (Opus) is reserved for requests jev itself calls complex.
+    if tier == "low" and scores.complexity_confidence < policy.complexity_confidence_min:
+        tier = "moderate"
+        reasons.append("tier_rounded_up")
     watch = scores.injection >= policy.injection_watch
     if watch:
         reasons.append("watch")
