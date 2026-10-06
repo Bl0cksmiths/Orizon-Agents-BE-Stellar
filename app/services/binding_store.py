@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..config import settings
+from .pg_schema import create_schema
 
 logger = logging.getLogger(__name__)
 
@@ -496,8 +497,8 @@ class PostgresBindingStore:
             if not self._ready:
                 # asyncpg runs argument-less queries through the simple
                 # protocol, which is what lets one execute() carry both DDL
-                # statements.
-                await self._pool.execute(_CREATE_TABLE_SQL)
+                # statements; create_schema runs them under the DDL lock.
+                await create_schema(self._pool, "agent_bindings", _CREATE_TABLE_SQL)
                 self._ready = True
         return self._pool
 
