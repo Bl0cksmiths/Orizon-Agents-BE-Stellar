@@ -1294,9 +1294,12 @@ _CRITIC_ID = "agt_12r0"
 _DEPLOY_ID = "agt_08j2"
 _OCR_ID = "agt_06q4"
 
-# A step dropped unless the plan holds at least one of these.
+# A step dropped unless the plan holds at least one of these. code.critic
+# reviews code.gen's single-file HTML only: it declines a code.next project
+# (`code_critic_worker.UNSUPPORTED_ARTIFACT`), so code.next alone gives it
+# nothing to review. deploy.v0 seals either builder's output.
 _NEEDS_ONE_OF: dict[str, frozenset[str]] = {
-    _CRITIC_ID: _CODE_BUILDER_IDS,
+    _CRITIC_ID: frozenset({"agt_11c0"}),
     _DEPLOY_ID: _CODE_BUILDER_IDS,
 }
 
@@ -1351,7 +1354,7 @@ def _compose(steps: list[PlanStep], intent: str) -> _Composed:
     for step in steps:
         needs = _NEEDS_ONE_OF.get(step.agent_id)
         if needs is not None and not needs & present:
-            logger.info("dropped a %s step: no code builder in the plan for it to work on", step.agent_name)
+            logger.info("dropped a %s step: no build in the plan it can work on", step.agent_name)
             continue
         if step.agent_id == _OCR_ID and not has_image_input(intent, None):
             agent = state.agents.get(step.agent_id)

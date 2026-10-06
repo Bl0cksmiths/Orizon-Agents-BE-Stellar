@@ -96,7 +96,7 @@ def _ids(resp: DecomposeResponse) -> list[str]:
     [
         [RESEARCH, SEO, COPY, DESIGN, GEN, CRITIC],  # website
         [DESIGN, GEN, CRITIC, DEPLOY],  # web app, shipped
-        [DESIGN, NEXT, CRITIC, DEPLOY],  # React / Next.js app
+        [DESIGN, NEXT, DEPLOY],  # React / Next.js app
         [RESEARCH, SEO, COPY, ADS, TRANSLATE],  # marketing, localised
         [RESEARCH, COPY, TRANSLATE],  # report, translated
         [AUDIT, RESEARCH, COPY],  # smart contract
@@ -123,6 +123,14 @@ def test_a_review_with_no_build_before_it_is_dropped(
     assert _ids(resp) == [RESEARCH, COPY]
     # Nothing is billed for the dropped step: the plan total is its steps'.
     assert resp.total_stroops == sum(s.price_stroops for s in resp.steps)
+
+
+def test_a_review_of_a_next_project_is_dropped(claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
+    # code.critic declines a code.next project (unbilled, unreviewed), so the
+    # plan never shows the buyer a priced review that cannot happen.
+    _plan_of(fake_claude, fake_jev, DESIGN, NEXT, CRITIC, DEPLOY)
+
+    assert _ids(_decompose()) == [DESIGN, NEXT, DEPLOY]
 
 
 def test_a_seal_with_no_build_before_it_is_dropped(claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
@@ -254,5 +262,7 @@ def test_composition_only_drops_or_reorders_never_adds(proposed: list[str]) -> N
     for i, a in enumerate(ids):
         if a in (CRITIC, DEPLOY):
             assert builders and all(b < i for b in builders)
+        if a == CRITIC:
+            assert GEN in ids  # the critic reviews code.gen's build only
         if a == DEPLOY:
             assert all(c < i for c, x in enumerate(ids) if x == CRITIC)
