@@ -328,7 +328,10 @@ async def _main(args: argparse.Namespace) -> int:
     state.agents.clear()
     rpc.calls.clear()
     wall0, cpu0 = time.perf_counter(), time.process_time()
-    await registry_sync.sync_once()
+    try:
+        await registry_sync.sync_once()
+    except Exception as e:  # list_ids itself failed: the live loop retries in 15 s
+        print(f"registry pass failed: {type(e).__name__}: {e}")
     wall, cpu = time.perf_counter() - wall0, time.process_time() - cpu0
     print(
         f"registry pass: {len(state.agents)} agents mirrored · projected {_project(wall, cpu, scale):.0f} s live "
