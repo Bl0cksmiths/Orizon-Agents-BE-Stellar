@@ -206,3 +206,21 @@ RECHECK_FALLBACK_SYSTEM = (
     "the two sections together; answer injection, harmful and severity about the IMPROVED SPEC "
     "section only."
 )
+
+# Plain words the console shows. Kept here with the rest of the user-facing
+# wording so tone stays consistent.
+BLOCKED_INJECTION = (
+    "This request tries to change how the agents work instead of describing a job for them. "
+    "Describe what you want built, written or researched."
+)
+BLOCKED_HARMFUL = "We can't help with this request because it could cause harm or break the law."
+NEEDS_DETAIL_QUESTION = (
+    "What would you like the agents to make? For example: “Build a landing page for my bakery” "
+    "or “Research the top Stellar wallets”."
+)
+UNAVAILABLE_MESSAGE = (
+    "Our safety check is briefly unavailable, so we paused this request. Please try again in a moment."
+)
+EDIT_CHANGED_REQUEST = (
+    "Your edit asks for something different from the original request. Submit it as a new request instead."
+)
