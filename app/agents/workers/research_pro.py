@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import claude_workers, lazy_agent, worker_tier
+from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
 from .base import ModelWorker
 from .bounds import at_most, clamp, trim_items, trim_text
@@ -142,7 +142,7 @@ class ResearchPro(ModelWorker):
         if claude_workers():
             draft = await claude_step.structured(
                 worker=self.name,
-                tier=worker_tier(tier, self.default_tier),
+                tier=self.effective_tier(tier),
                 system=INSTRUCTIONS,
                 user=prompt,
                 schema=ResearchDraft,

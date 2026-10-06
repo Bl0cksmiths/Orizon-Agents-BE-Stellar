@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ...config import settings
-from ..model_factory import claude_workers, lazy_agent, worker_tier
+from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
 from .base import ModelWorker
 from .prompt_safety import worker_prompt
@@ -474,7 +474,7 @@ class CodeGen(ModelWorker):
             return coerce_artifact(result.content)
         reply = await claude_step.text(
             worker=self.name,
-            tier=worker_tier(tier, self.default_tier),
+            tier=self.effective_tier(tier),
             system=CLAUDE_INSTRUCTIONS,
             user=prompt,
             max_tokens=MAX_TOKENS,

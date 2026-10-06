@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import claude_workers, lazy_agent, worker_tier
+from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
 from .base import ModelWorker
 from .prompt_safety import worker_prompt
@@ -109,7 +109,7 @@ class DesignTokens(ModelWorker):
         if claude_workers():
             out = await claude_step.structured(
                 worker=self.name,
-                tier=worker_tier(tier, self.default_tier),
+                tier=self.effective_tier(tier),
                 system=_INSTRUCTIONS,
                 user=prompt,
                 schema=_TokensOutput,
