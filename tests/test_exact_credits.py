@@ -110,3 +110,23 @@ def test_a_record_without_planned_stroops_is_still_creditable() -> None:
     settlement = a_settlement(steps=(step,), settled_usdc=0.05)
     dispute = dataclasses.replace(a_dispute(), creditable_usdc=0.05)
     assert refund_svc.creditable_for(settlement, dispute, 1.0) == 0.05
+
+
+def test_the_credit_line_on_the_workflow_names_the_asset_not_usdc() -> None:
+    import asyncio
+
+    from app.schemas import Task
+    from app.services import dispute_svc
+    from app.state import state
+
+    dispute = a_dispute(task_id="tsk_credit_label")
+    state.add_task(Task(id="tsk_credit_label", intent="x", agents=1, spent=0.0, status="complete"))
+    try:
+        asyncio.run(dispute_svc._note_credit_on_workflow(dispute, 0.0123457, "tx_refund"))
+        [line] = [ln.msg for ln in state.traces["tsk_credit_label"] if "upheld" in ln.msg]
+    finally:
+        state.tasks.pop("tsk_credit_label", None)
+        state.traces.pop("tsk_credit_label", None)
+
+    assert f"credited 0.0123457 {money.asset_code()} to the buyer" in line
+    assert "USDC" not in line
