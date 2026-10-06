@@ -40,9 +40,9 @@ from typing import TYPE_CHECKING, Any
 from . import claude_step
 from .bounds import trim_text
 from .claude_only import ClaudeOnlyWorker
-from .code_gen import MAX_ARTIFACT_CHARS, summary_with_deferred
+from .code_gen import MAX_ARTIFACT_CHARS, code_handoff, summary_with_deferred
 from .code_validator import harden_artifact
-from .context import scrub_secrets
+from .context import Handoff, scrub_secrets
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
@@ -321,6 +321,12 @@ class CodeNext(ClaudeOnlyWorker):
     default_tier = "moderate"
     max_tier = "moderate"  # like code.gen: Opus would outrun the step deadline
     reads_upstream = True
+
+    def handoff(self, context: dict[str, Any] | None) -> Handoff:
+        # Like code.gen: on a curated-kit run the seo.brief and research.pro
+        # outputs repeat the kit's own brand and feature brief, so they are
+        # left out. The prompt and the trace both read this.
+        return code_handoff(context, self.name)
 
     def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
         """The fenced request, the fenced upstream outputs, then the ask."""

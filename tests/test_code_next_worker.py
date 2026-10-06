@@ -124,6 +124,25 @@ def test_the_upstream_design_and_copy_are_fenced_into_the_prompt(claude: FakeCla
     assert WORKER.upstream_sources({"design.figma": design, "copywrite.v3": copy}) == ["design.figma", "copywrite.v3"]
 
 
+def test_a_kit_run_leaves_out_the_kits_duplicate_briefs(claude: FakeClaude) -> None:
+    research = {"summary": "RESEARCH-BRIEF", "findings": [{"claim": "c", "confidence": 0.9}]}
+    seo = {"summary": "SEO-BRIEF", "brand_name": "Spoke"}
+    copy = {"hero": {"headline": "UPSTREAM-HEADLINE"}, "sections": []}
+    context = {"kit": {"kit_id": "k"}, "research.pro": research, "seo.brief": seo, "copywrite.v3": copy}
+    claude.reply(_tagged())
+    run(context=context)
+    user = claude.calls[0].user
+    assert "UPSTREAM-HEADLINE" in user
+    assert "RESEARCH-BRIEF" not in user and "SEO-BRIEF" not in user
+    assert WORKER.upstream_sources(context) == ["copywrite.v3"]
+    # Without a kit the briefs are this run's own work, and are handed on.
+    assert WORKER.upstream_sources({k: v for k, v in context.items() if k != "kit"}) == [
+        "copywrite.v3",
+        "seo.brief",
+        "research.pro",
+    ]
+
+
 def test_the_facts_rule_is_part_of_the_brief() -> None:
     """The live smoke of 2026-10-06 showed made-up plan prices on a pricing page."""
     assert "never invent prices" in code_next.CLAUDE_INSTRUCTIONS
