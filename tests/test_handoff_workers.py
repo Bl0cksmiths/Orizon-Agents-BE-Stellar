@@ -372,3 +372,16 @@ def test_deploy_with_no_build_seals_nothing_and_names_no_source() -> None:
     out = run("agt_08j2", context)
     assert out["preview_url"] is None
     assert out["files"] == 0
+
+
+# ── the code briefs ─────────────────────────────────────────────────────────
+
+
+def test_code_gens_claude_brief_says_how_to_build_from_the_upstream_block() -> None:
+    from app.agents.workers import code_gen
+
+    flat = " ".join(code_gen.CLAUDE_INSTRUCTIONS.split())
+    assert "An UPSTREAM_OUTPUTS block (when present) holds what earlier agents in this pipeline produced" in flat
+    assert "copy its `:root { --bg: …; --primary: …; }` block verbatim" in flat
+    assert "use its hero headline, subtitle and section copy as the page's text" in flat
+    assert "DESIGN_TOKENS" not in flat  # no section by that name reaches the Claude path any more
