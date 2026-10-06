@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 from app.config import Settings, settings
 from app.llm import provider, spend
 from app.llm.spend import Usage
+from app.llm.testing import offline_operator_readiness, offline_readiness
 
 VALID_C = "C" + "A" * 55
 VALID_G = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -49,6 +51,9 @@ def _ready_stellar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "stellar_admin_address", VALID_G)
 
 
+OPERATOR_KEY = "operator-key-0123456789"
+
+
 def test_readiness_is_ready_on_claude_without_an_openai_key(client, monkeypatch: pytest.MonkeyPatch) -> None:
     _ready_stellar(monkeypatch)
     monkeypatch.setattr(settings, "openai_api_key", "")
@@ -57,7 +62,7 @@ def test_readiness_is_ready_on_claude_without_an_openai_key(client, monkeypatch:
     assert r.status_code == 200
     body = r.json()
     assert body["llm"] == "ok"
-    assert body["orchestrator"]["provider"] == "anthropic" and body["orchestrator"]["anthropic_key"] is True
+    assert body["orchestrator"] == {"provider": "anthropic", "planning": "active", "resets_at": None}
     assert "sk-ant" not in r.text  # presence only, never the key
 
 
@@ -72,15 +77,65 @@ def test_readiness_is_not_ready_when_claude_is_forced_without_its_key(client, mo
 def test_a_missing_jev_key_never_gates_readiness(client, monkeypatch: pytest.MonkeyPatch) -> None:
     _ready_stellar(monkeypatch)
     monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
-    r = client.get("/readiness")
+    monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
+    r = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY})
     assert r.status_code == 200 and r.json()["orchestrator"]["typesafe_key"] is False
 
 
-def test_readiness_reports_todays_spend_and_a_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+def _spend_past_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "llm_daily_spend_cap_usd", 0.01)
     asyncio.run(spend.record(model="claude-opus-5-5", purpose="planner", usage=Usage(), cost=0.0125))
-    report = provider.readiness()
-    assert (report.spend.spent_usd, report.spend.cap_usd, report.spend.paused) == (0.0125, 0.01, True)
+
+
+def test_anonymous_callers_see_paused_and_when_it_lifts_but_never_the_numbers(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _spend_past_the_cap(monkeypatch)
+    monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
+    for headers in ({}, {"X-API-Key": "wrong-key-0123456789"}):
+        r = client.get("/readiness", headers=headers)
+        orchestrator = r.json()["orchestrator"]
+        assert set(orchestrator) == {"provider", "planning", "resets_at"}
+        assert orchestrator["planning"] == "paused"
+        resets = datetime.fromisoformat(orchestrator["resets_at"])
+        assert resets.tzinfo is not None and (resets.hour, resets.minute, resets.second) == (0, 0, 0)
+        assert 0 < (resets - datetime.now(UTC)).total_seconds() <= 86_400
+        assert "0.0125" not in r.text and "cap_usd" not in r.text and "spent_usd" not in r.text
+
+
+def test_the_operator_key_adds_the_spend_figures(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    _spend_past_the_cap(monkeypatch)
+    monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
+    orchestrator = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY}).json()["orchestrator"]
+    assert orchestrator["planning"] == "paused" and orchestrator["resets_at"] is not None
+    assert orchestrator["spend"] == {
+        "day": datetime.now(UTC).date().isoformat(),
+        "spent_usd": 0.0125,
+        "cap_usd": 0.01,
+        "paused": True,
+    }
+    assert orchestrator["models"]["planner"] == "claude-opus-5-5"
+
+
+def test_with_no_operator_key_configured_nobody_gets_the_figures(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset API_KEY is the open demo's shape: nothing matches it, not even an empty header."""
+    monkeypatch.setattr(settings, "api_key", "")
+    for headers in ({}, {"X-API-Key": ""}, {"X-API-Key": "anything"}):
+        assert client.get("/readiness", headers=headers).json()["orchestrator"] == offline_readiness()
+
+
+def test_the_operator_view_is_the_full_report_when_nothing_is_spent(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
+    body = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY}).json()
+    assert body["orchestrator"] == offline_operator_readiness()
+
+
+def test_readiness_reports_a_pause_directly() -> None:
+    asyncio.run(spend.record(model="claude-opus-5-5", purpose="planner", usage=Usage(), cost=10.0))
+    public = provider.readiness()
+    assert isinstance(public, provider.LLMPublicReadiness) and public.planning == "paused"
+    full = provider.readiness(operator=True)
+    assert isinstance(full, provider.LLMReadiness) and full.spend.spent_usd == 10.0
 
 
 @pytest.mark.parametrize(

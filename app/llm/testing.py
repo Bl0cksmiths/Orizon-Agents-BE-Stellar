@@ -309,10 +309,16 @@ class OfflineJev:
 
 
 def offline_readiness() -> dict[str, Any]:
-    """The `orchestrator` object /readiness reports under `llm_offline`, spelled out
-    literally so the exact-payload probe tests review every field it carries."""
+    """The `orchestrator` object an anonymous /readiness caller sees under
+    `llm_offline`, spelled out literally so the exact-payload probe tests review
+    every field it carries: no spend figure, cap, key or model."""
+    return {"provider": "openai", "planning": "active", "resets_at": None}
+
+
+def offline_operator_readiness() -> dict[str, Any]:
+    """The same object for a caller holding the operator API key: the full report."""
     return {
-        "provider": "openai",
+        **offline_readiness(),
         "anthropic_key": False,
         "typesafe_key": False,
         "models": {

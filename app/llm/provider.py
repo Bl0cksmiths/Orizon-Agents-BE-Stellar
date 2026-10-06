@@ -6,13 +6,16 @@ once ANTHROPIC_API_KEY is set and OpenAI until then. The OpenAI/agno path
 stays behind this switch until Claude is proven live.
 
 `readiness()` is the probe's view: config and in-memory figures only, no
-network call. Only the active provider's key decides `llm` (and with it
-whether /readiness answers 503); jev's key is informational, because the
-guard falls back to Claude without it.
+network call. Anonymous callers see whether planning is active or paused;
+the spend figures, keys and models are for the operator API key only.
+Only the active provider's key decides `llm` (and with it whether
+/readiness answers 503); jev's key is informational, because the guard
+falls back to Claude without it.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
@@ -61,28 +64,57 @@ class LLMSpend(BaseModel):
     paused: bool  # the cap is reached: AI planning answers planning_paused
 
 
-class LLMReadiness(BaseModel):
-    """The model layer on /readiness. Informational: `llm` alone gates readiness.
+class LLMPublicReadiness(BaseModel):
+    """The model layer as anyone may see it on /readiness.
 
-    Key fields say present or not, never any part of a key.
+    Whether AI planning is running, and when a pause lifts — never how much
+    has been spent or what the cap is: those numbers would tell an abuser
+    exactly how much budget is left to burn. The operator view adds them.
     """
 
     provider: Provider
+    planning: Literal["active", "paused"]
+    resets_at: str | None  # ISO-8601 UTC, the next UTC midnight, only while paused
+
+
+class LLMReadiness(BaseModel):
+    """The model layer on /readiness for a caller holding the operator API key.
+
+    Informational: `llm` alone gates readiness. Key fields say present or
+    not, never any part of a key.
+    """
+
+    provider: Provider
+    planning: Literal["active", "paused"]
+    resets_at: str | None
     anthropic_key: bool
     typesafe_key: bool
     models: LLMModels
     spend: LLMSpend
 
 
-def readiness() -> LLMReadiness:
+def _resets_at() -> str:
+    moment = datetime.now(UTC) + timedelta(seconds=spend.seconds_until_reset())
+    return moment.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def readiness(*, operator: bool = False) -> LLMReadiness | LLMPublicReadiness:
     """The probe's view: config and the ledger's in-memory total, no I/O.
 
-    A stale total starts one background re-read for the next probe to see.
+    Anonymous callers get `LLMPublicReadiness`; `operator=True` (the caller
+    presented the operator API key) the full report. A stale total starts
+    one background re-read for the next probe to see.
     """
     spend.refresh_if_stale()
     today = spend.snapshot()
+    planning: Literal["active", "paused"] = "paused" if today.paused else "active"
+    resets_at = _resets_at() if today.paused else None
+    if not operator:
+        return LLMPublicReadiness(provider=active_provider(), planning=planning, resets_at=resets_at)
     return LLMReadiness(
         provider=active_provider(),
+        planning=planning,
+        resets_at=resets_at,
         anthropic_key=bool(settings.anthropic_api_key.strip()),
         typesafe_key=bool(settings.typesafe_api_key.strip()),
         models=LLMModels(

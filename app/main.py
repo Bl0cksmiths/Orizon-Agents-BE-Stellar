@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +29,7 @@ from .config import SERVICE_VERSION, settings
 # `from .routers import health` module import at call time.
 from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
 from .llm import provider as llm_provider
-from .llm.provider import LLMReadiness
+from .llm.provider import LLMPublicReadiness, LLMReadiness
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -62,6 +62,7 @@ from .security import (
     RequestIdLogFilter,
     SecretRedactionLogFilter,
     SecurityHeadersMiddleware,
+    header_secret_matches,
     request_id_var,
     security_headers,
     strict_cors_origins,
@@ -813,7 +814,10 @@ class ReadinessResponse(BaseModel):
     disputes: DisputesReadiness  # informational, never gates readiness
     escrow: EscrowReadiness  # informational, never gates readiness
     registry: RegistryReadiness  # informational, never gates readiness
-    orchestrator: LLMReadiness  # informational: provider, keys present, models, today's spend vs the cap
+    # Informational. Anyone: provider and planning active|paused (+ when a
+    # pause lifts). With the operator X-API-Key: keys present, models, and
+    # today's spend against the cap — numbers an abuser must not see.
+    orchestrator: LLMReadiness | LLMPublicReadiness
 
 
 @app.get(
@@ -823,7 +827,14 @@ class ReadinessResponse(BaseModel):
     response_model=ReadinessResponse,
     responses={503: {"model": ReadinessResponse, "description": "A required dependency is not configured."}},
 )
-async def readiness(response: Response) -> ReadinessResponse:
+async def readiness(
+    response: Response,
+    x_api_key: str | None = Header(
+        default=None,
+        alias="X-API-Key",
+        description="Optional. The operator's API_KEY adds the AI spend figures to `orchestrator`.",
+    ),
+) -> ReadinessResponse:
     """503 only when a dependency the API cannot serve without is missing:
     the LLM key or the Stellar contract/RPC config. The signing key is
     deliberately informational — read-only deployments are legitimate — and
@@ -885,5 +896,6 @@ async def readiness(response: Response) -> ReadinessResponse:
             agents=sync.agents,
             last_full_sync_at=sync.last_full_sync_at,
         ),
-        orchestrator=llm_provider.readiness(),
+        # A wrong or absent key is simply the public view: a probe never 401s.
+        orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )
