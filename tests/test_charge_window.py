@@ -279,6 +279,21 @@ def test_a_charge_that_ages_out_of_the_window_is_dropped(chain: Any) -> None:
     assert later.by_agent["ext_a"].entries == []
 
 
+def test_payers_of_charges_that_left_the_window_are_forgotten(chain: Any) -> None:
+    """What a long-lived process keeps is bounded by the window, not its uptime."""
+    rpc, views = chain
+    rpc.events = [_event("ext_a", OLDEST + 10, auth=1, job=1)]
+    views.payers = {_auth(1).hex(): BUYER}
+    _fetch({"ext_a": OWNER_A})
+    assert _auth(1).hex() in charge_window._held.payers
+
+    rpc.latest += 100
+    rpc.oldest += 100
+    _fetch({"ext_a": OWNER_A})
+
+    assert charge_window._held.payers == {}
+
+
 def test_a_held_index_from_before_the_window_is_rescanned_from_scratch(chain: Any) -> None:
     rpc, _views = chain
     _fetch({"ext_a": OWNER_A})
