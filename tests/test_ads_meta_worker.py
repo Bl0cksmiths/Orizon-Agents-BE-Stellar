@@ -123,6 +123,16 @@ def test_a_variant_no_boundary_can_fit_is_dropped_and_listed(claude: FakeClaude)
     ]
 
 
+def test_an_unfittable_description_is_blanked_and_the_variant_kept(claude: FakeClaude) -> None:
+    claude.reply(_draft(_ad(description="Workshopsforeveryoneeverysaturday"), _ad("Second")))
+    out = run()
+    assert [(a["headline"], a["description"]) for a in out["ads"]] == [
+        ("Fix your bike, together", ""),
+        ("Second", "Open Saturdays"),
+    ]
+    assert out["issues"] == [{"variant": 1, "problem": "description_dropped_no_boundary_fits"}]
+
+
 def test_too_few_fitting_variants_fail_the_step(claude: FakeClaude) -> None:
     unfit = _ad("Ok", primary_text="An unbroken run of words that never reaches a sentence end " * 3)
     claude.reply(_draft(_ad(), unfit))

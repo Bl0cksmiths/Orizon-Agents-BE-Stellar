@@ -10,8 +10,9 @@ Lengths follow Meta's recommended character counts for feed placements, past
 which the text is cut off behind "See more" or an ellipsis: primary text 125,
 headline 40, description 30. Structured outputs cannot enforce lengths, so the
 model drafts unbounded (`AdSetDraft`) and `fit_ad_set` fits in code — at a
-sentence or clause boundary only, never mid-sentence; a variant that cannot be
-fitted that way is dropped and listed in `issues`. The CTA
+sentence or clause boundary only, never mid-sentence; a variant whose primary
+text or headline cannot be fitted that way is dropped, and an unfittable
+description (optional on Meta) is blanked, both listed in `issues`. The CTA
 is one of Meta's call-to-action button types, the objective one of its six
 campaign objectives (the API's `OUTCOME_*` values). A special ad category
 (credit, employment, housing, social issues) gets Meta's restricted targeting:
@@ -186,16 +187,18 @@ def fit_ad_set(draft: AdSetDraft) -> dict[str, Any]:
     """The draft inside Meta's lengths and ranges.
 
     Over-long text is cut back to a sentence or clause boundary
-    (`fit_at_boundary`), never mid-sentence; a variant with a field no boundary
-    can fit is dropped and listed in `issues`, as is a duplicate. Fewer than
-    two usable variants stays invalid."""
+    (`fit_at_boundary`), never mid-sentence. A variant whose primary text or
+    headline no boundary can fit is dropped, as is a duplicate; a description
+    that cannot be fitted is blanked instead, since Meta's description is
+    optional. Each is listed in `issues`. Fewer than two usable variants stays
+    invalid."""
     ads: list[dict[str, str]] = []
     issues: list[dict[str, Any]] = []
     seen: set[str] = set()
     limits = {"primary_text": PRIMARY_TEXT_MAX, "headline": HEADLINE_MAX, "description": DESCRIPTION_MAX}
     for index, ad in enumerate(draft.ads, 1):
         fitted = {field: fit_at_boundary(getattr(ad, field), limit) for field, limit in limits.items()}
-        unfit = [field for field, value in fitted.items() if value is None]
+        unfit = [field for field in ("primary_text", "headline") if fitted[field] is None]
         if unfit:
             issues.append({"variant": index, "problem": "dropped_no_boundary_fits", "fields": unfit})
             continue
@@ -208,6 +211,8 @@ def fit_ad_set(draft: AdSetDraft) -> dict[str, Any]:
             issues.append({"variant": index, "problem": "dropped_duplicate"})
             continue
         seen.add(key)
+        if fitted["description"] is None:
+            issues.append({"variant": index, "problem": "description_dropped_no_boundary_fits"})
         ads.append(
             {
                 "primary_text": primary,
