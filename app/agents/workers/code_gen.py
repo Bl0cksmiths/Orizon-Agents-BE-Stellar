@@ -302,7 +302,12 @@ CLAUDE_LENGTH = """# Length target
 
 Write a single self-contained HTML file of about 250–450 lines. Prioritise
 working core features over breadth: for a large request, implement the core
-flow well and list the deferred features in the summary.
+flow well and list the deferred features in the summary (the
+<artifact_deferred> section below).
+
+Format the source readably so its length reflects the work: one statement or
+declaration per line, normal two-space indentation, no minified CSS or JS and
+no long single-line rules or functions.
 """
 
 
