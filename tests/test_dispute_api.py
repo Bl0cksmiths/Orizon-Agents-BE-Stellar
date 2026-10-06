@@ -854,6 +854,10 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "paid_usdc": None,
                 "receipt_id_hex": None,
                 "unpaid_reason": None,
+                # ADR 0015: a v1 record moved one total, so no per-step charge or return.
+                "planned": {"stroops": 1_000_000, "display": "0.100"},
+                "charged": None,
+                "returned": None,
             },
             {
                 "step_index": 1,
@@ -866,9 +870,20 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "paid_usdc": None,
                 "receipt_id_hex": None,
                 "unpaid_reason": None,
+                "planned": {"stroops": 2_500_000, "display": "0.250"},
+                "charged": None,
+                "returned": None,
             },
         ],
         "policy": {"credited_fraction": 1.0, "funded_by": "platform", "adjudicated_by": "platform"},
+        "asset": {"code": "XLM", "issuer": None, "decimals": 7},
+        "totals": {
+            "authorized": None,
+            "planned": {"stroops": 3_500_000, "display": "0.350"},
+            "charged": {"stroops": 2_500_000, "display": "0.250"},
+            "returned": None,
+            "surplus": None,
+        },
     }
     # Older clients read the deadline at the top level, and it must be the
     # same instant the settlement carries, not a second opinion about it.

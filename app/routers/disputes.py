@@ -46,7 +46,9 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from .. import money
 from ..config import settings
+from ..money import Amount, AssetInfo
 from ..schemas import SealKind, SealState, SettlementState
 from ..security import (
     CodedHTTPException,
@@ -472,10 +474,23 @@ class SettlementStepView(BaseModel):
     # Why a delivered v2 step was paid nothing ("free", "no_onchain_owner",
     # "owner_unreadable", "over_authorized_cap"); null otherwise.
     unpaid_reason: str | None = None
+    # The step's money as the receipt reconciles it (ADR 0015), each in exact
+    # stroops and a display string of `SettlementView.asset`:
+    #   planned   the plan's price for it — what the buyer authorized for it
+    #   charged   what the settle paid its operator (0 when it was not paid)
+    #   returned  planned − charged: what went back to the buyer in the settle
+    # `charged`/`returned` are null on a v1 settlement, which moved one total
+    # for the run; `planned` is null on a record too old to have kept it.
+    planned: Amount | None = None
+    charged: Amount | None = None
+    returned: Amount | None = None
 
     @classmethod
     def of(cls, step: SettlementStep, fraction: float) -> SettlementStepView:
         """Project a settled step onto the wire, pricing its credit under `fraction`."""
+        planned = _planned_stroops(step)
+        charged = None if step.paid_usdc is None else money.to_stroops(step.paid_usdc)
+        returned = None if planned is None or charged is None else planned - charged
         return cls(
             step_index=step.step_index,
             agent_id=step.agent_id,
@@ -491,6 +506,62 @@ class SettlementStepView(BaseModel):
             paid_usdc=step.paid_usdc,
             receipt_id_hex=step.receipt_id_hex,
             unpaid_reason=step.unpaid_reason,
+            planned=_amount(planned),
+            charged=_amount(charged),
+            returned=_amount(returned),
+        )
+
+
+def _amount(stroops: int | None) -> Amount | None:
+    return None if stroops is None else Amount.of(stroops)
+
+
+def _planned_stroops(step: SettlementStep) -> int | None:
+    """What the plan priced `step` at, in stroops — as recorded, or as an older record still shows it.
+
+    A record written since ADR 0015 keeps it (`planned_stroops`). Before that,
+    `price_usdc` is still the plan's price on a v1 record (no per-step payment)
+    and on an undelivered v2 step, and is what was paid — the plan's price,
+    since the cap never cut a planned run — on a paid v2 step. Only a delivered
+    v2 step that was paid NOTHING lost it (its `price_usdc` is the 0.0 credit
+    basis), and that is null rather than a guess.
+    """
+    if step.planned_stroops is not None:
+        return step.planned_stroops
+    if step.paid_usdc is not None and step.delivered and step.unpaid_reason is not None:
+        return None
+    return money.to_stroops(step.price_usdc)
+
+
+class SettlementTotals(BaseModel):
+    """A settlement's money in total, reconciled to the stroop (ADR 0015).
+
+    `charged + returned == authorized`, exactly: the settle pays `charged` out
+    of the buyer's custody and hands the rest back in the same transaction.
+    `returned` is the undelivered and unpaid steps' planned prices plus the
+    `surplus` — anything authorized above the plan's total. Null where the
+    record does not know the figure (a v1 settlement read no authorization;
+    a record from before ADR 0015 kept no plan prices).
+    """
+
+    authorized: Amount | None
+    planned: Amount | None
+    charged: Amount
+    returned: Amount | None
+    surplus: Amount | None
+
+    @classmethod
+    def of(cls, record: SettlementRecord, steps: list[SettlementStepView]) -> SettlementTotals:
+        charged = money.to_stroops(record.settled_usdc)
+        planned_each = [s.planned.stroops if s.planned is not None else None for s in steps]
+        planned = None if any(p is None for p in planned_each) else sum(p for p in planned_each if p is not None)
+        authorized = record.authorized_stroops
+        return cls(
+            authorized=_amount(authorized),
+            planned=_amount(planned),
+            charged=Amount.of(charged),
+            returned=_amount(None if authorized is None else authorized - charged),
+            surplus=_amount(None if authorized is None or planned is None else authorized - planned),
         )
 
 
@@ -530,6 +601,11 @@ class SettlementView(BaseModel):
     proof_tx: str | None
     steps: list[SettlementStepView]
     policy: CreditPolicy
+    # What every amount on this receipt is in, from the network config:
+    # native XLM on testnet. Never assume USDC from the `*_usdc` field names.
+    asset: AssetInfo = Field(default_factory=lambda: money.configured_asset() or money.UNKNOWN)
+    # Authorized / planned / charged / returned / surplus for the whole run.
+    totals: SettlementTotals | None = None
 
     @classmethod
     def of(cls, record: SettlementRecord) -> SettlementView:
@@ -540,6 +616,7 @@ class SettlementView(BaseModel):
         response.
         """
         fraction = settings.dispute_credited_fraction
+        steps = [SettlementStepView.of(s, fraction) for s in record.steps]
         return cls(
             job_id_hex=record.job_id_hex,
             payer=record.payer,
@@ -548,8 +625,9 @@ class SettlementView(BaseModel):
             settled_usdc=record.settled_usdc,
             charge_tx=record.charge_tx,
             proof_tx=record.proof_tx,
-            steps=[SettlementStepView.of(s, fraction) for s in record.steps],
+            steps=steps,
             policy=CreditPolicy.in_force(fraction),
+            totals=SettlementTotals.of(record, steps),
         )
 
 
