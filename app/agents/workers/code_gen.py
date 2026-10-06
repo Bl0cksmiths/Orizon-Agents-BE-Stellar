@@ -10,6 +10,7 @@ from ...config import settings
 from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
 from .base import ModelWorker
+from .bounds import trim_text
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
@@ -263,11 +264,12 @@ INSTRUCTIONS = _BRIEF + _JSON_SHAPE
 TAGGED_SHAPE = """
 # OUTPUT SHAPE
 
-Return the CodeArtifact as exactly three tagged sections, in this order, and
-nothing else — no JSON, no markdown fences, no commentary:
+Return the CodeArtifact as these tagged sections, in this order, and nothing
+else — no JSON, no markdown fences, no commentary:
 
 <artifact_title>product name</artifact_title>
 <artifact_summary>one sentence</artifact_summary>
+<artifact_deferred>feature one, feature two</artifact_deferred>
 <artifact_html>
 <!doctype html>
 …the full single-file HTML document…
@@ -277,6 +279,10 @@ nothing else — no JSON, no markdown fences, no commentary:
   name if provided.
 - summary: one punchy sentence, at most 280 characters, describing what it
   does + the one thing that makes it feel premium.
+- deferred: REQUIRED whenever the request asked for anything you did not build
+  — a comma-separated list of those features, in a few words each, so the
+  buyer knows what is missing. Leave it empty only when everything requested
+  is built.
 
 The HTML goes in raw: not escaped, not quoted, not wrapped in anything else.
 """
@@ -327,8 +333,25 @@ _HTML_OPEN = "<artifact_html>"
 _HTML_CLOSE = "</artifact_html>"
 _TITLE_RE = re.compile(r"<artifact_title>(.*?)</artifact_title>", re.DOTALL)
 _SUMMARY_RE = re.compile(r"<artifact_summary>(.*?)</artifact_summary>", re.DOTALL)
+_DEFERRED_RE = re.compile(r"<artifact_deferred>(.*?)</artifact_deferred>", re.DOTALL)
+# What a model writes when it means "nothing was deferred".
+_NOTHING_DEFERRED = {"", "none", "n/a", "na", "nothing", "-"}
+# Room the deferred list may take inside the 280-character summary; the
+# description gives way to it, never the other way round.
+_DEFERRED_MAX = 160
 _TITLE_MAX = 80
 _SUMMARY_MAX = 280
+
+
+def _summary_with_deferred(summary: str, deferred: str) -> str:
+    """The summary, ending "Deferred: a, b." when the reply named deferred
+    features — the list kept whole and the description trimmed to make room."""
+    items = " ".join(deferred.split()).rstrip(".")
+    if items.casefold() in _NOTHING_DEFERRED:
+        return trim_text(summary, _SUMMARY_MAX)
+    tail = "Deferred: " + trim_text(items, _DEFERRED_MAX - len("Deferred: ") - 1).rstrip(".") + "."
+    head = trim_text(summary, _SUMMARY_MAX - len(tail) - 1)
+    return f"{head} {tail}" if head else tail
 
 
 def parse_tagged_artifact(reply: str) -> CodeArtifact:
@@ -354,11 +377,15 @@ def parse_tagged_artifact(reply: str) -> CodeArtifact:
     head = reply[:start]
     title_match = _TITLE_RE.search(head)
     summary_match = _SUMMARY_RE.search(head)
-    title = " ".join(title_match.group(1).split()) if title_match else ""
-    summary = " ".join(summary_match.group(1).split()) if summary_match else ""
+    deferred_match = _DEFERRED_RE.search(head)
+    title = trim_text(title_match.group(1), _TITLE_MAX) if title_match else ""
+    summary = _summary_with_deferred(
+        summary_match.group(1) if summary_match else "",
+        deferred_match.group(1) if deferred_match else "",
+    )
     return CodeArtifact(
-        title=title[:_TITLE_MAX] or "Untitled app",
-        summary=summary[:_SUMMARY_MAX],
+        title=title or "Untitled app",
+        summary=summary,
         files=[ArtifactFile(path="index.html", language="html", content=html)],
         entry="index.html",
         preview_html=html,
