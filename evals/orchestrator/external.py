@@ -9,7 +9,7 @@ there.
 
 Pinned sources (licences read from each dataset card on 2026-10-06):
 
-* deepset/prompt-injections — Apache-2.0. Test split, `label` 1 = injection
+* deepset/prompt-injections — Apache-2.0. Train and test splits, `label` 1 = injection
   -> block (`ext_injection`), 0 = benign -> not_block (`ext_benign`).
 * JailbreakBench/JBB-Behaviors — MIT. `Goal` column; harmful-behaviors.csv ->
   block (`ext_harmful`), benign-behaviors.csv -> not_block (`ext_benign`).
@@ -102,24 +102,24 @@ def _check_revision(client: httpx.Client, b: Benchmark) -> None:
 
 def _deepset_rows(client: httpx.Client, b: Benchmark) -> Iterator[tuple[str, str, str, str]]:
     _check_revision(client, b)
-    offset = 0
-    while True:
-        r = client.get(
-            ROWS_API,
-            params={"dataset": b.repo, "config": "default", "split": "test", "offset": offset, "length": 100},
-        )
-        r.raise_for_status()
-        page = r.json().get("rows", [])
-        for item in page:
-            row = item["row"]
-            label = int(row["label"])
-            if label == 1:
-                yield row["text"], "block", "ext_injection", "deepset label 1 (injection)"
-            else:
-                yield row["text"], "not_block", "ext_benign", "deepset label 0 (benign)"
-        if len(page) < 100:
-            return
-        offset += 100
+    for split in ("train", "test"):  # the whole set: nothing here is trained on
+        offset = 0
+        while True:
+            r = client.get(
+                ROWS_API,
+                params={"dataset": b.repo, "config": "default", "split": split, "offset": offset, "length": 100},
+            )
+            r.raise_for_status()
+            page = r.json().get("rows", [])
+            for item in page:
+                row = item["row"]
+                if int(row["label"]) == 1:
+                    yield row["text"], "block", "ext_injection", f"deepset {split} label 1 (injection)"
+                else:
+                    yield row["text"], "not_block", "ext_benign", f"deepset {split} label 0 (benign)"
+            if len(page) < 100:
+                break
+            offset += 100
 
 
 def _jbb_rows(client: httpx.Client, b: Benchmark) -> Iterator[tuple[str, str, str, str]]:
