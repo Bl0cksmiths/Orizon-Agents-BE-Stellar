@@ -23,6 +23,8 @@ and `fit_files` validates in code:
   * imports: an `@/` alias import is rewritten to a relative path
     (`relative_imports`), so the files work without a tsconfig `paths`
     mapping, and listed in `issues`;
+  * colours: with design tokens upstream, a literal colour outside them is
+    listed in `issues` (`off_token_colours`);
   * network and code-execution calls (`fetch`, `axios`, WebSocket…, `eval`,
     `new Function`, `dangerouslySetInnerHTML`) are reported as violations when
     the request did not ask for data from an API or a server.
@@ -46,7 +48,7 @@ from .bounds import trim_text
 from .claude_only import ClaudeOnlyWorker
 from .code_gen import MAX_ARTIFACT_CHARS, code_handoff, summary_with_deferred
 from .code_validator import harden_artifact
-from .context import Handoff, scrub_secrets
+from .context import DESIGN, DesignHandoff, Handoff, scrub_secrets
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
@@ -133,7 +135,10 @@ At most 8 files, typically 2 to 5.
    guarantees or awards the request and upstream outputs do not state. Where
    the UI needs one, show a visibly marked placeholder such as
    `[placeholder: monthly price]`, kept in one clearly named constant.
-10. Import the project's own files by relative path (`../components/Hero`),
+10. When design tokens are given, use only their colours, through their CSS
+    custom properties (`var(--primary)`); derive any tint or shade with
+    `color-mix()` of those variables, never a new literal colour.
+11. Import the project's own files by relative path (`../components/Hero`),
     never through the `@/` alias: the files must work in a project whatever
     its tsconfig says.
 
@@ -308,6 +313,41 @@ def relative_imports(files: list[dict[str, str]]) -> tuple[list[dict[str, str]],
     return out, issues
 
 
+# Literal colours: a hex value in a CSS declaration (not a `#id` selector, which
+# runs into a `{` before any `;` or `}`), an rgb()/hsl() call, or (in TS/TSX) a
+# quoted hex string.
+_CSS_HEX_RE = re.compile(r"(?<![\w&-])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b(?![^;{}]*\{)")
+_TS_HEX_RE = re.compile(r"""(?<=['"`])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?=['"`])""")
+_COLOUR_FN_RE = re.compile(r"\b(?:rgba?|hsla?)\([^()]{1,60}\)", re.IGNORECASE)
+MAX_LISTED_COLOURS = 10
+
+
+def normalize_colour(value: str) -> str:
+    """One spelling per colour: lowercase, spaces dropped, short hex expanded."""
+    value = "".join(value.split()).lower()
+    if value.startswith("#") and len(value) in (4, 5):
+        value = "#" + "".join(ch * 2 for ch in value[1:])
+    return value
+
+
+def off_token_colours(files: list[dict[str, str]], palette: list[str]) -> list[dict[str, Any]]:
+    """An issue per file that writes a literal colour outside `palette` (the
+    supplied design tokens' values)."""
+    allowed = {normalize_colour(v) for v in palette}
+    issues: list[dict[str, Any]] = []
+    for f in files:
+        content = f["content"]
+        hexes = _CSS_HEX_RE if f["language"] == "css" else _TS_HEX_RE
+        found = [m.group(0) for m in hexes.finditer(content)] + [m.group(0) for m in _COLOUR_FN_RE.finditer(content)]
+        off: list[str] = []
+        for value in found:
+            if normalize_colour(value) not in allowed and value not in off:
+                off.append(value)
+        if off:
+            issues.append({"file": f["path"], "problem": "off_token_colours", "values": off[:MAX_LISTED_COLOURS]})
+    return issues
+
+
 def entry_path(files: list[dict[str, str]]) -> str:
     paths = [f["path"] for f in files]
     for candidate in ENTRY_CANDIDATES:
@@ -371,6 +411,13 @@ class CodeNext(ClaudeOnlyWorker):
         # left out. The prompt and the trace both read this.
         return code_handoff(context, self.name)
 
+    def _palette(self, context: dict[str, Any] | None) -> list[str]:
+        """The colour values of the design tokens this step was handed, if any."""
+        item = self.handoff(context).get(DESIGN)
+        if item is None or not isinstance(item.payload, DesignHandoff):
+            return []
+        return [value for _, value in item.payload.palette]
+
     def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
         """The fenced request, the fenced upstream outputs, then the ask."""
         return worker_prompt(
@@ -396,6 +443,9 @@ class CodeNext(ClaudeOnlyWorker):
             raise claude_step.ModelStepError(claude_step.INVALID_OUTPUT, f"code.next: {e}") from e
         files, violations = fit_files(raw_files, f"{intent}\n{rationale}")
         files, issues = relative_imports(files)
+        palette = self._palette(context)
+        if palette:
+            issues += off_token_colours(files, palette)
         artifact = harden_artifact(
             {
                 "title": title,

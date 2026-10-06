@@ -193,6 +193,42 @@ def test_the_brief_forbids_the_alias() -> None:
     assert "never through the `@/` alias" in code_next.CLAUDE_INSTRUCTIONS
 
 
+TOKENS = {"palette": {"bg": "#0B0414", "primary": "#7C5CFF", "accent": "#22D3EE"}, "typography": {}}
+STYLED_CSS = """#cafe { color: var(--text); }
+.list #bad, .grid #add { background: linear-gradient(#22d3ee, #000); }
+.card { color: #7c5cff; background: #FFF; border: 1px solid rgb(0, 0, 0); outline-color: #22d3ee; }
+.badge { background: #5B3CE0; }"""
+STYLED_TSX = (
+    "export default function Page() {\n"
+    '  return <a href="#faded" style={{ color: \'#7C5CFF\', background: "#2c1d4a" }}>x</a>;\n'
+    "}"
+)
+
+
+def test_colours_outside_the_design_tokens_are_listed(claude: FakeClaude) -> None:
+    claude.reply(_tagged(("app/page.tsx", STYLED_TSX), ("app/page.module.css", STYLED_CSS)))
+    out = run(context={"design.figma": TOKENS})
+    assert out["issues"] == [
+        {"file": "app/page.tsx", "problem": "off_token_colours", "values": ["#2c1d4a"]},
+        {
+            "file": "app/page.module.css",
+            "problem": "off_token_colours",
+            "values": ["#000", "#FFF", "#5B3CE0", "rgb(0, 0, 0)"],
+        },
+    ]
+    assert "use only their colours" in code_next.CLAUDE_INSTRUCTIONS
+
+
+def test_without_design_tokens_colours_are_not_judged(claude: FakeClaude) -> None:
+    claude.reply(_tagged(("app/page.tsx", STYLED_TSX), ("app/page.module.css", STYLED_CSS)))
+    assert run()["issues"] == []
+
+
+def test_colour_spellings_are_compared_as_one() -> None:
+    assert code_next.normalize_colour("#FFF") == code_next.normalize_colour("#ffffff")
+    assert code_next.normalize_colour("RGB(0, 0, 0)") == "rgb(0,0,0)"
+
+
 def test_the_facts_rule_is_part_of_the_brief() -> None:
     """The live smoke of 2026-10-06 showed made-up plan prices on a pricing page."""
     assert "never invent prices" in code_next.CLAUDE_INSTRUCTIONS
