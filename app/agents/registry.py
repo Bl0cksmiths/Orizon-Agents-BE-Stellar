@@ -10,6 +10,7 @@ from .workers.mock import MockWorker
 from .workers.research_pro import ResearchPro
 from .workers.seo_brief import SeoBrief
 from .workers.sol_audit import SolAudit
+from .workers.vision_ocr import VisionOcr
 
 # Real Agno workers
 _REAL: list[Worker] = [
@@ -21,12 +22,12 @@ _REAL: list[Worker] = [
     ResearchPro(),  # agt_09l5 research.pro — kit-aware feature brief
     CodeGen(),  # agt_11c0 code.gen — context-aware HTML draft
     CodeCriticWorker(),  # agt_12r0 code.critic — top-level polish step
+    VisionOcr(),  # agt_06q4 vision.ocr — Claude vision, Claude only
 ]
 
 # Mock workers for the remaining agents in the registry
 _MOCK: list[Worker] = [
     MockWorker("agt_03d9", "code.next"),
-    MockWorker("agt_06q4", "vision.ocr"),
     MockWorker("agt_07w3", "ads.meta"),
     MockWorker("agt_10b6", "translate.42"),
 ]
