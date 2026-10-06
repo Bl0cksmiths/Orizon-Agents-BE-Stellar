@@ -109,13 +109,20 @@ class Estimate:
         )
 
 
-def case_estimate(case: Case, *, stages: str) -> tuple[dict[str, float], float]:
+def reservation(case: Case, *, stages: str) -> float:
+    """What the runner holds back before starting `case`: its ceiling as if
+    the guard allowed it. A guard that misses lets an injection through to
+    the planner, and that case must not be able to spend past the cap."""
+    return case_estimate(case, stages=stages, assume_allowed=True)[1]
+
+
+def case_estimate(case: Case, *, stages: str, assume_allowed: bool = False) -> tuple[dict[str, float], float]:
     """(expected cost by stage, ceiling) for one case, one rep."""
     table = prices()
     intent = estimate_tokens(case.intent) + FENCE_OVERHEAD
     by_stage = {"guard": call_cost(GUARD_MODEL, intent + GUARD_QUESTIONS, 0, table)}
     ceiling = by_stage["guard"]
-    if stages == "all" and case.expected_verdict == "allow":
+    if stages == "all" and (assume_allowed or case.expected_verdict == "allow"):
         tier = case.expected_tier or "complex"
         effort = EFFORT_FOR_TIER[tier]
         improve_in = IMPROVER_SYSTEM + intent
