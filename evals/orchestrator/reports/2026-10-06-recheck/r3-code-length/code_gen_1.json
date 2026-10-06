@@ -1,0 +1,44 @@
+{
+  "agent_id": "agt_11c0",
+  "worker": "code.gen",
+  "label": "code.gen#1",
+  "unreported_estimated_usd": 0.0,
+  "case_id": "cpx-001",
+  "tier": "complex",
+  "intent": "Build a full booking system web app for a barbershop: services, staff schedules, time-slot booking, admin view, and email-style confirmations.",
+  "latency_s": 39.23,
+  "cost_usd": 0.0770275,
+  "calls": [
+    {
+      "model": "claude-sonnet-5-5",
+      "response_model": "claude-sonnet-5-5",
+      "served_by": null,
+      "input_tokens": 300,
+      "output_tokens": 7058,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 2339,
+      "cost_usd": 0.0770275,
+      "app_cost_usd": 0.0770275,
+      "latency_ms": 39223,
+      "first_token_ms": 1929,
+      "effort": "low",
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "Brass & Blade — Barbershop Booking — A complete barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard with schedule editing, and email-style confirmations, all persisted locally.",
+    "counts": {
+      "files": 1,
+      "bytes": 14371,
+      "lines": 180
+    },
+    "artifact_title": "Brass & Blade — Barbershop Booking",
+    "artifact_files": [
+      "index.html"
+    ],
+    "validator_violations": [
+      "under 200 lines (180) — feature-incomplete, add depth"
+    ]
+  }
+}
