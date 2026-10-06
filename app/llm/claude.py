@@ -37,13 +37,15 @@ What the request carries, per the Claude API rules for these models:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import math
 import time
 import weakref
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from dataclasses import dataclass, field, replace
+from typing import Any, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -59,9 +61,6 @@ from .errors import (
 )
 from .spend import Usage
 from .tiers import EFFORTS, Effort
-
-if TYPE_CHECKING:
-    import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +109,49 @@ class ClaudeRequest:
     stream: bool = False
     cache_system: bool = True
     on_text: TextCallback | None = field(default=None, compare=False)
+    # Filled in by the transport as a stream arrives (`_call` attaches one to
+    # every streamed request), so a stream cut short can still be billed.
+    progress: StreamProgress | None = field(default=None, compare=False)
+
+
+# Characters per output token when a cut stream's output has to be estimated
+# from what arrived: ~3.5 for English prose and code. Rounded up, so the
+# estimate errs towards the cap tripping early, never late.
+CHARS_PER_TOKEN = 3.5
+
+
+@dataclass
+class StreamProgress:
+    """What a stream has delivered so far — billed by Anthropic even if the call never completes.
+
+    `started` turns true at `message_start`, which carries the input and cache
+    token counts. `output_tokens` is the latest output count the API itself
+    reported (message_start / message_delta), and `streamed_chars` the text
+    and thinking characters received, for when the stream stops before the
+    API reports a final count.
+    """
+
+    started: bool = False
+    model: str | None = None
+    input_usage: Usage = field(default_factory=Usage)
+    output_tokens: int = 0
+    streamed_chars: int = 0
+
+    def start(self, model: str | None, usage: Usage) -> None:
+        self.started = True
+        self.model = model
+        self.input_usage = Usage(
+            input_tokens=usage.input_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
+        self.output_tokens = max(self.output_tokens, usage.output_tokens)
+
+    def billed_so_far(self) -> Usage:
+        """The usage to record for a stream that stopped here: input as reported,
+        output the higher of the API's own count and the character estimate."""
+        estimate = math.ceil(self.streamed_chars / CHARS_PER_TOKEN)
+        return self.input_usage + Usage(output_tokens=max(self.output_tokens, estimate))
 
 
 @dataclass(frozen=True)
@@ -235,8 +277,14 @@ def _request(*, effort: Effort | None, max_tokens: int, model: str, **fields: An
 async def _call(request: ClaudeRequest, *, enforce_cap: bool) -> tuple[Completion, float, int]:
     if enforce_cap:
         await spend.check_budget()
+    if request.stream and request.progress is None:
+        request = replace(request, progress=StreamProgress())
     started = time.perf_counter()
-    completion = await get_transport().complete(request)
+    try:
+        completion = await get_transport().complete(request)
+    except (Exception, asyncio.CancelledError) as error:
+        _record_cut_stream(request, error)
+        raise
     latency_ms = round((time.perf_counter() - started) * 1000)
     cost = completion.cost_usd()
     await spend.record(model=request.model, purpose=request.purpose, usage=completion.usage, cost=cost)
@@ -260,6 +308,41 @@ async def _call(request: ClaudeRequest, *, enforce_cap: bool) -> tuple[Completio
     if completion.stop_reason == "max_tokens":
         raise LLMTruncated(model=completion.model, max_tokens=request.max_tokens)
     return completion, cost, latency_ms
+
+
+def _record_cut_stream(request: ClaudeRequest, error: BaseException) -> None:
+    """Bill a stream that started and then stopped — cancelled (a step's stream
+    budget, a client gone) or failed mid-way — for what it delivered.
+
+    Recorded at once and persisted in the background, so the cancellation is
+    not held up; flagged as estimated in the log because the output count is
+    the API's last report or a character estimate, not a final figure. Never
+    raises: the caller re-raises the original error.
+    """
+    progress = request.progress
+    if progress is None or not progress.started:
+        return
+    try:
+        model = progress.model or request.model
+        usage = progress.billed_so_far()
+        cost = spend.cost_usd(model, usage)
+        spend.record_nowait(model=model, purpose=request.purpose, usage=usage, cost=cost)
+        logger.warning(
+            "claude stream cut purpose=%s model=%s by=%s recorded estimated usage in=%d out=%d cache_read=%d "
+            "cache_write=%d cost_usd=%.6f (streamed_chars=%d reported_out=%d)",
+            request.purpose,
+            model,
+            type(error).__name__,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            cost,
+            progress.streamed_chars,
+            progress.output_tokens,
+        )
+    except Exception as e:  # recording must never replace the error being raised
+        logger.error("claude stream cut purpose=%s: usage not recorded: %s: %s", request.purpose, type(e).__name__, e)
 
 
 def _result(value: V, request: ClaudeRequest, completion: Completion, cost: float, latency_ms: int) -> LLMResult[V]:
@@ -312,8 +395,6 @@ class AnthropicTransport:
         )
 
     def _client(self) -> Any:
-        import asyncio
-
         key = settings.anthropic_api_key.strip()
         if not key:
             raise LLMNotConfigured("missing_key")
@@ -334,8 +415,6 @@ class AnthropicTransport:
 
     async def aclose(self) -> None:
         """Close this loop's client (shutdown)."""
-        import asyncio
-
         held = self._clients.pop(asyncio.get_running_loop(), None)
         if held is not None:
             await held[1].close()
@@ -348,17 +427,38 @@ class AnthropicTransport:
         try:
             if request.stream:
                 async with client.beta.messages.stream(**kwargs) as stream:
-                    async for delta in stream.text_stream:
-                        if request.on_text is not None:
-                            maybe = request.on_text(delta)
-                            if inspect.isawaitable(maybe):
-                                await maybe
+                    async for event in stream:
+                        await _on_stream_event(event, request)
                     message = await stream.get_final_message()
             else:
                 message = await client.beta.messages.create(**kwargs)
         except anthropic.APIError as e:
             raise _unavailable(e, request.model) from e
         return _completion(message, request.model)
+
+
+async def _on_stream_event(event: Any, request: ClaudeRequest) -> None:
+    """Track a raw stream event in `request.progress` and pass text deltas to `on_text`."""
+    progress = request.progress
+    kind = getattr(event, "type", None)
+    if kind == "message_start":
+        if progress is not None:
+            progress.start(event.message.model, _usage(event.message.usage))
+    elif kind == "message_delta":
+        reported = getattr(event.usage, "output_tokens", None)
+        if progress is not None and reported is not None:
+            progress.output_tokens = max(progress.output_tokens, int(reported))
+    elif kind == "content_block_delta":
+        delta = event.delta
+        if delta.type == "text_delta":
+            if progress is not None:
+                progress.streamed_chars += len(delta.text)
+            if request.on_text is not None:
+                maybe = request.on_text(delta.text)
+                if inspect.isawaitable(maybe):
+                    await maybe
+        elif delta.type == "thinking_delta" and progress is not None:
+            progress.streamed_chars += len(delta.thinking)
 
 
 def _sdk_kwargs(request: ClaudeRequest) -> dict[str, Any]:
