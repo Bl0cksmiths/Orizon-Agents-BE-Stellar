@@ -481,6 +481,12 @@ class Settings(BaseSettings):
     # grew with every bound agent; past this many that cleared the floor, the
     # best-scored are listed. Never below the starvation backstop's minimum.
     decompose_prompt_max_agents: int = 24
+    # Whether a plan may route to EXTERNAL agents (bound operator endpoints).
+    # Off: plans use only the platform's own built-in agents, and every listed
+    # external agent is reported on the plan card as `external_not_routed`.
+    # On: externals compete on merit again, under the reputation floor and the
+    # reachability check, exactly as before this switch existed.
+    planner_route_external: bool = False
 
     # ── Stored plans ──────────────────────────────────────────
     # How long a built plan stays executable. The card the buyer authorises
