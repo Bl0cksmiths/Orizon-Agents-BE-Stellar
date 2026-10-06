@@ -5,7 +5,9 @@ from pydantic import BaseModel, ConfigDict
 from ..config import settings
 from ..llm.tiers import Tier
 from ..schemas import Plan
+from ..services.prompt_improver import Spec, spec_to_text
 from .model_factory import LazyAgent, lazy_agent
+from .workers.prompt_safety import fence_untrusted, fence_user_input
 
 INSTRUCTIONS = """You are Orizon Orchestrator — the brain that turns user intent into executable agent plans.
 
@@ -111,6 +113,37 @@ class ModelPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     steps: list[PlannedStep]
+
+
+def planner_system(agents_block: str) -> str:
+    """The planner's system prompt: the standing instructions, then the agent list.
+
+    Both are the stable part of every planning call — the instructions never
+    change and the agent list changes only when the registry or a reputation
+    score does — so they form the cached prefix, and everything that differs
+    per request goes in the user turn after it.
+    """
+    return f"{CLAUDE_INSTRUCTIONS}\n\n{agents_block}"
+
+
+def planner_user(request: str | Spec, *, tier: Tier) -> str:
+    """The per-request half: the fenced request, then the trusted ask last.
+
+    Exactly one block. A `Spec` is planned from ALONE, never beside the words
+    it was written from: it is only used once its re-check came back clean,
+    and the one case that most needs that rule — an intent the guard thought
+    borderline — is exactly the text that must not reach the planner.
+    """
+    if isinstance(request, Spec):
+        block = fence_untrusted(spec_to_text(request), label="UNDERSTOOD_REQUEST", max_chars=_UNDERSTOOD_MAX_CHARS)
+    else:
+        block = fence_user_input(request)
+    return f"{block}\n\nThe request's overall complexity is {tier}. Return the plan."
+
+
+# A spec is bounded field by field well below this; the clamp is the fence's
+# own last line for a spec from anywhere else.
+_UNDERSTOOD_MAX_CHARS = 6_000
 
 
 def _build() -> LazyAgent:
