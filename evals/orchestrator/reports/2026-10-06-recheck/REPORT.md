@@ -147,7 +147,7 @@ What the tier changes mean in practice:
 
 ## Complex code.gen after the length fix
 
-cpx-001 (barbershop booking system) handed to the real workers as a complex-tier step, after code.gen and code.critic moved to a 250–450-line target, a 9,000-token ceiling, low effort and a 100 s stream budget. Lines, bytes and validator are measured on the saved HTML.
+cpx-001 (barbershop booking system) handed to the real workers as a complex-tier step, after code.gen and code.critic moved to a 250–450-line target, a 9,000-token ceiling, low effort and a 100 s stream budget. Lines and bytes are measured on the saved HTML; validator violations are as found when this re-measure ran (the validator has changed since; see the final check).
 
 | run | served model | effort | first token | wall time | output tokens (incl. thinking) | cost | lines | bytes | validator violations | hit 9,000-token ceiling | hit 100 s budget | deferred features in summary |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -178,6 +178,37 @@ Summaries as returned:
 **code.gen#2 was not run.** After code.gen#1 ($0.0770) and code.critic#1 ($0.1017), $0.0213 was left of the $0.20 cap. That is below a second draft's measured cost, so the job was skipped rather than started. Run-to-run variance of the complex draft is therefore unmeasured. A second draft needs about $0.08 more.
 <!-- END narrative:code_length_notes -->
 
+### Final check
+
+The same cpx-001 complex step after the follow-up fixes: ceilings raised to the measured 12,000 (code.gen) and 14,000 (code.critic) tokens, readably formatted source asked for, a depth floor met by readable lines or source size, and deferred features named in the summary. Validator results are the current validator run on the saved HTML.
+
+| run | served model | effort | first token | wall time | output tokens (incl. thinking) / ceiling | cost | lines | bytes | chars per line | validator (new floor) | hit ceiling | hit 100 s budget |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| code.gen#1 | claude-sonnet-5-5 | low | 1.69 s | 43.3 s | 8,658 / 12,000 (72%) | $0.0935 | 394 | 19,283 | 48.9 | pass (no violations) | no | no |
+| code.gen#2 | not run — budget left 0.0399 USD | | | | | | | | | | | |
+| code.critic#1 | claude-sonnet-5-5 | low | 0.77 s | 40.7 s | 9,526 / 14,000 (68%) | $0.1166 | 445 | 20,880 | 46.9 | pass (no violations) | no | no |
+
+Summaries as returned, and the deferred list:
+
+- **code.gen#1** (`r4-final/code_gen_1__index.html`): Clipper & Co. — Barbershop Booking — A full barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard, and email-style confirmations, all persisted locally. Deferred: real email delivery, payments, recurring bookings, drag-to-edit schedules. — “Deferred: real email delivery, payments, recurring bookings, drag-to-edit schedules.”
+- **code.critic#1** (`r4-final/code_critic_1__index.html`): Clipper & Co. — Barbershop Booking · polished: 394L → 445L (+51) · 0 structural issues fixed — no “Deferred: …” list
+
+<!-- BEGIN narrative:final_notes -->
+**The fixes worked.**
+- Both calls were served by `claude-sonnet-5-5` at effort low. First token came in 1.69 s (code.gen) and 0.77 s (code.critic); the calls finished in 43.3 s and 40.7 s.
+- Neither hit its ceiling (72% and 68% of it) or the 100 s stream budget.
+- code.gen wrote 394 readable lines at 48.9 characters per line, where the previous run wrote 180 dense lines at about 80. code.critic took that draft to 445 lines.
+- Both files pass the current validator with no violations.
+
+**The deferred list is there.** code.gen's summary ends with a proper deferred list: "Deferred: real email delivery, payments, recurring bookings, drag-to-edit schedules."
+
+code.critic's summary is its own polish line ("polished: 394L → 445L (+51)"), so the deferred list does not carry through to the polished step's summary. If the run's final summary should name what was left out, the critic needs to pass code.gen's "Deferred:" tail through.
+
+**Cost:** one complex build (draft + polish) cost $0.2101, so $10/day covers about 47 such builds.
+
+**code.gen#2 was not run.** After the first two calls $0.0399 was left of the $0.25 cap, below a draft's measured $0.0935, so the job was skipped. Run-to-run variance of a complex draft is still unmeasured.
+<!-- END narrative:final_notes -->
+
 ## Spend
 
 <!-- BEGIN narrative:spend -->
@@ -191,6 +222,10 @@ Summaries as returned:
 **Complex code.gen re-measure (separate cap $0.20):**
 - code.gen#1 $0.0770 and code.critic#1 $0.1017 — **$0.1787 measured.** Both calls completed and were reported by the API, so there is no estimate in this figure.
 - code.gen#2 was not started.
+
+**Final check (separate cap $0.25):**
+- code.gen#1 $0.0935 and code.critic#1 $0.1166 — **$0.2101 measured.** Both calls completed and were reported by the API, so there is no estimate in this figure.
+- code.gen#2 was not started.
 <!-- END narrative:spend -->
 
 | item | amount |
@@ -201,4 +236,5 @@ Summaries as returned:
 | cut-off stream, code.gen (estimated, unreported) | ≈ $0.1296 |
 | **total including estimates** | **$0.1487** |
 | complex code.gen re-measure (separate $0.20 cap) | $0.1787 |
+| final check (separate $0.25 cap) | $0.2101 |
 
