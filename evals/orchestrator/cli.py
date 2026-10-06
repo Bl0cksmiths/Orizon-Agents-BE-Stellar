@@ -78,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--variant", default="baseline", help="baseline or v<N>")
     run.add_argument("--concurrency", type=int, default=4)
     run.add_argument("--timeout-s", type=float, default=180.0, help="hard wall-clock ceiling per case")
-    run.add_argument("--noise", type=float, default=0.15, help="score noise for --pipeline synthetic")
+    run.add_argument("--noise", type=float, default=0.15, help="label-score noise for the fake answers (not --live)")
     run.add_argument("--seed", type=int, default=0)
 
     for name, helptext in (("report", "rewrite summary.md"), ("sweep", "rewrite sweep.md")):
@@ -134,7 +134,7 @@ def _pipeline(args: argparse.Namespace, cases: list[Case]) -> Pipeline:
         return NullPipeline()
     from .app_pipeline import AppPipeline  # needs app/llm and the guard + planner modules
 
-    return AppPipeline.create(live=args.live, cases=cases)
+    return AppPipeline.create(live=args.live, cases=cases, stages=args.stages, noise=args.noise, seed=args.seed)
 
 
 def _run(args: argparse.Namespace) -> int:
