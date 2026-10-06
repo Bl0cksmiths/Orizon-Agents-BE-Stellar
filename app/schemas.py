@@ -120,8 +120,14 @@ class TaskSummary(BaseModel):
     id: str
     intent: str
     agents: int
+    # DEPRECATED — `spent_stroops` as a float of the plan's asset.
     spent: float
     status: TaskStatus
+    # The run's bill in stroops (ADR 0015): on a paid run what its settle
+    # actually moved (0 until it confirms — `settlement` says why); on a
+    # simulated run what its delivered steps' plan prices add up to. None on a
+    # task written before this existed, and while a run is still going.
+    spent_stroops: int | None = Field(default=None, ge=0)
     # Unix epoch seconds — the machine-readable truth, and what a client should
     # format itself. Pre-rendering a relative string server-side is what froze
     # the old `started` field at "just now": it was written once at creation and
