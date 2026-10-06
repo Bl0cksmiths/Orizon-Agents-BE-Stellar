@@ -31,6 +31,7 @@ class CodeCriticWorker(ModelWorker):
     name = "code.critic"
     real = True
     default_tier = CRITIC_DEFAULT_TIER
+    max_tier = "moderate"  # see ModelWorker: Opus would outrun the step deadline
 
     def __init__(self) -> None:
         self._critic = CodeCritic()
@@ -123,7 +124,7 @@ class CodeCriticWorker(ModelWorker):
                 rationale=rationale,
                 draft_html=draft_html,
                 violations=violations_for_critic,
-                tier=tier,
+                tier=self.effective_tier(tier),
             )
             revised_html = revised.get("preview_html") or ""
             post_violations = validate_html(revised_html)

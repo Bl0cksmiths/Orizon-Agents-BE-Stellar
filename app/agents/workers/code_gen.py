@@ -341,6 +341,7 @@ class CodeGen(ModelWorker):
     name = "code.gen"
     real = True
     default_tier = "moderate"
+    max_tier = "moderate"  # see ModelWorker: Opus would outrun the step deadline
 
     def __init__(self) -> None:
         # NOTE: gpt-5.3-codex (and other reasoning-class models) reject the
