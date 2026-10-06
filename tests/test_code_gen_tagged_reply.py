@@ -14,6 +14,7 @@ import pytest
 
 from app.agents.workers.code_gen import (
     CLAUDE_INSTRUCTIONS,
+    CLAUDE_UPSTREAM,
     INSTRUCTIONS,
     MAX_ARTIFACT_CHARS,
     TAGGED_SHAPE,
@@ -90,9 +91,11 @@ def test_a_reply_without_an_app_raises_value_error(reply: str) -> None:
         parse_tagged_artifact(reply)
 
 
-def test_both_prompts_share_one_brief_and_differ_in_length_target_and_output_shape() -> None:
-    brief = INSTRUCTIONS[: INSTRUCTIONS.index("# Length target")]
-    assert CLAUDE_INSTRUCTIONS.startswith(brief)
+def test_both_prompts_share_one_brief_and_differ_in_upstream_section_length_target_and_output_shape() -> None:
+    # The Claude path reads earlier steps from one fenced UPSTREAM_OUTPUTS
+    # block, so its upstream section differs too; the rest of the brief is one.
+    brief = INSTRUCTIONS[: INSTRUCTIONS.index("# Using the upstream context")]
+    assert CLAUDE_INSTRUCTIONS.startswith(brief + CLAUDE_UPSTREAM + "# Length target")
     assert "<artifact_html>" in CLAUDE_INSTRUCTIONS and "<artifact_html>" not in INSTRUCTIONS
     assert "preview_html" in INSTRUCTIONS
 
