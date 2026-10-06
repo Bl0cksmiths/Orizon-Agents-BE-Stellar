@@ -166,3 +166,12 @@ def test_an_unreadable_sac_is_unknown_never_usdc(monkeypatch: pytest.MonkeyPatch
 )
 def test_sac_names_parse(name: str, asset: money.AssetInfo) -> None:
     assert money.asset_from_sac_name(name) == asset
+
+
+def test_amounts_are_labelled_with_the_configured_asset_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "stellar_network_passphrase", TESTNET)
+    monkeypatch.setattr(settings, "stellar_asset_sac", TESTNET_NATIVE_SAC)
+    assert money.asset_code() == "XLM"
+    monkeypatch.setattr(settings, "stellar_asset_sac", "CSOMEOTHERSACSOMEOTHERSACSOMEOTHERSACSOMEOTHERSACSOMEOTH")
+    monkeypatch.setattr(money, "_sac_assets", {})
+    assert money.asset_code() == "UNKNOWN"

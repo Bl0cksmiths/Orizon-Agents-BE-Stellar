@@ -148,6 +148,21 @@ def _checked(stroops: int) -> Decimal:
     return Decimal(stroops)
 
 
+class Amount(BaseModel):
+    """One amount on the wire: exact `stroops`, and the `display` string a page shows.
+
+    The display never rounds (see `format_amount`); the asset it is in is
+    named once beside it by the enclosing payload, never assumed.
+    """
+
+    stroops: int = Field(ge=0)
+    display: str
+
+    @classmethod
+    def of(cls, stroops: int) -> Amount:
+        return cls(stroops=stroops, display=format_amount(stroops))
+
+
 # ── the asset ──────────────────────────────────────────────────────────
 class AssetInfo(BaseModel):
     """What a plan's stroops are stroops OF (`Plan.asset`).
@@ -228,3 +243,8 @@ async def current_asset() -> AssetInfo:
     if asset is not UNKNOWN:
         _sac_assets[sac] = asset
     return asset
+
+
+def asset_code() -> str:
+    """The code amounts are labelled with in text — `"XLM"` on testnet, never an assumed `"USDC"`."""
+    return (configured_asset() or UNKNOWN).code
