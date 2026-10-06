@@ -329,7 +329,8 @@ class StoredPlan(BaseModel):
 # verdict about the agent: `simulated_worker` is a built-in agent whose worker
 # still simulates its output (a buyer is never charged for that), and
 # `external_not_routed` is an external operator agent left out while plans use
-# only the built-in agents (`PLANNER_ROUTE_EXTERNAL`).
+# only the built-in agents (`PLANNER_ROUTE_EXTERNAL`). `no_image_input` is a
+# vision.ocr step the planner proposed for a request with no image to read.
 ExclusionReason = Literal[
     "below_floor",
     "unbound_endpoint",
@@ -337,6 +338,7 @@ ExclusionReason = Literal[
     "unreachable_endpoint",
     "simulated_worker",
     "external_not_routed",
+    "no_image_input",
 ]
 
 

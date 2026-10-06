@@ -373,3 +373,14 @@ def test_external_exclusions_order_by_id_then_cap():
     assert [n.agent_id for n in notices] == [f"ext_{i:02d}" for i in range(plan_notices.UNBOUND_REPORT_CAP)]
     assert all(n.reason_code == "external_not_routed" for n in notices)
     assert plan_notices.external_exclusions([]) == []
+
+
+def test_no_image_exclusion_says_there_was_nothing_to_read():
+    n = plan_notices.no_image_exclusion(_agent("agt_06q4", "vision.ocr"))
+
+    assert (n.kind, n.reason_code) == ("excluded", "no_image_input")
+    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.reason == (
+        "the plan asked it to read an image, but the request has no image or https image link (nothing to read, so "
+        "the step was left out)"
+    )

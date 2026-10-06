@@ -77,6 +77,12 @@ _EXTERNAL_REASON = (
 )
 
 
+_NO_IMAGE_REASON = (
+    "the plan asked it to read an image, but the request has no image or https image link (nothing to read, so "
+    "the step was left out)"
+)
+
+
 def _floor_reason(info: RepInfo | None) -> str:
     """Why the floor acted on an agent, with the deciding lower-bound bps.
 
@@ -237,6 +243,24 @@ def external_exclusion(agent: Agent) -> PlanFloorNotice:
         agent_name=agent.name,
         reason=_EXTERNAL_REASON,
         reason_code="external_not_routed",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def no_image_exclusion(agent: Agent) -> PlanFloorNotice:
+    """vision.ocr left out of a plan that proposed it, for want of an image to read.
+
+    Emitted only when the planner put the step in the plan, like an endpoint
+    found dead mid-plan: an OCR agent that was merely not picked gets no
+    notice, so a plan card for an ordinary text request stays quiet.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_NO_IMAGE_REASON,
+        reason_code="no_image_input",
         lower_bound_bps=None,
         floor_bps=settings.reputation_floor_bps,
     )

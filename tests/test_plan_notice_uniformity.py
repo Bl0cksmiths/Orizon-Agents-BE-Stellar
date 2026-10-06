@@ -430,7 +430,8 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
     the agent-pipelines work: routing policy the buyer needs explained — a
     built-in agent left out because its worker would only simulate the paid
     step, and an external agent left out while plans use only the built-in
-    agents. Appended, so the first four keep their positions.
+    agents. Appended, so the first four keep their positions. `no_image_input`
+    followed: a vision.ocr step dropped because the request has no image.
     """
     assert get_args(ExclusionReason) == (
         "below_floor",
@@ -439,6 +440,7 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
         "unreachable_endpoint",
         "simulated_worker",
         "external_not_routed",
+        "no_image_input",
     )
 
     # And the model actually enforces it — a Literal that is never validated
