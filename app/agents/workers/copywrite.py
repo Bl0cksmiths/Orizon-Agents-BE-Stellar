@@ -8,21 +8,58 @@ from ...config import settings
 from ..model_factory import claude_workers, lazy_agent, worker_tier
 from . import claude_step
 from .base import ModelWorker
+from .bounds import at_most, trim_text
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
 
 
+MAX_BODY_CHARS = 280
+MIN_SECTIONS, MAX_SECTIONS = 2, 5
+
+
 class Section(BaseModel):
     title: str
-    body: str = Field(..., max_length=280)
+    body: str = Field(..., max_length=MAX_BODY_CHARS)
 
 
 class CopyOutput(BaseModel):
     hero_headline: str
     hero_subtitle: str
-    sections: list[Section] = Field(..., min_length=2, max_length=5)
+    sections: list[Section] = Field(..., min_length=MIN_SECTIONS, max_length=MAX_SECTIONS)
+
+
+class SectionDraft(BaseModel):
+    title: str
+    body: str = Field(..., description="Short body copy, under 280 characters.")
+
+
+class CopyDraft(BaseModel):
+    """What Claude is asked for: CopyOutput's shape with no hard bounds, which
+    structured outputs cannot enforce (see `bounds`); `fit_copy` applies them."""
+
+    hero_headline: str = Field(..., description="At most 80 characters.")
+    hero_subtitle: str = Field(..., description="At most 160 characters.")
+    sections: list[SectionDraft] = Field(..., description="3 to 4 landing sections.")
+
+
+def fit_copy(draft: CopyDraft) -> CopyOutput:
+    """Trim and cap a draft into CopyOutput; fewer than two sections stays invalid."""
+    sections = [
+        Section(title=" ".join(sec.title.split()), body=body)
+        for sec in draft.sections
+        if (body := trim_text(sec.body, MAX_BODY_CHARS))
+    ]
+    if len(sections) < MIN_SECTIONS:
+        raise claude_step.ModelStepError(
+            claude_step.INVALID_OUTPUT, f"copywrite.v3: {len(sections)} usable sections, needs {MIN_SECTIONS}"
+        )
+    return CopyOutput(
+        hero_headline=" ".join(draft.hero_headline.split()),
+        hero_subtitle=" ".join(draft.hero_subtitle.split()),
+        sections=at_most(sections, MAX_SECTIONS),
+    )
 
 
 INSTRUCTIONS = (
@@ -60,14 +97,15 @@ class Copywrite(ModelWorker):
         prompt = worker_prompt(intent, rationale, "Draft the copy.")
         out: CopyOutput
         if claude_workers():
-            out = await claude_step.structured(
+            draft = await claude_step.structured(
                 worker=self.name,
                 tier=worker_tier(tier, self.default_tier),
                 system=INSTRUCTIONS,
                 user=prompt,
-                schema=CopyOutput,
+                schema=CopyDraft,
                 max_tokens=MAX_TOKENS,
             )
+            out = fit_copy(draft)
         else:
             out = (await self._agent.arun(prompt)).content
         return {
