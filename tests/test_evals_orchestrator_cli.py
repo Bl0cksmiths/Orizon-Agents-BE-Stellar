@@ -172,3 +172,38 @@ def test_the_sample_contract_fits_the_intent_bound():
 
     assert all(3 <= len(j.intent) <= 500 and len(j.rationale) <= 500 for j in JOBS)
     assert len({j.agent_id for j in JOBS}) == 7
+
+
+def test_a_streamed_reply_is_cut_off_at_the_budget():
+    from app.llm.claude import Attempt, ClaudeRequest, Completion
+    from app.llm.spend import Usage
+    from evals.orchestrator.workers_sample import BudgetedClaude, BudgetExceeded
+
+    class Streaming:
+        async def complete(self, request):
+            for _ in range(1000):
+                await request.on_text("x" * 350)  # ~100 tokens a delta
+            return Completion(
+                text="", stop_reason="end_turn", model=request.model, attempts=(Attempt(request.model, Usage()),)
+            )
+
+    request = ClaudeRequest(
+        purpose="worker.code.gen",
+        model="claude-sonnet-5-5",
+        system="s",
+        user="u",
+        max_tokens=48_000,
+        effort="medium",
+        stream=True,
+    )
+    guard = BudgetedClaude(Streaming(), remaining=lambda: 0.01)
+    with pytest.raises(BudgetExceeded) as caught:
+        import asyncio
+
+        asyncio.run(guard.complete(request))
+    assert 0.0099 < caught.value.estimate_usd < 0.0115
+
+
+def test_the_recheck_is_refused_when_its_measured_cost_does_not_fit(tmp_path, capsys):
+    assert cli.main(["workers", "--recheck", "--live", "--max-usd", "0.05", "--out", str(tmp_path)]) == cli.EXIT_REFUSED
+    assert "headroom" in capsys.readouterr().err
