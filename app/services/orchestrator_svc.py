@@ -14,6 +14,7 @@ from typing import Any, NamedTuple, Protocol
 
 from pydantic import ValidationError
 
+from .. import money
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
 from ..agents.workers.base import ModelWorker
@@ -489,7 +490,7 @@ def _kit_step(
         agent_id=agent.id,
         agent_name=agent.name,
         rationale=rationale,
-        est_price_usdc=agent.price,
+        price_stroops=money.to_stroops(agent.price),
         est_eta_seconds=eta,
         substituted_for=substituted_for,
         degraded=degraded,
@@ -987,14 +988,14 @@ async def _build_kit_plan(
     steps = [_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
-    total_price = sum(s.est_price_usdc for s in steps)
     total_eta = sum(s.est_eta_seconds for s in steps)
 
     stored = StoredPlan(
         id=plan_id,
         intent=intent,
+        # Priced in stroops step by step; the plan's total and the legacy
+        # `total_usdc` are derived from those integers (ADR 0015).
         plan=Plan(steps=steps, tier=plan_tier),
-        total_usdc=total_price,
         total_eta=total_eta,
         # What the buyer is about to be shown, kept with the plan so
         # `/execute` judges the plan the buyer actually authorised.
@@ -1009,7 +1010,6 @@ async def _build_kit_plan(
         plan_id=plan_id,
         intent=intent,
         steps=steps,
-        total_usdc=authorizable_total_usdc(steps),
         total_eta=round(total_eta, 2),
         notices=notices,
         # Both paths answer the same two questions, because a buyer cannot tell
@@ -1058,37 +1058,24 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
     )
 
 
+def authorizable_total_usdc(steps: list[PlanStep]) -> float:
+    """The plan's total as the legacy float: `Σ price_stroops`, exactly.
+
+    The console signs the authorization's `max_amount` from the plan's total,
+    and escrow v2 pays each delivered step its own price in stroops, refusing
+    the whole settle when their sum passes the max (S6). Since ADR 0015 every
+    step IS priced in stroops, so the total is their integer sum and this float
+    is only its legacy spelling — `DecomposeResponse.total_usdc` derives the
+    same number itself. Sign `total_stroops`, never a float.
+    """
+    return money.stroops_to_float(sum(s.price_stroops or 0 for s in steps))
+
+
 # The most steps a free-form plan may carry, matching the "1–6 ordered steps"
 # the planner is instructed to return (app/agents/orchestrator.py). Every step
 # is a paid dispatch and `/execute` runs them all, so the count is the buyer's
 # bill: the model is asked for six, and the clamp is what makes six a limit
 # rather than a request. A 200-step plan was storable before this.
-# The ledger's unit: 7 decimals.
-_STROOPS_PER_USDC = 10_000_000
-
-
-def authorizable_total_usdc(steps: list[PlanStep]) -> float:
-    """The plan's total as the buyer should authorize it: EXACTLY what paying
-    every step would move, not a rounded estimate of it.
-
-    The console signs this number as the escrow authorization's `max_amount`,
-    and escrow v2 pays each delivered step its own price in stroops, refusing
-    the whole settle when their sum passes the max. Rounded to four decimals it
-    could land below that sum — a 0.037002 plan authorized as 0.037 (370000
-    stroops against 370020) — and every fully delivered run of it would fail to
-    pay anyone (S6). So it is the sum of the per-step stroop amounts, in the
-    same rounding the settle uses, back in USDC: a float the authorize route
-    turns into exactly that many stroops again.
-    """
-    try:
-        stroops = sum(round(s.est_price_usdc * _STROOPS_PER_USDC) for s in steps)
-    except (OverflowError, ValueError):
-        # A price the ledger cannot hold. Nothing can authorize it, and the
-        # v2 execute check refuses it; the card shows the raw sum.
-        return sum(s.est_price_usdc for s in steps)
-    return stroops / _STROOPS_PER_USDC
-
-
 _MAX_PLAN_STEPS = 6
 
 
@@ -1260,7 +1247,7 @@ def _clamp(
                 agent_id=agent.id,
                 agent_name=agent.name,
                 rationale=rationale,
-                est_price_usdc=agent.price,
+                price_stroops=money.to_stroops(agent.price),
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
                 # The model's own tier, never above the plan's: a step cannot be
                 # harder than the request it is part of, and the cap is what keeps
@@ -1320,7 +1307,7 @@ def _finish_free_form(
                     if fallback.id == _FALLBACK_AGENT_ID
                     else "fallback: the planner returned no usable step, so the top-ranked shortlisted agent takes it"
                 ),
-                est_price_usdc=fallback.price,
+                price_stroops=money.to_stroops(fallback.price),
                 est_eta_seconds=0.8,
                 tier=plan_tier,
                 degraded=not reputation_svc.passes_floor(info),
@@ -1332,14 +1319,13 @@ def _finish_free_form(
     notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
-    total_price = sum(s.est_price_usdc for s in cleaned)
     total_eta = sum(s.est_eta_seconds for s in cleaned)
 
     stored = StoredPlan(
         id=plan_id,
         intent=intent,
+        # Totals derive from the steps' stroops (ADR 0015), as on the kit path.
         plan=Plan(steps=cleaned, tier=plan_tier),
-        total_usdc=total_price,
         total_eta=total_eta,
         notices=notices,
         floor_bps=settings.reputation_floor_bps,
@@ -1353,7 +1339,6 @@ def _finish_free_form(
         plan_id=plan_id,
         intent=intent,
         steps=cleaned,
-        total_usdc=authorizable_total_usdc(cleaned),
         total_eta=round(total_eta, 2),
         # The floor acted BEFORE the planner was asked anything, so these
         # describe the shortlist the model chose from, not the model's choice.
@@ -1430,6 +1415,10 @@ async def decompose(intent: str, *, spec: UnderstoodSpec | None = None) -> Decom
     legacy agno planner runs exactly as before and `spec` is ignored, since
     nothing on that path ever offered one to correct.
     """
+    # What the plan's stroops are stroops OF (`Plan.asset`). Decided from the
+    # config alone on testnet; a non-native SAC is read once and remembered,
+    # so the plan built below can name it (ADR 0015).
+    await money.current_asset()
     if provider.active_provider() == "anthropic":
         return await _decompose_claude(intent, spec)
     return await _decompose_legacy(intent)
