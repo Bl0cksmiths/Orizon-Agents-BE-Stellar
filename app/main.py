@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any, Literal
 
-from agno.utils.log import LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -22,6 +21,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .agno_logging import install as install_agno_log_hand_back
 from .config import SERVICE_VERSION, settings
 
 # Imported by symbol, not as a module: the root `/health` handler defined
@@ -130,17 +130,9 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 # Held at WARNING: the app logs what it dispatched itself, without the URL.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# agno gives its loggers a Rich console handler of their own and switches
-# propagation off, so its lines bypassed everything above: no JSON, no request
-# id, and no redaction — while it logs a provider's error text verbatim at
-# ERROR, the one line most likely to quote a key. Handing them back to the root
-# handler puts them under all three. Held at WARNING: agno's INFO chatter was
-# only ever console decoration, and its warnings and errors are what matters.
-for _agno_logger_name in (LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME):
-    _agno_logger = logging.getLogger(_agno_logger_name)
-    _agno_logger.handlers.clear()
-    _agno_logger.propagate = True
-    _agno_logger.setLevel(logging.WARNING)
+# agno's loggers go through the root handler too (JSON, request id, redaction),
+# however late agno itself is first imported — see app/agno_logging.py.
+install_agno_log_hand_back()
 logger = logging.getLogger(__name__)
 
 
