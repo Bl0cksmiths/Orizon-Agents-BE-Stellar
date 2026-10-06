@@ -858,6 +858,9 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "planned": {"stroops": 1_000_000, "display": "0.100"},
                 "charged": None,
                 "returned": None,
+                # ADR 0016: a step nobody was paid for has no payee.
+                "payee": None,
+                "payee_role": None,
             },
             {
                 "step_index": 1,
@@ -873,6 +876,8 @@ def test_the_task_listing_carries_the_settlement_a_first_dispute_starts_from(cli
                 "planned": {"stroops": 2_500_000, "display": "0.250"},
                 "charged": None,
                 "returned": None,
+                "payee": None,
+                "payee_role": None,
             },
         ],
         "policy": {"credited_fraction": 1.0, "funded_by": "platform", "adjudicated_by": "platform"},
