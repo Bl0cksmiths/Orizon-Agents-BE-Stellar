@@ -34,6 +34,8 @@ from . import intent_guard_prompts as guard_prompts
 from . import prompt_improver_prompts as prompts
 from .intent_guard import (
     DEFAULT_POLICY,
+    RETRY_AFTER_SECONDS,
+    GuardDecision,
     GuardPolicy,
     MalformedAnswer,
     answer,
@@ -304,3 +306,72 @@ async def recheck(original: str, spec: Spec, *, policy: GuardPolicy = DEFAULT_PO
         check = await _fallback_recheck(original_state, spec_text, policy)
     logger.info("spec re-check: verdict=%s source=%s reasons=%s", check.verdict, check.source, ",".join(check.reasons))
     return check
+
+
+# --- resolution ---------------------------------------------------------------
+
+Action = Literal["use_spec", "use_original", "block", "needs_detail", "unavailable"]
+
+
+class Resolution(BaseModel):
+    """What the planner does next. ``use_spec`` means plan from the spec text
+    only; ``use_original`` means plan from the fenced original intent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    action: Action
+    reasons: list[str] = []
+    message: str | None = None
+    retry_after_s: int | None = None
+
+
+def _blocked(reasons: list[str]) -> Resolution:
+    message = guard_prompts.BLOCKED_INJECTION if "injection" in reasons else guard_prompts.BLOCKED_HARMFUL
+    return Resolution(action="block", reasons=reasons, message=message)
+
+
+def _unavailable() -> Resolution:
+    return Resolution(
+        action="unavailable",
+        reasons=["guard_unavailable"],
+        message=guard_prompts.UNAVAILABLE_MESSAGE,
+        retry_after_s=RETRY_AFTER_SECONDS,
+    )
+
+
+def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bool = False) -> Resolution:
+    """Combine the intent decision and the spec re-check.
+
+    ``check`` is None when no spec exists (the improver failed). Rules:
+
+    * unsafe spec → block, whoever wrote it.
+    * watch-band intent → proceeds only on a clean spec; anything else blocks
+      (or is unavailable when the re-check could not run). Falling back to
+      the original would plan from exactly the borderline text.
+    * user-edited spec → must read clean too; a drifted edit is a new request,
+      not a correction, so it gets needs_detail.
+    * otherwise a drifted, watch-band or unchecked improver spec is discarded
+      in favour of the original the guard already cleared.
+    """
+    if decision.verdict != "allow":
+        raise ValueError(f"resolve() needs an allowed decision, got {decision.verdict!r}")
+
+    strict = decision.watch or user_edited
+    if check is None:
+        if strict:
+            return _blocked(["watch", "no_spec"]) if decision.watch else _unavailable()
+        return Resolution(action="use_original", reasons=["no_spec"])
+    if check.verdict == "unsafe":
+        return _blocked([r for r in check.reasons if r != "fallback"] or ["harmful"])
+    if check.verdict == "clean":
+        return Resolution(action="use_spec")
+    if check.verdict == "unavailable":
+        return _unavailable() if strict else Resolution(action="use_original", reasons=["recheck_unavailable"])
+    # drifted or watch
+    if decision.watch:
+        return _blocked(["injection", "watch", check.verdict])
+    if user_edited:
+        if check.verdict == "drifted":
+            return Resolution(action="needs_detail", reasons=["drifted"], message=guard_prompts.EDIT_CHANGED_REQUEST)
+        return _blocked(["injection", "watch"])
+    return Resolution(action="use_original", reasons=[check.verdict])
