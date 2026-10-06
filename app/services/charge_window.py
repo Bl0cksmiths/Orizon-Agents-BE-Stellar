@@ -482,6 +482,12 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
                 logger.warning("[charges] the event window could not be read: %s: %s", type(e).__name__, e)
             else:
                 _held.index = held = advance.index
+                if held is not None:
+                    # A payer is kept only while its charge is in the window,
+                    # so what a long-lived process holds is bounded by it.
+                    live = {c.charge.auth_id for c in held.charges}
+                    for auth_id in [a for a in _held.payers if a not in live]:
+                        del _held.payers[auth_id]
                 out_of_time = advance.out_of_time
                 in_window = advance.ledgers_in_window
                 reached_tip = held is not None and held.next_ledger > held.latest
