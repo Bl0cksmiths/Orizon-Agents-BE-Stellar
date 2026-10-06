@@ -88,6 +88,11 @@ def _parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=f"{helptext} from a variant directory's results")
         p.add_argument("variant_dir", type=Path)
 
+    wk = sub.add_parser("workers", help="run each built-in Claude worker once (live only)")
+    wk.add_argument("--live", action="store_true", help="required: this calls the real Claude API")
+    wk.add_argument("--max-usd", type=float, help="refused unless every worker's full budget fits under it")
+    wk.add_argument("--out", type=Path, required=True)
+
     fx = sub.add_parser("fetch-external", help="download pinned public benchmarks into the git-ignored cache")
     fx.add_argument("keys", nargs="+", choices=sorted(external.BENCHMARKS))
     return ap
@@ -205,6 +210,32 @@ def _run(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _workers(args: argparse.Namespace) -> int:
+    from .workers_sample import ceiling_usd
+
+    ceiling = ceiling_usd()
+    print(f"[LIVE] worker sample: 7 workers, ceiling {cost.usd(ceiling)}")
+    if not args.live or args.max_usd is None:
+        print("refused: the worker sample needs --live and --max-usd N", file=sys.stderr)
+        return EXIT_REFUSED
+    if ceiling > args.max_usd:
+        print(f"refused: ceiling {cost.usd(ceiling)} is over --max-usd {cost.usd(args.max_usd)}", file=sys.stderr)
+        return EXIT_REFUSED
+    missing = [k for k in _keys_present() if k == "ANTHROPIC_API_KEY"]
+    if missing:
+        print("refused: ANTHROPIC_API_KEY not set", file=sys.stderr)
+        return EXIT_REFUSED
+    from .workers_sample import run_sample
+
+    results = asyncio.run(run_sample(args.out))
+    total = sum(r["cost_usd"] for r in results.values())
+    for name, r in results.items():
+        status = r["error"] or "ok"
+        print(f"{name}: {r['latency_s']}s {cost.usd(r['cost_usd'])} {status}")
+    print(f"total {cost.usd(total)}; outputs in {args.out}")
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -220,6 +251,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary, sweep_md = report.write(args.variant_dir)
             print(summary if args.cmd == "report" else sweep_md)
             return EXIT_OK
+        if args.cmd == "workers":
+            return _workers(args)
         if args.cmd == "fetch-external":
             for key in args.keys:
                 r = external.fetch(key)
