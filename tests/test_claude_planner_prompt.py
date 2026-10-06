@@ -139,7 +139,7 @@ def test_the_instructions_compose_pipelines_instead_of_one_code_step() -> None:
     assert "Order the steps so each one's output flows into the steps after it" in text
     assert "Never add a step that contributes nothing to this request" in text
     # The handoffs the plan is also held to in code (orchestrator_svc._compose).
-    assert "code.critic only after a code builder (code.gen or code.next)" in text
+    assert "code.critic only after code.gen (it does not review code.next projects)" in text
     assert "deploy.v0 only after a build, as the last step" in text
     assert "vision.ocr only when the request includes an image or an https image link" in text
     # One builder per plan: the two are alternatives, not a sequence.
@@ -149,7 +149,7 @@ def test_the_instructions_compose_pipelines_instead_of_one_code_step() -> None:
     for recipe in (
         "Website or landing page: research.pro, seo.brief, copywrite.v3, design.figma, code.gen, code.critic",
         "Web app, tool or game: design.figma, code.gen, code.critic, deploy.v0",
-        "design.figma, code.next, code.critic, deploy.v0",
+        "design.figma, code.next, deploy.v0",
         "Marketing or ads: research.pro, seo.brief, copywrite.v3, ads.meta",
         "Research or report: research.pro, copywrite.v3",
         "Smart contract: sol-audit",
