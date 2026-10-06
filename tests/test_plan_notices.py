@@ -338,3 +338,38 @@ def test_unreachable_exclusions_order_by_id_and_cap():
     assert [n.agent_id for n in notices] == [f"ext_{i:02d}" for i in range(plan_notices.UNBOUND_REPORT_CAP)]
     assert all(n.reason_code == "unreachable_endpoint" for n in notices)
     assert plan_notices.unreachable_exclusions([]) == []
+
+
+def test_simulated_exclusion_is_policy_not_a_verdict_on_the_agent():
+    n = plan_notices.simulated_exclusion(_agent("agt_03d9", "code.next"))
+
+    assert (n.kind, n.reason_code) == ("excluded", "simulated_worker")
+    assert (n.agent_id, n.agent_name) == ("agt_03d9", "code.next")
+    assert n.lower_bound_bps is None and n.count is None and n.floor_bps == FLOOR
+    assert n.reason == (
+        "its built-in worker only simulates this agent's output so far (a buyer is never charged for simulated "
+        "work, so the planner passed it over)"
+    )
+
+
+def test_external_exclusion_names_the_policy_not_the_agents_standing():
+    n = plan_notices.external_exclusion(_agent("ext_top", "top operator"))
+
+    assert (n.kind, n.reason_code) == ("excluded", "external_not_routed")
+    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.reason == (
+        "an external operator agent (plans currently use only the platform's built-in agents, so the planner "
+        "passed it over)"
+    )
+    # Not the endpoint sentences: a bound, healthy external agent is just as absent.
+    assert "endpoint" not in n.reason and "floor" not in n.reason
+
+
+def test_external_exclusions_order_by_id_then_cap():
+    many = [_agent(f"ext_{i:02d}") for i in reversed(range(plan_notices.UNBOUND_REPORT_CAP + 3))]
+
+    notices = plan_notices.external_exclusions(many)
+
+    assert [n.agent_id for n in notices] == [f"ext_{i:02d}" for i in range(plan_notices.UNBOUND_REPORT_CAP)]
+    assert all(n.reason_code == "external_not_routed" for n in notices)
+    assert plan_notices.external_exclusions([]) == []

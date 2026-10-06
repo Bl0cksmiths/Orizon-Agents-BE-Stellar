@@ -65,6 +65,18 @@ _UNREACHABLE_REASON = (
 )
 
 
+# Routing policy, not a verdict on the agent, so neither sentence blames it.
+_SIMULATED_REASON = (
+    "its built-in worker only simulates this agent's output so far (a buyer is never charged for simulated "
+    "work, so the planner passed it over)"
+)
+
+_EXTERNAL_REASON = (
+    "an external operator agent (plans currently use only the platform's built-in agents, so the planner "
+    "passed it over)"
+)
+
+
 def _floor_reason(info: RepInfo | None) -> str:
     """Why the floor acted on an agent, with the deciding lower-bound bps.
 
@@ -193,6 +205,43 @@ def unreachable_exclusion(agent: Agent) -> PlanFloorNotice:
     )
 
 
+def simulated_exclusion(agent: Agent) -> PlanFloorNotice:
+    """A built-in agent left out because its worker would only simulate the step.
+
+    The platform's own catalog lists agents ahead of their workers, and a
+    simulated step is still a paid step: the buyer would be charged for
+    placeholder output. Not a reputation verdict, so `lower_bound_bps` stays
+    None, as on the endpoint notices.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_SIMULATED_REASON,
+        reason_code="simulated_worker",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def external_exclusion(agent: Agent) -> PlanFloorNotice:
+    """An external operator agent left out while plans use only built-in agents.
+
+    The owner's routing policy (`PLANNER_ROUTE_EXTERNAL` off), so the sentence
+    says nothing about the agent's reputation or endpoint — it may have both
+    in order, and neither is why it is absent.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_EXTERNAL_REASON,
+        reason_code="external_not_routed",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
 def substitution(designated: Agent, replacement: Agent, info: RepInfo | None) -> PlanFloorNotice:
     """A sub-floor agent whose step a floor-clearing agent took over.
 
@@ -268,3 +317,14 @@ def unreachable_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
     """
     ordered = sorted(agents, key=lambda a: a.id)
     return [unreachable_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]
+
+
+def external_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
+    """External-not-routed notices for `agents`, ordered by id and capped.
+
+    The external set is the permissionless registry, so it grows without limit
+    exactly as the unbound set does, and it is held to the same rule: sorted by
+    id before the same cap, so the same registry always names the same agents.
+    """
+    ordered = sorted(agents, key=lambda a: a.id)
+    return [external_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]
