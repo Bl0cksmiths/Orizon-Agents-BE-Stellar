@@ -101,9 +101,11 @@ class RecordingClaude:
                     output_tokens=usage.output_tokens,
                     cache_read_input_tokens=usage.cache_read_tokens,
                     cache_creation_input_tokens=usage.cache_write_tokens,
-                    cost_usd=completion.cost_usd(),
+                    cost_usd=list_price_usd(completion),
                     latency_ms=(time.perf_counter() - started) * 1000,
                     stop_reason=completion.stop_reason,
+                    response_model=completion.model,
+                    app_cost_usd=completion.cost_usd(),
                 )
             )
             log.transcript.append({"role": "tool_call", "name": request.purpose, "content": request.user})
@@ -143,6 +145,20 @@ class RecordingJev:
                 choice = reply.answers.get("complexity")
                 log.raw_tier = getattr(choice, "choice", None)
         return reply
+
+
+_SNAPSHOT = re.compile(r"-\d{8}$")
+
+
+def list_price_usd(completion: claude.Completion) -> float:
+    """Each billed attempt at its model's list price.
+
+    The API answers with a dated snapshot id (`claude-haiku-4-5-20251001`)
+    where the request named the alias; the app's price table is keyed by
+    alias, so its own `Completion.cost_usd()` prices a snapshot as an unknown
+    model. The eval prices by the alias the snapshot belongs to, and keeps the
+    app's figure beside it (`app_cost_usd`) so the gap stays visible."""
+    return sum(spend.cost_usd(_SNAPSHOT.sub("", a.model), a.usage) for a in completion.attempts)
 
 
 def _answer_json(answer: Any) -> Any:
