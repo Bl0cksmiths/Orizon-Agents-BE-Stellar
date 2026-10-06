@@ -3,7 +3,7 @@ Read snapshots — public read models built behind the request, served from memo
 
 The dashboard's reads are aggregates over the whole registry: the overview reads
 every agent's reputation, the reputation batch is one ledger read per agent, and
-the adoption report (D-091) runs a settlement scan per external agent. Computed
+the adoption report (D-091) scans the escrow's settlements for every agent. Computed
 on the request that asks, they cost what the chain costs — 2.7 s, 2.9 s and
 several MINUTES measured live — and a reviewer opening the page pays it.
 

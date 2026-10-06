@@ -38,6 +38,7 @@ from stellar_sdk import (
     TransactionBuilder,
     scval,
 )
+from stellar_sdk import xdr as stellar_xdr
 from stellar_sdk.client.requests_client import RequestsClient
 from stellar_sdk.exceptions import PrepareTransactionException
 from stellar_sdk.soroban_rpc import GetTransactionStatus, SendTransactionStatus
@@ -371,6 +372,97 @@ def ledger_scorer(ledger_id: str) -> str | None:
         scorer = None if entry is None else _instance_storage_address(entry.xdr, _SCORER_STORAGE_KEY)
         span["stage"] = "ok"
     return scorer
+
+
+# getLedgerEntries answers at most this many keys per request (stellar-rpc's cap).
+LEDGER_ENTRIES_PER_REQUEST = 200
+
+
+def _agent_record_key(registry_id: str, agent_id: str) -> stellar_xdr.LedgerKey:
+    """`DataKey::Agent(id)` in AgentRegistry's persistent storage. A
+    `#[contracttype]` tuple variant encodes as a vec of the variant's name and
+    its field (contract/agent-registry/src/lib.rs)."""
+    return stellar_xdr.LedgerKey(
+        type=stellar_xdr.LedgerEntryType.CONTRACT_DATA,
+        contract_data=stellar_xdr.LedgerKeyContractData(
+            contract=Address(registry_id).to_xdr_sc_address(),
+            key=scval.to_vec([scval.to_symbol("Agent"), scval.to_symbol(agent_id)]),
+            durability=stellar_xdr.ContractDataDurability.PERSISTENT,
+        ),
+    )
+
+
+def _agent_record(entry_xdr: str, wanted: set[str]) -> tuple[str, dict[str, Any]] | None:
+    """(id, record) from one ledger entry, or None when it is not the stored
+    record of an id in `wanted` — which the caller then reads with `get`."""
+    data = stellar_xdr.LedgerEntryData.from_xdr(entry_xdr).contract_data
+    if data is None:
+        return None
+    key = scval.to_native(data.key)
+    if not isinstance(key, list) or len(key) != 2 or key[0] != "Agent" or key[1] not in wanted:
+        return None
+    record = _to_jsonable(scval.to_native(data.val))
+    if not isinstance(record, dict) or record.get("id") != key[1]:
+        return None
+    return key[1], record
+
+
+def read_agent_records(registry_id: str, agent_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """AgentRegistry records for `agent_ids`, read straight from its storage. Blocking.
+
+    What `get(id)` returns, without simulating it: `get` is a plain read of
+    `DataKey::Agent(id)`, so the stored entry IS its answer — and reading
+    entries costs one getLedgerEntries round trip per 200 ids, where a
+    simulated `get` costs two per id (the source account, then the
+    simulation). On a registry of 1,000 agents that is 5 requests instead of
+    2,000, which is what took the mirror's first pass ~29 minutes.
+
+    Each record is decoded into exactly the shape `simulate_read` gives `get`.
+    An id is ABSENT from the result whenever this cannot vouch for it: no
+    entry (never registered, or archived out of the live state), an entry that
+    is not that id's record, or a request that failed (logged, like every
+    read). Absent never means "not registered" — a caller reads those ids
+    with `get`, which says so authoritatively.
+    """
+    wanted = set(agent_ids)
+    records: dict[str, dict[str, Any]] = {}
+    if not agent_ids:
+        return records
+    try:
+        server = _server()
+    except Exception as e:
+        logger.warning("[stellar.rpc] agent records unreadable: %s: %s", type(e).__name__, e)
+        return records
+    label = f"{_contract_label(registry_id)}.records"
+    for start in range(0, len(agent_ids), LEDGER_ENTRIES_PER_REQUEST):
+        chunk = agent_ids[start : start + LEDGER_ENTRIES_PER_REQUEST]
+        keys = [_agent_record_key(registry_id, i) for i in chunk]
+        response = None
+        # Asked twice: the read profile does not retry, and a batch that is
+        # dropped once would otherwise send 200 ids down the slow path.
+        for attempt in (1, 2):
+            try:
+                with _rpc_span("read", label, slow_ms=SLOW_READ_MS) as span:
+                    span["keys"] = len(chunk)
+                    span["attempt"] = attempt
+                    span["stage"] = "get_ledger_entries"
+                    response = server.get_ledger_entries(keys)
+                    span["entries"] = len(response.entries or [])
+                    span["stage"] = "ok"
+                break
+            except Exception:
+                continue  # logged by the span
+        if response is None:
+            continue  # these ids fall back to `get`
+        for entry in response.entries or []:
+            try:
+                decoded = _agent_record(entry.xdr, wanted)
+            except Exception as e:
+                logger.warning("[stellar.rpc] undecodable agent record entry: %s: %s", type(e).__name__, e)
+                continue
+            if decoded is not None:
+                records[decoded[0]] = decoded[1]
+    return records
 
 
 @lru_cache(maxsize=1)

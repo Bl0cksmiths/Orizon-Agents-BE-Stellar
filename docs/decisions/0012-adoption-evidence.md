@@ -110,7 +110,8 @@ The mirror has blind spots that nothing else reports:
 - a record the mirror refused, such as an unbelievable price.
 
 So the report also reads the registry's `list_ids`. For every id the mirror
-lacks, it reads `owner_of`:
+lacks, it reads the owner — in one batch from the registry's storage, then
+`owner_of` for what the batch could not answer, at most 64 per build (D9):
 
 - if the owner is ours, the id is listed under `excluded`;
 - otherwise, the id goes in `unreadable_agents`.
@@ -123,11 +124,11 @@ owners.
 
 ### D5. A settled external workflow
 
-This reuses `settlement_svc.fetch_settlement(agent_id)`, one call per external
-agent, with bounded concurrency (`READ_CONCURRENCY = 4`). It counts only the
-entries that settlement counts as verified revenue. So it inherits
-settlement's exclusions: a charge is not counted when the payer is the agent's
-owner, the settler, a platform key, or unreadable.
+Every external agent's charges come from ONE scan of the escrow's `charged`
+events (`charge_window`, D9), attributed with `settlement_svc`'s own rule. It
+counts only the entries that settlement counts as verified revenue. So it
+inherits settlement's exclusions: a charge is not counted when the payer is the
+agent's owner, the settler, a platform key, or unreadable.
 
 A charge is counted only if it names a usable transaction hash, because §6.3
 asks for a charge a reviewer can open. The total is the number of **distinct
@@ -145,6 +146,8 @@ in `unreadable_agents` when:
 
 - its settlement read failed, timed out or answered `unavailable`;
 - its scan was truncated;
+- it has a charge whose payer, or the settler it is compared with, could not
+  be read yet (`payer_unreadable`, `settler_unreadable`);
 - it has a verified charge with no usable hash;
 - it has no owner;
 - it is an on-chain id the mirror lacks and that is not ours.
@@ -180,6 +183,56 @@ sees what the settlement scans see, and the response did not say so.
 - It is `0` when no scan ran at all, for example when there are no external
   agents.
 
+### D9. At scale: one scan, kept between builds
+
+*Added 2026-10-06, after the live build overran.* With 1,017 agents in the
+registry (~1,000 external, ~990 owners) the endpoint answered 202 for 40
+minutes and then 503: D5's call per external agent cost ~15 RPC calls each
+(an `owner_of`, a ledger probe, thirteen getEvents pages), ~15,000 per build,
+and two builds in a row ran past the 15-minute budget with nothing to serve.
+The registry mirror's first full pass also took ~29 minutes, one simulated
+`get` (two round trips) per agent. Reproduced offline by
+`scripts/adoption_scale_bench.py`.
+
+- **Settlements: one window scan for every agent.** `charge_window` reads the
+  escrow's `("charged", *)` topic once for the RPC's window and files each
+  charge under the agent its second topic names. It keeps the index between
+  builds, so a build reads only the ledgers closed since, and drops what aged
+  out. Payers are read once per authorization, ever. The index and its payers
+  are stored beside the report in `read_snapshots`, so a restart resumes. A
+  page that comes back full is split until each range reads whole; one ledger
+  that still overflows is reported `truncated` until it leaves the window.
+- **Owners: the mirror's.** `Agent.owner` is set by `register` and never
+  written again, so the mirror's owner is the on-chain owner; nothing is
+  re-read per agent. Ids the mirror lacks are read in one storage batch.
+- **Bindings: one read.** The bound set (`list_agent_ids`), not a `get` per
+  agent.
+- **The mirror: batched.** `registry_sync` reads records straight from the
+  registry's storage, 200 per getLedgerEntries call, falling back to `get`
+  only for an id the batch could not vouch for.
+- **A budget, then a partial report.** A build reads for at most
+  `REPORT_WORK_BUDGET_SECONDS` (300). What it could not read in time is left
+  for the next build and the report is published **partial**: `complete:
+  false`, `degraded: true`, each number a floor (registrations are counted
+  only when their owner was read, settlements only when verified, so nothing
+  can be overstated). `coverage` says how much was read. A partial build does
+  not replace a complete report younger than an hour.
+- **Restarts serve the last report.** The stored report is restored at boot
+  whatever its age, marked `X-Snapshot-Source: persisted` and dated, until the
+  new process's first build lands. Once any report has been built, a restart
+  answers neither 202 nor 503 while the database holds it.
+- **Fresher.** Rebuilt every 5 minutes (was 15), and within 2 minutes of a
+  registry change (was 5).
+
+Measured by the bench (fake RPC at testnet's measured latencies, 1% of reads
+timing out): at 1,000 agents the old build was abandoned at its 900 s budget
+having reached ~780 agents, the new one takes ~6 s and 35 RPC calls; at 5,000
+and 10,000 the old one was abandoned the same way, the new one still takes
+~6 s and 35 calls. The mirror's first pass went from ~620 s to ~4 s (1,000)
+and from ~2,980 s to ~15 s (5,000). With 10% of reads timing out, a 5,000-agent
+build that stopped a sixth of the way through the window resumed and finished
+it on the next build (`--builds 3`).
+
 ## Consequences
 
 - **The window is about seven days, and the report says so.** Soroban RPC
@@ -192,8 +245,9 @@ sees what the settlement scans see, and the response did not say so.
 - **The unit is the escrow's asset.** `amount_usdc` is the escrow's 7-decimal
   amount, the unit prices are quoted in. On testnet the SAC wraps the native
   asset (`settlement_svc` reads it as `native`), so the value moved is XLM.
-- **Bindings follow the store.** `bound` is `get_binding_store().get(id) is not
-  None`. The endpoint URL is never read into the response, in any form.
+- **Bindings follow the store.** `bound` is whether the id is in the store's
+  bound set (`list_agent_ids`, which leaves revoked bindings out). The
+  endpoint URL is never read into the response, in any form.
 - **v1 is never asked for `admin()`.** The escrow's version is read first
   (`sc.escrow_version`, cached per contract), and only v2 is asked for a view
   it has. Asking v1 would log an RPC error on every report computation.

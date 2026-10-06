@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ecosystem", tags=["ecosystem"])
 
 # How long a shared cache may hold the report past its freshness while it
-# fetches the next one. The report is rebuilt every 15 minutes; a CDN copy a
+# fetches the next one. The report is rebuilt every 5 minutes; a CDN copy a
 # minute old says nothing a fresher one would not.
 ADOPTION_SHARED_MAX_AGE_SECONDS = 60.0
 ADOPTION_STALE_WHILE_REVALIDATE_SECONDS = 600
@@ -61,13 +61,19 @@ async def adoption(request: Request) -> Response:
     (the smallest, when agents' scans differ; 0 when none ran), and a
     settlement older than that is not counted.
 
-    Computed in the background — one settlement scan per external agent takes
-    minutes — and rebuilt every 15 minutes and when the registry's agents
-    change. The last report is served at once: `generated_at` dates it, and so
-    do `Last-Modified` and `X-Snapshot-Age`; `X-Snapshot-Source: persisted`
-    marks one restored from the database after a restart. With no report yet
-    the answer is 202 with `Retry-After`; 503 only when the last attempt
-    failed and there is nothing to serve.
+    Computed in the background from one scan of the escrow's settlement events
+    for every external agent, kept between builds so each reads only the
+    ledgers closed since; rebuilt every 5 minutes and when the registry's
+    agents change. The last report is served at once: `generated_at` dates
+    it, and so do `Last-Modified` and `X-Snapshot-Age`;
+    `X-Snapshot-Source: persisted` marks one restored from the database after
+    a restart, served whatever its age until the new process's first build
+    lands. A build that runs out of time publishes what it read as a PARTIAL
+    report — `complete: false`, `degraded: true`, every number a floor, and
+    `coverage` saying how much was read — unless a complete report under an
+    hour old is in service, which is kept instead. With no report yet the
+    answer is 202 with `Retry-After`; 503 only when the last attempt failed
+    and there is nothing to serve.
     """
     snap = await adoption_svc.report_snapshot()
     if snap is not None:
@@ -86,7 +92,7 @@ async def adoption(request: Request) -> Response:
             status="computing",
             message=(
                 "The adoption report is being computed from on-chain data "
-                "(a settlement scan per external agent). Ask again shortly."
+                "(one scan of settlement events for every external agent). Ask again shortly."
             ),
             retry_after_seconds=retry,
         )

@@ -9,9 +9,10 @@ What is pinned is not arithmetic but the two ways this metric could lie:
     `unreadable_agents` and sets `degraded`; it never quietly contributes 0.
 
 Hermetic: the seams are the ones the settlement tests use — `sc.simulate_read`
-for the contract views, `settlement_svc.fetch_settlement` for per-agent charges
-(one test drives the real one through `sc._server`), and the binding store.
-No pytest-asyncio, so async entry points run under a bare `asyncio.run`.
+for the contract views, `charge_window.fetch_settlements` for every external
+agent's charges at once (one test drives the real one through `sc._server`),
+and the binding store. No pytest-asyncio, so async entry points run under a
+bare `asyncio.run`.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from test_settlement_svc import _auth_id, _charged_event, _FakeRpc, _job_id
 
 from app.config import settings
 from app.schemas import Agent
-from app.services import adoption_svc, registry_sync, settlement_svc
+from app.services import adoption_svc, charge_window, registry_sync, settlement_svc, snapshot_store
 from app.services.settlement_svc import SettlementEntry, SettlementEvidence
 from app.state import state
 from app.stellar import cache as rcache
@@ -115,11 +116,16 @@ class _Store:
     def __init__(self, *bound: str, broken: bool = False) -> None:
         self.bound = set(bound)
         self.broken = broken
+        self.listed = 0
 
     async def get(self, agent_id: str) -> Any:
+        raise AssertionError("the report reads the bound set once, never per agent")
+
+    async def list_agent_ids(self) -> frozenset[str]:
+        self.listed += 1
         if self.broken:
             raise RuntimeError("binding store unreachable")
-        return object() if agent_id in self.bound else None
+        return frozenset(self.bound)
 
 
 def _entry(
@@ -172,11 +178,15 @@ class _World:
         self.chain = _Chain()
         self.settlements: dict[str, Any] = {}
         self.settlement_calls: list[str] = []
+        self.window_calls = 0
+        self.window_error: BaseException | None = None
+        self.out_of_time = False
+        self.deadlines: list[float] = []
         self.store = _Store()
         monkeypatch.setattr(sc, "simulate_read", self.chain)
         monkeypatch.setattr(sc, "cached_escrow_version", lambda _id: None)
         monkeypatch.setattr(sc, "escrow_version", self._escrow_version)
-        monkeypatch.setattr(settlement_svc, "fetch_settlement", self._fetch)
+        monkeypatch.setattr(charge_window, "fetch_settlements", self._fetch_all)
         monkeypatch.setattr(adoption_svc, "get_binding_store", lambda: self.store)
         monkeypatch.setattr(adoption_svc, "dispatch_signer_address", lambda: DISPATCH)
 
@@ -186,12 +196,28 @@ class _World:
             raise self.chain.escrow_version
         return int(self.chain.escrow_version)
 
-    async def _fetch(self, agent_id: str) -> SettlementEvidence:
-        self.settlement_calls.append(agent_id)
-        value = self.settlements.get(agent_id) or _evidence(agent_id)
-        if isinstance(value, BaseException):
-            raise value
-        return value
+    async def _fetch_all(self, owners: dict[str, str], *, deadline: float) -> charge_window.WindowSettlements:
+        """One window read for every agent asked about. An exception set for an
+        agent leaves it out of the answer, as a read that never came back."""
+        self.window_calls += 1
+        self.deadlines.append(deadline)
+        self.settlement_calls.extend(owners)
+        if self.window_error is not None:
+            raise self.window_error
+        by_agent: dict[str, SettlementEvidence] = {}
+        for agent_id in owners:
+            value = self.settlements.get(agent_id) or _evidence(agent_id)
+            if not isinstance(value, BaseException):
+                by_agent[agent_id] = value
+        entries = [e for ev in by_agent.values() for e in ev.entries]
+        return charge_window.WindowSettlements(
+            by_agent=by_agent,
+            ledgers_scanned=120_960,
+            ledgers_in_window=120_960,
+            out_of_time=self.out_of_time,
+            charges=len(entries),
+            unattributed=sum(1 for e in entries if e.exclusion == "payer_unreadable"),
+        )
 
     def agent(
         self, agent_id: str, owner: str | None, *entries: SettlementEntry, active: bool = True, listed: bool = True
@@ -224,6 +250,7 @@ def world(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_
     saved_agents = dict(state.agents)
     state.agents.clear()
     rcache.clear()
+    adoption_svc.forget_owners()
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
     monkeypatch.setattr(settings, "stellar_payment_escrow", ESCROW_ID)
     monkeypatch.setattr(settings, "stellar_asset_sac", SAC_ID)
@@ -232,6 +259,7 @@ def world(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_
     state.agents.clear()
     state.agents.update(saved_agents)
     rcache.clear()
+    adoption_svc.forget_owners()
 
 
 def _totals(report: adoption_svc.AdoptionReport) -> tuple[int, int, int]:
@@ -367,7 +395,7 @@ def test_one_job_paying_two_external_agents_is_one_workflow(world: _World) -> No
     assert sorted(listed) == sorted([_job(7), _job(8), _job(7)])
 
 
-@pytest.mark.parametrize("exclusion", ["owner", "settler", "payer_unreadable", "settler_unreadable"])
+@pytest.mark.parametrize("exclusion", ["owner", "settler"])
 def test_a_charge_settlement_excludes_is_not_a_settled_workflow(
     world: _World, exclusion: settlement_svc.Exclusion
 ) -> None:
@@ -378,6 +406,22 @@ def test_a_charge_settlement_excludes_is_not_a_settled_workflow(
     assert _totals(report) == (1, 1, 1)
     assert [w.job_id_hex for w in report.operators[0].agents[0].settled_workflows] == [_job(2)]
     assert report.degraded is False
+
+
+@pytest.mark.parametrize("exclusion", ["payer_unreadable", "settler_unreadable"])
+def test_a_charge_whose_check_could_not_run_is_not_counted_and_says_so(
+    world: _World, exclusion: settlement_svc.Exclusion
+) -> None:
+    """Not revenue — and not proven NOT revenue either: the payer, or the
+    settler it is compared against, was never read. The count may be low, so
+    the report has to say so rather than present a clean figure."""
+    world.agent("ext_a", EXT_A, _entry(1, payer=BUYER, exclusion=exclusion), _entry(2))
+
+    report = world.report()
+
+    assert _totals(report) == (1, 1, 1)
+    assert [w.job_id_hex for w in report.operators[0].agents[0].settled_workflows] == [_job(2)]
+    assert (report.degraded, report.unreadable_agents) == (True, ["ext_a"])
 
 
 def test_a_team_buyer_paying_an_external_operator_counts_and_is_flagged(world: _World) -> None:
@@ -391,11 +435,12 @@ def test_a_team_buyer_paying_an_external_operator_counts_and_is_flagged(world: _
 
 
 def test_the_real_settlement_scan_excludes_what_it_excludes(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
-    """End to end through `settlement_svc`: the agent's own owner paying and
+    """End to end through `charge_window`: the agent's own owner paying and
     the platform's settler paying are not revenue, a third party paying is."""
-    monkeypatch.setattr(settlement_svc, "fetch_settlement", _REAL_FETCH)
+    monkeypatch.setattr(charge_window, "fetch_settlements", _REAL_FETCH)
+    monkeypatch.setattr(snapshot_store, "_store", snapshot_store.InMemorySnapshotStore())
+    charge_window.reset()
     world.agent("ext_agent", EXT_A)
-    world.chain.owners["ext_agent"] = EXT_A
     payers = {_auth_id(1).hex(): EXT_A, _auth_id(2).hex(): SETTLER, _auth_id(3).hex(): BUYER}
     rpc = _FakeRpc(
         events=[
@@ -417,18 +462,19 @@ def test_the_real_settlement_scan_excludes_what_it_excludes(world: _World, monke
     monkeypatch.setattr(sc, "_server", lambda **_kw: rpc)
 
     report = world.report()
+    charge_window.reset()
 
     assert _totals(report) == (1, 1, 1)
     (workflow,) = report.operators[0].agents[0].settled_workflows
     assert (workflow.job_id_hex, workflow.payer) == (_job_id(3).hex(), BUYER)
-    assert report.degraded is False
-    # The window is the one the scan measured, not a constant.
-    scanned = asyncio.run(settlement_svc.fetch_settlement("ext_agent"))
-    assert scanned.window_days > 0
-    assert report.window_days == scanned.window_days
+    assert report.degraded is False and report.complete is True
+    # The window is the one the scan measured, not a constant: the fake node
+    # holds 101 ledgers at 5 s each.
+    assert report.window_days == round(101 * 5 / 86_400, 3) > 0
+    assert world.chain.reads.count((REGISTRY_ID, "owner_of")) == 0  # the mirror's owner, never re-read
 
 
-_REAL_FETCH = settlement_svc.fetch_settlement
+_REAL_FETCH = charge_window.fetch_settlements
 
 
 # ── how far back it looked ──────────────────────────────────────────────────
@@ -663,24 +709,17 @@ def test_concurrent_callers_share_one_computation(world: _World, monkeypatch: py
     assert all(r is reports[0] for r in reports)
 
 
-def test_the_settlement_reads_fan_out_with_bounded_concurrency(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
-    in_flight = peak = 0
+def test_one_build_is_one_window_read_and_one_binding_read_however_many_agents(world: _World) -> None:
+    """The cost that broke the live build was per agent; nothing here is."""
+    for i in range(40):
+        world.agent(f"ext_{i:02d}", _g(60 + i), _entry(i + 1))
 
-    async def fetch(agent_id: str) -> SettlementEvidence:
-        nonlocal in_flight, peak
-        in_flight += 1
-        peak = max(peak, in_flight)
-        await asyncio.sleep(0.01)
-        in_flight -= 1
-        return _evidence(agent_id)
+    report = world.report()
 
-    monkeypatch.setattr(settlement_svc, "fetch_settlement", fetch)
-    for i in range(10):
-        world.agent(f"ext_{i}", _g(60 + i))
-
-    world.report()
-
-    assert peak == adoption_svc.READ_CONCURRENCY
+    assert _totals(report) == (40, 40, 40)
+    assert world.window_calls == 1
+    assert sorted(world.settlement_calls) == [f"ext_{i:02d}" for i in range(40)]
+    assert world.store.listed == 1
 
 
 # ── probe bounds ────────────────────────────────────────────────────────────
@@ -688,8 +727,9 @@ def test_a_stalled_binding_probe_costs_that_agent_its_answer_not_the_build(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class _Hung:
-        async def get(self, agent_id: str) -> Any:
+        async def list_agent_ids(self) -> frozenset[str]:
             await asyncio.sleep(30)
+            return frozenset()
 
     monkeypatch.setattr(adoption_svc, "PROBE_TIMEOUT_SECONDS", 0.05)
     world.store = _Hung()  # type: ignore[assignment]
@@ -719,3 +759,129 @@ def test_a_stalled_owner_probe_leaves_the_agent_unreadable(world: _World, monkey
     assert time.perf_counter() - started < 2.0
     assert report.unreadable_agents == ["unmirrored_one"]
     assert report.degraded is True
+
+
+# ── at scale (D-091: 1,000 agents overran the build budget) ─────────────────
+def test_the_window_read_failing_outright_still_builds_an_honest_report(world: _World) -> None:
+    world.agent("ext_a", EXT_A, _entry(1))
+    world.agent("ext_b", EXT_B)
+    world.window_error = RuntimeError("cache layer")
+
+    report = world.report()
+
+    # Registrations are facts the window cannot change; settlements are unknown.
+    assert _totals(report) == (2, 2, 0)
+    assert (report.degraded, report.unreadable_agents) == (True, ["ext_a", "ext_b"])
+    assert report.window_days == 0.0
+
+
+def test_the_window_is_given_the_builds_work_deadline(world: _World) -> None:
+    world.agent("ext_a", EXT_A)
+
+    started = time.monotonic()
+    world.report()
+
+    (deadline,) = world.deadlines
+    assert started < deadline <= time.monotonic() + adoption_svc.REPORT_WORK_BUDGET_SECONDS
+    assert adoption_svc.REPORT_WORK_BUDGET_SECONDS < adoption_svc.REPORT_BUILD_BUDGET_SECONDS
+
+
+def test_a_build_that_ran_out_of_time_is_published_as_a_marked_partial(world: _World) -> None:
+    """What was read in time is a floor on every number, so it is published —
+    marked, so nobody reads it as the whole answer."""
+    world.agent("ext_a", EXT_A)
+    world.settlements["ext_a"] = _evidence("ext_a", _entry(1), truncated=True, window_days=2.0)
+    world.out_of_time = True
+
+    report = world.report()
+
+    assert report.complete is False
+    assert (report.degraded, report.unreadable_agents) == (True, ["ext_a"])
+    assert _totals(report) == (1, 1, 1)
+    assert report.window_days == 2.0
+
+
+def test_a_complete_build_says_so_and_what_it_covered(world: _World) -> None:
+    world.agent("ext_a", EXT_A, _entry(1), _entry(2, payer=EXT_A, exclusion="owner"))
+    world.agent("ours", QA_OPERATOR)
+    world.chain.list_ids.append("agt_seeded")  # the seeded namespace is never the registry's to count
+
+    report = world.report()
+
+    assert report.complete is True and report.degraded is False
+    assert report.coverage is not None
+    assert report.coverage.model_dump() == {
+        "agents_listed": 2,
+        "agents_accounted": 2,
+        "settlement_ledgers_scanned": 120_960,
+        "settlement_ledgers_in_window": 120_960,
+        "external_charges": 2,
+        "external_charges_unattributed": 0,
+    }
+
+
+def test_an_unreadable_registry_listing_is_coverage_unknown(world: _World) -> None:
+    world.agent("ext_a", EXT_A)
+    world.chain.list_ids = ConnectionError("rpc down")
+
+    report = world.report()
+
+    assert report.coverage is not None and report.coverage.agents_listed is None
+    assert report.degraded is True
+
+
+def test_unmirrored_owners_are_read_in_one_batch_not_a_probe_each(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ours = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
+    world.agent("ext_a", EXT_A)
+    gap = [f"cold_{i:03d}" for i in range(300)]
+    world.chain.list_ids += gap
+    batches: list[list[str]] = []
+
+    def records(registry_id: str, ids: list[str]) -> dict[str, dict[str, Any]]:
+        assert registry_id == REGISTRY_ID
+        batches.append(list(ids))
+        return {i: {"id": i, "owner": ours if i.endswith("0") else EXT_C} for i in ids}
+
+    monkeypatch.setattr(sc, "read_agent_records", records)
+
+    report = world.report()
+
+    assert [len(b) for b in batches] == [300]
+    assert (REGISTRY_ID, "owner_of") not in world.chain.reads
+    # Ours are excluded by name; an outside owner the mirror lacks is not
+    # counted (its agent is not mirrored) and not silently dropped either.
+    assert _excluded(report)[ours][2] == [i for i in gap if i.endswith("0")]
+    assert len(report.unreadable_agents) == 270
+    assert report.complete is True  # every listed id was accounted for in time
+
+
+def test_owner_probes_past_the_batch_are_capped_per_build(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(adoption_svc, "MAX_OWNER_PROBES_PER_BUILD", 5)
+    world.agent("ext_a", EXT_A)
+    gap = [f"cold_{i:02d}" for i in range(12)]
+    world.chain.list_ids += gap
+    world.chain.owners.update({i: EXT_C for i in gap})
+
+    report = world.report()
+
+    assert world.chain.reads.count((REGISTRY_ID, "owner_of")) == 5
+    assert report.unreadable_agents == gap
+    assert report.complete is False  # seven ids were left for the next build
+
+
+def test_an_owner_read_once_is_not_read_again(world: _World) -> None:
+    """`Agent.owner` is set at registration and has no setter on-chain."""
+    ours = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
+    world.agent("ext_a", EXT_A)
+    world.chain.list_ids.append("orizon_batch")
+    world.chain.owners["orizon_batch"] = ours
+
+    first = world.report()
+    reads = world.chain.reads.count((REGISTRY_ID, "owner_of"))
+    second = world.report()
+
+    assert reads == 1
+    assert world.chain.reads.count((REGISTRY_ID, "owner_of")) == 1
+    assert _excluded(first) == _excluded(second)
