@@ -87,6 +87,10 @@ class FakeStore:
             raise OSError("could not connect to server")
         return self.plans.get(plan_id)
 
+    async def recent_task_ids(self, limit: int) -> list[str]:
+        newest = sorted(self.tasks.values(), key=lambda row: row.started_at, reverse=True)
+        return [row.task_id for row in newest[: max(limit, 0)]]
+
     async def prune(self, *, task_cutoff: float, max_tasks: int, plan_cutoff: float) -> PruneResult:
         return PruneResult(0, 0, 0)
 
