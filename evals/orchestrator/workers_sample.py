@@ -265,7 +265,11 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
         worker = WORKERS[job.agent_id]
         label = job.label or worker.name
         if budget_usd is not None and job.typical_usd * HEADROOM > remaining():
-            results[label] = {"worker": worker.name, "label": label, "skipped": f"budget left {remaining():.4f} USD"}
+            skipped = {"worker": worker.name, "label": label, "skipped": f"budget left {remaining():.4f} USD"}
+            results[label] = skipped
+            (out_dir / f"{label.replace('.', '_').replace('#', '_')}.json").write_text(
+                json.dumps(skipped, indent=2) + "\n", encoding="utf-8"
+            )
             continue
         if job.critic_of is not None:
             context["code.gen"] = drafts.get(job.critic_of, {})
