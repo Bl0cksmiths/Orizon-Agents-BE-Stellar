@@ -37,7 +37,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from app.llm.tiers import Tier, tier_up
+from app.agents.workers.prompt_safety import fence_untrusted
+from app.llm import claude, jev
+from app.llm.errors import JevUnavailable, LLMError, LLMRefused, SpendCapReached
+from app.llm.tiers import Tier, guard_fallback_model, tier_up
 
 from . import intent_guard_prompts as prompts
 
@@ -224,3 +227,84 @@ def decide(
     if watch:
         reasons.append("watch")
     return GuardDecision(verdict="allow", tier=tier, watch=watch, reasons=reasons, **common)
+
+
+def unavailable(*, model: str | None = None) -> GuardDecision:
+    return GuardDecision(
+        verdict="unavailable",
+        reasons=["guard_unavailable"],
+        message=prompts.UNAVAILABLE_MESSAGE,
+        model=model,
+        retry_after_s=RETRY_AFTER_SECONDS,
+    )
+
+
+def _refused(model: str | None) -> GuardDecision:
+    # The fallback classifier declining to even read the text is itself the
+    # strongest harm signal we get — fail closed as a block.
+    return GuardDecision(
+        verdict="block",
+        reasons=["harmful", "refused", "fallback"],
+        message=prompts.BLOCKED_HARMFUL,
+        source="fallback",
+        model=model,
+    )
+
+
+async def _jev_scores(state: str) -> tuple[Scores, str]:
+    result = await jev.ask(purpose="guard.intent", state=state, questions=prompts.INTENT_BATTERY)
+    return _scores_from_jev(result.answers), result.model
+
+
+async def _fallback_decision(intent: str, policy: GuardPolicy) -> GuardDecision:
+    model = guard_fallback_model()
+    try:
+        result = await claude.structured(
+            purpose="guard.intent.fallback",
+            model=model,
+            system=prompts.INTENT_FALLBACK_SYSTEM,
+            user=fence_untrusted(intent, label="USER_REQUEST", max_chars=MAX_STATE_CHARS),
+            schema=IntentAssessment,
+            max_tokens=_FALLBACK_MAX_TOKENS,
+            # Like jev, the guard is not held to the daily cap: a pass costs a
+            # fraction of a cent, and curated demo kits must still clear it
+            # after AI planning has paused.
+            enforce_cap=False,
+        )
+        scores = _scores_from_fallback(result.value)
+    except SpendCapReached:
+        raise
+    except LLMRefused as exc:
+        logger.warning("guard fallback refused (category=%s)", getattr(exc, "category", None))
+        return _refused(model)
+    except (LLMError, MalformedAnswer) as exc:
+        logger.error("guard unavailable: jev and fallback both failed (%s)", type(exc).__name__)
+        return unavailable(model=model)
+    return decide(scores, source="fallback", model=result.served_by or result.model, policy=policy)
+
+
+async def check_intent(intent: str, *, policy: GuardPolicy = DEFAULT_POLICY) -> GuardDecision:
+    """Classify one intent. Never raises for a classifier outage — that is the
+    ``unavailable`` verdict — but lets ``SpendCapReached`` through so the
+    caller can pause planning with its own notice."""
+    state = classifier_state(intent)
+    if not state:
+        return GuardDecision(verdict="needs_detail", reasons=["unclear"], message=prompts.NEEDS_DETAIL_QUESTION)
+    try:
+        scores, jev_model = await _jev_scores(state)
+    except SpendCapReached:
+        raise
+    except (JevUnavailable, MalformedAnswer) as exc:
+        logger.warning("jev guard unavailable (%s); using the Claude fallback guard", type(exc).__name__)
+        decision = await _fallback_decision(state, policy)
+    else:
+        decision = decide(scores, source="jev", model=jev_model, policy=policy)
+    logger.info(
+        "intent guard: verdict=%s tier=%s watch=%s source=%s reasons=%s",
+        decision.verdict,
+        decision.tier,
+        decision.watch,
+        decision.source,
+        ",".join(decision.reasons),
+    )
+    return decision
