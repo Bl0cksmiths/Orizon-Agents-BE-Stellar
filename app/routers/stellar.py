@@ -190,6 +190,15 @@ READ_TTL_SECONDS = 3.0
 
 
 # ── meta ────────────────────────────────────────────────────────
+def _sac_name(asset: money.AssetInfo) -> str:
+    """`asset` as the SAC's own `name()` spells it: "native", or "CODE:ISSUER"."""
+    if asset == money.NATIVE:
+        return "native"
+    if asset.issuer is None:
+        return asset.code.lower()  # "unknown": the SAC could not be read
+    return f"{asset.code}:{asset.issuer}"
+
+
 @router.get("/network", response_model=NetworkInfo)
 async def network() -> NetworkInfo:
     ids = sc.contract_ids()
@@ -199,7 +208,7 @@ async def network() -> NetworkInfo:
         network_passphrase=sc.network_passphrase(),
         admin=settings.stellar_admin_address,
         dispatch_signer=dispatch_signer_address(),
-        asset="native",
+        asset=_sac_name(await money.current_asset()),
         asset_sac=ids.asset_sac,
         contracts={
             "agent_registry": ids.agent_registry,
