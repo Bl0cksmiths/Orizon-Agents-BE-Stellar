@@ -183,6 +183,10 @@ def test_an_alias_under_src_resolves_to_the_src_file() -> None:
     ]
     fixed, _ = code_next.relative_imports(files)
     assert fixed[0]["content"] == 'import Hero from "../components/Hero";\n'
+    # Resolved by the file that exists, not by where the importer sits.
+    root_page = {"path": "app/page.tsx", "language": "tsx", "content": 'import Hero from "@/components/Hero";\n'}
+    fixed, _ = code_next.relative_imports([root_page, files[1]])
+    assert fixed[0]["content"] == 'import Hero from "../src/components/Hero";\n'
 
 
 def test_the_brief_forbids_the_alias() -> None:
