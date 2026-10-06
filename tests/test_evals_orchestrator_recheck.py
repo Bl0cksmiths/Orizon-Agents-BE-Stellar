@@ -72,7 +72,7 @@ def test_the_code_length_section_measures_the_saved_html(runs, tmp_path):
         "cost_usd": 0.07,
         "calls": [call],
         "error": None,
-        "output": {"summary": "An app; deferred: reports"},
+        "output": {"summary": "An app; deferred: reports", "validator_violations": ["under 200 lines (2)"]},
     }
     (d / "code_gen_1.json").write_text(json.dumps(rec))
     (d / "code_gen_1__index.html").write_text("<!doctype html>\n<html><body>tiny</body></html>\n")
@@ -87,3 +87,36 @@ def test_the_code_length_section_measures_the_saved_html(runs, tmp_path):
     report = (tmp_path / "REPORT.md").read_text()
     assert "## Complex code.gen after the length fix" in report and "code.gen#2 | not run" in report
     assert (tmp_path / "r3-code-length" / "code_gen_1__index.html").exists()
+
+
+def test_the_final_check_quotes_the_deferred_list_and_the_ceiling_share(runs, tmp_path):
+    campaign, recheck = runs
+    d = recheck / "r4-final"
+    d.mkdir(exist_ok=True)
+    call = {
+        "response_model": "claude-sonnet-5-5",
+        "effort": "low",
+        "first_token_ms": 800,
+        "output_tokens": 7000,
+        "stop_reason": "end_turn",
+    }
+    summary = "An app with slots. Deferred: payments, email delivery."
+    rec = {
+        "worker": "code.critic",
+        "label": "code.critic#1",
+        "latency_s": 40.0,
+        "cost_usd": 0.1,
+        "calls": [call],
+        "error": None,
+        "output": {"summary": summary},
+    }
+    (d / "code_critic_1.json").write_text(json.dumps(rec))
+    (d / "code_critic_1__index.html").write_text("<!doctype html>\n<html>\n<body>app</body>\n</html>\n")
+    analysis = build(campaign, recheck, tmp_path)
+    (row,) = analysis["final"]
+    assert row["deferred_quote"] == "Deferred: payments, email delivery."
+    assert row["chars_per_line"] == pytest.approx(row["bytes"] / row["lines"], abs=0.1)
+    report = (tmp_path / "REPORT.md").read_text()
+    ceiling = analysis["final_ceilings"]["code.critic"]
+    assert "### Final check" in report and f"7,000 / {ceiling:,}" in report
+    assert "“Deferred: payments, email delivery.”" in report
