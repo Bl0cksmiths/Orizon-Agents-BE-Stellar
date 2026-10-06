@@ -24,7 +24,7 @@ from app.llm import claude as claude_layer
 from app.llm.claude import ClaudeRequest, Completion
 from app.llm.errors import LLMUnavailable
 from app.llm.testing import FakeClaude
-from app.schemas import Plan, PlanStep, StoredPlan, Task
+from app.schemas import Plan, PlanStage, PlanStep, StoredPlan, Task
 from app.services import execution_svc
 from app.services import failure_tracker as ft
 from app.state import state
@@ -84,13 +84,20 @@ def _step(agent_id: str, price: float, tier: str | None = None) -> PlanStep:
     )
 
 
-def _run(task_id: str, *steps: PlanStep, intent: str = INTENT, paid: bool = False) -> tuple[Task, list[str]]:
+def _run(
+    task_id: str,
+    *steps: PlanStep,
+    intent: str = INTENT,
+    paid: bool = False,
+    stages: list[PlanStage] | None = None,
+) -> tuple[Task, list[str]]:
     plan = StoredPlan(
         id="pln_" + task_id,
         intent=intent,
         plan=Plan(steps=list(steps)),
         total_usdc=sum(s.est_price_usdc for s in steps),
         total_eta=1.0,
+        stages=stages or [],
     )
     state.add_task(Task(id=task_id, intent=intent, agents=len(steps), spent=0.0, status="running"))
     if paid:
@@ -299,3 +306,28 @@ def test_only_a_first_party_step_can_be_excused(monkeypatch: pytest.MonkeyPatch)
     assert "w.ext failed (model_unavailable)" in trace
     assert seen["undispatched"] == frozenset()
     assert ft.consecutive_failures("agt_x") == 1
+
+
+# ── the plan's stages open the run's trace ──────────────────────────────────
+
+
+def test_the_plans_stages_follow_intent_received_in_order(claude: FakeClaude) -> None:
+    claude.reply(_copy(), purpose="worker.copywrite.v3")
+    stages = [
+        PlanStage(stage="guard", msg="Request checked by jev (tier: moderate)"),
+        PlanStage(stage="improve", msg="Prompt improved by Claude Sonnet 5.5"),
+        PlanStage(stage="recheck", msg="Improved request re-checked by jev"),
+        PlanStage(stage="plan", msg="Planned by Claude Opus 5.5 (effort medium)"),
+    ]
+    _, trace = _run("tsk_cw_stages", _step("agt_01h8", COPY_PRICE), stages=stages)
+
+    assert trace[0].startswith("intent received → ")
+    assert trace[1:5] == [s.msg for s in stages]
+
+
+def test_a_legacy_plan_has_no_stage_lines(claude: FakeClaude) -> None:
+    claude.reply(_copy(), purpose="worker.copywrite.v3")
+    _, trace = _run("tsk_cw_nostages", _step("agt_01h8", COPY_PRICE))
+
+    assert trace[0].startswith("intent received → ")
+    assert trace[1].startswith("orchestrator: decompose → ")
