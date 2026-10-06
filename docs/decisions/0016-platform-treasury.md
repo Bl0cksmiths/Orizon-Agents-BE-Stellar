@@ -49,3 +49,26 @@ the registry's price — each payout's amount is what the settler sends — and 
 id the registry does not hold traps the whole settle. Because the owner is
 write-once, the owner read before a settle and the one inside it cannot
 disagree.
+
+### What the backend does with an on-chain `agt_*` id, as audited
+
+| Consumer | Once the twelve exist on-chain | Verdict |
+| --- | --- | --- |
+| `registry_sync._pass` (the mirror) | Skips every `agt_` id before the batch read, so the seeded `Agent` (`source="seeded"`, `owner=None`, `real=True`) is never overwritten. It logs the id once as a WARNING that reads like a squat. | Safe; the warning is wrong for our own registration, and nothing checks the on-chain record (B1, B2) |
+| `client.read_agent_records` | Only asked for non-`agt_` ids. | Safe |
+| `GET /api/agents`, `state.agents` | Unchanged: 12 seeded + the non-`agt_` mirror. | Safe |
+| Overview `registered` / `onchain` / `seeded` | Counted over `state.agents` by `source`, so the twelve stay `seeded` and are not also counted `onchain`. | Safe — no double count |
+| Overview `external`, `operators.external_wallets` | Taken over the on-chain mirror only, which never holds `agt_`. | Safe |
+| Adoption (`adoption_svc`) | `onchain_mirror()` and the `list_ids` cross-check both drop `SEEDED_PREFIX`; the charge window scans only the external agents' charges. A treasury-paid `charged` event is never an external settlement. | Safe; the treasury still belongs in the register so a reader can see whose it is (B3) |
+| `plannable()`, `_with_executor`, `resolve_worker` | Decided by `get_worker(agent_id)`: a local worker wins over any binding, so `agt_*` stays `built_in` with its tier's model. | Safe |
+| Pricing (`PlanStep.price_stroops`) | Frozen from the seeded agent's price; the on-chain price of an `agt_` id is never read, and the escrow pays the plan's amount, not the registry's. | Safe; the on-chain price should still equal the plan's, and nothing says when it does not (B2) |
+| `execution_svc._unpaid_agents` → `_payout_plan` → `settle` | `owner_of` now answers, so each delivered built-in step is paid its `price_stroops` — to **whoever owns the id**. | **Change needed**: `register` is permissionless and write-once, so anyone who registers an `agt_` id we have not would be paid for our work. Pay a built-in step only to the treasury (B4) |
+| Settlement record and receipt | Keep amount, receipt id and unpaid reason per step, not who was paid. | **Change needed**: record and show the payee (B5) |
+| Trace / unpaid notices | Only "no confirmed on-chain owner". | Extended with the not-the-treasury reason (B4) |
+| `settlement_svc` per-agent earnings | `owner_of(agt_…)` is the treasury; a buyer-funded payout counts as that agent's revenue, which it is. | Safe |
+| Seal (`AttestationRegistry.seal`) | Names the paid agents with their receipts; a built-in run becomes `paid` instead of `delivery_only`. | Safe — intended |
+| Disputes / credits | A credit is computed from what the step was paid (ADR 0010 D5) and funded by the platform's refund key, as before. | Safe |
+| Register route (`/build/register-agent`) | Refuses `agt_` ids (`id_reserved`) before any read. | Safe |
+| Management preflight (`_agent_exists`) | Now finds `agt_` ids, so an update-price / set-active XDR can be built for one; only the treasury key can sign it. | Safe |
+| Binding | An `agt_` binding could only be signed by the treasury and is never used: the local worker wins. | Safe |
+| Reputation | Keyed by agent id on the ReputationLedger, not the registry. | Unaffected |
