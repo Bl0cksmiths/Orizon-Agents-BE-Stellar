@@ -1,0 +1,15 @@
+{
+  "agent_id": "agt_11c0",
+  "worker": "code.gen",
+  "case_id": "cpx-001",
+  "tier": "complex",
+  "intent": "Build a full booking system web app for a barbershop: services, staff schedules, time-slot booking, admin view, and email-style confirmations.",
+  "latency_s": 104.81,
+  "cost_usd": 0,
+  "calls": [],
+  "error": "BudgetExceeded: stopped at an estimated $0.1296",
+  "output": {
+    "summary": null,
+    "counts": null
+  }
+}

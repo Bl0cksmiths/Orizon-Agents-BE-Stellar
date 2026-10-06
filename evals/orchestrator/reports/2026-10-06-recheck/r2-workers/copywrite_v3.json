@@ -1,0 +1,53 @@
+{
+  "agent_id": "agt_01h8",
+  "worker": "copywrite.v3",
+  "case_id": "mod-001",
+  "tier": null,
+  "intent": "Build a landing page for my Pilates studio in BGC with a hero, class schedule, pricing and a contact form.",
+  "latency_s": 5.96,
+  "cost_usd": 0.001714,
+  "calls": [
+    {
+      "model": "claude-haiku-4-5",
+      "response_model": "claude-haiku-4-5-20251001",
+      "served_by": null,
+      "input_tokens": 839,
+      "output_tokens": 175,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cost_usd": 0.001714,
+      "app_cost_usd": 0.001714,
+      "latency_ms": 5362,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "Transform Your Body with Pilates in BGC",
+    "counts": {
+      "sections": 4
+    },
+    "hero": {
+      "headline": "Transform Your Body with Pilates in BGC",
+      "subtitle": "Strengthen, lengthen, and build lean muscle through precision-focused classes designed for every level."
+    },
+    "sections": [
+      {
+        "title": "Class Schedule",
+        "body": "Choose from mat and reformer classes throughout the week. Morning, afternoon, and evening sessions fit your routine."
+      },
+      {
+        "title": "Pricing",
+        "body": "[placeholder: pricing tiers and class packages]. Start with a trial class to experience the studio firsthand."
+      },
+      {
+        "title": "Why Pilates",
+        "body": "Build core strength, improve posture, and increase flexibility. Low-impact training that delivers visible results over time."
+      },
+      {
+        "title": "Get Started",
+        "body": "Ready to begin? Fill out our contact form to book your first class or ask questions about membership options."
+      }
+    ]
+  }
+}
