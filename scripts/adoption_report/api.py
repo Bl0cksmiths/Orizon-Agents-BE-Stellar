@@ -17,7 +17,15 @@ from typing import Any
 
 import httpx
 
-from .config import ADOPTION_PATH, EXCLUSION_REASONS, TARGETS
+from .config import (
+    ADOPTION_PATH,
+    EXCLUSION_REASONS,
+    PENDING_DEFAULT_DELAY_SECONDS,
+    PENDING_MAX_DELAY_SECONDS,
+    PENDING_MAX_WAIT_SECONDS,
+    PENDING_MIN_DELAY_SECONDS,
+    TARGETS,
+)
 from .retry import RETRYABLE_STATUS, RetryableStatus, RetryPolicy, retry_after_seconds
 
 
@@ -206,23 +214,59 @@ def parse(body: Any) -> AdoptionClaim:
 
 
 # ── transport ───────────────────────────────────────────────────
+@dataclass(frozen=True)
+class _Pending:
+    """A 202: the report is still being computed; ask again after `retry_after`."""
+
+    retry_after: float | None
+
+
 @dataclass
 class AdoptionApi:
     client: httpx.Client
     base: str
     retry: RetryPolicy
+    # The most this fetch waits, in total, on 202 "computing" answers.
+    pending_max_wait_seconds: float = PENDING_MAX_WAIT_SECONDS
 
     @property
     def url(self) -> str:
         return f"{self.base}{ADOPTION_PATH}"
 
     def fetch(self) -> Any:
-        """The endpoint's JSON body. A read, so retried on the transient statuses."""
+        """The endpoint's JSON body. A read, so retried on the transient statuses.
+
+        A 202 is not a failure: the service is computing its first report since
+        it booted. The fetch waits as long as `Retry-After` says (clamped), and
+        asks again, until the report arrives or `pending_max_wait_seconds` is
+        spent — then it gives up saying so, never with a half-read body.
+        """
+        waited = 0.0
+        while True:
+            answer = self._fetch_once()
+            if not isinstance(answer, _Pending):
+                return answer
+            remaining = self.pending_max_wait_seconds - waited
+            if remaining <= 0:
+                raise ApiUnreachable(
+                    f"GET {self.url} was still computing the report after {waited:.0f} s "
+                    f"(the most this run waits); run the verifier again in a few minutes"
+                )
+            delay = PENDING_DEFAULT_DELAY_SECONDS if answer.retry_after is None else answer.retry_after
+            delay = min(max(delay, PENDING_MIN_DELAY_SECONDS), PENDING_MAX_DELAY_SECONDS, remaining)
+            self.retry.sleep(delay)
+            waited += delay
+
+    def _fetch_once(self) -> Any:
+        """One answer: the JSON body, or `_Pending` for a 202 — with the
+        transient statuses and transport errors retried by the policy."""
 
         def once() -> Any:
             response = self.client.get(self.url, timeout=90.0, headers={"accept": "application/json"})
             if response.status_code in RETRYABLE_STATUS:
                 raise RetryableStatus(response.status_code, retry_after_seconds(response))
+            if response.status_code == 202:
+                return _Pending(retry_after_seconds(response))
             if response.status_code != 200:
                 raise ApiUnreachable(f"GET {self.url} answered HTTP {response.status_code}")
             try:

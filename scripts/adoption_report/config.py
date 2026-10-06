@@ -23,6 +23,16 @@ DEFAULT_TEAM_REGISTER = Path("app/data/team_wallets.json")
 
 ADOPTION_PATH = "/api/ecosystem/adoption"
 
+# The endpoint answers 202 {"status": "computing"} with Retry-After while the
+# first report since the service booted is computed — a settlement scan per
+# external agent, minutes on the live registry (D-091). The verifier waits for
+# it, as told, but never longer than this in total, nor more than the bounds
+# below between two asks.
+PENDING_MAX_WAIT_SECONDS = 600.0
+PENDING_MIN_DELAY_SECONDS = 1.0
+PENDING_MAX_DELAY_SECONDS = 60.0
+PENDING_DEFAULT_DELAY_SECONDS = 30.0
+
 # SOW §6.3, as story 5.02 (BLO-36) states it. The verifier holds its own copy
 # on purpose: an API that lowered a target to make itself MET is one of the
 # claims being checked.
