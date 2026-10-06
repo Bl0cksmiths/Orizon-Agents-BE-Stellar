@@ -58,7 +58,7 @@ from ..security import (
     request_id_var,
     require_adjudicator,
 )
-from ..services import dispute_read, dispute_svc, refund_svc, task_persistence
+from ..services import dispute_read, dispute_svc, platform_treasury, refund_svc, task_persistence
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
 from ..state import state
@@ -435,6 +435,11 @@ class CreditPolicy(BaseModel):
         )
 
 
+# Who a paid step's money went to: the platform treasury (a built-in agent,
+# ADR 0016) or an operator's wallet.
+PayeeRole = Literal["platform_treasury", "operator"]
+
+
 class SettlementStepView(BaseModel):
     """One settled step, and what disputing it would credit.
 
@@ -484,6 +489,12 @@ class SettlementStepView(BaseModel):
     planned: Amount | None = None
     charged: Amount | None = None
     returned: Amount | None = None
+    # Who the settle paid for this step (ADR 0016): the account `owner_of` named,
+    # and whether that is the platform treasury — every built-in agent's payee —
+    # or an operator's wallet. Both null for a step that was not paid and on a
+    # record written before the payee was kept.
+    payee: str | None = None
+    payee_role: PayeeRole | None = None
 
     @classmethod
     def of(cls, step: SettlementStep, fraction: float) -> SettlementStepView:
@@ -509,7 +520,24 @@ class SettlementStepView(BaseModel):
             planned=_amount(planned),
             charged=_amount(charged),
             returned=_amount(returned),
+            payee=step.payee,
+            payee_role=_payee_role(step.payee),
         )
+
+
+def _payee_role(payee: str | None) -> PayeeRole | None:
+    """Whether `payee` is the platform treasury or an operator; None when nobody was paid.
+
+    Judged against the register as it stands now. An unreadable treasury (two
+    declared) leaves the role unsaid rather than guessed.
+    """
+    if payee is None:
+        return None
+    try:
+        treasury = platform_treasury.treasury_address()
+    except platform_treasury.TreasuryError:
+        return None
+    return "platform_treasury" if payee == treasury else "operator"
 
 
 def _amount(stroops: int | None) -> Amount | None:
