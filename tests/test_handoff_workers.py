@@ -99,3 +99,37 @@ def test_a_worker_that_does_not_read_upstream_never_claims_to() -> None:
     mock = MockWorker("agt_03d9", "code.next")  # code.next's role reads a lot; the mock reads nothing
     assert mock.upstream_sources(ctx(**{"seo.brief": seo(), "design.figma": {"palette": {"bg": "#000"}}})) == []
     assert not mock.handoff(ctx(**{"seo.brief": seo()}))
+
+
+# ── copywrite.v3 ────────────────────────────────────────────────────────────
+
+
+def _copy_reply() -> dict[str, Any]:
+    return {
+        "hero_headline": "Fix it together",
+        "hero_subtitle": "Stands and tools, Saturdays.",
+        "sections": [{"title": "Tools", "body": "b1"}, {"title": "Classes", "body": "b2"}],
+    }
+
+
+def test_copywrite_writes_from_the_seo_keywords_and_the_research(claude: FakeClaude) -> None:
+    claude.reply(_copy_reply(), purpose="worker.copywrite.v3")
+    run("agt_01h8", ctx(**{"research.pro": research(), "seo.brief": seo()}))
+    prompt = claude.calls_for("worker.copywrite.v3")[0].user
+
+    body = fenced_body(prompt)
+    assert "SEO-KEYWORD bike repair co-op" in body
+    assert "SEO-AUDIENCE commuters" in body
+    assert "RESEARCH-CLAIM riders want same-week fixes." in body
+    # The request's own fence comes first and the trusted ask comes last.
+    assert prompt.index("BEGIN USER_INPUT") < prompt.index(FENCE_BEGIN)
+    assert prompt.rstrip().endswith("Draft the copy.")
+    assert "work its keywords in naturally" in prompt[: prompt.index(FENCE_BEGIN)]
+
+
+def test_copywrite_with_nothing_upstream_asks_what_it_always_asked(claude: FakeClaude) -> None:
+    from app.agents.workers.prompt_safety import worker_prompt
+
+    claude.reply(_copy_reply(), purpose="worker.copywrite.v3")
+    run("agt_01h8", ctx())
+    assert claude.calls_for("worker.copywrite.v3")[0].user == worker_prompt(INTENT, RATIONALE, "Draft the copy.")

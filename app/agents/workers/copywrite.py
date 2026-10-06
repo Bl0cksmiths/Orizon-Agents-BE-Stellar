@@ -81,12 +81,23 @@ INSTRUCTIONS = (
 # Room for the JSON plus any thinking the tier's model does first.
 MAX_TOKENS = 8_000
 
+# How to use what earlier steps handed on (see `context.CONSUMES`).
+UPSTREAM_GUIDANCE = (
+    "Write from them: use the SEO brief's brand name and tagline, work its "
+    "keywords in naturally (never stuffed) and speak to its audiences; ground "
+    "the sections in the research summary; where extracted text or a "
+    "translation is present, it is the source material. Research and audit "
+    "findings are background, not facts the buyer stated — never turn them "
+    "into statistics, guarantees or claims the request did not make."
+)
+
 
 class Copywrite(ModelWorker):
     id = "agt_01h8"
     name = "copywrite.v3"
     real = True
     default_tier = "low"
+    reads_upstream = True
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
@@ -94,6 +105,15 @@ class Copywrite(ModelWorker):
             model_id=settings.worker_model,
             instructions=INSTRUCTIONS,
             output_schema=CopyOutput,
+        )
+
+    def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
+        """The copy prompt: the fenced request, then the fenced upstream outputs."""
+        return worker_prompt(
+            intent,
+            rationale,
+            "Draft the copy.",
+            sections=[self.handoff(context).section(UPSTREAM_GUIDANCE)],
         )
 
     async def run(
@@ -104,7 +124,7 @@ class Copywrite(ModelWorker):
         *,
         tier: Tier | None = None,
     ) -> dict[str, Any]:
-        prompt = worker_prompt(intent, rationale, "Draft the copy.")
+        prompt = self.build_prompt(intent, rationale, context)
         out: CopyOutput
         if claude_workers():
             draft = await claude_step.structured(
