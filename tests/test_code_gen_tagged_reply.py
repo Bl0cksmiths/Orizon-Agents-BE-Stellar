@@ -16,6 +16,7 @@ from app.agents.workers.code_gen import (
     CLAUDE_INSTRUCTIONS,
     INSTRUCTIONS,
     MAX_ARTIFACT_CHARS,
+    TAGGED_SHAPE,
     parse_tagged_artifact,
 )
 
@@ -94,3 +95,48 @@ def test_both_prompts_share_one_brief_and_differ_in_length_target_and_output_sha
     assert CLAUDE_INSTRUCTIONS.startswith(brief)
     assert "<artifact_html>" in CLAUDE_INSTRUCTIONS and "<artifact_html>" not in INSTRUCTIONS
     assert "preview_html" in INSTRUCTIONS
+
+
+# ── deferred features ───────────────────────────────────────────────────────
+
+
+def _with_deferred(deferred: str, summary: str = "A barbershop booking app.") -> str:
+    return (
+        f"<artifact_title>Brass & Blade</artifact_title>\n<artifact_summary>{summary}</artifact_summary>\n"
+        f"<artifact_deferred>{deferred}</artifact_deferred>\n<artifact_html>\n{HTML}\n</artifact_html>"
+    )
+
+
+def test_deferred_features_are_named_in_the_summary() -> None:
+    art = parse_tagged_artifact(_with_deferred("online payments, SMS reminders"))
+    assert art.summary == "A barbershop booking app. Deferred: online payments, SMS reminders."
+
+
+def test_the_deferred_list_survives_a_long_summary() -> None:
+    """The summary is bounded at 280; the main text gives way, never the list."""
+    long = " ".join(f"Sentence {i} about the app." for i in range(30))
+    art = parse_tagged_artifact(_with_deferred("online payments, SMS reminders", summary=long))
+    assert len(art.summary) <= 280
+    assert art.summary.endswith(" Deferred: online payments, SMS reminders.")
+    assert art.summary.startswith("Sentence 0 about the app.")
+
+
+@pytest.mark.parametrize("deferred", ["", "   ", "none", "None.", "n/a"])
+def test_an_empty_deferred_list_adds_nothing(deferred: str) -> None:
+    art = parse_tagged_artifact(_with_deferred(deferred))
+    assert art.summary == "A barbershop booking app."
+
+
+def test_a_reply_with_no_deferred_tag_keeps_its_summary() -> None:
+    assert parse_tagged_artifact(_reply()).summary == "A focused timer."
+
+
+def test_the_deferred_tag_is_read_only_from_before_the_html() -> None:
+    html = "<!doctype html><p><artifact_deferred>everything</artifact_deferred></p>"
+    art = parse_tagged_artifact(_reply(html=html))
+    assert "Deferred" not in art.summary
+
+
+def test_the_tagged_shape_asks_for_the_deferred_list() -> None:
+    assert "<artifact_deferred>" in TAGGED_SHAPE
+    assert "did not build" in " ".join(TAGGED_SHAPE.split())
