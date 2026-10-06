@@ -131,6 +131,8 @@ def _call_dict(c: StageCall) -> dict[str, Any]:
         "stop_reason": c.stop_reason,
         "response_model": c.response_model,
         "app_cost_usd": c.app_cost_usd,
+        "effort": c.effort,
+        "first_token_ms": c.first_token_ms,
     }
 
 
