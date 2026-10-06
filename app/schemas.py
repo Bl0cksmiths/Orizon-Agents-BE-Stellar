@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, computed_field
 
 from .llm.tiers import Tier
 
@@ -397,6 +397,32 @@ class OverviewMetrics(BaseModel):
     # registry, served as measured but partial, and `degraded` is true.
     registry_synced: bool
     degraded: bool  # True when any part above could not be fully read, or the registry is not synced
+
+
+# ───── Planning pipeline ───────────────────────────────────
+# Bounds on one understood-request line. A spec reaches the planner as fenced
+# DATA, but a buyer can edit and resubmit it, so it is bounded like the intent:
+# the whole spec stays under a few thousand characters however it is filled.
+SpecLine = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+SPEC_MAX_LINES = 8
+
+
+class UnderstoodSpec(BaseModel):
+    """What the request was understood as: the improved prompt, as data.
+
+    Served on a decompose response as `understood_as` and accepted back as
+    `spec` on the next request once the buyer has corrected it. Either way it
+    is untrusted text — written by a model from the buyer's words, or by the
+    buyer — so it is fenced before any model reads it and re-checked first.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    goal: str = Field(..., min_length=1, max_length=300)
+    deliverable: str = Field(..., min_length=1, max_length=300)
+    constraints: list[SpecLine] = Field(default_factory=list, max_length=SPEC_MAX_LINES)
+    done_criteria: list[SpecLine] = Field(default_factory=list, max_length=SPEC_MAX_LINES)
+    summary: str = Field(..., min_length=1, max_length=300)
 
 
 # ───── Requests ────────────────────────────────────────────
