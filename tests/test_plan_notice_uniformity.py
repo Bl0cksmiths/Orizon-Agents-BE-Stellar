@@ -421,8 +421,21 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
     the marketplace and the plan that the buyer needs explained, exactly like
     an unbound one — and routing to it made the buyer pay for a run that could
     not be delivered.
+
+    `simulated_worker` and `external_not_routed` were the next two, made for
+    the agent-pipelines work: routing policy the buyer needs explained — a
+    built-in agent left out because its worker would only simulate the paid
+    step, and an external agent left out while plans use only the built-in
+    agents. Appended, so the first four keep their positions.
     """
-    assert get_args(ExclusionReason) == ("below_floor", "unbound_endpoint", "floor_relaxed", "unreachable_endpoint")
+    assert get_args(ExclusionReason) == (
+        "below_floor",
+        "unbound_endpoint",
+        "floor_relaxed",
+        "unreachable_endpoint",
+        "simulated_worker",
+        "external_not_routed",
+    )
 
     # And the model actually enforces it — a Literal that is never validated
     # against is a comment.

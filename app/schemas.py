@@ -271,7 +271,20 @@ class StoredPlan(BaseModel):
 # whose endpoint failed its latest health check, left out of the plan while
 # that failure is fresh (`app/services/reachability.py`). Appended, so the
 # existing three keep their positions for any client that indexes them.
-ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed", "unreachable_endpoint"]
+#
+# Two more, appended for the same reason, are routing POLICY rather than a
+# verdict about the agent: `simulated_worker` is a built-in agent whose worker
+# still simulates its output (a buyer is never charged for that), and
+# `external_not_routed` is an external operator agent left out while plans use
+# only the built-in agents (`PLANNER_ROUTE_EXTERNAL`).
+ExclusionReason = Literal[
+    "below_floor",
+    "unbound_endpoint",
+    "floor_relaxed",
+    "unreachable_endpoint",
+    "simulated_worker",
+    "external_not_routed",
+]
 
 
 class PlanFloorNotice(BaseModel):
