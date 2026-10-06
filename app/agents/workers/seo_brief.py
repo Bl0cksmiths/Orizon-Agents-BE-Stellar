@@ -10,16 +10,40 @@ from ...config import settings
 from ..model_factory import claude_workers, lazy_agent, worker_tier
 from . import claude_step
 from .base import ModelWorker
+from .bounds import at_most, trim_items
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
 
 
+MAX_KEYWORDS = 12
+MAX_AUDIENCES = 5
+
+
 class SeoBriefOutput(BaseModel):
-    keywords: list[str] = Field(..., max_length=12)
-    audiences: list[str] = Field(..., max_length=5)
+    keywords: list[str] = Field(..., max_length=MAX_KEYWORDS)
+    audiences: list[str] = Field(..., max_length=MAX_AUDIENCES)
     summary: str
+
+
+class SeoBriefDraft(BaseModel):
+    """What Claude is asked for: SeoBriefOutput's shape with no hard bounds,
+    which structured outputs cannot enforce (see `bounds`); `fit_seo_brief`
+    applies them."""
+
+    keywords: list[str] = Field(..., description="8 to 12 high-intent keywords.")
+    audiences: list[str] = Field(..., description="2 to 4 audience clusters, concise labels.")
+    summary: str = Field(..., description="One line.")
+
+
+def fit_seo_brief(draft: SeoBriefDraft) -> SeoBriefOutput:
+    """Cap a draft's lists into SeoBriefOutput."""
+    return SeoBriefOutput(
+        keywords=at_most(trim_items(draft.keywords), MAX_KEYWORDS),
+        audiences=at_most(trim_items(draft.audiences), MAX_AUDIENCES),
+        summary=" ".join(draft.summary.split()),
+    )
 
 
 INSTRUCTIONS = (
@@ -85,14 +109,15 @@ class SeoBrief(ModelWorker):
         prompt = worker_prompt(intent, rationale, "Return the SEO brief.")
         out: SeoBriefOutput
         if claude_workers():
-            out = await claude_step.structured(
+            draft = await claude_step.structured(
                 worker=self.name,
                 tier=worker_tier(tier, self.default_tier),
                 system=INSTRUCTIONS,
                 user=prompt,
-                schema=SeoBriefOutput,
+                schema=SeoBriefDraft,
                 max_tokens=MAX_TOKENS,
             )
+            out = fit_seo_brief(draft)
         else:
             out = (await self._agent.arun(prompt)).content
         return {
