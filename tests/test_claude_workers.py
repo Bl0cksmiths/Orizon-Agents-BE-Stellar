@@ -114,6 +114,9 @@ STRUCTURED = {
 }
 
 
+DRAFTS = {"agt_01h8": "CopyDraft", "agt_04m1": "AuditDraft", "agt_05x7": "SeoBriefDraft", "agt_09l5": "ResearchDraft"}
+
+
 def _instructions(module: Any) -> str:
     return getattr(module, "INSTRUCTIONS", None) or module._INSTRUCTIONS
 
@@ -139,7 +142,9 @@ def test_a_structured_worker_hands_back_the_same_output_on_claude_as_on_agno(
     (call,) = claude.calls
     assert call.purpose == f"worker.{worker.name}"
     assert call.system == _instructions(module)
-    assert call.schema_name == type(reply()).__name__ and call.json_schema
+    # Claude is asked for the draft shape where the output carries hard bounds
+    # (tests/test_worker_output_bounds.py); design tokens has none to lift.
+    assert call.schema_name == DRAFTS.get(agent_id, type(reply()).__name__) and call.json_schema
     assert call.stream is False
     assert call.max_tokens == module.MAX_TOKENS
 
@@ -228,7 +233,11 @@ def test_the_spend_cap_fails_the_step_before_any_call(claude: FakeClaude, monkey
 
 
 def test_a_reply_outside_the_schema_fails_the_step(claude: FakeClaude) -> None:
-    claude.reply({"summary": "s", "findings": [], "cvss_estimate": 42})
+    """Bounds are fitted in code, but a wrong SHAPE (here, a severity outside
+    the enum) is still the model's failure."""
+    claude.reply(
+        {"summary": "s", "findings": [{"severity": "apocalyptic", "title": "t", "rationale": "r"}], "cvss_estimate": 4}
+    )
     assert _failure("agt_04m1").rule == "invalid_output"
 
 

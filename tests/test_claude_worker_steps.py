@@ -120,7 +120,14 @@ def test_each_step_names_its_model_and_runs_on_its_tier(claude: FakeClaude) -> N
         (lambda c: c.refuse(purpose="worker.sol-audit", category="cyber", explanation="MODEL-PROSE"), "model_refused"),
         (lambda c: c.truncate(purpose="worker.sol-audit", partial='{"summary": "'), "model_truncated"),
         (
-            lambda c: c.reply({"summary": "s", "findings": [], "cvss_estimate": 42}, purpose="worker.sol-audit"),
+            lambda c: c.reply(
+                {
+                    "summary": "s",
+                    "findings": [{"severity": "apocalyptic", "title": "t", "rationale": "r"}],
+                    "cvss_estimate": 4,
+                },
+                purpose="worker.sol-audit",
+            ),
             "invalid_output",
         ),
     ],
