@@ -15,6 +15,7 @@ from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
+from ..llm.tiers import TIERS, Tier
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from ..security import redact_secrets
 from ..state import state
@@ -1012,7 +1013,7 @@ def _planner_plan(result: Any) -> Plan | None:
 
 
 class _ProposedStep(Protocol):
-    """A step as a planner proposed it."""
+    """A step as a planner proposed it: the legacy `PlanStep` or Claude's `PlannedStep`."""
 
     @property
     def agent_id(self) -> str: ...
@@ -1020,6 +1021,22 @@ class _ProposedStep(Protocol):
     def rationale(self) -> str: ...
     @property
     def est_eta_seconds(self) -> float: ...
+    @property
+    def tier(self) -> Tier | None: ...
+
+
+def _capped_tier(step_tier: Tier | None, plan_tier: Tier | None) -> Tier | None:
+    """A step's tier held at or below its plan's; the plan's when the step has none.
+
+    None without a plan tier: only the Claude pipeline rates a request, and a
+    tier the legacy planner happened to write into its output is not one
+    anything judged.
+    """
+    if plan_tier is None:
+        return None
+    if step_tier is None:
+        return plan_tier
+    return min(step_tier, plan_tier, key=TIERS.index)
 
 
 class _Clamped(NamedTuple):
@@ -1032,13 +1049,15 @@ def _clamp(
     proposed: Sequence[_ProposedStep],
     shortlist: _Shortlist,
     reps: dict[str, reputation_svc.RepInfo],
+    *,
+    plan_tier: Tier | None = None,
 ) -> _Clamped:
     """Hold a planner's proposal to the shortlist; backfill names, snap prices to registry truth.
 
     A planner that produced no plan proposes no steps, so it lands in the
     empty-plan fallback by the same road as a plan the clamp emptied. Every
-    planner goes through here, so the floor, the allowlist and the
-    dead-endpoint check cannot differ between them.
+    planner goes through here — the legacy one and Claude — so the floor, the
+    allowlist and the dead-endpoint check cannot differ between them.
     """
     cleaned: list[PlanStep] = []
     # (agent, rationale) pairs already kept. A repeated pair is the same paid
@@ -1093,6 +1112,10 @@ def _clamp(
                 rationale=rationale,
                 est_price_usdc=agent.price,
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
+                # The model's own tier, never above the plan's: a step cannot be
+                # harder than the request it is part of, and the cap is what keeps
+                # an over-eager plan off the most expensive model.
+                tier=_capped_tier(step.tier, plan_tier),
                 # An OFFERED agent below the floor can only be one the
                 # starvation backstop re-admitted, which already carries a
                 # `floor_relaxed` notice — so the inline flag and the notice
@@ -1111,6 +1134,8 @@ def _finish_free_form(
     shortlist: _Shortlist,
     reps: dict[str, reputation_svc.RepInfo],
     clamped: _Clamped,
+    *,
+    plan_tier: Tier | None = None,
 ) -> DecomposeResponse:
     """Serve a clamped free-form plan: the fallback if it is empty, then store and answer."""
     cleaned = clamped.steps
@@ -1141,6 +1166,7 @@ def _finish_free_form(
                 ),
                 est_price_usdc=fallback.price,
                 est_eta_seconds=0.8,
+                tier=plan_tier,
                 degraded=not reputation_svc.passes_floor(info),
                 **_rep_fields(info),
             )
@@ -1155,7 +1181,7 @@ def _finish_free_form(
     stored = StoredPlan(
         id=plan_id,
         intent=intent,
-        plan=Plan(steps=cleaned),
+        plan=Plan(steps=cleaned, tier=plan_tier),
         total_usdc=total_price,
         total_eta=total_eta,
         notices=notices,
