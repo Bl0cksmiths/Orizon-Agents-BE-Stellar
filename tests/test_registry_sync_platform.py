@@ -176,3 +176,24 @@ def test_an_agt_id_with_no_worker_is_skipped_unread(registry: Any) -> None:
     assert fake.batches == [["ext_a"]]
     assert "agt_squat" not in state.agents
     assert "agt_squat" not in registry_sync.platform_agents()
+
+
+# ── /readiness ────────────────────────────────────────────────────────────
+def test_readiness_names_the_treasury_and_each_built_in_verdict(client: Any) -> None:
+    registry_sync._note_platform("agt_01h8", registry_sync._PlatformCheck("registered"))
+
+    body = client.get("/readiness").json()
+
+    assert body["treasury"] == {
+        "address": TREASURY,
+        "agents": {**dict.fromkeys(sorted(WORKERS), "unread"), "agt_01h8": "registered"},
+    }
+
+
+def test_readiness_survives_an_unreadable_treasury(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _two() -> str:
+        raise platform_treasury.TreasuryError("the team register has 2 entries")
+
+    monkeypatch.setattr(platform_treasury, "treasury_address", _two)
+
+    assert client.get("/readiness").json()["treasury"]["address"] is None
