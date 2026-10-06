@@ -53,7 +53,10 @@ def test_a_complex_code_step_runs_on_sonnet_not_opus(agent_id: str, context: Any
     claude.reply(TAGGED)
     ctx = _critic_context() if context else None
     asyncio.run(WORKERS[agent_id].run("build a dashboard", "r", context=ctx, tier="complex"))
-    assert (claude.calls[0].model, claude.calls[0].effort) == (SONNET, "medium")
+    assert (claude.calls[0].model, claude.calls[0].effort) == (
+        SONNET,
+        "low",
+    )  # code effort: see test_code_stream_budget
 
 
 @pytest.mark.parametrize(("tier", "model"), [("low", HAIKU), ("moderate", SONNET), (None, SONNET)])

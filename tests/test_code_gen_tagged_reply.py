@@ -89,8 +89,8 @@ def test_a_reply_without_an_app_raises_value_error(reply: str) -> None:
         parse_tagged_artifact(reply)
 
 
-def test_both_prompts_share_one_brief_and_differ_only_in_the_output_shape() -> None:
-    brief = INSTRUCTIONS[: INSTRUCTIONS.index("# OUTPUT SHAPE")]
+def test_both_prompts_share_one_brief_and_differ_in_length_target_and_output_shape() -> None:
+    brief = INSTRUCTIONS[: INSTRUCTIONS.index("# Length target")]
     assert CLAUDE_INSTRUCTIONS.startswith(brief)
     assert "<artifact_html>" in CLAUDE_INSTRUCTIONS and "<artifact_html>" not in INSTRUCTIONS
     assert "preview_html" in INSTRUCTIONS

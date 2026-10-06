@@ -302,7 +302,7 @@ def test_code_gen_streams_a_tagged_app_and_returns_the_same_contract(claude: Fak
     out = run("agt_11c0")
 
     (call,) = claude.calls
-    assert (call.purpose, call.model, call.effort) == ("worker.code.gen", SONNET, "medium")
+    assert (call.purpose, call.model, call.effort) == ("worker.code.gen", SONNET, "low")
     assert call.stream is True and call.json_schema is None
     assert call.system == code_gen.CLAUDE_INSTRUCTIONS
     assert call.max_tokens == code_gen.MAX_TOKENS
