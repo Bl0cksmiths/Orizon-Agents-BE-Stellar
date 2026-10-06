@@ -463,9 +463,9 @@ def test_a_watch_band_intent_needs_a_clean_spec(
 ) -> None:
     # Borderline injection: planned only through a spec that re-checks clean,
     # never from the borderline words themselves.
-    _intent_ok(fake_jev, injection=0.5)
+    _intent_ok(fake_jev, injection=0.37)
     fake_claude.reply(SPEC_DRAFT, purpose="improve.spec")
-    _spec_ok(fake_jev, injection=0.5)
+    _spec_ok(fake_jev, injection=0.37)
 
     r = client.post(DECOMPOSE, json={"intent": INTENT})
 
@@ -477,7 +477,7 @@ def test_a_watch_band_intent_needs_a_clean_spec(
 def test_a_watch_band_intent_with_a_clean_spec_plans_from_the_spec(
     claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev
 ) -> None:
-    _happy(fake_claude, fake_jev, injection=0.5)
+    _happy(fake_claude, fake_jev, injection=0.37)
 
     resp = _decompose()
 
