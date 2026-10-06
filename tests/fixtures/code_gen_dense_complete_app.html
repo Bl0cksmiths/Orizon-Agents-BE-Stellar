@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'"><!-- orizon-artifact-csp -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Brass &amp; Blade — Barbershop Booking</title>
+<style>
+:root{--bg:#14110f;--panel:#1e1a17;--panel2:#272220;--line:#3a332e;--text:#f3ece4;--muted:#a79b8f;--accent:#d4a24c;--accent2:#e8c27a;--ok:#6fbf8b;--bad:#e56b5d;--ease:200ms ease}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;align-items:flex-start;justify-content:center;background:var(--bg);color:var(--text);font-family:"Inter","SF Pro Text",system-ui,sans-serif;font-size:15px;overflow-x:hidden}
+.app{width:100%;max-width:880px;padding:16px;min-height:100%}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:clamp(22px,5vw,30px);margin:0;color:var(--accent2);letter-spacing:.5px}
+h2{font-family:Georgia,serif;font-size:clamp(18px,4vw,22px);margin:0 0 12px}
+nav{display:flex;gap:4px;background:var(--panel);padding:4px;border-radius:12px;border:1px solid var(--line)}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;min-height:40px;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:0 14px;transition:all var(--ease)}
+button:hover{border-color:var(--accent)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+nav button{border:0;background:transparent}
+nav button[aria-selected=true]{background:var(--accent);color:#1a1407;font-weight:600}
+.primary{background:var(--accent);color:#1a1407;border-color:var(--accent);font-weight:600}
+.primary:disabled{opacity:.4;cursor:not-allowed}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px;backdrop-filter:blur(12px);box-shadow:0 8px 24px #0006;animation:in .3s ease}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
+.steps{display:flex;gap:6px;margin-bottom:14px}
+.steps i{flex:1;height:4px;border-radius:2px;background:var(--line);transition:background var(--ease)}
+.steps i[data-on=true]{background:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.opt{text-align:left;padding:12px;min-height:64px;display:flex;flex-direction:column;gap:4px}
+.opt[aria-pressed=true]{border-color:var(--accent);background:#3a2e17}
+.opt small,.muted{color:var(--muted)}
+.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px}
+.slots button[disabled]{opacity:.35;text-decoration:line-through;cursor:not-allowed}
+.slots button[aria-pressed=true]{background:var(--accent);color:#1a1407;font-weight:600}
+label{display:block;margin:10px 0 4px;color:var(--muted);font-size:13px}
+input,select{width:100%;min-height:42px;padding:0 12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:140px}
+.actions{display:flex;justify-content:space-between;gap:10px;margin-top:14px}
+.mail{background:#f6f1e9;color:#241d16;border-radius:12px;padding:18px;font-size:14px;line-height:1.55}
+.mail h3{margin:0 0 8px;font-family:Georgia,serif}
+.mail .hd{font-size:12px;color:#6b5f52;border-bottom:1px solid #d9cfc0;padding-bottom:8px;margin-bottom:10px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);font-size:14px}
+th{color:var(--muted);font-weight:500}
+.tabwrap{overflow-x:auto}
+.badge{padding:2px 8px;border-radius:99px;font-size:12px;background:#2d3d33;color:var(--ok)}
+.badge[data-s=cancelled]{background:#47241f;color:var(--bad)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.stat{background:var(--panel2);border-radius:12px;padding:12px}.stat b{display:block;font-size:22px;color:var(--accent2)}
+.days{display:flex;gap:6px;flex-wrap:wrap}
+.days label{display:flex;align-items:center;gap:4px;margin:0;color:var(--text);background:var(--panel2);padding:6px 10px;border-radius:8px;min-height:36px}
+.days input{width:auto;min-height:0}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--accent);color:#1a1407;padding:10px 16px;border-radius:10px;font-weight:600;z-index:9}
+[hidden]{display:none!important}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main class="app">
+<header>
+<h1>Brass &amp; Blade</h1>
+<nav role="tablist" aria-label="Views">
+<button role="tab" data-view="book" aria-selected="true">Book</button>
+<button role="tab" data-view="admin" aria-selected="false">Admin</button>
+</nav>
+</header>
+<section id="book"></section>
+<section id="admin" hidden></section>
+<div id="toast" class="toast" role="status" hidden></div>
+</main>
+<script>
+(function(){
+const KEY='orizon.barber.v1';
+const DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const defaults={
+services:[{id:'s1',name:'Classic Cut',min:30,price:35},{id:'s2',name:'Beard Trim',min:20,price:22},{id:'s3',name:'Cut + Beard',min:50,price:55},{id:'s4',name:'Hot Towel Shave',min:30,price:40}],
+staff:[{id:'b1',name:'Marco',days:[2,3,4,5,6],start:9,end:17},{id:'b2',name:'Dre',days:[1,2,3,4,5],start:11,end:19},{id:'b3',name:'Sam',days:[4,5,6],start:10,end:18}],
+bookings:[]};
+let db=load();
+let st={step:0,svc:null,barber:null,date:null,time:null,name:'',email:'',done:null};
+const $=s=>document.querySelector(s);
+function load(){try{const d=JSON.parse(localStorage.getItem(KEY));if(d&&d.services)return d}catch(e){}return JSON.parse(JSON.stringify(defaults))}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(db))}catch(e){}}
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pad=n=>String(n).padStart(2,'0');
+const fmtT=m=>{const h=Math.floor(m/60),mm=m%60;return(h%12||12)+':'+pad(mm)+(h<12?' AM':' PM')};
+const iso=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+const parse=s=>{const[a,b,c]=s.split('-').map(Number);return new Date(a,b-1,c)};
+const fmtD=s=>parse(s).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+const svcOf=id=>db.services.find(s=>s.id===id);
+const stOf=id=>db.staff.find(s=>s.id===id);
+function toast(t){const e=$('#toast');e.textContent=t;e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>e.hidden=true,2400)}
+function nextDates(){const out=[];const d=new Date();for(let i=0;i<14;i++){out.push(iso(d));d.setDate(d.getDate()+1)}return out}
+function slotsFor(barber,date,svc){
+const b=stOf(barber),dow=parse(date).getDay();
+if(!b||!b.days.includes(dow))return[];
+const now=new Date(),isToday=date===iso(now),nowM=now.getHours()*60+now.getMinutes();
+const taken=db.bookings.filter(x=>x.barber===barber&&x.date===date&&x.status==='confirmed').map(x=>[x.start,x.start+x.min]);
+const res=[];
+for(let t=b.start*60;t+svc.min<=b.end*60;t+=30){
+const free=!taken.some(([a,e])=>t<e&&t+svc.min>a)&&!(isToday&&t<=nowM);
+res.push({t,free})}
+return res}
+function renderBook(){
+const el=$('#book');
+if(st.done){const b=st.done;el.innerHTML=`<div class="card"><h2>You're booked ✓</h2><p class="muted">A confirmation was sent to ${esc(b.email)}.</p>
+<div class="mail"><div class="hd">To: ${esc(b.email)}<br>From: hello@brassandblade.example<br>Subject: Confirmed — ${esc(svcOf(b.svc).name)} on ${esc(b.date)}</div>
+<h3>See you soon, ${esc(b.name)}.</h3>
+<p>Your appointment is confirmed:</p>
+<p><b>${esc(svcOf(b.svc).name)}</b> with <b>${esc(stOf(b.barber).name)}</b><br>${esc(fmtD(b.date))} at ${fmtT(b.start)}<br>Duration ${b.min} min · $${b.price}</p>
+<p>Reference: <b>${esc(b.id)}</b><br>Need to cancel? Reply to this email 24h ahead.</p></div>
+<div class="actions"><button id="newb" class="primary">Book another</button></div></div>`;return}
+const stepsHtml='<div class="steps">'+[0,1,2,3].map(i=>`<i data-on="${i<=st.step}"></i>`).join('')+'</div>';
+let body='';
+if(st.step===0){
+body='<h2>Choose a service</h2><div class="grid">'+db.services.map(s=>`<button class="opt" data-svc="${s.id}" aria-pressed="${st.svc===s.id}"><b>${esc(s.name)}</b><small>${s.min} min · $${s.price}</small></button>`).join('')+'</div>'}
+else if(st.step===1){
+body='<h2>Choose your barber</h2><div class="grid">'+db.staff.map(b=>`<button class="opt" data-barber="${b.id}" aria-pressed="${st.barber===b.id}"><b>${esc(b.name)}</b><small>${b.days.map(d=>DAYS[d]).join(' ')} · ${fmtT(b.start*60)}–${fmtT(b.end*60)}</small></button>`).join('')+'</div>'}
+else if(st.step===2){
+const svc=svcOf(st.svc);
+body='<h2>Pick a time</h2><label for="dt">Date</label><select id="dt">'+nextDates().map(d=>`<option value="${d}" ${st.date===d?'selected':''}>${fmtD(d)}</option>`).join('')+'</select>';
+if(!st.date)st.date=nextDates()[0];
+const sl=slotsFor(st.barber,st.date,svc);
+body=body.replace(/<option value="([^"]+)" >/g,'<option value="$1">');
+body+='<label>Available slots</label>'+(sl.length?'<div class="slots">'+sl.map(s=>`<button data-time="${s.t}" ${s.free?'':'disabled'} aria-pressed="${st.time===s.t}">${fmtT(s.t)}</button>`).join('')+'</div>':'<p class="muted">'+esc(stOf(st.barber).name)+' is off this day. Try another date.</p>')}
+else{
+const svc=svcOf(st.svc);
+body=`<h2>Your details</h2><p class="muted">${esc(svc.name)} · ${esc(stOf(st.barber).name)} · ${esc(fmtD(st.date))} ${fmtT(st.time)} · $${svc.price}</p>
+<div class="row"><div><label for="nm">Name</label><input id="nm" autocomplete="name" value="${esc(st.name)}"></div><div><label for="em">Email</label><input id="em" type="email" autocomplete="email" value="${esc(st.email)}"></div></div>`}
+const canNext=[st.svc,st.barber,st.time!==null&&st.date,true][st.step];
+el.innerHTML=`<div class="card">${stepsHtml}${body}<div class="actions"><button id="back" ${st.step?'':'disabled'}>Back</button><button id="next" class="primary" ${canNext?'':'disabled'}>${st.step===3?'Confirm booking':'Continue'}</button></div></div>`}
+function renderAdmin(){
+const live=db.bookings.filter(b=>b.status==='confirmed');
+const rev=live.reduce((a,b)=>a+b.price,0);
+const today=iso(new Date());
+const list=[...db.bookings].sort((a,b)=>(a.date+pad(a.start/60|0)+a.start).localeCompare(b.date+pad(b.start/60|0)+b.start));
+$('#admin').innerHTML=`<div class="card"><h2>Dashboard</h2><div class="stats">
+<div class="stat"><b>${live.length}</b>Upcoming</div><div class="stat"><b>${live.filter(b=>b.date===today).length}</b>Today</div><div class="stat"><b>$${rev}</b>Booked revenue</div></div>
+<div class="tabwrap"><table><thead><tr><th>When</th><th>Client</th><th>Service</th><th>Barber</th><th></th></tr></thead><tbody>${list.length?list.map(b=>`<tr><td>${esc(b.date)}<br><small class="muted">${fmtT(b.start)}</small></td><td>${esc(b.name)}<br><small class="muted">${esc(b.email)}</small></td><td>${esc(svcOf(b.svc)?.name||'')}</td><td>${esc(stOf(b.barber)?.name||'')}</td><td>${b.status==='confirmed'?`<button data-cancel="${b.id}">Cancel</button>`:'<span class="badge" data-s="cancelled">cancelled</span>'}</td></tr>`).join(''):'<tr><td colspan="5" class="muted">No bookings yet.</td></tr>'}</tbody></table></div></div>
+<div class="card"><h2>Staff schedules</h2>${db.staff.map(b=>`<fieldset style="border:1px solid var(--line);border-radius:12px;margin:0 0 10px;padding:10px"><legend>${esc(b.name)}</legend>
+<div class="days" data-staff="${b.id}">${DAYS.map((d,i)=>`<label><input type="checkbox" data-day="${i}" ${b.days.includes(i)?'checked':''}>${d}</label>`).join('')}</div>
+<div class="row"><div><label>Start hour</label><input type="number" min="0" max="23" data-f="start" data-id="${b.id}" value="${b.start}"></div><div><label>End hour</label><input type="number" min="1" max="24" data-f="end" data-id="${b.id}" value="${b.end}"></div></div></fieldset>`).join('')}</div>`}
+function render(){renderBook();renderAdmin()}
+document.addEventListener('click',e=>{
+const t=e.target.closest('button');if(!t)return;
+if(t.dataset.view){document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-selected',b===t));$('#book').hidden=t.dataset.view!=='book';$('#admin').hidden=t.dataset.view!=='admin';return}
+if(t.dataset.svc){st.svc=t.dataset.svc;st.time=null}
+else if(t.dataset.barber){st.barber=t.dataset.barber;st.time=null}
+else if(t.dataset.time){st.time=+t.dataset.time}
+else if(t.id==='back'){st.step--}
+else if(t.id==='next'){
+if(st.step===3){
+const nm=$('#nm').value.trim(),em=$('#em').value.trim();
+st.name=nm;st.email=em;
+if(!nm||!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)){toast('Enter a name and valid email');return}
+const svc=svcOf(st.svc);
+if(!slotsFor(st.barber,st.date,svc).some(s=>s.t===st.time&&s.free)){toast('That slot was just taken');st.step=2;st.time=null;render();return}
+const b={id:'BB-'+Math.random().toString(36).slice(2,7).toUpperCase(),svc:st.svc,barber:st.barber,date:st.date,start:st.time,min:svc.min,price:svc.price,name:nm,email:em,status:'confirmed'};
+db.bookings.push(b);save();st.done=b}
+else st.step++}
+else if(t.id==='newb'){st={step:0,svc:null,barber:null,date:null,time:null,name:'',email:'',done:null}}
+else if(t.dataset.cancel){const b=db.bookings.find(x=>x.id===t.dataset.cancel);if(b){b.status='cancelled';save();toast('Booking cancelled')}}
+else return;
+render()});
+document.addEventListener('change',e=>{
+const t=e.target;
+if(t.id==='dt'){st.date=t.value;st.time=null;render();return}
+const wrap=t.closest('[data-staff]');
+if(wrap&&t.dataset.day!==undefined){const b=stOf(wrap.dataset.staff);const d=+t.dataset.day;b.days=t.checked?[...new Set([...b.days,d])].sort():b.days.filter(x=>x!==d);save();toast('Schedule saved');return}
+if(t.dataset.f){const b=stOf(t.dataset.id);let v=Math.max(0,Math.min(24,+t.value||0));
+if(t.dataset.f==='start')b.start=Math.min(v,b.end-1);else b.end=Math.max(v,b.start+1);
+save();toast('Schedule saved');renderAdmin()}});
+document.addEventListener('input',e=>{if(e.target.id==='nm')st.name=e.target.value;if(e.target.id==='em')st.email=e.target.value});
+render();
+})();
+</script>
+</body>
+</html>
