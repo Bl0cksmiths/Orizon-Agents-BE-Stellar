@@ -42,9 +42,9 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, TypeVar
 
 from stellar_sdk import scval
 from stellar_sdk.soroban_rpc import EventFilter, EventFilterType, EventInfo
@@ -189,7 +189,10 @@ def _read_range(server: Any, filters: list[EventFilter], start: int, end: int, d
     full. Raises `_Dense` for a single ledger that overflows a page (carrying
     what it did return), TimeoutError past the deadline, and whatever the node
     raises."""
-    page = server.get_events(start_ledger=start, end_ledger=end, filters=filters, limit=PAGE_EVENT_LIMIT)
+    page = _twice(
+        lambda: server.get_events(start_ledger=start, end_ledger=end, filters=filters, limit=PAGE_EVENT_LIMIT),
+        deadline,
+    )
     events = [e for e in page.events if start <= e.ledger < end]
     if len(page.events) < PAGE_EVENT_LIMIT:
         return events
@@ -199,6 +202,22 @@ def _read_range(server: Any, filters: list[EventFilter], start: int, end: int, d
         raise TimeoutError("out of time splitting a full page")
     middle = (start + end) // 2
     return _read_range(server, filters, start, middle, deadline) + _read_range(server, filters, middle, end, deadline)
+
+
+_T = TypeVar("_T")
+
+
+def _twice(read: Callable[[], _T], deadline: float) -> _T:
+    """`read()`, asked once more if it fails while there is time. The read
+    profile does not retry (`sc._server()`), and one dropped request would
+    otherwise end a build's scan where a second ask would have finished it."""
+    try:
+        return read()
+    except Exception as e:
+        if time.monotonic() >= deadline:
+            raise
+        logger.info("[charges] read failed, asking once more: %s: %s", type(e).__name__, e)
+        return read()
 
 
 @dataclass(frozen=True)
@@ -217,8 +236,8 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
     """
     server = sc._server()
     filters = [_window_filter(escrow_id)]
-    latest = server.get_latest_ledger().sequence
-    probe = server.get_events(start_ledger=latest, filters=filters, limit=1)
+    latest = _twice(server.get_latest_ledger, deadline).sequence
+    probe = _twice(lambda: server.get_events(start_ledger=latest, filters=filters, limit=1), deadline)
     window_start = max(probe.oldest_ledger, latest - settlement_svc.RETENTION_LEDGERS + 1, 1)
     seconds_per_ledger = settlement_svc._seconds_per_ledger(probe)
     in_window = latest - window_start + 1
