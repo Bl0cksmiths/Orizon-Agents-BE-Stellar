@@ -368,6 +368,7 @@ def test_building_a_handoff_leaves_the_context_untouched() -> None:
 
 def test_delivered_roles_are_what_an_operator_envelope_carries() -> None:
     ctx = run_context(**{"research.pro": research(), "seo.brief": seo(), "external.agt_x": {"summary": "s"}})
+    ctx["images"] = {"media_type": "image/png", "data": "QUJD"}  # the buyer's input, not a step's output
     assert handoff.delivered_roles(ctx) == ["research.pro", "seo.brief", "external.agt_x"]
     assert handoff.delivered_roles(None) == []
 

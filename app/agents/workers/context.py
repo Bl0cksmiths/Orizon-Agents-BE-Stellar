@@ -84,8 +84,9 @@ CODE_ROLES: tuple[str, ...] = (CODE_GEN, CODE_NEXT, CODE_CRITIC)
 # A bound operator's output is filed under "external.<agent_id>".
 EXTERNAL_PREFIX = "external."
 
-# `context` keys that are not a step's output.
-META_KEYS = frozenset({"kit", "intent"})
+# `context` keys that are not a step's output: the curated kit, the request,
+# and the buyer's uploaded images (`vision_input.UPLOADED_IMAGES_KEY`).
+META_KEYS = frozenset({"kit", "intent", "images"})
 
 # The handoff map: consumer → the upstream roles it reads, most useful first.
 # Bound operators' outputs follow these, in delivery order, for every consumer
