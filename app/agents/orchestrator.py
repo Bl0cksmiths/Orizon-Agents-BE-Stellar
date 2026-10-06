@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict
+
 from ..config import settings
+from ..llm.tiers import Tier
 from ..schemas import Plan
 from .model_factory import LazyAgent, lazy_agent
 
@@ -84,6 +87,30 @@ Do not add seo.brief or copywrite.v3 unless the request explicitly asks for mark
 plans short and direct: every step is paid for.
 
 Return only the structured plan."""
+
+
+class PlannedStep(BaseModel):
+    """One step as the Claude planner proposes it — before the clamp.
+
+    Lean on purpose: price, name and reputation are registry facts the clamp
+    stamps from its own snapshot, so the model is not asked for them, and a
+    field it is not asked for is one it cannot get wrong.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    rationale: str
+    est_eta_seconds: float
+    tier: Tier
+
+
+class ModelPlan(BaseModel):
+    """The Claude planner's structured output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[PlannedStep]
 
 
 def _build() -> LazyAgent:
