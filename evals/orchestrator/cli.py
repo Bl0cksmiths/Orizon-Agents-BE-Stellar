@@ -184,7 +184,7 @@ def _run(args: argparse.Namespace) -> int:
     print(
         f"scored {outcome.scored}, failed {outcome.errors} {dict(outcome.error_classes) or ''}, "
         f"resumed past {outcome.skipped_resume}, not started {outcome.skipped_budget}; "
-        f"measured spend {cost.usd(outcome.spent_usd)}"
+        + (f"measured spend {cost.usd(outcome.spent_usd)}" if pipeline.live else "nothing billed")
     )
     print(report.headline(cfg.variant_dir))
     print(f"summary: {summary}\nsweep:   {sweep_md}")
