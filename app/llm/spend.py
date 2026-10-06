@@ -34,6 +34,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 from ..config import settings
+from ..services.pg_schema import create_schema
 from .errors import SpendCapReached
 
 logger = logging.getLogger(__name__)
@@ -157,20 +158,6 @@ ON CONFLICT (day, model, purpose) DO UPDATE SET
 
 _TOTAL_SQL = "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM llm_spend WHERE day = $1"
 
-# `CREATE TABLE IF NOT EXISTS` is not safe against itself: two sessions
-# creating the same table at once can both pass the check, and the loser fails
-# on the catalog's unique index. Two processes first using the ledger together
-# (an old and a new instance across a deploy) would do exactly that, so the
-# DDL runs under a transaction-scoped advisory lock keyed to this table.
-_DDL_LOCK_KEY = 0x6C6C6D5F7370656E  # "llm_spen"
-
-
-async def _create_table(pool: Any) -> None:
-    async with pool.acquire(timeout=_POOL_CONNECT_TIMEOUT) as conn:
-        async with conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", _DDL_LOCK_KEY, timeout=_POOL_COMMAND_TIMEOUT)
-            await conn.execute(_CREATE_TABLE_SQL, timeout=_POOL_COMMAND_TIMEOUT)
-
 
 class SpendStore(Protocol):
     async def add(self, day: date, model: str, purpose: str, usage: Usage, cost: float) -> None: ...
@@ -218,7 +205,9 @@ class PostgresSpendStore:
                     command_timeout=_POOL_COMMAND_TIMEOUT,
                 )
                 try:
-                    await _create_table(pool)
+                    # Under the DDL lock: two processes first using the ledger
+                    # at once (a deploy's old and new instance) must not race.
+                    await create_schema(pool, "llm_spend", _CREATE_TABLE_SQL, timeout=_POOL_COMMAND_TIMEOUT)
                 except BaseException:
                     await pool.close()
                     raise
