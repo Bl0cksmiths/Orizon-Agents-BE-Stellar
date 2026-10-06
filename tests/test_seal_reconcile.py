@@ -328,7 +328,7 @@ def test_the_receipt_carries_the_seal_state_and_the_proof_it_found(
 
     receipt = client.get("/api/tasks/tsk_v2_seal_receipt/disputes").json()
 
-    assert (receipt["seal"], receipt["proof_tx"]) == ("sealed", H2)
+    assert (receipt["seal"], receipt["seal_kind"], receipt["proof_tx"]) == ("sealed", "paid", H2)
     assert receipt["settlement"]["proof_tx"] == H2
 
 
@@ -367,6 +367,42 @@ def test_without_the_task_the_receipt_reads_the_seal_off_the_settlement() -> Non
         settled_at=1.0,
         window_closes_at=2.0,
     )
-    assert disputes._receipt_seal("tsk_v2_seal_gone", record) == ("sealed", H1)
-    assert disputes._receipt_seal("tsk_v2_seal_gone", replace(record, proof_tx=None)) == (None, None)
-    assert disputes._receipt_seal("tsk_v2_seal_gone", None) == (None, None)
+    assert disputes._receipt_seal("tsk_v2_seal_gone", record) == ("sealed", "paid", H1)
+    # A sealed run that moved nothing was attested as delivery only.
+    unpaid = replace(record, settled_usdc=0.0)
+    assert disputes._receipt_seal("tsk_v2_seal_gone", unpaid) == ("sealed", "delivery_only", H1)
+    assert disputes._receipt_seal("tsk_v2_seal_gone", replace(record, proof_tx=None)) == (None, None, None)
+    assert disputes._receipt_seal("tsk_v2_seal_gone", None) == (None, None, None)
+
+
+# ── delivery-only seals (nobody could be paid) ──────────────────────────
+def test_a_delivery_only_seal_is_reconciled_like_a_paid_one(
+    monkeypatch: pytest.MonkeyPatch, store: _Store, client: Any
+) -> None:
+    """Rejected once, provably absent, re-submitted identically — still with no
+    receipt and a zero total — and labelled delivery-only on the task, in the
+    trace and on the receipt."""
+    now = time.time()
+    chain = _install_seal(
+        monkeypatch,
+        _SealChain(
+            [{"hash": H1, "status": "FAILED"}, {"hash": H2, "status": "SUCCESS"}],
+            lookups={H1: [_found(H1, "FAILED", latest_close=now)]},
+        ),
+    )
+    chain.owners = {"agt_0": None, "agt_1": None}
+
+    _run(_plan((0.01, 0.02)), "tsk_v2_seal_delivery")
+
+    first, second = chain.named("seal")
+    assert [a.to_xdr() for a in first] == [a.to_xdr() for a in second]
+    assert (scval.to_native(second[5]), scval.to_native(second[6])) == ([], 0)
+    task = state.tasks["tsk_v2_seal_delivery"]
+    assert (task.seal, task.seal_kind, task.proof_tx) == ("sealed", "delivery_only", H2)
+    assert any(
+        m.startswith("workflow sealed — 2 agents delivered, no payment was made")
+        for m in _messages("tsk_v2_seal_delivery")
+    )
+    receipt = client.get("/api/tasks/tsk_v2_seal_delivery/disputes").json()
+    assert (receipt["seal"], receipt["seal_kind"], receipt["proof_tx"]) == ("sealed", "delivery_only", H2)
+    assert receipt["settlement_state"] == "settled" and receipt["settlement"]["settled_usdc"] == 0
