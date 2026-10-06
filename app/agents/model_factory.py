@@ -30,6 +30,7 @@ or run pays it instead, once per process.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from ..config import settings
@@ -122,3 +123,30 @@ def worker_tier(tier: object, default: Tier) -> Tier:
 def step_model_label(tier: Tier) -> str:
     """The trace's name for the model a step of `tier` runs on, with the tier."""
     return f"{display_name(model_for(tier))} (tier: {tier})"
+
+
+# The models a server-side fallback answered with during the current step,
+# collected so the trace names the model that actually served the step. The
+# run loop starts a fresh list per step (`watch_served_models`); the step's
+# task inherits the context, so `note_served_model` appends to that step's
+# list and no other — concurrent runs each have their own.
+_served_models: ContextVar[list[str] | None] = ContextVar("worker_served_models", default=None)
+
+
+def watch_served_models() -> list[str]:
+    """Start collecting, for the step about to run, the fallback models that serve it."""
+    served: list[str] = []
+    _served_models.set(served)
+    return served
+
+
+def note_served_model(model: str) -> None:
+    """Record that a fallback `model` answered a call of the current step."""
+    served = _served_models.get()
+    if served is not None:
+        served.append(model)
+
+
+def served_model_label(tier: Tier, model: str) -> str:
+    """The trace's name for a fallback model that served a step of `tier`."""
+    return f"{display_name(model)} (fallback; tier: {tier})"
