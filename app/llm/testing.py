@@ -24,6 +24,7 @@ validation — only the network is replaced.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections import deque
@@ -59,6 +60,17 @@ def _as_text(value: Any) -> str:
 class _Step:
     make: Callable[[ClaudeRequest], Completion]
     persistent: bool = False
+    cut: _Cut | None = None
+
+
+@dataclass(frozen=True)
+class _Cut:
+    """A stream that starts, delivers `text`, then fails or hangs until cancelled."""
+
+    text: str
+    usage: Usage
+    output_tokens: int
+    error: BaseException | None
 
 
 class FakeClaude:
@@ -134,6 +146,25 @@ class FakeClaude:
 
         return self._push(purpose, _Step(make))
 
+    def cut_stream(
+        self,
+        text: str,
+        *,
+        purpose: str | None = None,
+        usage: Usage = REFUSAL_USAGE,
+        output_tokens: int = 0,
+        error: BaseException | None = None,
+    ) -> FakeClaude:
+        """Start the next matching stream like the API does — `usage`'s input and
+        cache tokens at message_start, `output_tokens` as the API's last reported
+        count — deliver `text`, then raise `error`, or with none hang until the
+        caller cancels (a stream budget running out)."""
+
+        def make(request: ClaudeRequest) -> Completion:
+            raise AssertionError("cut_stream is played by complete()")
+
+        return self._push(purpose, _Step(make, cut=_Cut(text, usage, output_tokens, error)))
+
     def fail(self, error: BaseException, *, purpose: str | None = None) -> FakeClaude:
         """Raise `error` (an `LLMUnavailable`, say) from the next matching call."""
 
@@ -173,14 +204,37 @@ class FakeClaude:
 
     async def complete(self, request: ClaudeRequest) -> Completion:
         self.calls.append(request)
-        completion = self._next(request.purpose).make(request)
-        if request.stream and request.on_text is not None and completion.text:
-            step = max(1, len(completion.text) // 3)
-            for i in range(0, len(completion.text), step):
-                maybe = request.on_text(completion.text[i : i + step])
+        step = self._next(request.purpose)
+        if step.cut is not None:
+            cut = step.cut
+            if request.progress is not None:
+                request.progress.start(request.model, cut.usage)
+                request.progress.output_tokens = max(request.progress.output_tokens, cut.output_tokens)
+            await self._play(request, cut.text)
+            if cut.error is not None:
+                raise cut.error
+            await asyncio.Event().wait()  # hangs until the caller's budget cancels it
+        completion = step.make(request)
+        if request.stream and request.progress is not None:
+            billed = completion.attempts[-1].usage
+            request.progress.start(completion.model, Usage(billed.input_tokens, 0, billed.cache_read_tokens))
+        await self._play(request, completion.text)
+        return completion
+
+    @staticmethod
+    async def _play(request: ClaudeRequest, text: str) -> None:
+        """Stream `text` in a few deltas, tracked as the real transport tracks them."""
+        if not request.stream or not text:
+            return
+        size = max(1, len(text) // 3)
+        for i in range(0, len(text), size):
+            delta = text[i : i + size]
+            if request.progress is not None:
+                request.progress.streamed_chars += len(delta)
+            if request.on_text is not None:
+                maybe = request.on_text(delta)
                 if inspect.isawaitable(maybe):
                     await maybe
-        return completion
 
     # ── reading back ──
 
