@@ -141,6 +141,10 @@ SELECT seq, line FROM task_trace_lines WHERE task_id = $1 ORDER BY seq
 
 _SELECT_PLAN_SQL = "SELECT body FROM stored_plans WHERE plan_id = $1"
 
+# The newest tasks by start time, for the boot warm-up (services/task_warmup.py).
+# `task_records_started_at_idx` serves the ORDER BY ... LIMIT as an index scan.
+_SELECT_RECENT_IDS_SQL = "SELECT task_id FROM task_records ORDER BY started_at DESC LIMIT $1"
+
 # Past the age limit, or past the newest TASK_RETENTION_MAX by start time.
 _PRUNE_TASKS_SQL = """
 DELETE FROM task_records
@@ -275,6 +279,10 @@ class TaskStore(Protocol):
     async def load_task(self, task_id: str) -> StoredTask | None: ...
 
     async def load_plan(self, plan_id: str) -> StoredPlan | None: ...
+
+    async def recent_task_ids(self, limit: int) -> list[str]:
+        """The newest `limit` task ids by start time, newest first."""
+        ...
 
     async def prune(self, *, task_cutoff: float, max_tasks: int, plan_cutoff: float) -> PruneResult: ...
 
@@ -411,6 +419,13 @@ class PostgresTaskStore:
         except ValueError:
             logger.exception("task store: plan %s has a row that cannot be read back; treating it as absent", plan_id)
             return None
+
+    async def recent_task_ids(self, limit: int) -> list[str]:
+        if limit <= 0:
+            return []
+        pool = await self._ready_pool()
+        rows = await pool.fetch(_SELECT_RECENT_IDS_SQL, limit, timeout=_POOL_COMMAND_TIMEOUT)
+        return [str(row["task_id"]) for row in rows]
 
     async def prune(self, *, task_cutoff: float, max_tasks: int, plan_cutoff: float) -> PruneResult:
         pool = await self._ready_pool()
