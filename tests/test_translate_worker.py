@@ -122,6 +122,28 @@ def test_ads_and_extracted_text_are_segmented_with_their_labels() -> None:
     assert trimmed is False
 
 
+def test_research_audit_and_seo_text_is_segmented_without_the_handoffs_annotations() -> None:
+    context = {
+        "research.pro": {"summary": "Co-ops thrive.", "findings": [{"claim": "Riders want fixes.", "confidence": 0.8}]},
+        "sol-audit": {
+            "summary": "One issue.",
+            "findings": [{"severity": "high", "title": "Reentrancy", "rationale": "withdraw() calls out first"}],
+        },
+        "seo.brief": {"summary": "Local intent.", "tagline": "Fix it together", "keywords": ["bike repair"]},
+    }
+    segments, _ = translate.source_segments(list(upstream(context, "translate.42")))
+    assert [(s.role, s.label, s.text) for s in segments] == [
+        ("research.pro", "Research summary", "Co-ops thrive."),
+        ("research.pro", "Finding 1", "Riders want fixes."),
+        ("sol-audit", "Audit summary", "One issue."),
+        ("sol-audit", "Audit finding 1", "Reentrancy"),
+        ("sol-audit", "Audit finding 1 detail", "withdraw() calls out first"),
+        ("seo.brief", "Tagline", "Fix it together"),
+        ("seo.brief", "SEO summary", "Local intent."),
+    ]
+    assert not any("background, not facts" in s.text or "confidence" in s.text for s in segments)
+
+
 def test_the_source_is_bounded_and_says_so(claude: FakeClaude, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(translate, "MAX_SOURCE_CHARS", 40)
     claude.reply(_draft(_lang("tl", "Tagalog", {"S1": "Ayusin natin"})))
