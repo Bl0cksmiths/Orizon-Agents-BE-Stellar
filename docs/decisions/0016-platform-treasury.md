@@ -72,3 +72,60 @@ disagree.
 | Management preflight (`_agent_exists`) | Now finds `agt_` ids, so an update-price / set-active XDR can be built for one; only the treasury key can sign it. | Safe |
 | Binding | An `agt_` binding could only be signed by the treasury and is never used: the local worker wins. | Safe |
 | Reputation | Keyed by agent id on the ReputationLedger, not the registry. | Unaffected |
+
+## Decision
+
+### B1 — One treasury, declared in the team register
+
+A new testnet account, `GDOGIRT73NAQ7VRCIOK7G76EK7MAOC55EDT5GG4EKRE4VPVWSWG7KSP3`
+(stellar-cli identity `orizon-treasury`, friendbot-funded in tx `26d4b8f9…e515`),
+is the owner of every built-in agent. It is declared in
+`app/data/team_wallets.json` with the role
+`platform treasury (built-in agents' payee)`, so the adoption report and the
+overview count it as ours (ADR 0012), and `services/platform_treasury.py`
+reads it from there — the one entry with that role. None declared means no
+treasury; two is `TreasuryError`, and both mean no built-in step is paid.
+
+### B2 — Registered on the catalog's own terms, and checked every pass
+
+`platform_treasury.registrations()` derives each `register` call from the
+seeded agent in `state.agents`: its name, its skills as Symbols (any character
+outside `[A-Za-z0-9_]` becomes `_`, so `42 langs` → `42_langs`), and
+`money.to_stroops(price)` — the very number a plan freezes into
+`PlanStep.price_stroops`. The twelve are pinned literally in
+`tests/test_platform_treasury.py`.
+
+The registry mirror still never upserts an `agt_` id. The built-in ones now
+ride in the pass's single batch read and are compared with those terms; the
+verdict per id — `registered`, `mismatch` (a term differs), `foreign_owner`,
+`unregistered`, `unread` — is logged once per change and served on
+`GET /readiness` under `treasury`. An `agt_` id with no worker is skipped as
+before. Nothing reads the on-chain price into a plan, so a reprice on-chain
+(only the treasury can sign one) shows as `mismatch` and charges nothing
+different.
+
+### B3 — Built-in stays built-in
+
+Built-in means "has a local worker" (`get_worker`) everywhere: `plannable()`,
+the plan's `executor` stamp, `resolve_worker`, and now the payout rule. An
+on-chain record never changes that, and the counts stay over `state.agents`,
+where the twelve are `seeded` and never also `onchain`.
+
+### B4 — A built-in step is paid to the treasury, and to nobody else
+
+Before a settle, `execution_svc._settle_owners` reads `owner_of` for every
+delivered agent (cached as before). A built-in agent is named in the payouts
+only when that owner **is** the declared treasury; otherwise its step is
+recorded unpaid with `unpaid_reason: owner_not_platform_treasury`, its price is
+returned to the buyer in the same settle, and the trace says "… is registered
+on-chain to an account that is not the platform treasury — its step is not
+paid". An operator's agent is paid to its owner exactly as before. This closes
+the squat: `register` is permissionless and write-once, so whoever registered
+an unclaimed `agt_` id would otherwise collect for the platform's work.
+
+### B5 — The receipt says who was paid
+
+`SettlementStep.payee` keeps the confirmed owner each paid step's payout went
+to (JSONB, no migration; older rows read null). The receipt's step gains
+`payee` and `payee_role` — `platform_treasury` or `operator` — both null for an
+unpaid step.
