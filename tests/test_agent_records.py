@@ -148,7 +148,7 @@ def test_a_failed_request_leaves_only_its_own_ids_for_the_ordinary_read(ledger: 
     real = fake.get_ledger_entries
 
     def flaky(keys: list[stellar_xdr.LedgerKey]) -> GetLedgerEntriesResponse:
-        if len(fake.requests) == 0:
+        if len(keys) == 200:  # the first batch fails, and so does its retry
             fake.requests.append(keys)
             raise ConnectionError("rpc down")
         return real(keys)
@@ -158,6 +158,25 @@ def test_a_failed_request_leaves_only_its_own_ids_for_the_ordinary_read(ledger: 
     records = sc.read_agent_records(REGISTRY_ID, ids)
 
     assert sorted(records) == ids[200:]
+    assert [len(k) for k in fake.requests] == [200, 200, 50]
+
+
+def test_a_batch_that_fails_once_is_asked_again(ledger: Any) -> None:
+    """One dropped request must not send 200 ids down the slow path."""
+    ids = [f"op_{i:04d}" for i in range(3)]
+    fake = ledger({i: _record(i) for i in ids})
+    real = fake.get_ledger_entries
+
+    def once(keys: list[stellar_xdr.LedgerKey]) -> GetLedgerEntriesResponse:
+        if not fake.requests:
+            fake.requests.append(keys)
+            raise TimeoutError("read timed out")
+        return real(keys)
+
+    fake.get_ledger_entries = once
+
+    assert sorted(sc.read_agent_records(REGISTRY_ID, ids)) == ids
+    assert len(fake.requests) == 2
 
 
 def test_an_unreachable_rpc_reads_as_nothing_answered(monkeypatch: pytest.MonkeyPatch) -> None:
