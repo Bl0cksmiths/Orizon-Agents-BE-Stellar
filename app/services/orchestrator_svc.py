@@ -15,6 +15,7 @@ from typing import Any, NamedTuple, Protocol
 from pydantic import ValidationError
 
 from ..agents.orchestrator import draft_plan, orchestrator_agent
+from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
@@ -252,6 +253,30 @@ class _RegistrySnapshot(NamedTuple):
     agents: tuple[Agent, ...]
     routable: tuple[Agent, ...]
     unreachable: tuple[Agent, ...] = ()
+
+
+def _with_executor(step: PlanStep) -> PlanStep:
+    """`step` stamped with who runs it and, for our own workers, on which model.
+
+    Built-in is exactly what `/execute` will treat as first-party: the agent
+    id has a local worker (`get_worker`). Everything else a plan can hold is a
+    bound operator endpoint, whose model is the operator's business, so it is
+    named as external with no model rather than with a guess.
+
+    The model is the one the step's tier routes to on the active provider —
+    `model_for(tier)` on Claude, the agno worker model on OpenAI. A step with
+    no tier on the Claude path (a kit planned while the check was paused)
+    falls back to the worker's own default tier, which is what it will run on.
+    Stamped once, in each builder's last pass over its steps, so the kit path,
+    the free-form clamp and the fallback cannot disagree about it.
+    """
+    worker = get_worker(step.agent_id)
+    if worker is None:
+        return step.model_copy(update={"executor": "external", "model": None})
+    if provider.active_provider() != "anthropic":
+        return step.model_copy(update={"executor": "built_in", "model": settings.worker_model})
+    tier = step.tier or getattr(worker, "default_tier", None)
+    return step.model_copy(update={"executor": "built_in", "model": model_for(tier) if tier else None})
 
 
 def _snapshot_registry() -> _RegistrySnapshot:
@@ -882,7 +907,7 @@ async def _build_kit_plan(
     # path used to report none, so a demo intent showed a marketplace with
     # agents its plan card never accounted for.
     notices += _unbound_notices(registry)
-    steps = [step for _, step in sorted(placed, key=lambda p: p[0])]
+    steps = [_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in steps)
@@ -1225,6 +1250,7 @@ def _finish_free_form(
             )
         ]
 
+    cleaned = [_with_executor(step) for step in cleaned]
     notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
