@@ -177,3 +177,20 @@ def test_research_on_a_kit_asks_no_model_and_reads_nothing_upstream(claude: Fake
     assert worker.upstream_sources(context) == []
     run("agt_09l5", context)
     assert claude.calls == []
+
+
+def _tokens_reply() -> dict[str, Any]:
+    keys = ["bg", "surface", "surface_2", "border", "text", "muted", "primary", "accent", "danger"]
+    colours = dict.fromkeys(keys, "#123")
+    return {**colours, "family_ui": "Inter, sans-serif", "family_display": "Inter, sans-serif"}
+
+
+def test_design_takes_its_tone_from_the_brand_and_the_copy(claude: FakeClaude) -> None:
+    claude.reply(_tokens_reply(), purpose="worker.design.figma")
+    copy = {"hero": {"headline": "COPY-HEADLINE Fix it together", "subtitle": "sub"}, "sections": []}
+    brand = {**seo(), "brand_name": "SEO-BRAND Spoke", "tagline": "Ride on"}
+    run("agt_02k2", ctx(**{"seo.brief": brand, "copywrite.v3": copy, "research.pro": research()}))
+    body = fenced_body(claude.calls_for("worker.design.figma")[0].user)
+    assert "Brand name: SEO-BRAND Spoke" in body
+    assert "Hero headline: COPY-HEADLINE Fix it together" in body
+    assert body.index("seo.brief") < body.index("copywrite.v3") < body.index("research.pro")

@@ -63,12 +63,20 @@ _INSTRUCTIONS = (
 # Room for the JSON plus any thinking the tier's model does first.
 MAX_TOKENS = 8_000
 
+# How to use what earlier steps handed on (see `context.CONSUMES`).
+UPSTREAM_GUIDANCE = (
+    "Fit the tokens to them: the brand name, tagline and audiences set the "
+    "tone, and the copy's headline and voice hint at the mood. Keep WCAG AA "
+    "contrast whatever they suggest."
+)
+
 
 class DesignTokens(ModelWorker):
     id = "agt_02k2"
     name = "design.figma"
     real = True
     default_tier = "low"
+    reads_upstream = True
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
@@ -80,6 +88,15 @@ class DesignTokens(ModelWorker):
 
     def _deterministic(self, context: dict[str, Any] | None) -> bool:
         return bool((context or {}).get("kit"))
+
+    def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
+        """The free-form prompt: the fenced request, then the fenced upstream outputs."""
+        return worker_prompt(
+            intent,
+            rationale,
+            "Return the design tokens.",
+            sections=[self.handoff(context).section(UPSTREAM_GUIDANCE)],
+        )
 
     async def run(
         self,
@@ -104,7 +121,7 @@ class DesignTokens(ModelWorker):
             )
 
         # ── Free-form path: LLM-generated tokens ───────────────────────────
-        prompt = worker_prompt(intent, rationale, "Return the design tokens.")
+        prompt = self.build_prompt(intent, rationale, context)
         out: _TokensOutput
         if claude_workers():
             out = await claude_step.structured(
