@@ -8,9 +8,11 @@ entry points, in the order `/api/orchestrator/decompose` uses them:
     prompt_improver.recheck / resolve   jev re-check of the Spec    │ allowed, with
     agents.orchestrator.draft_plan      Opus 5.5 RAW plan           ┘ --stages all
 
-The improver runs after the guard here rather than beside it: the outcome is
-the same (the app discards the improver's work on a refusal), and the eval
-does not pay for specs nobody plans from.
+This is `intent_screening.screen_free_form`'s sequence with one difference:
+the improver runs after the guard rather than beside it. The outcome is the
+same (the app discards the improver's work on a refusal), the eval does not
+pay for specs nobody plans from, and calling the functions directly keeps the
+guard's scores and reasons, which a refusal exception does not carry.
 
 Accounting happens at the transport seam (`claude.set_transport`,
 `jev.set_transport`): every request and completion, refusals and truncations
@@ -43,14 +45,12 @@ from typing import Any
 from app.llm import claude, jev, spend
 from app.llm.errors import JevUnavailable, LLMError, LLMInvalidOutput, LLMRefused, LLMTruncated, LLMUnavailable
 from app.llm.errors import SpendCapReached as AppSpendCapReached
-from app.llm.tiers import Tier
 from app.services import intent_guard, prompt_improver
+from app.services.intent_screening import PROVISIONAL_IMPROVER_TIER
 
 from .contract import CaseRun, GuardObservation, PipelineUnavailable, PlanObservation, SpendCapReached, StageCall
 from .dataset import Case
 from .synthetic import noisy_scores
-
-IMPROVER_TIER: Tier = "moderate"
 
 # Planner calls, by the planner lane's contract: draft_plan(request, *, tier, agents_block) -> LLMResult[ModelPlan].
 PlanFn = Callable[..., Awaitable[Any]]
@@ -237,9 +237,9 @@ class AppPipeline:
         if stages == "all" and verdict == "allow" and tier is not None:
             spec = None
             try:
-                # The app writes the spec before the guard's tier is known, on a
-                # provisional middle tier (intent_screening.PROVISIONAL_IMPROVER_TIER).
-                spec = await prompt_improver.improve(intent, IMPROVER_TIER)
+                # The app writes the spec before the guard's tier is known, on
+                # its provisional tier; the eval asks for the same spec.
+                spec = await prompt_improver.improve(intent, PROVISIONAL_IMPROVER_TIER)
             except AppSpendCapReached:
                 raise
             except LLMError as e:  # the app plans from the original on any improver failure
