@@ -184,6 +184,20 @@ _KIT_ETAS: dict[str, float] = {
     "agt_08j2": 0.4,  # deploy (deterministic seal)
 }
 
+# The model tier each kit ROLE runs on, before the request's own tier caps it.
+# The deterministic roles are low: they read the kit, not a model. code.gen
+# serves a baked artifact where the kit has one and code.critic polishes it —
+# real model work, but bounded by a fixed brief, so moderate rather than the
+# planner-grade tier.
+_KIT_TIERS: dict[str, Tier] = {
+    "agt_09l5": "low",
+    "agt_05x7": "low",
+    "agt_02k2": "low",
+    "agt_11c0": "moderate",
+    "agt_12r0": "moderate",
+    "agt_08j2": "low",
+}
+
 
 def _is_listed(agent: Agent) -> bool:
     """Whether this agent's operator still wants work routed to it.
@@ -376,6 +390,7 @@ def _kit_step(
     reps: dict[str, reputation_svc.RepInfo],
     substituted_for: str | None = None,
     degraded: bool = False,
+    tier: Tier | None = None,
 ) -> PlanStep:
     """One curated-pipeline step, priced from the registry and rep-stamped.
 
@@ -392,6 +407,7 @@ def _kit_step(
         est_eta_seconds=eta,
         substituted_for=substituted_for,
         degraded=degraded,
+        tier=tier,
         **_rep_fields(reps.get(agent.id)),
     )
 
@@ -752,6 +768,12 @@ async def _build_kit_plan(
     registry = registry or _snapshot_registry()
     routable = {a.id for a in registry.routable}
     by_id = {a.id: a for a in registry.agents}
+    plan_tier = pipeline.screening.tier if pipeline is not None else None
+
+    def role_tier(role_id: str) -> Tier | None:
+        # A stand-in inherits the ROLE's tier, as it inherits the role's eta.
+        return _capped_tier(_KIT_TIERS.get(role_id, "low"), plan_tier)
+
     await _kit_thinking()
 
     # (pipeline position, step). Execution runs steps in list order and later
@@ -809,7 +831,7 @@ async def _build_kit_plan(
 
         eta = _KIT_ETAS.get(agent_id, 1.0)
         if reputation_svc.passes_floor(info):
-            placed.append((position, _kit_step(agent, rationale, eta, reps)))
+            placed.append((position, _kit_step(agent, rationale, eta, reps, tier=role_tier(agent_id))))
             taken.add(agent.id)
             continue
 
@@ -817,7 +839,9 @@ async def _build_kit_plan(
         # shares a skill, else drop the step. Either way the buyer is told.
         sub = _floor_substitute(agent, reps, taken, registry)
         if sub is not None:
-            placed.append((position, _kit_step(sub, rationale, eta, reps, substituted_for=agent.id)))
+            placed.append(
+                (position, _kit_step(sub, rationale, eta, reps, substituted_for=agent.id, tier=role_tier(agent_id)))
+            )
             taken.add(sub.id)
             notices.append(substitution(agent, sub, info))
         else:
@@ -845,7 +869,9 @@ async def _build_kit_plan(
         )
     for position, agent, rationale, info in dropped:
         if agent.id in readmit_ids:
-            step = _kit_step(agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True)
+            step = _kit_step(
+                agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True, tier=role_tier(agent.id)
+            )
             placed.append((position, step))
             taken.add(agent.id)
             notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
@@ -865,7 +891,7 @@ async def _build_kit_plan(
     stored = StoredPlan(
         id=plan_id,
         intent=intent,
-        plan=Plan(steps=steps),
+        plan=Plan(steps=steps, tier=plan_tier),
         total_usdc=total_price,
         total_eta=total_eta,
         # What the buyer is about to be shown, kept with the plan so
