@@ -50,7 +50,7 @@ from ..schemas import Agent
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
-from . import external_binding, registry_sync, settlement_svc, snapshot_store, snapshots
+from . import charge_window, external_binding, registry_sync, settlement_svc, snapshot_store, snapshots
 from .binding_store import get_binding_store
 from .dispatch_signing import dispatch_signer_address
 from .snapshots import KeepWarm, Snapshot, SnapshotCell
@@ -134,19 +134,29 @@ TARGET_UNIQUE_OPERATOR_WALLETS = 2
 TARGET_SETTLED_EXTERNAL_WORKFLOWS = 3
 
 # The report is a snapshot built in the background (D-091), never on the
-# request. It costs one settlement scan per external agent — minutes on the
-# live registry — so a reviewer's request is answered from memory with the
-# last report and its age, and the first request after a boot with nothing to
-# serve gets a 202 that says it is being computed. See `report_cell` below.
+# request: a reviewer's request is answered from memory with the last report
+# and its age, and the first request after a boot with nothing to serve gets a
+# 202 that says it is being computed. See `report_cell` below.
+#
+# A build's cost does not grow with the number of agents. Settlements come from
+# ONE scan of the escrow's event window for every agent (`charge_window`), kept
+# between builds so each build reads only the ledgers closed since; owners come
+# from the registry mirror; binding status is one read of the bound set. It
+# used to be a settlement scan per external agent — ~15 RPC calls each — and
+# at 1,000 agents the build overran its budget and the endpoint went 503.
 #
 # Rebuilt this often while the process is up. Settlements only show up here
 # through a scan, so this is how long a new one can take to appear.
-REPORT_REFRESH_SECONDS = 900.0
+REPORT_REFRESH_SECONDS = 300.0
 # ...and when the on-chain mirror's agents or owners change, but not more often
-# than this: a full registry pass lands every few minutes, and a rebuild per
-# pass would keep the scans running back to back.
-REPORT_REGISTRY_REBUILD_SECONDS = 300.0
-# A build that runs past this is abandoned and the previous report kept.
+# than this.
+REPORT_REGISTRY_REBUILD_SECONDS = 120.0
+# The time a build gives itself to read. Past it, every read still outstanding
+# is left for the next build, and what was read is published as a PARTIAL
+# report (`complete: false`): each number is then a floor, never inflated.
+REPORT_WORK_BUDGET_SECONDS = 300.0
+# The backstop: a build still running past this is abandoned, the previous
+# report kept. Well above the work budget, which is what normally ends a build.
 REPORT_BUILD_BUDGET_SECONDS = 900.0
 # After a build that failed or overran, the next attempt waits this long.
 REPORT_RETRY_AFTER_FAILURE_SECONDS = 120.0
@@ -156,23 +166,32 @@ REPORT_RETRY_AFTER_FAILURE_SECONDS = 120.0
 REPORT_BOOT_GRACE_SECONDS = 600.0
 # What a 202 asks the client to wait before asking again.
 REPORT_PENDING_RETRY_AFTER_SECONDS = 30
-# A report restored from the database after a restart is served only when it
-# is younger than this. Older, "computing" is the more honest answer.
-REPORT_RESTORE_MAX_AGE_SECONDS = 86_400.0
+# A report restored from the database after a restart is served whatever its
+# age, marked `persisted` and dated by `generated_at` and `X-Snapshot-Age`,
+# until this process's first build replaces it: once any report has been
+# built, an old one with its age on it beats "computing" or a 503.
+REPORT_RESTORE_MAX_AGE_SECONDS: float | None = None
+# A PARTIAL build does not replace a COMPLETE report younger than this: the
+# complete one is kept in service and the next build resumes where the
+# partial stopped (`charge_window` keeps its progress). An older complete
+# report is replaced, because by then the registry it counted has moved on.
+REPORT_PARTIAL_KEEPS_COMPLETE_SECONDS = 3_600.0
 
-# How many per-agent reads run at once. Each settlement scan pins a thread of
-# the bounded pool app/main.py hands to asyncio.to_thread, so this stays well
-# under that pool rather than starving the money path that shares it.
+# How many `owner_of` probes run at once. Each pins a thread of the bounded
+# pool app/main.py hands to asyncio.to_thread, so this stays well under that
+# pool rather than starving the money path that shares it.
 READ_CONCURRENCY = 4
 
-# Per-agent ceiling. Above settlement_svc's own 20 s scan plus 10 s payer
-# budget, so it only fires on a read that has genuinely stalled; the scan
-# itself keeps running (the cache shields it) and lands for the next request.
-AGENT_READ_BUDGET_SECONDS = 45.0
+# Registry ids the mirror does not hold are read in one batch from registry
+# storage; an id that batch cannot answer is probed with `owner_of`, at most
+# this many per build. The rest wait for the next build, and are named in
+# `unreadable_agents` until then.
+MAX_OWNER_PROBES_PER_BUILD = 64
 
-# Ceiling on each of the smaller probes: one `owner_of` read, one binding-store
-# lookup. Each has its own transport timeouts; this is the bound the report
-# relies on, so one stalled probe costs one agent's answer, not the build.
+# Ceiling on each of the smaller probes: one `owner_of` read, one read of the
+# binding store's bound set. Each has its own transport timeouts; this is the
+# bound the report relies on, so one stalled probe costs its answer, not the
+# build.
 PROBE_TIMEOUT_SECONDS = 20.0
 
 # Contract `admin()` views. v2's settler and admin can be rotated, so these
@@ -470,6 +489,7 @@ class _Unmirrored:
 
     ids: list[str]
     listed: bool  # False when `list_ids` itself could not be read
+    total: int = 0  # every id it listed outside the seeded namespace
 
 
 async def _unmirrored(mirrored: set[str]) -> _Unmirrored:
@@ -492,39 +512,100 @@ async def _unmirrored(mirrored: set[str]) -> _Unmirrored:
     if not isinstance(ids, list):
         logger.warning("[adoption] registry list_ids answered %s, not a list", type(ids).__name__)
         return _Unmirrored(ids=[], listed=False)
-    missing = sorted({i for i in ids if isinstance(i, str) and not i.startswith(SEEDED_PREFIX) and i not in mirrored})
-    return _Unmirrored(ids=missing, listed=True)
+    listed = {i for i in ids if isinstance(i, str) and not i.startswith(SEEDED_PREFIX)}
+    return _Unmirrored(ids=sorted(listed - mirrored), listed=True, total=len(listed))
 
 
-async def _owner_or_none(agent_id: str) -> str | None:
+# Owners read for ids the mirror lacked, by (registry, id). `Agent.owner` is
+# set by `register` and no function ever writes it again, so an owner once
+# read is the owner for good: it is never read twice.
+_owners_read: dict[tuple[str, str], str] = {}
+
+
+def forget_owners() -> None:
+    """Drop the owners read so far (tests)."""
+    _owners_read.clear()
+
+
+async def _owner_or_none(agent_id: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> str | None:
     """The live `owner_of`, or None when it could not be established."""
     try:
-        return await asyncio.wait_for(external_binding.resolve_owner(agent_id), timeout=PROBE_TIMEOUT_SECONDS)
+        return await asyncio.wait_for(external_binding.resolve_owner(agent_id), timeout=timeout)
     except (external_binding.OwnerLookupError, TimeoutError) as e:
         logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
         return None
 
 
-# ── one external agent ────────────────────────────────────────────────────
-async def _bound(agent_id: str) -> bool | None:
-    """Whether a binding exists, the way GET /agents/{id}/binding decides it.
+async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, str], bool]:
+    """The owners of `agent_ids` that could be read by `deadline`, and whether
+    any id was left unread for the next build (out of time, or past
+    MAX_OWNER_PROBES_PER_BUILD).
 
-    Only the fact is kept: the record carries the endpoint URL, which this
-    public route never exposes in any form.
+    Owners already read are reused; the rest are read in one batch from the
+    registry's storage, and only what that batch could not answer is probed
+    with `owner_of`, a bounded number per build. An id with no owner here is
+    never counted — the caller names it unreadable.
+    """
+    registry_id = settings.stellar_agent_registry
+    owners = {i: _owners_read[(registry_id, i)] for i in agent_ids if (registry_id, i) in _owners_read}
+    rest = [i for i in agent_ids if i not in owners]
+    if rest and time.monotonic() < deadline:
+        try:
+            records = await asyncio.wait_for(
+                asyncio.to_thread(sc.read_agent_records, registry_id, rest), timeout=deadline - time.monotonic()
+            )
+        except Exception as e:
+            logger.warning("[adoption] registry records unreadable: %s", _describe(e))
+            records = {}
+        for agent_id, record in records.items():
+            owner = record.get("owner")
+            if isinstance(owner, str) and owner:
+                owners[agent_id] = owner
+        rest = [i for i in rest if i not in owners]
+    probe = rest[:MAX_OWNER_PROBES_PER_BUILD]
+    left = len(rest) > len(probe)
+
+    async def _probe(agent_id: str) -> str | None:
+        nonlocal left
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            left = True
+            return None
+        return await _owner_or_none(agent_id, min(remaining, PROBE_TIMEOUT_SECONDS))
+
+    for agent_id, owner in zip(probe, await _bounded(probe, _probe), strict=True):
+        if owner is not None:
+            owners[agent_id] = owner
+    for agent_id, owner in owners.items():
+        _owners_read[(registry_id, agent_id)] = owner
+    return owners, left
+
+
+# ── one external agent ────────────────────────────────────────────────────
+async def _bound_ids() -> frozenset[str] | None:
+    """Every agent with a live binding, the way GET /agents/{id}/binding
+    decides it — one read of the store, never one per agent. None when the
+    store could not be read.
+
+    Only the ids are read: a binding record carries the endpoint URL, which
+    this public route never exposes in any form.
     """
     try:
-        return await asyncio.wait_for(get_binding_store().get(agent_id), timeout=PROBE_TIMEOUT_SECONDS) is not None
+        return await asyncio.wait_for(get_binding_store().list_agent_ids(), timeout=PROBE_TIMEOUT_SECONDS)
     except Exception as e:
-        logger.warning("[adoption] binding store unreadable for %s: %s", agent_id, _describe(e))
+        logger.warning("[adoption] binding store unreadable: %s", _describe(e))
         return None
 
 
-async def _settlement(agent_id: str) -> settlement_svc.SettlementEvidence | None:
-    """This agent's settlement evidence, or None when the read did not finish."""
+async def _window(owners: dict[str, str], deadline: float) -> charge_window.WindowSettlements | None:
+    """Every external agent's settlement evidence, from one window scan, or
+    None when the read did not come back at all."""
+    if not owners:
+        return None
     try:
-        return await asyncio.wait_for(settlement_svc.fetch_settlement(agent_id), timeout=AGENT_READ_BUDGET_SECONDS)
+        return await charge_window.fetch_settlements(owners, deadline=deadline)
     except Exception as e:
-        logger.warning("[adoption] settlement read for %s did not finish: %s", agent_id, _describe(e))
+        logger.warning("[adoption] settlement window unreadable: %s", _describe(e))
         return None
 
 
@@ -537,6 +618,11 @@ def _unix(at: str | None) -> int | None:
         return None
 
 
+# Exclusions that are not a finding about the charge but a check that could
+# not run: the charge may be revenue, so the count may be low.
+_UNCHECKED: frozenset[str] = frozenset({"payer_unreadable", "settler_unreadable"})
+
+
 @dataclass(frozen=True)
 class _AgentResult:
     agent: AdoptionAgent
@@ -544,23 +630,31 @@ class _AgentResult:
     window_days: float | None  # the scan's measured span; None when no scan ran
 
 
-async def _external_agent(agent: Agent, team_roles: dict[str, str]) -> _AgentResult:
+def _external_agent(
+    agent: Agent,
+    evidence: settlement_svc.SettlementEvidence | None,
+    bound_ids: frozenset[str] | None,
+    team_roles: dict[str, str],
+) -> _AgentResult:
     """One external agent: its binding, and the charges that verifiably paid it.
 
-    A charge counts only when `settlement_svc` counts it as verified revenue —
-    its payer was read, and is neither this agent's owner nor the platform —
-    AND it names a transaction, because §6.3 asks for a charge a reviewer can
-    open. Anything short of that leaves the agent `complete=False`: a scan
-    that did not run, one that stopped early, or a verified charge with no
-    usable hash. Its verified charges still count; the flag is what stops the
-    total from being read as the whole truth.
+    A charge counts only when `settlement_svc`'s rule counts it as verified
+    revenue — its payer was read, and is neither this agent's owner nor the
+    platform — AND it names a transaction, because §6.3 asks for a charge a
+    reviewer can open. Anything short of that leaves the agent
+    `complete=False`: a scan that did not run or did not reach the tip, a
+    charge whose payer (or the settler it is compared with) is not read yet,
+    or a verified charge with no usable hash. Its verified charges still
+    count; the flag is what stops the total from being read as the whole truth.
     """
-    evidence, bound = await asyncio.gather(_settlement(agent.id), _bound(agent.id))
     workflows: list[SettledWorkflow] = []
     complete = evidence is not None and evidence.unavailable is None and not evidence.truncated
     if evidence is not None and evidence.unavailable is not None:
-        logger.warning("[adoption] settlement for %s unavailable: %s", agent.id, evidence.unavailable)
+        logger.info("[adoption] settlement for %s unavailable: %s", agent.id, evidence.unavailable)
     for entry in evidence.entries if evidence is not None else []:
+        if entry.exclusion in _UNCHECKED:
+            complete = False
+            continue
         if entry.self_payment:
             continue
         if entry.tx_hash is None:
@@ -584,7 +678,7 @@ async def _external_agent(agent: Agent, team_roles: dict[str, str]) -> _AgentRes
             agent_id=agent.id,
             name=agent.name,
             active=agent.status != "offline",
-            bound=bound,
+            bound=None if bound_ids is None else agent.id in bound_ids,
             settled_workflows=workflows,
         ),
         complete=complete,
@@ -594,13 +688,16 @@ async def _external_agent(agent: Agent, team_roles: dict[str, str]) -> _AgentRes
 
 # ── the report ────────────────────────────────────────────────────────────
 async def build_report() -> AdoptionReport:
-    """Compute the report from scratch. Never raises for a failed read.
+    """Compute the report. Never raises for a failed read, and stops reading
+    at REPORT_WORK_BUDGET_SECONDS.
 
     Every failure lands in `degraded` and, where it concerns one agent, in
     `unreadable_agents` — the numbers are then a floor, never a zero standing
-    in for a lookup that did not happen.
+    in for a lookup that did not happen. A read left for the next build
+    because time ran out also makes the report `complete: false`.
     """
     started = time.monotonic()
+    deadline = started + REPORT_WORK_BUDGET_SECONDS
     rule = await owner_rule()
     classify = rule.classify
     team_roles = rule.team_roles
@@ -618,7 +715,9 @@ async def build_report() -> AdoptionReport:
     gap = await _unmirrored(set(mirrored))
     if not gap.listed:
         degraded = True
-    for agent_id, owner in zip(gap.ids, await _bounded(gap.ids, _owner_or_none), strict=True):
+    gap_owners, owners_left = await _owners_of(gap.ids, deadline)
+    for agent_id in gap.ids:
+        owner = gap_owners.get(agent_id)
         if owner is not None and classify(owner) is not None:
             owners[agent_id] = owner  # ours: listed under `excluded`, never counted
         else:
@@ -642,15 +741,19 @@ async def build_report() -> AdoptionReport:
             external.setdefault(owner, []).append(mirrored[agent_id])
 
     externals = [a for owner in sorted(external) for a in external[owner]]
-    results = {r.agent.agent_id: r for r in await _bounded(externals, lambda a: _external_agent(a, team_roles))}
+    bound_ids, window = await asyncio.gather(_bound_ids(), _window({a.id: owners[a.id] for a in externals}, deadline))
+    evidence = window.by_agent if window is not None else {}
+    results = {a.id: _external_agent(a, evidence.get(a.id), bound_ids, team_roles) for a in externals}
     for result in results.values():
         if not result.complete:
             unreadable.add(result.agent.agent_id)
-    if unreadable:
-        degraded = True
-    # The smallest span any scan covered, so the claim holds for every agent.
+    # One scan answers every agent, so this is its span — or 0 when it never
+    # ran; kept as the smallest so the claim holds for every agent regardless.
     windows = [r.window_days for r in results.values() if r.window_days is not None]
     window_days = min(windows) if windows else 0.0
+    complete = not owners_left and not (window is not None and window.out_of_time)
+    if unreadable or not complete:
+        degraded = True
 
     operators = [
         AdoptionOperator(
@@ -667,6 +770,14 @@ async def build_report() -> AdoptionReport:
         unique_operator_wallets=len(external),
         settled_external_workflows=len(jobs),
     )
+    coverage = AdoptionCoverage(
+        agents_listed=gap.total if gap.listed else None,
+        agents_accounted=len(owners),
+        settlement_ledgers_scanned=window.ledgers_scanned if window is not None else 0,
+        settlement_ledgers_in_window=window.ledgers_in_window if window is not None else 0,
+        external_charges=window.charges if window is not None else 0,
+        external_charges_unattributed=window.unattributed if window is not None else 0,
+    )
     report = AdoptionReport(
         network=_network(),
         generated_at=int(time.time()),
@@ -682,10 +793,13 @@ async def build_report() -> AdoptionReport:
         excluded=[excluded[o] for o in sorted(excluded)],
         degraded=degraded,
         unreadable_agents=sorted(unreadable),
+        complete=complete,
+        coverage=coverage,
     )
     logger.info(
         "[adoption] external_agents=%d unique_operator_wallets=%d settled_external_workflows=%d window_days=%s "
-        "excluded_owners=%d unreadable_agents=%d degraded=%s platform_unreadable=%s registry_listed=%s elapsed_ms=%d",
+        "excluded_owners=%d unreadable_agents=%d degraded=%s complete=%s platform_unreadable=%s registry_listed=%s "
+        "ledgers=%d/%d charges=%d unattributed=%d elapsed_ms=%d",
         totals.external_agents,
         totals.unique_operator_wallets,
         totals.settled_external_workflows,
@@ -693,8 +807,13 @@ async def build_report() -> AdoptionReport:
         len(report.excluded),
         len(report.unreadable_agents),
         degraded,
+        complete,
         ",".join(rule.unreadable) or "-",
         gap.listed,
+        coverage.settlement_ledgers_scanned,
+        coverage.settlement_ledgers_in_window,
+        coverage.external_charges,
+        coverage.external_charges_unattributed,
         int((time.monotonic() - started) * 1000),
     )
     return report
