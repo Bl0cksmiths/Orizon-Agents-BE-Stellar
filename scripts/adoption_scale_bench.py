@@ -342,6 +342,17 @@ async def _main(args: argparse.Namespace) -> int:
     if args.mirror == "half":
         for agent_id in list(state.agents)[::2]:
             del state.agents[agent_id]
+    report = None
+    for build in range(1, args.builds + 1):
+        report = await _build_once(rpc, args, build, budget, scale)
+    return 0 if report is not None else 1
+
+
+async def _build_once(
+    rpc: FakeRpc, args: argparse.Namespace, build: int, budget: float, scale: float
+) -> adoption_svc.AdoptionReport | None:
+    """One report build, timed and counted. A later one shows what a build
+    costs once the previous one's progress is kept."""
     rcache.clear()
     rpc.calls.clear()
     rpc.timeouts = 0
@@ -356,7 +367,7 @@ async def _main(args: argparse.Namespace) -> int:
     took = f"> {budget:.0f}" if report is None else f"{_project(wall, cpu, scale):.0f}"
     rpc_calls = sum(v for k, v in rpc.calls.items() if not k.startswith("binding"))
     print(
-        f"report build ({args.mirror} mirror): {outcome} · projected {took} s live "
+        f"report build {build} ({args.mirror} mirror): {outcome} · projected {took} s live "
         f"(wall {wall:.1f} s, cpu {cpu:.1f} s) · rpc calls {rpc_calls} "
         f"{dict(rpc.calls)} · timeouts injected {rpc.timeouts}"
     )
@@ -366,7 +377,7 @@ async def _main(args: argparse.Namespace) -> int:
             f"  totals {report.totals.model_dump()} degraded={report.degraded} "
             f"unreadable={len(report.unreadable_agents)} window_days={report.window_days} {extra}"
         )
-    return 0 if report is not None else 1
+    return report
 
 
 def main() -> int:
@@ -376,6 +387,7 @@ def main() -> int:
     parser.add_argument("--timeout-rate", type=float, default=0.01, help="share of RPC reads that hang to timeout")
     parser.add_argument("--mirror", choices=["full", "half"], default="full", help="registry mirror at build time")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--builds", type=int, default=1, help="report builds in a row, as the schedule runs them")
     # The per-read warnings are the point of a live log and noise here: the
     # summary lines carry the counts.
     logging.basicConfig(level=logging.CRITICAL)
