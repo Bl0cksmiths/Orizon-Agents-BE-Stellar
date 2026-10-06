@@ -32,6 +32,17 @@ Tiers (only on `allow`):
 * `complex` — four or more steps or disciplines, or a system (booking app,
   contract + tests + review + UI, research + design + build + launch).
 
+Pipeline labels (optional, on a subset of `allow` cases) — the pipeline a
+careful reviewer would compose for the request, by agent NAME, following the
+planner's recipes (app/agents/orchestrator.py):
+
+    "pipeline": {"recipe": "website", "expect": ["research.pro", ...],
+                 "optional": ["deploy.v0"]}
+
+* `expect` — the specialists the plan should use, in handoff order;
+* `optional` — specialists that are reasonable for the request but not needed;
+* anything else in a plan is an irrelevant step (padding the buyer pays for).
+
 Harmful-request and broader jailbreak coverage is NOT authored here: it comes
 from vetted public benchmarks fetched at run time into a git-ignored cache
 (`external.py`).
@@ -64,6 +75,50 @@ HELD_OUT_SHARE = 0.4
 
 _REQUIRED = ("id", "intent", "expected_verdict", "expected_tier", "category", "language", "notes")
 
+# The platform's built-in agents by name (app/seed.py; a test holds the two
+# together). Labels name agents, not ids, so they read as the recipes do.
+AGENT_NAMES = (
+    "copywrite.v3",
+    "design.figma",
+    "code.next",
+    "sol-audit",
+    "seo.brief",
+    "vision.ocr",
+    "ads.meta",
+    "deploy.v0",
+    "research.pro",
+    "translate.42",
+    "code.gen",
+    "code.critic",
+)
+RECIPES = (
+    "website",
+    "webapp",
+    "marketing",
+    "research",
+    "contract",
+    "image",
+    "translation",
+    "short_copy",
+    "design",
+    "seo",
+)
+# Mirrors the planner's step cap: an expectation it could not meet is no label.
+MAX_EXPECTED_STEPS = 6
+
+
+@dataclass(frozen=True)
+class PipelineLabel:
+    """The pipeline a reviewer would compose for one case (see module docstring)."""
+
+    recipe: str
+    expect: tuple[str, ...]
+    optional: tuple[str, ...] = ()
+
+    @property
+    def relevant(self) -> frozenset[str]:
+        return frozenset(self.expect) | frozenset(self.optional)
+
 
 class DatasetError(ValueError):
     """A case file that would make the numbers misleading."""
@@ -79,6 +134,7 @@ class Case:
     language: str
     notes: str
     source: str = "orizon"  # "orizon" for the in-repo set, else the benchmark's name
+    pipeline: PipelineLabel | None = None
 
     @property
     def expects_block(self) -> bool:
@@ -137,6 +193,9 @@ def _case_from(row: dict[str, object], where: str, *, external: bool) -> Case:
     intent = str(row["intent"])
     if not MIN_INTENT_CHARS <= len(intent.strip()) <= MAX_INTENT_CHARS:
         raise DatasetError(f"{where}: intent is {len(intent.strip())} chars, outside the API's 3..500")
+    pipeline = _pipeline_from(row.get("pipeline"), where) if "pipeline" in row else None
+    if pipeline is not None and verdict != "allow":
+        raise DatasetError(f"{where}: only allow cases carry a pipeline label")
     return Case(
         id=str(row["id"]),
         intent=intent,
@@ -146,7 +205,27 @@ def _case_from(row: dict[str, object], where: str, *, external: bool) -> Case:
         language=str(row["language"]),
         notes=str(row["notes"]),
         source=str(row.get("source", "orizon")),
+        pipeline=pipeline,
     )
+
+
+def _pipeline_from(raw: object, where: str) -> PipelineLabel:
+    if not isinstance(raw, dict) or set(raw) - {"recipe", "expect", "optional"}:
+        raise DatasetError(f"{where}: pipeline must be an object of recipe, expect and optional")
+    recipe = raw.get("recipe")
+    if recipe not in RECIPES:
+        raise DatasetError(f"{where}: pipeline recipe {recipe!r} not in {RECIPES}")
+    expect, optional = raw.get("expect"), raw.get("optional", [])
+    if not isinstance(expect, list) or not isinstance(optional, list):
+        raise DatasetError(f"{where}: pipeline expect and optional must be lists")
+    if not 1 <= len(expect) <= MAX_EXPECTED_STEPS:
+        raise DatasetError(f"{where}: pipeline expects {len(expect)} agents, outside 1..{MAX_EXPECTED_STEPS}")
+    unknown = [n for n in [*expect, *optional] if n not in AGENT_NAMES]
+    if unknown:
+        raise DatasetError(f"{where}: pipeline names unknown agents {unknown}")
+    if len(set(expect)) != len(expect) or len(set(optional)) != len(optional) or set(expect) & set(optional):
+        raise DatasetError(f"{where}: pipeline names an agent twice")
+    return PipelineLabel(recipe=str(recipe), expect=tuple(expect), optional=tuple(optional))
 
 
 def validate(cases: Iterable[Case]) -> list[Case]:

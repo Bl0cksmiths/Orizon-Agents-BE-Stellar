@@ -159,3 +159,78 @@ def test_the_loader_refuses_rows_that_would_mislead(tmp_path, rows, message):
 def test_the_committed_file_is_one_json_object_per_line():
     for n, line in enumerate(DATASET_PATH.read_text(encoding="utf-8").splitlines(), 1):
         assert isinstance(json.loads(line), dict), n
+
+
+# ── pipeline labels ─────────────────────────────────────────────
+
+from evals.orchestrator.dataset import AGENT_NAMES, PipelineLabel, case_from_external  # noqa: E402
+
+_ROW = {
+    "id": "t-1",
+    "intent": "Build a landing page for my bakery",
+    "expected_verdict": "allow",
+    "expected_tier": "moderate",
+    "category": "legit_moderate",
+    "language": "en",
+    "notes": "-",
+}
+
+
+def _load_rows(tmp_path: Path, *rows: dict) -> list:
+    path = tmp_path / "set.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return load(path)
+
+
+def test_the_agent_names_are_the_seeded_catalogs() -> None:
+    from app.seed import _SEED
+
+    assert sorted(AGENT_NAMES) == sorted(row[1] for row in _SEED)
+
+
+def test_a_pipeline_label_loads_in_order(tmp_path: Path) -> None:
+    (case,) = _load_rows(
+        tmp_path,
+        {**_ROW, "pipeline": {"recipe": "website", "expect": ["copywrite.v3", "code.gen"], "optional": ["deploy.v0"]}},
+    )
+
+    assert case.pipeline == PipelineLabel("website", ("copywrite.v3", "code.gen"), ("deploy.v0",))
+    assert case.pipeline.relevant == {"copywrite.v3", "code.gen", "deploy.v0"}
+
+
+def test_an_unlabelled_case_has_no_pipeline(tmp_path: Path) -> None:
+    (case,) = _load_rows(tmp_path, _ROW)
+
+    assert case.pipeline is None
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        {"recipe": "nope", "expect": ["code.gen"]},
+        {"recipe": "webapp", "expect": []},
+        {"recipe": "webapp", "expect": ["code.gen", "code.gen"]},
+        {"recipe": "webapp", "expect": ["code.gen"], "optional": ["code.gen"]},
+        {"recipe": "webapp", "expect": ["agt_11c0"]},
+        {"recipe": "webapp", "expect": ["code.gen"], "extra": 1},
+        {"recipe": "webapp", "expect": "code.gen"},
+        {"recipe": "website", "expect": list(AGENT_NAMES[:7])},
+    ],
+)
+def test_a_malformed_pipeline_label_is_refused(tmp_path: Path, label: dict) -> None:
+    with pytest.raises(DatasetError):
+        _load_rows(tmp_path, {**_ROW, "pipeline": label})
+
+
+def test_only_an_allow_case_carries_a_pipeline_label(tmp_path: Path) -> None:
+    row = {
+        **_ROW,
+        "expected_verdict": "block",
+        "expected_tier": None,
+        "pipeline": {"recipe": "webapp", "expect": ["code.gen"]},
+    }
+
+    with pytest.raises(DatasetError):
+        _load_rows(tmp_path, row)
+    with pytest.raises(DatasetError):
+        case_from_external({**row, "expected_verdict": "block"}, "ext:1")
