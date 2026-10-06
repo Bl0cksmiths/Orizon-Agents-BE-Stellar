@@ -195,3 +195,20 @@ def test_retention_keeps_the_newest_tasks_inside_the_window_with_their_traces(pg
     assert lines == kept
     assert plans == {"pln_00000001"}
     assert (pruned.tasks, pruned.trace_lines, pruned.plans) == (2, 3, 1)
+
+
+def test_recent_task_ids_are_the_newest_by_start_time_and_bounded(pg_dsn: str) -> None:
+    """The warm-up's listing: one indexed query, newest first, `limit` rows."""
+    store = PostgresTaskStore(pg_dsn)
+    tasks = [
+        _task(f"tsk_{i:016x}").model_copy(update={"started_at": started})
+        for i, started in enumerate((30.0, 10.0, 40.0, 20.0))
+    ]
+
+    async def go() -> tuple[list[str], list[str]]:
+        await store.write(WriteBatch(tasks=tuple(_row(t) for t in tasks)))
+        return await store.recent_task_ids(3), await store.recent_task_ids(0)
+
+    newest, none = _run(store, go())
+    assert newest == [tasks[2].id, tasks[0].id, tasks[3].id]
+    assert none == []
