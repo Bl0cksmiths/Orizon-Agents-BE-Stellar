@@ -52,3 +52,38 @@ def test_the_recheck_compares_both_runs_and_books_the_cut_off_estimate(runs, tmp
     assert costs["total_with_estimates_usd"] == pytest.approx(costs["measured_total_usd"] + 0.1296)
     report = (tmp_path / "REPORT.md").read_text()
     assert "≈ $0.1296" in report and "| re-check, legit requests |" in report
+
+
+def test_the_code_length_section_measures_the_saved_html(runs, tmp_path):
+    campaign, recheck = runs
+    d = recheck / "r3-code-length"
+    d.mkdir(exist_ok=True)
+    call = {
+        "response_model": "claude-sonnet-5-5",
+        "effort": "low",
+        "first_token_ms": 1500,
+        "output_tokens": 7000,
+        "stop_reason": "end_turn",
+    }
+    rec = {
+        "worker": "code.gen",
+        "label": "code.gen#1",
+        "latency_s": 39.0,
+        "cost_usd": 0.07,
+        "calls": [call],
+        "error": None,
+        "output": {"summary": "An app; deferred: reports"},
+    }
+    (d / "code_gen_1.json").write_text(json.dumps(rec))
+    (d / "code_gen_1__index.html").write_text("<!doctype html>\n<html><body>tiny</body></html>\n")
+    (d / "code_gen_2.json").write_text(
+        json.dumps({"worker": "code.gen", "label": "code.gen#2", "skipped": "budget left 0.0213 USD"})
+    )
+    analysis = build(campaign, recheck, tmp_path)
+    first, second = analysis["code_length"]
+    assert first["lines"] == 2 and first["validator"] and first["deferred_listed"] is True
+    assert first["hit_token_ceiling"] is False and first["hit_stream_budget"] is False
+    assert second["skipped"].startswith("budget left")
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "## Complex code.gen after the length fix" in report and "code.gen#2 | not run" in report
+    assert (tmp_path / "r3-code-length" / "code_gen_1__index.html").exists()
