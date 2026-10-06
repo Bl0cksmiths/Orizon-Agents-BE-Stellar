@@ -88,6 +88,18 @@ class Settings(BaseSettings):
     # the router maps a breach to HTTP 504 "decompose_timeout").
     decompose_timeout_seconds: float = 90.0
 
+    # ── Claude + jev (orchestrator v2, app/llm/) ──────────────
+    # Which stack plans and runs the built-in workers: "anthropic", "openai",
+    # or empty for automatic — Claude once ANTHROPIC_API_KEY is set, OpenAI
+    # until then. The OpenAI path stays behind this switch until Claude is
+    # proven live; app/llm/provider.py is the one reader.
+    orchestrator_provider: str = ""
+    # Set on Render at release, never in render.yaml (the dashboard overrides
+    # it, and the file is in git). Empty keeps every Claude and jev call off:
+    # the guard falls back as documented and planning reports unavailable.
+    anthropic_api_key: str = ""
+    typesafe_api_key: str = ""
+
     # ── Code-generation quality dials (code.gen + code.critic) ─
     # Higher reasoning = better artifacts, more latency + cost.
     # Valid: "low" | "medium" | "high" | "xhigh".
