@@ -823,6 +823,29 @@ def _serialize(report: AdoptionReport) -> bytes:
     return report.model_dump_json().encode()
 
 
+class PartialReportHeld(RuntimeError):
+    """A partial build, not published over the complete report in service."""
+
+
+async def _build_for_cell() -> AdoptionReport:
+    """A build, unless it is partial and a complete report younger than
+    REPORT_PARTIAL_KEEPS_COMPLETE_SECONDS is in service: that one is kept
+    (the cell records this build as failed and keeps serving it), and the
+    next build resumes the reads this one did not finish."""
+    report = await build_report()
+    held = report_cell.current()
+    if (
+        not report.complete
+        and held is not None
+        and held.value.complete
+        and held.age_seconds() < REPORT_PARTIAL_KEEPS_COMPLETE_SECONDS
+    ):
+        raise PartialReportHeld(
+            f"partial build kept back: the complete report from {held.age_seconds():.0f} s ago stays in service"
+        )
+    return report
+
+
 def registry_fingerprint() -> int:
     """What the report's agent list depends on in the mirror: each on-chain
     agent's id, owner and status. A change means a rebuild is due."""
@@ -842,7 +865,7 @@ def _may_build() -> bool:
 # one it serves — once the registry gate is open.
 report_cell: SnapshotCell[AdoptionReport] = SnapshotCell(
     "adoption",
-    lambda: build_report(),
+    lambda: _build_for_cell(),
     _serialize,
     lambda report: float(report.generated_at),
     fresh_seconds=REPORT_REFRESH_SECONDS,
