@@ -330,7 +330,11 @@ class StoredPlan(BaseModel):
 # still simulates its output (a buyer is never charged for that), and
 # `external_not_routed` is an external operator agent left out while plans use
 # only the built-in agents (`PLANNER_ROUTE_EXTERNAL`). `no_image_input` is a
-# vision.ocr step the planner proposed for a request with no image to read.
+# vision.ocr step the planner proposed for a request with no image to read,
+# and `no_step_input` any other proposed step the run loop would predictably
+# not attempt for want of its input (a review with no code.gen build, a seal
+# with no build, a translation with no target language) — dropped before the
+# buyer authorizes its price.
 ExclusionReason = Literal[
     "below_floor",
     "unbound_endpoint",
@@ -339,6 +343,7 @@ ExclusionReason = Literal[
     "simulated_worker",
     "external_not_routed",
     "no_image_input",
+    "no_step_input",
 ]
 
 

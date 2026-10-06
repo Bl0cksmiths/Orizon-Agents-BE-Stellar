@@ -384,3 +384,14 @@ def test_no_image_exclusion_says_there_was_nothing_to_read():
         "the plan asked it to read an image, but the request has no image or https image link (nothing to read, so "
         "the step was left out)"
     )
+
+
+def test_no_input_exclusion_says_what_the_step_lacked():
+    n = plan_notices.no_input_exclusion(_agent("agt_12r0", "code.critic"), "there is no code.gen build to review")
+
+    assert (n.kind, n.reason_code) == ("excluded", "no_step_input")
+    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.reason == (
+        "the plan asked it for a step, but there is no code.gen build to review (nothing to work on, so the step "
+        "was left out)"
+    )

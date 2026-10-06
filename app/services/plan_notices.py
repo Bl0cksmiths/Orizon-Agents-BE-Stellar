@@ -266,6 +266,25 @@ def no_image_exclusion(agent: Agent) -> PlanFloorNotice:
     )
 
 
+def no_input_exclusion(agent: Agent, missing: str) -> PlanFloorNotice:
+    """A proposed step left out because it would have nothing to work on.
+
+    `missing` says what, in a clause ("there is no code.gen build to review");
+    the run loop would not attempt the step, so leaving it in would only show
+    the buyer a price they authorize for nothing. Emitted only for a step the
+    planner proposed, like `no_image_exclusion`.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=f"the plan asked it for a step, but {missing} (nothing to work on, so the step was left out)",
+        reason_code="no_step_input",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
 def substitution(designated: Agent, replacement: Agent, info: RepInfo | None) -> PlanFloorNotice:
     """A sub-floor agent whose step a floor-clearing agent took over.
 
