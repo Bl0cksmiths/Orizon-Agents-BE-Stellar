@@ -96,3 +96,17 @@ def readiness() -> LLMReadiness:
         ),
         spend=LLMSpend(day=today.day, spent_usd=today.spent_usd, cap_usd=today.cap_usd, paused=today.paused),
     )
+
+
+async def close() -> None:
+    """Release the model layer at shutdown: this loop's SDK clients and the ledger's pool.
+
+    A transport that was never used holds nothing and is not created here.
+    """
+    from . import claude, jev
+
+    for transport in (claude._transport, jev._transport):
+        aclose = getattr(transport, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    await spend.close_spend_store()

@@ -365,6 +365,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # that has settled a workflow, not only one an operator has bound.
     await close_dispute_store()
     await close_snapshot_store()
+    # The model layer: Claude and jev clients and the spend ledger's pool.
+    await llm_provider.close()
     executor.shutdown(wait=False)
 
 
