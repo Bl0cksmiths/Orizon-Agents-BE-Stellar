@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
 
 from ..state import state
 from . import task_persistence, task_store
@@ -31,27 +29,13 @@ logger = logging.getLogger(__name__)
 WARM_TASKS = state.task_order.maxlen or 200
 WARM_CONCURRENCY = 2
 WARM_BUDGET_SECONDS = 60.0
-_LIST_TIMEOUT_SECONDS = 10.0
-
-# The newest tasks by start time; `task_records_started_at_idx` serves it.
-_RECENT_IDS_SQL = "SELECT task_id FROM task_records ORDER BY started_at DESC LIMIT $1"
 
 
-async def _recent_ids(store: Any, limit: int) -> list[str]:
-    """The newest `limit` task ids, newest first.
-
-    Through the store's own `recent_task_ids` when it has one; otherwise, for
-    the Postgres store, one indexed query on its pool (so the warm-up also
-    dials the pool the journal's writer is about to need).
-    """
-    lister: Callable[[int], Awaitable[list[str]]] | None = getattr(store, "recent_task_ids", None)
-    if lister is not None:
-        return list(await lister(limit))
-    if isinstance(store, task_store.PostgresTaskStore):
-        pool = await store._ready_pool()
-        rows = await pool.fetch(_RECENT_IDS_SQL, limit, timeout=_LIST_TIMEOUT_SECONDS)
-        return [str(row["task_id"]) for row in rows]
-    return []
+async def _recent_ids(store: task_store.TaskStore, limit: int) -> list[str]:
+    """The newest `limit` task ids, newest first — the store's own indexed
+    listing (`TaskStore.recent_task_ids`), bounded by its command timeout. On
+    Postgres it also dials the pool the journal's writer is about to need."""
+    return list(await store.recent_task_ids(limit))
 
 
 async def warm_recent_tasks(limit: int = WARM_TASKS, budget_seconds: float | None = None) -> int:
