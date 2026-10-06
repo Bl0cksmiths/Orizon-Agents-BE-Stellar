@@ -205,5 +205,39 @@ def test_a_streamed_reply_is_cut_off_at_the_budget():
 
 
 def test_the_recheck_is_refused_when_its_measured_cost_does_not_fit(tmp_path, capsys):
-    assert cli.main(["workers", "--recheck", "--live", "--max-usd", "0.05", "--out", str(tmp_path)]) == cli.EXIT_REFUSED
+    assert (
+        cli.main(["workers", "--recheck", "release", "--live", "--max-usd", "0.001", "--out", str(tmp_path)])
+        == cli.EXIT_REFUSED
+    )
     assert "headroom" in capsys.readouterr().err
+
+
+def test_a_stream_aborted_from_outside_leaves_its_running_estimate():
+    import asyncio
+
+    from app.llm.claude import ClaudeRequest
+    from evals.orchestrator.workers_sample import BudgetedClaude
+
+    class Slow:
+        async def complete(self, request):
+            await request.on_text("x" * 3_500)  # ~1,000 tokens streamed
+            await asyncio.sleep(10)
+
+    request = ClaudeRequest(
+        purpose="worker.code.gen",
+        model="claude-sonnet-5-5",
+        system="s",
+        user="u",
+        max_tokens=9_000,
+        effort="low",
+        stream=True,
+    )
+    guard = BudgetedClaude(Slow(), remaining=lambda: 1.0)
+
+    async def abort() -> None:
+        await asyncio.wait_for(guard.complete(request), timeout=0.05)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(abort())
+    # ~1,000 text tokens x 1.7 for thinking at $10/MTok
+    assert guard.in_flight_usd == pytest.approx(0.017, rel=0.05)
