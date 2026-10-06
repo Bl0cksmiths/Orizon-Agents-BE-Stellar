@@ -79,6 +79,16 @@ SettlementState = Literal["settled", "released", "skipped", "unconfirmed", "fail
 #                included — the job's payment stands, unattested
 SealState = Literal["sealed", "pending", "unconfirmed", "failed"]
 
+# What a seal attests to, so a client can label it. Set with `seal`, from the
+# moment it is submitted.
+#   paid           the agents that delivered AND were paid, one per payout,
+#                  each beside its payout's receipt, with the total that moved
+#   delivery_only  nobody could be paid (no confirmed on-chain owner, a free
+#                  step, an authorization already spent): the agents that
+#                  DELIVERED, with no receipt and a total of zero — on-chain,
+#                  nothing in it reads as a payment
+SealKind = Literal["paid", "delivery_only"]
+
 
 def humanize_age(seconds: float) -> str:
     """Coarse relative age, e.g. 125.0 → "2m ago". Clock skew reads "just now"."""
@@ -120,6 +130,7 @@ class TaskSummary(BaseModel):
     proof_tx: str | None = None
     settlement: SettlementState | None = None
     seal: SealState | None = None
+    seal_kind: SealKind | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
