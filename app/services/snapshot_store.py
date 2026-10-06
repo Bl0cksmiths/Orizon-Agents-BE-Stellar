@@ -35,6 +35,7 @@ from typing import Any, NamedTuple, Protocol, TypeVar
 
 from ..config import settings
 from . import snapshots
+from .pg_schema import create_schema
 from .snapshots import Snapshot, SnapshotCell
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,7 @@ class PostgresSnapshotStore:
                     command_timeout=_POOL_COMMAND_TIMEOUT,
                 )
                 try:
-                    await pool.execute(_CREATE_TABLE_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                    await create_schema(pool, "read_snapshots", _CREATE_TABLE_SQL, timeout=_POOL_COMMAND_TIMEOUT)
                 except BaseException:
                     await pool.close()
                     raise
