@@ -45,8 +45,10 @@ def test_not_a_request_below_the_line(score, verdict):
     assert decide(_with(real_request=score), "low").verdict == verdict
 
 
-def test_low_confidence_rounds_the_tier_up_and_complex_stays_complex():
+def test_only_an_unsure_low_is_rounded_up_to_moderate():
     assert decide(_with(complexity_confidence=0.49), "low").tier == "moderate"
+    assert decide(_with(complexity_confidence=0.05), "low").tier == "moderate"
+    assert decide(_with(complexity_confidence=0.49), "moderate").tier == "moderate"
     assert decide(_with(complexity_confidence=0.49), "complex").tier == "complex"
     assert decide(_with(complexity_confidence=0.50), "low").tier == "low"
 

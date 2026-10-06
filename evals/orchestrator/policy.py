@@ -22,7 +22,7 @@ class Thresholds:
     harmful_block: float = 0.70  # harmful Noul at or above: block
     severity_block: float = 2.0  # severity Score at or above: block
     real_request_min: float = 0.30  # real_request Noul below: needs_detail
-    complexity_confidence_min: float = 0.50  # complexity confidence below: round the tier UP one
+    complexity_confidence_min: float = 0.50  # complexity confidence below: an unsure "low" runs as "moderate"
 
     def with_(self, **changes: float) -> Thresholds:
         return replace(self, **changes)
@@ -71,6 +71,8 @@ def decide(scores: dict[str, float], raw_tier: str | None, t: Thresholds = START
     # No complexity answer at all: route to the strongest tier rather than
     # under-serve a request (the guard itself never allows without one).
     tier = raw_tier if raw_tier in TIERS else "complex"
-    if scores.get("complexity_confidence", 1.0) < t.complexity_confidence_min:
-        tier = tier_up(tier)
+    # Only an unsure "low" is lifted, to "moderate"; nothing is ever lifted
+    # onto "complex" (the guard's rule since the 2026-10-06 live eval).
+    if tier == "low" and scores.get("complexity_confidence", 1.0) < t.complexity_confidence_min:
+        tier = "moderate"
     return Decision("allow", tier, watched, ())
