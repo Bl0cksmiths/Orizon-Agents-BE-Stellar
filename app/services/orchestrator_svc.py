@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
 import re
@@ -9,8 +10,6 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
-
-from agno.run.base import RunStatus
 
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
@@ -950,8 +949,14 @@ def _loggable(text: str) -> str:
     return redact_secrets(text)[:_FAILURE_EXCERPT_CHARS]
 
 
-# Run states in which agno itself reports that the planner call did not finish.
-_FAILED_RUNS = frozenset({RunStatus.error, RunStatus.cancelled})
+@functools.cache
+def _failed_runs() -> frozenset[Any]:
+    """Run states in which agno itself reports that the planner call did not
+    finish. Read from agno on first use: importing it at module scope put agno
+    on the boot path (app/agents/model_factory.py)."""
+    from agno.run.base import RunStatus
+
+    return frozenset({RunStatus.error, RunStatus.cancelled})
 
 
 def _planner_plan(result: Any) -> Plan | None:
@@ -983,7 +988,7 @@ def _planner_plan(result: Any) -> Plan | None:
     """
     status = getattr(result, "status", None)
     content = getattr(result, "content", None)
-    if status not in _FAILED_RUNS and isinstance(content, Plan):
+    if status not in _failed_runs() and isinstance(content, Plan):
         return content
     excerpt = f": {_loggable(content)!r}" if isinstance(content, str) else ""
     logger.warning(
