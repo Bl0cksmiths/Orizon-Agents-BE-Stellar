@@ -524,6 +524,11 @@ async def _run(
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
+        # How the plan was reached (checked, improved, re-checked, planned), in
+        # the order the stages ran. Server-written lines; a plan from the legacy
+        # planner has none.
+        for stage in plan.stages:
+            await _emit(task_id, start, "exec", stage.msg)
         if kit is not None:
             await _emit(
                 task_id,
