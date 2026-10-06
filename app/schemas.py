@@ -482,6 +482,11 @@ class DecomposeRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     intent: str = Field(..., min_length=3, max_length=500)
+    # The buyer's corrected reading of `intent`, from a previous response's
+    # `understood_as`. It replaces the prompt improver for this request; the
+    # intent is still checked, and the spec is checked against it, before
+    # anything is planned from it.
+    spec: UnderstoodSpec | None = None
 
 
 class DecomposeResponse(BaseModel):
