@@ -129,3 +129,38 @@ an unclaimed `agt_` id would otherwise collect for the platform's work.
 to (JSONB, no migration; older rows read null). The receipt's step gains
 `payee` and `payee_role` — `platform_treasury` or `operator` — both null for an
 unpaid step.
+
+## The on-chain step (not taken here)
+
+Twelve `register(owner=treasury, id, name, skills, price)` transactions,
+signed by `orizon-treasury`, one per built-in agent. Each was built and
+simulated against the live registry on 2026-10-06 — `invoke --send=no` and
+`--build-only` + `stellar tx simulate` — and all twelve succeed, each emitting
+`regd(id) → GDOGIRT7…KSP3`, at about 0.05 XLM in fees apiece. The treasury has
+submitted nothing. Because `register` is write-once, whoever registers these
+ids first owns them for good; until the owner sends them, B4 keeps any squatter
+unpaid.
+
+After they land: `owner_of(agt_…)` answers the treasury (the BE's "none" cache
+lasts 60 s), every delivered built-in step settles its plan price to the
+treasury, and `GET /readiness` → `treasury.agents` reads `registered` for all
+twelve within one sync pass.
+
+## API changes (all additive)
+
+| Payload | New |
+| --- | --- |
+| `GET /api/tasks/{id}/disputes` → `settlement.steps[]` | `payee: string \| null`, `payee_role: "platform_treasury" \| "operator" \| null` |
+| `… settlement.steps[].unpaid_reason` | new value `owner_not_platform_treasury` |
+| `GET /readiness` | `treasury: {address, agents: {agt_…: registered \| mismatch \| foreign_owner \| unregistered \| unread}}` |
+
+## Consequences
+
+- Until the twelve are registered nothing changes for a buyer: every built-in
+  step is returned, as ADR 0015 P8 says, and the receipt says why.
+- Once they are, the platform is paid for its own agents and the seal of a
+  built-in run becomes `paid` rather than `delivery_only`.
+- A dispute credit on a built-in step is still funded by the platform's refund
+  key, not by the treasury; the treasury only receives.
+- The front end's copy of `team_wallets.json` must gain the same entry, byte
+  for byte.
