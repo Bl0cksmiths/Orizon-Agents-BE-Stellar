@@ -8,6 +8,7 @@ from ...config import settings
 from ..model_factory import claude_workers, lazy_agent, worker_tier
 from . import claude_step
 from .base import ModelWorker
+from .bounds import at_most, clamp, trim_text
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
@@ -16,16 +17,53 @@ if TYPE_CHECKING:
 Severity = Literal["info", "low", "medium", "high", "critical"]
 
 
+MAX_RATIONALE_CHARS = 240
+MAX_SUMMARY_CHARS = 280
+MAX_FINDINGS = 6
+CVSS_MIN, CVSS_MAX = 0.0, 10.0
+
+
 class AuditFinding(BaseModel):
     severity: Severity
     title: str
-    rationale: str = Field(..., max_length=240)
+    rationale: str = Field(..., max_length=MAX_RATIONALE_CHARS)
 
 
 class AuditOutput(BaseModel):
-    summary: str = Field(..., max_length=280)
-    findings: list[AuditFinding] = Field(..., max_length=6)
-    cvss_estimate: float = Field(..., ge=0, le=10)
+    summary: str = Field(..., max_length=MAX_SUMMARY_CHARS)
+    findings: list[AuditFinding] = Field(..., max_length=MAX_FINDINGS)
+    cvss_estimate: float = Field(..., ge=CVSS_MIN, le=CVSS_MAX)
+
+
+class AuditFindingDraft(BaseModel):
+    severity: Severity
+    title: str
+    rationale: str = Field(..., description="Why it matters, under 240 characters.")
+
+
+class AuditDraft(BaseModel):
+    """What Claude is asked for: AuditOutput's shape with no hard bounds, which
+    structured outputs cannot enforce (see `bounds`); `fit_audit` applies them."""
+
+    summary: str = Field(..., description="Under 280 characters.")
+    findings: list[AuditFindingDraft] = Field(..., description="Up to 6 findings, most severe first.")
+    cvss_estimate: float = Field(..., description="CVSS-style estimate from 0 to 10.")
+
+
+def fit_audit(draft: AuditDraft) -> AuditOutput:
+    """Trim, cap and clamp a draft into AuditOutput."""
+    return AuditOutput(
+        summary=trim_text(draft.summary, MAX_SUMMARY_CHARS),
+        findings=[
+            AuditFinding(
+                severity=f.severity,
+                title=" ".join(f.title.split()),
+                rationale=trim_text(f.rationale, MAX_RATIONALE_CHARS),
+            )
+            for f in at_most(draft.findings, MAX_FINDINGS)
+        ],
+        cvss_estimate=clamp(draft.cvss_estimate, CVSS_MIN, CVSS_MAX),
+    )
 
 
 INSTRUCTIONS = (
@@ -64,14 +102,15 @@ class SolAudit(ModelWorker):
         prompt = worker_prompt(intent, rationale, "Return the audit summary.")
         out: AuditOutput
         if claude_workers():
-            out = await claude_step.structured(
+            draft = await claude_step.structured(
                 worker=self.name,
                 tier=worker_tier(tier, self.default_tier),
                 system=INSTRUCTIONS,
                 user=prompt,
-                schema=AuditOutput,
+                schema=AuditDraft,
                 max_tokens=MAX_TOKENS,
             )
+            out = fit_audit(draft)
         else:
             out = (await self._agent.arun(prompt)).content
         return {
