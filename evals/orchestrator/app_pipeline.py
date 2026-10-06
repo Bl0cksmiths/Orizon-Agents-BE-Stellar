@@ -34,7 +34,9 @@ own total).
 from __future__ import annotations
 
 import contextvars
+import dataclasses
 import importlib
+import inspect
 import json
 import re
 import time
@@ -89,6 +91,19 @@ class RecordingClaude:
     async def complete(self, request: claude.ClaudeRequest) -> claude.Completion:
         log = _current.get()
         started = time.perf_counter()
+        first: list[float] = []
+        if request.stream:
+            original = request.on_text
+
+            async def on_text(delta: str) -> None:
+                if not first:
+                    first.append((time.perf_counter() - started) * 1000)
+                if original is not None:
+                    maybe = original(delta)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+
+            request = dataclasses.replace(request, on_text=on_text)
         completion = await self.inner.complete(request)
         if log is not None:
             usage = completion.usage
@@ -106,6 +121,8 @@ class RecordingClaude:
                     stop_reason=completion.stop_reason,
                     response_model=completion.model,
                     app_cost_usd=completion.cost_usd(),
+                    effort=request.effort,
+                    first_token_ms=first[0] if first else None,
                 )
             )
             log.transcript.append({"role": "tool_call", "name": request.purpose, "content": request.user})
