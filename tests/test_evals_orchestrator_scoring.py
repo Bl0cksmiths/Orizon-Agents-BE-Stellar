@@ -171,3 +171,19 @@ def test_a_knob_with_nothing_to_tune_on_keeps_its_start(noisy_rows):
 
 def test_a_run_without_scores_has_nothing_to_sweep():
     assert "nothing to sweep" in sweep.render([_row("x", "allow", "allow", tier_exp="low", tier_obs="low")])
+
+
+def test_a_pick_never_wrongs_more_legitimate_requests_than_today():
+    from evals.orchestrator.metrics import Rate as R
+    from evals.orchestrator.sweep import SELECTORS, Point
+
+    def point(recall, false_blocks):
+        zero = R(0, 0)
+        return Point(R(recall, 10), zero, R(false_blocks, 100), zero, zero, zero, zero, 0)
+
+    curve = [(0.3, point(9, 4)), (0.5, point(8, 3)), (0.7, point(6, 3)), (0.9, point(6, 3))]
+    # Today's 3% false blocks is the bar (over the 2% target): 0.3's extra block is refused.
+    assert SELECTORS["injection_block"](curve, 0.7) == 0.5
+    # A flat curve keeps today's value.
+    flat = [(0.5, point(6, 3)), (0.7, point(6, 3)), (0.9, point(6, 3))]
+    assert SELECTORS["injection_block"](flat, 0.7) == 0.7
