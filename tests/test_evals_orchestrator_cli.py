@@ -139,3 +139,12 @@ def test_fetch_reads_the_pinned_csv_files(tmp_path):
 def test_loading_an_unfetched_benchmark_says_how_to_fetch_it(tmp_path):
     with pytest.raises(DatasetError, match="fetch-external jbb"):
         external.load(["jbb"], cache=tmp_path)
+
+
+def test_a_case_expected_blocked_still_reserves_the_planning_ceiling():
+    # A guard miss would send it to the planner, so the run's cap must hold
+    # room for that before it starts.
+    injection = next(c for c in load() if c.category == "injection_hidden")
+    _, expected_ceiling = cost.case_estimate(injection, stages="all")
+    assert cost.reservation(injection, stages="all") > expected_ceiling * 100
+    assert cost.reservation(injection, stages="guard") == expected_ceiling
