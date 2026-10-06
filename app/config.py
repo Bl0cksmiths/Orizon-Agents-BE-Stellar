@@ -510,6 +510,32 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _llm_settings_are_usable(self) -> "Settings":
+        """Refuse an LLM configuration that would misroute, never answer, or never stop spending.
+
+        An unknown provider would otherwise silently mean "automatic"; a spend
+        cap that is negative or NaN compares false with every total, so it would
+        never pause anything; a timeout of zero, NaN or infinity either fails
+        every call or removes the bound. Names variables, never values that
+        could be secrets.
+        """
+        if self.orchestrator_provider.strip().lower() not in {"", "auto", "anthropic", "openai"}:
+            raise ValueError("ORCHESTRATOR_PROVIDER must be anthropic, openai, auto or empty")
+        if not math.isfinite(self.llm_daily_spend_cap_usd) or self.llm_daily_spend_cap_usd < 0:
+            raise ValueError("LLM_DAILY_SPEND_CAP_USD must be a finite number of USD, 0 or more")
+        for name in ("claude_timeout_seconds", "jev_timeout_seconds"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(f"{name.upper()} must be a positive, finite number of seconds")
+        for name in ("claude_max_retries", "jev_max_retries"):
+            if not 0 <= getattr(self, name) <= 10:
+                raise ValueError(f"{name.upper()} must be between 0 and 10")
+        for name in ("claude_model_low", "claude_model_moderate", "claude_model_complex", "typesafe_model"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"{name.upper()} must name a model")
+        return self
+
+    @model_validator(mode="after")
     def _refund_reconcile_interval_is_usable(self) -> "Settings":
         """Refuse a sweep interval that could not keep up with the RPC's history.
 
