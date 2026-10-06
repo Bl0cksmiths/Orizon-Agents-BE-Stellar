@@ -150,3 +150,11 @@ def test_a_case_expected_blocked_still_reserves_the_planning_ceiling():
     _, expected_ceiling = cost.case_estimate(injection, stages="all")
     assert cost.reservation(injection, stages="all") > expected_ceiling * 100
     assert cost.reservation(injection, stages="guard") == expected_ceiling
+
+
+def test_the_fallback_guard_is_priced_as_haiku():
+    cases = load()
+    jev_only = cost.estimate(cases, stages="guard")
+    haiku = cost.estimate(cases, stages="guard", fallback=True)
+    assert haiku.expected_usd > jev_only.expected_usd * 20
+    assert cost.reservation(cases[0], stages="guard", fallback=True) > cost.reservation(cases[0], stages="guard")
