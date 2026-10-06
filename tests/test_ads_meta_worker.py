@@ -170,6 +170,8 @@ def test_the_facts_rule_is_asked_for_and_unbacked_figures_are_surfaced(claude: F
     assert "never invent facts" in ads_meta.INSTRUCTIONS
     # The live smoke of 2026-10-06 added "expert volunteers" and "Saturday morning".
     assert "Do not embellish" in ads_meta.INSTRUCTIONS
+    # The re-run added "Stop paying for simple repairs" and "without high shop costs".
+    assert "no implied comparisons or savings" in ads_meta.INSTRUCTIONS
     claude.reply(
         _draft(
             _ad("Join 500+ riders", primary_text="Save 20% on repairs. [placeholder: 2 hours] free stand time."),

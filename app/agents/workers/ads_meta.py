@@ -122,7 +122,9 @@ INSTRUCTIONS = (
     "write a clearly marked placeholder for the owner to fill in, such as "
     "[placeholder: discount] or [placeholder: price], and list it in the notes. "
     "Do not embellish either: no qualifiers (expert, certified, award-winning), "
-    "times, places or extras the request and the upstream outputs do not give."
+    "times, places or extras the request and the upstream outputs do not give, "
+    "and no implied comparisons or savings ('stop paying for…', 'cheaper than a "
+    "shop', 'save money') the inputs do not state."
 )
 
 UPSTREAM_GUIDANCE = (
