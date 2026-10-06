@@ -39,7 +39,7 @@ from typing import Any
 import pytest
 from pg_support import events, execute, fetch, run, settlements, statuses
 
-from app.services import dispute_store
+from app.services import dispute_store, pg_schema
 from app.services.dispute_store import (
     DisputeRecord,
     DisputeStore,
@@ -872,6 +872,7 @@ class FakePool:
             self.settlements.append(dict(zip(_SETTLEMENT_COLUMNS, args, strict=True)))
             return "INSERT 0 1"
         assert sql in (
+            pg_schema.DDL_LOCK_SQL,
             dispute_store._CREATE_SETTLEMENTS_SQL,
             dispute_store._CREATE_DISPUTES_SQL,
             dispute_store._CREATE_REFUND_CLAIMS_SQL,
@@ -1195,6 +1196,13 @@ def test_the_schema_is_created_lazily_and_only_once() -> None:
     assert len(ddl) == 3
     assert any("CREATE TABLE IF NOT EXISTS workflow_settlements" in s for s in ddl)
     assert any("CREATE TABLE IF NOT EXISTS dispute_events" in s for s in ddl)
+    # On one connection, behind the DDL lock (app/services/pg_schema.py).
+    assert pool.statements[:4] == [
+        pg_schema.DDL_LOCK_SQL,
+        dispute_store._CREATE_SETTLEMENTS_SQL,
+        dispute_store._CREATE_DISPUTES_SQL,
+        dispute_store._CREATE_REFUND_CLAIMS_SQL,
+    ]
 
 
 def test_the_duplicate_rule_is_an_index_and_not_only_a_read() -> None:
@@ -1827,10 +1835,10 @@ def test_every_statement_and_every_acquire_names_its_own_bound() -> None:
     # Every statement the store sent, the DDL included, named a bound.
     assert pool.statements and None not in pool.timeouts
     assert len(pool.timeouts) == len(pool.statements)
-    # And the one call that takes a connection of its own bounded the wait for
-    # it — longer than a command, so a waiter is never cut off before the
-    # holder it is waiting for has been.
-    assert pool.acquired == [dispute_store._POOL_ACQUIRE_TIMEOUT]
+    # And the two calls that take a connection of their own — the DDL and
+    # append_status — bounded the wait for it: longer than a command, so a
+    # waiter is never cut off before the holder it is waiting for has been.
+    assert pool.acquired == [dispute_store._POOL_ACQUIRE_TIMEOUT] * 2
     assert dispute_store._POOL_ACQUIRE_TIMEOUT > dispute_store._POOL_COMMAND_TIMEOUT
 
 

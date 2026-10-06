@@ -47,6 +47,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from ..config import settings
+from .pg_schema import create_schema
 
 logger = logging.getLogger(__name__)
 
@@ -1609,9 +1610,17 @@ class PostgresDisputeStore:
                 # own rationale above it. asyncpg runs argument-less queries
                 # through the simple protocol, which is what lets one execute()
                 # carry a table and its indexes together.
-                await pool.execute(_CREATE_SETTLEMENTS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
-                await pool.execute(_CREATE_DISPUTES_SQL, timeout=_POOL_COMMAND_TIMEOUT)
-                await pool.execute(_CREATE_REFUND_CLAIMS_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                # All three in one transaction under the DDL lock, so a deploy's
+                # old and new process cannot race each other's CREATEs.
+                await create_schema(
+                    pool,
+                    "dispute_store",
+                    _CREATE_SETTLEMENTS_SQL,
+                    _CREATE_DISPUTES_SQL,
+                    _CREATE_REFUND_CLAIMS_SQL,
+                    timeout=_POOL_COMMAND_TIMEOUT,
+                    acquire_timeout=_POOL_ACQUIRE_TIMEOUT,
+                )
                 self._ready = True
             return pool
 
