@@ -133,3 +133,18 @@ def test_copywrite_with_nothing_upstream_asks_what_it_always_asked(claude: FakeC
     claude.reply(_copy_reply(), purpose="worker.copywrite.v3")
     run("agt_01h8", ctx())
     assert claude.calls_for("worker.copywrite.v3")[0].user == worker_prompt(INTENT, RATIONALE, "Draft the copy.")
+
+
+# ── seo.brief, research.pro, design.figma, sol-audit ────────────────────────
+
+
+def ocr() -> dict[str, Any]:
+    return {"summary": "read 2 lines", "text": "OCR-TEXT pragma solidity ^0.8.0;\ncontract Vault {}"}
+
+
+def test_seo_brief_builds_on_the_research(claude: FakeClaude) -> None:
+    claude.reply({"keywords": ["k"], "audiences": ["a"], "summary": "s"}, purpose="worker.seo.brief")
+    run("agt_05x7", ctx(**{"research.pro": research()}))
+    prompt = claude.calls_for("worker.seo.brief")[0].user
+    assert "RESEARCH-CLAIM riders want same-week fixes." in fenced_body(prompt)
+    assert prompt.rstrip().endswith("Return the SEO brief.")
