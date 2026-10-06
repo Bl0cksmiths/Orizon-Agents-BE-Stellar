@@ -7,7 +7,7 @@ from .state import state
 _SEED: list[tuple[str, str, list[str], float, float, str, int, bool]] = [
     ("agt_01h8", "copywrite.v3", ["copy", "seo", "en"], 0.012, 4.92, "online", 18420, True),
     ("agt_02k2", "design.figma", ["ui", "tokens", "figma"], 0.018, 4.87, "online", 7321, True),
-    ("agt_03d9", "code.next", ["ts", "react", "next"], 0.066, 4.95, "online", 24610, False),
+    ("agt_03d9", "code.next", ["ts", "react", "next"], 0.066, 4.95, "online", 24610, True),
     ("agt_04m1", "sol-audit", ["solidity", "security"], 0.180, 4.78, "idle", 1204, True),
     ("agt_05x7", "seo.brief", ["seo", "research"], 0.009, 4.65, "online", 32012, True),
     ("agt_06q4", "vision.ocr", ["vision", "ocr"], 0.014, 4.71, "idle", 8811, True),

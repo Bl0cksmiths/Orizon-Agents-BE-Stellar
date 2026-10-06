@@ -437,6 +437,7 @@ def test_every_llm_worker_is_tier_aware() -> None:
             "vision.ocr",
             "ads.meta",
             "translate.42",
+            "code.next",
         ]
     )
     defaults = {w.name: w.default_tier for w in WORKERS.values() if isinstance(w, ModelWorker)}
@@ -451,4 +452,5 @@ def test_every_llm_worker_is_tier_aware() -> None:
         "vision.ocr": "low",
         "ads.meta": "low",
         "translate.42": "low",
+        "code.next": "moderate",
     }
