@@ -1627,6 +1627,52 @@
       }
     }
   },
+  "code_length": [
+    {
+      "label": "code.gen#1",
+      "worker": "code.gen",
+      "served_model": "claude-sonnet-5-5",
+      "effort": "low",
+      "first_token_s": 1.929,
+      "wall_s": 39.23,
+      "output_tokens": 7058,
+      "cost_usd": 0.0770275,
+      "unreported_estimated_usd": 0.0,
+      "lines": 180,
+      "bytes": 14385,
+      "validator": [
+        "under 200 lines (180) — feature-incomplete, add depth"
+      ],
+      "hit_token_ceiling": false,
+      "hit_stream_budget": false,
+      "summary": "Brass & Blade — Barbershop Booking — A complete barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard with schedule editing, and email-style confirmations, all persisted locally.",
+      "deferred_listed": false,
+      "html": "code_gen_1__index.html",
+      "error": null
+    },
+    {
+      "label": "code.critic#1",
+      "worker": "code.critic",
+      "served_model": "claude-sonnet-5-5",
+      "effort": "low",
+      "first_token_s": 0.867,
+      "wall_s": 37.69,
+      "output_tokens": 8383,
+      "cost_usd": 0.10171,
+      "unreported_estimated_usd": 0.0,
+      "lines": 192,
+      "bytes": 16886,
+      "validator": [
+        "under 200 lines (192) — feature-incomplete, add depth"
+      ],
+      "hit_token_ceiling": false,
+      "hit_stream_budget": false,
+      "summary": "Brass & Blade — Barbershop Booking · polished: 180L → 192L (+12) · 1 structural issue fixed",
+      "deferred_listed": false,
+      "html": "code_critic_1__index.html",
+      "error": null
+    }
+  ],
   "spend": {
     "guard_usd": 0.008598744,
     "workers_reported_usd": 0.01052,
@@ -1639,6 +1685,7 @@
       "code.gen": 0.1296
     },
     "measured_total_usd": 0.019118744,
-    "total_with_estimates_usd": 0.14871874399999999
+    "total_with_estimates_usd": 0.14871874399999999,
+    "code_length_usd": 0.1787375
   }
 }
