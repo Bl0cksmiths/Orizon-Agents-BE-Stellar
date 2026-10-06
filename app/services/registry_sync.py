@@ -383,9 +383,12 @@ async def _pass() -> int:
                 )
             continue
         try:
-            raw = batched.get(agent_id)
-            if raw is None:
-                raw = await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+            known = batched.get(agent_id)
+            raw = (
+                known
+                if known is not None
+                else await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+            )
             # Answered: whatever the mapper makes of it, the chain has told
             # us about this id, so it no longer holds the mirror partial.
             _answered_ids.add(agent_id)
