@@ -281,11 +281,38 @@ nothing else — no JSON, no markdown fences, no commentary:
 The HTML goes in raw: not escaped, not quoted, not wrapped in anything else.
 """
 
-# The Claude path's prompt: the same brief, answered as tagged raw HTML. A
-# whole app escaped into a JSON string costs tokens for every quote and
-# newline and breaks on the first one missed; raw HTML between tags does
-# neither, and it streams as it is written.
-CLAUDE_INSTRUCTIONS = _BRIEF + TAGGED_SHAPE
+_AGNO_LENGTH = """# Length target
+
+For curated demo intents (kit context present), aim for **600–1000 lines** of
+production-quality code — the kit deserves polish. For free-form intents,
+**400–700 lines** is the sweet spot.
+"""
+
+# The Claude path's length target. A step must finish inside the run loop's
+# 120 s deadline: measured live, Claude Sonnet 5.5 writes about 110 tokens/s
+# (thinking included), a 282–355-line app took 35–45 s, and a complex request
+# left to the agno target was still streaming at 104.8 s.
+CLAUDE_LENGTH = """# Length target
+
+Write a single self-contained HTML file of about 250–450 lines. Prioritise
+working core features over breadth: for a large request, implement the core
+flow well and list the deferred features in the summary.
+"""
+
+
+def swap_section(prompt: str, old: str, new: str) -> str:
+    """`prompt` with its `old` section replaced by `new` — loudly, so an edit
+    to the shared brief cannot silently leave both length targets in place."""
+    if prompt.count(old) != 1:
+        raise ValueError("the section to replace is not in the prompt exactly once")
+    return prompt.replace(old, new)
+
+
+# The Claude path's prompt: the same brief with the Claude length target,
+# answered as tagged raw HTML. A whole app escaped into a JSON string costs
+# tokens for every quote and newline and breaks on the first one missed; raw
+# HTML between tags does neither, and it streams as it is written.
+CLAUDE_INSTRUCTIONS = swap_section(_BRIEF, _AGNO_LENGTH, CLAUDE_LENGTH) + TAGGED_SHAPE
 
 _HTML_OPEN = "<artifact_html>"
 _HTML_CLOSE = "</artifact_html>"
