@@ -335,8 +335,8 @@ def test_code_gen_hardens_a_hostile_app_from_claude(claude: FakeClaude) -> None:
 
 def test_code_gen_runs_on_the_steps_tier(claude: FakeClaude) -> None:
     claude.reply(_tagged())
-    run("agt_11c0", tier="complex")
-    assert (claude.calls[0].model, claude.calls[0].effort) == (OPUS, "high")
+    run("agt_11c0", tier="low")
+    assert (claude.calls[0].model, claude.calls[0].effort) == (HAIKU, None)
 
 
 def test_code_gen_fails_the_step_on_a_reply_with_no_app(claude: FakeClaude) -> None:
