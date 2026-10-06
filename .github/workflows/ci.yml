@@ -50,8 +50,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # The app's dependencies exactly as locked and hash-checked — what
+      # deploys — then the dev tools held to them: every installed package is
+      # frozen into a constraint, so a tool can never upgrade a locked one (a
+      # tool that needs a newer one fails the install instead), and pip check
+      # confirms the result is consistent.
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install --require-hashes -r requirements.lock
+          pip freeze > "$RUNNER_TEMP/locked-constraints.txt"
+          pip install -r requirements-tools.txt -c "$RUNNER_TEMP/locked-constraints.txt"
+          pip check
 
       - name: Lint
         run: ruff check .
