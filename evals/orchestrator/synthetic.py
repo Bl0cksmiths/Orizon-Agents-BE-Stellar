@@ -110,14 +110,7 @@ class SyntheticPipeline:
             ids = sorted(offered)[: _STEPS_FOR_TIER[d.tier]]
             raw = {
                 "steps": [
-                    {
-                        "agent_id": i,
-                        "rationale": "synthetic step",
-                        "est_price_usdc": 0.01,
-                        "est_eta_seconds": 1.0,
-                        "tier": d.tier,
-                    }
-                    for i in ids
+                    {"agent_id": i, "rationale": "synthetic step", "est_eta_seconds": 1.0, "tier": d.tier} for i in ids
                 ]
             }
             run.plan = PlanObservation(offered=offered, raw=raw)
