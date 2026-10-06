@@ -55,7 +55,7 @@ SPEC_TOKENS = 400  # the Spec as re-checked and as handed to the planner
 PLANNER_SYSTEM = 1_200
 AGENT_BLOCK = 700
 PLANNER_OUTPUT_BY_EFFORT = {"low": 2_000, "medium": 5_000, "high": 10_000}  # plan + thinking
-PLANNER_MAX_TOKENS = 16_000
+PLANNER_MAX_TOKENS = {"low": 4_000, "moderate": 8_000, "complex": 16_000}  # the planner's own budgets
 EFFORT_FOR_TIER = {"low": "low", "moderate": "medium", "complex": "high"}
 
 
@@ -116,7 +116,8 @@ def case_estimate(case: Case, *, stages: str) -> tuple[dict[str, float], float]:
     by_stage = {"guard": call_cost(GUARD_MODEL, intent + GUARD_QUESTIONS, 0, table)}
     ceiling = by_stage["guard"]
     if stages == "all" and case.expected_verdict == "allow":
-        effort = EFFORT_FOR_TIER[case.expected_tier or "complex"]
+        tier = case.expected_tier or "complex"
+        effort = EFFORT_FOR_TIER[tier]
         improve_in = IMPROVER_SYSTEM + intent
         by_stage["improve"] = call_cost(IMPROVER_MODEL, improve_in, IMPROVER_OUTPUT, table)
         by_stage["recheck"] = call_cost(GUARD_MODEL, SPEC_TOKENS + intent + GUARD_QUESTIONS, 0, table)
@@ -125,7 +126,7 @@ def case_estimate(case: Case, *, stages: str) -> tuple[dict[str, float], float]:
         ceiling += (
             call_cost(IMPROVER_MODEL, improve_in, IMPROVER_MAX_TOKENS, table)
             + by_stage["recheck"]
-            + call_cost(PLANNER_MODEL, plan_in, PLANNER_MAX_TOKENS, table)
+            + call_cost(PLANNER_MODEL, plan_in, PLANNER_MAX_TOKENS[tier], table)
         )
     return by_stage, ceiling
 
