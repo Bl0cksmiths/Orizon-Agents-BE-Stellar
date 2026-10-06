@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from .. import money
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
+from ..agents.role_cards import card_for
 from ..agents.workers.base import ModelWorker
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
@@ -769,7 +770,10 @@ def _routable_registry(
 
 
 def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.RepInfo]) -> str:
-    """The AVAILABLE_AGENTS block for `agents`, one line per agent, in order.
+    """The AVAILABLE_AGENTS block for `agents`, one entry per agent, in order.
+
+    An entry is one `- id=…` line, then — for a built-in agent — its role card
+    on an indented line of its own.
 
     The planner's whole view of who it may route to. Public so the evals
     harness can hand `draft_plan` the same block decompose would; decompose
@@ -796,6 +800,13 @@ def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
+        # A built-in agent's role card, indented under its entry: what it
+        # does, reads and hands on, so the planner can compose a pipeline
+        # whose handoffs exist. Static first-party text (`role_cards`), so the
+        # block stays as cacheable as before; an external agent has none.
+        card = card_for(a.id)
+        if card is not None and not _is_external(a.id):
+            lines.append(f"  {card.render()}")
     return "\n".join(lines)
 
 

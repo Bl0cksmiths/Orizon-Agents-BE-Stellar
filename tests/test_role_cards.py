@@ -36,3 +36,39 @@ def test_a_card_names_only_agents_that_exist(agent_id: str) -> None:
     named = set(re.findall(r"\b[a-z]+(?:\.[a-z0-9]+)+\b", ROLE_CARDS[agent_id].render()))
 
     assert named <= SEEDED_NAMES, named - SEEDED_NAMES
+
+
+def test_a_card_renders_in_its_pinned_shape() -> None:
+    assert ROLE_CARDS["agt_08j2"].render() == (
+        "does: seals the finished build and issues a preview link; "
+        "reads: the latest code artifact (after code.critic when it ran); "
+        "hands on: the sealed build and its preview link, as the last step; "
+        "use when: a build should be live, shared or deployed; never without a code builder before it"
+    )
+
+
+def test_the_block_sets_a_built_in_agents_card_under_its_entry_and_gives_an_external_agent_none() -> None:
+    from app.schemas import Agent
+    from app.services.orchestrator_svc import render_agents_block
+
+    built_in = Agent(id="agt_11c0", name="code.gen", skills=["code"], price=0.054, rep=4.0, status="online", runs=1)
+    external = Agent(
+        id="ext_op",
+        name="operator agent",
+        skills=["code"],
+        price=0.01,
+        rep=4.0,
+        status="online",
+        runs=1,
+        source="onchain",
+    )
+
+    lines = render_agents_block([built_in, external], {}).splitlines()
+
+    assert lines == [
+        "AVAILABLE_AGENTS:",
+        lines[1],
+        "  " + ROLE_CARDS["agt_11c0"].render(),
+        lines[3],
+    ]
+    assert lines[1].startswith("- id=agt_11c0 ") and lines[3].startswith("- id=ext_op ")

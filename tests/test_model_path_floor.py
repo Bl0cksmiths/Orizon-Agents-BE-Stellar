@@ -19,10 +19,12 @@ floor-filtered listing and the starvation backstop's top-N.
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
 
+from app.agents.role_cards import ROLE_CARDS
 from app.config import settings
 from app.schemas import Agent, DecomposeResponse, Plan, PlanStep
 from app.seed import seed_registry
@@ -85,7 +87,7 @@ def _pinned_reps() -> dict[str, RepInfo]:
 # adds, the 3-decimal price, the 2-decimal rep on the 0–5 scale, and the
 # comma-joined skills. Written out rather than rebuilt from a format string: a
 # pin that recomputes the thing it pins cannot catch the thing it is for.
-PINNED_BLOCK = """AVAILABLE_AGENTS:
+PINNED_ENTRIES = """AVAILABLE_AGENTS:
 - id=agt_01h8 name="copywrite.v3" price=0.012 rep=3.00 skills=copy,seo,en
 - id=agt_02k2 name="design.figma" price=0.018 rep=3.05 skills=ui,tokens,figma
 - id=agt_03d9 name="code.next" price=0.066 rep=3.10 skills=ts,react,next
@@ -103,10 +105,30 @@ PINNED_BLOCK = """AVAILABLE_AGENTS:
 # but the block lists them in REGISTRY order, like every other block. A
 # best-first order would read to the planner as a ranking the floor never
 # endorsed, so the order is pinned too.
-PINNED_STARVED_BLOCK = """AVAILABLE_AGENTS:
+PINNED_STARVED_ENTRIES = """AVAILABLE_AGENTS:
 - id=agt_10b6 name="translate.42" price=0.007 rep=0.55 skills=i18n,42 langs
 - id=agt_11c0 name="code.gen" price=0.054 rep=0.55 skills=code,html,js,build
 - id=agt_12r0 name="code.critic" price=0.052 rep=0.56 skills=a11y,polish,review"""
+
+
+def _with_cards(entries: str) -> str:
+    """`entries` with each built-in agent's role card on an indented line under it.
+
+    The card TEXT is `role_cards` data, pinned in tests/test_role_cards.py;
+    what the block pins is where a card goes and how it is set off from the
+    entries — so a card can be reworded without re-pinning every block.
+    """
+    out = []
+    for line in entries.splitlines():
+        out.append(line)
+        entry = re.match(r"- id=(\S+) ", line)
+        if entry:
+            out.append("  " + ROLE_CARDS[entry.group(1)].render())
+    return "\n".join(out)
+
+
+PINNED_BLOCK = _with_cards(PINNED_ENTRIES)
+PINNED_STARVED_BLOCK = _with_cards(PINNED_STARVED_ENTRIES)
 
 
 def test_registry_prompt_block_is_byte_identical(seeded: object) -> None:
@@ -130,7 +152,7 @@ def test_an_unscored_agent_is_not_offered_and_its_own_rating_never_shown(seeded:
 
     assert "agt_06q4" not in block
     assert "4.71" not in block
-    assert block == "\n".join(ln for ln in PINNED_BLOCK.splitlines() if "agt_06q4" not in ln)
+    assert block == _with_cards("\n".join(ln for ln in PINNED_ENTRIES.splitlines() if "agt_06q4" not in ln))
 
 
 def test_an_unscored_agent_is_scored_at_the_prior_never_its_own_claim(seeded: object) -> None:
