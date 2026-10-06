@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import lazy_agent
 from .base import Worker
 from .prompt_safety import worker_prompt
 
@@ -28,9 +27,9 @@ class Copywrite(Worker):
     real = True
 
     def __init__(self) -> None:
-        self._agent = Agent(
+        self._agent = lazy_agent(
             name="copywrite.v3",
-            model=build_openai_chat(settings.worker_model),
+            model_id=settings.worker_model,
             instructions=(
                 "You are a senior marketing copywriter. Given an intent, draft a hero "
                 "headline (<=80 chars), a hero subtitle (<=160 chars), and 3–4 landing "
@@ -47,7 +46,7 @@ class Copywrite(Worker):
     ) -> dict[str, Any]:
         prompt = worker_prompt(intent, rationale, "Draft the copy.")
         result = await self._agent.arun(prompt)
-        out: CopyOutput = result.content  # type: ignore[assignment]
+        out: CopyOutput = result.content
         return {
             "summary": out.hero_headline,
             "hero": {"headline": out.hero_headline, "subtitle": out.hero_subtitle},

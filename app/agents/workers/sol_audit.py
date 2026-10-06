@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import lazy_agent
 from .base import Worker
 from .prompt_safety import worker_prompt
 
@@ -31,9 +30,9 @@ class SolAudit(Worker):
     real = True
 
     def __init__(self) -> None:
-        self._agent = Agent(
+        self._agent = lazy_agent(
             name="sol-audit",
-            model=build_openai_chat(settings.worker_model),
+            model_id=settings.worker_model,
             instructions=(
                 "You are a smart contract security auditor. Given an intent or contract "
                 "description, return up to 6 findings (severity, title, rationale) and a "
@@ -51,7 +50,7 @@ class SolAudit(Worker):
     ) -> dict[str, Any]:
         prompt = worker_prompt(intent, rationale, "Return the audit summary.")
         result = await self._agent.arun(prompt)
-        out: AuditOutput = result.content  # type: ignore[assignment]
+        out: AuditOutput = result.content
         return {
             "summary": out.summary,
             "findings": [f.model_dump() for f in out.findings],

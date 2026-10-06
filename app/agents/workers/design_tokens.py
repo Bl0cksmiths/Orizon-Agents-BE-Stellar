@@ -23,11 +23,10 @@ import asyncio
 import random
 from typing import Any
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import lazy_agent
 from .base import Worker
 from .prompt_safety import worker_prompt
 
@@ -63,9 +62,9 @@ class DesignTokens(Worker):
     real = True
 
     def __init__(self) -> None:
-        self._agent = Agent(
+        self._agent = lazy_agent(
             name="design.figma",
-            model=build_openai_chat(settings.worker_model),
+            model_id=settings.worker_model,
             instructions=_INSTRUCTIONS,
             output_schema=_TokensOutput,
         )
@@ -93,7 +92,7 @@ class DesignTokens(Worker):
         # ── Free-form path: LLM-generated tokens ───────────────────────────
         prompt = worker_prompt(intent, rationale, "Return the design tokens.")
         result = await self._agent.arun(prompt)
-        out: _TokensOutput = result.content  # type: ignore[assignment]
+        out: _TokensOutput = result.content
         palette = {
             "bg": out.bg,
             "surface": out.surface,
