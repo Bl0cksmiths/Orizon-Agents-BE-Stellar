@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ...config import settings
-from ..model_factory import claude_workers, step_model_label, worker_tier
+from ..model_factory import claude_workers, served_model_label, step_model_label, worker_tier
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
@@ -67,6 +67,10 @@ class ModelWorker(Worker):
         if not claude_workers():
             return settings.worker_model
         return step_model_label(worker_tier(tier, self.default_tier))
+
+    def served_model(self, tier: object, model: str) -> str:
+        """The trace's description of a fallback `model` that served this step."""
+        return served_model_label(worker_tier(tier, self.default_tier), model)
 
     @abstractmethod
     async def run(
