@@ -81,6 +81,24 @@ def no_live_rpc(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_platform_verdicts():
+    """Every test starts with no built-in agent verdicts (ADR 0016).
+
+    Any registry pass over a configured registry records one for every
+    built-in agent, and they live for the process like the mirror's other
+    state, so without this the readiness probe would report the last such
+    test's registry to the next.
+    """
+    from app.services import registry_sync
+
+    registry_sync._platform.clear()
+    registry_sync._platform_logged.clear()
+    yield
+    registry_sync._platform.clear()
+    registry_sync._platform_logged.clear()
+
+
+@pytest.fixture(autouse=True)
 def fresh_planner_limiter(monkeypatch):
     """Every test starts with an empty per-client /decompose budget.
 
