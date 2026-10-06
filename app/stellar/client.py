@@ -436,15 +436,24 @@ def read_agent_records(registry_id: str, agent_ids: list[str]) -> dict[str, dict
     label = f"{_contract_label(registry_id)}.records"
     for start in range(0, len(agent_ids), LEDGER_ENTRIES_PER_REQUEST):
         chunk = agent_ids[start : start + LEDGER_ENTRIES_PER_REQUEST]
-        try:
-            with _rpc_span("read", label, slow_ms=SLOW_READ_MS) as span:
-                span["keys"] = len(chunk)
-                span["stage"] = "get_ledger_entries"
-                response = server.get_ledger_entries([_agent_record_key(registry_id, i) for i in chunk])
-                span["entries"] = len(response.entries or [])
-                span["stage"] = "ok"
-        except Exception:
-            continue  # logged by the span; these ids fall back to `get`
+        keys = [_agent_record_key(registry_id, i) for i in chunk]
+        response = None
+        # Asked twice: the read profile does not retry, and a batch that is
+        # dropped once would otherwise send 200 ids down the slow path.
+        for attempt in (1, 2):
+            try:
+                with _rpc_span("read", label, slow_ms=SLOW_READ_MS) as span:
+                    span["keys"] = len(chunk)
+                    span["attempt"] = attempt
+                    span["stage"] = "get_ledger_entries"
+                    response = server.get_ledger_entries(keys)
+                    span["entries"] = len(response.entries or [])
+                    span["stage"] = "ok"
+                break
+            except Exception:
+                continue  # logged by the span
+        if response is None:
+            continue  # these ids fall back to `get`
         for entry in response.entries or []:
             try:
                 decoded = _agent_record(entry.xdr, wanted)
