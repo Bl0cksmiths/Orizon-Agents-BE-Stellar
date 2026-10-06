@@ -11,6 +11,7 @@ from .workers.mock import MockWorker
 from .workers.research_pro import ResearchPro
 from .workers.seo_brief import SeoBrief
 from .workers.sol_audit import SolAudit
+from .workers.translate import Translate42
 from .workers.vision_ocr import VisionOcr
 
 # Real Agno workers
@@ -25,12 +26,12 @@ _REAL: list[Worker] = [
     CodeCriticWorker(),  # agt_12r0 code.critic — top-level polish step
     VisionOcr(),  # agt_06q4 vision.ocr — Claude vision, Claude only
     AdsMeta(),  # agt_07w3 ads.meta — Meta ad set copy, Claude only
+    Translate42(),  # agt_10b6 translate.42 — upstream text into requested languages, Claude only
 ]
 
 # Mock workers for the remaining agents in the registry
 _MOCK: list[Worker] = [
     MockWorker("agt_03d9", "code.next"),
-    MockWorker("agt_10b6", "translate.42"),
 ]
 
 WORKERS: dict[str, Worker] = {w.id: w for w in (_REAL + _MOCK)}
