@@ -350,15 +350,50 @@ _TITLE_MAX = 80
 _SUMMARY_MAX = 280
 
 
-def _summary_with_deferred(summary: str, deferred: str) -> str:
-    """The summary, ending "Deferred: a, b." when the reply named deferred
-    features — the list kept whole and the description trimmed to make room."""
-    items = " ".join(deferred.split()).rstrip(".")
-    if items.casefold() in _NOTHING_DEFERRED:
-        return trim_text(summary, _SUMMARY_MAX)
-    tail = "Deferred: " + trim_text(items, _DEFERRED_MAX - len("Deferred: ") - 1).rstrip(".") + "."
-    head = trim_text(summary, _SUMMARY_MAX - len(tail) - 1)
+_DEFERRED_LABEL = "Deferred: "
+
+
+def _deferred_items(listed: str) -> list[str]:
+    """The features in a comma-separated deferred list; none for "none" and the like."""
+    text = " ".join(listed.split()).rstrip(".")
+    if text.casefold() in _NOTHING_DEFERRED:
+        return []
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def summary_with_deferred(description: str, items: list[str]) -> str:
+    """The summary: `description`, ending "Deferred: a, b." when anything was
+    deferred — the list kept whole and the description trimmed to make room."""
+    if not items:
+        return trim_text(description, _SUMMARY_MAX)
+    listed = trim_text(", ".join(items), _DEFERRED_MAX - len(_DEFERRED_LABEL) - 1).rstrip(".")
+    tail = f"{_DEFERRED_LABEL}{listed}."
+    head = trim_text(description, _SUMMARY_MAX - len(tail) - 1)
     return f"{head} {tail}" if head else tail
+
+
+def split_deferred(summary: str) -> tuple[str, list[str]]:
+    """A summary's description and its deferred features (see `summary_with_deferred`)."""
+    head, label, listed = summary.rpartition(_DEFERRED_LABEL)
+    if not label:
+        return summary, []
+    return head.rstrip(), _deferred_items(listed)
+
+
+def carry_deferred(summary: str, earlier: str) -> str:
+    """`summary` with the deferred features of an `earlier` summary carried in
+    — first, in their order — merged with its own and de-duplicated (case-
+    insensitively). code.critic uses it so a rewrite never drops what the
+    draft said was left out."""
+    description, own = split_deferred(summary)
+    _, carried = split_deferred(earlier)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*carried, *own]:
+        if item.casefold() not in seen:
+            seen.add(item.casefold())
+            merged.append(item)
+    return summary_with_deferred(description, merged)
 
 
 def parse_tagged_artifact(reply: str) -> CodeArtifact:
@@ -386,9 +421,9 @@ def parse_tagged_artifact(reply: str) -> CodeArtifact:
     summary_match = _SUMMARY_RE.search(head)
     deferred_match = _DEFERRED_RE.search(head)
     title = trim_text(title_match.group(1), _TITLE_MAX) if title_match else ""
-    summary = _summary_with_deferred(
+    summary = summary_with_deferred(
         summary_match.group(1) if summary_match else "",
-        deferred_match.group(1) if deferred_match else "",
+        _deferred_items(deferred_match.group(1)) if deferred_match else [],
     )
     return CodeArtifact(
         title=title or "Untitled app",
