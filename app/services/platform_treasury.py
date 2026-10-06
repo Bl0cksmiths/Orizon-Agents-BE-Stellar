@@ -68,6 +68,11 @@ def is_built_in(agent_id: str) -> bool:
     return get_worker(agent_id) is not None
 
 
+def built_in_ids() -> list[str]:
+    """Every built-in agent's id, in catalog order."""
+    return sorted(WORKERS)
+
+
 def onchain_skill(skill: str) -> str:
     """`skill` as a Symbol: every character outside `[A-Za-z0-9_]` made `_`, cut to 32.
 
@@ -106,4 +111,4 @@ def registration_for(agent_id: str) -> Registration:
 
 def registrations() -> list[Registration]:
     """Every built-in agent's registration, in catalog order."""
-    return [registration_for(agent_id) for agent_id in sorted(WORKERS)]
+    return [registration_for(agent_id) for agent_id in built_in_ids()]
