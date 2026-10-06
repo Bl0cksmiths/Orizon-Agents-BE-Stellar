@@ -1,0 +1,40 @@
+{
+  "agent_id": "agt_12r0",
+  "worker": "code.critic",
+  "case_id": "mod-008",
+  "intent": "Make an expense tracker web app where I can add expenses by category and see a pie chart.",
+  "latency_s": 44.56,
+  "cost_usd": 0.1219935,
+  "calls": [
+    {
+      "model": "claude-sonnet-5-5",
+      "response_model": "claude-sonnet-5-5",
+      "served_by": null,
+      "input_tokens": 9258,
+      "output_tokens": 10089,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 1035,
+      "cost_usd": 0.1219935,
+      "app_cost_usd": 0.1219935,
+      "latency_ms": 44556,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "Ledgerly — Expense Tracker · polished: 355L → 403L (+48) · 0 structural issues fixed",
+    "counts": {
+      "violations": 0,
+      "kit_requirements": 0,
+      "notes": 1
+    },
+    "artifact_title": "Ledgerly — Expense Tracker",
+    "artifact_files": [
+      "index.html"
+    ],
+    "critic_violations": [],
+    "critic_notes": [
+      "polished: 355L → 403L (+48) · 0 structural issues fixed"
+    ]
+  }
+}

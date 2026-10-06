@@ -1,0 +1,51 @@
+{
+  "agent_id": "agt_05x7",
+  "worker": "seo.brief",
+  "case_id": "low-006",
+  "intent": "Write a 5-bullet SEO brief for a blog post about budget travel in Siargao.",
+  "latency_s": 6.28,
+  "cost_usd": 0.001344,
+  "calls": [
+    {
+      "model": "claude-haiku-4-5",
+      "response_model": "claude-haiku-4-5-20251001",
+      "served_by": null,
+      "input_tokens": 519,
+      "output_tokens": 165,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cost_usd": 0.001344,
+      "app_cost_usd": 0.00672,
+      "latency_ms": 6281,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "Guide to experiencing Siargao's beaches, surfing, and local culture without breaking the bank, covering accommodation, food, and activity costs.",
+    "counts": {
+      "keywords": 12,
+      "audiences": 4
+    },
+    "keywords": [
+      "budget travel Siargao",
+      "cheap flights to Siargao",
+      "Siargao budget accommodation",
+      "backpacking Siargao",
+      "affordable Siargao hotels",
+      "Siargao travel costs",
+      "budget food Siargao",
+      "free things to do Siargao",
+      "Siargao on a budget",
+      "low-cost Siargao tours",
+      "Siargao travel tips",
+      "how much money Siargao"
+    ],
+    "audiences": [
+      "Backpackers and budget travelers",
+      "Digital nomads seeking affordable destinations",
+      "College students and young adults",
+      "Solo travelers on tight budgets"
+    ]
+  }
+}

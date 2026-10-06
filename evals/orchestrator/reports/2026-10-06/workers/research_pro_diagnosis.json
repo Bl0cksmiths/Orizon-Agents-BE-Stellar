@@ -1,0 +1,41 @@
+{
+  "diagnostic": true,
+  "about": "research.pro re-run twice to capture why its output failed validation",
+  "cost_usd": 0.016895599999999997,
+  "attempts": [
+    {
+      "result": "ModelStepError: research.pro: claude-sonnet-5-5 returned output outside its schema | cause: LLMInvalidOutput('claude-sonnet-5-5 returned output that is not a valid ResearchOutput: findings.0.claim: String should have at most 200 characters (4 error(s))')",
+      "calls": [
+        [
+          "claude-sonnet-5-5",
+          273,
+          744,
+          "end_turn"
+        ]
+      ],
+      "shape": {
+        "findings": 6,
+        "sources": 5,
+        "summary_chars": 421,
+        "longest_claim_chars": 223
+      }
+    },
+    {
+      "result": "ModelStepError: research.pro: claude-sonnet-5-5 returned output outside its schema | cause: LLMInvalidOutput('claude-sonnet-5-5 returned output that is not a valid ResearchOutput: findings.0.claim: String should have at most 200 characters (4 error(s))')",
+      "calls": [
+        [
+          "claude-sonnet-5-5",
+          273,
+          810,
+          "end_turn"
+        ]
+      ],
+      "shape": {
+        "findings": 6,
+        "sources": 5,
+        "summary_chars": 421,
+        "longest_claim_chars": 236
+      }
+    }
+  ]
+}
