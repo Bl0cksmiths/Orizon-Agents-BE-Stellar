@@ -295,3 +295,22 @@ def test_a_restarted_process_resumes_the_day_from_postgres(pg_dsn: str, monkeypa
 
     asyncio.run(before_restart())
     asyncio.run(after_restart())
+
+
+def test_record_nowait_counts_at_once_and_persists_in_the_background() -> None:
+    store = InMemorySpendStore()
+    spend.set_ledger(SpendLedger(store))
+
+    async def run() -> tuple[float, int]:
+        spend.record_nowait(model="claude-opus-5-5", purpose="worker.code.gen", usage=Usage(10, 20), cost=0.5)
+        counted, rows_before = spend.snapshot().spent_usd, len(store.rows)
+        await spend.close_spend_store()  # shutdown waits for the write in flight
+        return counted, rows_before
+
+    counted, rows_before = asyncio.run(run())
+    assert counted == 0.5 and rows_before == 0
+    assert [row for row in store.rows.values()] == [(1, Usage(10, 20), 0.5)]
+    # With no loop to write on, the in-memory total still holds it.
+    ledger = SpendLedger(InMemorySpendStore())
+    ledger.record_nowait(model="claude-opus-5-5", purpose="planner", usage=Usage(), cost=0.25)
+    assert ledger.snapshot().spent_usd == 0.25

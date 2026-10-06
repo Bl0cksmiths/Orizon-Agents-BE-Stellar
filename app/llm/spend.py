@@ -353,14 +353,36 @@ class SpendLedger:
         if spent >= cap:
             raise SpendCapReached(spent_usd=spent, cap_usd=cap, retry_after=seconds_until_reset(self._clock()))
 
-    async def record(self, *, model: str, purpose: str, usage: Usage, cost: float) -> None:
-        """Add one call to today's total and persist it (a failed write is logged, never raised)."""
+    def _hold(self, purpose: str, cost: float) -> date:
         if not _PURPOSE.fullmatch(purpose):
             raise ValueError(f"purpose must match {_PURPOSE.pattern}: {purpose!r}")
         if not (math.isfinite(cost) and cost >= 0):
             raise ValueError(f"cost must be a finite, non-negative USD amount: {cost!r}")
         day = self._roll()
         self._spent += cost
+        return day
+
+    async def record(self, *, model: str, purpose: str, usage: Usage, cost: float) -> None:
+        """Add one call to today's total and persist it (a failed write is logged, never raised)."""
+        day = self._hold(purpose, cost)
+        await self._persist(day, model, purpose, usage, cost)
+
+    def record_nowait(self, *, model: str, purpose: str, usage: Usage, cost: float) -> None:
+        """Add one call to today's total now, and persist it in the background.
+
+        For a call that is being cancelled: the cap sees the spend at once, and
+        the cancellation is not held up by a database write.
+        """
+        day = self._hold(purpose, cost)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # no loop to write on: the in-memory total still holds it
+            return
+        task = loop.create_task(self._persist(day, model, purpose, usage, cost))
+        _pending_writes.add(task)
+        task.add_done_callback(_pending_writes.discard)
+
+    async def _persist(self, day: date, model: str, purpose: str, usage: Usage, cost: float) -> None:
         try:
             await self.store.add(day, model, purpose, usage, cost)
         except Exception as e:
@@ -381,6 +403,7 @@ class SpendLedger:
 
 
 _ledger: SpendLedger | None = None
+_pending_writes: set[asyncio.Task[None]] = set()
 
 
 def get_ledger() -> SpendLedger:
@@ -401,6 +424,11 @@ def set_ledger(ledger: SpendLedger | None) -> None:
 async def close_spend_store() -> None:
     """Release the ledger's pool (shutdown)."""
     global _ledger
+    pending = [t for t in _pending_writes if not t.done()]
+    if pending:
+        _done, late = await asyncio.wait(pending, timeout=5)
+        for task in late:
+            task.cancel()
     ledger, _ledger = _ledger, None
     if ledger is not None:
         try:
@@ -417,6 +445,11 @@ async def check_budget() -> None:
 async def record(*, model: str, purpose: str, usage: Usage, cost: float) -> None:
     """Add one priced call to today's ledger."""
     await get_ledger().record(model=model, purpose=purpose, usage=usage, cost=cost)
+
+
+def record_nowait(*, model: str, purpose: str, usage: Usage, cost: float) -> None:
+    """Add one priced call to today's total at once; persist it in the background."""
+    get_ledger().record_nowait(model=model, purpose=purpose, usage=usage, cost=cost)
 
 
 async def spent_today() -> float:
