@@ -108,6 +108,16 @@ class Settings(BaseSettings):
     claude_model_low: str = "claude-haiku-4-5"
     claude_model_moderate: str = "claude-sonnet-5-5"
     claude_model_complex: str = "claude-opus-5-5"
+    # Per-attempt HTTP bound for a Claude call, and the SDK's own retries of
+    # 408/409/429/5xx and connection errors before the call is unavailable.
+    claude_timeout_seconds: float = 120.0
+    claude_max_retries: int = 2
+    # Server-side refusal fallbacks (beta) on the models that offer them.
+    claude_server_fallbacks: bool = True
+    # jev's whole retry budget per guard question set, retries included —
+    # the guard is on every request's path, so this is short.
+    jev_timeout_seconds: float = 8.0
+    jev_max_retries: int = 2
 
     # ── Code-generation quality dials (code.gen + code.critic) ─
     # Higher reasoning = better artifacts, more latency + cost.
