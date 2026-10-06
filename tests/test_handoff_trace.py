@@ -235,3 +235,22 @@ def test_one_buyers_outputs_never_reach_another_buyers_run(claude: FakeClaude) -
     assert "BUYER-A-KEYWORD" not in second.user
     assert "UPSTREAM_OUTPUTS" not in second.user
     assert not any(" output from: " in line for line in trace_b)
+
+
+def test_code_critic_after_code_next_is_not_attempted_and_the_project_is_what_ships(claude: FakeClaude) -> None:
+    reply = (
+        "<next_title>Pricing</next_title>\n<next_summary>A pricing toggle.</next_summary>\n"
+        "<next_deferred></next_deferred>\n"
+        '<next_file path="app/page.tsx">\nexport default function Page() {\n  return null;\n}\n</next_file>'
+    )
+    claude.reply(reply, purpose="worker.code.next")
+    task, trace = _run("tsk_ho_next", _step("agt_03d9"), _step("agt_12r0"), _step("agt_08j2"))
+
+    assert "code.critic: reviews single-file HTML apps, not a Next.js project — not charged, not rated" in trace
+    assert not any(line.startswith("code.critic failed") for line in trace)
+    assert not any(line.startswith("code.critic uses output from") for line in trace)
+    assert "deploy.v0 uses output from: code.next" in trace
+    assert claude.calls_for("worker.code.critic") == []
+    assert task.spent == pytest.approx(0.02)  # code.next and deploy.v0; the critic is not billed
+    assert ft.consecutive_failures("agt_12r0") == 0
+    assert task.artifact is not None and task.artifact.get("framework") == "next"

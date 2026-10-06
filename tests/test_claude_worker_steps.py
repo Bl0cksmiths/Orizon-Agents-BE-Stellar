@@ -278,7 +278,7 @@ def test_a_refusal_is_still_the_agents_failure_and_rated(claude: FakeClaude, mon
 
 
 def test_the_not_attempted_classes_are_the_ones_the_workers_raise() -> None:
-    from app.agents.workers import translate, vision_ocr
+    from app.agents.workers import code_critic_worker, translate, vision_ocr
 
     assert set(execution_svc._NOT_ATTEMPTED) == {
         claude_step.SPEND_CAP_REACHED,
@@ -288,6 +288,7 @@ def test_the_not_attempted_classes_are_the_ones_the_workers_raise() -> None:
         vision_ocr.IMAGE_UNAVAILABLE,
         translate.NO_INPUT,
         translate.NO_TARGET_LANGUAGE,
+        code_critic_worker.UNSUPPORTED_ARTIFACT,
     }
     # Every per-worker wording names a worker that exists and a class in the table.
     names = {w.name for w in WORKERS.values()}

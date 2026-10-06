@@ -3008,7 +3008,8 @@ UNUSABLE_OUTPUT_FAILURE = "unusable_output"
 
 # Failure classes of a first-party step that the agent could not attempt —
 # OUR outage (budget, provider), or a request that gave the step nothing it can
-# work on (no image to read, nothing to translate, no target language) — rather
+# work on (no image to read, nothing to translate, no target language, a
+# Next.js project for the HTML critic) — rather
 # than the agent's failure to deliver, with the trace's plain words for each.
 # Spelled here, not imported from the worker that raises them, for the same
 # reason `_failure_class` reads `rule` duck-typed (ADR 0005).
@@ -3019,6 +3020,7 @@ _NOT_ATTEMPTED = {
     "no_input": "nothing to work on",
     "image_unavailable": "no image could be read (refused or unreachable)",
     "no_target_language": "no target language named",
+    "unsupported_artifact": "reviews single-file HTML apps, not a Next.js project",
 }
 
 # Where one class reads better in a particular worker's words.
