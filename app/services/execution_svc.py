@@ -15,7 +15,17 @@ from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import PlanStep, SealState, SettlementState, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..schemas import (
+    PlanStep,
+    SealKind,
+    SealState,
+    SettlementState,
+    StoredPlan,
+    Task,
+    TaskStatus,
+    TraceLevel,
+    TraceLine,
+)
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
@@ -2054,15 +2064,6 @@ async def _settle_v2(
 
         if not delivered_steps:
             return (settle_tx, None, settled_job_id)
-        if release:
-            # Delivered, but nobody could be paid (no confirmed on-chain owner,
-            # free, or the cap was spent), so the settle moved nothing to any
-            # operator. An attestation needs a payment to attest to: one naming
-            # no agent and no receipt says nothing, and one naming the unpaid
-            # agents would claim payments that never happened (D-086).
-            await _emit(task_id, start, "exec", "no agent was paid — nothing to attest, no seal submitted")
-            return (settle_tx, None, settled_job_id)
-
         # Seal, exactly as v1 does, with one receipt per payout rather than one
         # for the run: the attestation's link to every payment that funded it.
         # The agents are the PAID ones, one per payout, so `agents[i]` and
@@ -2070,7 +2071,20 @@ async def _settle_v2(
         # attested work to an agent that timed out, failed or was refused —
         # and the seal is permanent on-chain evidence a buyer or an indexer
         # reads as "this agent delivered and was paid for this job".
-        sealed_agents = [payout.agent_id for payout in payout_plan.payouts]
+        #
+        # A run that delivered and paid NOBODY (no confirmed on-chain owner —
+        # the seeded catalogue — a free step, a spent cap) is sealed too, as
+        # DELIVERY ONLY: the agents of the delivered steps in plan order, NO
+        # receipt and a total of zero. The contract stores exactly what it is
+        # given, so with the receipts empty and `total_spent` 0 nothing in the
+        # attestation reads as a payment, and `seal_kind` says so to clients.
+        # Under the release's own job id, so it attests the job the custody
+        # was handed back for.
+        kind: SealKind = "delivery_only" if release else "paid"
+        if release:
+            sealed_agents = [plan.plan.steps[i].agent_id for i in sorted(delivered_steps)]
+        else:
+            sealed_agents = [payout.agent_id for payout in payout_plan.payouts]
         if receipts is None and payout_plan.payouts:
             logger.error(
                 "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
@@ -2096,11 +2110,11 @@ async def _settle_v2(
             _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
             sc.i128(total),
         ]
-        _note_seal(task_id, "pending")
+        _note_seal(task_id, "pending", kind=kind)
         seal_tx, submission = await _submit_seal(seal_args)
         if submission is None:
             proof_tx = seal_tx
-            await _sealed(task_id, start, seal_tx, agents=len(sealed_agents), total_usdc=total_usdc)
+            await _sealed(task_id, start, seal_tx, agents=len(sealed_agents), total_usdc=total_usdc, kind=kind)
         else:
             logger.error(
                 "task %s: AttestationRegistry.seal did not confirm — %s, hash=%s; reconciling "
@@ -2127,6 +2141,7 @@ async def _settle_v2(
                         args=seal_args,
                         agents=len(sealed_agents),
                         total_usdc=total_usdc,
+                        kind=kind,
                         submissions=[submission],
                     )
                 )
@@ -2233,30 +2248,35 @@ class _PendingSeal:
     args: list[Any]  # exactly what was submitted, so a re-submission is identical
     agents: int
     total_usdc: float
+    kind: SealKind
     submissions: list[_SealSubmission]
     record: SettlementRecord | None = None
 
 
-def _note_seal(task_id: str, seal: SealState, proof_tx: str | None = None) -> None:
-    """Write the seal's state (and, once known, its hash) onto the task."""
+def _note_seal(task_id: str, seal: SealState, proof_tx: str | None = None, *, kind: SealKind | None = None) -> None:
+    """Write the seal's state (and, once known, its hash and kind) onto the task."""
     task = state.tasks.get(task_id)
     if task is None:
         return
     update: dict[str, Any] = {"seal": seal}
+    if kind is not None:
+        update["seal_kind"] = kind
     if proof_tx is not None:
         update["proof_tx"] = proof_tx
     state.put_task(task.model_copy(update=update))
 
 
-async def _sealed(task_id: str, start: float, seal_tx: str | None, *, agents: int, total_usdc: float) -> None:
+async def _sealed(
+    task_id: str, start: float, seal_tx: str | None, *, agents: int, total_usdc: float, kind: SealKind
+) -> None:
     if seal_tx is not None:
         await _emit(task_id, start, "proof", f"ERC-8004 attestation sealed · tx {seal_tx[:10]}…")
-        await _emit(
-            task_id,
-            start,
-            "proof",
-            f"workflow sealed — {agents} agents · {total_usdc:.3f} USDC · {time.monotonic() - start:.2f}s",
-        )
+        elapsed = f"{time.monotonic() - start:.2f}s"
+        if kind == "delivery_only":
+            line = f"workflow sealed — {agents} agents delivered, no payment was made · {elapsed}"
+        else:
+            line = f"workflow sealed — {agents} agents · {total_usdc:.3f} USDC · {elapsed}"
+        await _emit(task_id, start, "proof", line)
     else:
         await _emit(task_id, start, "proof", "attestation found on-chain for this job")
     _note_seal(task_id, "sealed", seal_tx)
@@ -2352,7 +2372,12 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
                 verdict = await _seal_verdict(submission)
                 if verdict == "landed":
                     await _sealed(
-                        task_id, start, submission.tx_hash, agents=pending.agents, total_usdc=pending.total_usdc
+                        task_id,
+                        start,
+                        submission.tx_hash,
+                        agents=pending.agents,
+                        total_usdc=pending.total_usdc,
+                        kind=pending.kind,
                     )
                     if submission.tx_hash is not None and pending.record is not None:
                         await _record_proof(task_id, pending.record, submission.tx_hash)
@@ -2369,7 +2394,9 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
                 logger.warning("task %s: attestation registry unreadable while reconciling its seal: %s", task_id, e)
                 continue
             if held:
-                await _sealed(task_id, start, None, agents=pending.agents, total_usdc=pending.total_usdc)
+                await _sealed(
+                    task_id, start, None, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind
+                )
                 return
             if not all_absent:
                 continue
@@ -2378,7 +2405,9 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
                 break
             seal_tx, again = await _submit_seal(pending.args)
             if again is None:
-                await _sealed(task_id, start, seal_tx, agents=pending.agents, total_usdc=pending.total_usdc)
+                await _sealed(
+                    task_id, start, seal_tx, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind
+                )
                 if seal_tx is not None and pending.record is not None:
                     await _record_proof(task_id, pending.record, seal_tx)
                 return
