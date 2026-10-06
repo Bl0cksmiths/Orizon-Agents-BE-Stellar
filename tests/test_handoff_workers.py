@@ -385,3 +385,12 @@ def test_code_gens_claude_brief_says_how_to_build_from_the_upstream_block() -> N
     assert "copy its `:root { --bg: …; --primary: …; }` block verbatim" in flat
     assert "use its hero headline, subtitle and section copy as the page's text" in flat
     assert "DESIGN_TOKENS" not in flat  # no section by that name reaches the Claude path any more
+
+
+def test_code_critics_claude_brief_says_to_check_the_draft_against_the_upstream_intent() -> None:
+    from app.agents.workers import code_critic
+
+    flat = " ".join(code_critic.CLAUDE_INSTRUCTIONS.split())
+    assert "UPSTREAM_OUTPUTS block (when present)" in flat
+    assert "Restore any of them the draft drifted from" in flat
+    assert "UPSTREAM_OUTPUTS" not in code_critic.INSTRUCTIONS  # the agno brief is pinned unchanged
