@@ -26,7 +26,6 @@ def _step(agent="agt_11c0", tier="low", **over):
     return {
         "agent_id": agent,
         "rationale": "builds it",
-        "est_price_usdc": 0.05,
         "est_eta_seconds": 1.0,
         "tier": tier,
         **over,
@@ -53,6 +52,7 @@ def test_a_well_formed_plan_passes_every_check():
         (_plan(_step(tier=None)), "plan_tiers"),
         (_plan(_step(tier="extreme")), "plan_tiers"),
         (_plan({"agent_id": "agt_11c0", "tier": "low"}), "plan_schema"),
+        (_plan(_step(est_price_usdc=0.0)), "plan_schema"),  # a field the planner is not asked for
         (_plan(*[_step()] * 7), "plan_valid"),
         (_plan(), "plan_valid"),
         (PlanObservation(offered=OFFERED, raw=None), "plan_schema"),
