@@ -73,14 +73,14 @@ ROLE_CARDS: dict[str, RoleCard] = {
     "agt_03d9": RoleCard(
         does="builds a React / Next.js app in TypeScript",
         reads="copy, design tokens, research findings and the brand brief from earlier steps",
-        hands_on="the code artifact that code.critic reviews and deploy.v0 seals",
-        use_when="the buyer asks for React, Next.js or TypeScript specifically",
+        hands_on="a Next.js project that deploy.v0 seals (code.critic does not review it)",
+        use_when="the buyer asks for React, Next.js or TypeScript specifically; never together with code.gen",
     ),
     "agt_12r0": RoleCard(
-        does="reviews and fixes the built code: accessibility, polish, edge cases",
-        reads="the code builder's artifact, with the copy and design tokens it was built from",
+        does="reviews and fixes a code.gen build: accessibility, polish, edge cases",
+        reads="code.gen's single-file HTML artifact, with the copy and design tokens it was built from",
         hands_on="the improved artifact, for deploy.v0 to seal",
-        use_when="right after a code builder step; never without one before it",
+        use_when="right after code.gen; never without it, and never for a code.next project",
     ),
     "agt_08j2": RoleCard(
         does="seals the finished build and issues a preview link",
