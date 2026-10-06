@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from route_inventory import concrete, operator_guard, write_operations
 
 from app import rate_limit
 from app.main import app
@@ -154,6 +155,19 @@ def test_an_expensive_read_has_a_budget_too(client, monkeypatch) -> None:
     assert client.get("/api/agents/agt_01h8/readiness").status_code == 429
 
 
+_OWN_LIMITER = {"/api/orchestrator/decompose", "/api/pdax/webhooks/receive"}
+
+
+def _unbudgeted(application) -> list[str]:
+    return sorted(
+        f"{method} {path}"
+        for (method, path), operation in write_operations(application).items()
+        if path not in _OWN_LIMITER
+        and operator_guard(operation) is None
+        and rate_limit.policy_for(method, concrete(path)) is None
+    )
+
+
 def test_every_unguarded_state_changing_route_has_a_budget() -> None:
     """A new write route must decide its budget, not inherit 1200 a minute.
 
@@ -162,31 +176,22 @@ def test_every_unguarded_state_changing_route_has_a_budget() -> None:
     (`decompose_rate_limit_per_minute`) and the PDAX webhook, which is HMAC
     verified and must never be throttled against the provider's retries.
     """
-    from fastapi.routing import APIRoute
+    assert _unbudgeted(app) == []
 
-    operator_guards = {"require_api_key", "require_adjudicator", "require_operator_key", "require_seal_key"}
-    own_limiter = {"/api/orchestrator/decompose", "/api/pdax/webhooks/receive"}
 
-    def guards(dependant) -> set[str]:
-        names: set[str] = set()
-        for d in dependant.dependencies:
-            if d.call is not None:
-                names.add(getattr(d.call, "__name__", ""))
-            names |= guards(d)
-        return names
+def test_a_new_unbudgeted_route_is_caught() -> None:
+    from fastapi import APIRouter, FastAPI
 
-    unbudgeted = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        for method in route.methods - {"GET", "HEAD"}:
-            if route.path in own_limiter or guards(route.dependant) & operator_guards:
-                continue
-            concrete = route.path.replace("{agent_id}", "agt_01h8").replace("{dispute_id}", "dsp_1")
-            if rate_limit.policy_for(method, concrete) is None:
-                unbudgeted.append(f"{method} {route.path}")
+    toy = FastAPI()
+    router = APIRouter(prefix="/widgets")
 
-    assert unbudgeted == []
+    @router.post("/{widget_id}/spin")
+    async def spin(widget_id: str) -> None:
+        return None
+
+    toy.include_router(router, prefix="/api")
+
+    assert _unbudgeted(toy) == ["POST /api/widgets/{widget_id}/spin"]
 
 
 # ── who counts as a client ──────────────────────────────────────
