@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
+from ..agents.workers.base import ModelWorker
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
@@ -275,7 +276,11 @@ def _with_executor(step: PlanStep) -> PlanStep:
         return step.model_copy(update={"executor": "external", "model": None})
     if provider.active_provider() != "anthropic":
         return step.model_copy(update={"executor": "built_in", "model": settings.worker_model})
-    tier = step.tier or getattr(worker, "default_tier", None)
+    # A built-in LLM worker reports the tier it will really run on — its
+    # default when the step names none, capped at its `max_tier` (code.gen and
+    # code.critic never run on Opus) — so the card never claims a model the
+    # step will not use.
+    tier = worker.effective_tier(step.tier) if isinstance(worker, ModelWorker) else step.tier
     return step.model_copy(update={"executor": "built_in", "model": model_for(tier) if tier else None})
 
 
