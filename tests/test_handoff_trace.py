@@ -216,3 +216,22 @@ def test_a_trace_line_that_cannot_be_built_never_fails_the_step(
     assert task.status == "complete"
     assert any(line.startswith("copywrite.v3: ") for line in trace)
     assert "could not name the upstream outputs of copywrite.v3" in caplog.text
+
+
+def test_one_buyers_outputs_never_reach_another_buyers_run(claude: FakeClaude) -> None:
+    copy_reply = {"hero_headline": "H", "hero_subtitle": "S", "sections": [{"title": "a", "body": "b"}] * 2}
+    claude.reply(
+        {"keywords": ["BUYER-A-KEYWORD"], "audiences": ["a"], "summary": "s"},
+        purpose="worker.seo.brief",
+    )
+    claude.reply(copy_reply, purpose="worker.copywrite.v3")
+    claude.reply(copy_reply, purpose="worker.copywrite.v3")
+
+    _run("tsk_ho_buyer_a", _step("agt_05x7"), _step("agt_01h8"))
+    _, trace_b = _run("tsk_ho_buyer_b", _step("agt_01h8"))
+
+    first, second = claude.calls_for("worker.copywrite.v3")
+    assert "BUYER-A-KEYWORD" in first.user
+    assert "BUYER-A-KEYWORD" not in second.user
+    assert "UPSTREAM_OUTPUTS" not in second.user
+    assert not any(" output from: " in line for line in trace_b)
