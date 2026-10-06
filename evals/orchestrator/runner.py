@@ -129,6 +129,8 @@ def _call_dict(c: StageCall) -> dict[str, Any]:
         "cost_usd": c.cost_usd,
         "latency_ms": c.latency_ms,
         "stop_reason": c.stop_reason,
+        "response_model": c.response_model,
+        "app_cost_usd": c.app_cost_usd,
     }
 
 
