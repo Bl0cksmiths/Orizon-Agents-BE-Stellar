@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from .llm.tiers import Tier
+
 # Agent ids are contract Symbols: short alphanumeric/underscore tokens. Reject
 # garbage at the router edge instead of paying an RPC round-trip to find out.
 # Lives here, not in a router, because more than one router now bounds an agent
@@ -195,10 +197,18 @@ class PlanStep(BaseModel):
     # starvation backstop — kept so the plan stays workable, but flagged so the
     # buyer sees it is a degraded choice. Inline mate to substituted_for.
     degraded: bool = False
+    # How hard this step is, which decides the model a built-in worker runs it
+    # on (low → Haiku, moderate → Sonnet, complex → Opus; `models.tiers` on the
+    # decompose response names the exact ids). Never above the plan's own
+    # tier. None on a plan built by the legacy planner, which has no tiers.
+    tier: Tier | None = None
 
 
 class Plan(BaseModel):
     steps: list[PlanStep]
+    # The request's overall complexity as the request check judged it. None
+    # on a plan built by the legacy planner.
+    tier: Tier | None = None
 
 
 class StoredPlan(BaseModel):
