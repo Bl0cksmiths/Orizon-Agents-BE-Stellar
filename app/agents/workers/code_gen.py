@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ...config import settings
 from ..model_factory import lazy_agent
@@ -135,7 +136,7 @@ def coerce_artifact(content: Any) -> CodeArtifact:
     raise TypeError(f"unexpected code.gen content type: {type(content).__name__}")
 
 
-INSTRUCTIONS = """You are Orizon's code-generation agent — the best coding agent in the
+_BRIEF = """You are Orizon's code-generation agent — the best coding agent in the
 network. Your output must feel like something shipped by a senior product
 engineer at a design-led studio, not a demo.
 
@@ -238,7 +239,9 @@ shipping version looks like.
 For curated demo intents (kit context present), aim for **600–1000 lines** of
 production-quality code — the kit deserves polish. For free-form intents,
 **400–700 lines** is the sweet spot.
+"""
 
+_JSON_SHAPE = """
 # OUTPUT SHAPE
 
 Return a CodeArtifact with:
@@ -249,6 +252,77 @@ Return a CodeArtifact with:
 - `entry`: "index.html".
 - `preview_html`: EXACT same string as files[0].content.
 """
+
+# The OpenAI path's prompt: the brief, answered as CodeArtifact JSON.
+INSTRUCTIONS = _BRIEF + _JSON_SHAPE
+
+TAGGED_SHAPE = """
+# OUTPUT SHAPE
+
+Return the CodeArtifact as exactly three tagged sections, in this order, and
+nothing else — no JSON, no markdown fences, no commentary:
+
+<artifact_title>product name</artifact_title>
+<artifact_summary>one sentence</artifact_summary>
+<artifact_html>
+<!doctype html>
+…the full single-file HTML document…
+</artifact_html>
+
+- title: a confident product-style name, at most 80 characters. Use the brand
+  name if provided.
+- summary: one punchy sentence, at most 280 characters, describing what it
+  does + the one thing that makes it feel premium.
+
+The HTML goes in raw: not escaped, not quoted, not wrapped in anything else.
+"""
+
+# The Claude path's prompt: the same brief, answered as tagged raw HTML. A
+# whole app escaped into a JSON string costs tokens for every quote and
+# newline and breaks on the first one missed; raw HTML between tags does
+# neither, and it streams as it is written.
+CLAUDE_INSTRUCTIONS = _BRIEF + TAGGED_SHAPE
+
+_HTML_OPEN = "<artifact_html>"
+_HTML_CLOSE = "</artifact_html>"
+_TITLE_RE = re.compile(r"<artifact_title>(.*?)</artifact_title>", re.DOTALL)
+_SUMMARY_RE = re.compile(r"<artifact_summary>(.*?)</artifact_summary>", re.DOTALL)
+_TITLE_MAX = 80
+_SUMMARY_MAX = 280
+
+
+def parse_tagged_artifact(reply: str) -> CodeArtifact:
+    """A CodeArtifact from a tagged reply (see `TAGGED_SHAPE`).
+
+    The HTML runs from the first opening tag to the LAST closing tag, so an
+    app whose own source mentions the tag cannot cut itself short; the title
+    and summary are read only from the text before it, so the app cannot
+    supply them either. Over-long prose is trimmed rather than failed — the
+    run has been paid for, as with `clamp_artifact_content`. A reply with no
+    HTML section raises ValueError; one in the JSON shape is still accepted.
+    """
+    start = reply.find(_HTML_OPEN)
+    end = reply.rfind(_HTML_CLOSE)
+    if start < 0 or end < start:
+        try:
+            return coerce_artifact(reply)
+        except (ValueError, ValidationError) as e:
+            raise ValueError("reply has no <artifact_html> section") from e
+    html = reply[start + len(_HTML_OPEN) : end].strip()
+    if not html:
+        raise ValueError("reply has an empty <artifact_html> section")
+    head = reply[:start]
+    title_match = _TITLE_RE.search(head)
+    summary_match = _SUMMARY_RE.search(head)
+    title = " ".join(title_match.group(1).split()) if title_match else ""
+    summary = " ".join(summary_match.group(1).split()) if summary_match else ""
+    return CodeArtifact(
+        title=title[:_TITLE_MAX] or "Untitled app",
+        summary=summary[:_SUMMARY_MAX],
+        files=[ArtifactFile(path="index.html", language="html", content=html)],
+        entry="index.html",
+        preview_html=html,
+    )
 
 
 class CodeGen(Worker):
