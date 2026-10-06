@@ -88,11 +88,15 @@ class _Rpc:
         self.filters: list[Any] = []
         self.page_errors: dict[int, BaseException] = {}
         self.anchor_error: BaseException | None = None
+        self.anchor_fails = 0  # how many tip reads fail before one answers
         self.on_page: Any = None
 
     def get_latest_ledger(self) -> Any:
         if self.anchor_error is not None:
             raise self.anchor_error
+        if self.anchor_fails:
+            self.anchor_fails -= 1
+            raise TimeoutError("read timed out")
         return SimpleNamespace(sequence=self.latest)
 
     def get_events(
@@ -339,9 +343,26 @@ def test_out_of_time_mid_walk_keeps_what_it_read_and_the_next_build_resumes(chai
     assert len(_revenue(second, "ext_a")) == 2
 
 
-def test_a_page_that_fails_is_resumed_from_not_restarted(chain: Any) -> None:
+def test_a_page_that_fails_once_is_read_again(chain: Any) -> None:
     rpc, _views = chain
     rpc.page_errors = {3: ConnectionError("rpc down")}
+
+    window = _fetch({"ext_a": OWNER_A})
+
+    assert window.complete is True
+    assert rpc.pages[2] == rpc.pages[3]  # the same range, asked twice
+
+
+def test_a_tip_read_that_fails_once_is_read_again(chain: Any) -> None:
+    rpc, _views = chain
+    rpc.anchor_fails = 1
+
+    assert _fetch({"ext_a": OWNER_A}).complete is True
+
+
+def test_a_page_that_fails_is_resumed_from_not_restarted(chain: Any) -> None:
+    rpc, _views = chain
+    rpc.page_errors = {3: ConnectionError("rpc down"), 4: ConnectionError("rpc down")}
 
     first = _fetch({"ext_a": OWNER_A})
 
