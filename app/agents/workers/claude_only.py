@@ -8,7 +8,8 @@ charged for — and fails as `model_not_configured` instead, which the run loop
 treats as our outage: not run, not charged, not rated.
 
 The trace names no model for a step that will not ask one, so `step_model`
-says None off Claude rather than naming the OpenAI worker model.
+says None off Claude rather than naming the OpenAI worker model — and, for
+the same reason, `upstream_sources` names no earlier step whose output it used.
 """
 
 from __future__ import annotations
@@ -31,6 +32,12 @@ class ClaudeOnlyWorker(ModelWorker):
         if not claude_workers():
             return None
         return super().step_model(tier, context)
+
+    def upstream_sources(self, context: dict[str, Any] | None) -> list[str]:
+        # Off Claude no prompt is built, so no earlier output is used.
+        if not claude_workers():
+            return []
+        return super().upstream_sources(context)
 
     def require_claude(self) -> None:
         """Raise `model_not_configured` unless the workers run on Claude."""
