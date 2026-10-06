@@ -175,6 +175,10 @@ def _agent_of(event: EventInfo) -> str | None:
     return agent_id if isinstance(agent_id, str) else None
 
 
+class _OutOfTime(Exception):
+    """The build's deadline passed part-way through a range."""
+
+
 class _Dense(Exception):
     """One ledger holds more charges than a page returns."""
 
@@ -187,8 +191,9 @@ class _Dense(Exception):
 def _read_range(server: Any, filters: list[EventFilter], start: int, end: int, deadline: float) -> list[EventInfo]:
     """Every event in `[start, end)`, splitting any range whose page came back
     full. Raises `_Dense` for a single ledger that overflows a page (carrying
-    what it did return), TimeoutError past the deadline, and whatever the node
-    raises."""
+    what it did return), `_OutOfTime` past the deadline, and whatever the node
+    raises — a read that timed out included, which is a failed read and not
+    the build running out of time."""
     page = _twice(
         lambda: server.get_events(start_ledger=start, end_ledger=end, filters=filters, limit=PAGE_EVENT_LIMIT),
         deadline,
@@ -199,7 +204,7 @@ def _read_range(server: Any, filters: list[EventFilter], start: int, end: int, d
     if end - start <= 1:
         raise _Dense(start, events)
     if time.monotonic() >= deadline:
-        raise TimeoutError("out of time splitting a full page")
+        raise _OutOfTime("out of time splitting a full page")
     middle = (start + end) // 2
     return _read_range(server, filters, start, middle, deadline) + _read_range(server, filters, middle, end, deadline)
 
@@ -273,7 +278,7 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
             except Exception as e:
                 logger.warning("[charges] page [%d, %d) failed after a dense ledger: %s", cursor, end, e)
                 end = dense.ledger + 1
-        except TimeoutError:
+        except _OutOfTime:
             out_of_time = True
             break
         except Exception as e:
