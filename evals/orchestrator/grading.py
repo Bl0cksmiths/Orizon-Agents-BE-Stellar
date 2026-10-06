@@ -12,9 +12,10 @@ are different facts, and the aggregation counts only cases where it applies.
 
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .contract import CaseRun, PlanObservation
 from .dataset import TIERS, Case
@@ -29,15 +30,40 @@ def verdict_correct(case: Case, verdict: str) -> bool:
     return verdict == case.expected_verdict
 
 
+class _PlannedStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    rationale: str
+    est_eta_seconds: float
+    tier: str
+
+
+class _ContractPlan(BaseModel):
+    """The raw plan's shape by the planner contract — `agents.orchestrator.ModelPlan`
+    — used only until that model is importable; then the planner's own wins."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[_PlannedStep]
+
+
+def plan_schema() -> type[BaseModel]:
+    try:
+        model = importlib.import_module("app.agents.orchestrator").ModelPlan
+    except (ImportError, AttributeError):
+        return _ContractPlan
+    return model if isinstance(model, type) and issubclass(model, BaseModel) else _ContractPlan
+
+
 def plan_checks(plan: PlanObservation) -> dict[str, int]:
     """Schema, allowlist, step tiers and step count on the RAW plan.
 
-    The schema is the app's own `Plan` model, so a field the planner lane adds
-    (`PlanStep.tier`) is enforced here the moment it lands, and a plan that
-    would not have parsed in production cannot pass in the eval.
+    The schema is the planner's own structured-output model, so a plan that
+    would not have parsed in production cannot pass in the eval. (Price, name
+    and reputation are not in it: the clamp stamps those from the registry.)
     """
-    from app.schemas import Plan  # the real model; imported late so the dataset tools need no app
-
+    Plan = plan_schema()
     raw = plan.raw
     if raw is None:
         return {"plan_schema": 0, "plan_allowlisted": 0, "plan_tiers": 0, "plan_valid": 0}
