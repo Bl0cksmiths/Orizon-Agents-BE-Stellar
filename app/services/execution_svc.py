@@ -13,7 +13,8 @@ from typing import Any, Literal
 
 from ..agents.model_factory import watch_served_models
 from ..agents.registry import get_worker
-from ..agents.workers.base import ModelWorker
+from ..agents.workers.base import ModelWorker, Worker
+from ..agents.workers.context import delivered_roles
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
@@ -252,6 +253,28 @@ def _fenced_for_context(output: dict) -> dict[str, Any]:
             # earlier. That gate also guarantees every item here is a `str`.
             fenced[key] = [fence_untrusted(item, label=_OPERATOR_FENCE_LABEL) for item in value]
     return fenced
+
+
+def _upstream_line(worker: Worker, context: dict[str, Any], *, first_party: bool) -> str | None:
+    """The trace line naming the earlier steps this step builds on, or None.
+
+    A first-party worker names the roles its handoff carries — the same
+    `Worker.handoff` its prompt is built from, so the line cannot name a step
+    the prompt did not use. A bound operator is sent the whole `context` in its
+    dispatch envelope (ADR 0001, unchanged), so its line names everything that
+    envelope carries, and says "receives": what the operator then uses is its
+    own business. A line is commentary, never the step's work: a failure to
+    build one is logged and the step runs without it.
+    """
+    try:
+        sources = worker.upstream_sources(context) if first_party else delivered_roles(context)
+    except Exception:
+        logger.exception("could not name the upstream outputs of %s", worker.name)
+        return None
+    if not sources:
+        return None
+    verb = "uses" if first_party else "receives"
+    return f"{worker.name} {verb} output from: {', '.join(sources)}"
 
 
 def _trace_url(value: object) -> str | None:
@@ -625,6 +648,9 @@ async def _run(
                 "exec",
                 f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
             )
+            upstream_line = _upstream_line(worker, context, first_party=get_worker(step.agent_id) is worker)
+            if upstream_line:
+                await _emit(task_id, start, "exec", upstream_line)
 
             try:
                 if isinstance(worker, ModelWorker):
