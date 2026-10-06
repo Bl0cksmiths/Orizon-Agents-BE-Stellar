@@ -930,6 +930,12 @@ class SettlementStep:
     # the planned figure, and with it what was returned, would otherwise be
     # lost. None on every record written before it existed.
     planned_stroops: int | None = None
+    # The account escrow v2's `settle` paid this step to — `owner_of` its agent,
+    # read before the settle and unchangeable after it (the registry has no
+    # transfer). The platform treasury for a built-in agent (ADR 0016), the
+    # operator's wallet otherwise. None for a step that was not paid, and on
+    # every record written before ADR 0016.
+    payee: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1541,6 +1547,7 @@ def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
                 "receipt_id_hex": s.receipt_id_hex,
                 "unpaid_reason": s.unpaid_reason,
                 "planned_stroops": s.planned_stroops,
+                "payee": s.payee,
             }
             for s in steps
         ],
@@ -1571,6 +1578,8 @@ def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
             unpaid_reason=s.get("unpaid_reason"),
             # `.get` again: absent on every row written before ADR 0015.
             planned_stroops=None if s.get("planned_stroops") is None else int(s["planned_stroops"]),
+            # `.get` again: absent on every row written before ADR 0016.
+            payee=s.get("payee"),
         )
         for s in json.loads(raw)
     )
