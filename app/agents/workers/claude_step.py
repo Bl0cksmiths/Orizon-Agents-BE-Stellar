@@ -33,7 +33,7 @@ from ...llm.tiers import display_name, effort_for, model_for
 from ..model_factory import note_served_model
 
 if TYPE_CHECKING:
-    from ...llm.tiers import Tier
+    from ...llm.tiers import Effort, Tier
 
 logger = logging.getLogger(__name__)
 
@@ -124,12 +124,17 @@ async def text(
     system: str,
     user: str,
     max_tokens: int,
+    effort: Effort,
 ) -> str:
     """Ask the tier's model for a long text answer, streamed.
 
     Streamed because the answer is a whole HTML app: a request that size must
     stream (the SDK refuses a non-streamed one it expects to outlast its idle
     timeout), and the final message is read once the stream completes.
+
+    `effort` is the caller's, not the tier's: thinking time counts against the
+    step deadline, so the code workers ask for "low" (and `app/llm/claude.py`
+    leaves it off for a model that takes none).
     """
     from ...llm import claude
 
@@ -141,7 +146,7 @@ async def text(
             system=system,
             user=user,
             max_tokens=max_tokens,
-            effort=effort_for(tier),
+            effort=effort,
             stream=True,
         )
     except LLMError as e:

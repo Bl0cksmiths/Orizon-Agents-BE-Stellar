@@ -13,7 +13,7 @@ from .base import ModelWorker
 from .prompt_safety import worker_prompt
 
 if TYPE_CHECKING:
-    from ...llm.tiers import Tier
+    from ...llm.tiers import Effort, Tier
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +308,15 @@ def swap_section(prompt: str, old: str, new: str) -> str:
     return prompt.replace(old, new)
 
 
+# Output ceiling for the Claude path, sized to the step deadline: 9 000 tokens
+# at ~100 tokens/s plus first-token latency is about 93 s, under the 100 s
+# stream budget (claude_step.STREAM_BUDGET_SECONDS) — while a 450-line app is
+# roughly 5 500 tokens. A reply that reaches it fails as `model_truncated`.
+MAX_TOKENS = 9_000
+
+# Thinking tokens are written before the app and count against the same clock.
+CLAUDE_EFFORT: Effort = "low"
+
 # The Claude path's prompt: the same brief with the Claude length target,
 # answered as tagged raw HTML. A whole app escaped into a JSON string costs
 # tokens for every quote and newline and breaks on the first one missed; raw
@@ -354,13 +363,6 @@ def parse_tagged_artifact(reply: str) -> CodeArtifact:
         entry="index.html",
         preview_html=html,
     )
-
-
-# Output budget for one generated app. The artifact ceiling is 120 000
-# characters, about 36 000 tokens of HTML/CSS/JS, and the tier's model may
-# think before it writes; past this the reply is cut off and the step fails as
-# truncated rather than shipping half an app.
-MAX_TOKENS = 48_000
 
 
 class CodeGen(ModelWorker):
@@ -506,6 +508,7 @@ class CodeGen(ModelWorker):
             system=CLAUDE_INSTRUCTIONS,
             user=prompt,
             max_tokens=MAX_TOKENS,
+            effort=CLAUDE_EFFORT,
         )
         try:
             return parse_tagged_artifact(reply)

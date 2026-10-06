@@ -20,12 +20,14 @@ from ...config import settings
 from ..model_factory import LazyAgent, claude_workers, lazy_agent, worker_tier
 from . import claude_step
 from .code_gen import (  # reuse schema + JSON-string coercion + the tagged reply
+    CLAUDE_EFFORT,
     TAGGED_SHAPE,
     CodeArtifact,
     coerce_artifact,
     parse_tagged_artifact,
     swap_section,
 )
+from .code_gen import MAX_TOKENS as CODE_GEN_MAX_TOKENS
 from .prompt_safety import fence_untrusted, worker_prompt
 
 if TYPE_CHECKING:
@@ -108,8 +110,9 @@ _CLAUDE_LENGTH = """- **Length**: keep it a single self-contained HTML file of a
 # summary names the improved edge).
 CLAUDE_INSTRUCTIONS = swap_section(_BRIEF, _AGNO_LENGTH, _CLAUDE_LENGTH) + TAGGED_SHAPE
 
-# Output budget for the refined app — the same ceiling as code.gen's draft.
-MAX_TOKENS = 48_000
+# Output ceiling and effort for the Claude path — code.gen's, for the same
+# deadline.
+MAX_TOKENS = CODE_GEN_MAX_TOKENS
 
 
 # The critic rewrites a whole app, so a step with no tier runs where code.gen's
@@ -161,6 +164,7 @@ class CodeCritic:
             system=CLAUDE_INSTRUCTIONS,
             user=prompt,
             max_tokens=MAX_TOKENS,
+            effort=CLAUDE_EFFORT,
         )
         try:
             return parse_tagged_artifact(reply)
