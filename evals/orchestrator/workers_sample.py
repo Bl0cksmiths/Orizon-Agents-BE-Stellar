@@ -48,6 +48,8 @@ class Job:
     model: str  # its default tier's model, for the ceiling
     tier: str | None = None  # the plan step's tier; None runs the worker's default
     typical_usd: float = 0.0  # what this job cost when last measured, for a budgeted run
+    label: str | None = None  # names the record when a worker runs more than once
+    critic_of: str | None = None  # code.critic: the label of the code.gen draft it polishes
 
 
 JOBS: tuple[Job, ...] = (
@@ -136,6 +138,30 @@ RECHECK_JOBS: tuple[Job, ...] = (
 HEADROOM = 1.25
 
 
+# The complex code.gen re-measure after the length fix (code.gen and
+# code.critic on Claude: ~250-450 lines, 9 000-token ceiling, low effort, a
+# 100 s stream budget): two code.gen drafts of cpx-001 on a complex step, and
+# code.critic on the first. Ordered so the critic runs before the second
+# draft; a job that no longer fits the budget is skipped, not started.
+_CPX_001 = RECHECK_JOBS[2]
+CODE_LENGTH_JOBS: tuple[Job, ...] = (
+    replace(_CPX_001, label="code.gen#1", typical_usd=0.06),
+    Job(
+        "agt_12r0",
+        "cpx-001",
+        _CPX_001.intent,
+        "Polish the draft: accessibility, layout, edge cases.",
+        9_000,
+        "claude-sonnet-5-5",
+        tier="complex",
+        typical_usd=0.07,
+        label="code.critic#1",
+        critic_of="code.gen#1",
+    ),
+    replace(_CPX_001, label="code.gen#2", typical_usd=0.06),
+)
+
+
 class BudgetExceeded(Exception):
     """A streamed reply was cut off because it would have passed the budget."""
 
@@ -161,6 +187,10 @@ class BudgetedClaude:
     def __init__(self, inner: Any, remaining: Callable[[], float]) -> None:
         self.inner = inner
         self.remaining = remaining
+        # The running estimate of the stream in flight, kept for a stream that
+        # is aborted from outside (the worker's own wall-clock budget): billed,
+        # never reported back, so the run books this figure instead.
+        self.in_flight_usd = 0.0
 
     async def complete(self, request: Any) -> Any:
         if not request.stream:
@@ -176,6 +206,7 @@ class BudgetedClaude:
             nonlocal seen
             seen += len(delta)
             spent = prompt_usd + seen / _CHARS_PER_TOKEN * _THINKING_FACTOR * price.output / 1_000_000
+            self.in_flight_usd = spent
             if spent > self.remaining():
                 raise BudgetExceeded(spent)
             if original is not None:
@@ -183,7 +214,10 @@ class BudgetedClaude:
                 if inspect.isawaitable(maybe):
                     await maybe
 
-        return await self.inner.complete(dataclasses.replace(request, on_text=on_text))
+        self.in_flight_usd = prompt_usd
+        completion = await self.inner.complete(dataclasses.replace(request, on_text=on_text))
+        self.in_flight_usd = 0.0  # reported: the recorder books the real figure
+        return completion
 
 
 def ceiling_usd(jobs: tuple[Job, ...] = JOBS) -> float:
@@ -221,22 +255,27 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
         return (budget_usd if budget_usd is not None else float("inf")) - spent
 
     spend.set_ledger(spend.SpendLedger(spend.InMemorySpendStore()))
-    inner = claude.get_transport()
-    if budget_usd is not None:
-        inner = BudgetedClaude(inner, remaining)
-    claude.set_transport(RecordingClaude(inner))
+    budgeted = BudgetedClaude(claude.get_transport(), remaining) if budget_usd is not None else None
+    claude.set_transport(RecordingClaude(budgeted or claude.get_transport()))
+    drafts: dict[str, dict[str, Any]] = {}
     out_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, Any] = {}
     context: dict[str, Any] = {}
     for job in jobs:
         worker = WORKERS[job.agent_id]
+        label = job.label or worker.name
         if budget_usd is not None and job.typical_usd * HEADROOM > remaining():
-            results[worker.name] = {"worker": worker.name, "skipped": f"budget left {remaining():.4f} USD"}
+            results[label] = {"worker": worker.name, "label": label, "skipped": f"budget left {remaining():.4f} USD"}
             continue
+        if job.critic_of is not None:
+            context["code.gen"] = drafts.get(job.critic_of, {})
         log = _CaseLog()
         token = _current.set(log)
         started = time.perf_counter()
         error = None
+        unreported = 0.0
+        if budgeted is not None:
+            budgeted.in_flight_usd = 0.0
         out: dict[str, Any] = {}
         try:
             if job.tier is not None:
@@ -246,23 +285,33 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
         except BudgetExceeded as e:
             error = f"BudgetExceeded: {e}"
             spent += e.estimate_usd
+            unreported = e.estimate_usd
         except Exception as e:  # a worker failure is a result to report, not a crash
             error = f"{type(e).__name__}: {e}"
+            if budgeted is not None and budgeted.in_flight_usd:
+                # A stream aborted from outside (the worker's own wall-clock
+                # budget): billed, never reported. Book the running estimate.
+                unreported = budgeted.in_flight_usd
+                spent += unreported
+                error += f" (stream aborted; estimated ${unreported:.4f} unreported)"
         finally:
             _current.reset(token)
         elapsed = time.perf_counter() - started
         spent += sum(c.cost_usd for c in log.calls)
         if job.agent_id == "agt_11c0" and out:
             context["code.gen"] = out  # the critic polishes this draft
+            drafts[label] = out
         artifact = out.get("artifact") if isinstance(out.get("artifact"), dict) else None
         if artifact:
-            stem = worker.name.replace(".", "_")
+            stem = label.replace(".", "_").replace("#", "_")
             for f in artifact.get("files", []):
                 path = out_dir / f"{stem}__{Path(str(f.get('path', 'index.html'))).name}"
                 path.write_text(str(f.get("content", "")), encoding="utf-8")
         record = {
             "agent_id": job.agent_id,
             "worker": worker.name,
+            "label": label,
+            "unreported_estimated_usd": unreported,
             "case_id": job.case_id,
             "tier": job.tier,
             "intent": job.intent,
@@ -280,6 +329,8 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
                     "cost_usd": c.cost_usd,
                     "app_cost_usd": c.app_cost_usd,
                     "latency_ms": round(c.latency_ms),
+                    "first_token_ms": round(c.first_token_ms) if c.first_token_ms is not None else None,
+                    "effort": c.effort,
                     "stop_reason": c.stop_reason,
                 }
                 for c in log.calls
@@ -287,8 +338,8 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
             "error": error,
             "output": _digest(job.agent_id, out),
         }
-        results[worker.name] = record
-        (out_dir / f"{worker.name.replace('.', '_')}.json").write_text(
+        results[label] = record
+        (out_dir / f"{label.replace('.', '_').replace('#', '_')}.json").write_text(
             json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     return results
