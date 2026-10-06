@@ -152,6 +152,31 @@ generic fallback, the way `pdax.errors.orizon_code` defaults. The loop must not
 import a worker's module to classify a failure, and an unclassified exception
 must degrade to the generic token rather than crash the classifier.
 
+### Built-in model steps (orchestrator v2, `app/agents/workers/claude_step.py`)
+
+The seven built-in LLM workers run on Claude and leave a step they could not
+deliver as `ModelStepError(rule, message)` — the same duck-typed `rule`, from a
+closed vocabulary of its own. The model's words never reach the class or the
+trace; a refusal's explanation goes to the server log only.
+
+| class | meaning | billed | counted / rated |
+|---|---|---|---|
+| `model_refused` | Claude declined (after any server-side fallback) | no | yes — the step did not deliver |
+| `model_truncated` | the reply hit `max_tokens` before it finished | no | yes |
+| `invalid_output` | the reply did not fit its schema, or code.gen's reply had no app | no | yes |
+| `model_error` | Claude rejected the request itself — a defect in the worker that repeats, which is what the streak names — or any other model-layer error | no | yes |
+| `model_unavailable` | rate limit, overload, 5xx, timeout or network, retries spent | no | **no** — our outage |
+| `model_not_configured` | no Anthropic key, or one the API refuses | no | **no** — our outage |
+| `spend_cap_reached` | today's AI spend reached `LLM_DAILY_SPEND_CAP_USD` | no | **no** — our outage |
+
+The last three are D5 applied to our own provider: the agent could not be asked,
+so the run loop (`execution_svc._NOT_ATTEMPTED`) treats the step like one
+refused at execute — not billed, not counted in the failure streak, not rated —
+and traces it in plain words ("paused: daily AI budget reached", "AI provider
+unavailable", "AI provider not configured"). Only for a FIRST-PARTY step: an
+external worker's failure is classified by its own contract, never excused by
+a class it happens to carry.
+
 ## Out of scope, stated so it is not assumed
 
 The floor-starvation fallback re-admits below-floor agents when fewer than three
