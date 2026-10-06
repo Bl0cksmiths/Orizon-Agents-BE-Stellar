@@ -310,13 +310,13 @@ def test_with_the_switch_on_an_external_agent_competes_on_merit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "planner_route_external", True)
-    _screened(fake_claude, fake_jev, _plan(EXTERNAL, "agt_12r0"))
+    _screened(fake_claude, fake_jev, _plan(EXTERNAL, "agt_01h8"))
 
     resp = _decompose()
 
     (call,) = fake_claude.calls_for("planner")
     assert f"id={EXTERNAL} " in call.system and f"id={UNBOUND} " not in call.system
-    assert [s.agent_id for s in resp.steps] == [EXTERNAL, "agt_12r0"]
+    assert [s.agent_id for s in resp.steps] == [EXTERNAL, "agt_01h8"]
     assert resp.steps[0].executor == "external"
     codes = _codes(resp)
     assert EXTERNAL not in codes

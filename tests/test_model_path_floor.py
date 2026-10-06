@@ -439,10 +439,12 @@ def test_a_re_admitted_model_step_is_flagged_degraded(seeded: object, monkeypatc
     reps = {a.id: _info(a.id, smoothed=9000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
     reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
     reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
+    # The best-scored sub-floor agent, so the one the backstop re-admits.
+    reps["agt_10b6"] = _info("agt_10b6", smoothed=9900, lower=100)
 
-    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_12r0")
+    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_10b6")
 
-    assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_12r0", True)]
+    assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_10b6", True)]
 
 
 def test_a_disputed_agent_is_reported_with_its_dispute_rate(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:

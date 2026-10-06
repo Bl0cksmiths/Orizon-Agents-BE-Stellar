@@ -20,6 +20,7 @@ from ..agents.registry import get_worker
 from ..agents.role_cards import card_for
 from ..agents.workers.base import ModelWorker
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
+from ..agents.workers.vision_input import has_image_input
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
 from ..llm import provider
@@ -1277,6 +1278,75 @@ def _clamp(
     return _Clamped(cleaned, went_unreachable)
 
 
+# ── Plan composition: the handoffs a step depends on must exist ───────────
+#
+# A pipeline step that refines or ships another step's output is paid work on
+# nothing when that output is missing: code.critic reviews a code builder's
+# draft and deploy.v0 seals one, and without a builder in the plan both
+# answer "nothing to do" — for the buyer's money. vision.ocr likewise reads an
+# image the request must supply. The planner is told all of this (its role
+# cards); these rules hold the plan to it in code, after the clamp, on both
+# planners. They only ever DROP or REORDER the model's own steps — never add
+# one, so they cannot put an agent in a plan the floor or the policy kept out.
+_CODE_BUILDER_IDS: frozenset[str] = frozenset({"agt_11c0", "agt_03d9"})  # code.gen, code.next
+_CRITIC_ID = "agt_12r0"
+_DEPLOY_ID = "agt_08j2"
+_OCR_ID = "agt_06q4"
+
+# A step dropped unless the plan holds at least one of these.
+_NEEDS_ONE_OF: dict[str, frozenset[str]] = {
+    _CRITIC_ID: _CODE_BUILDER_IDS,
+    _DEPLOY_ID: _CODE_BUILDER_IDS,
+}
+
+# A step moved after every one of these the plan holds: the critic after the
+# draft it reviews, the seal after the build it seals and the review of it.
+_RUNS_AFTER: dict[str, frozenset[str]] = {
+    _CRITIC_ID: _CODE_BUILDER_IDS,
+    _DEPLOY_ID: _CODE_BUILDER_IDS | {_CRITIC_ID},
+}
+
+
+def _handoff_order(steps: list[PlanStep]) -> list[PlanStep]:
+    """`steps` reordered so each runs after what `_RUNS_AFTER` says it reads.
+
+    A stable topological sort: at every position, the earliest step (in the
+    model's order) whose producers are all placed goes next, so a plan that
+    already flows forward comes back unchanged and any other moves only the
+    steps it must. Always total: the edges only point from builders to the
+    critic and from both to the seal, so there is no cycle to stall on.
+    """
+    waiting = list(range(len(steps)))
+    after = [
+        {j for j in waiting if steps[j].agent_id in _RUNS_AFTER.get(steps[i].agent_id, frozenset())} for i in waiting
+    ]
+    placed: set[int] = set()
+    order: list[PlanStep] = []
+    while waiting:
+        nxt = next(i for i in waiting if after[i] <= placed)
+        waiting.remove(nxt)
+        placed.add(nxt)
+        order.append(steps[nxt])
+    return order
+
+
+def _compose(steps: list[PlanStep], intent: str) -> list[PlanStep]:
+    """The clamped plan held to its handoffs: steps with nothing to work on are
+    dropped, and steps that read another step's output run after it."""
+    present = {s.agent_id for s in steps}
+    kept: list[PlanStep] = []
+    for step in steps:
+        needs = _NEEDS_ONE_OF.get(step.agent_id)
+        if needs is not None and not needs & present:
+            logger.info("dropped a %s step: no code builder in the plan for it to work on", step.agent_name)
+            continue
+        if step.agent_id == _OCR_ID and not has_image_input(intent):
+            logger.info("dropped a %s step: the request carries no image to read", step.agent_name)
+            continue
+        kept.append(step)
+    return _handoff_order(kept)
+
+
 def _finish_free_form(
     intent: str,
     shortlist: _Shortlist,
@@ -1292,10 +1362,10 @@ def _finish_free_form(
     request check, the understood request, the models, the stage lines); the
     legacy planner passes none and its answer is exactly what it always was.
     """
-    cleaned = clamped.steps
+    cleaned = _compose(clamped.steps, intent)
     # Whatever left `cleaned` empty — a planner that failed, or one whose every
-    # step the clamp discarded — the steps served from here on are not the
-    # model's plan, and the response has to say so.
+    # step the clamp or the composition rules discarded — the steps served
+    # from here on are not the model's plan, and the response has to say so.
     planner_fallback = not cleaned
     if planner_fallback:
         # Fall back to a minimal safe plan so the UI never gets stuck — drawn
