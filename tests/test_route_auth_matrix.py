@@ -6,7 +6,9 @@ behind the operator key, or authorized by something the caller cannot forge
 HMAC), or deliberately public because it changes nothing a caller does not
 already control. The table says which, with the reason, and the tests make
 it a contract: a new write route fails here until someone decides which it is,
-and an operator-keyed route that loses its dependency fails here too.
+and an operator-keyed route that loses its dependency fails here too. The
+routes and their guards are read off the published schema (route_inventory.py
+says why), so the check holds on every FastAPI the lock or the range allows.
 
 The signature and authorization checks themselves are exercised where they
 live (tests/test_money_route_auth.py, test_bind_api*.py, test_unbind_api.py,
@@ -16,9 +18,11 @@ test_dispute_read_grant.py, test_execute_guard_route.py, test_pdax_auth.py).
 from __future__ import annotations
 
 import pytest
-from fastapi.routing import APIRoute
+from fastapi import APIRouter, Depends, FastAPI
+from route_inventory import Guard, concrete, operator_guard, write_operations
 
 from app.main import app
+from app.security import require_api_key
 
 OPERATOR_KEY_FAIL_CLOSED = "operator key, fail closed (503 while API_KEY is unset)"
 OPERATOR_KEY = "operator key (X-API-Key); open while API_KEY is unset, which config refuses on mainnet"
@@ -69,53 +73,75 @@ AUTH: dict[tuple[str, str], str] = {
     ("POST", "/api/pdax/ramp/{ramp_id}/reconcile"): OPERATOR_KEY,
 }
 
-_KEY_GUARDS = {
-    OPERATOR_KEY: {"require_api_key"},
-    OPERATOR_KEY_FAIL_CLOSED: {"require_adjudicator", "require_operator_key", "require_seal_key"},
+_KEY_GUARDS: dict[str, Guard] = {
+    OPERATOR_KEY: "api_key",
+    OPERATOR_KEY_FAIL_CLOSED: "operator_key_fail_closed",
 }
 
-
-def _write_routes() -> dict[tuple[str, str], APIRoute]:
-    return {
-        (method, route.path): route
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        for method in route.methods - {"GET", "HEAD"}
-    }
+KEYED = [k for k, v in AUTH.items() if v in _KEY_GUARDS]
+UNKEYED = [k for k, v in AUTH.items() if v not in _KEY_GUARDS]
 
 
-def _guards(dependant) -> set[str]:
-    names: set[str] = set()
-    for dep in dependant.dependencies:
-        if dep.call is not None:
-            names.add(getattr(dep.call, "__name__", ""))
-        names |= _guards(dep)
-    return names
+def _undeclared(application: FastAPI) -> list[tuple[str, str]]:
+    return sorted(set(write_operations(application)) - set(AUTH))
 
 
 def test_every_state_changing_route_has_a_declared_authorization() -> None:
-    routes = set(_write_routes())
+    routes = set(write_operations(app))
 
-    assert sorted(routes - set(AUTH)) == [], "a new write route needs an entry in AUTH, and a decision"
+    assert _undeclared(app) == [], "a new write route needs an entry in AUTH, and a decision"
     assert sorted(set(AUTH) - routes) == [], "a route in AUTH no longer exists; drop it"
 
 
-@pytest.mark.parametrize("key", [k for k, v in AUTH.items() if v in _KEY_GUARDS], ids=lambda k: f"{k[0]} {k[1]}")
+def test_a_new_write_route_in_an_included_router_is_caught() -> None:
+    # The check's own teeth, on the shape that broke the old walk: a route
+    # that arrives through a prefixed, included router.
+    toy = FastAPI()
+    inner = APIRouter(prefix="/things")
+
+    @inner.post("/{thing_id}/poke")
+    async def poke(thing_id: str) -> None:
+        return None
+
+    toy.include_router(inner, prefix="/api")
+
+    assert _undeclared(toy) == [("POST", "/api/things/{thing_id}/poke")]
+
+
+def test_a_router_level_key_dependency_is_seen_on_each_route() -> None:
+    # PDAX puts `require_api_key` on the router, not on each route.
+    toy = FastAPI()
+    secured = APIRouter(dependencies=[Depends(require_api_key)])
+
+    @secured.post("/withdraw")
+    async def withdraw() -> None:
+        return None
+
+    toy.include_router(secured, prefix="/api/money")
+
+    assert operator_guard(write_operations(toy)[("POST", "/api/money/withdraw")]) == "api_key"
+
+
+@pytest.mark.parametrize("key", KEYED, ids=lambda k: f"{k[0]} {k[1]}")
 def test_an_operator_keyed_route_carries_its_guard(key: tuple[str, str]) -> None:
-    route = _write_routes()[key]
+    operation = write_operations(app)[key]
 
-    assert _guards(route.dependant) & _KEY_GUARDS[AUTH[key]], f"{key} lost its operator-key dependency"
+    assert operator_guard(operation) == _KEY_GUARDS[AUTH[key]], f"{key} lost its operator-key dependency"
 
 
-@pytest.mark.parametrize("key", [k for k, v in AUTH.items() if v not in _KEY_GUARDS], ids=lambda k: f"{k[0]} {k[1]}")
+@pytest.mark.parametrize("key", KEYED, ids=lambda k: f"{k[0]} {k[1]}")
+def test_an_operator_keyed_route_refuses_a_caller_without_the_key(client, hermetic_settings, key) -> None:
+    # The schema says the guard is there; this says it runs.
+    hermetic_settings.api_key = "operator-secret-key"
+    method, path = key
+
+    r = client.request(method, concrete(path), json={})
+
+    assert (r.status_code, r.json()["detail"]) == (401, "invalid_api_key")
+
+
+@pytest.mark.parametrize("key", UNKEYED, ids=lambda k: f"{k[0]} {k[1]}")
 def test_a_route_not_behind_the_key_is_not_silently_put_behind_it(key: tuple[str, str]) -> None:
     # Moving a buyer-facing route behind the operator key would lock every
     # buyer out of it; that has to be a decision made in AUTH, not a side effect.
-    route = _write_routes()[key]
-
-    assert not _guards(route.dependant) & {
-        "require_api_key",
-        "require_adjudicator",
-        "require_operator_key",
-        "require_seal_key",
-    }
+    assert operator_guard(write_operations(app)[key]) is None
