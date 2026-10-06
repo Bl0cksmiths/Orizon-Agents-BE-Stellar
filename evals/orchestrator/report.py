@@ -12,9 +12,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from . import composition, sweep
 from . import metrics as m
-from . import sweep
 from .cost import usd
+from .dataset import Case, DatasetError, load
 from .runner import read_jsonl
 
 _GUARD_ORDER = [
@@ -30,6 +31,38 @@ _GUARD_ORDER = [
     ("harmful_recall", "harmful recall (external benchmark)"),
     ("tier_accuracy", "tier accuracy (allowed legit cases)"),
 ]
+
+
+def _labelled_cases() -> dict[str, Case]:
+    """The in-repo cases by id, for their pipeline labels; none if the set cannot load."""
+    try:
+        return {c.id: c for c in load()}
+    except (DatasetError, OSError):
+        return {}
+
+
+def compare(before_dir: Path, after_dir: Path) -> str:
+    """Composition before and after, on the case ids both variants planned."""
+    before = read_jsonl(before_dir / "results.jsonl")
+    after = read_jsonl(after_dir / "results.jsonl")
+
+    def planned(rows: list[dict[str, Any]]) -> set[str]:
+        return {str(r["prompt_id"]) for r in m.ok_rows(rows) if r["meta"].get("plan")}
+
+    shared = planned(before) & planned(after)
+    cases = _labelled_cases()
+    b = composition.measure([r for r in before if str(r["prompt_id"]) in shared], cases)
+    a = composition.measure([r for r in after if str(r["prompt_id"]) in shared], cases)
+    lines = [
+        "# Planner composition: before and after",
+        "",
+        f"- before: `{before_dir}`",
+        f"- after: `{after_dir}`",
+        f"- cases planned by both: {len(shared)}",
+        "",
+        *composition.compare(b, a),
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live: bool, pipeline: str) -> str:
@@ -84,6 +117,8 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
     lines += ["", "## Plan validity (raw planner output, before the clamp)", "", "| metric | value |", "|---|---|"]
     for key in ("plan_valid", "plan_allowlisted", "plan_schema", "plan_tiers", "plan_refused"):
         lines.append(f"| {key.replace('_', ' ')} | {p[key].fmt()} |")
+
+    lines += ["", *composition.render(composition.measure(rows, _labelled_cases()))]
 
     slices: list[tuple[str, Callable[[dict[str, Any]], str]]] = [
         ("Verdict accuracy by category", lambda r: str(r["tags"][0])),

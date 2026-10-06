@@ -17,6 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from . import composition
 from .contract import CaseRun, PlanObservation
 from .dataset import TIERS, Case
 
@@ -94,4 +95,7 @@ def grade(case: Case, run: CaseRun) -> dict[str, int]:
         out["tier_ok"] = int(g.tier == case.expected_tier)
     if run.plan is not None and run.plan.refused is None and not run.plan.truncated:
         out.update(plan_checks(run.plan))
+        steps = composition.plan_names(run.plan.raw, composition.agent_names())
+        if steps:
+            out.update(composition.checks(steps, case.pipeline))
     return out
