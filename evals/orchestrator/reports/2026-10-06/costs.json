@@ -1,0 +1,135 @@
+{
+  "stages": {
+    "s1-guard": {
+      "calls": 504,
+      "list_price_usd": 0.025859735999999956,
+      "app_booked_usd": 0.025859735999999956,
+      "by_model": {
+        "jev-1.13.0": {
+          "calls": 504.0,
+          "usd": 0.025859735999999956,
+          "app_booked_usd": 0.025859735999999956,
+          "input_tokens": 615708.0,
+          "output_tokens": 53499.0,
+          "cache_read_input_tokens": 0.0,
+          "cache_creation_input_tokens": 0.0
+        }
+      },
+      "by_stage": {
+        "guard": 0.025859735999999956
+      }
+    },
+    "s2-external": {
+      "calls": 844,
+      "list_price_usd": 0.043338497999999934,
+      "app_booked_usd": 0.043338497999999934,
+      "by_model": {
+        "jev-1.13.0": {
+          "calls": 844.0,
+          "usd": 0.043338497999999934,
+          "app_booked_usd": 0.043338497999999934,
+          "input_tokens": 1031869.0,
+          "output_tokens": 89487.0,
+          "cache_read_input_tokens": 0.0,
+          "cache_creation_input_tokens": 0.0
+        }
+      },
+      "by_stage": {
+        "guard": 0.043338497999999934
+      }
+    },
+    "s3-haiku": {
+      "calls": 168,
+      "list_price_usd": 0.343243,
+      "app_booked_usd": 1.7162150000000007,
+      "by_model": {
+        "claude-haiku-4-5": {
+          "calls": 168.0,
+          "usd": 0.343243,
+          "app_booked_usd": 1.7162150000000007,
+          "input_tokens": 301668.0,
+          "output_tokens": 8315.0,
+          "cache_read_input_tokens": 0.0,
+          "cache_creation_input_tokens": 0.0
+        }
+      },
+      "by_stage": {
+        "guard_fallback": 0.343243
+      }
+    },
+    "s4-full": {
+      "calls": 520,
+      "list_price_usd": 0.8699667900000001,
+      "app_booked_usd": 0.8699667900000001,
+      "by_model": {
+        "jev-1.13.0": {
+          "calls": 344.0,
+          "usd": 0.014729190000000003,
+          "app_booked_usd": 0.014729190000000003,
+          "input_tokens": 350695.0,
+          "output_tokens": 24257.0,
+          "cache_read_input_tokens": 0.0,
+          "cache_creation_input_tokens": 0.0
+        },
+        "claude-sonnet-5-5": {
+          "calls": 88.0,
+          "usd": 0.35635440000000007,
+          "app_booked_usd": 0.35635440000000007,
+          "input_tokens": 24921.0,
+          "output_tokens": 28057.0,
+          "cache_read_input_tokens": 81312.0,
+          "cache_creation_input_tokens": 3872.0
+        },
+        "claude-opus-5-5": {
+          "calls": 88.0,
+          "usd": 0.49888319999999997,
+          "app_booked_usd": 0.49888319999999997,
+          "input_tokens": 48870.0,
+          "output_tokens": 12476.0,
+          "cache_read_input_tokens": 170366.0,
+          "cache_creation_input_tokens": 3962.0
+        }
+      },
+      "by_stage": {
+        "guard": 0.008619912000000002,
+        "improve": 0.35635440000000007,
+        "recheck": 0.006109278,
+        "plan": 0.49888319999999997
+      }
+    },
+    "s5-workers": {
+      "list_price_usd": 0.252573,
+      "diagnostic_reruns_usd": 0.016895599999999997,
+      "by_worker": {
+        "code.critic": 0.1219935,
+        "code.gen": 0.09366,
+        "copywrite.v3": 0.001773,
+        "design.figma": 0.001401,
+        "research.pro": 0.0109635,
+        "research_pro_diagnosis": 0.016895599999999997,
+        "seo.brief": 0.001344,
+        "sol-audit": 0.021438
+      }
+    },
+    "smoke": {
+      "calls": 2,
+      "list_price_usd": 0.000101808,
+      "app_booked_usd": 0.000101808,
+      "by_model": {
+        "jev-1.13.0": {
+          "calls": 2.0,
+          "usd": 0.000101808,
+          "app_booked_usd": 0.000101808,
+          "input_tokens": 2424.0,
+          "output_tokens": 212.0,
+          "cache_read_input_tokens": 0.0,
+          "cache_creation_input_tokens": 0.0
+        }
+      },
+      "by_stage": {
+        "guard": 0.000101808
+      }
+    }
+  },
+  "grand_total_usd": 1.551978432
+}
