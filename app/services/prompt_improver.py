@@ -18,17 +18,29 @@ panel, so its fields are bounded like any other request input.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agents.workers.prompt_safety import sanitize_untrusted
-from app.llm import claude
-from app.llm.errors import LLMError
-from app.llm.tiers import Effort, Tier, improver_model
+from app.agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
+from app.llm import claude, jev
+from app.llm.errors import JevUnavailable, LLMError, LLMRefused, SpendCapReached
+from app.llm.tiers import Effort, Tier, guard_fallback_model, improver_model
 
+from . import intent_guard_prompts as guard_prompts
 from . import prompt_improver_prompts as prompts
+from .intent_guard import (
+    DEFAULT_POLICY,
+    GuardPolicy,
+    MalformedAnswer,
+    answer,
+    classifier_state,
+    level,
+    unit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,3 +161,146 @@ async def improve(intent: str, tier: Tier) -> Spec:
         effort=_IMPROVER_EFFORT[tier],
     )
     return normalize_spec(result.value, intent)
+
+
+# --- re-check -----------------------------------------------------------------
+
+CheckVerdict = Literal["clean", "watch", "drifted", "unsafe", "unavailable"]
+
+
+class SpecCheck(BaseModel):
+    """jev's (or the fallback's) reading of a spec against its original.
+
+    ``verdict`` precedence: unsafe > drifted > watch > clean.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    verdict: CheckVerdict
+    reasons: list[str] = []
+    scores: dict[str, float] = {}
+    source: Literal["jev", "fallback"] | None = None
+    model: str | None = None
+
+
+class RecheckAssessment(BaseModel):
+    """Structured output the Claude fallback returns for the re-check."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    same_request: float
+    injection: float
+    harmful: float
+    severity: int
+
+
+def judge_spec(
+    *,
+    same_request: float,
+    injection: float,
+    harmful: float,
+    severity: float,
+    source: Literal["jev", "fallback"],
+    model: str | None,
+    policy: GuardPolicy = DEFAULT_POLICY,
+) -> SpecCheck:
+    """Pure verdict for one set of re-check scores."""
+    scores = {"same_request": same_request, "injection": injection, "harmful": harmful, "severity": severity}
+    extra = ["fallback"] if source == "fallback" else []
+    unsafe = [
+        name
+        for name, hit in (
+            ("injection", injection >= policy.injection_block),
+            ("harmful", harmful >= policy.harmful_block),
+            ("severity", severity >= policy.severity_block),
+        )
+        if hit
+    ]
+    if unsafe:
+        verdict: CheckVerdict = "unsafe"
+        reasons = unsafe
+    elif same_request < policy.same_request_min:
+        verdict, reasons = "drifted", ["drifted"]
+    elif injection >= policy.injection_watch:
+        verdict, reasons = "watch", ["watch"]
+    else:
+        verdict, reasons = "clean", []
+    return SpecCheck(verdict=verdict, reasons=reasons + extra, scores=scores, source=source, model=model)
+
+
+def _check_unavailable(model: str | None = None) -> SpecCheck:
+    return SpecCheck(verdict="unavailable", reasons=["guard_unavailable"], model=model)
+
+
+async def _jev_recheck(original: str, spec_text: str, policy: GuardPolicy) -> SpecCheck:
+    safety_call = jev.ask(purpose="guard.spec", state=spec_text, questions=guard_prompts.SPEC_SAFETY_BATTERY)
+    same_call = jev.ask(
+        purpose="guard.spec.same",
+        state=guard_prompts.spec_state(original, spec_text),
+        questions=guard_prompts.SAME_REQUEST_BATTERY,
+    )
+    # Both calls run to completion (no orphaned request), then the spend cap
+    # outranks any outage so the caller can pause rather than fall back.
+    safety, same = await asyncio.gather(safety_call, same_call, return_exceptions=True)
+    if isinstance(safety, BaseException) or isinstance(same, BaseException):
+        errors = [o for o in (safety, same) if isinstance(o, BaseException)]
+        raise next((e for e in errors if isinstance(e, SpendCapReached)), errors[0])
+    return judge_spec(
+        same_request=unit(answer(same.answers, "same_request", "noul"), "same_request"),
+        injection=unit(answer(safety.answers, "injection", "noul"), "injection"),
+        harmful=unit(answer(safety.answers, "harmful", "noul"), "harmful"),
+        severity=level(answer(safety.answers, "severity", "score"), "severity"),
+        source="jev",
+        model=safety.model,
+        policy=policy,
+    )
+
+
+async def _fallback_recheck(original: str, spec_text: str, policy: GuardPolicy) -> SpecCheck:
+    model = guard_fallback_model()
+    try:
+        result = await claude.structured(
+            purpose="guard.spec.fallback",
+            model=model,
+            system=guard_prompts.RECHECK_FALLBACK_SYSTEM,
+            user=fence_untrusted(guard_prompts.spec_state(original, spec_text), label="SPEC_REVIEW"),
+            schema=RecheckAssessment,
+            max_tokens=_FALLBACK_MAX_TOKENS,
+            enforce_cap=False,  # a guard pass, like the intent guard's fallback
+        )
+        value: RecheckAssessment = result.value
+        return judge_spec(
+            same_request=unit(value.same_request, "same_request"),
+            injection=unit(value.injection, "injection"),
+            harmful=unit(value.harmful, "harmful"),
+            severity=level(value.severity, "severity"),
+            source="fallback",
+            model=result.served_by or result.model,
+            policy=policy,
+        )
+    except SpendCapReached:
+        raise
+    except LLMRefused:
+        return SpecCheck(verdict="unsafe", reasons=["refused", "fallback"], source="fallback", model=model)
+    except (LLMError, MalformedAnswer) as exc:
+        logger.error("spec re-check unavailable: jev and fallback both failed (%s)", type(exc).__name__)
+        return _check_unavailable(model)
+
+
+async def recheck(original: str, spec: Spec, *, policy: GuardPolicy = DEFAULT_POLICY) -> SpecCheck:
+    """Re-check a spec (improver-written or user-edited) against its original.
+
+    Never raises for a classifier outage (``unavailable`` verdict); lets
+    ``SpendCapReached`` through.
+    """
+    original_state = classifier_state(original)
+    spec_text = classifier_state(spec_to_text(spec))
+    try:
+        check = await _jev_recheck(original_state, spec_text, policy)
+    except SpendCapReached:
+        raise
+    except (JevUnavailable, MalformedAnswer) as exc:
+        logger.warning("jev spec re-check unavailable (%s); using the Claude fallback", type(exc).__name__)
+        check = await _fallback_recheck(original_state, spec_text, policy)
+    logger.info("spec re-check: verdict=%s source=%s reasons=%s", check.verdict, check.source, ",".join(check.reasons))
+    return check
