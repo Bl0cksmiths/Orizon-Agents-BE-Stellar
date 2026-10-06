@@ -482,7 +482,13 @@ def test_malformed_quote_fields_fail_ramp_cleanly():
     asyncio.run(run())
 
 
-UPSTREAM_TEXT = "Insufficient balance in institutional account 9912."
+# The account named in the upstream text is a marker no generated value can
+# contain: ramp ids are lowercase hex and timestamps are digits, so a bare
+# number like "9912" turned up inside a random ramp id about once in a few
+# hundred runs. "q", "x" and "z" are not hex digits, and the lowercase,
+# hyphenated form is not a Stellar address either.
+UPSTREAM_ACCOUNT = "acct-qzx-upstream"
+UPSTREAM_TEXT = f"Insufficient balance in institutional account {UPSTREAM_ACCOUNT}."
 
 
 def _failing_onramp_client() -> FakePdaxClient:
@@ -527,7 +533,7 @@ def test_ramp_status_route_never_returns_upstream_text(client):
     record = asyncio.run(_run_failing_onramp(fake))
     r = client.get(f"/api/pdax/ramp/{record.ramp_id}")
     assert r.status_code == 200
-    assert "9912" not in r.text
+    assert UPSTREAM_ACCOUNT not in r.text
     assert "Insufficient balance" not in r.text
     assert r.json()["error"] == "insufficient_balance"
 
