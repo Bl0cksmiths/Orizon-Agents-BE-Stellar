@@ -18,11 +18,17 @@ annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
     # via pydantic
+anthropic==1.11.0 \
+    --hash=sha256:3906fabac7ad7b5b46c6186040398fc7826885c77ce34e4dd7849de16fc8d0f8 \
+    --hash=sha256:52f97b2c485cca7ac66058374f5073a3febb7e6849b16989c145d602a3efee21
+    # via -r requirements.txt
 anyio==4.14.2 \
     --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494 \
     --hash=sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f
     # via
+    #   anthropic
     #   httpx
+    #   httpx2
     #   openai
     #   sse-starlette
     #   starlette
@@ -301,7 +307,9 @@ distro==1.9.0 \
 docstring-parser==0.18.0 \
     --hash=sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015 \
     --hash=sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b
-    # via agno
+    # via
+    #   agno
+    #   anthropic
 fastapi==0.140.0 \
     --hash=sha256:e951c0a0d9540bf5d9a2a9e078fd415da2ab7e312d435139e7d9e2e7fe9f0b23 \
     --hash=sha256:f338951b82fd74ca8f843163aec43ea1a1ce84d515415a50fa98fa25572a5544
@@ -312,6 +320,7 @@ h11==0.16.0 \
     # via
     #   agno
     #   httpcore
+    #   httpcore2
     #   uvicorn
 h2==4.4.0 \
     --hash=sha256:46b551bdcdc7e83cf5c04d0bf93badb8a939bd2287d9fee1abb23a445b9e0580 \
@@ -325,6 +334,10 @@ httpcore==1.0.9 \
     --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55 \
     --hash=sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8
     # via httpx
+httpcore2==2.13.1 \
+    --hash=sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103 \
+    --hash=sha256:e1e05d4f25f7d7d496bfb96748f6f4b67657b03da069b3a68c36069f3db73d0a
+    # via httpx2
 httptools==0.8.0 \
     --hash=sha256:0770728beb05094c809b98e814edff5fef69d26ad7d21185f2f6d5884a0ba683 \
     --hash=sha256:0ea897f0c729581ebf72131a438a7932d9b14efef72d75ada966700cac3caaeb \
@@ -385,6 +398,12 @@ httpx==0.28.1 \
     #   agno
     #   agnoctl
     #   openai
+httpx2==2.13.1 \
+    --hash=sha256:6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4 \
+    --hash=sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa
+    # via
+    #   anthropic
+    #   typesafe-sdk
 hyperframe==6.1.0 \
     --hash=sha256:b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5 \
     --hash=sha256:f630908a00854a7adeabd6382b43923a4c4cd4b821fcb527e6ab9e15382a3b08
@@ -395,6 +414,7 @@ idna==3.18 \
     # via
     #   anyio
     #   httpx
+    #   httpx2
     #   requests
 jiter==0.16.0 \
     --hash=sha256:0542a7189c26920778658fc8fcf2af8bae05bae9924577f71804acef37996536 \
@@ -502,7 +522,9 @@ jiter==0.16.0 \
     --hash=sha256:f3bd327cdfa118bc1ce69c214c2678571d5bd39b8ccd0ebf43a54db00541ba9a \
     --hash=sha256:f4444a83f946605990c98f625cdd3d2725bfb818158760c5748c653170a20e0e \
     --hash=sha256:fb08c276dd02dac3a284acdd02cacc630d2e3cd6572a4b85519f35cbd133c3de
-    # via openai
+    # via
+    #   anthropic
+    #   openai
 markdown-it-py==4.2.0 \
     --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
@@ -533,10 +555,12 @@ pydantic==2.13.4 \
     # via
     #   -r requirements.txt
     #   agno
+    #   anthropic
     #   fastapi
     #   openai
     #   pydantic-settings
     #   stellar-sdk
+    #   typesafe-sdk
 pydantic-core==2.46.4 \
     --hash=sha256:00c603d540afdd6b80eb39f078f33ebd46211f02f33e34a32d9f053bba711de0 \
     --hash=sha256:0186750b482eefa11d7f435892b09c5c606193ef3375bcf94aa00ae6bfb66262 \
@@ -658,7 +682,9 @@ pydantic-core==2.46.4 \
     --hash=sha256:fc010ab034c8c7452522748bf937df58020d256ccae0874463d1f4d01758af8e \
     --hash=sha256:fc3e9034a63de20e15e8ade85358bc6efc614008cab72898b4b4952bea0509ff \
     --hash=sha256:fd8b3d9fd264be37976686c7f65cd52a83f5e84f4bfd2adf9c1d469676bbb6ae
-    # via pydantic
+    # via
+    #   pydantic
+    #   typesafe-sdk
 pydantic-settings==2.14.2 \
     --hash=sha256:a20c97b37910b6550d5ea50fbcc2d4187defe58cd57070b73863d069419c9440 \
     --hash=sha256:c19dd64b19097f1de80184f0cc7b0272a13ae6e170cbf240a3e27e381ed14a5f
@@ -803,7 +829,9 @@ shellingham==1.5.4 \
 sniffio==1.3.1 \
     --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2 \
     --hash=sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc
-    # via openai
+    # via
+    #   anthropic
+    #   openai
 sse-starlette==3.4.6 \
     --hash=sha256:56217ab4c9a9f9c5db7b21e08732d3e7c2b807f45231ad23de0551a24c4a41f6 \
     --hash=sha256:725f8a1bd6d26ae1b2c9610c0ef5065dfdd496f3988d28adcf8c4b49dc25c627
@@ -818,26 +846,43 @@ stellar-sdk==13.2.1 \
     --hash=sha256:66936d463a0e6467d64370f8fa3b2bcc2bebcc17ba6d5000d647d7c35caa4660 \
     --hash=sha256:e0fcc97b24f246381943fd1722068d85341854e60c43425d06468ec3c6f47472
     # via -r requirements.txt
+tenacity==9.1.4 \
+    --hash=sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55 \
+    --hash=sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a
+    # via typesafe-sdk
 tqdm==4.69.1 \
     --hash=sha256:0a654b96f7a2660cceb615b56f307ec2bef96c515409014a429a561981ab52b4 \
     --hash=sha256:2be21080a0ce17e902c2f1baeb6a74bf551b67bbdfa4bc0109fad471d0b4cb0d
     # via openai
+truststore==0.10.4 \
+    --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
+    --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981
+    # via
+    #   httpcore2
+    #   httpx2
 typer==0.27.0 \
     --hash=sha256:629bd12ea5d13a17148125d9a264f949eb171fb3f120f9b04d85873cab054fa5 \
     --hash=sha256:6f4b27631e47f077871b7dc30e933ec0131c1390fbe0e387ea5574b5bac9ccf1
     # via agnoctl
+typesafe-sdk==0.7.2 \
+    --hash=sha256:0a961148187d52e18276ed7f2d02617cfac48e3b97673cb631a8749397d43d1e \
+    --hash=sha256:2434f4af5cdfc45d6ab5ff27048e8b257207f786b60456e69995e345b32e77e1
+    # via -r requirements.txt
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
     # via
     #   agno
+    #   anthropic
     #   anyio
     #   fastapi
+    #   httpx2
     #   openai
     #   pydantic
     #   pydantic-core
     #   starlette
     #   stellar-sdk
+    #   typesafe-sdk
     #   typing-inspection
 typing-inspection==0.4.2 \
     --hash=sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7 \
