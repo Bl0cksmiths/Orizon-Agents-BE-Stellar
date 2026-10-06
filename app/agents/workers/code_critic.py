@@ -24,6 +24,7 @@ from .code_gen import (  # reuse schema + JSON-string coercion + the tagged repl
     CodeArtifact,
     coerce_artifact,
     parse_tagged_artifact,
+    swap_section,
 )
 from .prompt_safety import fence_untrusted, worker_prompt
 
@@ -91,9 +92,21 @@ Return a CodeArtifact with the SAME structure as the draft:
 # The OpenAI path's prompt: the brief, answered as CodeArtifact JSON.
 INSTRUCTIONS = _BRIEF + _JSON_SHAPE
 
-# The Claude path's prompt: the same brief, answered in code.gen's tagged shape
-# (keep or refine the draft's title; the summary names the improved edge).
-CLAUDE_INSTRUCTIONS = _BRIEF + TAGGED_SHAPE
+_AGNO_LENGTH = """- **Length**: 500–900 lines of well-commented production code is the
+  sweet spot. Go longer only if the feature list demands it.
+"""
+
+# The Claude path's length bullet: the polish must finish inside the same step
+# deadline as the draft (see code_gen.CLAUDE_LENGTH).
+_CLAUDE_LENGTH = """- **Length**: keep it a single self-contained HTML file of about 250–450
+  lines. Prioritise working core features over breadth: for a large request,
+  implement the core flow well and list the deferred features in the summary.
+"""
+
+# The Claude path's prompt: the same brief with the Claude length bullet,
+# answered in code.gen's tagged shape (keep or refine the draft's title; the
+# summary names the improved edge).
+CLAUDE_INSTRUCTIONS = swap_section(_BRIEF, _AGNO_LENGTH, _CLAUDE_LENGTH) + TAGGED_SHAPE
 
 # Output budget for the refined app — the same ceiling as code.gen's draft.
 MAX_TOKENS = 48_000
