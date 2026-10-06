@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ...config import settings
-from ..model_factory import lazy_agent
-from .base import Worker
+from ..model_factory import claude_workers, lazy_agent, worker_tier
+from . import claude_step
+from .base import ModelWorker
 from .prompt_safety import worker_prompt
+
+if TYPE_CHECKING:
+    from ...llm.tiers import Tier
 
 logger = logging.getLogger(__name__)
 
@@ -325,10 +329,18 @@ def parse_tagged_artifact(reply: str) -> CodeArtifact:
     )
 
 
-class CodeGen(Worker):
+# Output budget for one generated app. The artifact ceiling is 120 000
+# characters, about 36 000 tokens of HTML/CSS/JS, and the tier's model may
+# think before it writes; past this the reply is cut off and the step fails as
+# truncated rather than shipping half an app.
+MAX_TOKENS = 48_000
+
+
+class CodeGen(ModelWorker):
     id = "agt_11c0"
     name = "code.gen"
     real = True
+    default_tier = "moderate"
 
     def __init__(self) -> None:
         # NOTE: gpt-5.3-codex (and other reasoning-class models) reject the
@@ -441,11 +453,45 @@ class CodeGen(Worker):
             sections=[cls._context_block(context)],
         )
 
+    @staticmethod
+    def _baked(context: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The kit's pre-built artifact, when the run has a kit that ships one."""
+        kit_dict = (context or {}).get("kit")
+        if not (isinstance(kit_dict, dict) and kit_dict.get("artifact_path")):
+            return None
+        from ...demo_kits import kit_by_id
+
+        kit = kit_by_id(kit_dict.get("kit_id", ""))
+        return kit.load_artifact() if kit else None
+
+    def _deterministic(self, context: dict[str, Any] | None) -> bool:
+        return self._baked(context) is not None
+
+    async def _draft(self, prompt: str, tier: Tier | None) -> CodeArtifact:
+        """The model's CodeArtifact for `prompt`, on whichever provider is live."""
+        if not claude_workers():
+            result = await self._agent.arun(prompt)
+            return coerce_artifact(result.content)
+        reply = await claude_step.text(
+            worker=self.name,
+            tier=worker_tier(tier, self.default_tier),
+            system=CLAUDE_INSTRUCTIONS,
+            user=prompt,
+            max_tokens=MAX_TOKENS,
+        )
+        try:
+            return parse_tagged_artifact(reply)
+        except (ValueError, ValidationError) as e:
+            logger.warning("code.gen reply could not be read as an artifact: %s", e)
+            raise claude_step.ModelStepError(claude_step.INVALID_OUTPUT, f"code.gen: {e}") from e
+
     async def run(
         self,
         intent: str,
         rationale: str,
         context: dict[str, Any] | None = None,
+        *,
+        tier: Tier | None = None,
     ) -> dict[str, Any]:
         import asyncio
         import random
@@ -456,32 +502,27 @@ class CodeGen(Worker):
         # ── Baked-artifact fast path ───────────────────────────────────────
         # When the kit has a pre-built HTML artifact, skip the LLM and serve
         # it deterministically. Guarantees demo quality + saves ~30s + cost.
-        kit_dict = (context or {}).get("kit")
-        if isinstance(kit_dict, dict) and kit_dict.get("artifact_path"):
-            from ...demo_kits import kit_by_id
-
-            kit = kit_by_id(kit_dict.get("kit_id", ""))
-            baked = kit.load_artifact() if kit else None
-            if baked:
-                # Mimic generation time so the trace doesn't feel instant.
-                await asyncio.sleep(0.4 + random.random() * 0.6)
-                # Baked artifacts are repo-owned and already clean, but they go
-                # through the same hardening so every artifact the frontend
-                # renders carries the same policy.
-                baked = harden_artifact(baked)
-                html = baked["preview_html"]
-                lines = html.count("\n") + 1
-                return {
-                    "summary": f"{baked['title']} — {baked['summary']}",
-                    "artifact": baked,
-                    "counts": {
-                        "files": len(baked["files"]),
-                        "bytes": len(html),
-                        "lines": lines,
-                    },
-                    "validator_violations": [],
-                    "source": "baked",
-                }
+        baked = self._baked(context)
+        if baked:
+            # Mimic generation time so the trace doesn't feel instant.
+            await asyncio.sleep(0.4 + random.random() * 0.6)
+            # Baked artifacts are repo-owned and already clean, but they go
+            # through the same hardening so every artifact the frontend
+            # renders carries the same policy.
+            baked = harden_artifact(baked)
+            html = baked["preview_html"]
+            lines = html.count("\n") + 1
+            return {
+                "summary": f"{baked['title']} — {baked['summary']}",
+                "artifact": baked,
+                "counts": {
+                    "files": len(baked["files"]),
+                    "bytes": len(html),
+                    "lines": lines,
+                },
+                "validator_violations": [],
+                "source": "baked",
+            }
 
         # ── Build the prompt with optional context sections ────────────────
         # The intent is fenced as untrusted data; the upstream context block is
@@ -490,8 +531,7 @@ class CodeGen(Worker):
         prompt = self.build_prompt(intent, rationale, context)
 
         # ── Draft ──────────────────────────────────────────────────────────
-        result = await self._agent.arun(prompt)
-        draft = coerce_artifact(result.content)
+        draft = await self._draft(prompt, tier)
         draft_art = self._artifact_dict(draft)
 
         # ── Validate (no critic here — critic runs as a separate pipeline step) ─
