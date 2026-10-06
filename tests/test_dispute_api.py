@@ -978,6 +978,7 @@ def test_the_task_listing_is_an_empty_window_before_settlement(client, monkeypat
         "disputes": [],
         "settlement_state": None,
         "seal": None,
+        "seal_kind": None,
         "proof_tx": None,
     }
 
