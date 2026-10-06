@@ -16,9 +16,12 @@ every worker writing its full `max_tokens` would still fit under `--max-usd`.
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +46,8 @@ class Job:
     rationale: str
     max_tokens: int  # the worker's own budget, for the ceiling
     model: str  # its default tier's model, for the ceiling
+    tier: str | None = None  # the plan step's tier; None runs the worker's default
+    typical_usd: float = 0.0  # what this job cost when last measured, for a budgeted run
 
 
 JOBS: tuple[Job, ...] = (
@@ -105,6 +110,82 @@ JOBS: tuple[Job, ...] = (
 )
 
 
+# The release re-check (2026-10-06): the two workers whose prompts or schemas
+# changed after the campaign, on the campaign's own inputs, and code.gen handed
+# a complex-tier step — which its tier cap must run on Sonnet, not Opus.
+# `typical_usd` is each job's campaign cost.
+_BY_ID = {j.agent_id: j for j in JOBS}
+RECHECK_JOBS: tuple[Job, ...] = (
+    replace(_BY_ID["agt_01h8"], typical_usd=0.0018),
+    replace(_BY_ID["agt_09l5"], typical_usd=0.0110),
+    Job(
+        "agt_11c0",
+        "cpx-001",
+        "Build a full booking system web app for a barbershop: services, staff schedules, time-slot booking, "
+        "admin view, and email-style confirmations.",
+        "Single-file HTML booking app: services, schedules, slots, admin view, confirmations.",
+        48_000,
+        "claude-sonnet-5-5",
+        tier="complex",
+        typical_usd=0.0937,
+    ),
+)
+
+
+# A budgeted job starts only if its last measured cost, times this, fits.
+HEADROOM = 1.25
+
+
+class BudgetExceeded(Exception):
+    """A streamed reply was cut off because it would have passed the budget."""
+
+    def __init__(self, estimate_usd: float) -> None:
+        super().__init__(f"stopped at an estimated ${estimate_usd:.4f}")
+        self.estimate_usd = estimate_usd  # billed but never reported back: counted as spent
+
+
+# Streamed text is about 3.5 characters a token; thinking is billed but not
+# streamed, so the visible text is scaled up by the share code.gen's campaign
+# call spent thinking (8,725 output tokens for ~5,400 of HTML).
+_CHARS_PER_TOKEN = 3.5
+_THINKING_FACTOR = 1.7
+
+
+class BudgetedClaude:
+    """Stops a streamed reply before its estimated cost passes the budget left.
+
+    Non-streamed calls cannot be cut off, so a budgeted run only starts a job
+    whose last measured cost fits; the long code.gen reply streams and is the
+    one this guard can actually stop."""
+
+    def __init__(self, inner: Any, remaining: Callable[[], float]) -> None:
+        self.inner = inner
+        self.remaining = remaining
+
+    async def complete(self, request: Any) -> Any:
+        if not request.stream:
+            return await self.inner.complete(request)
+        from app.llm import spend
+
+        price = spend.price_for(request.model)
+        prompt_usd = (len(request.system) + len(request.user)) / _CHARS_PER_TOKEN * price.input / 1_000_000
+        seen = 0
+        original = request.on_text
+
+        async def on_text(delta: str) -> None:
+            nonlocal seen
+            seen += len(delta)
+            spent = prompt_usd + seen / _CHARS_PER_TOKEN * _THINKING_FACTOR * price.output / 1_000_000
+            if spent > self.remaining():
+                raise BudgetExceeded(spent)
+            if original is not None:
+                maybe = original(delta)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        return await self.inner.complete(dataclasses.replace(request, on_text=on_text))
+
+
 def ceiling_usd(jobs: tuple[Job, ...] = JOBS) -> float:
     """Every worker writing its whole budget, plus a generous 6k-token prompt
     (code.critic reads code.gen's full draft)."""
@@ -127,29 +208,50 @@ def _digest(agent_id: str, out: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
-async def run_sample(out_dir: Path) -> dict[str, Any]:
+async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: float | None = None) -> dict[str, Any]:
+    """Run `jobs` in order. With `budget_usd`, a job starts only when its last
+    measured cost fits what is left, and a streamed reply is cut off before it
+    would pass the budget (`BudgetedClaude`)."""
     from app.agents.registry import WORKERS
     from app.llm import claude, spend
 
+    spent = 0.0
+
+    def remaining() -> float:
+        return (budget_usd if budget_usd is not None else float("inf")) - spent
+
     spend.set_ledger(spend.SpendLedger(spend.InMemorySpendStore()))
-    claude.set_transport(RecordingClaude(claude.get_transport()))
+    inner = claude.get_transport()
+    if budget_usd is not None:
+        inner = BudgetedClaude(inner, remaining)
+    claude.set_transport(RecordingClaude(inner))
     out_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, Any] = {}
     context: dict[str, Any] = {}
-    for job in JOBS:
+    for job in jobs:
         worker = WORKERS[job.agent_id]
+        if budget_usd is not None and job.typical_usd * HEADROOM > remaining():
+            results[worker.name] = {"worker": worker.name, "skipped": f"budget left {remaining():.4f} USD"}
+            continue
         log = _CaseLog()
         token = _current.set(log)
         started = time.perf_counter()
         error = None
         out: dict[str, Any] = {}
         try:
-            out = await worker.run(job.intent, job.rationale, dict(context))
+            if job.tier is not None:
+                out = await worker.run(job.intent, job.rationale, dict(context), tier=job.tier)  # type: ignore[call-arg]
+            else:
+                out = await worker.run(job.intent, job.rationale, dict(context))
+        except BudgetExceeded as e:
+            error = f"BudgetExceeded: {e}"
+            spent += e.estimate_usd
         except Exception as e:  # a worker failure is a result to report, not a crash
             error = f"{type(e).__name__}: {e}"
         finally:
             _current.reset(token)
         elapsed = time.perf_counter() - started
+        spent += sum(c.cost_usd for c in log.calls)
         if job.agent_id == "agt_11c0" and out:
             context["code.gen"] = out  # the critic polishes this draft
         artifact = out.get("artifact") if isinstance(out.get("artifact"), dict) else None
@@ -162,6 +264,7 @@ async def run_sample(out_dir: Path) -> dict[str, Any]:
             "agent_id": job.agent_id,
             "worker": worker.name,
             "case_id": job.case_id,
+            "tier": job.tier,
             "intent": job.intent,
             "latency_s": round(elapsed, 2),
             "cost_usd": sum(c.cost_usd for c in log.calls),
