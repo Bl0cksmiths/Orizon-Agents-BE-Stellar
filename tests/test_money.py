@@ -175,3 +175,20 @@ def test_amounts_are_labelled_with_the_configured_asset_code(monkeypatch: pytest
     monkeypatch.setattr(settings, "stellar_asset_sac", "CSOMEOTHERSACSOMEOTHERSACSOMEOTHERSACSOMEOTHERSACSOMEOTH")
     monkeypatch.setattr(money, "_sac_assets", {})
     assert money.asset_code() == "UNKNOWN"
+
+
+def test_the_ledger_client_converts_by_the_same_one_rule() -> None:
+    """`usdc_to_i128` was `round(amount * 10_000_000)` on binary floats, which
+    resolves a half-stroop by the double's error rather than by any rule:
+    0.00000125 became 13 and 0.00000455 became 45 — one up, one down — where
+    the written decimals round half-to-even to 12 and 46. One rule, one answer."""
+    from app.stellar import client as sc
+
+    assert sc.usdc_to_i128(0.00000125) == 12
+    assert sc.usdc_to_i128(0.00000455) == 46
+    for amount in (0.0123457, 0.054, 0.1 + 0.2, 7.0):
+        assert sc.usdc_to_i128(amount) == money.to_stroops(amount)
+    with pytest.raises(ValueError):
+        sc.usdc_to_i128(float("inf"))
+    with pytest.raises(ValueError):
+        sc.usdc_to_i128(-0.01)
