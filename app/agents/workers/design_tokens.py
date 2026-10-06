@@ -21,14 +21,18 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import lazy_agent
-from .base import Worker
+from ..model_factory import claude_workers, lazy_agent, worker_tier
+from . import claude_step
+from .base import ModelWorker
 from .prompt_safety import worker_prompt
+
+if TYPE_CHECKING:
+    from ...llm.tiers import Tier
 
 
 class _TokensOutput(BaseModel):
@@ -56,10 +60,15 @@ _INSTRUCTIONS = (
 )
 
 
-class DesignTokens(Worker):
+# Room for the JSON plus any thinking the tier's model does first.
+MAX_TOKENS = 8_000
+
+
+class DesignTokens(ModelWorker):
     id = "agt_02k2"
     name = "design.figma"
     real = True
+    default_tier = "low"
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
@@ -69,11 +78,16 @@ class DesignTokens(Worker):
             output_schema=_TokensOutput,
         )
 
+    def _deterministic(self, context: dict[str, Any] | None) -> bool:
+        return bool((context or {}).get("kit"))
+
     async def run(
         self,
         intent: str,
         rationale: str,
         context: dict[str, Any] | None = None,
+        *,
+        tier: Tier | None = None,
     ) -> dict[str, Any]:
         kit = (context or {}).get("kit")
 
@@ -91,8 +105,18 @@ class DesignTokens(Worker):
 
         # ── Free-form path: LLM-generated tokens ───────────────────────────
         prompt = worker_prompt(intent, rationale, "Return the design tokens.")
-        result = await self._agent.arun(prompt)
-        out: _TokensOutput = result.content
+        out: _TokensOutput
+        if claude_workers():
+            out = await claude_step.structured(
+                worker=self.name,
+                tier=worker_tier(tier, self.default_tier),
+                system=_INSTRUCTIONS,
+                user=prompt,
+                schema=_TokensOutput,
+                max_tokens=MAX_TOKENS,
+            )
+        else:
+            out = (await self._agent.arun(prompt)).content
         palette = {
             "bg": out.bg,
             "surface": out.surface,
