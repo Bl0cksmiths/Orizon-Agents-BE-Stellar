@@ -2,8 +2,8 @@
 
 Wraps the existing CodeCritic Agno agent (defined in code_critic.py) as a
 first-class Worker so it appears as its own step in the pipeline trace. Reads
-the latest code step's artifact (code.gen, code.next or an earlier critic pass)
-from `context`, runs the validator to surface any structural violations,
+the latest code step's artifact (code.gen or an earlier critic pass; a code.next
+Next.js project is declined as not attempted) from `context`, runs the validator to surface any structural violations,
 prepends the demo-kit critic_checklist as non-negotiable requirements, and asks
 the critic to refine the HTML against the copy and design intent upstream of it.
 
@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # The steps whose artifact the critic reviews: the latest delivered of them,
-# so it refines code.next's build as readily as code.gen's, and a second
-# critic pass refines the first one's.
+# so a second critic pass refines the first one's. When the latest is a
+# code.next project it is declined, not reviewed (see UNSUPPORTED_ARTIFACT).
 DRAFT_ROLES = (CODE_GEN, CODE_NEXT, CODE_CRITIC)
 
 UPSTREAM_GUIDANCE = (
@@ -43,6 +43,21 @@ def _draft(context: dict[str, Any] | None) -> tuple[str, dict[str, Any]] | None:
     """The role and output of the draft to review, or None when no code step
     delivered an artifact."""
     return latest_output(context, DRAFT_ROLES)
+
+
+# The failure class of a draft this critic does not review. code.next builds a
+# multi-file Next.js project (`artifact.framework == "next"`); the critic's job
+# is a single-file HTML app, and rewriting a project into one would replace the
+# buyer's deliverable with something they did not order. So the step is not
+# attempted — unbilled and unrated, like a request with no input (see
+# execution_svc._NOT_ATTEMPTED) — rather than reviewed in the wrong format.
+UNSUPPORTED_ARTIFACT = "unsupported_artifact"
+
+
+def _is_project(output: dict[str, Any]) -> bool:
+    """True when the draft is a framework project, not a single-file HTML app."""
+    artifact = output.get("artifact")
+    return isinstance(artifact, dict) and artifact.get("framework") == "next"
 
 
 class CodeCriticWorker(ModelWorker):
@@ -60,12 +75,14 @@ class CodeCriticWorker(ModelWorker):
         # No draft to refine, or code.gen served a baked artifact: either way
         # the step answers without asking a model (see run()).
         draft = _draft(context)
-        return draft is None or draft[1].get("source") == "baked"
+        return draft is None or draft[1].get("source") == "baked" or _is_project(draft[1])
 
     def upstream_sources(self, context: dict[str, Any] | None) -> list[str]:
         """The draft's step — reviewed even when no model is asked — then the
         handoff's roles when the review goes to a model."""
         draft = _draft(context)
+        if draft and _is_project(draft[1]):
+            return []  # not reviewed (see UNSUPPORTED_ARTIFACT), so nothing is used
         sources = [draft[0]] if draft else []
         return sources + [r for r in super().upstream_sources(context) if r not in sources]
 
@@ -82,6 +99,10 @@ class CodeCriticWorker(ModelWorker):
 
         ctx = context or {}
         draft = _draft(ctx)
+        if draft and _is_project(draft[1]):
+            raise ModelStepError(
+                UNSUPPORTED_ARTIFACT, f"code.critic: {draft[0]} built a Next.js project; the critic reviews HTML apps"
+            )
         prior: dict[str, Any] = draft[1] if draft else {}
         draft_artifact = prior.get("artifact")
 

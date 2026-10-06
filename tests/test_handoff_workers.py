@@ -320,12 +320,37 @@ def test_code_critic_sees_the_copy_and_design_intent_beside_the_draft(claude: Fa
 
 def test_code_critic_reviews_the_latest_code_step(claude: FakeClaude) -> None:
     claude.reply(TAGGED_APP, purpose="worker.code.critic")
-    context = ctx(**{"code.gen": code(body="OLD-DRAFT"), "code.next": code(title="Next", body="NEXT-DRAFT")})
-    assert WORKERS["agt_12r0"].upstream_sources(context)[0] == "code.next"
+    first_pass = code(title="Polished", body="FIRST-PASS")
+    context = ctx(**{"code.gen": code(body="OLD-DRAFT"), "code.critic": first_pass})
+    assert WORKERS["agt_12r0"].upstream_sources(context)[0] == "code.critic"
     run("agt_12r0", context)
     prompt = claude.calls_for("worker.code.critic")[0].user
-    assert "NEXT-DRAFT" in prompt
+    assert "FIRST-PASS" in prompt
     assert "OLD-DRAFT" not in prompt
+
+
+def _next_project() -> dict[str, Any]:
+    out = code(title="Pricing", body="NEXT-PREVIEW")
+    out["artifact"]["framework"] = "next"
+    out["artifact"]["files"] = [
+        {"path": "app/page.tsx", "language": "tsx", "content": "export default function Page() {}"},
+        {"path": "components/Pricing.tsx", "language": "tsx", "content": "export function Pricing() {}"},
+    ]
+    return out
+
+
+def test_code_critic_declines_a_next_project_instead_of_rewriting_it_as_html(claude: FakeClaude) -> None:
+    from app.agents.workers.claude_step import ModelStepError
+    from app.agents.workers.code_critic_worker import UNSUPPORTED_ARTIFACT
+
+    context = ctx(**{"code.gen": code(body="OLD-HTML"), "copywrite.v3": copy_out(), "code.next": _next_project()})
+    worker = WORKERS["agt_12r0"]
+    assert worker.upstream_sources(context) == []  # nothing is reviewed, so nothing is used
+    assert worker.step_model("moderate", context) is None  # and the trace names no model
+    with pytest.raises(ModelStepError) as info:
+        run("agt_12r0", context)
+    assert info.value.rule == UNSUPPORTED_ARTIFACT
+    assert claude.calls == []  # never handed to a model, never polished into the older HTML draft
 
 
 def test_code_critic_on_a_baked_draft_names_the_draft_and_asks_no_model(claude: FakeClaude) -> None:
