@@ -1647,6 +1647,8 @@
       "hit_stream_budget": false,
       "summary": "Brass & Blade — Barbershop Booking — A complete barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard with schedule editing, and email-style confirmations, all persisted locally.",
       "deferred_listed": false,
+      "deferred_quote": null,
+      "chars_per_line": 79.8,
       "html": "code_gen_1__index.html",
       "error": null
     },
@@ -1669,10 +1671,66 @@
       "hit_stream_budget": false,
       "summary": "Brass & Blade — Barbershop Booking · polished: 180L → 192L (+12) · 1 structural issue fixed",
       "deferred_listed": false,
+      "deferred_quote": null,
+      "chars_per_line": 87.9,
       "html": "code_critic_1__index.html",
       "error": null
     }
   ],
+  "final": [
+    {
+      "label": "code.gen#1",
+      "worker": "code.gen",
+      "served_model": "claude-sonnet-5-5",
+      "effort": "low",
+      "first_token_s": 1.692,
+      "wall_s": 43.29,
+      "output_tokens": 8658,
+      "cost_usd": 0.0934575,
+      "unreported_estimated_usd": 0.0,
+      "lines": 394,
+      "bytes": 19283,
+      "validator": [],
+      "hit_token_ceiling": false,
+      "hit_stream_budget": false,
+      "summary": "Clipper & Co. — Barbershop Booking — A full barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard, and email-style confirmations, all persisted locally. Deferred: real email delivery, payments, recurring bookings, drag-to-edit schedules.",
+      "deferred_listed": true,
+      "deferred_quote": "Deferred: real email delivery, payments, recurring bookings, drag-to-edit schedules.",
+      "chars_per_line": 48.9,
+      "html": "code_gen_1__index.html",
+      "error": null
+    },
+    {
+      "label": "code.gen#2",
+      "skipped": "budget left 0.0399 USD"
+    },
+    {
+      "label": "code.critic#1",
+      "worker": "code.critic",
+      "served_model": "claude-sonnet-5-5",
+      "effort": "low",
+      "first_token_s": 0.767,
+      "wall_s": 40.7,
+      "output_tokens": 9526,
+      "cost_usd": 0.116649,
+      "unreported_estimated_usd": 0.0,
+      "lines": 445,
+      "bytes": 20880,
+      "validator": [],
+      "hit_token_ceiling": false,
+      "hit_stream_budget": false,
+      "summary": "Clipper & Co. — Barbershop Booking · polished: 394L → 445L (+51) · 0 structural issues fixed",
+      "deferred_listed": false,
+      "deferred_quote": null,
+      "chars_per_line": 46.9,
+      "html": "code_critic_1__index.html",
+      "error": null
+    }
+  ],
+  "final_ceilings": {
+    "code.gen": 12000,
+    "code.critic": 14000
+  },
   "spend": {
     "guard_usd": 0.008598744,
     "workers_reported_usd": 0.01052,
@@ -1686,6 +1744,7 @@
     },
     "measured_total_usd": 0.019118744,
     "total_with_estimates_usd": 0.14871874399999999,
-    "code_length_usd": 0.1787375
+    "code_length_usd": 0.1787375,
+    "final_usd": 0.2101065
   }
 }
