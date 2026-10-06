@@ -202,3 +202,83 @@ def test_sol_audit_audits_the_extracted_contract_source(claude: FakeClaude) -> N
     body = fenced_body(claude.calls_for("worker.sol-audit")[0].user)
     assert "OCR-TEXT pragma solidity ^0.8.0;\ncontract Vault {}" in body  # line breaks kept: it is source
     assert "RESEARCH-CLAIM" in body
+
+
+# ── code.gen ────────────────────────────────────────────────────────────────
+
+TAGGED_APP = (
+    "<artifact_title>Spoke</artifact_title><artifact_summary>A co-op site.</artifact_summary>"
+    "<artifact_deferred>none</artifact_deferred><artifact_html><!doctype html><html><head>"
+    '<meta charset="utf-8"><title>Spoke</title></head><body><main>APP</main></body></html></artifact_html>'
+)
+
+
+def design() -> dict[str, Any]:
+    return {
+        "summary": "palette",
+        "palette": {
+            "bg": "#0B0414",
+            "surface": "#140A24",
+            "surface_2": "#1D1033",
+            "border": "#2A1A47",
+            "text": "#F4F0FF",
+            "muted": "#A99BC7",
+            "primary": "#7C5CFF",
+            "accent": "#22D3EE",
+            "danger": "#F43F5E",
+        },
+        "typography": {"family_ui": "Inter, system-ui, sans-serif", "family_display": "Georgia, serif"},
+        "css_vars": ":root { --bg: #0B0414; }",
+        "source": "llm",
+    }
+
+
+def copy_out() -> dict[str, Any]:
+    return {
+        "summary": "COPY-HEADLINE",
+        "hero": {"headline": "COPY-HEADLINE Fix it together", "subtitle": "COPY-SUBTITLE Saturdays."},
+        "sections": [{"title": "Tools", "body": "COPY-BODY every tool you need."}],
+    }
+
+
+def test_code_gen_builds_from_the_design_tokens_copy_brand_and_research(claude: FakeClaude) -> None:
+    claude.reply(TAGGED_APP, purpose="worker.code.gen")
+    upstream = {"design.figma": design(), "copywrite.v3": copy_out(), "seo.brief": seo(), "research.pro": research()}
+    run("agt_11c0", ctx(**upstream))
+    prompt = claude.calls_for("worker.code.gen")[0].user
+    body = fenced_body(prompt)
+
+    assert "  --primary: #7C5CFF;" in body
+    assert "Body font stack (family_ui): Inter, system-ui, sans-serif" in body
+    assert "Hero headline: COPY-HEADLINE Fix it together" in body
+    assert "Section — Tools: COPY-BODY every tool you need." in body
+    assert "SEO-KEYWORD bike repair co-op" in body
+    assert "RESEARCH-CLAIM" in body
+    # Design first: the tokens are what code.gen must copy verbatim.
+    assert body.index("design.figma") < body.index("copywrite.v3") < body.index("seo.brief")
+    # Model-written upstream text never sits outside a fence any more.
+    outside = prompt.replace(body, "")
+    assert "#7C5CFF" not in outside
+    assert "COPY-HEADLINE" not in outside
+    assert prompt.rstrip().endswith("Return the CodeArtifact.")
+
+
+def test_code_gen_on_a_kit_keeps_the_kit_sections_trusted_and_skips_its_duplicate_briefs() -> None:
+    from app.agents.workers.code_gen import CodeGen
+    from app.demo_kits import ALL_KITS
+
+    kit = ALL_KITS[0].model_dump()
+    context = {"kit": kit, "intent": INTENT, "seo.brief": seo(), "research.pro": research(), "design.figma": design()}
+    prompt = CodeGen.build_prompt(INTENT, RATIONALE, context)
+
+    body = fenced_body(prompt)
+    assert "## BRAND" in prompt.replace(body, "")  # the kit's own, repo-owned and unfenced
+    assert "  --primary: #7C5CFF;" in body
+    assert "SEO-KEYWORD" not in prompt  # the kit's brand block is not sent twice
+    assert "RESEARCH-CLAIM" not in prompt
+    assert prompt.index("## BRAND") < prompt.index(FENCE_BEGIN)
+
+
+def test_code_gen_reports_the_roles_it_was_handed() -> None:
+    upstream = {"design.figma": design(), "copywrite.v3": copy_out(), "sol-audit": {"summary": "not read"}}
+    assert WORKERS["agt_11c0"].upstream_sources(ctx(**upstream)) == ["design.figma", "copywrite.v3"]
