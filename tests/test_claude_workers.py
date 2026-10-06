@@ -435,6 +435,7 @@ def test_every_llm_worker_is_tier_aware() -> None:
             "design.figma",
             "sol-audit",
             "vision.ocr",
+            "ads.meta",
         ]
     )
     defaults = {w.name: w.default_tier for w in WORKERS.values() if isinstance(w, ModelWorker)}
@@ -447,4 +448,5 @@ def test_every_llm_worker_is_tier_aware() -> None:
         "code.critic": "moderate",
         "sol-audit": "complex",
         "vision.ocr": "low",
+        "ads.meta": "low",
     }

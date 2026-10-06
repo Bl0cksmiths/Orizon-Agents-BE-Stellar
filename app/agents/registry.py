@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .workers.ads_meta import AdsMeta
 from .workers.base import Worker
 from .workers.code_critic_worker import CodeCriticWorker
 from .workers.code_gen import CodeGen
@@ -23,12 +24,12 @@ _REAL: list[Worker] = [
     CodeGen(),  # agt_11c0 code.gen — context-aware HTML draft
     CodeCriticWorker(),  # agt_12r0 code.critic — top-level polish step
     VisionOcr(),  # agt_06q4 vision.ocr — Claude vision, Claude only
+    AdsMeta(),  # agt_07w3 ads.meta — Meta ad set copy, Claude only
 ]
 
 # Mock workers for the remaining agents in the registry
 _MOCK: list[Worker] = [
     MockWorker("agt_03d9", "code.next"),
-    MockWorker("agt_07w3", "ads.meta"),
     MockWorker("agt_10b6", "translate.42"),
 ]
 
