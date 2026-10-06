@@ -102,7 +102,11 @@ _AGNO_LENGTH = """- **Length**: 500–900 lines of well-commented production cod
 # deadline as the draft (see code_gen.CLAUDE_LENGTH).
 _CLAUDE_LENGTH = """- **Length**: keep it a single self-contained HTML file of about 250–450
   lines. Prioritise working core features over breadth: for a large request,
-  implement the core flow well and list the deferred features in the summary.
+  implement the core flow well and list the deferred features in the summary
+  (the <artifact_deferred> section below).
+- **Formatting**: readable source, so its length reflects the work — one
+  statement or declaration per line, normal two-space indentation, no
+  minified CSS or JS.
 """
 
 # The Claude path's prompt: the same brief with the Claude length bullet,
