@@ -442,6 +442,25 @@ class GuardSummary(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class TierModels(BaseModel):
+    """The model a built-in worker runs a step of each tier on, at plan time."""
+
+    low: str
+    moderate: str
+    complex: str
+
+
+class PlanModels(BaseModel):
+    """Which model did each planning stage, by exact id. None for a stage
+    that did not run: the improver on a buyer-edited spec, the planner on a
+    curated demo kit."""
+
+    planner: str | None = None
+    improver: str | None = None
+    guard: str | None = None
+    tiers: TierModels
+
+
 # ───── Requests ────────────────────────────────────────────
 class DecomposeRequest(BaseModel):
     # Stripped BEFORE the length bounds apply, so whitespace can neither make
