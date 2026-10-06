@@ -189,3 +189,28 @@ def test_a_dated_snapshot_is_priced_as_its_alias():
     )
     # $1/MTok in + $5/MTok out on Haiku 4.5, whatever id the API answered with.
     assert list_price_usd(snapshot) == pytest.approx(1.0 + 0.5)
+
+
+def test_a_streamed_call_records_its_effort_and_first_token_time():
+    from evals.orchestrator.app_pipeline import _CaseLog, _current
+
+    fake = testing.FakeClaude().reply("<html>" + "x" * 300 + "</html>", purpose="worker.code.gen")
+    claude.set_transport(RecordingClaude(fake))
+    log = _CaseLog()
+    token = _current.set(log)
+    try:
+        asyncio.run(
+            claude.text(
+                purpose="worker.code.gen",
+                model="claude-sonnet-5-5",
+                system="s",
+                user="u",
+                max_tokens=9_000,
+                effort="low",
+                stream=True,
+            )
+        )
+    finally:
+        _current.reset(token)
+    call = log.calls[0]
+    assert call.effort == "low" and call.first_token_ms is not None and call.first_token_ms <= call.latency_ms
