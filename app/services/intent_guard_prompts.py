@@ -107,18 +107,18 @@ COMPLEXITY = jev.choice(
     f"{PRODUCT_CONTEXT} How much work does this request take for the team of AI agents?",
     {
         "low": (
-            "One small deliverable a single agent can finish in one pass: a short piece of copy, "
-            "one simple page or component, a quick summary, or a small fix."
+            "One small, quick piece: a single small component or widget, a text or style tweak, "
+            "a short piece of copy, or a quick answer or summary."
         ),
         "moderate": (
-            "A few connected deliverables or a multi-section result: a full landing page with "
-            "copy and styling, a sourced research brief, an SEO plan, or a review of a short "
-            "contract."
+            "A typical single deliverable with several parts: a single-page app, tool or game, a "
+            "landing page, a content or SEO brief, a standard research summary, or a review of "
+            "one contract file."
         ),
         "complex": (
-            "Many interdependent parts or deep expert work: a multi-page app with data and logic, "
-            "an in-depth multi-source report, a full smart-contract security audit, or work that "
-            "needs several agents coordinating over many steps."
+            "A large system or deep expert work: a multi-page or multi-service app, integrations "
+            "with outside services or data, an in-depth multi-source report, or an audit of a "
+            "whole codebase or protocol."
         ),
     },
 )

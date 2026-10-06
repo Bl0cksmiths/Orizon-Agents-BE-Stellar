@@ -94,6 +94,18 @@ def test_questions_carry_the_domain_and_say_requests_about_security_are_work():
     assert "Tagalog" in prompts.INTENT_BATTERY["real_request"]["criteria"]["true"]
 
 
+def test_complexity_criteria_carry_concrete_anchors():
+    # "moderate" split toward both neighbours in the live eval; anchors pin it.
+    criteria = prompts.INTENT_BATTERY["complexity"]["criteria"]
+    for anchor in ("single small component", "text or style tweak", "short piece of copy"):
+        assert anchor in criteria["low"]
+    for anchor in ("single-page app, tool or game", "landing page", "research summary", "one contract file"):
+        assert anchor in criteria["moderate"]
+    for anchor in ("multi-service", "integrations", "whole codebase"):
+        assert anchor in criteria["complex"]
+    assert all(len(text) <= 240 for text in criteria.values())  # short criteria
+
+
 def test_fallback_prompt_is_rendered_from_the_same_questions_jev_gets():
     for question in prompts.INTENT_BATTERY.values():
         assert question["instructions"] in prompts.INTENT_FALLBACK_SYSTEM
