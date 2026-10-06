@@ -138,3 +138,25 @@ def test_a_refused_plan_is_recorded_as_a_refusal(cases, tmp_path):
     assert rows[0]["meta"]["plan_refused"] == "cyber"
     assert "plan_valid" not in rows[0]["grade"]
     assert rows[0]["meta"]["calls"][-1]["stop_reason"] == "refusal"  # billed even though refused
+
+
+def test_all_stages_run_through_the_real_raw_planner(cases, tmp_path):
+    from app.agents.orchestrator import ModelPlan
+
+    legit = [c for c in cases if c.category == "legit_low"][:3] + [c for c in cases if c.category == "legit_complex"][
+        :3
+    ]
+    pipeline = AppPipeline.create(live=False, cases=cases, stages="all", noise=0.0)
+    rows, errors = _run(legit, pipeline, tmp_path, stages="all")
+    assert errors == []
+    fake = claude.get_transport().inner
+    planner_calls = fake.calls_for("planner")
+    assert len(planner_calls) == len(legit)
+    # The planner saw the same AVAILABLE_AGENTS block decompose renders, and
+    # effort followed each case's tier.
+    assert all("AVAILABLE_AGENTS:" in c.system for c in planner_calls)
+    assert {c.effort for c in planner_calls} == {"low", "high"}
+    for r in rows:
+        ModelPlan.model_validate(r["meta"]["plan"])
+        assert r["grade"]["plan_valid"] == 1
+        assert set(r["meta"]["offered"]) == {a.id for a in seeded_agents()}
