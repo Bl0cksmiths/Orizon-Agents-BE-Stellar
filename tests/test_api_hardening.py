@@ -10,7 +10,7 @@ from starlette.routing import Route
 from app.config import settings
 from app.llm.testing import offline_readiness
 from app.security import RateLimitMiddleware
-from app.services import registry_sync
+from app.services import platform_treasury, registry_sync
 
 VALID_G = "G" + "A" * 55
 CHARGE_BODY = {
@@ -43,6 +43,13 @@ _RECONCILE_OFF = {"enabled": False, "running": False, "last_run_at": None, "last
 # the lifespan's loop and every earlier test decide; pinned so the exact
 # payloads below do not depend on test order.
 _REGISTRY_SYNCED = {"synced": True, "syncing": False, "agents": 12, "last_full_sync_at": 1_790_000_000.0}
+
+
+# No registry pass has checked a built-in agent in the hermetic suite (ADR 0016).
+_TREASURY_UNREAD = {
+    "address": platform_treasury.treasury_address(),
+    "agents": dict.fromkeys(platform_treasury.built_in_ids(), "unread"),
+}
 
 
 def _pin_registry_status(monkeypatch) -> None:
@@ -94,6 +101,7 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
+        "treasury": _TREASURY_UNREAD,
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }
@@ -127,6 +135,7 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
+        "treasury": _TREASURY_UNREAD,
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }
