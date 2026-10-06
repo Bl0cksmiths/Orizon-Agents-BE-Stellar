@@ -9,17 +9,34 @@ import secrets
 from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, NamedTuple, Protocol
 
-from ..agents.orchestrator import orchestrator_agent
+from pydantic import ValidationError
+
+from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
-from ..llm.tiers import TIERS, Tier
-from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
+from ..llm import provider
+from ..llm.errors import LLMError, LLMRefused, SpendCapReached
+from ..llm.tiers import TIERS, Tier, display_name, effort_for, model_for, planner_model
+from ..schemas import (
+    Agent,
+    DecomposeResponse,
+    GuardSummary,
+    Plan,
+    PlanFloorNotice,
+    PlanModels,
+    PlanStage,
+    PlanStep,
+    StoredPlan,
+    TierModels,
+    UnderstoodSpec,
+)
 from ..security import redact_secrets
 from ..state import state
-from . import reachability, reputation_svc
+from . import intent_screening, reachability, reputation_svc
 from .binding_registry import is_dispatchable
 from .plan_notices import (
     below_floor_exclusion,
@@ -29,6 +46,7 @@ from .plan_notices import (
     unreachable_exclusion,
     unreachable_exclusions,
 )
+from .prompt_improver import Spec
 from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
@@ -707,6 +725,7 @@ async def _build_kit_plan(
     kit: DemoKit,
     reps: dict[str, reputation_svc.RepInfo],
     registry: _RegistrySnapshot | None = None,
+    pipeline: _PipelineFacts | None = None,
 ) -> DecomposeResponse:
     """Deterministic 6-step plan for a curated demo intent. No LLM call.
 
@@ -854,6 +873,7 @@ async def _build_kit_plan(
         notices=notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
+        stages=pipeline.stages_with(False) if pipeline else [],
     )
     state.add_plan(stored)
 
@@ -868,6 +888,7 @@ async def _build_kit_plan(
         # which one planned their intent and should not have to.
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
+        **(pipeline.response_fields(False) if pipeline else {}),
     )
 
 
@@ -1136,8 +1157,14 @@ def _finish_free_form(
     clamped: _Clamped,
     *,
     plan_tier: Tier | None = None,
+    pipeline: _PipelineFacts | None = None,
 ) -> DecomposeResponse:
-    """Serve a clamped free-form plan: the fallback if it is empty, then store and answer."""
+    """Serve a clamped free-form plan: the fallback if it is empty, then store and answer.
+
+    `pipeline` carries what the Claude pipeline adds to the answer (the
+    request check, the understood request, the models, the stage lines); the
+    legacy planner passes none and its answer is exactly what it always was.
+    """
     cleaned = clamped.steps
     # Whatever left `cleaned` empty — a planner that failed, or one whose every
     # step the clamp discarded — the steps served from here on are not the
@@ -1188,6 +1215,7 @@ def _finish_free_form(
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
         planner_fallback=planner_fallback,
+        stages=pipeline.stages_with(planner_fallback) if pipeline else [],
     )
     state.add_plan(stored)
 
@@ -1207,10 +1235,162 @@ def _finish_free_form(
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
         planner_fallback=planner_fallback,
+        **(pipeline.response_fields(planner_fallback) if pipeline else {}),
     )
 
 
-async def decompose(intent: str) -> DecomposeResponse:
+@dataclass(frozen=True)
+class _PipelineFacts:
+    """What the Claude pipeline adds to a plan: how it was screened and who planned it.
+
+    Built once the planner has answered (or not), and read by both plan
+    builders, so a kit plan and a free-form plan describe themselves the same
+    way. `fallback_stage` is the plan line when the served plan turns out to be
+    the fallback — only `_finish_free_form` knows that, after the clamp.
+    """
+
+    screening: intent_screening.Screening
+    plan_stage: str
+    fallback_stage: str = ""
+    planner: str | None = None
+    understood_as: UnderstoodSpec | None = None
+
+    def stages_with(self, planner_fallback: bool) -> list[PlanStage]:
+        msg = self.fallback_stage if planner_fallback and self.fallback_stage else self.plan_stage
+        return [*self.screening.stages, PlanStage(stage="plan", msg=msg)]
+
+    def response_fields(self, planner_fallback: bool) -> dict[str, Any]:
+        decision = self.screening.decision
+        return {
+            "tier": self.screening.tier,
+            "understood_as": self.understood_as,
+            "guard": (
+                GuardSummary(verdict=decision.verdict, tier=decision.tier, reasons=list(decision.reasons))
+                if decision is not None and decision.tier is not None
+                else None
+            ),
+            "models": PlanModels(
+                planner=self.planner,
+                improver=self.screening.improved_by,
+                guard=self.screening.guard_model,
+                tiers=TierModels(low=model_for("low"), moderate=model_for("moderate"), complex=model_for("complex")),
+            ),
+            "stages": self.stages_with(planner_fallback),
+        }
+
+
+def _understood(spec: Spec | None) -> UnderstoodSpec | None:
+    """The spec the plan was built from, as the buyer may correct and resubmit it."""
+    if spec is None:
+        return None
+    try:
+        return UnderstoodSpec.model_validate(spec.model_dump())
+    except ValidationError:
+        # Both models carry the same bounds, so this is drift between them, not
+        # a buyer's problem: the plan stands, the panel is just not offered.
+        logger.warning("an accepted spec does not fit the understood-request shape; not echoing it")
+        return None
+
+
+async def decompose(intent: str, *, spec: UnderstoodSpec | None = None) -> DecomposeResponse:
+    """Plan an intent: a curated kit's fixed pipeline, or a planner's clamped plan.
+
+    `ORCHESTRATOR_PROVIDER` picks the planner. On `anthropic` the request is
+    screened first (`intent_screening`) and planned on Claude; on `openai` the
+    legacy agno planner runs exactly as before and `spec` is ignored, since
+    nothing on that path ever offered one to correct.
+    """
+    if provider.active_provider() == "anthropic":
+        return await _decompose_claude(intent, spec)
+    return await _decompose_legacy(intent)
+
+
+async def _decompose_claude(intent: str, user_spec: UnderstoodSpec | None) -> DecomposeResponse:
+    """The Claude pipeline: screen, then plan on Opus, then the same clamp as ever.
+
+    The reputation read runs beside the screening rather than after it: both
+    are bounded waits on someone else, and a request the check refuses only
+    wastes a read the cache will serve the next one anyway. The registry
+    snapshot is still taken first, for the reason `_RegistrySnapshot` gives.
+    """
+    registry = _snapshot_registry()
+    reachability.refresh_stale([a.id for a in registry.routable if a.source == "onchain"])
+    kit = detect_kit(intent)
+    if kit is None and not registry.routable:
+        # Before any paid call, as on the legacy path: no agent, nothing to screen for.
+        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+    reading = asyncio.create_task(reputation_svc.fetch_reps([a.id for a in registry.routable]))
+    try:
+        if kit is not None:
+            screening = await asyncio.wait_for(intent_screening.screen_kit(intent), settings.decompose_timeout_seconds)
+            pipeline = _PipelineFacts(screening=screening, plan_stage=f"Curated demo plan: {kit.brand.name}")
+            return await _build_kit_plan(intent, kit, await reading, registry, pipeline)
+        return await asyncio.wait_for(
+            _screen_and_plan(intent, user_spec, registry, reading), timeout=settings.decompose_timeout_seconds
+        )
+    finally:
+        if not reading.done():
+            reading.cancel()
+
+
+async def _screen_and_plan(
+    intent: str,
+    user_spec: UnderstoodSpec | None,
+    registry: _RegistrySnapshot,
+    reading: asyncio.Task[dict[str, reputation_svc.RepInfo]],
+) -> DecomposeResponse:
+    """The free-form half, inside the planning gate: every call in it is a paid model call."""
+    async with _decompose_gate().slot(max(0, settings.decompose_max_queued)):
+        edited = Spec.model_validate(user_spec.model_dump()) if user_spec is not None else None
+        screening = await intent_screening.screen_free_form(intent, user_spec=edited)
+        tier = screening.tier
+        # screen_free_form refuses an untiered verdict instead of returning it.
+        assert tier is not None
+        reps = await reading
+        shortlist = _routable_registry(reps, registry)
+        if not shortlist.offered:
+            raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+        request: str | Spec = screening.spec if screening.spec is not None else intent
+        try:
+            result = await draft_plan(request, tier=tier, agents_block=shortlist.block)
+        except SpendCapReached as err:
+            raise intent_screening.paused(err) from err
+        except LLMRefused as err:
+            # The planner's own safety classifiers declined what the guard let
+            # through. That is a refusal, not a planner fault: no fallback plan
+            # is dressed up as an answer to a request the model would not touch.
+            logger.warning("planner declined a screened request (category=%s)", err.category)
+            raise intent_screening.IntentBlocked(intent_screening.PLANNER_DECLINED_MESSAGE) from err
+        except LLMError as err:
+            # Unavailable, truncated, invalid output, a rejected request: the
+            # buyer gets the fallback plan, flagged, as on the legacy path.
+            logger.warning(
+                "planner gave no usable plan (%s: %s); serving the fallback plan",
+                type(err).__name__,
+                _loggable(str(err)),
+            )
+            result = None
+
+    effort = effort_for(tier)
+    planner = (result.served_by or result.model) if result is not None else None
+    pipeline = _PipelineFacts(
+        screening=screening,
+        plan_stage=f"Planned by {display_name(planner or planner_model())} (effort {effort})",
+        fallback_stage=(
+            "The planner could not answer; a fallback plan was served"
+            if result is None
+            else "None of the planner's steps could be used; a fallback plan was served"
+        ),
+        planner=planner,
+        understood_as=_understood(screening.spec),
+    )
+    proposed = result.value.steps if result is not None else []
+    return _finish_free_form(
+        intent, shortlist, reps, _clamp(proposed, shortlist, reps, plan_tier=tier), plan_tier=tier, pipeline=pipeline
+    )
+
+
+async def _decompose_legacy(intent: str) -> DecomposeResponse:
     # One registry snapshot and one live reputation snapshot per decompose,
     # shared by the kit path, the routing prompt and the per-step stamps.
     #
