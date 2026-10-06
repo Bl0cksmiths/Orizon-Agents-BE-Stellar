@@ -173,3 +173,19 @@ def test_forced_fallback_answers_on_haiku_and_never_bills_jev(cases, tmp_path):
         assert "fallback" in r["meta"]["observed"]["reasons"]
         assert r["grade"]["verdict_ok"] == 1
         assert r["meta"]["observed"]["raw_tier"] in ("low", "moderate", "complex")
+
+
+def test_a_dated_snapshot_is_priced_as_its_alias():
+    from app.llm import spend
+    from app.llm.claude import Attempt, Completion
+    from evals.orchestrator.app_pipeline import list_price_usd
+
+    usage = spend.Usage(input_tokens=1_000_000, output_tokens=100_000)
+    snapshot = Completion(
+        text="{}",
+        stop_reason="end_turn",
+        model="claude-haiku-4-5-20251001",
+        attempts=(Attempt("claude-haiku-4-5-20251001", usage),),
+    )
+    # $1/MTok in + $5/MTok out on Haiku 4.5, whatever id the API answered with.
+    assert list_price_usd(snapshot) == pytest.approx(1.0 + 0.5)
