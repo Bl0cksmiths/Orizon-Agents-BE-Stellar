@@ -47,6 +47,7 @@ from .plan_notices import (
     below_floor_exclusion,
     external_exclusions,
     no_image_exclusion,
+    no_input_exclusion,
     relaxation,
     simulated_exclusion,
     substitution,
@@ -56,6 +57,7 @@ from .plan_notices import (
 )
 from .prompt_improver import Spec
 from .registry_sync import MAX_AGENT_NAME_CHARS
+from .request_signals import has_translation_target
 
 logger = logging.getLogger(__name__)
 
@@ -1293,14 +1295,15 @@ _CODE_BUILDER_IDS: frozenset[str] = frozenset({"agt_11c0", "agt_03d9"})  # code.
 _CRITIC_ID = "agt_12r0"
 _DEPLOY_ID = "agt_08j2"
 _OCR_ID = "agt_06q4"
+_TRANSLATE_ID = "agt_10b6"
 
-# A step dropped unless the plan holds at least one of these. code.critic
-# reviews code.gen's single-file HTML only: it declines a code.next project
-# (`code_critic_worker.UNSUPPORTED_ARTIFACT`), so code.next alone gives it
-# nothing to review. deploy.v0 seals either builder's output.
-_NEEDS_ONE_OF: dict[str, frozenset[str]] = {
-    _CRITIC_ID: frozenset({"agt_11c0"}),
-    _DEPLOY_ID: _CODE_BUILDER_IDS,
+# A step dropped unless the plan holds at least one of these, with what the
+# buyer is told it lacked. code.critic reviews code.gen's single-file HTML
+# only: it declines a code.next project (`code_critic_worker.UNSUPPORTED_ARTIFACT`),
+# so code.next alone gives it nothing to review. deploy.v0 seals either build.
+_NEEDS_ONE_OF: dict[str, tuple[frozenset[str], str]] = {
+    _CRITIC_ID: (frozenset({"agt_11c0"}), "there is no code.gen build to review (it does not review code.next)"),
+    _DEPLOY_ID: (_CODE_BUILDER_IDS, "there is no build to seal"),
 }
 
 # A step moved after every one of these the plan holds: the critic after the
@@ -1336,33 +1339,55 @@ def _handoff_order(steps: list[PlanStep]) -> list[PlanStep]:
 
 class _Composed(NamedTuple):
     steps: list[PlanStep]
-    # vision.ocr agents whose proposed step had no image to read: the buyer is
-    # told (`no_image_input`), as for an agent found unreachable mid-plan.
-    no_image: dict[str, Agent]
+    # One notice per agent whose proposed steps were dropped for want of their
+    # input (`no_image_input`, `no_step_input`), in id order — the buyer is
+    # told, as for an agent found unreachable mid-plan.
+    notices: list[PlanFloorNotice]
+
+
+def _missing_input(agent_id: str, present: set[str], intent: str) -> str | None:
+    """What a proposed step on `agent_id` would lack — None when it has its input.
+
+    Every check is one the run loop would otherwise make at dispatch, failing
+    the step unbilled; made here, before the buyer authorizes its price. All
+    pure: `has_image_input` judges an image link without fetching it (and with
+    no upload context, since decompose takes none), and the translation check
+    is `request_signals.has_translation_target`, which only says no when sure.
+    """
+    needs = _NEEDS_ONE_OF.get(agent_id)
+    if needs is not None and not needs[0] & present:
+        return needs[1]
+    if agent_id == _OCR_ID and not has_image_input(intent, None):
+        return _NO_IMAGE
+    if agent_id == _TRANSLATE_ID and not has_translation_target(intent):
+        return "the request names no language to translate into"
+    return None
+
+
+_NO_IMAGE = "no image"
 
 
 def _compose(steps: list[PlanStep], intent: str) -> _Composed:
     """The clamped plan held to its handoffs: steps with nothing to work on are
-    dropped, and steps that read another step's output run after it.
-
-    The image check is `vision_input.has_image_input` on the buyer's own words
-    — pure, no fetch — with no upload context, since decompose takes none.
-    """
+    dropped (and the buyer told), and steps that read another step's output
+    run after it."""
     present = {s.agent_id for s in steps}
     kept: list[PlanStep] = []
-    no_image: dict[str, Agent] = {}
+    dropped: dict[str, str] = {}
     for step in steps:
-        needs = _NEEDS_ONE_OF.get(step.agent_id)
-        if needs is not None and not needs & present:
-            logger.info("dropped a %s step: no build in the plan it can work on", step.agent_name)
+        missing = _missing_input(step.agent_id, present, intent)
+        if missing is None:
+            kept.append(step)
+        else:
+            dropped[step.agent_id] = missing
+    notices = []
+    for agent_id, missing in sorted(dropped.items()):
+        agent = state.agents.get(agent_id)
+        if agent is None:
             continue
-        if step.agent_id == _OCR_ID and not has_image_input(intent, None):
-            agent = state.agents.get(step.agent_id)
-            if agent is not None:
-                no_image[agent.id] = agent
-            continue
-        kept.append(step)
-    return _Composed(_handoff_order(kept), no_image)
+        logger.info("dropped a %s step: %s", agent.name, missing)
+        notices.append(no_image_exclusion(agent) if missing is _NO_IMAGE else no_input_exclusion(agent, missing))
+    return _Composed(_handoff_order(kept), notices)
 
 
 def _finish_free_form(
@@ -1419,7 +1444,7 @@ def _finish_free_form(
     notices = (
         shortlist.notices
         + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
-        + [no_image_exclusion(a) for _, a in sorted(composed.no_image.items())]
+        + composed.notices
     )
 
     plan_id = f"pln_{secrets.token_hex(4)}"

@@ -107,10 +107,12 @@ def test_a_pipeline_that_already_flows_forward_is_served_as_planned(
 ) -> None:
     _plan_of(fake_claude, fake_jev, *pipeline)
 
-    resp = _decompose()
+    # Names target languages, so a translation step has one.
+    resp = _decompose(f"{INTENT}, in English and Spanish")
 
     assert _ids(resp) == pipeline
     assert resp.planner_fallback is False
+    assert all(n.reason_code not in ("no_step_input", "no_image_input") for n in resp.notices)
 
 
 def test_a_review_with_no_build_before_it_is_dropped(
@@ -121,6 +123,7 @@ def test_a_review_with_no_build_before_it_is_dropped(
     resp = _decompose()
 
     assert _ids(resp) == [RESEARCH, COPY]
+    assert _dropped(resp) == {CRITIC: "no_step_input"}
     # Nothing is billed for the dropped step: the plan total is its steps'.
     assert resp.total_stroops == sum(s.price_stroops for s in resp.steps)
 
@@ -130,13 +133,55 @@ def test_a_review_of_a_next_project_is_dropped(claude_on: None, fake_claude: Fak
     # plan never shows the buyer a priced review that cannot happen.
     _plan_of(fake_claude, fake_jev, DESIGN, NEXT, CRITIC, DEPLOY)
 
-    assert _ids(_decompose()) == [DESIGN, NEXT, DEPLOY]
+    resp = _decompose()
+
+    assert _ids(resp) == [DESIGN, NEXT, DEPLOY]
+    assert _dropped(resp) == {CRITIC: "no_step_input"}
+    (notice,) = [n for n in resp.notices if n.agent_id == CRITIC]
+    assert "no code.gen build to review" in notice.reason
+
+
+def _dropped(resp: DecomposeResponse) -> dict[str, str]:
+    codes = ("no_step_input", "no_image_input")
+    return {n.agent_id: n.reason_code for n in resp.notices if n.reason_code in codes}
+
+
+def test_a_translation_with_no_target_language_is_dropped(
+    claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev
+) -> None:
+    _plan_of(fake_claude, fake_jev, RESEARCH, COPY, TRANSLATE)
+
+    resp = _decompose("write a report on solar panels for homeowners")
+
+    assert _ids(resp) == [RESEARCH, COPY]
+    assert _dropped(resp) == {TRANSLATE: "no_step_input"}
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "write a report on solar panels for homeowners, in Tagalog",
+        "Gumawa ng report tungkol sa solar panels para sa mga may-ari ng bahay",
+    ],
+)
+def test_a_translation_with_a_target_language_is_kept(
+    claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev, intent: str
+) -> None:
+    _plan_of(fake_claude, fake_jev, RESEARCH, COPY, TRANSLATE)
+
+    resp = _decompose(intent)
+
+    assert _ids(resp) == [RESEARCH, COPY, TRANSLATE]
+    assert _dropped(resp) == {}
 
 
 def test_a_seal_with_no_build_before_it_is_dropped(claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
     _plan_of(fake_claude, fake_jev, COPY, DEPLOY)
 
-    assert _ids(_decompose()) == [COPY]
+    resp = _decompose()
+
+    assert _ids(resp) == [COPY]
+    assert _dropped(resp) == {DEPLOY: "no_step_input"}
 
 
 def test_a_review_and_seal_planned_before_the_build_are_moved_after_it(

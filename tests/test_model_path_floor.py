@@ -377,8 +377,8 @@ def test_notice_order_is_stable_across_runs(seeded: object, monkeypatch: pytest.
     _add_agent("ext_idx1", source="onchain")
     reps = {a.id: _info(a.id, smoothed=1000 + i * 10, lower=100) for i, a in enumerate(state.list_agents())}
 
-    first = _decompose(monkeypatch, reps, "agt_12r0")
-    second = _decompose(monkeypatch, reps, "agt_12r0")
+    first = _decompose(monkeypatch, reps, "agt_11c0")
+    second = _decompose(monkeypatch, reps, "agt_11c0")
     shape = [(n.kind, n.reason_code, n.agent_id) for n in first.notices]
 
     assert shape == [(n.kind, n.reason_code, n.agent_id) for n in second.notices]
@@ -440,11 +440,11 @@ def test_a_re_admitted_model_step_is_flagged_degraded(seeded: object, monkeypatc
     reps["agt_01h8"] = _info("agt_01h8", smoothed=6000, lower=6000)
     reps["agt_02k2"] = _info("agt_02k2", smoothed=6000, lower=6000)
     # The best-scored sub-floor agent, so the one the backstop re-admits.
-    reps["agt_10b6"] = _info("agt_10b6", smoothed=9900, lower=100)
+    reps["agt_07w3"] = _info("agt_07w3", smoothed=9900, lower=100)
 
-    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_10b6")
+    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_07w3")
 
-    assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_10b6", True)]
+    assert [(s.agent_id, s.degraded) for s in resp.steps] == [("agt_01h8", False), ("agt_07w3", True)]
 
 
 def test_a_disputed_agent_is_reported_with_its_dispute_rate(seeded: object, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -491,9 +491,9 @@ def test_the_prompt_lists_at_most_the_configured_number_of_agents(
 
     assert _offered_ids(reps) == ["agt_09l5", "agt_10b6", "agt_11c0", "agt_12r0"]
 
-    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_12r0")
+    resp = _decompose(monkeypatch, reps, "agt_01h8", "agt_09l5")
 
-    assert [s.agent_id for s in resp.steps] == ["agt_12r0"]  # the unlisted pick is clamped away
+    assert [s.agent_id for s in resp.steps] == ["agt_09l5"]  # the unlisted pick is clamped away
     assert resp.notices == []
 
 
