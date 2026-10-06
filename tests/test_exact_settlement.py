@@ -40,7 +40,7 @@ from app import money
 from app.config import settings
 from app.routers.disputes import SettlementView
 from app.schemas import Plan, PlanStep, StoredPlan, Task
-from app.services import dispute_store, execution_svc
+from app.services import dispute_store, execution_svc, platform_treasury
 from app.services.dispute_store import SettlementRecord, SettlementStep
 from app.state import state
 
@@ -195,7 +195,11 @@ def test_a_registry_price_change_after_planning_changes_nothing(monkeypatch: pyt
         # Cheaper, so the authorization's cap cannot mask a re-read: a payout
         # at the new price would be 300_000, under the 540_000 authorized.
         state.add_agent(state.agents["agt_11c0"].model_copy(update={"price": 0.03}))
-        chain = _install(monkeypatch, _Chain(auth=_auth(max_amount=plan.plan.total_stroops)))
+        # A built-in agent is paid only to the platform treasury (ADR 0016).
+        treasury = platform_treasury.treasury_address()
+        chain = _install(
+            monkeypatch, _Chain(auth=_auth(max_amount=plan.plan.total_stroops), owners={"agt_11c0": treasury})
+        )
         _workers(monkeypatch, {"agt_11c0": _Ok()})
 
         _run(plan, "tsk_px_frozen")
