@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from ...config import settings
 from ..model_factory import cap_tier, claude_workers, served_model_label, step_model_label, worker_tier
+from .context import Handoff, upstream
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
@@ -14,6 +15,24 @@ class Worker(ABC):
     id: str
     name: str
     real: bool
+    # True for a worker that builds on earlier steps' output through
+    # `handoff()`. Off by default, so a worker that ignores its context (a
+    # mock, an operator dispatch) never claims in the trace to have used it.
+    reads_upstream: ClassVar[bool] = False
+
+    def handoff(self, context: dict[str, Any] | None) -> Handoff:
+        """What this step is handed from the steps before it (see `context.py`).
+
+        The prompt and the run trace's "uses output from" line both read this,
+        so the trace cannot name a step whose output the prompt did not carry.
+        """
+        if not self.reads_upstream:
+            return Handoff(consumer=self.name)
+        return upstream(context, self.name)
+
+    def upstream_sources(self, context: dict[str, Any] | None) -> list[str]:
+        """The earlier steps whose output this step will use, for the trace."""
+        return self.handoff(context).sources
 
     @abstractmethod
     async def run(
@@ -31,6 +50,8 @@ class Worker(ABC):
           - context['seo.brief']     → prior brand block
           - context['design.figma']  → prior design tokens
           - context['code.gen']      → prior code artifact
+        Read prior outputs through `self.handoff(context)` (typed, bounded,
+        fenced) rather than by key, so the trace and the prompt agree.
         Workers are free to ignore the kwarg if they don't need context.
         """
         raise NotImplementedError
@@ -71,6 +92,13 @@ class ModelWorker(Worker):
     def _deterministic(self, context: dict[str, Any] | None) -> bool:
         """True when this step will be served without asking a model."""
         return False
+
+    def upstream_sources(self, context: dict[str, Any] | None) -> list[str]:
+        """Empty on a deterministic path: a kit or baked step asks no model, so
+        no upstream output reaches a prompt."""
+        if self._deterministic(context):
+            return []
+        return super().upstream_sources(context)
 
     def step_model(self, tier: object, context: dict[str, Any] | None) -> str | None:
         """The trace's description of the model this step will run on, or None
