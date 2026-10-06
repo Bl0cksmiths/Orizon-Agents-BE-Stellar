@@ -46,7 +46,8 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
-        plan = await decompose(req.intent)
+        # `spec` only when sent, so the call is the one it always was otherwise.
+        plan = await (decompose(req.intent, spec=req.spec) if req.spec is not None else decompose(req.intent))
     except TimeoutError as e:
         # asyncio.wait_for tripped decompose_timeout_seconds — the LLM hung,
         # nothing else failed. Distinct from the blanket 502 below.
