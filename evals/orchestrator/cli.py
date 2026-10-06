@@ -80,6 +80,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-s", type=float, default=180.0, help="hard wall-clock ceiling per case")
     run.add_argument("--noise", type=float, default=0.15, help="label-score noise for the fake answers (not --live)")
     run.add_argument("--seed", type=int, default=0)
+    run.add_argument(
+        "--force-fallback", action="store_true", help="fail every jev call so the Haiku fallback guard answers"
+    )
 
     for name, helptext in (("report", "rewrite summary.md"), ("sweep", "rewrite sweep.md")):
         p = sub.add_parser(name, help=f"{helptext} from a variant directory's results")
@@ -134,12 +137,19 @@ def _pipeline(args: argparse.Namespace, cases: list[Case]) -> Pipeline:
         return NullPipeline()
     from .app_pipeline import AppPipeline  # needs app/llm and the guard + planner modules
 
-    return AppPipeline.create(live=args.live, cases=cases, stages=args.stages, noise=args.noise, seed=args.seed)
+    return AppPipeline.create(
+        live=args.live,
+        cases=cases,
+        stages=args.stages,
+        noise=args.noise,
+        seed=args.seed,
+        force_fallback=args.force_fallback,
+    )
 
 
 def _run(args: argparse.Namespace) -> int:
     cases = _cases(args)
-    est = cost.estimate(cases, stages=args.stages, reps=args.reps)
+    est = cost.estimate(cases, stages=args.stages, reps=args.reps, fallback=args.force_fallback)
     mode = "LIVE" if args.live else "fake (no paid calls)"
     print(f"[{mode}] estimate: {est.describe()}")
     if args.live:
@@ -178,6 +188,7 @@ def _run(args: argparse.Namespace) -> int:
         concurrency=args.concurrency,
         timeout_s=args.timeout_s,
         max_usd=args.max_usd,
+        guard_fallback=args.force_fallback,
     )
     outcome = asyncio.run(run_cases(cases, pipeline, cfg))
     summary, sweep_md = report.write(cfg.variant_dir)
