@@ -92,6 +92,11 @@ def _parser() -> argparse.ArgumentParser:
     wk.add_argument("--live", action="store_true", help="required: this calls the real Claude API")
     wk.add_argument("--max-usd", type=float, help="refused unless every worker's full budget fits under it")
     wk.add_argument("--out", type=Path, required=True)
+    wk.add_argument(
+        "--recheck",
+        action="store_true",
+        help="the release re-check jobs, run against --max-usd as a budget (streamed replies cut off at it)",
+    )
 
     cp = sub.add_parser("campaign", help="build a live campaign's report and data files from its runs")
     cp.add_argument("--runs", type=Path, required=True)
@@ -215,25 +220,36 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _workers(args: argparse.Namespace) -> int:
-    from .workers_sample import ceiling_usd
+    from .workers_sample import HEADROOM, JOBS, RECHECK_JOBS, ceiling_usd
 
-    ceiling = ceiling_usd()
-    print(f"[LIVE] worker sample: 7 workers, ceiling {cost.usd(ceiling)}")
     if not args.live or args.max_usd is None:
         print("refused: the worker sample needs --live and --max-usd N", file=sys.stderr)
         return EXIT_REFUSED
-    if ceiling > args.max_usd:
-        print(f"refused: ceiling {cost.usd(ceiling)} is over --max-usd {cost.usd(args.max_usd)}", file=sys.stderr)
-        return EXIT_REFUSED
+    jobs = RECHECK_JOBS if args.recheck else JOBS
+    if args.recheck:
+        typical = sum(j.typical_usd for j in jobs)
+        print(f"[LIVE] worker re-check: {len(jobs)} jobs, last measured {cost.usd(typical)}")
+        if typical * HEADROOM > args.max_usd:
+            print("refused: the jobs' measured cost with its headroom is over --max-usd", file=sys.stderr)
+            return EXIT_REFUSED
+    else:
+        ceiling = ceiling_usd()
+        print(f"[LIVE] worker sample: 7 workers, ceiling {cost.usd(ceiling)}")
+        if ceiling > args.max_usd:
+            print(f"refused: ceiling {cost.usd(ceiling)} is over --max-usd {cost.usd(args.max_usd)}", file=sys.stderr)
+            return EXIT_REFUSED
     missing = [k for k in _keys_present() if k == "ANTHROPIC_API_KEY"]
     if missing:
         print("refused: ANTHROPIC_API_KEY not set", file=sys.stderr)
         return EXIT_REFUSED
     from .workers_sample import run_sample
 
-    results = asyncio.run(run_sample(args.out))
-    total = sum(r["cost_usd"] for r in results.values())
+    results = asyncio.run(run_sample(args.out, jobs, args.max_usd if args.recheck else None))
+    total = sum(r.get("cost_usd", 0.0) for r in results.values())
     for name, r in results.items():
+        if "skipped" in r:
+            print(f"{name}: skipped ({r['skipped']})")
+            continue
         status = r["error"] or "ok"
         print(f"{name}: {r['latency_s']}s {cost.usd(r['cost_usd'])} {status}")
     print(f"total {cost.usd(total)}; outputs in {args.out}")
