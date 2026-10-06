@@ -192,7 +192,9 @@ def test_a_registry_price_change_after_planning_changes_nothing(monkeypatch: pyt
             ),
             total_eta=1.0,
         )
-        state.add_agent(state.agents["agt_11c0"].model_copy(update={"price": 9.0}))
+        # Cheaper, so the authorization's cap cannot mask a re-read: a payout
+        # at the new price would be 300_000, under the 540_000 authorized.
+        state.add_agent(state.agents["agt_11c0"].model_copy(update={"price": 0.03}))
         chain = _install(monkeypatch, _Chain(auth=_auth(max_amount=plan.plan.total_stroops)))
         _workers(monkeypatch, {"agt_11c0": _Ok()})
 
