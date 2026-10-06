@@ -102,6 +102,11 @@ def _parser() -> argparse.ArgumentParser:
     cp.add_argument("--runs", type=Path, required=True)
     cp.add_argument("--out", type=Path, required=True)
 
+    rc = sub.add_parser("recheck", help="build the release re-check report from its runs")
+    rc.add_argument("--campaign", type=Path, required=True, help="the campaign's runs directory")
+    rc.add_argument("--runs", type=Path, required=True)
+    rc.add_argument("--out", type=Path, required=True)
+
     fx = sub.add_parser("fetch-external", help="download pinned public benchmarks into the git-ignored cache")
     fx.add_argument("keys", nargs="+", choices=sorted(external.BENCHMARKS))
     return ap
@@ -276,6 +281,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             analysis = build(args.runs, args.out)
             print(f"report: {args.out / 'REPORT.md'}; campaign spend {cost.usd(analysis['grand_total_usd'])}")
+            return EXIT_OK
+        if args.cmd == "recheck":
+            from .recheck import build as build_recheck
+
+            build_recheck(args.campaign, args.runs, args.out)
+            print(f"report: {args.out / 'REPORT.md'}")
             return EXIT_OK
         if args.cmd == "workers":
             return _workers(args)
