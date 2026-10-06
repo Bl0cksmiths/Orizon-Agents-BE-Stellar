@@ -227,8 +227,11 @@ The registry mirror's first full pass also took ~29 minutes, one simulated
 Measured by the bench (fake RPC at testnet's measured latencies, 1% of reads
 timing out): at 1,000 agents the old build was abandoned at its 900 s budget
 having reached ~780 agents, the new one takes ~6 s and 35 RPC calls; at 5,000
-the old one was abandoned the same way, the new one takes ~6 s; the mirror's
-first pass went from ~620 s to ~4 s (1,000) and ~2,980 s to ~16 s (5,000).
+and 10,000 the old one was abandoned the same way, the new one still takes
+~6 s and 35 calls. The mirror's first pass went from ~620 s to ~4 s (1,000)
+and from ~2,980 s to ~15 s (5,000). With 10% of reads timing out, a 5,000-agent
+build that stopped a sixth of the way through the window resumed and finished
+it on the next build (`--builds 3`).
 
 ## Consequences
 
