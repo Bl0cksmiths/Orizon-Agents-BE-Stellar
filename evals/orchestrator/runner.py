@@ -67,6 +67,7 @@ class RunConfig:
     concurrency: int = 4
     timeout_s: float = 180.0
     max_usd: float | None = None  # None: no cap (only allowed when nothing is live)
+    guard_fallback: bool = False  # the guard answers on its Haiku fallback (prices the reservation)
 
     @property
     def variant_dir(self) -> Path:
@@ -267,7 +268,7 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
             if stop.is_set():
                 outcome.skipped_budget += 1
                 return
-            ceiling = cost.reservation(case, stages=cfg.stages)
+            ceiling = cost.reservation(case, stages=cfg.stages, fallback=cfg.guard_fallback)
             if not meter.try_reserve(ceiling):
                 outcome.skipped_budget += 1
                 outcome.stopped = outcome.stopped or f"spend cap ${cfg.max_usd:.2f} reached"
