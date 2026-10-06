@@ -47,7 +47,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..schemas import SealState, SettlementState
+from ..schemas import SealKind, SealState, SettlementState
 from ..security import (
     CodedHTTPException,
     ErrorEnvelope,
@@ -589,6 +589,9 @@ class TaskDisputesResponse(BaseModel):
     # settlement record's otherwise, where a proof hash IS a confirmed seal.
     # Null when no seal was submitted, or nothing is known of it.
     seal: SealState | None = None
+    # What the seal attests: `paid`, or `delivery_only` when nobody could be
+    # paid (no receipt, zero total on-chain) — `Task.seal_kind`'s vocabulary.
+    seal_kind: SealKind | None = None
     proof_tx: str | None = None
 
 
@@ -1006,7 +1009,7 @@ async def list_task_disputes(
     # no payer, and a grant buys nothing.
     free_text = proof.proves_free_text(task_id, settlement.payer if settlement is not None else None)
     disputes = await dispute_svc.list_for_task(task_id)
-    seal, proof_tx = _receipt_seal(task_id, settlement)
+    seal, seal_kind, proof_tx = _receipt_seal(task_id, settlement)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
@@ -1017,19 +1020,26 @@ async def list_task_disputes(
         disputes=[DisputeResponse.of(d, free_text=free_text) for d in disputes],
         settlement_state=_settlement_state(task_id, settlement),
         seal=seal,
+        seal_kind=seal_kind,
         proof_tx=proof_tx,
     )
 
 
-def _receipt_seal(task_id: str, settlement: SettlementRecord | None) -> tuple[SealState | None, str | None]:
-    """The receipt's seal: (state, proof hash), the task's word first, then the record's."""
+def _receipt_seal(
+    task_id: str, settlement: SettlementRecord | None
+) -> tuple[SealState | None, SealKind | None, str | None]:
+    """The receipt's seal: (state, kind, proof hash), the task's word first, then the record's.
+
+    On the record's word alone the kind follows from what moved: a sealed run
+    that paid nothing was sealed delivery-only.
+    """
     record_proof = settlement.proof_tx if settlement is not None else None
     task = state.tasks.get(task_id)
     if task is not None and task.seal is not None:
-        return task.seal, task.proof_tx or record_proof
-    if record_proof is not None:
-        return "sealed", record_proof
-    return None, None
+        return task.seal, task.seal_kind, task.proof_tx or record_proof
+    if settlement is not None and record_proof is not None:
+        return "sealed", "paid" if settlement.settled_usdc > 0 else "delivery_only", record_proof
+    return None, None, None
 
 
 def _settlement_state(task_id: str, settlement: SettlementRecord | None) -> SettlementState | None:
