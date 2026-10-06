@@ -193,11 +193,12 @@ def test_spec_to_text_lists_every_field():
         ({"injection": 0.35}, "watch"),
         ({"same_request": 0.49}, "drifted"),
         ({"same_request": 0.50}, "clean"),
-        ({"injection": 0.70}, "unsafe"),
+        ({"injection": 0.39}, "watch"),
+        ({"injection": 0.40}, "unsafe"),
         ({"harmful": 0.70}, "unsafe"),
         ({"severity": 2.0}, "unsafe"),
         ({"severity": 1.99}, "clean"),
-        ({"same_request": 0.1, "injection": 0.5}, "drifted"),  # drifted outranks watch
+        ({"same_request": 0.1, "injection": 0.37}, "drifted"),  # drifted outranks watch
         ({"same_request": 0.1, "harmful": 0.9}, "unsafe"),  # unsafe outranks drifted
     ],
 )
@@ -255,7 +256,7 @@ def test_either_jev_call_failing_moves_the_whole_recheck_to_haiku(fake_jev, fake
     else:
         fake_jev.answer({"same_request": 0.9}, purpose=other)
     fake_claude.reply(
-        RecheckAssessment(same_request=0.9, injection=0.6, harmful=0.0, severity=0), purpose="guard.spec.fallback"
+        RecheckAssessment(same_request=0.9, injection=0.37, harmful=0.0, severity=0), purpose="guard.spec.fallback"
     )
     result = asyncio.run(recheck(INTENT, SPEC))
     assert result.source == "fallback"

@@ -4,9 +4,9 @@ One jev (TypeSafe) call answers a five-question battery about the raw intent —
 injection, harmful + severity, real request, complexity — and the thresholds
 below turn those probabilities into a verdict:
 
-* ``block``        injection ≥ 0.70, or harmful ≥ 0.70, or severity ≥ 2
+* ``block``        injection ≥ 0.40, or harmful ≥ 0.70, or severity ≥ 2
 * ``needs_detail`` real_request < 0.30 (gibberish, pings, a lone keyword)
-* ``allow``        everything else, with a tier; injection in [0.35, 0.70)
+* ``allow``        everything else, with a tier; injection in [0.35, 0.40)
                    marks the decision ``watch``, and the request may then only
                    proceed through an improved spec whose own re-check reads
                    clean (see ``prompt_improver.resolve``)
@@ -22,8 +22,10 @@ intent inside the standard untrusted-data fence because, unlike jev, it is an
 instruction-following model; jev reads the text bare because it is a classifier
 and the fence's marker redaction would hide a forgery attempt from it.
 
-Thresholds are starting values to be tuned against the evals dataset — they
-live in ``GuardPolicy`` so the evals harness can sweep them without patching.
+Thresholds live in ``GuardPolicy`` so the evals harness can sweep them without
+patching. The injection block line is the live-eval pick (2026-10-06 report,
+sweep.md): 0.40 caught 75% of held-out injections against 67% at the starting
+0.70, at the same 1.7% false-block rate.
 """
 
 from __future__ import annotations
@@ -63,15 +65,27 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 @dataclass(frozen=True)
 class GuardPolicy:
-    """Decision thresholds. Defaults are the owner's starting values."""
+    """Decision thresholds.
 
-    injection_block: float = 0.70
+    Injection has two lines: at or above ``injection_block`` a request is
+    blocked; from ``injection_watch`` up to (not including) the block line it
+    is allowed under ``watch`` and must proceed through a clean spec. With the
+    block line at 0.40 the watch band is the narrow [0.35, 0.40). The same two
+    lines judge an improved spec's re-check. A watch line above the block line
+    would leave no band at all and is refused.
+    """
+
+    injection_block: float = 0.40
     injection_watch: float = 0.35
     harmful_block: float = 0.70
     severity_block: float = 2.0
     real_request_min: float = 0.30
     complexity_confidence_min: float = 0.5
     same_request_min: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.injection_watch <= self.injection_block <= 1.0:
+            raise ValueError("GuardPolicy needs 0 <= injection_watch <= injection_block <= 1")
 
 
 DEFAULT_POLICY = GuardPolicy()

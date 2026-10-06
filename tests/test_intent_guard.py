@@ -140,7 +140,13 @@ def test_clean_request_is_allowed_with_its_tier(fake_jev):
 
 @pytest.mark.parametrize(
     ("injection", "verdict", "watch"),
-    [(0.34, "allow", False), (0.35, "allow", True), (0.69, "allow", True), (0.70, "block", False)],
+    [
+        (0.34, "allow", False),
+        (0.35, "allow", True),
+        (0.39, "allow", True),
+        (0.40, "block", False),
+        (0.6, "block", False),
+    ],
 )
 def test_injection_edges(fake_jev, injection, verdict, watch):
     fake_jev.answer(battery(injection=injection), purpose="guard.intent")
@@ -215,8 +221,14 @@ def test_low_confidence_rounds_the_tier_up(fake_jev, complexity, confidence, tie
 
 
 def test_policy_is_overridable_for_threshold_sweeps(fake_jev):
-    fake_jev.answer(battery(injection=0.6), purpose="guard.intent")
-    assert check(policy=GuardPolicy(injection_block=0.5)).verdict == "block"
+    fake_jev.answer(battery(injection=0.3), purpose="guard.intent")
+    assert check(policy=GuardPolicy(injection_watch=0.2, injection_block=0.25)).verdict == "block"
+
+
+def test_watch_band_sits_between_the_two_injection_lines():
+    assert GuardPolicy().injection_watch == 0.35 and GuardPolicy().injection_block == 0.40
+    with pytest.raises(ValueError):
+        GuardPolicy(injection_watch=0.5, injection_block=0.4)
 
 
 # --- the Claude Haiku fallback -----------------------------------------------------------
@@ -243,7 +255,7 @@ def test_jev_outage_falls_back_to_haiku_with_a_fenced_intent(fake_jev, fake_clau
 
 def test_fallback_applies_the_same_thresholds(fake_jev, fake_claude):
     fake_jev.fail()
-    fake_claude.reply(assessment(injection=0.5), purpose="guard.intent.fallback")
+    fake_claude.reply(assessment(injection=0.37), purpose="guard.intent.fallback")
     decision = check()
     assert decision.verdict == "allow" and decision.watch is True
 
