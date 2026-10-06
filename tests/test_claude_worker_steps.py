@@ -21,7 +21,6 @@ from app.agents.workers import copywrite, sol_audit
 from app.config import settings
 from app.llm import claude as claude_layer
 from app.llm.claude import ClaudeRequest, Completion
-from app.llm.errors import LLMUnavailable
 from app.llm.testing import FakeClaude
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
@@ -31,6 +30,8 @@ from app.state import state
 INTENT = "a landing page for a neighbourhood bike repair co-op"
 COPY_PRICE = 0.02
 AUDIT_PRICE = 0.05
+AUTH = "ab" * 16
+PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
 
 
 class _TieredStep(PlanStep):
@@ -81,7 +82,7 @@ def _step(agent_id: str, price: float, tier: str | None = None) -> PlanStep:
     )
 
 
-def _run(task_id: str, *steps: PlanStep, intent: str = INTENT) -> tuple[Task, list[str]]:
+def _run(task_id: str, *steps: PlanStep, intent: str = INTENT, paid: bool = False) -> tuple[Task, list[str]]:
     plan = StoredPlan(
         id="pln_" + task_id,
         intent=intent,
@@ -90,7 +91,10 @@ def _run(task_id: str, *steps: PlanStep, intent: str = INTENT) -> tuple[Task, li
         total_eta=1.0,
     )
     state.add_task(Task(id=task_id, intent=intent, agents=len(steps), spent=0.0, status="running"))
-    asyncio.run(execution_svc._run(plan, task_id))
+    if paid:
+        asyncio.run(execution_svc._run(plan, task_id, auth_id_hex=AUTH, payer=PAYER))
+    else:
+        asyncio.run(execution_svc._run(plan, task_id))
     return state.tasks[task_id], [line.msg for line in state.traces[task_id]]
 
 
@@ -101,6 +105,7 @@ def test_each_step_names_its_model_and_runs_on_its_tier(claude: FakeClaude) -> N
 
     assert "copywrite.v3 on Claude Sonnet 5.5 (tier: moderate)" in trace
     assert "sol-audit on Claude Opus 5.5 (tier: complex)" in trace  # no tier: the worker's default
+    assert not any("(fallback" in line for line in trace)
     assert [c.model for c in claude.calls] == ["claude-sonnet-5-5", "claude-opus-5-5"]
     assert task.spent == pytest.approx(COPY_PRICE + AUDIT_PRICE)
 
@@ -110,9 +115,12 @@ def test_each_step_names_its_model_and_runs_on_its_tier(claude: FakeClaude) -> N
     [
         (lambda c: c.refuse(purpose="worker.sol-audit", category="cyber", explanation="MODEL-PROSE"), "model_refused"),
         (lambda c: c.truncate(purpose="worker.sol-audit", partial='{"summary": "'), "model_truncated"),
-        (lambda c: c.fail(LLMUnavailable("overloaded"), purpose="worker.sol-audit"), "model_unavailable"),
+        (
+            lambda c: c.reply({"summary": "s", "findings": [], "cvss_estimate": 42}, purpose="worker.sol-audit"),
+            "invalid_output",
+        ),
     ],
-    ids=["refused", "truncated", "unavailable"],
+    ids=["refused", "truncated", "invalid"],
 )
 def test_a_step_the_model_did_not_deliver_is_failed_and_not_charged(claude: FakeClaude, script: Any, rule: str) -> None:
     claude.reply(_copy(), purpose="worker.copywrite.v3")
@@ -170,3 +178,17 @@ def test_a_kit_step_names_no_model(claude: FakeClaude) -> None:
     assert claude.calls == []
     assert not any(line.startswith("design.figma on ") for line in trace)
     assert task.spent == pytest.approx(0.01)
+
+
+# ── the fallback that served a step is the model the trace names ───────────
+
+
+def test_a_step_a_fallback_served_names_the_fallback_model(claude: FakeClaude) -> None:
+    claude.reply(_copy(), purpose="worker.copywrite.v3", served_by="claude-opus-5-5")
+    claude.reply(_audit(), purpose="worker.sol-audit")
+    _, trace = _run("tsk_cw_fallback", _step("agt_01h8", COPY_PRICE, "moderate"), _step("agt_04m1", AUDIT_PRICE))
+
+    at = trace.index("copywrite.v3 on Claude Sonnet 5.5 (tier: moderate)")
+    assert trace[at + 1] == "copywrite.v3 on Claude Opus 5.5 (fallback; tier: moderate)"
+    # Collected per step: the next step, answered by its own model, names no fallback.
+    assert [line for line in trace if "(fallback" in line] == [trace[at + 1]]
