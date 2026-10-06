@@ -1,0 +1,12 @@
+# The dev and CI tools, and nothing of the app's own. CI installs these on top
+# of requirements.lock, constrained to the versions the lock just installed, so
+# a tool can never move a locked package (.github/workflows/ci.yml).
+pytest>=8
+ruff>=0.9
+mypy>=2
+pytest-cov>=7
+# A throwaway Postgres 16 for the dispute store's real-SQL tests
+# (tests/conftest.py `pg_dsn`). Local only: CI runs a postgres service and
+# points ORIZON_TEST_PG_DSN at it, and without either the tests skip. Its
+# wheels stop at CPython 3.12 (the runtime.txt version), hence the marker.
+pgserver>=0.1.4,<0.2; python_version < "3.13"
