@@ -33,6 +33,8 @@ def test_a_clearly_english_request_naming_no_language_has_no_target(text: str) -
         "カフェのメニューに載せるチーズケーキの短い紹介文を書いてください。",  # non-Latin script
         "Rédige un message de bienvenue",  # accented Latin
         "x",  # too little to call English
+        # Mostly English words, but Taglish: the Tagalog function words decide it.
+        "Pwede mo ba i-rewrite itong bio ko? I am a VA and I do admin tasks for my clients.",
     ],
 )
 def test_anything_uncertain_keeps_the_translation(text: str) -> None:
