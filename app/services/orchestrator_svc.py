@@ -46,6 +46,7 @@ from .binding_registry import is_dispatchable
 from .plan_notices import (
     below_floor_exclusion,
     external_exclusions,
+    no_image_exclusion,
     relaxation,
     simulated_exclusion,
     substitution,
@@ -1330,21 +1331,35 @@ def _handoff_order(steps: list[PlanStep]) -> list[PlanStep]:
     return order
 
 
-def _compose(steps: list[PlanStep], intent: str) -> list[PlanStep]:
+class _Composed(NamedTuple):
+    steps: list[PlanStep]
+    # vision.ocr agents whose proposed step had no image to read: the buyer is
+    # told (`no_image_input`), as for an agent found unreachable mid-plan.
+    no_image: dict[str, Agent]
+
+
+def _compose(steps: list[PlanStep], intent: str) -> _Composed:
     """The clamped plan held to its handoffs: steps with nothing to work on are
-    dropped, and steps that read another step's output run after it."""
+    dropped, and steps that read another step's output run after it.
+
+    The image check is `vision_input.has_image_input` on the buyer's own words
+    — pure, no fetch — with no upload context, since decompose takes none.
+    """
     present = {s.agent_id for s in steps}
     kept: list[PlanStep] = []
+    no_image: dict[str, Agent] = {}
     for step in steps:
         needs = _NEEDS_ONE_OF.get(step.agent_id)
         if needs is not None and not needs & present:
             logger.info("dropped a %s step: no code builder in the plan for it to work on", step.agent_name)
             continue
-        if step.agent_id == _OCR_ID and not has_image_input(intent):
-            logger.info("dropped a %s step: the request carries no image to read", step.agent_name)
+        if step.agent_id == _OCR_ID and not has_image_input(intent, None):
+            agent = state.agents.get(step.agent_id)
+            if agent is not None:
+                no_image[agent.id] = agent
             continue
         kept.append(step)
-    return _handoff_order(kept)
+    return _Composed(_handoff_order(kept), no_image)
 
 
 def _finish_free_form(
@@ -1362,7 +1377,8 @@ def _finish_free_form(
     request check, the understood request, the models, the stage lines); the
     legacy planner passes none and its answer is exactly what it always was.
     """
-    cleaned = _compose(clamped.steps, intent)
+    composed = _compose(clamped.steps, intent)
+    cleaned = composed.steps
     # Whatever left `cleaned` empty — a planner that failed, or one whose every
     # step the clamp or the composition rules discarded — the steps served
     # from here on are not the model's plan, and the response has to say so.
@@ -1397,7 +1413,11 @@ def _finish_free_form(
         ]
 
     cleaned = [_with_executor(step) for step in cleaned]
-    notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
+    notices = (
+        shortlist.notices
+        + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
+        + [no_image_exclusion(a) for _, a in sorted(composed.no_image.items())]
+    )
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_eta = sum(s.est_eta_seconds for s in cleaned)

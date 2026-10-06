@@ -149,7 +149,30 @@ def test_the_seal_follows_the_review_of_the_build(claude_on: None, fake_claude: 
 def test_image_reading_without_an_image_is_dropped(claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
     _plan_of(fake_claude, fake_jev, OCR, TRANSLATE)
 
-    assert _ids(_decompose("translate the menu in my photo into Japanese")) == [TRANSLATE]
+    resp = _decompose("translate the menu in my photo into Japanese")
+
+    assert _ids(resp) == [TRANSLATE]
+    # The buyer is told why the step they might expect is missing.
+    assert [(n.agent_id, n.reason_code) for n in resp.notices if n.reason_code == "no_image_input"] == [
+        (OCR, "no_image_input")
+    ]
+
+
+@pytest.mark.parametrize("link", ["http://example.com/menu.png", "https://127.0.0.1/menu.png"])
+def test_a_link_the_image_fetch_would_refuse_is_no_image(
+    claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev, link: str
+) -> None:
+    _plan_of(fake_claude, fake_jev, OCR, TRANSLATE)
+
+    assert _ids(_decompose(f"translate the menu at {link} into Japanese")) == [TRANSLATE]
+
+
+def test_a_text_plan_that_never_proposed_ocr_carries_no_image_notice(
+    claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev
+) -> None:
+    _plan_of(fake_claude, fake_jev, COPY)
+
+    assert all(n.reason_code != "no_image_input" for n in _decompose().notices)
 
 
 def test_image_reading_with_an_image_link_is_kept(claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
@@ -158,6 +181,7 @@ def test_image_reading_with_an_image_link_is_kept(claude_on: None, fake_claude: 
     resp = _decompose("translate the menu at https://example.com/menu.png into Japanese")
 
     assert _ids(resp) == [OCR, TRANSLATE]
+    assert all(n.reason_code != "no_image_input" for n in resp.notices)
 
 
 def test_a_plan_left_with_nothing_to_do_takes_the_fallback(
@@ -219,7 +243,7 @@ def test_composition_only_drops_or_reorders_never_adds(proposed: list[str]) -> N
         for i, a in enumerate(proposed)
     ]
 
-    out = orchestrator_svc._compose(steps, "no image here")
+    out = orchestrator_svc._compose(steps, "no image here").steps
 
     kept = [s.rationale for s in out]
     assert len(set(kept)) == len(kept)
