@@ -4,11 +4,10 @@ import asyncio
 import random
 from typing import Any
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import lazy_agent
 from .base import Worker
 from .prompt_safety import worker_prompt
 
@@ -30,9 +29,9 @@ class ResearchPro(Worker):
     real = True
 
     def __init__(self) -> None:
-        self._agent = Agent(
+        self._agent = lazy_agent(
             name="research.pro",
-            model=build_openai_chat(settings.worker_model),
+            model_id=settings.worker_model,
             instructions=(
                 "You are a research synthesis agent. Given an intent, return 3–6 findings "
                 "(each a concrete claim + 0..1 confidence), 2–6 plausible source descriptors "
@@ -84,7 +83,7 @@ class ResearchPro(Worker):
         # ── Free-form path: LLM ─────────────────────────────────────────────
         prompt = worker_prompt(intent, rationale, "Return the research brief.")
         result = await self._agent.arun(prompt)
-        out: ResearchOutput = result.content  # type: ignore[assignment]
+        out: ResearchOutput = result.content
         return {
             "summary": out.summary,
             "findings": [f.model_dump() for f in out.findings],

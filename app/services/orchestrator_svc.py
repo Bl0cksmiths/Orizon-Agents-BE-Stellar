@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
 import re
@@ -10,8 +11,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
 
-from agno.run.base import RunStatus
-
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..config import settings
@@ -19,9 +18,16 @@ from ..demo_kits import DemoKit, detect_kit
 from ..schemas import Agent, DecomposeResponse, Plan, PlanFloorNotice, PlanStep, StoredPlan
 from ..security import redact_secrets
 from ..state import state
-from . import reputation_svc
+from . import reachability, reputation_svc
 from .binding_registry import is_dispatchable
-from .plan_notices import below_floor_exclusion, relaxation, substitution, unbound_exclusions
+from .plan_notices import (
+    below_floor_exclusion,
+    relaxation,
+    substitution,
+    unbound_exclusions,
+    unreachable_exclusion,
+    unreachable_exclusions,
+)
 from .registry_sync import MAX_AGENT_NAME_CHARS
 
 logger = logging.getLogger(__name__)
@@ -202,16 +208,28 @@ class _RegistrySnapshot(NamedTuple):
     The two point-of-use checks — the clamp and `_fallback_agent` — still ask
     the live registry, deliberately: they only ever NARROW this set, dropping
     an agent delisted or unbound while the planner ran, and never widen it.
+
+    `unreachable` is the listed, dispatchable agents a FRESH failed health
+    check stands against (D-084): bound, so not unbound, but with nothing
+    answering at the endpoint. They are kept out of `routable` — no backstop
+    may re-admit them, since relaxing a rule cannot make a dead endpoint
+    answer — and reported under their own reason code.
     """
 
     agents: tuple[Agent, ...]
     routable: tuple[Agent, ...]
+    unreachable: tuple[Agent, ...] = ()
 
 
 def _snapshot_registry() -> _RegistrySnapshot:
     """Read the registry once and split out what planning may route to."""
     agents = tuple(state.list_agents())
-    return _RegistrySnapshot(agents, tuple(a for a in agents if _is_listed(a) and is_dispatchable(a.id)))
+    dispatchable = [a for a in agents if _is_listed(a) and is_dispatchable(a.id)]
+    return _RegistrySnapshot(
+        agents,
+        tuple(a for a in dispatchable if not reachability.is_failing(a.id)),
+        tuple(a for a in dispatchable if reachability.is_failing(a.id)),
+    )
 
 
 def _still_routable(agent_id: str) -> bool:
@@ -224,7 +242,9 @@ def _still_routable(agent_id: str) -> bool:
     planning call.
     """
     agent = state.agents.get(agent_id)
-    return agent is not None and _is_listed(agent) and is_dispatchable(agent_id)
+    return (
+        agent is not None and _is_listed(agent) and is_dispatchable(agent_id) and not reachability.is_failing(agent_id)
+    )
 
 
 def _rep_fields(info: reputation_svc.RepInfo | None) -> dict[str, Any]:
@@ -477,10 +497,14 @@ def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     the same registry yields the same notices.
 
     Listed and not routable is listed and not dispatchable, read off the same
-    snapshot the plan was built from.
+    snapshot the plan was built from — less the agents left out for a dead
+    endpoint, which ARE bound and are reported first, under their own code
+    (D-084). Calling one "unbound" would send its operator to fix the wrong
+    thing.
     """
-    routable = {a.id for a in registry.routable}
-    return unbound_exclusions(
+    unreachable = {a.id for a in registry.unreachable}
+    routable = {a.id for a in registry.routable} | unreachable
+    return unreachable_exclusions(registry.unreachable) + unbound_exclusions(
         a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
     )
 
@@ -861,7 +885,7 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
 
     None when nothing offered is still routable; the caller refuses the plan.
     """
-    candidates = [a for a in state.list_agents() if a.id in offered and _is_listed(a) and is_dispatchable(a.id)]
+    candidates = [a for a in state.list_agents() if a.id in offered and _still_routable(a.id)]
     if not candidates:
         return None
     return min(
@@ -925,8 +949,14 @@ def _loggable(text: str) -> str:
     return redact_secrets(text)[:_FAILURE_EXCERPT_CHARS]
 
 
-# Run states in which agno itself reports that the planner call did not finish.
-_FAILED_RUNS = frozenset({RunStatus.error, RunStatus.cancelled})
+@functools.cache
+def _failed_runs() -> frozenset[Any]:
+    """Run states in which agno itself reports that the planner call did not
+    finish. Read from agno on first use: importing it at module scope put agno
+    on the boot path (app/agents/model_factory.py)."""
+    from agno.run.base import RunStatus
+
+    return frozenset({RunStatus.error, RunStatus.cancelled})
 
 
 def _planner_plan(result: Any) -> Plan | None:
@@ -958,7 +988,7 @@ def _planner_plan(result: Any) -> Plan | None:
     """
     status = getattr(result, "status", None)
     content = getattr(result, "content", None)
-    if status not in _FAILED_RUNS and isinstance(content, Plan):
+    if status not in _failed_runs() and isinstance(content, Plan):
         return content
     excerpt = f": {_loggable(content)!r}" if isinstance(content, str) else ""
     logger.warning(
@@ -981,6 +1011,10 @@ async def decompose(intent: str) -> DecomposeResponse:
     # the batch deadline on agents no plan could use, so enough spam
     # registrations timed out every read and pushed every plan onto the prior.
     registry = _snapshot_registry()
+    # Ask, in the background, after every bound endpoint this plan could route
+    # to that has no fresh health verdict (D-084). It never delays this plan;
+    # it is what lets the next one leave a dead endpoint out.
+    reachability.refresh_stale([a.id for a in registry.routable if a.source == "onchain"])
     reps = await reputation_svc.fetch_reps([a.id for a in registry.routable])
 
     # ── Demo-kit short circuit ─────────────────────────────────────────────
@@ -1047,6 +1081,11 @@ async def decompose(intent: str) -> DecomposeResponse:
     # (agent, rationale) pairs already kept. A repeated pair is the same paid
     # work bought twice — whitespace and case are the model's, not the task's.
     seen: set[tuple[str, str]] = set()
+    # Offered agents whose endpoint was found dead WHILE the planner ran — a
+    # background probe (`reachability.refresh_stale`) landing mid-call. Their
+    # steps are dropped like any other no-longer-routable pick, and the buyer
+    # is told, so the card accounts for every agent it lost (D-084).
+    went_unreachable: dict[str, Agent] = {}
     for step in proposed:
         if len(cleaned) >= _MAX_PLAN_STEPS:
             # Capped on the steps KEPT, so an invented id the clamp drops
@@ -1075,6 +1114,9 @@ async def decompose(intent: str) -> DecomposeResponse:
             # again here rather than trusted from the snapshot: a delisted
             # agent reaching /execute is the whole bug, and a step with nothing
             # to execute it would only reach /execute's unknown-agent skip.
+            continue
+        if reachability.is_failing(agent.id):
+            went_unreachable[agent.id] = agent
             continue
         rationale = step.rationale.strip()
         if (agent.id, rationale.casefold()) in seen:
@@ -1131,6 +1173,8 @@ async def decompose(intent: str) -> DecomposeResponse:
             )
         ]
 
+    notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(went_unreachable.items())]
+
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_price = sum(s.est_price_usdc for s in cleaned)
     total_eta = sum(s.est_eta_seconds for s in cleaned)
@@ -1141,7 +1185,7 @@ async def decompose(intent: str) -> DecomposeResponse:
         plan=Plan(steps=cleaned),
         total_usdc=total_price,
         total_eta=total_eta,
-        notices=shortlist.notices,
+        notices=notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
         planner_fallback=planner_fallback,
@@ -1157,8 +1201,10 @@ async def decompose(intent: str) -> DecomposeResponse:
         # The floor acted BEFORE the planner was asked anything, so these
         # describe the shortlist the model chose from, not the model's choice.
         # An agent that cleared the floor and simply was not picked is absent
-        # from `notices` by construction — see `_routable_registry`.
-        notices=shortlist.notices,
+        # from `notices` by construction — see `_routable_registry`. The one
+        # addition is an offered agent whose endpoint was found dead during
+        # the call, which the clamp dropped.
+        notices=notices,
         floor_bps=settings.reputation_floor_bps,
         reputation_degraded=_reputation_degraded(reps),
         planner_fallback=planner_fallback,

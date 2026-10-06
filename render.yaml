@@ -29,6 +29,18 @@ services:
       # deliberate, and safer than serving those routes unauthenticated.
       - key: API_KEY
         sync: false
+      # The shared secret the frontend's server-side route handlers send as
+      # X-Frontend-Proxy-Token, so their X-Orizon-Client-Ip names the visitor
+      # for rate limiting (README: "Rate limiting and who the client is").
+      # Same value on Vercel; at least 32 random characters. Unset, the
+      # frontend is just another caller keyed by Vercel's shared egress.
+      - key: FRONTEND_PROXY_TOKEN
+        sync: false
+      # The rate limiters find the visitor past Render's own hops by address
+      # (non-public, then one Cloudflare edge), so they need no hop count; this
+      # only shapes the access log's client= field, and 0 is right here.
+      - key: TRUSTED_PROXY_HOPS
+        value: "0"
       # Postgres connection string for every durable store this service has:
       # the operator-endpoint bindings (story 2.01), and the settlement and
       # dispute records the refund path is built on (stories 4.02-4.04). Left

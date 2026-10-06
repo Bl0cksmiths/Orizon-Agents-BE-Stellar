@@ -3,6 +3,9 @@ keying on the trusted proxy hop, and X-Request-ID propagation."""
 
 from __future__ import annotations
 
+import re
+
+import pytest
 from fastapi.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
@@ -94,3 +97,31 @@ def test_request_id_generated_when_absent(client):
     rid = r.headers["x-request-id"]
     assert len(rid) == 16
     int(rid, 16)  # generated ids are uuid4 hex prefixes
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        "has space",
+        '"><script>alert(1)</script>',
+        "x" * 65,
+        "line\\nbreak",
+        "café",
+        "{rid}%0d%0aSet-Cookie:a=b",
+    ],
+    ids=["space", "markup", "too-long", "escaped-newline", "non-ascii", "crlf-encoded"],
+)
+def test_a_request_id_outside_the_safe_shape_is_replaced_not_echoed(client, supplied):
+    # The id is echoed in a header, written into every log line of the request
+    # and quoted back in every error body, so only a plain token is taken from
+    # the caller; anything else gets a fresh id, never a trimmed copy of theirs.
+    r = client.get("/", headers={"X-Request-ID": supplied.encode("utf-8")})
+
+    rid = r.headers["x-request-id"]
+    assert rid != supplied and supplied[:64] != rid
+    assert re.fullmatch(r"[0-9a-f]{16}", rid)
+
+
+@pytest.mark.parametrize("supplied", ["trace-me-42", "a1b2c3d4e5f60718", "req_01:edge.7", "x" * 64])
+def test_a_plain_token_request_id_is_kept(client, supplied):
+    assert client.get("/", headers={"X-Request-ID": supplied}).headers["x-request-id"] == supplied

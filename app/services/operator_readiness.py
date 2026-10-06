@@ -80,7 +80,7 @@ from ..config import settings
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
-from . import external_binding, registry_sync, reputation_svc, settlement_svc
+from . import external_binding, reachability, registry_sync, reputation_svc, settlement_svc
 from .binding_store import BindingRecord, get_binding_store
 from .endpoint_policy import EndpointPolicyError, validate_endpoint_url
 
@@ -580,6 +580,15 @@ def reachable_step(endpoint: _Endpoint) -> Step:
     return Step("reachable", "failed", detail + warning, action)
 
 
+async def check_reachable(agent_id: str) -> Step:
+    """The `reachable` step alone: the binding read and one probe of its URL.
+
+    For the planner's background re-probe (`reachability.refresh_stale`),
+    which needs this verdict and none of the chain reads around it.
+    """
+    return reachable_step(await _check_endpoint(agent_id))
+
+
 def _rep_unreadable(key: StepKey, rep: _Read[reputation_svc.RepInfo]) -> Step | None:
     """`unknown` for a read that timed out, or degraded to the prior."""
     if not rep.ok or rep.value is None:
@@ -747,6 +756,9 @@ async def _compute(agent_id: str) -> Readiness:
         first_run_step(owner, rep),
         first_settlement_step(owner, settlement),
     )
+    # The planner reads this verdict (D-084): an endpoint this check just found
+    # dead is left out of plans until a fresh probe says otherwise.
+    reachability.record(agent_id, steps[STEP_KEYS.index("reachable")].status)
     ready = is_ready(steps)
     logger.info(
         "readiness: agent_id=%s ready=%s %s",

@@ -341,6 +341,88 @@ def test_a_step_whose_agent_has_no_onchain_owner_is_not_paid(monkeypatch, store)
     with pytest.raises(dispute_svc.DisputeError) as refused:
         dispute_svc._disputable_step(record, 0)
     assert refused.value.code == "nothing_was_charged"
+    # D-086: the attestation names the agent that was paid, and nobody else.
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[4]) == ["ext_op"]
+    assert scval.to_native(seal[5]) == [_receipt(0)]
+
+
+# ── the seal attests to what was paid (D-086) ───────────────────────────
+def test_the_seal_names_each_paid_payout_beside_its_receipt(monkeypatch, store):
+    """One agent hired for two steps and paid for both is named once per
+    payout, so `agents[i]` and `receipts[i]` describe the same payment; the
+    step that failed between them is named nowhere."""
+    chain = _install(monkeypatch, _Chain(auth=_auth()))
+    monkeypatch.setattr(execution_svc, "STEP_TIMEOUT_SECONDS", 0.05)
+    by_step = iter([_Ok(), _Hangs(), _Ok()])
+
+    async def _resolve(agent_id):
+        return next(by_step)
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
+
+    async def _no_ratings(*a, **k):
+        return None
+
+    monkeypatch.setattr(execution_svc, "_submit_ratings", _no_ratings)
+
+    _run(_plan((0.01, 0.02, 0.03), ("ext_a", "ext_b", "ext_a")), "tsk_v2_seal_paid")
+
+    [settle] = chain.named("settle")
+    assert _payouts(settle) == [{"agent_id": "ext_a", "amount": 100_000}, {"agent_id": "ext_a", "amount": 300_000}]
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[4]) == ["ext_a", "ext_a"]
+    assert scval.to_native(seal[5]) == [_receipt(0), _receipt(1)]
+    assert scval.to_native(seal[6]) == 400_000
+
+
+def test_a_run_that_delivered_but_paid_nobody_gets_a_delivery_only_seal(monkeypatch, store):
+    """Every delivered step's agent has no on-chain owner (the seeded
+    catalogue), so the settle pays nobody and releases the custody. The run is
+    still attested — as delivery, never as payment: the seal names the agents
+    that delivered, carries NO receipt and a total of zero, so nothing on-chain
+    reads as a payment that was not made. The task says which kind it is, and
+    the dispute window stays shut: nothing was charged."""
+    chain = _install(monkeypatch, _Chain(auth=_auth(), owners={"agt_0": None, "agt_1": None}))
+    _workers(monkeypatch, {"agt_0": _Ok(), "agt_1": _Ok()})
+
+    _run(_plan((0.01, 0.02)), "tsk_v2_paid_nobody")
+
+    [settle] = chain.named("settle")
+    assert _payouts(settle) == []
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[1]) == scval.to_native(settle[2])  # the job the release settled
+    assert scval.to_native(seal[4]) == ["agt_0", "agt_1"]
+    assert scval.to_native(seal[5]) == []
+    assert scval.to_native(seal[6]) == 0
+    task = state.tasks["tsk_v2_paid_nobody"]
+    assert (task.charge_tx, task.proof_tx, task.settlement) == (SETTLE_TX, SEAL_TX, "released")
+    assert (task.seal, task.seal_kind) == ("sealed", "delivery_only")
+    record = store.recorded[-1]
+    assert record.proof_tx == SEAL_TX and all(s.delivered and not s.paid_usdc for s in record.steps)
+    messages = [line.msg for line in state.traces["tsk_v2_paid_nobody"]]
+    assert any(m.startswith("workflow sealed — 2 agents delivered, no payment was made") for m in messages)
+    assert not any("USDC" in m and m.startswith("workflow sealed") for m in messages)
+    # Nothing was charged, so no step can be disputed (`nothing_was_charged`):
+    # the trace must not promise the buyer a window they cannot use.
+    assert not any(m.startswith("dispute window open") for m in messages)
+    with pytest.raises(dispute_svc.DisputeError) as refused:
+        dispute_svc._disputable_step(record, 0)
+    assert refused.value.code == "nothing_was_charged"
+
+
+def test_a_run_that_paid_someone_is_sealed_as_paid_and_names_only_the_paid(monkeypatch, store):
+    """D-086 unchanged where anything was paid: an unowned agent's delivered
+    step is left out of the PAID seal rather than turning it delivery-only."""
+    chain = _install(monkeypatch, _Chain(auth=_auth(), owners={"agt_0": None}))
+    _workers(monkeypatch, {"agt_0": _Ok(), "agt_1": _Ok()})
+
+    _run(_plan((0.01, 0.02)), "tsk_v2_paid_some")
+
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[4]) == ["agt_1"] and scval.to_native(seal[6]) == 200_000
+    task = state.tasks["tsk_v2_paid_some"]
+    assert (task.seal, task.seal_kind) == ("sealed", "paid")
 
 
 def test_owner_reads_are_cached_per_agent(monkeypatch):
@@ -428,6 +510,9 @@ def test_every_payout_receipt_reaches_the_seal_and_the_record(monkeypatch, store
 
 def test_a_seal_that_did_not_confirm_is_not_kept_as_the_proof(monkeypatch, store):
     """S7: a rejected hash is evidence of nothing."""
+    # What the run does next — reconcile the seal — is test_seal_reconcile's;
+    # here it only must not wait out its real delays.
+    monkeypatch.setattr(execution_svc, "SEAL_RECONCILE_DELAYS", (0.0,))
     _install(monkeypatch, _Chain(auth=_auth(), seal={"hash": SEAL_TX, "status": "FAILED"}))
     _workers(monkeypatch, {"agt_0": _Ok()})
 

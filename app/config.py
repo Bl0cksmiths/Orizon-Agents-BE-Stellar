@@ -112,11 +112,14 @@ class Settings(BaseSettings):
     # require the per-task read token minted at execute (or a valid API key).
     task_auth_required: bool = False
     # Sliding-window request budget (in-process, per worker), spent per key
-    # resolved by app/security.py client_key().
+    # resolved by app/security.py client_identity(); requests it cannot
+    # attribute share one bucket of the same size.
     #
-    # Sized as a WHOLE-SERVICE budget, because that is what it currently is:
-    # trusted_proxy_hops defaults to 0, so the key is the constant address our
-    # own edge appends and every visitor draws on one bucket. The console's
+    # Sized as a WHOLE-SERVICE budget, because that is what it was until the
+    # identity existed: the limiter keyed on the last forwarded entry, which
+    # on Render is an address from the platform's own pool, so every visitor
+    # drew on a couple of buckets. It is now per visitor and could come down;
+    # it stays a coarse flood cut until production traffic says where. The console's
     # real cost drives the number — an open dashboard tab polls two endpoints
     # every 5 s (24 req/min), /app/reputation adds a 4-request burst on mount
     # and 3 more on every window focus, and both liveness probes are exempt
@@ -135,20 +138,17 @@ class Settings(BaseSettings):
     # route whose key a caller chooses must bound the key space itself —
     # /api/stellar/reputation/{agent_id} answers only registered ids, and 404s
     # the rest before any RPC. This limit alone does not make a flood cheap.
-    # Once trusted_proxy_hops is tuned this becomes per-visitor and can come
-    # back down; the frontend backs off on 429 and honours Retry-After, so a
-    # tightened limit degrades cadence rather than breaking the console.
+    # The frontend backs off on 429 and honours Retry-After, so a tightened
+    # limit degrades cadence rather than breaking the console.
     rate_limit_per_minute: int = 1200
-    # How many TRAILING X-Forwarded-For entries belong to this deployment's own
-    # infrastructure, and are therefore dropped when app/security.py resolves
-    # the caller. 0 — the default — keys on the LAST entry, exactly as this
-    # service always has, so nothing changes until the value is deliberately
-    # tuned. Both directions of error are silent and opposite (too low: the key
-    # is a constant our edge wrote, so every visitor shares one rate-limit
-    # bucket and the access log's client= cannot attribute abuse; too high: the
-    # key is one the CALLER wrote, so the limiter is bypassed by sending a
-    # header). Only tune it against a chain actually observed from this edge —
-    # see forwarded_chain_samples below and client_key()'s docstring.
+    # How many TRAILING X-Forwarded-For entries the ACCESS LOG's `client=`
+    # drops (app/security.py client_key). The rate limiters no longer read it:
+    # they key on client_identity(), which recognises Render's own hops by
+    # address (non-public, then one Cloudflare edge) and so needs no count —
+    # 0, the default, is correct for this deployment, and no stale dashboard
+    # value can make a limiter read an entry the caller wrote. For the log,
+    # too low names our own edge and too high names whatever the caller wrote;
+    # the chain samples below print both views side by side.
     trusted_proxy_hops: int = 0
     # Diagnostic budget for that tuning: log the raw X-Forwarded-For chain and
     # the key it resolves to for the first N non-exempt requests after each
@@ -158,6 +158,20 @@ class Settings(BaseSettings):
     # deployments so a route could not be reliably gated. Changing any env var
     # on Render redeploys the service, which re-arms the sample.
     forwarded_chain_samples: int = 5
+    # Shared secret our own frontend's server-side route handlers send as the
+    # X-Frontend-Proxy-Token header. Empty — the default — trusts nobody. With
+    # it set, a request carrying it (compared in constant time, never logged)
+    # is our frontend: its X-Orizon-Client-Ip header, the visitor's address as
+    # Vercel saw it, becomes the rate-limit client, so visitors behind
+    # Vercel's shared egress addresses keep budgets of their own; without that
+    # header (a cached, shared read) no per-client budget applies at all. See
+    # `security.client_identity`. At least 32 characters, random.
+    frontend_proxy_token: str = ""
+    # /api/stellar/server/seal makes the platform's sealer sign an attestation
+    # with whatever the caller sends, so it FAILS CLOSED while API_KEY is
+    # empty. A local or CI testnet run that wants it open without a key sets
+    # this to true, deliberately; never on a deployment.
+    allow_keyless_server_seal: bool = False
     # Ceiling on concurrently running workflows (each fans out LLM calls).
     # execute returns 503 "capacity_exhausted" once this many are in flight.
     orchestrator_max_concurrent: int = 8
@@ -367,14 +381,13 @@ class Settings(BaseSettings):
     # registrations into the marketplace every N seconds; values under 5 are
     # clamped by the service, and a blank STELLAR_AGENT_REGISTRY disables it.
     registry_sync_seconds: int = 15
-    # How long boot waits for the registry sync's FIRST pass before the
-    # reputation pre-warm reads the registry (app/main.py lifespan). Without
-    # the wait the pre-warm read only the seeded catalog and the first plans
-    # after a restart were built without any on-chain agent — Render's free
-    # tier restarts often. A pass slower than this does not hold boot: it
-    # carries on in the background loop and boot goes ahead with a WARNING.
-    # Kept well inside Render's health-check grace, since the service answers
-    # nothing — /health included — until lifespan startup returns. 0 skips
+    # How long the reputation pre-warm waits for the registry sync's FIRST
+    # pass before it reads the registry (app/main.py `_warm_reputation`), so
+    # on-chain agents are pre-warmed too and not just the seeded catalog. The
+    # wait runs in the BACKGROUND: boot does not wait for it, and requests —
+    # /health included — are answered throughout. A pass slower than this is
+    # not cancelled: it carries on in the sync loop, the pre-warm goes ahead
+    # with a WARNING, and agents indexed later are read on first use. 0 skips
     # the wait.
     registry_boot_sync_timeout_seconds: float = 5.0
 
@@ -411,24 +424,23 @@ class Settings(BaseSettings):
     # with 503 "planner_busy" instead of joining the queue.
     decompose_max_queued: int = 16
     # Free-form (LLM) decompose calls one client may make per minute, on top
-    # of the global rate_limit_per_minute, keyed by the same client_key(). A
-    # breach is 429 "decompose_rate_limited" with Retry-After; kit intents
-    # make no LLM call and are not counted. 0 disables it. At
-    # trusted_proxy_hops=0 callers sharing a last forwarded hop share this —
-    # and browser traffic arrives through the frontend's /api rewrite, most
-    # likely from one shared egress address, so until the hop count is
-    # confirmed from the deploy's forwarded_chain_samples this is probably one
-    # budget for every visitor. 30 keeps a demo or a QA run clear of it while
-    # still bounding spend; tune it down once the key is truly per-visitor.
+    # of the global rate_limit_per_minute, keyed by security.client_identity()
+    # (the visitor behind Render's proxies, or the one our frontend names with
+    # FRONTEND_PROXY_TOKEN). A breach is 429 "decompose_rate_limited" with
+    # Retry-After; kit intents make no LLM call and are not counted. 0 disables
+    # it. A caller with no identity has no budget here; the planner's
+    # concurrency gate and bounded queue hold those. Browser traffic through
+    # the frontend's plain /api rewrite arrives from Vercel's shared egress, so
+    # it shares one budget until the frontend sends the token and the visitor.
     decompose_rate_limit_per_minute: int = 30
     # Dispute challenges one client may mint per minute (POST
-    # /api/disputes/challenge), keyed by the same client_key(). Every mint that
+    # /api/disputes/challenge), keyed by the same client_identity(). Every mint that
     # takes a slot holds it for five minutes out of a 200-slot `dispute` budget,
     # so an unbounded client could fill that budget alone; at 20 a minute one
     # client holds at most 100. A buyer disputes one step at a time, and a
     # re-mint of a live challenge returns the same nonce, so no honest flow
     # comes near it. A breach is 429 "dispute_challenge_rate_limited" with
-    # Retry-After; 0 disables it. Same TRUSTED_PROXY_HOPS caveat as above.
+    # Retry-After; 0 disables it. No identity, no budget, as above.
     dispute_challenge_rate_limit_per_minute: int = 20
     # Most agents listed in the planning prompt. Prompt tokens per planner call
     # grew with every bound agent; past this many that cleared the floor, the
@@ -484,19 +496,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _registry_boot_sync_timeout_is_a_bound(self) -> "Settings":
-        """Refuse a boot wait that is not a bound.
+        """Refuse a pre-warm wait that is not a bound.
 
         NaN would make the wait expire on arrival and inf would let a hung RPC
-        hold boot forever — no request, /health included, is answered until
-        lifespan startup returns. Past 60 s the wait eats into the time Render
-        gives a deploy to answer its health check. Names the variable, never
-        the value.
+        hold the reputation pre-warm back forever, leaving the first plans
+        after a restart routed on priors. Past 60 s the pre-warm starts so late
+        that the plans it exists for have already been made. Names the
+        variable, never the value.
         """
         bound = self.registry_boot_sync_timeout_seconds
         if not (math.isfinite(bound) and 0 <= bound <= 60):
             raise ValueError(
-                "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — boot waits "
-                "this long for the first registry sync pass, and answers no request until it is done"
+                "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — the "
+                "reputation pre-warm waits this long, in the background, for the first registry sync pass"
             )
         return self
 
@@ -631,6 +643,32 @@ class Settings(BaseSettings):
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _keyless_seal_is_never_mainnet(self) -> "Settings":
+        """The keyless-seal opt-out is for local and CI testnet runs, never for real money."""
+        if self.allow_keyless_server_seal and self.is_mainnet():
+            raise ValueError(
+                "ALLOW_KEYLESS_SERVER_SEAL must not be set on mainnet: it lets anyone have the platform's "
+                "sealer sign an attestation. Unset it and set API_KEY."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _frontend_proxy_token_is_strong(self) -> "Settings":
+        """Refuse a frontend token a caller could guess, or one that would print itself.
+
+        It lifts per-client rate limits for whoever sends it, so a short one is
+        a bypass, and below `security._MIN_MASKED_SECRET_CHARS` the log
+        redaction would not mask it by value either.
+        """
+        token = self.frontend_proxy_token
+        if token and (len(token) < 32 or token != token.strip() or not token.isascii()):
+            raise ValueError(
+                "FRONTEND_PROXY_TOKEN must be at least 32 ascii characters with no surrounding whitespace "
+                "(generate one with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`), or be unset."
             )
         return self
 

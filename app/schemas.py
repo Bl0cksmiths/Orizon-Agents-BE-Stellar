@@ -64,6 +64,31 @@ TaskStatus = Literal["pending", "running", "complete", "failed"]
 # None on a task that asked for no on-chain settlement (a simulated run).
 SettlementState = Literal["settled", "released", "skipped", "unconfirmed", "failed"]
 
+# What became of a paid run's attestation seal (AttestationRegistry.seal), for
+# the same reason `settlement` exists: a client branches on a field, not on a
+# trace sentence. Set only once a seal was submitted, so never on a simulated
+# run or on one that paid nobody (nothing to attest, D-086).
+#   sealed       the attestation is on the ledger; `proof_tx` is its hash when
+#                the transaction that wrote it is known
+#   pending      submitted and not yet confirmed: the run is reconciling it
+#                (`execution_svc._reconcile_seal`), re-checking by hash and by
+#                job, and re-submitting only once it provably is not there
+#   unconfirmed  reconciliation ran out of time without an answer either way:
+#                it MAY still be on the ledger
+#   failed       provably not on the ledger, every bounded re-submission
+#                included — the job's payment stands, unattested
+SealState = Literal["sealed", "pending", "unconfirmed", "failed"]
+
+# What a seal attests to, so a client can label it. Set with `seal`, from the
+# moment it is submitted.
+#   paid           the agents that delivered AND were paid, one per payout,
+#                  each beside its payout's receipt, with the total that moved
+#   delivery_only  nobody could be paid (no confirmed on-chain owner, a free
+#                  step, an authorization already spent): the agents that
+#                  DELIVERED, with no receipt and a total of zero — on-chain,
+#                  nothing in it reads as a payment
+SealKind = Literal["paid", "delivery_only"]
+
 
 def humanize_age(seconds: float) -> str:
     """Coarse relative age, e.g. 125.0 → "2m ago". Clock skew reads "just now"."""
@@ -104,6 +129,8 @@ class TaskSummary(BaseModel):
     charge_tx: str | None = None
     proof_tx: str | None = None
     settlement: SettlementState | None = None
+    seal: SealState | None = None
+    seal_kind: SealKind | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -218,7 +245,12 @@ class StoredPlan(BaseModel):
 #   * `not_selected_by_planner` — the story's own product rules forbid listing
 #     every unpicked agent, which would drown the signal this exists to create.
 #     A plan that simply did not choose an agent is not an exclusion.
-ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed"]
+#
+# `unreachable_endpoint` (D-084) is the one value added since: a bound agent
+# whose endpoint failed its latest health check, left out of the plan while
+# that failure is fresh (`app/services/reachability.py`). Appended, so the
+# existing three keep their positions for any client that indexes them.
+ExclusionReason = Literal["below_floor", "unbound_endpoint", "floor_relaxed", "unreachable_endpoint"]
 
 
 class PlanFloorNotice(BaseModel):

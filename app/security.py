@@ -29,6 +29,7 @@ Lightweight, dependency-free hardening primitives.
 from __future__ import annotations
 
 import contextvars
+import ipaddress
 import json
 import logging
 import math
@@ -177,6 +178,7 @@ def _configured_secrets() -> tuple[str, ...]:
         settings.pdax_password,
         settings.pdax_otp_secret,
         settings.pdax_webhook_secret,
+        settings.frontend_proxy_token,
     )
     unique = {v.strip() for v in values if v and len(v.strip()) >= _MIN_MASKED_SECRET_CHARS}
     return tuple(sorted(unique, key=len, reverse=True))
@@ -319,6 +321,125 @@ def client_key(scope: dict, hops: int | None = None) -> str:
     return client[0] if client else "unknown"
 
 
+# ── rate-limit identity ─────────────────────────────────────────
+
+# Cloudflare's published edge ranges (https://www.cloudflare.com/ips/). Render
+# serves every *.onrender.com service through Cloudflare, so the hop Render's
+# proxy appends to X-Forwarded-For is a Cloudflare edge. They change rarely;
+# a missing range degrades to "no identity" (see below), never to a spoofable one.
+_CLOUDFLARE_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        "2400:cb00::/32",
+        "2606:4700::/32",
+        "2803:f800::/32",
+        "2405:b500::/32",
+        "2405:8100::/32",
+        "2a06:98c0::/29",
+        "2c0f:f248::/32",
+    )
+)
+
+FRONTEND_TOKEN_HEADER = b"x-frontend-proxy-token"
+FRONTEND_CLIENT_IP_HEADER = b"x-orizon-client-ip"
+
+
+def _ip(entry: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(entry.strip())
+    except ValueError:
+        return None
+
+
+def _is_cloudflare(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(ip in net for net in _CLOUDFLARE_NETWORKS if net.version == ip.version)
+
+
+def _visitor(ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None) -> str | None:
+    """`ip` as an identity if it can be a visitor: public, and not a Cloudflare edge."""
+    if ip is None or not ip.is_global or _is_cloudflare(ip):
+        return None
+    return str(ip)
+
+
+def is_frontend(scope: dict) -> bool:
+    """Whether the request carries our frontend's FRONTEND_PROXY_TOKEN. Constant time.
+
+    False whenever no token is configured, so an empty header can never match.
+    The token itself is never logged (and is masked by the redaction filter
+    if anything ever tries).
+    """
+    expected = settings.frontend_proxy_token
+    if not expected:
+        return False
+    supplied = dict(scope.get("headers") or []).get(FRONTEND_TOKEN_HEADER)
+    return header_secret_matches(supplied.decode("latin-1") if supplied is not None else None, expected)
+
+
+def client_identity(scope: dict) -> str | None:
+    """The client a request's rate-limit budgets belong to, or None when nobody trustworthy is named.
+
+    Unlike `client_key` (the access log's view, governed by TRUSTED_PROXY_HOPS),
+    this needs no hop count, so no stale or mistuned value can make it read an
+    entry the caller wrote:
+
+      1. Our frontend (`is_frontend`) names the visitor in X-Orizon-Client-Ip;
+         Vercel's egress addresses are shared and unpublished, so without this
+         every visitor of the console would be one client. No usable address
+         there — a cached read serving everyone — is no identity.
+      2. Otherwise X-Forwarded-For is read from the RIGHT: entries that are not
+         publicly routable (Render's internal hops) are skipped, then at most
+         ONE Cloudflare edge (the hop Render appends). The next entry was
+         written by Cloudflare itself — the address it accepted the connection
+         from — and is the caller. Everything further left is the caller's own
+         writing and is never read.
+      3. No forwarded header at all (a local run, a test) is the socket peer.
+
+    None — a chain of infrastructure only, an unparseable entry, a second
+    Cloudflare hop (a Cloudflare Worker calling us, which could put anything
+    to its left), or the frontend reading on nobody's behalf — means the
+    caller cannot be told apart. Limiters then apply no per-client budget:
+    lumping such requests into one bucket would let any one of them starve the
+    rest, so per-wallet budgets and service-wide ceilings hold them instead.
+    """
+    headers = dict(scope.get("headers") or [])
+    if is_frontend(scope):
+        named = headers.get(FRONTEND_CLIENT_IP_HEADER)
+        return _visitor(_ip(named.decode("latin-1"))) if named is not None else None
+    raw = headers.get(b"x-forwarded-for")
+    chain = [entry.strip() for entry in raw.decode("latin-1").split(",")] if raw else []
+    chain = [entry for entry in chain if entry]
+    if not raw:
+        peer = scope.get("client")
+        return peer[0] if peer else None
+    index = len(chain) - 1
+    while index >= 0:
+        ip = _ip(chain[index])
+        if ip is None or ip.is_global:
+            break
+        index -= 1
+    if index >= 0:
+        ip = _ip(chain[index])
+        if ip is not None and _is_cloudflare(ip):
+            index -= 1
+    return _visitor(_ip(chain[index])) if index >= 0 else None
+
+
 class ForwardedChainSampler:
     """Log the first N forwarded chains a process sees, then go quiet.
 
@@ -367,8 +488,8 @@ class ForwardedChainSampler:
         peer = scope.get("client")
         logger.info(
             "forwarded chain sample %d/%d on %s %s: entries=%d chain=%s peer=%s "
-            "TRUSTED_PROXY_HOPS=%d resolves client=%s — set TRUSTED_PROXY_HOPS to the number of "
-            "TRAILING entries this edge appends, so the one to their left is the visitor",
+            "TRUSTED_PROXY_HOPS=%d resolves client=%s identity=%s — the rate limiters key on identity "
+            "(our hops skipped by address); client= is the access log's view, tuned by TRUSTED_PROXY_HOPS",
             self.budget - self.remaining,
             self.budget,
             scope.get("method", "-"),
@@ -378,6 +499,7 @@ class ForwardedChainSampler:
             peer[0] if peer else "-",
             _trusted_hops(),
             client_key(scope),
+            client_identity(scope) or "-",
         )
 
 
@@ -484,6 +606,31 @@ def check_operator_key(supplied: str | None, *, unconfigured: str, log_unconfigu
     raise HTTPException(status_code=503, detail=unconfigured)
 
 
+async def require_seal_key(
+    x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
+) -> None:
+    """The operator key for /api/stellar/server/seal — FAIL CLOSED unless opted out.
+
+    A seal makes the platform's sealer sign an attestation with whatever the
+    caller sends, so an anonymous seal is a record written under our
+    signature by anyone. `require_api_key`'s open-while-unset posture is
+    therefore wrong here, as it is for the adjudication routes: with API_KEY
+    empty the route answers 503 `operator_key_not_configured`, unless a local
+    or CI testnet run sets ALLOW_KEYLESS_SERVER_SEAL (which config refuses on
+    mainnet). With a key configured the opt-out changes nothing.
+    """
+    if not settings.api_key and settings.allow_keyless_server_seal:
+        return
+    check_operator_key(
+        x_api_key,
+        unconfigured="operator_key_not_configured",
+        log_unconfigured=(
+            "server seal refused: API_KEY is empty, so /api/stellar/server/seal stays closed; set API_KEY, "
+            "or ALLOW_KEYLESS_SERVER_SEAL=true on a local or CI testnet run"
+        ),
+    )
+
+
 async def require_adjudicator(
     x_api_key: Annotated[str | None, Security(_operator_key_scheme)] = None,
 ) -> None:
@@ -555,6 +702,89 @@ async def require_adjudicator(
         raise HTTPException(status_code=503, detail="dispute_refunds_disabled")
 
 
+# ── CORS origins ────────────────────────────────────────────────
+
+# An exact origin: https with a host (and optional port), or plain http to the
+# loopback only, for local development. No path, no wildcard, no `null`.
+_SECURE_ORIGIN = re.compile(r"https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?")
+_LOOPBACK_ORIGIN = re.compile(r"http://(localhost|127\.0\.0\.1)(:\d{1,5})?")
+
+
+def strict_cors_origins(origins: list[str]) -> list[str]:
+    """The configured CORS origins, less any that would widen who may call us.
+
+    `*` would admit every site, `null` admits sandboxed frames and `file:`
+    pages, a plain-http public origin can be spoofed on the wire, and a value
+    with a path never matches a browser's Origin header at all, so it is a
+    typo that silently allows nothing. Each is dropped with a warning naming
+    it — an origin is configuration, not a secret — so a mistyped
+    CORS_ORIGINS shows up in the boot log instead of as a wide-open API.
+    """
+    kept: list[str] = []
+    for origin in origins:
+        if _SECURE_ORIGIN.fullmatch(origin) or _LOOPBACK_ORIGIN.fullmatch(origin):
+            kept.append(origin)
+        else:
+            logger.warning("CORS_ORIGINS entry %r dropped: not an exact https (or loopback http) origin", origin)
+    return kept
+
+
+# ── hardening headers ───────────────────────────────────────────
+
+# On every response. HSTS is ours to send: Render's edge does not add it (a
+# live response from the deployment carried none, 2026-10-06), and a browser
+# ignores it over plain http, so local runs are unaffected. Two years with
+# subdomains is the preload-list floor.
+_BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-frame-options", b"DENY"),
+    (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
+)
+# This API renders nothing, so nothing in a response may load, run or frame:
+# a body a browser is tricked into rendering stays inert text.
+_API_CSP = b"default-src 'none'; frame-ancestors 'none'"
+# Swagger UI and ReDoc are pages that load their own scripts and styles, so
+# they keep only the framing ban.
+_DOCS_CSP = b"frame-ancestors 'none'"
+_DOCS_PREFIXES = ("/docs", "/redoc")
+
+
+def security_headers(path: str) -> list[tuple[bytes, bytes]]:
+    """The hardening headers for a response to `path`."""
+    csp = _DOCS_CSP if path.startswith(_DOCS_PREFIXES) else _API_CSP
+    return [*_BASE_SECURITY_HEADERS, (b"content-security-policy", csp)]
+
+
+class SecurityHeadersMiddleware:
+    """Pure-ASGI middleware stamping the hardening headers on every response.
+
+    Registered outside the limiters and the body cap, so their short-circuit
+    429s and 413s carry the headers too. The 500 handler runs outside every
+    middleware and stamps the same set itself, from `security_headers`.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        extra = security_headers(scope.get("path", ""))
+
+        async def send_with_headers(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = list(message.get("headers") or []) + extra
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+# A caller-supplied X-Request-ID is kept only in this shape (see below).
+_REQUEST_ID_SHAPE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+
+
 class RequestContextMiddleware:
     """Request-id + access-log middleware (pure ASGI, no external deps).
 
@@ -579,9 +809,13 @@ class RequestContextMiddleware:
             return
 
         headers = dict(scope.get("headers") or [])
-        request_id = (headers.get(b"x-request-id") or b"").decode("latin-1").strip()[:64]
-        if not request_id:
-            request_id = uuid.uuid4().hex[:16]
+        # Taken from the caller only when it is a plain token. The id is echoed
+        # in a header, stamped on every log line of the request and quoted in
+        # every error body, so anything else — markup, spaces, encoded CRLF,
+        # non-ASCII, or a value longer than the cap — is replaced outright
+        # rather than trimmed into something that still carries part of it.
+        supplied = (headers.get(b"x-request-id") or b"").decode("latin-1").strip()
+        request_id = supplied if _REQUEST_ID_SHAPE.fullmatch(supplied) else uuid.uuid4().hex[:16]
 
         # Deliberately never reset: the 500 handler runs on the outermost
         # ServerErrorMiddleware layer AFTER this frame has unwound, so a
@@ -613,19 +847,33 @@ class RequestContextMiddleware:
                 ]
                 if path not in EXEMPT_PATHS:
                     duration_ms = (time.monotonic() - started) * 1000.0
+                    # Path + query with token values masked: SSE auth tokens
+                    # ride in the query string and must not be recoverable
+                    # from logs.
+                    target = _redacted_target(scope)
+                    # Same key the rate limiter buckets on, so a 429 in the
+                    # log can be traced to the client that caused it.
+                    client = client_key(scope)
                     logger.info(
                         "%s %s -> %s in %.1fms [%s] client=%s",
                         method,
-                        # Path + query with token values masked: SSE auth
-                        # tokens ride in the query string and must not be
-                        # recoverable from logs.
-                        _redacted_target(scope),
+                        target,
                         message.get("status"),
                         duration_ms,
                         request_id,
-                        # Same key the rate limiter buckets on, so a 429 in
-                        # the log can be traced to the client that caused it.
-                        client_key(scope),
+                        client,
+                        # The same facts as data, for a log platform to filter
+                        # on; the JSON formatter emits them under "http".
+                        extra={
+                            "http": {
+                                "method": method,
+                                "target": target,
+                                "status": message.get("status"),
+                                "duration_ms": round(duration_ms, 1),
+                                "client": client,
+                                "identity": client_identity(scope) or "-",
+                            }
+                        },
                     )
             await send(message)
 
@@ -729,19 +977,23 @@ class BodyLimitMiddleware:
             await self._send_413(send)
 
 
+# The global limiter's bucket for requests `client_identity` cannot attribute.
+# Not an address, so no real client can collide with it.
+UNIDENTIFIED_KEY = "unidentified"
+
+
 class RateLimitMiddleware:
-    """Sliding-window limiter, keyed by client_key(). In-process (1 worker).
+    """Sliding-window limiter, keyed by client_identity(). In-process (1 worker).
 
     Timestamps per key live in a dict of deques; old entries are pruned on
     each hit and the whole table is swept periodically so idle keys don't
     accumulate. All mutation happens synchronously between awaits, so it is
     safe under a single asyncio event loop without locks.
 
-    How much this limits *per visitor* rather than *in total* is entirely
-    decided by TRUSTED_PROXY_HOPS — see client_key(). At the default of 0 the
-    key is a constant this deployment's edge wrote, so `rate_limit_per_minute`
-    is one budget for the whole service; the default limit is sized for that
-    reading.
+    Per visitor: `client_identity` finds the caller behind Render's proxies
+    and our frontend. Requests it cannot attribute share one bucket,
+    UNIDENTIFIED_KEY, at the same limit — a service-wide ceiling for them
+    alone, which no identified visitor's budget is ever spent on.
     """
 
     _SWEEP_EVERY = 1024  # requests between full-table sweeps
@@ -775,7 +1027,7 @@ class RateLimitMiddleware:
             return
 
         now = time.monotonic()
-        key = client_key(scope)
+        key = client_identity(scope) or UNIDENTIFIED_KEY
         dq = self._hits.setdefault(key, deque())
         cutoff = now - self.window
         while dq and dq[0] <= cutoff:
@@ -841,10 +1093,8 @@ class KeyedRateLimiter:
     dashboard polling. That is the wrong budget for a route whose every call
     buys an LLM completion: 1200 cheap reads a minute is a usable console, 1200
     planner calls a minute is a bill. A route that costs real money takes one
-    of these on top, keyed by the same `client_key()` so "per client" means
-    exactly what it means for the global limiter — including its caveat: at
-    TRUSTED_PROXY_HOPS=0 every caller that shares the last forwarded hop
-    shares a budget here too.
+    of these on top, keyed by the same `client_identity()` so "per client" means
+    exactly what it means for the global limiter.
 
     `limit` is read on every hit, so a deployment or a test can tune it
     without rebuilding the limiter; 0 or less switches it off. Same
@@ -859,10 +1109,16 @@ class KeyedRateLimiter:
         self._hits: dict[str, deque[float]] = {}
         self._since_sweep = 0
 
-    def hit(self, key: str, now: float | None = None) -> int | None:
-        """Spend one unit of `key`'s budget: None if admitted, else the Retry-After seconds."""
+    def hit(self, key: str | None, now: float | None = None) -> int | None:
+        """Spend one unit of `key`'s budget: None if admitted, else the Retry-After seconds.
+
+        A None key — `client_identity` could not attribute the caller — is
+        admitted: there is no client to hold to a budget, and one shared bucket
+        would let any such caller starve the rest. The route's own ceiling
+        (a concurrency gate, a capped challenge budget) still holds them.
+        """
         limit = self._limit()
-        if limit <= 0:
+        if limit <= 0 or key is None:
             return None
         now = time.monotonic() if now is None else now
         cutoff = now - self.window

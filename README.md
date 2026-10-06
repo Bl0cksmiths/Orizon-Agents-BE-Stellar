@@ -51,7 +51,7 @@ cp .env.example .env
 | GET  | `/health`                            | liveness probe |
 | GET  | `/api/health`                        | the same liveness probe under the `/api` prefix |
 | GET  | `/readiness`                         | readiness probe — per-dependency config status, plus informational blocks including `cold_start` (can a brand-new agent clear the floor?), `ratings` (can this deployment write ratings — is its signer the ledger's scorer?) and `registry` (`synced`, `syncing`, `agents`, `last_full_sync_at`: has the on-chain mirror finished a full pass since boot?) |
-| GET  | `/api/agents`                        | registry listing — a bare list; `X-Registry-Synced: true\|false` says whether the on-chain mirror has finished a full pass since boot (false: the list is a prefix still filling after a restart), `X-Registry-Count` is the list's length |
+| GET  | `/api/agents`                        | registry listing — a bare list; `X-Registry-Synced: true\|false` says whether the on-chain mirror has finished a full pass since boot (false: the list is a prefix still filling after a restart), `X-Registry-Count` is the list's length. Optional `limit` (1-1000) + `cursor` page by id (`X-Next-Cursor` for the next page, `X-Total-Count` for the whole list) and `fields=a,b` keeps only those keys (`id` always); with no parameters the full list is unchanged. `ETag` + `Cache-Control: no-cache`, so `If-None-Match` revalidates to a 304 |
 | GET  | `/api/agents/{id}`                   | agent detail |
 | POST | `/api/orchestrator/decompose`        | intent → plan (real LLM) |
 | POST | `/api/orchestrator/execute`          | run a plan → `{task_id}` |
@@ -60,12 +60,13 @@ cp .env.example .env
 | GET  | `/api/tasks/{id}/artifact`           | task deliverable (the actual artifact) |
 | GET  | `/api/trace/{task_id}`               | full trace snapshot |
 | GET  | `/api/trace/{task_id}/stream`        | SSE live trace |
-| GET  | `/api/metrics/overview`              | dashboard overview — measured values only: registered / on-chain / seeded / external / bound / online agents, distinct external operator wallets, settled workflows from the settlement store with a 14-day UTC series, task completion, mean on-chain trust and the registry's skill mix; an unreadable part is `null` with `degraded: true`, never a stand-in (ADR 0013). `registry_synced: false` means the registry mirror is still filling, so the agent counts are partial (and `degraded` is true). Cached 15 s; a recently expired overview is served while it refreshes in the background |
+| GET  | `/api/metrics/overview`              | dashboard overview — measured values only: registered / on-chain / seeded / external / bound / online agents, distinct external operator wallets, settled workflows from the settlement store with a 14-day UTC series, task completion, mean on-chain trust and the registry's skill mix; an unreadable part is `null` with `degraded: true`, never a stand-in (ADR 0013). `registry_synced: false` means the registry mirror is still filling, so the agent counts are partial (and `degraded` is true). Served from a snapshot rebuilt in the background (every 30 s, on a registry pass, and after a rating lands): fresh 15 s, a recently expired one is served while it refreshes. `ETag`/`Last-Modified`/`X-Snapshot-Age`, `Cache-Control: public, max-age=<remaining>, s-maxage=<remaining>, stale-while-revalidate=60` (`no-cache` while `registry_synced` is false) |
+| GET  | `/api/ecosystem/adoption`           | SOW §6.3 adoption evidence from on-chain facts (ADR 0012). Built in the background — a settlement scan per external agent takes minutes — every 15 min and when the registry's agents change, and served at once with its age (`generated_at`, `X-Snapshot-Age`); the last report is stored in Postgres so a restart serves it (`X-Snapshot-Source: persisted`). `202 {"status":"computing"}` with `Retry-After` while the first report since boot is computed; `503` only when that attempt failed |
 | GET  | `/api/flow/default`                  | default DAG |
 | POST | `/api/payments/x402`                 | simulated HTTP 402 flow |
 | GET  | `/api/stellar/network`               | configured-network contract IDs the FE renders |
 | GET  | `/api/stellar/agent/{id}`            | read an agent from AgentRegistry |
-| GET  | `/api/stellar/reputation`            | smoothed reputation for every agent + routing floor |
+| GET  | `/api/stellar/reputation`            | smoothed reputation for every agent + routing floor. Served from a snapshot (fresh for the read TTL, rebuilt in the background, retired the moment a rating lands) with `ETag`, `Last-Modified`, `X-Snapshot-Age` and `stale-while-revalidate=15` |
 | GET  | `/api/stellar/reputation/params`     | full reputation parameter set — priors, floor, decay constants |
 | GET  | `/api/stellar/reputation/{id}`       | smoothed reputation for one agent |
 | GET  | `/api/stellar/attestation/{job_id}`  | on-chain attestation by hex job id |
@@ -160,12 +161,14 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 
 | name | default | purpose |
 | --- | --- | --- |
-| `API_KEY` | *(unset)* | when set, `/api/stellar/server/*` and all non-public `/api/pdax/*` routes require a matching `X-API-Key` header. The dispute adjudication routes are the exception that **fails closed** — they refuse while it is unset rather than running open |
+| `API_KEY` | *(unset)* | when set, `/api/stellar/server/*` and all non-public `/api/pdax/*` routes require a matching `X-API-Key` header. The dispute adjudication routes and `/api/stellar/server/seal` are the exceptions that **fail closed** — they refuse while it is unset rather than running open |
 | `DATABASE_URL` | *(unset)* | Postgres DSN. With it, settlements, disputes and operator-endpoint bindings are durable; without it all three fall back to an in-memory store that is lost on every restart. The store implementation is chosen from this value alone — no code change, no migration flag |
 | `TASK_AUTH_REQUIRED` | `false` | when true, task/trace/artifact reads require the per-task `read_token` returned by execute |
 | `ORCHESTRATOR_MAX_CONCURRENT` | `8` | in-flight workflow ceiling — excess execute calls get a 503 `capacity_exhausted` |
-| `RATE_LIMIT_PER_MINUTE` | `1200` | request budget per resolved client key (sliding 60 s window) — see below |
-| `TRUSTED_PROXY_HOPS` | `0` | how many **trailing** `X-Forwarded-For` entries are this deployment's own infrastructure and are skipped when resolving the client |
+| `RATE_LIMIT_PER_MINUTE` | `1200` | request budget per client (sliding 60 s window), and the ceiling for requests no client can be named for — see below |
+| `TRUSTED_PROXY_HOPS` | `0` | how many **trailing** `X-Forwarded-For` entries the access log's `client=` skips; the rate limiters do not read it (see below) |
+| `FRONTEND_PROXY_TOKEN` | *(unset)* | shared secret our frontend's server sends as `X-Frontend-Proxy-Token`; with it, `X-Orizon-Client-Ip` names the visitor for rate limiting — see below |
+| `ALLOW_KEYLESS_SERVER_SEAL` | `false` | `/api/stellar/server/seal` **fails closed** while `API_KEY` is unset; a local or CI testnet run may set this to keep it open. Refused on mainnet |
 | `FORWARDED_CHAIN_SAMPLES` | `5` | log the raw forwarded chain + resolved key for the first N non-exempt requests after each restart (`0` disables) |
 | `MAX_CHARGE_USDC` | `100` | server-side ceiling for a single `PaymentEscrow.charge` (v1) or one `settle`'s payouts (v2), in USDC |
 | `DISPUTE_REFUNDS_ENABLED` | `false` | master switch on the refund path — while it is false, `/api/disputes/{id}/uphold` and `/reject` refuse. **Turning it on makes `API_KEY` mandatory on its own: the process refuses to boot without one, on every network including testnet, whether or not a signing key or an asset SAC is wired up yet.** |
@@ -174,23 +177,28 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 
 Everything else (model IDs, contract addresses, RPC, PDAX sandbox) is documented in `.env.example` — copy it to `.env` and fill in what you need.
 
-### Rate limiting and the proxy trust boundary
+### Rate limiting and who the client is
 
-`X-Forwarded-For` is append-only — each proxy adds the address of the peer it received the request from — so the chain reads `<anything the caller sent>, <caller's address>, <our edge>, …` and only the **rightmost** entries were written by infrastructure we control. `TRUSTED_PROXY_HOPS` says how many of those trailing entries are ours; `client_key()` (`app/security.py`) drops them, and the entry to their left becomes the rate-limit bucket and the access log's `client=` field.
+Every budget — the global `RATE_LIMIT_PER_MINUTE`, the planner's and the dispute challenge's own, and the per-route budgets on the write and expensive routes (`app/rate_limit.py`) — is spent per client as `client_identity()` (`app/security.py`) resolves one:
 
-**The budget is currently effectively global.** The default of `0` drops nothing and keys on the last entry, which is the address this deployment's own edge appends — the same value for every visitor. `RATE_LIMIT_PER_MINUTE` therefore behaves as one budget for the whole service rather than one per visitor, and `client=` is a constant in every access line, so abuse cannot be attributed during an incident. The default is `0` on purpose: it reproduces the behaviour this service has always had, so nothing changes until the hop count is tuned against a chain actually observed from production. The limit is sized for that reading — an open dashboard tab polls two endpoints every 5 s (24 req/min), so `1200` seats roughly 50 concurrent tabs, where the old `120` seated five. Both liveness probes are exempt, and the frontend backs off on `429` and honours `Retry-After`.
+1. **Our frontend.** A request carrying `X-Frontend-Proxy-Token` equal to `FRONTEND_PROXY_TOKEN` (constant-time comparison, never logged) is our own Vercel server. Vercel's egress addresses are shared and unpublished, so it names the visitor in `X-Orizon-Client-Ip` and that address is the client. A frontend request that names nobody — a cached route handler reading on everyone's behalf — has no per-client budget at all. Without the right token both headers are ignored.
+2. **Behind Render.** `X-Forwarded-For` is append-only, and on Render it ends with the platform's own hops: Render's internal (non-public) addresses, and before them the Cloudflare edge that fronts every `*.onrender.com` service. The chain is read **from the right**: non-public entries are skipped, then at most one Cloudflare edge, and the next entry — written by Cloudflare itself, the address it accepted the connection from — is the client. Nothing further left is ever read, because the caller wrote it. No hop count is needed, so no stale or mistuned setting can make a limiter read a caller-written entry.
+3. **No forwarded header** (local runs, tests): the socket peer.
 
-Setting it **too high** is the worse failure and is equally silent: the resolved entry becomes one the *caller* wrote, so anyone can mint a fresh bucket per request by rotating a header value and the limiter stops limiting. A chain too short to contain a client entry resolves to the literal `forwarded-chain-too-short` rather than clamping to the leftmost (caller-controlled) entry — seeing that as `client=` means the value is set higher than the chain this edge actually produces.
+When no client can be named — a chain of infrastructure only, an unparseable entry, a second Cloudflare hop (a Cloudflare Worker calling us, which could put anything to its left), or the frontend reading for nobody — **no per-client budget applies**: lumping strangers into one bucket would let any one of them starve the rest. Those requests are held by per-wallet budgets (a G-address in the body) and by each route's service-wide **ceiling**, which caps what a route can cost per minute however its callers are spread. The global limiter holds them in one `unidentified` bucket of `RATE_LIMIT_PER_MINUTE`.
 
-**Verifying the hop count from logs.** The number of entries Vercel's rewrite proxy and Render's edge each contribute is not observable from outside, so read it off production. After any restart (changing an env var in the Render dashboard triggers one), the first `FORWARDED_CHAIN_SAMPLES` non-exempt requests each log one line to Render's log stream:
+Why it was needed: measured against the live deployment on 2026-10-06, one caller's consecutive requests alternated between two `x-ratelimit-remaining` counters — the old key, the last forwarded entry, was an address from the platform's pool, so every visitor shared a couple of budgets.
+
+`TRUSTED_PROXY_HOPS` now only shapes the access log's `client=` field (`client_key()`); the limiters ignore it, and `0` is right for this deployment. The access record also carries the limiter's `identity`, so a `429` can be traced to its bucket. After a restart the first `FORWARDED_CHAIN_SAMPLES` non-exempt requests each log the raw chain with both views side by side:
 
 ```
-forwarded chain sample 1/5 on GET /api/agents: entries=3 chain=['203.0.113.50', '76.76.21.9', '10.201.3.4']
-peer=203.0.113.50 TRUSTED_PROXY_HOPS=0 resolves client=10.201.3.4 — set TRUSTED_PROXY_HOPS to the number of
-TRAILING entries this edge appends, so the one to their left is the visitor
+forwarded chain sample 1/5 on GET /api/agents: entries=3 chain=['81.2.69.160', '172.70.81.12', '10.201.3.4']
+peer=81.2.69.160 TRUSTED_PROXY_HOPS=0 resolves client=10.201.3.4 identity=81.2.69.160 — the rate limiters key on identity ...
 ```
 
-Load the console in a browser, then read one sample line: count the trailing entries that are *not* the visitor (Render's edge, plus Vercel's egress if the request came through `orizons.xyz`) and set `TRUSTED_PROXY_HOPS` to that count. Confirm by watching `client=` in the access lines vary between visitors instead of repeating. The sample line and the access line for the same request share an `X-Request-ID`, so they can be read side by side. This is deliberately a log sample and not a diagnostic endpoint — the chain contains visitors' IP addresses, and `API_KEY` is empty on demo deployments, so a route could not be reliably gated; after the budget is spent the cost is a single integer comparison per request.
+Read one after the first deploy: `identity=` should be the visitor's address and vary between visitors. If Render ever adds a public hop of its own, `identity=` shows it, and the hop belongs in the recognised ranges in `app/security.py`. This is deliberately a log sample and not a diagnostic endpoint — the chain contains visitors' IP addresses.
+
+**For the frontend.** Set the same random `FRONTEND_PROXY_TOKEN` (at least 32 characters; config refuses a weaker one) on Render and on Vercel. Server-side route handlers send it as `X-Frontend-Proxy-Token`, plus `X-Orizon-Client-Ip` with the visitor's address whenever the call is made for one visitor. Browser traffic through a plain `/api` rewrite carries neither, so it arrives keyed by Vercel's egress until the frontend adds them (Next.js middleware can, on the rewrite's request headers).
 
 ## Deploy — Render (recommended)
 

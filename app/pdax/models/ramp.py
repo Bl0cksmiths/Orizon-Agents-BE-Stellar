@@ -20,6 +20,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .common import BoundedRequest
+
 RampDirection = Literal["onramp", "offramp"]
 
 # Lifecycle: quoted → awaiting_payment → funded → converting → settling →
@@ -79,7 +81,7 @@ def _positive_decimal_str(value: str, cap: str) -> str:
     return value
 
 
-class OnRampRequest(BaseModel):
+class OnRampRequest(BoundedRequest):
     """Start a PHP → USDCXLM ramp. The buyer pays PHP via a bank/e-wallet
     channel; the converted USDCXLM is delivered to `stellar_address`."""
 
@@ -103,7 +105,7 @@ class OnRampRequest(BaseModel):
     relationship_of_sender_to_beneficiary: str = "Myself"
 
 
-class OffRampRequest(BaseModel):
+class OffRampRequest(BoundedRequest):
     """Start a USDCXLM → PHP ramp. The agent sends USDCXLM to the returned
     deposit address; the converted PHP is paid out to the beneficiary bank."""
 

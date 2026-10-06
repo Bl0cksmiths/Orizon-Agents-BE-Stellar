@@ -469,8 +469,15 @@ def test_a_hundred_undisputed_tasks_cannot_hold_the_read_budget(client, settled,
 
     monkeypatch.setattr(dispute_svc, "list_for_task", _list)
 
+    # From a different address each, as a budget-sized flood has to arrive:
+    # one client is held to its per-route budget long before this (app/rate_limit.py).
     codes = {
-        client.post("/api/disputes/read-challenge", json={"task_id": f"tsk_any{i}"}).status_code for i in range(budget)
+        client.post(
+            "/api/disputes/read-challenge",
+            json={"task_id": f"tsk_any{i}"},
+            headers={"x-forwarded-for": f"198.51.{i // 250}.{i % 250}"},
+        ).status_code
+        for i in range(budget)
     }
 
     assert codes == {404}

@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any, Literal
 
-from agno.utils.log import LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -22,8 +21,15 @@ from fastapi.utils import is_body_allowed_for_status_code
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .agno_logging import install as install_agno_log_hand_back
 from .config import SERVICE_VERSION, settings
+
+# Imported by symbol, not as a module: the root `/health` handler defined
+# below rebinds the name `health` at module scope, which would shadow a
+# `from .routers import health` module import at call time.
+from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
 from .pdax.client import aclose_pdax_client
+from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
     agents,
     binding,
@@ -38,11 +44,7 @@ from .routers import (
     tasks,
     trace,
 )
-
-# Imported by symbol, not as a module: the root `/health` handler defined
-# below rebinds the name `health` at module scope, which would shadow a
-# `from .routers import health` module import at call time.
-from .routers.agents import REGISTRY_COUNT_HEADER, REGISTRY_SYNCED_HEADER
+from .routers.agents import NEXT_CURSOR_HEADER, REGISTRY_COUNT_HEADER, REGISTRY_SYNCED_HEADER, TOTAL_COUNT_HEADER
 from .routers.health import HealthResponse, health_payload
 from .routers.health import router as health_router
 
@@ -57,14 +59,27 @@ from .security import (
     RequestContextMiddleware,
     RequestIdLogFilter,
     SecretRedactionLogFilter,
+    SecurityHeadersMiddleware,
     request_id_var,
+    security_headers,
+    strict_cors_origins,
 )
 from .seed import seed_registry
-from .services import execution_svc, rating_writer, refund_reconcile, registry_sync, reputation_svc
+from .services import (
+    execution_svc,
+    rating_writer,
+    refund_reconcile,
+    registry_sync,
+    reputation_svc,
+    snapshots,
+    task_persistence,
+    task_warmup,
+)
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
+from .services.snapshot_store import close_snapshot_store
 from .stellar import client as sc
 
 
@@ -83,16 +98,18 @@ class JsonLogFormatter(logging.Formatter):
         msg = record.getMessage()
         if record.exc_info:
             msg = f"{msg}\n{self.formatException(record.exc_info)}"
-        return json.dumps(
-            {
-                "ts": f"{self.formatTime(record, '%Y-%m-%dT%H:%M:%S')}.{int(record.msecs):03d}Z",
-                "level": record.levelname,
-                "logger": record.name,
-                "msg": msg,
-                "request_id": getattr(record, "request_id", "-"),
-            },
-            ensure_ascii=False,
-        )
+        line = {
+            "ts": f"{self.formatTime(record, '%Y-%m-%dT%H:%M:%S')}.{int(record.msecs):03d}Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": msg,
+            "request_id": getattr(record, "request_id", "-"),
+        }
+        # Structured fields a record carries (the access log's `http`).
+        http = getattr(record, "http", None)
+        if isinstance(http, dict):
+            line["http"] = http
+        return json.dumps(line, ensure_ascii=False, default=str)
 
 
 # Root logging: everything the app emits leaves as one JSON line carrying the
@@ -113,17 +130,9 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 # Held at WARNING: the app logs what it dispatched itself, without the URL.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# agno gives its loggers a Rich console handler of their own and switches
-# propagation off, so its lines bypassed everything above: no JSON, no request
-# id, and no redaction — while it logs a provider's error text verbatim at
-# ERROR, the one line most likely to quote a key. Handing them back to the root
-# handler puts them under all three. Held at WARNING: agno's INFO chatter was
-# only ever console decoration, and its warnings and errors are what matters.
-for _agno_logger_name in (LOGGER_NAME, TEAM_LOGGER_NAME, WORKFLOW_LOGGER_NAME):
-    _agno_logger = logging.getLogger(_agno_logger_name)
-    _agno_logger.handlers.clear()
-    _agno_logger.propagate = True
-    _agno_logger.setLevel(logging.WARNING)
+# agno's loggers go through the root handler too (JSON, request id, redaction),
+# however late agno itself is first imported — see app/agno_logging.py.
+install_agno_log_hand_back()
 logger = logging.getLogger(__name__)
 
 
@@ -189,6 +198,42 @@ def _report_cold_start_routability() -> None:
     )
 
 
+# How long boot holds the first request for the bound-id set (see lifespan).
+BOOT_BINDING_LOAD_BUDGET_SECONDS = 3.0
+
+# Boot work that runs on past startup, held so shutdown can stop it.
+_boot_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _load_bindings() -> None:
+    """The bound-id load, then its background retry if the load failed."""
+    await refresh_bound_ids()
+    start_refresh_retry()
+
+
+async def _warm_reputation() -> None:
+    """Wait, bounded, for the registry's first pass, then pre-warm reputation."""
+    await registry_sync.wait_first_pass(settings.registry_boot_sync_timeout_seconds)
+    # Last, so the reads it queues cannot delay anything above; after the
+    # registry wait, so the on-chain agents that pass indexed are read too.
+    reputation_svc.start_prewarm()
+
+
+async def _warm_tasks() -> None:
+    """Load the newest tasks from the durable store, then let the overview's
+    completion rate pick them up on its next poll."""
+    if await task_warmup.warm_recent_tasks():
+        metrics.overview_cell.expire()
+
+
+async def _stop_boot_tasks() -> None:
+    tasks = [t for t in _boot_tasks if not t.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=5)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # First thing in the boot sequence: whether this config admits new agents
@@ -229,30 +274,57 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Seed the planner's routability set from the binding store. Without this a
     # binding made before this process started would stay unroutable until the
     # operator bound it again — which is precisely the restart AC-5 is about.
-    await refresh_bound_ids()
     # ...and if that read failed, keep trying in the background. The load
     # swallows its own failure so an unreadable store cannot stop the service,
     # which used to mean a store that was merely SLOW to wake — a cold
     # serverless Postgres, exactly what the min_size=0 pool is built for — left
     # every externally operated agent unroutable for the whole process
     # lifetime, with nothing but a redeploy to fix it. A no-op on the healthy
-    # path: the load above has already set `_loaded` and no task is created.
-    start_refresh_retry()
-    # Wait, bounded, for the registry sync's first pass — started above, so it
-    # has been running alongside the binding load — before the pre-warm reads
-    # the registry. Without this the pre-warm read the seeded catalog alone,
-    # and the first plans after a restart had no on-chain agent in them (S13).
-    # A pass slower than REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS is not cancelled:
-    # boot stops waiting with a WARNING and the loop finishes it. Nothing is
-    # served until this returns — /health included — which is why it is
-    # bounded well inside Render's health-check grace.
-    await registry_sync.wait_first_pass(settings.registry_boot_sync_timeout_seconds)
-    # Read every agent's reputation once, in the background, so the first plan
-    # after a deploy is routed on the ledger rather than on priors. Last, so
-    # the reads it queues cannot delay anything above; after the registry
-    # wait, so the on-chain agents that pass indexed are read too.
-    reputation_svc.start_prewarm()
+    # path: the load has already set `_loaded` and no task is created.
+    #
+    # Boot waits for the load only up to BOOT_BINDING_LOAD_BUDGET_SECONDS. A
+    # Neon compute waking from suspend answers in a second or two, and that is
+    # worth holding the first request for; a store that takes longer is not —
+    # the request that woke the instance would wait on it, the health check
+    # with it. Past the budget the load is NOT cancelled: it finishes in the
+    # background, and its retry is scheduled when it does.
+    bindings = asyncio.get_running_loop().create_task(_load_bindings(), name="boot-bindings")
+    _boot_tasks.add(bindings)
+    bindings.add_done_callback(_boot_tasks.discard)
+    _done, pending_load = await asyncio.wait({bindings}, timeout=BOOT_BINDING_LOAD_BUDGET_SECONDS)
+    if pending_load:
+        logger.warning(
+            "binding store: the bound-id set did not load within %.1f s of boot — serving without it; external "
+            "agents are unroutable until the load, still running in the background, lands",
+            BOOT_BINDING_LOAD_BUDGET_SECONDS,
+        )
+    # The registry sync's first pass and the reputation pre-warm that reads it,
+    # in the background. The pre-warm waits, bounded, for the pass — started
+    # above — so it reads the on-chain agents too; without that the pre-warm
+    # read the seeded catalog alone (S13). Boot used to await that wait
+    # itself, which on the live registry (~600 agents, a pass of minutes) was
+    # REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS added to every wake from idle for
+    # nothing: the pass never finished inside it. The mirror says whether it
+    # is complete (`X-Registry-Synced`, `registry_synced`), so nothing served
+    # in the meantime claims to be the whole registry.
+    warmup = asyncio.get_running_loop().create_task(_warm_reputation(), name="boot-reputation-warmup")
+    _boot_tasks.add(warmup)
+    warmup.add_done_callback(_boot_tasks.discard)
+    # The newest tasks from the durable store, so the task list and the
+    # overview's completion rate are not empty after a restart. Background
+    # and bounded (services/task_warmup.py): boot never waits on it.
+    tasks_warmup = asyncio.get_running_loop().create_task(_warm_tasks(), name="boot-task-warmup")
+    _boot_tasks.add(tasks_warmup)
+    tasks_warmup.add_done_callback(_boot_tasks.discard)
+    # The read snapshots behind the dashboard (overview, reputation batch,
+    # adoption report): their keep-warm refresher, and the restore of the
+    # last adoption report from the database. Background only.
+    snapshots.start()
     yield
+    # The boot tasks and the snapshot builds first: each may still be reading
+    # through the stores and the read pool that the steps below close.
+    await _stop_boot_tasks()
+    await snapshots.stop()
     # Before anything else in the shutdown: a retry sitting in a 120 s sleep
     # would otherwise still be pending when the loop closes.
     await stop_refresh_retry()
@@ -277,6 +349,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task.cancel()
     if pending:
         await asyncio.wait(pending, timeout=5)
+    # After the drain, so the runs' final states are among what is flushed:
+    # the task journal's queued writes go to the store (bounded), then its
+    # pool is released. Before the dispute store closes, like every store.
+    await task_persistence.close()
     await aclose_pdax_client()
     # Release the binding store's connection pool. A no-op for the in-memory
     # store, which is what runs whenever DATABASE_URL is unset.
@@ -286,36 +362,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # is written on the execution path, so this store is live on any deployment
     # that has settled a workflow, not only one an operator has bound.
     await close_dispute_store()
+    await close_snapshot_store()
     executor.shutdown(wait=False)
-
-
-class SecurityHeadersMiddleware:
-    """Pure-ASGI middleware stamping baseline hardening headers on responses.
-
-    Deliberately minimal for a JSON API: no CSP (nothing is rendered) and no
-    HSTS (TLS terminates at Render's edge, which sets it).
-    """
-
-    _HEADERS = [
-        (b"x-content-type-options", b"nosniff"),
-        (b"referrer-policy", b"no-referrer"),
-        (b"x-frame-options", b"DENY"),
-    ]
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        async def send_with_headers(message: dict) -> None:
-            if message["type"] == "http.response.start":
-                message["headers"] = list(message.get("headers") or []) + self._HEADERS
-            await send(message)
-
-        await self.app(scope, receive, send_with_headers)
 
 
 # DOCS_ENABLED=false hides /docs, /redoc, and the schema on locked-down
@@ -369,6 +417,11 @@ app = FastAPI(
 # layers wrapping it.
 app.add_middleware(BodyLimitMiddleware)
 
+# Per-route budgets for the write and expensive routes (app/rate_limit.py).
+# Inside the global limiter, so a request it refused never spends one, and
+# outside the body limiter, which still meters the body this layer replays.
+app.add_middleware(RouteRateLimitMiddleware)
+
 # Registered before CORS so CORS wraps it and 429 responses still carry
 # the Access-Control-Allow-Origin header the browser needs to read them.
 app.add_middleware(RateLimitMiddleware)
@@ -388,12 +441,12 @@ def _cors_allows(origin: str) -> bool:
     """Mirror the CORS middleware's decision — the exact allow-list OR the
     compiled origin regex — for handlers that must stamp CORS headers by
     hand (the 500 handler runs outside the middleware stack)."""
-    return origin in settings.cors_origin_list or _CORS_ORIGIN_REGEX.fullmatch(origin) is not None
+    return origin in strict_cors_origins(settings.cors_origin_list) or _CORS_ORIGIN_REGEX.fullmatch(origin) is not None
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=strict_cors_origins(settings.cors_origin_list),
     allow_origin_regex=_CORS_ORIGIN_REGEX.pattern,
     # The API is token/header-based — no cookies — so credentials stay off,
     # and only the methods/headers the frontend actually sends are allowed.
@@ -411,9 +464,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-api-key", "x-task-token", "x-dispute-read-grant"],
     # Response headers a cross-origin caller may read. GET /api/agents says in
-    # these whether its list is the whole registry (routers/agents.py); a
+    # these whether its list is the whole registry, how long it is and where
+    # the next page starts (routers/agents.py); the snapshot reads say how old
+    # they are (app/http_cache.py); ETag is what a client revalidates with. A
     # browser hides any header not listed here from cross-origin script.
-    expose_headers=[REGISTRY_SYNCED_HEADER, REGISTRY_COUNT_HEADER],
+    expose_headers=[
+        REGISTRY_SYNCED_HEADER,
+        REGISTRY_COUNT_HEADER,
+        TOTAL_COUNT_HEADER,
+        NEXT_CURSOR_HEADER,
+        SNAPSHOT_AGE_HEADER,
+        SNAPSHOT_SOURCE_HEADER,
+        "ETag",
+        "Retry-After",
+    ],
 )
 
 # Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
@@ -527,11 +591,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     # Stamp the hardening headers — and the CORS header for known origins —
     # by hand, or browsers report an opaque CORS failure instead of letting
     # the frontend read this JSON envelope.
-    headers = {
-        "x-content-type-options": "nosniff",
-        "referrer-policy": "no-referrer",
-        "x-frame-options": "DENY",
-    }
+    headers = {name.decode(): value.decode() for name, value in security_headers(request.url.path)}
     # RequestContextMiddleware's send wrapper never sees this response (the
     # exception unwound past it), so echo the id header here as well.
     request_id = request_id_var.get()

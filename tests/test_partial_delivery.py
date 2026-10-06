@@ -188,15 +188,16 @@ def test_a_hung_endpoint_is_not_charged_and_the_workflow_still_seals(monkeypatch
     assert authorized - sum(p["amount"] for p in _payouts(settle)) == sc.usdc_to_i128(PRICES[HANGS])
     assert any("the rest released" in m for m in _messages(task_id))
 
-    # Sealed, under the settle's own job id: the plan's agents in plan order
-    # (the hung one included — the seal records what was planned), only the
-    # delivered step's receipt, and the paid total, not the plan's.
+    # Sealed, under the settle's own job id: ONLY the agent that delivered and
+    # was paid (D-086 — the hung one is not attested to work it never did),
+    # its receipt beside it, and the paid total, not the plan's.
     [seal] = chain.named("seal")
     job_id = scval.to_native(settle[2])
     assert scval.to_native(seal[1]) == job_id
-    assert scval.to_native(seal[4]) == list(order)
+    assert scval.to_native(seal[4]) == [DELIVERS]
     assert scval.to_native(seal[5]) == [_receipt(0)]
     assert scval.to_native(seal[6]) == 300_000
+    assert any(m.startswith("workflow sealed — 1 agents · 0.030 USDC") for m in _messages(task_id))
 
     # The settlement a dispute is judged against says the same thing.
     record = store.recorded[-1]
@@ -245,7 +246,8 @@ def test_a_partial_run_with_no_artifact_left_is_failed_yet_charged_and_sealed(mo
 
     [settle] = chain.named("settle")
     assert _payouts(settle) == [{"agent_id": DELIVERS, "amount": 300_000}]
-    assert len(chain.named("seal")) == 1
+    [seal] = chain.named("seal")
+    assert scval.to_native(seal[4]) == [DELIVERS]
     assert [(agent, rating) for agent, _job, rating, _kind in ratings] == [(DELIVERS, 80), (HANGS, FAILED_RATING)]
     task = state.tasks["tsk_ac5_no_artifact"]
     assert (task.status, task.spent, task.settlement) == ("failed", PRICES[DELIVERS], "settled")

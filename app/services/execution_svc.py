@@ -9,17 +9,27 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 from ..agents.registry import get_worker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
-from ..schemas import PlanStep, SettlementState, StoredPlan, Task, TaskStatus, TraceLevel, TraceLine
+from ..schemas import (
+    PlanStep,
+    SealKind,
+    SealState,
+    SettlementState,
+    StoredPlan,
+    Task,
+    TaskStatus,
+    TraceLevel,
+    TraceLine,
+)
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer, reputation_svc
+from . import failure_tracker, rating_writer, reputation_svc, task_persistence
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 from .orchestrator_svc import _is_listed
@@ -34,6 +44,17 @@ STEP_TIMEOUT_SECONDS = 120.0
 # only keeps a weak reference, so an un-referenced task can be garbage
 # collected mid-run. Tasks remove themselves on completion.
 _background_tasks: set[asyncio.Task] = set()
+
+# Task ids whose run is executing in THIS process, from its first line to its
+# stream's close. A task goes terminal at settlement, while its run still has
+# the seal reconciliation and the ratings to write, so the status cannot say
+# whether a producer still feeds the task's stream; this can (`is_live`).
+_live_runs: set[str] = set()
+
+
+def is_live(task_id: str) -> bool:
+    """True while this process's run of `task_id` may still write trace lines."""
+    return task_id in _live_runs
 
 
 class CapacityExhaustedError(RuntimeError):
@@ -115,7 +136,7 @@ async def _emit(
     if settlement is not None:
         task = state.tasks.get(task_id)
         if task is not None:
-            state.tasks[task_id] = task.model_copy(update={"settlement": settlement})
+            state.put_task(task.model_copy(update={"settlement": settlement}))
     line = TraceLine(t=_now_ts(start), level=level, msg=msg, settlement=settlement)
     state.append_trace(task_id, line)
     await bus.publish(task_id, line)
@@ -402,8 +423,9 @@ async def execute_plan(
 
     task_id = f"tsk_{secrets.token_hex(8)}"
     # Capability token for reading this task (status/artifact/trace). Lives
-    # in state.task_tokens — never on the Task response model — and is only
-    # enforced when settings.task_auth_required is on.
+    # in state.task_tokens — never on the Task response model; the durable
+    # store keeps only its digest — and is only enforced when
+    # settings.task_auth_required is on.
     read_token = secrets.token_urlsafe(24)
     task = Task(
         id=task_id,
@@ -413,12 +435,15 @@ async def execute_plan(
         status="running",
         # started_at defaults to now; `started` is derived from it per response.
     )
-    state.add_task(task)
-    state.task_tokens[task_id] = read_token
+    state.add_task(task, read_token=read_token)
 
     _track_background_task(
         asyncio.create_task(_run(plan, task_id, auth_id_hex=auth_id_hex, payer=payer, authorized_max=authorized_max))
     )
+    # Nothing awaits between starting the run and returning: the router claims
+    # the authorization for this task only once this returns, and a wait here
+    # that was cancelled would unclaim an authorization the run is already
+    # spending. The receipt's write-through wait is the router's, after that.
     return task_id
 
 
@@ -430,6 +455,7 @@ async def _run(
     payer: str | None = None,
     authorized_max: int | None = None,
 ) -> None:
+    _live_runs.add(task_id)
     start = time.monotonic()
     spent = 0.0
     succeeded = 0  # steps that returned output; drives the terminal status
@@ -443,6 +469,11 @@ async def _run(
     # until expiry (S4). One that ends after it never does: that settle may
     # still land, and a second one is a replay at best and a race at worst.
     settle_attempted = False
+    # Set the moment the task is written terminal. From then on the task is
+    # the buyer's receipt of what happened — a settle that moved money above
+    # all — and nothing later (a cancel during the seal or the ratings, a bug
+    # after the settle) may rewrite it as `failed` with no hash.
+    finalized = False
 
     # Accumulate prior step outputs so later steps can build on them.
     # The kit (if any) is seeded into context up-front so EVERY worker
@@ -765,6 +796,23 @@ async def _run(
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, succeeded, last_artifact)
+        # The job id this run's ratings are written under, once the settlement
+        # is over. Ratings are FOLLOW-UP work: one on-chain submit per step, in
+        # sequence, each polling up to ~30s, and the receipt used to read
+        # `running` for all of it after the buyer's money had moved. Now the
+        # task is final first and the ratings follow it, still the run's own
+        # work — still traced, still holding its capacity slot until done.
+        rate_under: bytes | None = None
+        # Seals that did not confirm, reconciled once the receipt is final.
+        pending_seals: list[_PendingSeal] = []
+
+        def _money_moved(settle_tx: str) -> None:
+            # Called the moment the settle (v2) or charge (v1) CONFIRMS, before
+            # the seal's own poll: the receipt is final, with the hash of what
+            # moved, from that instant. The seal's hash is added when it lands.
+            nonlocal finalized
+            _finalize_task(task_id, status, spent, last_artifact, settle_tx, None)
+            finalized = True
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
             if succeeded == 0 and await _escrow_version() >= 2:
@@ -783,16 +831,7 @@ async def _run(
                     delivered_steps=frozenset(),
                     authorized_max=authorized_max,
                 )
-                await _submit_ratings(
-                    task_id,
-                    start,
-                    plan,
-                    delivered,
-                    payer=payer,
-                    job_id=unsettled_job_id(task_id),
-                    undispatched=frozenset(undispatched),
-                    first_party_ids=frozenset(first_party_ids),
-                )
+                rate_under = unsettled_job_id(task_id)
             elif succeeded == 0:
                 # Same rule as the simulated branch below — a workflow that
                 # produced nothing has nothing to attest to, and nothing to
@@ -819,16 +858,7 @@ async def _run(
                 # routing floor needs, and withholding it meant the canonical
                 # broken endpoint — down, failing everything — accumulated no
                 # negative evidence at all and stayed routable forever.
-                await _submit_ratings(
-                    task_id,
-                    start,
-                    plan,
-                    delivered,
-                    payer=payer,
-                    job_id=unsettled_job_id(task_id),
-                    undispatched=frozenset(undispatched),
-                    first_party_ids=frozenset(first_party_ids),
-                )
+                rate_under = unsettled_job_id(task_id)
             else:
                 # The settlement is recorded inside this, the moment the charge
                 # confirms and before the seal — and so before the ratings
@@ -849,6 +879,8 @@ async def _run(
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
                     authorized_max=authorized_max,
+                    on_money_moved=_money_moved,
+                    on_seal_pending=pending_seals.append,
                 )
                 # Rated whether or not the money moved, exactly as the
                 # no-success branch above is (ADR 0005 D2). This used to sit
@@ -863,31 +895,24 @@ async def _run(
                 # asymmetry the story exists to remove. Settlement answers
                 # "who gets paid"; a rating answers "who delivered", and the
                 # second does not depend on the first.
-                await _submit_ratings(
-                    task_id,
-                    start,
-                    plan,
-                    delivered,
-                    payer=payer,
-                    # The job id is minted by the charge, so a run that did not
-                    # settle has none. Falling back to the task-derived id is
-                    # what lets the evidence land anyway, and it is derived
-                    # rather than random so the ledger's (agent_id, job_id)
-                    # replay guard still counts one run exactly once.
-                    job_id=job_id or unsettled_job_id(task_id),
-                    undispatched=frozenset(undispatched),
-                    first_party_ids=frozenset(first_party_ids),
-                )
+                #
+                # The job id is minted by the charge, so a run that did not
+                # settle has none. Falling back to the task-derived id is what
+                # lets the evidence land anyway, and it is derived rather than
+                # random so the ledger's (agent_id, job_id) replay guard still
+                # counts one run exactly once.
+                rate_under = job_id or unsettled_job_id(task_id)
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
-            # workflow that produced nothing has nothing to attest to.
+            # workflow that produced nothing has nothing to attest to — and it
+            # counts the agents that delivered, never the plan's (D-086).
             sim_hash = "0x" + secrets.token_hex(16)
             await _emit(task_id, start, "proof", f"ERC-8004 attestation: {sim_hash} (simulated)")
             await _emit(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {total_steps} agents · {spent:.3f} USDC · {time.monotonic() - start:.2f}s",
+                f"workflow sealed — {succeeded} agents · {spent:.3f} USDC · {time.monotonic() - start:.2f}s",
             )
 
         if status != "complete":
@@ -907,19 +932,41 @@ async def _run(
             )
 
         _finalize_task(task_id, status, spent, last_artifact, charge_tx, proof_tx)
+        finalized = True
+
+        # Follow-up work, in this order because both sign with the one server
+        # account and parallel submits collide on its sequence number: first
+        # the seal reconciliation (the attestation of money that moved), then
+        # the ratings.
+        for pending in pending_seals:
+            await _reconcile_seal(task_id, start, pending)
+        if rate_under is not None and payer:
+            await _submit_ratings(
+                task_id,
+                start,
+                plan,
+                delivered,
+                payer=payer,
+                job_id=rate_under,
+                undispatched=frozenset(undispatched),
+                first_party_ids=frozenset(first_party_ids),
+            )
 
     except asyncio.CancelledError:
         # Shutdown or external cancel: leave the task terminal instead of
         # "running" forever, tell the stream, and keep the cancellation
         # propagating. shield: a second cancel must not kill the trace line.
-        _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+        # A task already final keeps what it says (see `finalized`).
+        if not finalized:
+            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
         raise
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
-        _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+        if not finalized:
+            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
@@ -929,6 +976,10 @@ async def _run(
         # (a bare `await asyncio.sleep` here would swallow the close when a
         # CancelledError landed on it).
         await asyncio.shield(_finish_stream(task_id))
+        _live_runs.discard(task_id)
+        # The run's terminal state, durably, before the run is gone — shielded
+        # for the same reason: it is the write a receipt reads after a restart.
+        await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
 
 
 async def _release_on_exit(task_id: str, start: float, auth_id_hex: str, reason: str) -> None:
@@ -987,14 +1038,16 @@ def _finalize_task(
     task = state.tasks.get(task_id)
     if task is None:
         return
-    state.tasks[task_id] = task.model_copy(
-        update={
-            "status": status,
-            "spent": round(spent, 4),
-            "artifact": artifact,
-            "charge_tx": charge_tx,
-            "proof_tx": proof_tx,
-        }
+    state.put_task(
+        task.model_copy(
+            update={
+                "status": status,
+                "spent": round(spent, 4),
+                "artifact": artifact,
+                "charge_tx": charge_tx,
+                "proof_tx": proof_tx,
+            }
+        )
     )
 
 
@@ -1785,8 +1838,12 @@ async def _settle_v2(
     delivered_steps: frozenset[int],
     authorized_max: int | None = None,
     on_settled: Callable[[str, bytes, _PayoutPlan, list[bytes] | None], Awaitable[None]] | None = None,
+    on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """PaymentEscrow v2 `settle`, then the attestation seal.
+
+    A seal that does not confirm is handed to `on_seal_pending`, for the run to
+    reconcile once its receipt is final (`_reconcile_seal`).
 
     The v2 twin of `_settle_onchain`, and deliberately the same contract with
     its caller: returns (settle_tx, proof_tx, job_id), and `on_settled` is
@@ -2007,9 +2064,27 @@ async def _settle_v2(
 
         if not delivered_steps:
             return (settle_tx, None, settled_job_id)
-
         # Seal, exactly as v1 does, with one receipt per payout rather than one
         # for the run: the attestation's link to every payment that funded it.
+        # The agents are the PAID ones, one per payout, so `agents[i]` and
+        # `receipts[i]` name the same payment (D-086). Sealing every plan step
+        # attested work to an agent that timed out, failed or was refused —
+        # and the seal is permanent on-chain evidence a buyer or an indexer
+        # reads as "this agent delivered and was paid for this job".
+        #
+        # A run that delivered and paid NOBODY (no confirmed on-chain owner —
+        # the seeded catalogue — a free step, a spent cap) is sealed too, as
+        # DELIVERY ONLY: the agents of the delivered steps in plan order, NO
+        # receipt and a total of zero. The contract stores exactly what it is
+        # given, so with the receipts empty and `total_spent` 0 nothing in the
+        # attestation reads as a payment, and `seal_kind` says so to clients.
+        # Under the release's own job id, so it attests the job the custody
+        # was handed back for.
+        kind: SealKind = "delivery_only" if release else "paid"
+        if release:
+            sealed_agents = [plan.plan.steps[i].agent_id for i in sorted(delivered_steps)]
+        else:
+            sealed_agents = [payout.agent_id for payout in payout_plan.payouts]
         if receipts is None and payout_plan.payouts:
             logger.error(
                 "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
@@ -2026,44 +2101,50 @@ async def _settle_v2(
                 task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links"
             )
         intent_hash = hashlib.sha256(plan.intent.encode("utf-8")).digest()
-        seal = await sc.invoke_with_server_key_async(
-            sc.contract_ids().attestation_registry,
-            "seal",
-            [
-                sc.addr(settler),
-                sc.bytes16(job_id),
-                sc.addr(payer),
-                sc.bytes32(intent_hash),
-                _sv.to_vec([sc.sym(s.agent_id) for s in plan.plan.steps]),
-                _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
-                sc.i128(total),
-            ],
-        )
-        seal_tx = seal.get("hash")
-        if seal.get("status") == "SUCCESS" and seal_tx:
+        seal_args = [
+            sc.addr(settler),
+            sc.bytes16(job_id),
+            sc.addr(payer),
+            sc.bytes32(intent_hash),
+            _sv.to_vec([sc.sym(agent_id) for agent_id in sealed_agents]),
+            _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
+            sc.i128(total),
+        ]
+        _note_seal(task_id, "pending", kind=kind)
+        seal_tx, submission = await _submit_seal(seal_args)
+        if submission is None:
             proof_tx = seal_tx
-            await _emit(task_id, start, "proof", f"ERC-8004 attestation sealed · tx {seal_tx[:10]}…")
-            await _emit(
-                task_id,
-                start,
-                "proof",
-                f"workflow sealed — {len(plan.plan.steps)} agents · {total_usdc:.3f} USDC · "
-                f"{time.monotonic() - start:.2f}s",
-            )
+            await _sealed(task_id, start, seal_tx, agents=len(sealed_agents), total_usdc=total_usdc, kind=kind)
         else:
             logger.error(
-                "task %s: AttestationRegistry.seal did not settle — status=%s hash=%s "
+                "task %s: AttestationRegistry.seal did not confirm — %s, hash=%s; reconciling "
                 "(job %s settled %d stroops via tx %s, auth %s, payer %s)",
                 task_id,
-                seal.get("status"),
-                seal_tx,
+                submission.outcome,
+                submission.tx_hash,
                 job_hex,
                 total,
                 settle_tx,
                 auth_id_hex,
                 payer,
             )
-            await _emit(task_id, start, "error", f"seal status={seal.get('status')} hash={seal_tx}")
+            await _emit(
+                task_id,
+                start,
+                "error",
+                f"seal {submission.outcome} hash={submission.tx_hash} — checking the ledger before trying again",
+            )
+            if on_seal_pending is not None:
+                on_seal_pending(
+                    _PendingSeal(
+                        job_id=job_id,
+                        args=seal_args,
+                        agents=len(sealed_agents),
+                        total_usdc=total_usdc,
+                        kind=kind,
+                        submissions=[submission],
+                    )
+                )
     except asyncio.CancelledError:
         logger.error(
             "task %s: on-chain settle cancelled mid-flight (job %s, auth %s, payer %s, %d stroops, "
@@ -2120,6 +2201,244 @@ async def _settle_v2(
                 await release_authorization(auth_id_hex, reason="settle_not_submitted")
 
     return (settle_tx, proof_tx, settled_job_id)
+
+
+# ── seal reconciliation ─────────────────────────────────────────────────
+# The seal's validity window: `client._send_server_signed` builds every
+# server-signed transaction with `.set_timeout(30)`, so a seal can land no later
+# than the moment it was built plus this. A test holds the two together.
+SEAL_TX_TIMEOUT_SECONDS = 30
+# How far past that last valid moment the ledger must be before a hash the RPC
+# cannot find is read as "never landed". Short, because being early costs one
+# wasted fee and nothing else: the contract refuses a second seal of one job
+# (`AlreadyExists`), so a re-submission can never attest a job twice.
+SEAL_EXPIRY_MARGIN_SECONDS = 30
+# The RPC's oldest retained ledger must close at least this long before the
+# submission for NOT_FOUND to cover it (refund_reconcile.HISTORY_MARGIN_SECONDS).
+SEAL_HISTORY_MARGIN_SECONDS = 60
+# One check per entry, after waiting this long: ~2 minutes in all, past the
+# validity window plus its margin, so a lost seal is either found or provably
+# absent — and re-submitted — inside the bound.
+SEAL_RECONCILE_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0)
+# Submissions of one seal, the first included.
+MAX_SEAL_SUBMISSIONS = 3
+# The whole wait for one ledger or registry read.
+SEAL_LOOKUP_TIMEOUT_SECONDS = 20.0
+# AttestationRegistry's `Error::AlreadyExists`: the job is already attested.
+_ALREADY_SEALED = 3
+
+
+@dataclass(frozen=True)
+class _SealSubmission:
+    """One submission of a seal that did not confirm, and what is known of it."""
+
+    tx_hash: str | None  # None when nothing was signed or the client never said
+    submitted_at: float  # our clock, taken BEFORE the transaction was built
+    # unconfirmed: sent, outcome unknown · rejected: the ledger FAILED it ·
+    # not_sent: refused before it reached the network · already_sealed: the
+    # contract refused it because the job is attested
+    outcome: Literal["unconfirmed", "rejected", "not_sent", "already_sealed"]
+
+
+@dataclass
+class _PendingSeal:
+    """A seal the run still owes an answer about."""
+
+    job_id: bytes
+    args: list[Any]  # exactly what was submitted, so a re-submission is identical
+    agents: int
+    total_usdc: float
+    kind: SealKind
+    submissions: list[_SealSubmission]
+    record: SettlementRecord | None = None
+
+
+def _note_seal(task_id: str, seal: SealState, proof_tx: str | None = None, *, kind: SealKind | None = None) -> None:
+    """Write the seal's state (and, once known, its hash and kind) onto the task."""
+    task = state.tasks.get(task_id)
+    if task is None:
+        return
+    update: dict[str, Any] = {"seal": seal}
+    if kind is not None:
+        update["seal_kind"] = kind
+    if proof_tx is not None:
+        update["proof_tx"] = proof_tx
+    state.put_task(task.model_copy(update=update))
+
+
+async def _sealed(
+    task_id: str, start: float, seal_tx: str | None, *, agents: int, total_usdc: float, kind: SealKind
+) -> None:
+    if seal_tx is not None:
+        await _emit(task_id, start, "proof", f"ERC-8004 attestation sealed · tx {seal_tx[:10]}…")
+        elapsed = f"{time.monotonic() - start:.2f}s"
+        if kind == "delivery_only":
+            line = f"workflow sealed — {agents} agents delivered, no payment was made · {elapsed}"
+        else:
+            line = f"workflow sealed — {agents} agents · {total_usdc:.3f} USDC · {elapsed}"
+        await _emit(task_id, start, "proof", line)
+    else:
+        await _emit(task_id, start, "proof", "attestation found on-chain for this job")
+    _note_seal(task_id, "sealed", seal_tx)
+
+
+async def _submit_seal(args: list[Any]) -> tuple[str | None, _SealSubmission | None]:
+    """Submit `AttestationRegistry.seal`: (its hash, None) when it CONFIRMED, or
+    (None, the submission) when it did not.
+
+    Never raises but on cancellation: every other outcome is a submission the
+    reconciliation can reason about, by what the client's exception types
+    promise (`NotSubmittedError` nothing was sent; `InFlightError` it may land).
+    """
+    from ..stellar import client as sc
+
+    submitted_at = time.time()
+    try:
+        seal = await sc.invoke_with_server_key_async(sc.contract_ids().attestation_registry, "seal", args)
+    except sc.ContractError as e:
+        outcome: Literal["unconfirmed", "rejected", "not_sent", "already_sealed"] = (
+            "already_sealed" if e.code == _ALREADY_SEALED else "not_sent"
+        )
+        return None, _SealSubmission(None, submitted_at, outcome)
+    except sc.NotSubmittedError:
+        return None, _SealSubmission(None, submitted_at, "not_sent")
+    except sc.InFlightError as e:
+        return None, _SealSubmission(e.tx_hash, submitted_at, "unconfirmed")
+    except Exception:
+        logger.exception("seal submission failed in a way that does not say whether it was sent")
+        return None, _SealSubmission(None, submitted_at, "unconfirmed")
+    tx = seal.get("hash")
+    status = str(seal.get("status") or "")
+    if status == "SUCCESS" and tx:
+        return tx, None
+    return None, _SealSubmission(tx or None, submitted_at, "rejected" if status == "FAILED" else "unconfirmed")
+
+
+async def _seal_verdict(submission: _SealSubmission) -> Literal["landed", "absent", "unknown"]:
+    """Whether one submission landed, provably never will, or cannot be told yet."""
+    from ..stellar import client as sc
+
+    if submission.outcome == "not_sent":
+        return "absent"
+    expired_at = submission.submitted_at + SEAL_TX_TIMEOUT_SECONDS + SEAL_EXPIRY_MARGIN_SECONDS
+    if submission.tx_hash is None:
+        # No hash to ask about (or a contract refusal the registry read below
+        # answers). Past its last valid moment by our clock, whatever it was
+        # cannot land any more.
+        if submission.outcome == "already_sealed":
+            return "unknown"
+        return "absent" if time.time() > expired_at else "unknown"
+    try:
+        found = await asyncio.wait_for(
+            asyncio.to_thread(sc.get_transaction, submission.tx_hash), SEAL_LOOKUP_TIMEOUT_SECONDS
+        )
+    except Exception as e:
+        logger.warning("seal %s: ledger lookup failed: %s", submission.tx_hash, e)
+        return "unknown"
+    if found.status == "SUCCESS":
+        return "landed"
+    if found.status == "FAILED":
+        return "absent"
+    if found.status != "NOT_FOUND":
+        return "unknown"
+    if found.oldest_ledger_close_time > submission.submitted_at - SEAL_HISTORY_MARGIN_SECONDS:
+        return "unknown"  # the RPC's history starts after it was sent: it may have forgotten it
+    if found.latest_ledger_close_time <= expired_at:
+        return "unknown"  # still inside its validity window: it may yet land
+    return "absent"
+
+
+async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> None:
+    """Find out what became of a seal that did not confirm, within a bound.
+
+    Each round, after its delay: every submission is looked up by hash (one
+    that landed is the proof), then the registry is asked whether the job is
+    attested at all. Only when every submission is PROVEN absent and the job is
+    not attested is the identical seal submitted again — at most
+    `MAX_SEAL_SUBMISSIONS` in all. The contract refuses a second seal of one
+    job, so even a re-submission racing a late first one cannot attest twice.
+    The task's `seal` and trace say how it ended; a cancellation (shutdown)
+    leaves it `pending`, with the job id in the log for whoever follows up.
+    """
+    from ..stellar import client as sc
+
+    registry = sc.contract_ids().attestation_registry
+    outcome: SealState = "unconfirmed"
+    try:
+        for delay in SEAL_RECONCILE_DELAYS:
+            await asyncio.sleep(delay)
+            all_absent = True
+            for submission in list(pending.submissions):
+                verdict = await _seal_verdict(submission)
+                if verdict == "landed":
+                    await _sealed(
+                        task_id,
+                        start,
+                        submission.tx_hash,
+                        agents=pending.agents,
+                        total_usdc=pending.total_usdc,
+                        kind=pending.kind,
+                    )
+                    if submission.tx_hash is not None and pending.record is not None:
+                        await _record_proof(task_id, pending.record, submission.tx_hash)
+                    return
+                all_absent = all_absent and verdict == "absent"
+            try:
+                held = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        sc.simulate_read, registry, "exists", [sc.bytes16(pending.job_id)], load_source=False
+                    ),
+                    SEAL_LOOKUP_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                logger.warning("task %s: attestation registry unreadable while reconciling its seal: %s", task_id, e)
+                continue
+            if held:
+                await _sealed(
+                    task_id, start, None, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind
+                )
+                return
+            if not all_absent:
+                continue
+            if len(pending.submissions) >= MAX_SEAL_SUBMISSIONS:
+                outcome = "failed"
+                break
+            seal_tx, again = await _submit_seal(pending.args)
+            if again is None:
+                await _sealed(
+                    task_id, start, seal_tx, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind
+                )
+                if seal_tx is not None and pending.record is not None:
+                    await _record_proof(task_id, pending.record, seal_tx)
+                return
+            pending.submissions.append(again)
+    except asyncio.CancelledError:
+        logger.error(
+            "task %s: seal reconciliation cancelled — the seal of job %s is still unconfirmed (submissions: %s)",
+            task_id,
+            pending.job_id.hex(),
+            [s.tx_hash for s in pending.submissions],
+        )
+        raise
+    hashes = [s.tx_hash for s in pending.submissions]
+    if outcome == "failed":
+        logger.error(
+            "task %s: seal FAILED — job %s is provably not attested after %d submission(s) %s; its payment stands",
+            task_id,
+            pending.job_id.hex(),
+            len(pending.submissions),
+            hashes,
+        )
+        await _emit(task_id, start, "error", "attestation not sealed — the ledger never took it; the payment stands")
+    else:
+        logger.error(
+            "task %s: seal UNCONFIRMED after reconciliation — job %s may or may not be attested (submissions %s)",
+            task_id,
+            pending.job_id.hex(),
+            hashes,
+        )
+        await _emit(task_id, start, "error", "attestation unconfirmed — it may still be on the ledger")
+    _note_seal(task_id, outcome)
 
 
 def _settled_usdc(total_usdc: float) -> float:
@@ -2342,6 +2661,12 @@ async def _record_settlement(
         await _emit(task_id, start, "error", "settlement not recorded — this run cannot be disputed")
         return None
 
+    if record.settled_usdc <= 0:
+        # A v2 settle that paid nobody (every delivered step free or unowned):
+        # every step is refused as `nothing_was_charged`, so there is no window
+        # to promise — announcing one would send the buyer to a door that
+        # cannot open.
+        return record
     # The window is a promise, so it is made in the buyer's own record of the
     # run. The job id stays OUT of it: trace lines are world-readable when
     # TASK_AUTH_REQUIRED is off, and the dispute is filed against that id.
@@ -2391,8 +2716,14 @@ async def _settle_and_record(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None = None,
+    on_money_moved: Callable[[str], None] | None = None,
+    on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Charge, record the settlement, seal, then record the seal — in that order.
+
+    `on_money_moved(tx)` is called once, the moment the charge or settle
+    CONFIRMS and its settlement is recorded — before the seal is submitted —
+    so the run can make its receipt final without waiting on the seal.
 
     Against a v2 escrow the charge is `_settle_v2`'s one `settle`, paying each
     delivered step its own amount, and the record keeps those per-step
@@ -2420,6 +2751,8 @@ async def _settle_and_record(
             delivered_steps=delivered_steps,
             output_summaries=output_summaries,
             authorized_max=authorized_max,
+            on_money_moved=on_money_moved,
+            on_seal_pending=on_seal_pending,
         )
 
     recorded: list[SettlementRecord] = []
@@ -2440,6 +2773,8 @@ async def _settle_and_record(
         )
         if record is not None:
             recorded.append(record)
+        if on_money_moved is not None:
+            on_money_moved(charge_tx)
 
     charge_tx, proof_tx, job_id = await _settle_onchain(
         task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=total_usdc, on_charged=_on_charged
@@ -2474,9 +2809,12 @@ async def _settle_and_record_v2(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None,
+    on_money_moved: Callable[[str], None] | None = None,
+    on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """`_settle_and_record`'s order over `_settle_v2`: settle, record, seal, record the seal."""
     recorded: list[SettlementRecord] = []
+    pending_seals: list[_PendingSeal] = []
     settled: list[tuple[str, bytes, _PayoutPlan, list[bytes] | None]] = []
 
     async def _on_settled(
@@ -2502,6 +2840,8 @@ async def _settle_and_record_v2(
         )
         if record is not None:
             recorded.append(record)
+        if on_money_moved is not None:
+            on_money_moved(settle_tx)
 
     settle_tx, proof_tx, job_id = await _settle_v2(
         task_id,
@@ -2512,13 +2852,14 @@ async def _settle_and_record_v2(
         delivered_steps=delivered_steps,
         authorized_max=authorized_max,
         on_settled=_on_settled,
+        on_seal_pending=pending_seals.append,
     )
     if recorded:
         if proof_tx is not None:
             await _record_proof(task_id, recorded[0], proof_tx)
     elif settled:
         tx, settled_job_id, payout_plan, receipts = settled[0]
-        await _record_settlement(
+        late = await _record_settlement(
             task_id,
             start,
             plan,
@@ -2535,6 +2876,14 @@ async def _settle_and_record_v2(
             payout_plan=payout_plan,
             receipts=receipts,
         )
+        if late is not None:
+            recorded.append(late)
+    for pending in pending_seals:
+        # The reconciliation adds the proof to the record the buyer disputes
+        # against, exactly as a seal that confirmed first time does.
+        pending.record = recorded[0] if recorded else None
+        if on_seal_pending is not None:
+            on_seal_pending(pending)
     return settle_tx, proof_tx, job_id
 
 

@@ -103,8 +103,8 @@ def test_the_xdr_is_an_unsigned_reclaim_with_the_payer_as_source(
 @pytest.mark.parametrize(
     ("auth", "payer", "status", "code"),
     [
-        (expired(settled=True), PAYER, 409, "authorization_spent"),
-        (expired(revoked=True), PAYER, 409, "authorization_spent"),
+        (expired(settled=True), PAYER, 409, "authorization_settled"),
+        (expired(revoked=True), PAYER, 409, "authorization_revoked"),
         (expired(expires_at=int(time.time()) + 3_600), PAYER, 409, "authorization_locked"),
         (expired(), STRANGER, 403, "authorization_payer_mismatch"),
     ],
@@ -125,13 +125,22 @@ def test_every_refusal_is_named_before_anything_is_built(
     assert builds.calls == []
 
 
-def test_settled_and_reclaimed_share_a_code_and_say_which(
+def test_settled_and_reclaimed_each_have_their_documented_code_and_say_which(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, builds: BuildRecorder
 ) -> None:
+    # The route's docstring (and the OpenAPI the FE vendors) promise
+    # `authorization_settled` and `authorization_revoked`, and the console's
+    # reclaim flow maps exactly those two to "already settled" / "already
+    # reclaimed". A shared `authorization_spent` matched neither, so a buyer
+    # pressing Reclaim on a settled authorization was shown a failure instead.
     install(monkeypatch, FakeEscrow(auth=expired(settled=True)))
-    assert "settled" in reclaim(client).json()["error"]["message"]
+    settled = reclaim(client).json()["error"]
+    assert settled["code"] == "authorization_settled"
+    assert "settled" in settled["message"]
     install(monkeypatch, FakeEscrow(auth=expired(revoked=True)))
-    assert "reclaimed" in reclaim(client).json()["error"]["message"]
+    revoked = reclaim(client).json()["error"]
+    assert revoked["code"] == "authorization_revoked"
+    assert "reclaimed" in revoked["message"]
 
 
 def test_locked_holds_past_expiry_until_the_ledger_can_have_caught_up(

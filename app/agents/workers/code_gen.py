@@ -3,11 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field, field_validator
 
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import lazy_agent
 from .base import Worker
 from .prompt_safety import worker_prompt
 
@@ -263,9 +262,9 @@ class CodeGen(Worker):
         # endpoint. They have their own internal reasoning knobs. Omit both
         # and lean on the detailed prompt for quality. The polish pass now
         # runs as a separate top-level `code.critic` step in the pipeline.
-        self._agent = Agent(
+        self._agent = lazy_agent(
             name="code.gen",
-            model=build_openai_chat(settings.worker_model),
+            model_id=settings.worker_model,
             instructions=INSTRUCTIONS,
             output_schema=CodeArtifact,
         )

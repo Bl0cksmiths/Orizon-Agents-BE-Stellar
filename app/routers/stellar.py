@@ -15,16 +15,19 @@ import re
 import secrets
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Security
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, Security
 from pydantic import BaseModel, Field
 
+from .. import http_cache
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key
-from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc
+from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key, require_seal_key
+from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc, snapshots
 from ..services.dispatch_signing import dispatch_signer_address
+from ..services.snapshots import KeepWarm, SnapshotCell
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
@@ -332,18 +335,117 @@ async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentI
     return await rcache.get_or_set(f"agentavail:{agent_id}", READ_TTL_SECONDS, _resolve)
 
 
-@router.get("/reputation", response_model=ReputationBatch)
-async def read_reputations() -> ReputationBatch:
-    """Smoothed reputation for every registered agent, plus the routing
-    floor and prior. Never fails: agents without on-chain evidence (or with
-    the chain unreachable) come back as the prior, marked source="prior".
-    """
+# ── the reputation batch, as a snapshot ──────────────────────────
+# Every agent's reputation is one ledger read per agent under the batch
+# deadline, so answered on the request it cost the deadline whenever any read
+# had expired — 2.5 s on most polls of a ~600 agent registry. Built behind the
+# request instead (app/services/snapshots.py): fresh for the read TTL, served
+# at once past it while one rebuild runs, and retired the moment a rating lands
+# (`reputation_svc.on_change`), so the read after a dispute waits — bounded by
+# that same deadline — for a batch that includes it rather than being shown
+# the pre-rating score.
+
+# How long a shared cache may serve an expired batch while it fetches the next.
+# Short, because a landed rating is retired here at once but a CDN's copy is
+# only replaced on its own schedule.
+REPUTATION_STALE_WHILE_REVALIDATE_SECONDS = 15
+
+# Rebuilt at least this often while the process is up, and when the registry
+# mirror completes a pass (new agents).
+REPUTATION_KEEP_WARM_SECONDS = 60.0
+
+
+@dataclass(frozen=True)
+class _BatchBuild:
+    """A batch and when it was read; the timestamp stays out of the body,
+    whose shape the frontend parses as it stands."""
+
+    batch: ReputationBatch
+    generated_at: float
+
+
+async def build_reputation_batch() -> _BatchBuild:
+    """Every registered agent's reputation, under the batch deadline. Never
+    raises: an agent whose read fails is served stale or as the prior, and
+    says so in its own row."""
+    generated_at = time.time()
     infos = await reputation_svc.fetch_reps([a.id for a in state.list_agents()])
-    return ReputationBatch(
+    batch = ReputationBatch(
         reputations={aid: ReputationInfo(**info.model_dump()) for aid, info in infos.items()},
         floor_bps=settings.reputation_floor_bps,
         prior_bps=settings.reputation_prior_bps,
     )
+    return _BatchBuild(batch=batch, generated_at=generated_at)
+
+
+reputation_cell: SnapshotCell[_BatchBuild] = SnapshotCell(
+    "reputation",
+    lambda: build_reputation_batch(),
+    lambda build: build.batch.model_dump_json().encode(),
+    lambda build: build.generated_at,
+    fresh_seconds=settings.reputation_read_ttl_seconds,
+    # The oldest a row may be and still be judged (reputation_svc._stale_info).
+    max_serve_seconds=settings.reputation_read_ttl_seconds + settings.reputation_stale_grace_seconds,
+    # The build is bounded by the batch deadline; this is the backstop.
+    build_timeout_seconds=max(30.0, settings.reputation_batch_timeout_seconds * 4),
+    retry_after_failure_seconds=5.0,
+)
+snapshots.keep_warm(
+    KeepWarm(
+        cell=reputation_cell,
+        every_seconds=REPUTATION_KEEP_WARM_SECONDS,
+        fingerprint=lambda: registry_sync.status().last_full_sync_at,
+        min_change_rebuild_seconds=settings.reputation_read_ttl_seconds,
+    )
+)
+reputation_svc.on_change(lambda _agent_id: reputation_cell.invalidate())
+
+
+@router.get(
+    "/reputation",
+    response_model=ReputationBatch,
+    responses={304: {"description": "Not modified: the `If-None-Match` ETag is current."}},
+)
+async def read_reputations(request: Request) -> Response:
+    """Smoothed reputation for every registered agent, plus the routing
+    floor and prior. Never fails: agents without on-chain evidence (or with
+    the chain unreachable) come back as the prior, marked source="prior".
+
+    Served from a snapshot rebuilt in the background — fresh for the read TTL,
+    and a just-expired one is served while the next is built — so it is dated
+    by `Last-Modified` and `X-Snapshot-Age`, revalidates with `ETag` /
+    `If-None-Match`, and may be held by a shared cache for its remaining
+    freshness. A rating that lands retires the snapshot at once.
+    """
+    snap = await reputation_cell.get(wait_seconds=None)
+    if snap is None:
+        # build_reputation_batch does not raise, so this is a bug; it is still
+        # an answer we do not have, and a fabricated batch would be worse.
+        logger.error("reputation batch unavailable: %s", reputation_cell.status().last_error)
+        raise HTTPException(503, "reputation_unavailable")
+    return http_cache.snapshot_response(
+        request,
+        snap,
+        fresh_seconds=reputation_cell.fresh_seconds,
+        stale_while_revalidate=REPUTATION_STALE_WHILE_REVALIDATE_SECONDS,
+    )
+
+
+def _snapshot_row(agent_id: str) -> ReputationInfo | None:
+    """The agent's row from a FRESH batch snapshot, when it is a clean read.
+
+    Fresh means inside the read TTL and not retired by a landed rating — the
+    same window in which the read cache would answer this agent without the
+    ledger. A row that was degraded or stale when the batch was built is not
+    reused: a read of this one agent may do better than the batch deadline did.
+    """
+    snap = reputation_cell.current()
+    if snap is None or not reputation_cell.is_fresh(snap):
+        return None
+    row = snap.value.batch.reputations.get(agent_id)
+    if row is None or row.degraded or row.stale:
+        return None
+    return row
 
 
 # Declared BEFORE the dynamic /reputation/{agent_id} route — FastAPI matches
@@ -376,7 +478,9 @@ async def read_reputation(
 ) -> ReputationInfo:
     """Smoothed reputation for one REGISTERED agent — cached
     ReputationLedger.rep_state read with Bayesian prior smoothing; stale or
-    prior fallback on a failed read.
+    prior fallback on a failed read. Answered from the batch snapshot when it
+    holds a clean read of this agent taken inside the read TTL (and no rating
+    has landed since), which is the same answer the read cache would give.
 
     404 `unknown_agent` for an id the registry does not hold, answered before
     any RPC. The route used to read the chain for any id matching the
@@ -392,6 +496,9 @@ async def read_reputation(
     """
     if agent_id not in state.agents:
         raise HTTPException(404, "unknown_agent")
+    row = _snapshot_row(agent_id)
+    if row is not None:
+        return row
     info = await reputation_svc.fetch_rep(agent_id)
     return ReputationInfo(**info.model_dump())
 
@@ -911,7 +1018,7 @@ class SealReq(BaseModel):
     total_spent_usdc: float = Field(..., ge=0, le=100_000, allow_inf_nan=False)
 
 
-@router.post("/server/seal", dependencies=[Depends(require_api_key)])
+@router.post("/server/seal", dependencies=[Depends(require_seal_key)])
 async def server_seal(req: SealReq) -> dict:
     """Backend-signed AttestationRegistry.seal (backend is the `sealer` role)."""
     if not settings.stellar_signing_key:

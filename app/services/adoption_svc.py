@@ -50,9 +50,10 @@ from ..schemas import Agent
 from ..state import state
 from ..stellar import cache as rcache
 from ..stellar import client as sc
-from . import external_binding, settlement_svc
+from . import external_binding, registry_sync, settlement_svc, snapshot_store, snapshots
 from .binding_store import get_binding_store
 from .dispatch_signing import dispatch_signer_address
+from .snapshots import KeepWarm, Snapshot, SnapshotCell
 
 logger = logging.getLogger(__name__)
 
@@ -132,11 +133,32 @@ TARGET_EXTERNAL_AGENTS = 2
 TARGET_UNIQUE_OPERATOR_WALLETS = 2
 TARGET_SETTLED_EXTERNAL_WORKFLOWS = 3
 
-# The whole answer is cached, single-flight, for about one dashboard poll: it
-# costs one settlement scan per external agent, and a reviewer refreshing the
-# page must not turn into a scan per refresh.
-CACHE_KEY = "ecosystem:adoption"
-CACHE_TTL_SECONDS = 30.0
+# The report is a snapshot built in the background (D-091), never on the
+# request. It costs one settlement scan per external agent — minutes on the
+# live registry — so a reviewer's request is answered from memory with the
+# last report and its age, and the first request after a boot with nothing to
+# serve gets a 202 that says it is being computed. See `report_cell` below.
+#
+# Rebuilt this often while the process is up. Settlements only show up here
+# through a scan, so this is how long a new one can take to appear.
+REPORT_REFRESH_SECONDS = 900.0
+# ...and when the on-chain mirror's agents or owners change, but not more often
+# than this: a full registry pass lands every few minutes, and a rebuild per
+# pass would keep the scans running back to back.
+REPORT_REGISTRY_REBUILD_SECONDS = 300.0
+# A build that runs past this is abandoned and the previous report kept.
+REPORT_BUILD_BUDGET_SECONDS = 900.0
+# After a build that failed or overran, the next attempt waits this long.
+REPORT_RETRY_AFTER_FAILURE_SECONDS = 120.0
+# The first build waits for the registry mirror's first full pass — a partial
+# mirror would send every unmirrored id to its own `owner_of` read — but not
+# longer than this after boot.
+REPORT_BOOT_GRACE_SECONDS = 600.0
+# What a 202 asks the client to wait before asking again.
+REPORT_PENDING_RETRY_AFTER_SECONDS = 30
+# A report restored from the database after a restart is served only when it
+# is younger than this. Older, "computing" is the more honest answer.
+REPORT_RESTORE_MAX_AGE_SECONDS = 86_400.0
 
 # How many per-agent reads run at once. Each settlement scan pins a thread of
 # the bounded pool app/main.py hands to asyncio.to_thread, so this stays well
@@ -147,6 +169,11 @@ READ_CONCURRENCY = 4
 # budget, so it only fires on a read that has genuinely stalled; the scan
 # itself keeps running (the cache shields it) and lands for the next request.
 AGENT_READ_BUDGET_SECONDS = 45.0
+
+# Ceiling on each of the smaller probes: one `owner_of` read, one binding-store
+# lookup. Each has its own transport timeouts; this is the bound the report
+# relies on, so one stalled probe costs one agent's answer, not the build.
+PROBE_TIMEOUT_SECONDS = 20.0
 
 # Contract `admin()` views. v2's settler and admin can be rotated, so these
 # are not cached for as long as settlement_svc caches values that never move.
@@ -448,8 +475,8 @@ async def _unmirrored(mirrored: set[str]) -> _Unmirrored:
 async def _owner_or_none(agent_id: str) -> str | None:
     """The live `owner_of`, or None when it could not be established."""
     try:
-        return await external_binding.resolve_owner(agent_id)
-    except external_binding.OwnerLookupError as e:
+        return await asyncio.wait_for(external_binding.resolve_owner(agent_id), timeout=PROBE_TIMEOUT_SECONDS)
+    except (external_binding.OwnerLookupError, TimeoutError) as e:
         logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
         return None
 
@@ -462,7 +489,7 @@ async def _bound(agent_id: str) -> bool | None:
     public route never exposes in any form.
     """
     try:
-        return await get_binding_store().get(agent_id) is not None
+        return await asyncio.wait_for(get_binding_store().get(agent_id), timeout=PROBE_TIMEOUT_SECONDS) is not None
     except Exception as e:
         logger.warning("[adoption] binding store unreadable for %s: %s", agent_id, _describe(e))
         return None
@@ -649,10 +676,54 @@ async def build_report() -> AdoptionReport:
     return report
 
 
-async def fetch_report() -> AdoptionReport:
-    """The cached report: one computation per CACHE_TTL_SECONDS, shared by every
-    concurrent caller (the cache is single-flight and shields the flight)."""
-    result = await rcache.get_or_set(CACHE_KEY, CACHE_TTL_SECONDS, build_report)
-    if not isinstance(result, AdoptionReport):
-        raise RuntimeError(f"adoption cache held {type(result).__name__}")
-    return result
+def _serialize(report: AdoptionReport) -> bytes:
+    return report.model_dump_json().encode()
+
+
+def registry_fingerprint() -> int:
+    """What the report's agent list depends on in the mirror: each on-chain
+    agent's id, owner and status. A change means a rebuild is due."""
+    return hash(tuple(sorted((a.id, a.owner or "", a.status) for a in onchain_mirror().values())))
+
+
+def _may_build() -> bool:
+    """Whether a build may start: the registry mirror is complete, or boot was
+    long enough ago that waiting longer only means serving nothing. Gates the
+    requests and the schedule alike."""
+    return registry_sync.status().synced or time.time() - state.started_at >= REPORT_BOOT_GRACE_SECONDS
+
+
+# The report, built behind the request. Never retired by age (a request never
+# waits on a scan): the keep-warm schedule below rebuilds it, and a request
+# that finds it older than REPORT_REFRESH_SECONDS starts a rebuild behind the
+# one it serves — once the registry gate is open.
+report_cell: SnapshotCell[AdoptionReport] = SnapshotCell(
+    "adoption",
+    lambda: build_report(),
+    _serialize,
+    lambda report: float(report.generated_at),
+    fresh_seconds=REPORT_REFRESH_SECONDS,
+    build_timeout_seconds=REPORT_BUILD_BUDGET_SECONDS,
+    retry_after_failure_seconds=REPORT_RETRY_AFTER_FAILURE_SECONDS,
+    may_build=_may_build,
+)
+snapshots.keep_warm(
+    KeepWarm(
+        cell=report_cell,
+        every_seconds=REPORT_REFRESH_SECONDS,
+        fingerprint=registry_fingerprint,
+        min_change_rebuild_seconds=REPORT_REGISTRY_REBUILD_SECONDS,
+    )
+)
+# Every build is saved, and the next process serves it until its own lands.
+snapshot_store.persist(
+    report_cell,
+    AdoptionReport.model_validate_json,
+    max_restore_age_seconds=REPORT_RESTORE_MAX_AGE_SECONDS,
+)
+
+
+async def report_snapshot() -> Snapshot[AdoptionReport] | None:
+    """The report to serve now, or None while the first one is computed.
+    Never waits on a build: one is started if none is running."""
+    return await report_cell.get(wait_seconds=0)

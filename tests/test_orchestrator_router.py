@@ -48,7 +48,7 @@ def _raising(exc: BaseException) -> Callable[[str], Awaitable[object]]:
     return _decompose
 
 
-def _post(client: TestClient, intent: str = INTENT, *, caller: str = "203.0.113.7") -> tuple[int, str]:
+def _post(client: TestClient, intent: str = INTENT, *, caller: str = "81.2.69.160") -> tuple[int, str]:
     r = client.post("/api/orchestrator/decompose", json={"intent": intent}, headers={"X-Forwarded-For": caller})
     return r.status_code, r.json().get("detail")
 
@@ -71,7 +71,7 @@ def test_free_form_decompose_is_limited_per_client(client: TestClient, monkeypat
 
     assert _post(client)[0] == 200
     assert _post(client)[0] == 200
-    r = client.post("/api/orchestrator/decompose", json={"intent": INTENT}, headers={"X-Forwarded-For": "203.0.113.7"})
+    r = client.post("/api/orchestrator/decompose", json={"intent": INTENT}, headers={"X-Forwarded-For": "81.2.69.160"})
 
     assert r.status_code == 429
     assert r.json()["detail"] == "decompose_rate_limited"
@@ -79,7 +79,21 @@ def test_free_form_decompose_is_limited_per_client(client: TestClient, monkeypat
     # Refused before planning: the limited call never reached the planner.
     assert len(calls) == 2
     # Per client: another caller still has its whole budget.
-    assert _post(client, caller="198.51.100.9")[0] == 200
+    assert _post(client, caller="2.125.160.216")[0] == 200
+
+
+def test_a_caller_nobody_can_attribute_has_no_planner_budget_to_share(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A chain of infrastructure alone names nobody (security.client_identity).
+    # One shared bucket would let any such caller starve the rest, so none is
+    # applied; the planner's concurrency gate and queue still bound the spend.
+    monkeypatch.setattr(settings, "decompose_rate_limit_per_minute", 1)
+    monkeypatch.setattr(router, "decompose", _answering([]))
+
+    assert [_post(client, caller="172.70.81.12, 10.0.0.4")[0] for _ in range(3)] == [200, 200, 200]
+    assert _post(client)[0] == 200
+    assert _post(client)[0] == 429
 
 
 def test_kit_intents_do_not_spend_the_planner_budget(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

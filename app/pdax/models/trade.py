@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from .common import Side
+from .common import BoundedRequest, Side
 
 
 class IndicativePriceParams(BaseModel):
@@ -32,7 +32,7 @@ class IndicativePriceV2Params(BaseModel):
     quantity: str
 
 
-class FirmQuoteRequest(BaseModel):
+class FirmQuoteRequest(BoundedRequest):
     """Body for POST /v1/trade/quote."""
 
     quote_currency: str
@@ -41,7 +41,7 @@ class FirmQuoteRequest(BaseModel):
     base_quantity: str
 
 
-class FirmQuoteV2Request(BaseModel):
+class FirmQuoteV2Request(BoundedRequest):
     """Body for POST /v2/trade/quote."""
 
     side: Side
@@ -64,7 +64,7 @@ class Quote(BaseModel):
     total_amount: float
 
 
-class OrderRequest(BaseModel):
+class OrderRequest(BoundedRequest):
     """Body for POST /v1/trade — accept a firm quote."""
 
     quote_id: str

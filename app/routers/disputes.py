@@ -47,16 +47,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..schemas import SettlementState
+from ..schemas import SealKind, SealState, SettlementState
 from ..security import (
     CodedHTTPException,
     ErrorEnvelope,
     KeyedRateLimiter,
-    client_key,
+    client_identity,
     request_id_var,
     require_adjudicator,
 )
-from ..services import dispute_read, dispute_svc, refund_svc
+from ..services import dispute_read, dispute_svc, refund_svc, task_persistence
 from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
 from ..state import state
@@ -582,6 +582,17 @@ class TaskDisputesResponse(BaseModel):
     # settlement failed or is unconfirmed says so here rather than reading as
     # merely "not settled yet". Null when neither is known.
     settlement_state: SettlementState | None = None
+    # What became of the run's attestation seal — `Task.seal`'s vocabulary:
+    # sealed, pending (being reconciled), unconfirmed, failed — and the hash
+    # that proves it when there is one. The task's word while this process
+    # holds the task (it may be newer than the record: a reconciled seal); the
+    # settlement record's otherwise, where a proof hash IS a confirmed seal.
+    # Null when no seal was submitted, or nothing is known of it.
+    seal: SealState | None = None
+    # What the seal attests: `paid`, or `delivery_only` when nobody could be
+    # paid (no receipt, zero total on-chain) — `Task.seal_kind`'s vocabulary.
+    seal_kind: SealKind | None = None
+    proof_tx: str | None = None
 
 
 def _refuse(exc: dispute_svc.DisputeError) -> HTTPException:
@@ -664,7 +675,7 @@ async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> Disp
     (`_challenge_limiter`); past it, 429 `dispute_challenge_rate_limited` with
     Retry-After, before the settlement is read.
     """
-    retry_after = _challenge_limiter.hit(client_key(dict(request.scope)))
+    retry_after = _challenge_limiter.hit(client_identity(dict(request.scope)))
     if retry_after is not None:
         raise HTTPException(429, "dispute_challenge_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
@@ -884,6 +895,15 @@ async def get_dispute(
     record = await dispute_svc.get_dispute(dispute_id)
     if record is None:
         raise HTTPException(404, "unknown_dispute")
+    # The path names no task, so nothing has read this dispute's task back from
+    # the durable store yet: after a restart its token could not prove until
+    # something else had (D-090). Held here first, best effort, exactly as
+    # `task_read_proof` holds a `{task_id}` route's — a store that cannot answer
+    # leaves the token unproven and the free text withheld, never a failed read.
+    try:
+        await task_persistence.ensure_task(record.task_id)
+    except task_persistence.TaskStoreUnavailable:
+        pass
     # Against the payer the DISPUTE names, never one the caller supplies: a read
     # grant is honoured only for the party whose signature earned it.
     return DisputeResponse.of(record, free_text=proof.proves_free_text(record.task_id, record.payer))
@@ -989,6 +1009,7 @@ async def list_task_disputes(
     # no payer, and a grant buys nothing.
     free_text = proof.proves_free_text(task_id, settlement.payer if settlement is not None else None)
     disputes = await dispute_svc.list_for_task(task_id)
+    seal, seal_kind, proof_tx = _receipt_seal(task_id, settlement)
     return TaskDisputesResponse(
         task_id=task_id,
         window_closes_at=settlement.window_closes_at if settlement is not None else None,
@@ -998,7 +1019,27 @@ async def list_task_disputes(
         settlement=SettlementView.of(settlement) if settlement is not None else None,
         disputes=[DisputeResponse.of(d, free_text=free_text) for d in disputes],
         settlement_state=_settlement_state(task_id, settlement),
+        seal=seal,
+        seal_kind=seal_kind,
+        proof_tx=proof_tx,
     )
+
+
+def _receipt_seal(
+    task_id: str, settlement: SettlementRecord | None
+) -> tuple[SealState | None, SealKind | None, str | None]:
+    """The receipt's seal: (state, kind, proof hash), the task's word first, then the record's.
+
+    On the record's word alone the kind follows from what moved: a sealed run
+    that paid nothing was sealed delivery-only.
+    """
+    record_proof = settlement.proof_tx if settlement is not None else None
+    task = state.tasks.get(task_id)
+    if task is not None and task.seal is not None:
+        return task.seal, task.seal_kind, task.proof_tx or record_proof
+    if settlement is not None and record_proof is not None:
+        return "sealed", "paid" if settlement.settled_usdc > 0 else "delivery_only", record_proof
+    return None, None, None
 
 
 def _settlement_state(task_id: str, settlement: SettlementRecord | None) -> SettlementState | None:

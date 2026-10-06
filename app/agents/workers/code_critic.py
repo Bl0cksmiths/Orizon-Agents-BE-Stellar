@@ -13,10 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agno.agent import Agent
-
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import LazyAgent, lazy_agent
 from .code_gen import CodeArtifact, coerce_artifact  # reuse schema + JSON-string coercion
 from .prompt_safety import fence_untrusted, worker_prompt
 
@@ -75,12 +73,12 @@ Return a CodeArtifact with the SAME structure as the draft:
 """
 
 
-def _build_critic() -> Agent:
+def _build_critic() -> LazyAgent:
     # See note in code_gen.py — reasoning models reject reasoning_effort /
     # temperature on Chat Completions. Let the model default.
-    return Agent(
+    return lazy_agent(
         name="code.critic",
-        model=build_openai_chat(settings.worker_model),
+        model_id=settings.worker_model,
         instructions=INSTRUCTIONS,
         output_schema=CodeArtifact,
     )

@@ -9,19 +9,22 @@ rate-limited log line — it is never replaced by a number that looks measured
 (ADR 0013).
 
 The whole overview is computed at most once per OVERVIEW_CACHE_TTL_SECONDS and
-shared by every concurrent caller (single-flight, `app.stellar.cache`), so the
-dashboard's polling cannot turn into a chain read and a database query per
-request. The app-wide rate limit (`RateLimitMiddleware`) still applies.
+shared by every concurrent caller, so the dashboard's polling cannot turn into
+a chain read and a database query per request. The app-wide rate limit
+(`RateLimitMiddleware`) still applies.
 
 A poll never waits on a computation when there is a recent one to serve. A
 build is slow by construction: the trust part reads every agent's reputation,
-whose cache expires on the same 15 s as this one, so each rebuild of a ~300
+whose cache expires on the same 15 s as this one, so each rebuild of a ~600
 agent registry runs to the reputation batch deadline (2.5 s shipped), and the
-platform-key reads behind the owner rule go to the chain every few minutes. An
-expired overview younger than OVERVIEW_STALE_SERVE_SECONDS is therefore served
-at once while one refresh runs in the background (`generated_at` dates it);
-only a process with nothing recent to serve, or a cached overview taken from a
-registry mirror that has since completed, waits for the computation.
+platform-key reads behind the owner rule go to the chain every few minutes. So
+the overview is a snapshot (app/services/snapshots.py): built in the
+background every OVERVIEW_KEEP_WARM_SECONDS and when the registry mirror
+completes a pass, served from memory pre-encoded with an ETag, and an expired
+one younger than OVERVIEW_STALE_SERVE_SECONDS is served at once while one
+refresh runs behind it (`generated_at` dates it). Only a process with nothing
+recent to serve, or a snapshot taken from a registry mirror that has since
+completed, waits for the computation.
 """
 
 from __future__ import annotations
@@ -32,8 +35,9 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request, Response
 
+from .. import http_cache
 from ..schemas import (
     Agent,
     OverviewAgents,
@@ -45,10 +49,10 @@ from ..schemas import (
     SettledDay,
     SkillShare,
 )
-from ..services import adoption_svc, binding_registry, registry_sync, reputation_svc
+from ..services import adoption_svc, binding_registry, registry_sync, reputation_svc, snapshots
 from ..services.dispute_store import SECONDS_PER_DAY, get_dispute_store
+from ..services.snapshots import KeepWarm, Snapshot, SnapshotCell
 from ..state import state
-from ..stellar import cache as rcache
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +61,27 @@ router = APIRouter(tags=["metrics"])
 # One computation per this many seconds, whoever is polling. Short enough that
 # a settlement shows up within a poll or two; long enough that a dashboard left
 # open in several tabs costs one set of reads, not one per tab per poll.
-OVERVIEW_CACHE_KEY = "metrics:overview"
 OVERVIEW_CACHE_TTL_SECONDS = 15.0
 
 # How long past its expiry an overview may still be served while a refresh runs
 # behind it. A dashboard that is being polled never gets near this; it bounds
 # what the first poll after a quiet spell is shown before it waits instead.
 OVERVIEW_STALE_SERVE_SECONDS = 300.0
+
+# The background rebuild's schedule: this often while the process is up, and
+# whenever the registry mirror completes a full pass.
+OVERVIEW_KEEP_WARM_SECONDS = 30.0
+
+# A build is bounded inside (the reputation batch deadline, the settlement
+# store's read budget); this is the backstop for one that hangs anyway.
+OVERVIEW_BUILD_TIMEOUT_SECONDS = 30.0
+
+# After a build that failed, how long before the next one is tried.
+OVERVIEW_RETRY_AFTER_FAILURE_SECONDS = 5.0
+
+# How long a shared cache (Vercel's CDN) may keep serving an expired overview
+# while it fetches the next one.
+OVERVIEW_STALE_WHILE_REVALIDATE_SECONDS = 60
 
 # The settled-workflow sparkline: one point per UTC day, today included.
 SERIES_DAYS = 14
@@ -349,57 +367,74 @@ async def build_overview() -> OverviewMetrics:
     )
 
 
-async def fetch_overview() -> OverviewMetrics:
-    """The cached overview: one computation per OVERVIEW_CACHE_TTL_SECONDS,
-    shared by every concurrent caller (the cache is single-flight).
-
-    Stale-while-revalidate: an expired overview younger than
-    OVERVIEW_STALE_SERVE_SECONDS is returned at once and refreshed in the
-    background. Two cases wait for a fresh computation instead: nothing recent
-    to serve, and a cached overview whose `registry_synced` is false when the
-    mirror has since finished its full pass. That one's counts are a prefix
-    now known to be one, and the registry total is the number its readers are
-    waiting for.
-    """
-    stored = rcache.last_stored(OVERVIEW_CACHE_KEY)
-    if stored is not None and isinstance(stored.value, OverviewMetrics):
-        now = time.monotonic()
-        if not stored.value.registry_synced and registry_sync.status().synced:
-            rcache.invalidate(OVERVIEW_CACHE_KEY)
-        elif stored.expiry <= now < stored.expiry + OVERVIEW_STALE_SERVE_SECONDS:
-            _refresh_in_background()
-            return stored.value
-    result = await rcache.get_or_set(OVERVIEW_CACHE_KEY, OVERVIEW_CACHE_TTL_SECONDS, build_overview)
-    if not isinstance(result, OverviewMetrics):
-        raise RuntimeError(f"overview cache held {type(result).__name__}")
-    return result
+def _serialize(overview: OverviewMetrics) -> bytes:
+    return overview.model_dump_json().encode()
 
 
-# Background refreshes in flight, held so the loop cannot collect them early.
-_refreshes: set[asyncio.Task[object]] = set()
+def _partial_superseded(overview: OverviewMetrics) -> bool:
+    """A cached overview taken from a mirror that has since finished its full
+    pass: its counts are a prefix now known to be one, and the registry total
+    is the number its readers are waiting for, so it is not served again."""
+    return not overview.registry_synced and registry_sync.status().synced
 
 
-def _refresh_in_background() -> None:
-    """Start a refresh of the cached overview without awaiting it. Concurrent
-    starts join one computation: `get_or_set` is single-flight."""
-    task = asyncio.get_running_loop().create_task(
-        rcache.get_or_set(OVERVIEW_CACHE_KEY, OVERVIEW_CACHE_TTL_SECONDS, build_overview)
+# The overview, built behind the request (app/services/snapshots.py). Fresh for
+# OVERVIEW_CACHE_TTL_SECONDS; past that a poll is answered at once while one
+# rebuild runs behind it, up to OVERVIEW_STALE_SERVE_SECONDS past expiry, after
+# which a poll waits for the rebuild instead. The keep-warm schedule below means
+# a live process essentially never gets that far.
+overview_cell: SnapshotCell[OverviewMetrics] = SnapshotCell(
+    "overview",
+    lambda: build_overview(),
+    _serialize,
+    lambda overview: overview.generated_at,
+    fresh_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+    max_serve_seconds=OVERVIEW_CACHE_TTL_SECONDS + OVERVIEW_STALE_SERVE_SECONDS,
+    build_timeout_seconds=OVERVIEW_BUILD_TIMEOUT_SECONDS,
+    retry_after_failure_seconds=OVERVIEW_RETRY_AFTER_FAILURE_SECONDS,
+    must_rebuild=_partial_superseded,
+)
+
+# Rebuilt every OVERVIEW_KEEP_WARM_SECONDS whether or not anyone is polling, and
+# as soon as a registry full pass lands, so the first poll after a quiet spell
+# is answered from memory like every other one.
+snapshots.keep_warm(
+    KeepWarm(
+        cell=overview_cell,
+        every_seconds=OVERVIEW_KEEP_WARM_SECONDS,
+        fingerprint=lambda: registry_sync.status().last_full_sync_at,
+        min_change_rebuild_seconds=OVERVIEW_CACHE_TTL_SECONDS,
     )
-    _refreshes.add(task)
-    task.add_done_callback(_on_refresh_done)
+)
 
 
-def _on_refresh_done(task: asyncio.Task[object]) -> None:
-    # Nothing awaits a background refresh, so its failure is logged here or
-    # nowhere. build_overview is documented never to raise; reaching this is
-    # a bug, and the stale overview keeps being served until it is fixed.
-    _refreshes.discard(task)
-    if not task.cancelled() and task.exception() is not None:
-        logger.warning("overview background refresh failed: %s", task.exception())
+# A landed rating moves the trust average: the next poll is still answered from
+# the snapshot, and starts the rebuild that picks the rating up.
+reputation_svc.on_change(lambda _agent_id: overview_cell.expire())
 
 
-@router.get("/metrics/overview", response_model=OverviewMetrics, summary="Dashboard overview metrics")
-async def overview() -> OverviewMetrics:
+async def overview_snapshot() -> Snapshot[OverviewMetrics]:
+    """The overview to serve now. Waits only when there is nothing recent
+    enough to serve; 503 when no overview could be produced at all."""
+    snap = await overview_cell.get(wait_seconds=None)
+    if snap is None:
+        logger.error("overview unavailable: %s", overview_cell.status().last_error)
+        raise HTTPException(503, "overview_unavailable")
+    return snap
+
+
+async def fetch_overview() -> OverviewMetrics:
+    """The overview as `overview_snapshot` serves it, as the model."""
+    return (await overview_snapshot()).value
+
+
+@router.get(
+    "/metrics/overview",
+    response_model=OverviewMetrics,
+    summary="Dashboard overview metrics",
+    responses={304: {"description": "Not modified: the `If-None-Match` ETag is current."}},
+)
+async def overview(request: Request) -> Response:
     """Measured network numbers for the dashboard.
 
     Agents (registered, on-chain, seeded, external, bound, online), distinct
@@ -407,8 +442,20 @@ async def overview() -> OverviewMetrics:
     store with a 14-day UTC series, task completion over the in-memory task
     store, mean on-chain trust, and the registry's skill mix. Nothing is a
     baseline or a fallback: a part that could not be read is null (or []) and
-    `degraded` is true, as it is while `registry_synced` is false. Cached for
-    15 s and shared across callers; a recently expired overview is served
-    while it refreshes in the background.
+    `degraded` is true, as it is while `registry_synced` is false.
+
+    Served from a snapshot rebuilt in the background: fresh for 15 s, and a
+    recently expired one is served while it refreshes. `generated_at` dates it,
+    and so do `Last-Modified` and `X-Snapshot-Age`. `ETag` answers
+    `If-None-Match` with a 304; `Cache-Control` lets a shared cache hold it for
+    its remaining freshness — except while `registry_synced` is false, when it
+    is `no-cache`: those counts are a prefix of the registry.
     """
-    return await fetch_overview()
+    snap = await overview_snapshot()
+    return http_cache.snapshot_response(
+        request,
+        snap,
+        fresh_seconds=overview_cell.fresh_seconds,
+        stale_while_revalidate=OVERVIEW_STALE_WHILE_REVALIDATE_SECONDS,
+        cacheable=snap.value.registry_synced,
+    )

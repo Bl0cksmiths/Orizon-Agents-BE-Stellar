@@ -7,8 +7,9 @@ from fastapi.responses import JSONResponse
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse, StoredPlan
-from ..security import CodedHTTPException, KeyedRateLimiter, client_key, request_id_var
+from ..security import CodedHTTPException, KeyedRateLimiter, client_identity, request_id_var
 from ..services import authorization_guard as guard
+from ..services import task_persistence
 from ..services.execution_svc import CapacityExhaustedError, PlanExpiredError, execute_plan, plan_expired
 from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
@@ -41,11 +42,11 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
     # the demo path and makes no LLM call, so throttling it would cost a demo
     # its safety net to save nothing; `decompose` makes the same call.
     if detect_kit(req.intent) is None:
-        retry_after = _planner_limiter.hit(client_key(dict(request.scope)))
+        retry_after = _planner_limiter.hit(client_identity(dict(request.scope)))
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
-        return await decompose(req.intent)
+        plan = await decompose(req.intent)
     except TimeoutError as e:
         # asyncio.wait_for tripped decompose_timeout_seconds — the LLM hung,
         # nothing else failed. Distinct from the blanket 502 below.
@@ -69,6 +70,13 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
         # is left is a fault nothing anticipated, so it keeps its traceback.
         logger.exception("decompose failed for intent %s", _intent_ref(req.intent))
         raise HTTPException(502, "decompose_failed") from e
+    # Write-through for the plan id this hands out: the buyer reads the card
+    # and signs against it, and a restart in that minute must not turn their
+    # authorisation into a `plan_unknown` release (D-090). Bounded; the write
+    # keeps retrying in the background if this gives up on it.
+    if not await task_persistence.flush(task_persistence.RESPONSE_FLUSH_SECONDS):
+        logger.warning("plan %s: not yet durable when /decompose answered; its write is still queued", plan.plan_id)
+    return plan
 
 
 def _refused_after_release(status: int, detail: str, code: str, message: str, released: guard.Release) -> JSONResponse:
@@ -94,7 +102,15 @@ def _refused_after_release(status: int, detail: str, code: str, message: str, re
     )
 
 
-def _response(task_id: str) -> ExecuteResponse:
+async def _response(task_id: str) -> ExecuteResponse:
+    # Write-through for the receipt: the task id and read token this hands out
+    # must outlive a restart that lands a moment later (D-090). Here, after the
+    # authorization is claimed for the task, so a cancelled wait cannot unclaim
+    # an authorization the run is spending. Bounded — a slow database delays
+    # durability, not the buyer's answer — and the write keeps retrying in the
+    # background if this gives up on it.
+    if not await task_persistence.flush(task_persistence.RESPONSE_FLUSH_SECONDS):
+        logger.warning("task %s: not yet durable when /execute answered; its write is still queued", task_id)
     return ExecuteResponse(task_id=task_id, read_token=state.task_tokens.get(task_id))
 
 
@@ -108,7 +124,15 @@ async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONRes
             "authorization_incomplete",
             "send both auth_id_hex and payer for a paid run, or neither for a simulated one",
         )
-    plan = state.plans.get(req.plan_id)
+    try:
+        # From memory, or read back from the durable store after a restart
+        # (D-090) — a plan the buyer authorised moments before one must still
+        # execute. A store that cannot answer is a retryable 503, and nothing
+        # below runs: on the paid path a missing plan RELEASES the buyer's
+        # custody, which a plan that merely could not be read must never do.
+        plan = await task_persistence.load_plan(req.plan_id)
+    except task_persistence.TaskStoreUnavailable as e:
+        raise HTTPException(503, "plan_store_unavailable", headers={"Retry-After": "5"}) from e
     if req.auth_id_hex is None or req.payer is None:
         # The simulated run: no authorization, no charge, no seal — and no
         # on-chain rating, which `execute_plan` writes only on the paid path
@@ -121,7 +145,7 @@ async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONRes
             # No task was minted; the client should retry once a slot frees up.
             logger.warning("execute rejected for plan %s: %s", req.plan_id, e)
             raise HTTPException(503, "capacity_exhausted") from e
-        return _response(task_id)
+        return await _response(task_id)
     return await _execute_paid(req, plan, req.auth_id_hex, req.payer)
 
 
@@ -182,7 +206,7 @@ async def _execute_paid(
             raise
         if enforced:
             guard.claim(auth_id_hex, task_id)
-    return _response(task_id)
+    return await _response(task_id)
 
 
 async def _refuse_expired(plan: StoredPlan, auth_id_hex: str, payer: str) -> JSONResponse:

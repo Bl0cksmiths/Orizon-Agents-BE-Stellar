@@ -4,11 +4,10 @@ import asyncio
 import random
 from typing import Any
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import build_openai_chat
+from ..model_factory import lazy_agent
 from .base import Worker
 from .prompt_safety import worker_prompt
 
@@ -25,9 +24,9 @@ class SeoBrief(Worker):
     real = True
 
     def __init__(self) -> None:
-        self._agent = Agent(
+        self._agent = lazy_agent(
             name="seo.brief",
-            model=build_openai_chat(settings.worker_model),
+            model_id=settings.worker_model,
             instructions=(
                 "You are an SEO research agent. Given an intent, return a JSON brief with: "
                 "8–12 high-intent keywords, 2–4 audience clusters (concise labels), and a "
@@ -69,7 +68,7 @@ class SeoBrief(Worker):
         # ── Free-form path: LLM ─────────────────────────────────────────────
         prompt = worker_prompt(intent, rationale, "Return the SEO brief.")
         result = await self._agent.arun(prompt)
-        out: SeoBriefOutput = result.content  # type: ignore[assignment]
+        out: SeoBriefOutput = result.content
         return {
             "summary": out.summary,
             "keywords": out.keywords,

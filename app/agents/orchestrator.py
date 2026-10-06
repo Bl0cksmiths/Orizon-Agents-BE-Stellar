@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from agno.agent import Agent
-
 from ..config import settings
 from ..schemas import Plan
-from .model_factory import build_openai_chat
+from .model_factory import LazyAgent, lazy_agent
 
 INSTRUCTIONS = """You are Orizon Orchestrator — the brain that turns user intent into executable agent plans.
 
@@ -44,13 +42,14 @@ Return ONLY the structured Plan. No commentary.
 """
 
 
-def _build() -> Agent:
-    return Agent(
+def _build() -> LazyAgent:
+    return lazy_agent(
         name="orizon_orchestrator",
-        model=build_openai_chat(settings.orchestrator_model),
+        model_id=settings.orchestrator_model,
         instructions=INSTRUCTIONS,
         output_schema=Plan,
     )
 
 
-orchestrator_agent: Agent = _build()
+# Built on the first plan, not at import (app/agents/model_factory.py).
+orchestrator_agent: LazyAgent = _build()

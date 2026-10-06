@@ -415,8 +415,14 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
         create.
 
     Adding either one is a contract change, not a fix.
+
+    `unreachable_endpoint` WAS such a change, made deliberately for D-084: a
+    bound agent whose endpoint failed its latest health check is a gap between
+    the marketplace and the plan that the buyer needs explained, exactly like
+    an unbound one — and routing to it made the buyer pay for a run that could
+    not be delivered.
     """
-    assert get_args(ExclusionReason) == ("below_floor", "unbound_endpoint", "floor_relaxed")
+    assert get_args(ExclusionReason) == ("below_floor", "unbound_endpoint", "floor_relaxed", "unreachable_endpoint")
 
     # And the model actually enforces it — a Literal that is never validated
     # against is a comment.
@@ -452,10 +458,10 @@ def _assert_notice_invariants(resp: DecomposeResponse, path: str) -> None:
             # failing the gate while it is standing in their plan.
             assert n.reason_code == "floor_relaxed", f"{where}: degradation must say the floor was relaxed"
 
-        if n.reason_code == "unbound_endpoint":
+        if n.reason_code in ("unbound_endpoint", "unreachable_endpoint"):
             # Nothing can substitute for or relax an endpoint that does not
-            # exist; the only honest outcome is exclusion.
-            assert n.kind == "excluded", f"{where}: an unbound endpoint can only be an exclusion"
+            # exist or does not answer; the only honest outcome is exclusion.
+            assert n.kind == "excluded", f"{where}: a missing or dead endpoint can only be an exclusion"
 
         # One floor per plan. A notice quoting a different threshold from the
         # envelope it arrived in makes the card argue with itself.

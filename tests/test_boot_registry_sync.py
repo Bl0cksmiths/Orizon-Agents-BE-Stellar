@@ -212,8 +212,25 @@ def chain(monkeypatch):
     reputation_svc._prewarm_task = None
 
 
+def _join_warmup(client) -> None:
+    """Wait for lifespan's background warm-up: the registry wait, then the
+    pre-warm's start. Boot itself no longer waits for either."""
+    import app.main as main
+
+    tasks = {t for t in main._boot_tasks if t.get_name() == "boot-reputation-warmup"}
+    if not tasks:
+        return
+
+    async def join() -> None:
+        await asyncio.wait(tasks)
+
+    client.portal.call(join)
+
+
 def _join_prewarm(client) -> None:
     from app.services import reputation_svc
+
+    _join_warmup(client)
 
     task = reputation_svc._prewarm_task
     if task is None:
@@ -225,7 +242,7 @@ def _join_prewarm(client) -> None:
     client.portal.call(join)
 
 
-def test_boot_awaits_the_first_registry_pass_before_the_prewarm_and_prewarms_onchain_agents(chain, monkeypatch):
+def test_the_prewarm_awaits_the_first_registry_pass_and_prewarms_onchain_agents(chain, monkeypatch):
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -253,14 +270,17 @@ def test_boot_awaits_the_first_registry_pass_before_the_prewarm_and_prewarms_onc
         assert ONCHAIN_ID in chain.rep_reads  # the pre-warm read the on-chain agent
 
 
-def test_a_hung_registry_pass_does_not_hold_boot_past_its_bound(chain, monkeypatch, caplog):
+def test_a_hung_registry_pass_never_holds_boot_and_the_prewarm_stops_waiting_at_its_bound(chain, monkeypatch, caplog):
+    """Boot does not wait for the registry pass at all — on the live registry a
+    pass takes minutes, so the old bounded wait only ever added its whole bound
+    to every wake. The pre-warm behind it still waits, bounded, then goes."""
     from fastapi.testclient import TestClient
 
     from app.config import settings
     from app.main import app
     from app.services import reputation_svc
 
-    monkeypatch.setattr(settings, "registry_boot_sync_timeout_seconds", 0.3)
+    monkeypatch.setattr(settings, "registry_boot_sync_timeout_seconds", 2.0)
     chain.hold_registry()
     try:
         with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
@@ -268,15 +288,47 @@ def test_a_hung_registry_pass_does_not_hold_boot_past_its_bound(chain, monkeypat
             with TestClient(app) as client:
                 booted = time.monotonic() - started
                 assert client.get("/health").status_code == 200
-                assert reputation_svc._prewarm_task is not None
+                assert reputation_svc._prewarm_task is None  # still waiting on the pass
                 _join_prewarm(client)
+                assert reputation_svc._prewarm_task is not None
                 chain.release()
     finally:
         chain.release()
 
-    assert booted < 3.0
-    assert ONCHAIN_ID not in chain.rep_reads  # boot did not wait for it
-    assert any("did not finish within 0.3 s" in line for line in _warnings(caplog))
+    assert booted < 1.0, f"boot was held {booted:.2f} s"
+    assert ONCHAIN_ID not in chain.rep_reads  # the pre-warm did not wait past its bound
+    assert any("did not finish within 2.0 s" in line for line in _warnings(caplog))
+
+
+def test_a_slow_binding_store_holds_boot_no_longer_than_its_budget(monkeypatch, caplog):
+    """A waking database is worth a second or two of the first request, and no
+    more. Past the budget boot serves without the bound set; the load carries
+    on and lands."""
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+    from app.services import binding_registry
+
+    loaded: list[str] = []
+
+    async def slow_load() -> bool:
+        await asyncio.sleep(0.6)
+        loaded.append("bindings")
+        return True
+
+    monkeypatch.setattr(main, "BOOT_BINDING_LOAD_BUDGET_SECONDS", 0.1)
+    monkeypatch.setattr(main, "refresh_bound_ids", slow_load)
+    monkeypatch.setattr(binding_registry, "_loaded", True)
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        started = time.monotonic()
+        with TestClient(main.app) as client:
+            booted = time.monotonic() - started
+            assert loaded == []
+            client.portal.call(asyncio.sleep, 0.8)
+            assert loaded == ["bindings"]  # not cancelled: it finished behind boot
+
+    assert booted < 0.5
+    assert any("did not load within 0.1 s of boot" in r.getMessage() for r in caplog.records)
 
 
 def test_shutdown_keeps_its_order(monkeypatch):
@@ -287,7 +339,7 @@ def test_shutdown_keeps_its_order(monkeypatch):
     from fastapi.testclient import TestClient
 
     import app.main as main
-    from app.services import rating_writer, refund_reconcile, reputation_svc
+    from app.services import rating_writer, refund_reconcile, reputation_svc, task_persistence
 
     order: list[str] = []
 
@@ -314,6 +366,7 @@ def test_shutdown_keeps_its_order(monkeypatch):
         (reputation_svc, "shutdown_read_pool"),
         (registry_sync, "stop"),
         (refund_reconcile, "stop"),
+        (task_persistence, "close"),
         (main, "aclose_pdax_client"),
         (main, "close_binding_store"),
         (main, "close_dispute_store"),
@@ -332,6 +385,7 @@ def test_shutdown_keeps_its_order(monkeypatch):
         "reputation_svc.shutdown_read_pool",
         "registry_sync.stop",
         "refund_reconcile.stop",
+        "task_persistence.close",
         "main.aclose_pdax_client",
         "main.close_binding_store",
         "main.close_dispute_store",

@@ -98,6 +98,40 @@ def fresh_planner_limiter(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def fresh_route_limits():
+    """Every test starts with full per-route budgets (app/rate_limit.py).
+
+    Same reason as the planner limiter above: the backend is module-global and
+    every TestClient is one client, so without this the suite's writes would
+    accumulate across tests until a late one is answered 429.
+    """
+    from app import rate_limit
+
+    previous = rate_limit.get_backend()
+    rate_limit.set_backend(rate_limit.InMemoryTokenBucket())
+    yield
+    rate_limit.set_backend(previous)
+
+
+@pytest.fixture(autouse=True)
+def isolated_snapshots(monkeypatch):
+    """Every test starts with empty read snapshots and no keep-warm refresher.
+
+    The snapshot cells behind the overview, the reputation batch and the
+    adoption report live for the whole process, like the read cache, so one
+    test's snapshot would otherwise be served to the next. And the refresher a
+    TestClient's lifespan would start builds them in the background, behind
+    whatever the test is counting. A test of the refresher enables it itself.
+    """
+    from app.services import snapshots
+
+    monkeypatch.setattr(snapshots, "KEEP_WARM_ENABLED", False)
+    snapshots.reset_all()
+    yield
+    snapshots.reset_all()
+
+
 @pytest.fixture()
 def client():
     with TestClient(app) as c:

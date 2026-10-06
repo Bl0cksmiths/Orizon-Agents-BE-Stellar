@@ -776,3 +776,41 @@ def test_a_registry_boot_wait_inside_the_bound_boots(bound: float) -> None:
 def test_a_registry_boot_wait_that_is_not_a_bound_is_refused(bound: float) -> None:
     with pytest.raises(ValidationError, match="REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS"):
         _settings(registry_boot_sync_timeout_seconds=bound)
+
+
+# ── FRONTEND_PROXY_TOKEN ────────────────────────────────────────
+# It lifts per-client rate limits for whoever sends it, so a guessable or
+# self-printing value is refused at boot rather than trusted.
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["short-token", " " + "t" * 40, "t" * 40 + "\n", "é" * 40],
+    ids=["short", "leading-space", "trailing-newline", "non-ascii"],
+)
+def test_a_weak_frontend_proxy_token_refuses_to_boot(token):
+    with pytest.raises(ValidationError, match="FRONTEND_PROXY_TOKEN"):
+        _settings(frontend_proxy_token=token)
+
+
+def test_a_strong_frontend_proxy_token_boots_and_unset_is_the_default():
+    assert _settings(frontend_proxy_token="f" * 43).frontend_proxy_token == "f" * 43
+    assert _settings().frontend_proxy_token == ""
+    assert _settings().allow_keyless_server_seal is False
+
+
+def test_the_frontend_proxy_token_is_masked_in_logs(monkeypatch):
+    from app.security import REDACTED, redact_secrets
+
+    token = "frontend-proxy-token-" + "x" * 20
+    from app.config import settings as live_settings
+
+    monkeypatch.setattr(live_settings, "frontend_proxy_token", token)
+
+    assert redact_secrets(f"header was {token}") == f"header was {REDACTED}"
+
+
+def test_the_keyless_seal_opt_out_is_refused_on_mainnet():
+    with pytest.raises(ValidationError, match="ALLOW_KEYLESS_SERVER_SEAL"):
+        _settings(**_MAINNET, allow_keyless_server_seal=True)
+    assert _settings(allow_keyless_server_seal=True).allow_keyless_server_seal is True

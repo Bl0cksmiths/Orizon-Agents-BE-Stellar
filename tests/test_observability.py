@@ -35,6 +35,43 @@ def test_log_record_during_request_carries_request_id(client, caplog):
     assert "client=" in access[-1].getMessage()
 
 
+def test_the_access_record_carries_its_facts_as_structured_fields(client, caplog):
+    # A log platform filters on fields, not on a sentence: status, route and
+    # duration are emitted as data beside the human line, and the token in the
+    # query string is masked there exactly as it is in the line.
+    with caplog.at_level(logging.INFO, logger="app.security"):
+        client.get("/api/agents?task_token=sekrit&x=1", headers={"X-Request-ID": "fields-rid-1"})
+
+    access = [rec for rec in caplog.records if rec.name == "app.security" and "/api/agents" in rec.getMessage()]
+    http = access[-1].http
+    assert http["method"] == "GET"
+    assert http["target"] == "/api/agents?task_token=***&x=1"
+    assert http["status"] == 200
+    assert isinstance(http["duration_ms"], float)
+    assert http["client"]
+    # The key the rate limiters used, so a 429 is traceable to its bucket.
+    assert http["identity"] == "testclient"
+    assert "sekrit" not in repr(http)
+
+
+def test_the_json_formatter_emits_structured_fields():
+    import json
+
+    from app.main import JsonLogFormatter
+
+    record = logging.LogRecord("app.security", logging.INFO, __file__, 1, "GET / -> 200", None, None)
+    record.http = {"method": "GET", "status": 200}
+    record.request_id = "rid-9"
+
+    line = json.loads(JsonLogFormatter().format(record))
+
+    assert line["http"] == {"method": "GET", "status": 200}
+    assert line["request_id"] == "rid-9"
+    # And a record without fields keeps the original five keys only.
+    plain = logging.LogRecord("app", logging.INFO, __file__, 1, "hello", None, None)
+    assert set(json.loads(JsonLogFormatter().format(plain))) == {"ts", "level", "logger", "msg", "request_id"}
+
+
 # ── Soroban RPC instrumentation ────────────────────────────────────────
 class _FakeSimulation:
     error = None
@@ -233,7 +270,10 @@ def test_charge_failure_log_carries_transaction_ids(client, server_signing_key, 
     assert server_signing_key.secret not in caplog.text
 
 
-def test_seal_failure_log_carries_transaction_ids(client, server_signing_key, failing_invoke, caplog):
+def test_seal_failure_log_carries_transaction_ids(client, server_signing_key, failing_invoke, caplog, monkeypatch):
+    # The seal fails closed without an operator key; this is the opted-out
+    # local testnet shape, so the signing path itself is what is exercised.
+    monkeypatch.setattr(settings, "allow_keyless_server_seal", True)
     with caplog.at_level(logging.ERROR, logger=ROUTER_LOGGER):
         r = client.post("/api/stellar/server/seal", json=SEAL_BODY)
     assert r.status_code == 400
