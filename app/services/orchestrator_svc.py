@@ -21,6 +21,12 @@ from ..agents.registry import get_worker
 from ..agents.role_cards import card_for
 from ..agents.workers.base import ModelWorker
 from ..agents.workers.claude_only import ClaudeOnlyWorker
+from ..agents.workers.context import CODE_GEN as CODE_GEN_ROLE
+from ..agents.workers.context import CODE_NEXT as CODE_NEXT_ROLE
+from ..agents.workers.context import CODE_ROLES, CONSUMES, EXTERNAL_PREFIX
+from ..agents.workers.context import DEPLOY as DEPLOY_ROLE
+from ..agents.workers.context import RESEARCH as RESEARCH_ROLE
+from ..agents.workers.context import SEO as SEO_ROLE
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..agents.workers.vision_input import has_image_input
 from ..config import settings
@@ -354,6 +360,53 @@ def plannable(agent: Agent, *, on_claude: bool | None = None) -> bool:
     if _is_simulated(agent.id) or _needs_absent_provider(agent.id, on_claude):
         return False
     return not _is_external(agent.id) or settings.planner_route_external
+
+
+def _role(agent_id: str) -> str:
+    """The `context` key a step's output is filed under: its worker's name, or
+    `external.<id>` for a bound operator (`execution_svc`, `workers/context`)."""
+    worker = get_worker(agent_id)
+    return worker.name if worker is not None else f"{EXTERNAL_PREFIX}{agent_id}"
+
+
+def _with_inputs(steps: list[PlanStep], *, kit: bool = False) -> list[PlanStep]:
+    """`steps` with `inputs_from` set: which earlier steps each one reads.
+
+    Mirrors the run loop's handoff rather than restating it:
+
+      * a built-in step reads the roles `CONSUMES` maps it to, plus every
+        earlier operator step when it reads upstream at all, never its own
+        role (`context.upstream`); on a kit plan the code builders leave out
+        the research and brand briefs the kit itself supplies
+        (`code_gen.code_handoff`);
+      * deploy.v0 seals the latest code artifact — the latest earlier code
+        step or operator step (`context.latest_output`);
+      * an operator step is sent the whole run context, so it reads every
+        earlier step.
+
+    A role run twice is read from its latest earlier run, whose output is the
+    one `context` holds at that point. Computed on the FINAL step list (after
+    `_compose`), so the positions are the ones the card shows.
+    """
+    roles = [_role(s.agent_id) for s in steps]
+    out: list[PlanStep] = []
+    for i, step in enumerate(steps):
+        earlier = list(range(i))
+        role = roles[i]
+        if role.startswith(EXTERNAL_PREFIX):
+            sources = earlier
+        elif role == DEPLOY_ROLE:
+            artifact = [j for j in earlier if roles[j] in CODE_ROLES or roles[j].startswith(EXTERNAL_PREFIX)]
+            sources = artifact[-1:]
+        else:
+            wanted = set(CONSUMES.get(role, ())) - {role}
+            if kit and role in (CODE_GEN_ROLE, CODE_NEXT_ROLE):
+                wanted -= {SEO_ROLE, RESEARCH_ROLE}
+            latest = {roles[j]: j for j in earlier if roles[j] in wanted}
+            operators = [j for j in earlier if roles[j].startswith(EXTERNAL_PREFIX)] if CONSUMES.get(role) else []
+            sources = sorted({*latest.values(), *operators})
+        out.append(step.model_copy(update={"inputs_from": [j + 1 for j in sources]}))
+    return out
 
 
 def _snapshot_registry() -> _RegistrySnapshot:
@@ -1044,7 +1097,7 @@ async def _build_kit_plan(
     # path used to report none, so a demo intent showed a marketplace with
     # agents its plan card never accounted for.
     notices += _registry_notices(registry)
-    steps = [_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])]
+    steps = _with_inputs([_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])], kit=True)
 
     plan_id = f"pln_{secrets.token_hex(4)}"
     total_eta = sum(s.est_eta_seconds for s in steps)
@@ -1484,7 +1537,7 @@ def _finish_free_form(
             )
         ]
 
-    cleaned = [_with_executor(step) for step in cleaned]
+    cleaned = _with_inputs([_with_executor(step) for step in cleaned])
     notices = (
         shortlist.notices
         + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
