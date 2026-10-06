@@ -80,6 +80,12 @@ _NO_IMAGE_REASON = (
 )
 
 
+_PROVIDER_REASON = (
+    "it runs on Claude only, and the platform's AI work is not running on Claude right now (so the planner "
+    "passed it over)"
+)
+
+
 def _floor_reason(info: RepInfo | None) -> str:
     """Why the floor acted on an agent, with the deciding lower-bound bps.
 
@@ -249,6 +255,23 @@ def external_policy_notice() -> PlanFloorNotice:
         agent_name=None,
         reason=_EXTERNAL_REASON,
         reason_code="external_not_routed",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def provider_exclusion(agent: Agent) -> PlanFloorNotice:
+    """A Claude-only built-in agent left out while the workers are not on Claude.
+
+    Its worker would fail the step unattempted (`model_not_configured`), so it
+    is not offered at all; the agent is fine, the provider is the reason.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_PROVIDER_REASON,
+        reason_code="provider_unavailable",
         lower_bound_bps=None,
         floor_bps=settings.reputation_floor_bps,
     )

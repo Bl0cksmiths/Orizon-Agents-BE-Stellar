@@ -383,3 +383,14 @@ def test_no_input_exclusion_says_what_the_step_lacked():
         "the plan asked it for a step, but there is no code.gen build to review (nothing to work on, so the step "
         "was left out)"
     )
+
+
+def test_provider_exclusion_blames_the_provider_not_the_agent():
+    n = plan_notices.provider_exclusion(_agent("agt_07w3", "ads.meta"))
+
+    assert (n.kind, n.reason_code, n.agent_id) == ("excluded", "provider_unavailable", "agt_07w3")
+    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.reason == (
+        "it runs on Claude only, and the platform's AI work is not running on Claude right now (so the planner "
+        "passed it over)"
+    )

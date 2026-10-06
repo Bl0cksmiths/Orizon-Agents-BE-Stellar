@@ -334,7 +334,8 @@ class StoredPlan(BaseModel):
 # and `no_step_input` any other proposed step the run loop would predictably
 # not attempt for want of its input (a review with no code.gen build, a seal
 # with no build, a translation with no target language) — dropped before the
-# buyer authorizes its price.
+# buyer authorizes its price. `provider_unavailable` is a built-in agent that
+# runs on Claude only, left out while the workers are not on Claude.
 ExclusionReason = Literal[
     "below_floor",
     "unbound_endpoint",
@@ -344,6 +345,7 @@ ExclusionReason = Literal[
     "external_not_routed",
     "no_image_input",
     "no_step_input",
+    "provider_unavailable",
 ]
 
 

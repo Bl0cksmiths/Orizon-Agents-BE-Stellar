@@ -432,7 +432,8 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
     step, and an external agent left out while plans use only the built-in
     agents. Appended, so the first four keep their positions. `no_image_input`
     followed: a vision.ocr step dropped because the request has no image; and
-    `no_step_input`, any other proposed step dropped for want of its input.
+    `no_step_input`, any other proposed step dropped for want of its input;
+    and `provider_unavailable`, a Claude-only agent while workers are off Claude.
     """
     assert get_args(ExclusionReason) == (
         "below_floor",
@@ -443,6 +444,7 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
         "external_not_routed",
         "no_image_input",
         "no_step_input",
+        "provider_unavailable",
     )
 
     # And the model actually enforces it — a Literal that is never validated
