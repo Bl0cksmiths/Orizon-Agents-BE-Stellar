@@ -156,3 +156,51 @@ def test_a_row_from_before_the_payee_reads_none() -> None:
     assert back.payee is None
     view = SettlementStepView.of(back, 1.0)
     assert (view.payee, view.payee_role) == (None, None)
+
+
+# ── the trace names who was paid ───────────────────────────────────────
+def _settle_line(task_id: str) -> str:
+    [line] = [line.msg for line in state.traces[task_id] if line.settlement == "settled"]
+    return line
+
+
+def test_the_settle_line_names_the_treasury_and_the_operators(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
+    plan = _plan((0.012, 0.02, 0.03), ("agt_01h8", "ext_op", "ext_op2"))
+    _install(
+        monkeypatch,
+        _Chain(
+            auth=_auth(max_amount=plan.plan.total_stroops),
+            owners={"agt_01h8": TREASURY, "ext_op": OWNER, "ext_op2": STRANGER},
+        ),
+    )
+    _workers(monkeypatch, {"agt_01h8": _Ok(), "ext_op": _Ok(), "ext_op2": _Ok()})
+
+    _run(plan, "tsk_tr_line_mixed")
+
+    line = _settle_line("tsk_tr_line_mixed")
+    assert line.startswith("x402 settle → ")
+    assert ": 1 step to the platform treasury and 2 steps to operators, the rest released · tx " in line
+    assert "operator payout" not in line
+
+
+def test_a_run_paying_only_the_treasury_says_so(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
+    plan = _plan((0.012, 0.054), ("agt_01h8", "agt_11c0"))
+    _install(
+        monkeypatch,
+        _Chain(auth=_auth(max_amount=plan.plan.total_stroops), owners={"agt_01h8": TREASURY, "agt_11c0": TREASURY}),
+    )
+    _workers(monkeypatch, {"agt_01h8": _Ok(), "agt_11c0": _Ok()})
+
+    _run(plan, "tsk_tr_line_treasury")
+
+    assert ": 2 steps to the platform treasury, the rest released · tx " in _settle_line("tsk_tr_line_treasury")
+
+
+def test_a_run_paying_one_operator_says_so(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
+    plan = _plan((0.02,), ("ext_op",))
+    _install(monkeypatch, _Chain(auth=_auth(max_amount=plan.plan.total_stroops), owners={"ext_op": OWNER}))
+    _workers(monkeypatch, {"ext_op": _Ok()})
+
+    _run(plan, "tsk_tr_line_operator")
+
+    assert ": 1 step to an operator, the rest released · tx " in _settle_line("tsk_tr_line_operator")
