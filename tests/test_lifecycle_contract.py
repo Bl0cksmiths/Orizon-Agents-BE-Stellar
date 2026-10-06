@@ -44,7 +44,9 @@ def _body_fields(path: str) -> set[str]:
         # `spec` is the optional corrected reading a console resubmits; the
         # harness plans from an intent alone and never sends one.
         ("/api/orchestrator/decompose", {"intent", "spec"}),
-        ("/api/stellar/build/authorize", {"payer", "agent_id", "max_amount_usdc", "ttl_seconds"}),
+        # `max_amount_stroops` is the exact amount (ADR 0015); the harness still
+        # sends the legacy float, which converts by the same rule.
+        ("/api/stellar/build/authorize", {"payer", "agent_id", "max_amount_stroops", "max_amount_usdc", "ttl_seconds"}),
         ("/api/stellar/submit", {"signed_xdr"}),
         ("/api/orchestrator/execute", {"plan_id", "auth_id_hex", "payer"}),
         ("/api/disputes/challenge", {"job_id_hex", "step_index"}),
