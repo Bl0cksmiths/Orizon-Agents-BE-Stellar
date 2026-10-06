@@ -51,6 +51,21 @@ def _receipt(client: TestClient, task_id: str, token: str) -> dict[str, Any]:
     }
 
 
+def _other_token(token: str) -> str:
+    """`token` with its last character flipped — never the token itself.
+
+    `token[:-1] + "x"` WAS the token whenever it already ended in "x"
+    (one urlsafe token in 64), which made the refusal assertion flaky.
+    """
+    return token[:-1] + ("B" if token.endswith("A") else "A")
+
+
+def test_the_other_token_is_never_the_token() -> None:
+    for token in ("abcx", "abcA", "abcB", "x", "A"):
+        other = _other_token(token)
+        assert other != token and len(other) == len(token) and other[:-1] == token[:-1]
+
+
 def _comparable(receipt: dict[str, Any]) -> dict[str, Any]:
     # `started` is "2m ago", derived at serialization time from the stored
     # `started_at`, so it moves with the clock rather than with the restart.
@@ -70,7 +85,7 @@ def test_a_paid_task_and_its_receipt_survive_a_restart(
     with _process(monkeypatch) as client:
         after = _receipt(client, task_id, token)
         anonymous = client.get(f"/api/tasks/{task_id}")
-        wrong = client.get(f"/api/tasks/{task_id}", headers={"X-Task-Token": token[:-1] + "x"})
+        wrong = client.get(f"/api/tasks/{task_id}", headers={"X-Task-Token": _other_token(token)})
         stream = client.get(f"/api/trace/{task_id}/stream", params={"token": token})
 
     assert _comparable(after) == _comparable(before)
