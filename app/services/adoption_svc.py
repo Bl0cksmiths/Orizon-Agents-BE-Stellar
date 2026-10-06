@@ -241,6 +241,24 @@ class ExcludedOwner(BaseModel):
     agent_ids: list[str]
 
 
+class AdoptionCoverage(BaseModel):
+    """How much of what the report rests on this build actually read."""
+
+    # On-chain ids `list_ids` names outside the seeded namespace; None when
+    # the listing could not be read.
+    agents_listed: int | None
+    # Agents with an owner verdict: counted as external, or excluded as ours.
+    agents_accounted: int
+    # The settlement scan's reach: ledgers read, of the ledgers the RPC node
+    # holds (0 when the node could not be asked).
+    settlement_ledgers_scanned: int
+    settlement_ledgers_in_window: int
+    # Charges to external agents found in the ledgers read, and how many of
+    # them have no payer read yet — those are never counted.
+    external_charges: int
+    external_charges_unattributed: int
+
+
 class AdoptionReport(BaseModel):
     """SOW §6.3's answer, with the limits of what was looked at.
 
@@ -266,6 +284,12 @@ class AdoptionReport(BaseModel):
     # scan stopped early, or an on-chain agent could not be accounted for.
     degraded: bool
     unreadable_agents: list[str]
+    # False when the build ran out of time and published what it had read: a
+    # PARTIAL report, its numbers floors, `degraded` true, the rest resumed by
+    # the next build. A report from before this field existed was complete.
+    complete: bool = True
+    # What was read; None on a report from before this field existed.
+    coverage: AdoptionCoverage | None = None
 
 
 TARGETS = AdoptionCounts(
