@@ -192,12 +192,14 @@ def deployment_scope() -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 
-def persist(cell: SnapshotCell[T], decode: Callable[[bytes], T], *, max_restore_age_seconds: float) -> None:
+def persist(cell: SnapshotCell[T], decode: Callable[[bytes], T], *, max_restore_age_seconds: float | None) -> None:
     """Save every live build of `cell`, and restore the last one at boot.
 
     A restored snapshot is served only until the cell's first build of this
     process lands, and never when it is older than `max_restore_age_seconds`:
     past that, "computing" is the more honest answer than a figure that old.
+    None restores one of any age — for a value whose response carries its age
+    and that is better shown dated than not at all.
     """
 
     def save(snap: Snapshot[T]) -> None:
@@ -220,7 +222,7 @@ async def _save(name: str, snap: Snapshot[Any]) -> None:
         logger.warning("snapshot %s not persisted: %s: %s", name, type(e).__name__, e)
 
 
-async def _restore(cell: SnapshotCell[T], decode: Callable[[bytes], T], max_age: float) -> None:
+async def _restore(cell: SnapshotCell[T], decode: Callable[[bytes], T], max_age: float | None) -> None:
     try:
         stored = await get_snapshot_store().load(cell.name, deployment_scope())
     except Exception as e:
@@ -229,7 +231,7 @@ async def _restore(cell: SnapshotCell[T], decode: Callable[[bytes], T], max_age:
     if stored is None:
         return
     age = time.time() - stored.generated_at
-    if age > max_age:
+    if max_age is not None and age > max_age:
         logger.info("snapshot %s not restored: the stored one is %.0f s old", cell.name, age)
         return
     try:
