@@ -82,6 +82,8 @@ def test_tiers_map_to_the_owner_chosen_models_and_efforts() -> None:
     )
     assert tiers.display_name("claude-opus-5-5") == "Claude Opus 5.5"
     assert tiers.display_name("claude-x") == "claude-x"
+    # The dated id the API serves Haiku under is still shown as Haiku.
+    assert tiers.display_name("claude-haiku-4-5-20251001") == "Claude Haiku 4.5"
 
 
 def test_tier_up_rounds_one_step_harder_and_saturates() -> None:

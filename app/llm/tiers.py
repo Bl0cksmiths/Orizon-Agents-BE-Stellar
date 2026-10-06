@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Literal, get_args
 
 from ..config import settings
+from .spend import listed_model
 
 Tier = Literal["low", "moderate", "complex"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -73,5 +74,9 @@ _DISPLAY = {
 
 
 def display_name(model: str) -> str:
-    """The name a trace line or a plan card shows for a model id ("Claude Opus 5.5")."""
-    return _DISPLAY.get(model, model)
+    """The name a trace line or a plan card shows for a model id ("Claude Opus 5.5").
+
+    A served id with a version suffix (`claude-haiku-4-5-20251001`, what the
+    API answers a Haiku 4.5 request as) shows as its listed model.
+    """
+    return _DISPLAY.get(listed_model(model) or model, model)
