@@ -30,6 +30,7 @@ from ...llm.errors import (
     SpendCapReached,
 )
 from ...llm.tiers import display_name, effort_for, model_for
+from ..model_factory import note_served_model
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
@@ -76,10 +77,11 @@ def _step_error(worker: str, model: str, exc: LLMError) -> ModelStepError:
 
 
 def _note_fallback(worker: str, model: str, served_by: str | None) -> None:
-    """Log a step a server-side fallback answered. The call itself (tokens,
-    cost, latency) is already logged once by `app/llm/claude.py`."""
+    """Record a call a server-side fallback answered, for the step's trace line.
+    The call itself (tokens, cost, latency) is logged once by `app/llm/claude.py`."""
     if served_by and served_by != model:
         logger.info("%s: %s declined, answered by fallback %s", worker, display_name(model), display_name(served_by))
+        note_served_model(served_by)
 
 
 async def structured(
