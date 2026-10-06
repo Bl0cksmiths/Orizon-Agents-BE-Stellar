@@ -86,7 +86,8 @@ def test_next_files_are_streamed_on_sonnet_and_returned_as_an_artifact(claude: F
     )
 
     art = out["artifact"]
-    assert set(out) == {"summary", "artifact", "counts", "validator_violations"}
+    assert set(out) == {"summary", "artifact", "counts", "validator_violations", "issues"}
+    assert out["issues"] == []
     assert out["summary"] == "Pricing — A pricing toggle."
     assert [(f["path"], f["language"]) for f in art["files"]] == [
         ("app/page.tsx", "tsx"),
@@ -141,6 +142,51 @@ def test_a_kit_run_leaves_out_the_kits_duplicate_briefs(claude: FakeClaude) -> N
         "seo.brief",
         "research.pro",
     ]
+
+
+def test_alias_imports_are_rewritten_to_relative_paths(claude: FakeClaude) -> None:
+    page = (
+        'import Pricing from "@/components/Pricing";\n'
+        "import { PLANS } from '@/lib/plans';\n"
+        'import "@/app/globals.css";\n'
+        "export default function Page() { return <Pricing plans={PLANS} />; }"
+    )
+    pricing = 'import type { Plan } from "@/lib/plans";\nexport default function Pricing() { return null; }'
+    claude.reply(
+        _tagged(
+            ("app/page.tsx", page),
+            ("components/Pricing.tsx", pricing),
+            ("lib/plans.ts", "export const PLANS = [];"),
+            ("app/globals.css", ":root {}"),
+        )
+    )
+    out = run()
+    files = {f["path"]: f["content"] for f in out["artifact"]["files"]}
+    assert files["app/page.tsx"].splitlines()[:3] == [
+        'import Pricing from "../components/Pricing";',
+        "import { PLANS } from '../lib/plans';",
+        'import "./globals.css";',
+    ]
+    assert files["components/Pricing.tsx"].startswith('import type { Plan } from "../lib/plans";')
+    assert not any("@/" in content for content in files.values())
+    assert "tsconfig.json" not in files
+    assert out["issues"] == [
+        {"file": "app/page.tsx", "problem": "alias_imports_rewritten", "count": 3},
+        {"file": "components/Pricing.tsx", "problem": "alias_imports_rewritten", "count": 1},
+    ]
+
+
+def test_an_alias_under_src_resolves_to_the_src_file() -> None:
+    files = [
+        {"path": "src/app/page.tsx", "language": "tsx", "content": 'import Hero from "@/components/Hero";\n'},
+        {"path": "src/components/Hero.tsx", "language": "tsx", "content": "export default function Hero() {}\n"},
+    ]
+    fixed, _ = code_next.relative_imports(files)
+    assert fixed[0]["content"] == 'import Hero from "../components/Hero";\n'
+
+
+def test_the_brief_forbids_the_alias() -> None:
+    assert "never through the `@/` alias" in code_next.CLAUDE_INSTRUCTIONS
 
 
 def test_the_facts_rule_is_part_of_the_brief() -> None:

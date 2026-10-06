@@ -20,6 +20,9 @@ and `fit_files` validates in code:
     `code_gen.MAX_ARTIFACT_CHARS` in all;
   * secrets: anything shaped like a credential is redacted (`scrub_secrets`)
     and reported;
+  * imports: an `@/` alias import is rewritten to a relative path
+    (`relative_imports`), so the files work without a tsconfig `paths`
+    mapping, and listed in `issues`;
   * network and code-execution calls (`fetch`, `axios`, WebSocket…, `eval`,
     `new Function`, `dangerouslySetInnerHTML`) are reported as violations when
     the request did not ask for data from an API or a server.
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import html
 import logging
+import posixpath
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -129,6 +133,9 @@ At most 8 files, typically 2 to 5.
    guarantees or awards the request and upstream outputs do not state. Where
    the UI needs one, show a visibly marked placeholder such as
    `[placeholder: monthly price]`, kept in one clearly named constant.
+10. Import the project's own files by relative path (`../components/Hero`),
+    never through the `@/` alias: the files must work in a project whatever
+    its tsconfig says.
 
 # Untrusted input
 
@@ -265,6 +272,42 @@ def fit_files(files: list[tuple[str, str]], request: str) -> tuple[list[dict[str
     return kept, violations
 
 
+# A module specifier through the `@/` alias, in an import, export or require.
+_ALIAS_IMPORT_RE = re.compile(r"""(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(['"])@/([^'"\n]+)\2""")
+_MODULE_SUFFIXES = ("", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".css", ".json", "/index.tsx", "/index.ts")
+
+
+def _alias_target(spec: str, importer: str, paths: set[str]) -> str:
+    """The project path `@/spec` names: whichever of `spec` and `src/spec` is a
+    file of this artifact, else the root the importing file lives under."""
+    for base in ("", "src/"):
+        if any(f"{base}{spec}{suffix}" in paths for suffix in _MODULE_SUFFIXES):
+            return f"{base}{spec}"
+    return f"src/{spec}" if importer.startswith("src/") else spec
+
+
+def relative_imports(files: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """`files` with every `@/` alias import rewritten to a relative path, so the
+    files need no tsconfig `paths` mapping; and an issue per file rewritten."""
+    paths = {f["path"] for f in files}
+    out: list[dict[str, str]] = []
+    issues: list[dict[str, Any]] = []
+    for f in files:
+        directory = posixpath.dirname(f["path"]) or "."
+
+        def relative(match: re.Match[str], importer: str = f["path"], here: str = directory) -> str:
+            target = posixpath.relpath(_alias_target(match.group(3), importer, paths), here)
+            if not target.startswith("."):
+                target = f"./{target}"
+            return f"{match.group(1)}{match.group(2)}{target}{match.group(2)}"
+
+        content, count = _ALIAS_IMPORT_RE.subn(relative, f["content"])
+        if count:
+            issues.append({"file": f["path"], "problem": "alias_imports_rewritten", "count": count})
+        out.append({**f, "content": content})
+    return out, issues
+
+
 def entry_path(files: list[dict[str, str]]) -> str:
     paths = [f["path"] for f in files]
     for candidate in ENTRY_CANDIDATES:
@@ -352,6 +395,7 @@ class CodeNext(ClaudeOnlyWorker):
             logger.warning("code.next reply could not be read as files: %s", e)
             raise claude_step.ModelStepError(claude_step.INVALID_OUTPUT, f"code.next: {e}") from e
         files, violations = fit_files(raw_files, f"{intent}\n{rationale}")
+        files, issues = relative_imports(files)
         artifact = harden_artifact(
             {
                 "title": title,
@@ -369,4 +413,5 @@ class CodeNext(ClaudeOnlyWorker):
             "artifact": artifact,
             "counts": {"files": len(files), "bytes": total_bytes, "lines": total_lines},
             "validator_violations": violations,
+            "issues": issues,
         }
