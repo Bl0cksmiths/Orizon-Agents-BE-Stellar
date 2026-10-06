@@ -60,19 +60,27 @@ def _routes(rows: list[dict[str, Any]], legit_only: bool) -> dict[str, int]:
 
 CODE_CEILING_TOKENS = 9_000  # code_gen.MAX_TOKENS after the length fix
 STREAM_BUDGET_S = 100.0  # claude_step.STREAM_BUDGET_SECONDS
+_DEFERRED_LIST = re.compile(r"Deferred:.*$")
 _DEFERRED = re.compile(r"\b(defer|deferred|later|not yet|out of scope|omitted|left out|future)\b", re.I)
 
 
-def _code_length(d: Path) -> list[dict[str, Any]]:
-    """Per run of the complex code.gen re-measure: what the record and the
-    saved HTML say, the validator run again over the file as saved."""
+def _code_length(d: Path, *, revalidate: bool) -> list[dict[str, Any]]:
+    """Per run of a complex code.gen re-measure: what the record and the saved
+    HTML say. With `revalidate`, the validator as it stands now is run over the
+    saved file; without, the result found at run time is kept (the directory's
+    `validator_at_run.json`, else what the worker recorded) — so a later
+    validator change cannot rewrite an earlier section's findings."""
     if not d.is_dir():
         return []
     from app.agents.workers.code_validator import validate_html
 
+    frozen_path = d / "validator_at_run.json"
+    frozen = json.loads(frozen_path.read_text(encoding="utf-8")) if frozen_path.exists() else {}
     out = []
     # code.gen drafts first, in run order, then the critic that polished one.
     for p in sorted(d.glob("*.json"), key=lambda p: (p.stem.startswith("code_critic"), p.stem)):
+        if p.name == frozen_path.name:
+            continue
         rec = json.loads(p.read_text(encoding="utf-8"))
         if "skipped" in rec:
             out.append({"label": rec.get("label"), "skipped": rec["skipped"]})
@@ -95,16 +103,38 @@ def _code_length(d: Path) -> list[dict[str, Any]]:
                 "unreported_estimated_usd": rec.get("unreported_estimated_usd", 0.0),
                 "lines": len(html.splitlines()) if html else None,
                 "bytes": len(html.encode()) if html else None,
-                "validator": validate_html(html) if html else None,
+                "validator": (validate_html(html) if html else None)
+                if revalidate
+                else frozen.get(html_files[0].name if html_files else "", _recorded_violations(rec)),
                 "hit_token_ceiling": call.get("stop_reason") == "max_tokens",
                 "hit_stream_budget": "did not finish within" in str(rec.get("error") or ""),
                 "summary": summary,
                 "deferred_listed": bool(_DEFERRED.search(summary)),
+                "deferred_quote": m.group(0).strip() if (m := _DEFERRED_LIST.search(summary)) else None,
+                "chars_per_line": round(len(html) / len(html.splitlines()), 1) if html else None,
                 "html": html_files[0].name if html_files else None,
                 "error": rec.get("error"),
             }
         )
     return out
+
+
+def _recorded_violations(rec: dict[str, Any]) -> list[str] | None:
+    """The violations the worker reported at run time: code.gen's on its draft;
+    code.critic's on the draft it was given (it does not re-validate its own)."""
+    out = rec.get("output") or {}
+    if "validator_violations" in out:
+        return list(out["validator_violations"])
+    if "critic_violations" in out:
+        return [f"on the draft it polished: {v}" for v in out["critic_violations"]]
+    return None
+
+
+def _ceilings() -> dict[str, int]:
+    """The code workers' output ceilings as the code stands now (the final check's)."""
+    from app.agents.workers import code_critic, code_gen
+
+    return {"code.gen": code_gen.MAX_TOKENS, "code.critic": code_critic.MAX_TOKENS}
 
 
 def _block(name: str, keep: dict[str, str]) -> str:
@@ -122,7 +152,8 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     for p in sorted(wdir.glob("*.json")):
         rec = json.loads(p.read_text(encoding="utf-8"))
         workers[rec["worker"]] = rec
-    code_length = _code_length(runs / "r3-code-length")
+    code_length = _code_length(runs / "r3-code-length", revalidate=False)
+    final = _code_length(runs / "r4-final", revalidate=True)
     guard_usd = sum(list_price(c) for r in new for c in r["meta"]["calls"])
     worker_usd = sum(w.get("cost_usd", 0.0) for w in workers.values())
     # A stream the budget guard cut off was billed but never reported back;
@@ -145,6 +176,8 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
         "errors": len(errors),
         "workers": workers,
         "code_length": code_length,
+        "final": final,
+        "final_ceilings": _ceilings() if final else {},
         "spend": {
             "guard_usd": guard_usd,
             "workers_reported_usd": worker_usd,
@@ -155,6 +188,7 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
             "code_length_usd": sum(
                 r.get("cost_usd", 0.0) + r.get("unreported_estimated_usd", 0.0) for r in code_length
             ),
+            "final_usd": sum(r.get("cost_usd", 0.0) + r.get("unreported_estimated_usd", 0.0) for r in final),
         },
     }
 
@@ -170,12 +204,12 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     (out / "metrics.json").write_text(
         json.dumps(_jsonable(analysis), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    r3 = runs / "r3-code-length"
-    if r3.is_dir():
-        (out / "r3-code-length").mkdir(exist_ok=True)
-        for p in sorted(r3.iterdir()):
-            if p.is_file():
-                shutil.copyfile(p, out / "r3-code-length" / p.name)
+    for sub in ("r3-code-length", "r4-final"):
+        if (runs / sub).is_dir():
+            (out / sub).mkdir(exist_ok=True)
+            for p in sorted((runs / sub).iterdir()):
+                if p.is_file():
+                    shutil.copyfile(p, out / sub / p.name)
     (out / "costs.json").write_text(json.dumps(analysis["spend"], indent=2) + "\n", encoding="utf-8")
     report = out / "REPORT.md"
     keep = narratives(report.read_text(encoding="utf-8")) if report.exists() else {}
@@ -274,7 +308,8 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
             "",
             "cpx-001 (barbershop booking system) handed to the real workers as a complex-tier step, after code.gen and "
             f"code.critic moved to a 250–450-line target, a {CODE_CEILING_TOKENS:,}-token ceiling, low effort and a "
-            f"{STREAM_BUDGET_S:.0f} s stream budget. Lines, bytes and validator are measured on the saved HTML.",
+            f"{STREAM_BUDGET_S:.0f} s stream budget. Lines and bytes are measured on the saved HTML; validator violations "
+            "are as found when this re-measure ran (the validator has changed since; see the final check).",
             "",
             "| run | served model | effort | first token | wall time | output tokens (incl. thinking) | cost | lines | bytes | validator violations | hit 9,000-token ceiling | hit 100 s budget | deferred features in summary |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
@@ -296,6 +331,39 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
             if "skipped" not in r:
                 L.append(f"- **{r['label']}** (`r3-code-length/{r['html']}`): {_cell(r['summary'])}")
         L += ["", _block("code_length_notes", keep), ""]
+    if a.get("final"):
+        ceil = a["final_ceilings"]
+        L += [
+            "### Final check",
+            "",
+            "The same cpx-001 complex step after the follow-up fixes: ceilings raised to the measured "
+            f"{ceil['code.gen']:,} (code.gen) and {ceil['code.critic']:,} (code.critic) tokens, readably formatted "
+            "source asked for, a depth floor met by readable lines or source size, and deferred features named in "
+            "the summary. Validator results are the current validator run on the saved HTML.",
+            "",
+            "| run | served model | effort | first token | wall time | output tokens (incl. thinking) / ceiling | cost | lines | bytes | chars per line | validator (new floor) | hit ceiling | hit 100 s budget |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for r in a["final"]:
+            if "skipped" in r:
+                L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
+                continue
+            viol = r["validator"]
+            cap = ceil.get(r["worker"])
+            share = f" / {cap:,} ({100 * r['output_tokens'] / cap:.0f}%)" if cap else ""
+            L.append(
+                f"| {r['label']} | {r['served_model'] or 'not recorded'} | {r['effort'] or '—'} | "
+                f"{r['first_token_s']:.2f} s | {r['wall_s']:.1f} s | {r['output_tokens']:,}{share} | {usd(r['cost_usd'])} | "
+                f"{r['lines']} | {r['bytes']:,} | {r['chars_per_line']} | {'; '.join(viol) if viol else 'pass (no violations)'} | "
+                f"{'yes' if r['hit_token_ceiling'] else 'no'} | {'yes' if r['hit_stream_budget'] else 'no'} |"
+            )
+        L += ["", "Summaries as returned, and the deferred list:", ""]
+        for r in a["final"]:
+            if "skipped" in r:
+                continue
+            quote = f"“{r['deferred_quote']}”" if r["deferred_quote"] else "no “Deferred: …” list"
+            L.append(f"- **{r['label']}** (`r4-final/{r['html']}`): {_cell(r['summary'])} — {quote}")
+        L += ["", _block("final_notes", keep), ""]
     L += ["## Spend", "", _block("spend", keep), ""]
     sp = a["spend"]
     L += [
@@ -314,6 +382,7 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
             if a.get("code_length")
             else []
         ),
+        *([f"| final check (separate $0.25 cap) | {usd(sp['final_usd'])} |"] if a.get("final") else []),
         "",
     ]
     return "\n".join(L) + "\n"
