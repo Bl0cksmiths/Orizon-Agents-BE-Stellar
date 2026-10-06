@@ -381,14 +381,13 @@ class Settings(BaseSettings):
     # registrations into the marketplace every N seconds; values under 5 are
     # clamped by the service, and a blank STELLAR_AGENT_REGISTRY disables it.
     registry_sync_seconds: int = 15
-    # How long boot waits for the registry sync's FIRST pass before the
-    # reputation pre-warm reads the registry (app/main.py lifespan). Without
-    # the wait the pre-warm read only the seeded catalog and the first plans
-    # after a restart were built without any on-chain agent — Render's free
-    # tier restarts often. A pass slower than this does not hold boot: it
-    # carries on in the background loop and boot goes ahead with a WARNING.
-    # Kept well inside Render's health-check grace, since the service answers
-    # nothing — /health included — until lifespan startup returns. 0 skips
+    # How long the reputation pre-warm waits for the registry sync's FIRST
+    # pass before it reads the registry (app/main.py `_warm_reputation`), so
+    # on-chain agents are pre-warmed too and not just the seeded catalog. The
+    # wait runs in the BACKGROUND: boot does not wait for it, and requests —
+    # /health included — are answered throughout. A pass slower than this is
+    # not cancelled: it carries on in the sync loop, the pre-warm goes ahead
+    # with a WARNING, and agents indexed later are read on first use. 0 skips
     # the wait.
     registry_boot_sync_timeout_seconds: float = 5.0
 
@@ -497,19 +496,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _registry_boot_sync_timeout_is_a_bound(self) -> "Settings":
-        """Refuse a boot wait that is not a bound.
+        """Refuse a pre-warm wait that is not a bound.
 
         NaN would make the wait expire on arrival and inf would let a hung RPC
-        hold boot forever — no request, /health included, is answered until
-        lifespan startup returns. Past 60 s the wait eats into the time Render
-        gives a deploy to answer its health check. Names the variable, never
-        the value.
+        hold the reputation pre-warm back forever, leaving the first plans
+        after a restart routed on priors. Past 60 s the pre-warm starts so late
+        that the plans it exists for have already been made. Names the
+        variable, never the value.
         """
         bound = self.registry_boot_sync_timeout_seconds
         if not (math.isfinite(bound) and 0 <= bound <= 60):
             raise ValueError(
-                "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — boot waits "
-                "this long for the first registry sync pass, and answers no request until it is done"
+                "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — the "
+                "reputation pre-warm waits this long, in the background, for the first registry sync pass"
             )
         return self
 
