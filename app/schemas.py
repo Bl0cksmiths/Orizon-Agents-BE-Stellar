@@ -425,6 +425,23 @@ class UnderstoodSpec(BaseModel):
     summary: str = Field(..., min_length=1, max_length=300)
 
 
+GuardVerdict = Literal["allow", "block", "needs_detail", "unavailable"]
+
+
+class GuardSummary(BaseModel):
+    """The request check's verdict on this intent, as the buyer may see it.
+
+    Only `allow` is ever served on a plan; the other verdicts are refusals
+    (422 `intent_blocked` / `intent_needs_detail`, 503 `intent_unavailable`).
+    The vocabulary is the check's whole set so a client can share one union
+    between a plan and a refusal. Scores stay server-side.
+    """
+
+    verdict: GuardVerdict
+    tier: Tier
+    reasons: list[str] = Field(default_factory=list)
+
+
 # ───── Requests ────────────────────────────────────────────
 class DecomposeRequest(BaseModel):
     # Stripped BEFORE the length bounds apply, so whitespace can neither make
