@@ -120,6 +120,13 @@ def worker_tier(tier: object, default: Tier) -> Tier:
     return default
 
 
+def cap_tier(tier: Tier, ceiling: Tier | None) -> Tier:
+    """`tier`, lowered to `ceiling` when it is above it; `ceiling` None caps nothing."""
+    if ceiling is not None and TIERS.index(tier) > TIERS.index(ceiling):
+        return ceiling
+    return tier
+
+
 def step_model_label(tier: Tier) -> str:
     """The trace's name for the model a step of `tier` runs on, with the tier."""
     return f"{display_name(model_for(tier))} (tier: {tier})"
