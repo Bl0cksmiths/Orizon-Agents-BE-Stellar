@@ -71,9 +71,11 @@ class StageCall:
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float = 0.0  # at list price for the model that answered
     latency_ms: float = 0.0
     stop_reason: str | None = None
+    response_model: str | None = None  # the id the API answered with (a dated snapshot, say)
+    app_cost_usd: float | None = None  # what the app's own spend ledger booked for this call
 
 
 @dataclass(frozen=True)
