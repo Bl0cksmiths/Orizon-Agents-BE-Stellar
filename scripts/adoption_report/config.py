@@ -24,8 +24,8 @@ DEFAULT_TEAM_REGISTER = Path("app/data/team_wallets.json")
 ADOPTION_PATH = "/api/ecosystem/adoption"
 
 # The endpoint answers 202 {"status": "computing"} with Retry-After while the
-# first report since the service booted is computed — a settlement scan per
-# external agent, minutes on the live registry (D-091). The verifier waits for
+# first report since the service booted is computed — when no earlier report
+# was stored to serve meanwhile (D-091). The verifier waits for
 # it, as told, but never longer than this in total, nor more than the bounds
 # below between two asks.
 PENDING_MAX_WAIT_SECONDS = 600.0
