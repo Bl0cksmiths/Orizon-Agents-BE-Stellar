@@ -2,9 +2,9 @@
 
 Wraps the existing CodeCritic Agno agent (defined in code_critic.py) as a
 first-class Worker so it appears as its own step in the pipeline trace. Reads
-the prior `code.gen` artifact from `context`, runs the validator to surface
-any structural violations, prepends the demo-kit critic_checklist as
-non-negotiable requirements, and asks the critic to refine the HTML.
+the prior `code.gen` artifact from `context`, runs the validator to surface any structural violations,
+prepends the demo-kit critic_checklist as non-negotiable requirements, and asks
+the critic to refine the HTML against the copy and design intent upstream of it.
 
 If the critic regresses (more violations after vs. before), we fall back to
 the original draft so the user is never worse off.
@@ -20,11 +20,26 @@ from .claude_step import ModelStepError
 from .code_critic import CRITIC_DEFAULT_TIER, CodeCritic
 from .code_gen import carry_deferred
 from .code_validator import harden_artifact, validate_html
+from .context import CODE_GEN, latest_output
 
 if TYPE_CHECKING:
     from ...llm.tiers import Tier
 
 logger = logging.getLogger(__name__)
+
+# The steps whose artifact the critic reviews.
+DRAFT_ROLES = (CODE_GEN,)
+
+UPSTREAM_GUIDANCE = (
+    "They are the intent the draft was built from: check the app uses this "
+    "copy and these design tokens, and restore any it drifted from."
+)
+
+
+def _draft(context: dict[str, Any] | None) -> tuple[str, dict[str, Any]] | None:
+    """The role and output of the draft to review, or None when no code step
+    delivered an artifact."""
+    return latest_output(context, DRAFT_ROLES)
 
 
 class CodeCriticWorker(ModelWorker):
@@ -33,6 +48,7 @@ class CodeCriticWorker(ModelWorker):
     real = True
     default_tier = CRITIC_DEFAULT_TIER
     max_tier = "moderate"  # see ModelWorker: Opus would outrun the step deadline
+    reads_upstream = True
 
     def __init__(self) -> None:
         self._critic = CodeCritic()
@@ -40,10 +56,15 @@ class CodeCriticWorker(ModelWorker):
     def _deterministic(self, context: dict[str, Any] | None) -> bool:
         # No draft to refine, or code.gen served a baked artifact: either way
         # the step answers without asking a model (see run()).
-        prior = (context or {}).get("code.gen") or {}
-        if not isinstance(prior, dict) or not isinstance(prior.get("artifact"), dict):
-            return True
-        return prior.get("source") == "baked"
+        draft = _draft(context)
+        return draft is None or draft[1].get("source") == "baked"
+
+    def upstream_sources(self, context: dict[str, Any] | None) -> list[str]:
+        """The draft's step — reviewed even when no model is asked — then the
+        handoff's roles when the review goes to a model."""
+        draft = _draft(context)
+        sources = [draft[0]] if draft else []
+        return sources + [r for r in super().upstream_sources(context) if r not in sources]
 
     async def run(
         self,
@@ -57,8 +78,9 @@ class CodeCriticWorker(ModelWorker):
         import random
 
         ctx = context or {}
-        prior = ctx.get("code.gen") or {}
-        draft_artifact = prior.get("artifact") if isinstance(prior, dict) else None
+        draft = _draft(ctx)
+        prior: dict[str, Any] = draft[1] if draft else {}
+        draft_artifact = prior.get("artifact")
 
         if not isinstance(draft_artifact, dict):
             return {
@@ -126,6 +148,7 @@ class CodeCriticWorker(ModelWorker):
                 draft_html=draft_html,
                 violations=violations_for_critic,
                 tier=self.effective_tier(tier),
+                upstream=self.handoff(ctx).section(UPSTREAM_GUIDANCE),
             )
             revised_html = revised.get("preview_html") or ""
             post_violations = validate_html(revised_html)

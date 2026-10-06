@@ -282,3 +282,49 @@ def test_code_gen_on_a_kit_keeps_the_kit_sections_trusted_and_skips_its_duplicat
 def test_code_gen_reports_the_roles_it_was_handed() -> None:
     upstream = {"design.figma": design(), "copywrite.v3": copy_out(), "sol-audit": {"summary": "not read"}}
     assert WORKERS["agt_11c0"].upstream_sources(ctx(**upstream)) == ["design.figma", "copywrite.v3"]
+
+
+# ── code.critic ─────────────────────────────────────────────────────────────
+
+
+def code(title: str = "Spoke", body: str = "DRAFT-HTML", **over: Any) -> dict[str, Any]:
+    html = f'<!doctype html><html><head><meta charset="utf-8"><title>{title}</title></head><body>{body}</body></html>'
+    return {
+        "summary": f"{title} — a co-op site",
+        "artifact": {
+            "title": title,
+            "summary": "A co-op site. Deferred: booking.",
+            "entry": "index.html",
+            "files": [{"path": "index.html", "language": "html", "content": html}],
+            "preview_html": html,
+        },
+        "validator_violations": [],
+        **over,
+    }
+
+
+def test_code_critic_sees_the_copy_and_design_intent_beside_the_draft(claude: FakeClaude) -> None:
+    claude.reply(TAGGED_APP, purpose="worker.code.critic")
+    run("agt_12r0", ctx(**{"copywrite.v3": copy_out(), "design.figma": design(), "code.gen": code()}))
+    prompt = claude.calls_for("worker.code.critic")[0].user
+    body = fenced_body(prompt)
+
+    assert "Hero headline: COPY-HEADLINE Fix it together" in body
+    assert "  --primary: #7C5CFF;" in body
+    assert "Deferred: booking." in body  # the draft's own account of what it left out
+    assert "DRAFT-HTML" not in body  # the HTML travels in its own fence, once
+    assert prompt.count("DRAFT-HTML") == 1
+    assert prompt.index("VIOLATIONS") < prompt.index(FENCE_BEGIN) < prompt.index("BEGIN DRAFT_HTML")
+    assert prompt.rstrip().endswith("Return the improved CodeArtifact.")
+
+
+def test_code_critic_on_a_baked_draft_names_the_draft_and_asks_no_model(claude: FakeClaude) -> None:
+    context = ctx(**{"copywrite.v3": copy_out(), "code.gen": code(source="baked")})
+    assert WORKERS["agt_12r0"].upstream_sources(context) == ["code.gen"]
+    out = run("agt_12r0", context)
+    assert out["source"] == "baked"
+    assert claude.calls == []
+
+
+def test_code_critic_with_no_draft_uses_nothing() -> None:
+    assert WORKERS["agt_12r0"].upstream_sources(ctx(**{"copywrite.v3": copy_out()})) == []
