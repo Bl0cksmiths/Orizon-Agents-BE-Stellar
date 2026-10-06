@@ -194,3 +194,11 @@ def test_design_takes_its_tone_from_the_brand_and_the_copy(claude: FakeClaude) -
     assert "Brand name: SEO-BRAND Spoke" in body
     assert "Hero headline: COPY-HEADLINE Fix it together" in body
     assert body.index("seo.brief") < body.index("copywrite.v3") < body.index("research.pro")
+
+
+def test_sol_audit_audits_the_extracted_contract_source(claude: FakeClaude) -> None:
+    claude.reply({"summary": "s", "findings": [], "cvss_estimate": 1.0}, purpose="worker.sol-audit")
+    run("agt_04m1", ctx(**{"vision.ocr": ocr(), "research.pro": research()}))
+    body = fenced_body(claude.calls_for("worker.sol-audit")[0].user)
+    assert "OCR-TEXT pragma solidity ^0.8.0;\ncontract Vault {}" in body  # line breaks kept: it is source
+    assert "RESEARCH-CLAIM" in body
