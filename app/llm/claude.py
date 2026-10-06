@@ -3,6 +3,11 @@
     structured(...)  a reply that validates against a Pydantic model (structured outputs)
     text(...)        a free-text reply, optionally streamed
 
+A structured call may carry `images` (`ImageBlock`s: base64 bytes and their
+media type), sent as image content blocks ahead of the user text — the vision
+worker's path. The bytes are the caller's to vet (type, size, where they came
+from); this layer only checks the media type is one Claude reads.
+
 Both run the same path:
 
 1. `spend.check_budget()` — `SpendCapReached` before anything is sent.
@@ -43,7 +48,7 @@ import logging
 import math
 import time
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -94,6 +99,18 @@ class LLMResult(Generic[V]):
     request_id: str | None = None
 
 
+# The image formats Claude reads.
+IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+
+@dataclass(frozen=True)
+class ImageBlock:
+    """One image for a call: base64 data (no `data:` prefix) and its media type."""
+
+    media_type: str
+    data: str = field(repr=False)
+
+
 @dataclass(frozen=True)
 class ClaudeRequest:
     """One call as the transport sees it, after normalisation (what FakeClaude records)."""
@@ -108,6 +125,7 @@ class ClaudeRequest:
     schema_name: str | None = None
     stream: bool = False
     cache_system: bool = True
+    images: tuple[ImageBlock, ...] = ()  # sent ahead of `user`, in order
     on_text: TextCallback | None = field(default=None, compare=False)
     # Filled in by the transport as a stream arrives (`_call` attaches one to
     # every streamed request), so a stream cut short can still be billed.
@@ -204,12 +222,14 @@ async def structured(
     effort: Effort | None = None,
     cache_system: bool = True,
     enforce_cap: bool = True,
+    images: Sequence[ImageBlock] = (),
 ) -> LLMResult[T]:
     """Ask `model` for a reply that validates as `schema`.
 
     `purpose` names the caller in the ledger and the logs ("planner",
     "guard.fallback", "worker.research"...): lowercase, at most 64 chars.
-    `effort` defaults to "medium" on models that take one.
+    `effort` defaults to "medium" on models that take one. `images` go ahead
+    of `user` in the same turn.
     """
     from anthropic import transform_schema  # the SDK's own schema → structured-outputs transform
 
@@ -223,6 +243,7 @@ async def structured(
         json_schema=transform_schema(schema),
         schema_name=schema.__name__,
         cache_system=cache_system,
+        images=tuple(images),
     )
     completion, cost, latency_ms = await _call(request, enforce_cap=enforce_cap)
     try:
@@ -266,6 +287,11 @@ async def text(
 
 
 def _request(*, effort: Effort | None, max_tokens: int, model: str, **fields: Any) -> ClaudeRequest:
+    for image in fields.get("images", ()):
+        if image.media_type not in IMAGE_MEDIA_TYPES:
+            raise ValueError(f"image media type must be one of {sorted(IMAGE_MEDIA_TYPES)}: {image.media_type!r}")
+        if not image.data:
+            raise ValueError("an image needs data")
     if effort is not None and effort not in EFFORTS:
         raise ValueError(f"effort must be one of {EFFORTS}: {effort!r}")
     if not isinstance(max_tokens, int) or max_tokens < 1:
@@ -469,7 +495,7 @@ def _sdk_kwargs(request: ClaudeRequest) -> dict[str, Any]:
         "model": request.model,
         "max_tokens": request.max_tokens,
         "system": [system],
-        "messages": [{"role": "user", "content": request.user}],
+        "messages": [{"role": "user", "content": _user_content(request)}],
     }
     output_config: dict[str, Any] = {}
     if request.effort is not None:
@@ -482,6 +508,18 @@ def _sdk_kwargs(request: ClaudeRequest) -> dict[str, Any]:
         kwargs["betas"] = [SERVER_FALLBACK_BETA]
         kwargs["fallbacks"] = "default"
     return kwargs
+
+
+def _user_content(request: ClaudeRequest) -> str | list[dict[str, Any]]:
+    """The user turn: the text alone, or the images first and then the text."""
+    if not request.images:
+        return request.user
+    blocks: list[dict[str, Any]] = [
+        {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data}}
+        for image in request.images
+    ]
+    blocks.append({"type": "text", "text": request.user})
+    return blocks
 
 
 def _usage(raw: Any) -> Usage:
@@ -576,6 +614,7 @@ def _unavailable(error: Exception, model: str) -> Exception:
 
 
 __all__ = [
+    "IMAGE_MEDIA_TYPES",
     "SERVER_FALLBACK_BETA",
     "SERVER_FALLBACK_MODELS",
     "AnthropicTransport",
@@ -583,6 +622,7 @@ __all__ = [
     "ClaudeRequest",
     "ClaudeTransport",
     "Completion",
+    "ImageBlock",
     "LLMResult",
     "TextCallback",
     "get_transport",
