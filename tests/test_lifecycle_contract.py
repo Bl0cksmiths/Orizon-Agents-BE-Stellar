@@ -128,7 +128,7 @@ def test_the_harness_signature_verifies_as_the_backend_verifies_it() -> None:
 
 
 # ── the stroop conversion and the trace lines ───────────────────
-@pytest.mark.parametrize("amount", [0.001, 0.012, 0.05, 0.07, 1.2345678, 12.5])
+@pytest.mark.parametrize("amount", [0.001, 0.012, 0.05, 0.07, 1.2345678, 12.5, 0.00000125, 0.00000455])
 def test_stroops_are_the_backends_stroops(amount: float) -> None:
     assert signing.usdc_to_stroops(amount) == sc.usdc_to_i128(amount)
 
