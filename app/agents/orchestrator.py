@@ -87,6 +87,8 @@ is paid for.
 - Some agents need another step's output or the buyer's input, and are wasted without it: code.critic only \
 after a code builder (code.gen or code.next); deploy.v0 only after a build, as the last step; vision.ocr only \
 when the request includes an image or an https image link.
+- Use one code builder, never both: code.next when the buyer asks for React, Next.js or TypeScript, \
+otherwise code.gen (a single-file HTML, CSS and JavaScript build).
 - Use translate.42 when the deliverable must be in a language other than English, or in several languages; \
 place it after the steps whose text it translates.
 
@@ -94,8 +96,9 @@ Pipelines that work well. Use the listed agents; skip any that are not listed, a
 the request calls for it:
 - Website or landing page: research.pro, seo.brief, copywrite.v3, design.figma, code.gen, code.critic; then \
 deploy.v0 when it should go live, and translate.42 when other languages are asked for.
-- Web app, tool or game: design.figma, code.gen, code.critic, deploy.v0; code.next instead of code.gen when \
-the buyer asks for React, Next.js or TypeScript; research.pro first when the rules or the domain need working out.
+- Web app, tool or game: design.figma, code.gen, code.critic, deploy.v0 - or, when the buyer asks for React, \
+Next.js or TypeScript, design.figma, code.next, code.critic, deploy.v0; research.pro first when the rules or the \
+domain need working out.
 - Marketing or ads: research.pro, seo.brief, copywrite.v3, ads.meta; then translate.42 for other languages.
 - Research or report: research.pro, copywrite.v3; then translate.42 for other languages.
 - Smart contract: sol-audit; research.pro for context and copywrite.v3 for a plain-language summary when useful.
