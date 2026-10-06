@@ -99,6 +99,15 @@ class Settings(BaseSettings):
     # the guard falls back as documented and planning reports unavailable.
     anthropic_api_key: str = ""
     typesafe_api_key: str = ""
+    # The jev model the guard asks, pinned so a new release cannot move the
+    # guard's thresholds under it (TYPESAFE_MODEL).
+    typesafe_model: str = "jev-1.13.0"
+    # One model per tier, exact Claude ids. The planner runs on the complex
+    # tier's model, the prompt improver on the moderate one and the fallback
+    # guard on the low one (app/llm/tiers.py).
+    claude_model_low: str = "claude-haiku-4-5"
+    claude_model_moderate: str = "claude-sonnet-5-5"
+    claude_model_complex: str = "claude-opus-5-5"
 
     # ── Code-generation quality dials (code.gen + code.critic) ─
     # Higher reasoning = better artifacts, more latency + cost.
