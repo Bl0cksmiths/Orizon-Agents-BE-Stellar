@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from ..agents.registry import get_worker
+from ..agents.workers.base import ModelWorker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
@@ -620,10 +621,20 @@ async def _run(
             )
 
             try:
-                output = await asyncio.wait_for(
-                    worker.run(plan.intent, step.rationale, context=context),
-                    timeout=STEP_TIMEOUT_SECONDS,
-                )
+                if isinstance(worker, ModelWorker):
+                    # A built-in LLM worker runs on its step's tier's model, and
+                    # the trace names that model before the step starts (no
+                    # line when the step is served without one, e.g. a kit).
+                    # getattr: a plan stored before steps carried a tier has
+                    # none, and the worker then runs on its own default tier.
+                    tier = getattr(step, "tier", None)
+                    model = worker.step_model(tier, context)
+                    if model:
+                        await _emit(task_id, start, "exec", f"{worker.name} on {model}")
+                    step_run = worker.run(plan.intent, step.rationale, context=context, tier=tier)
+                else:
+                    step_run = worker.run(plan.intent, step.rationale, context=context)
+                output = await asyncio.wait_for(step_run, timeout=STEP_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 logger.error(
                     "task %s step %s (%s): timed out after %.0fs",
