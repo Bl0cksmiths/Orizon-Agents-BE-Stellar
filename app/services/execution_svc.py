@@ -1870,6 +1870,25 @@ def _payout_plan(
     return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped, cap)
 
 
+def _paid_to(payout_plan: _PayoutPlan) -> str:
+    """Who a settle paid, in steps: "1 step to the platform treasury and 2 steps to operators".
+
+    A paid built-in step went to the platform treasury — `_settle_owners`
+    names one only when its owner IS the treasury (ADR 0016) — and every
+    other paid step to its operator. Counted in steps, not payouts, because
+    payouts merge per agent past the settle's limit.
+    """
+    paid = [s for s in payout_plan.steps if s.payout_index is not None]
+    treasury = sum(1 for s in paid if platform_treasury.is_built_in(s.agent_id))
+    operators = len(paid) - treasury
+    parts = []
+    if treasury:
+        parts.append(f"{treasury} step{'' if treasury == 1 else 's'} to the platform treasury")
+    if operators:
+        parts.append("1 step to an operator" if operators == 1 else f"{operators} steps to operators")
+    return " and ".join(parts)
+
+
 def _onchain_owner_sync(agent_id: str) -> str | None:
     """`AgentRegistry.owner_of(agent_id)`: the owner, or None when the registry
     answers NotFound (#2). Raises on anything else. Cached per agent id —
@@ -2161,8 +2180,7 @@ async def _settle_v2(
                     task_id,
                     start,
                     "cost",
-                    f"x402 settle → {_amount(total)} paid to {len(payout_plan.payouts)} "
-                    f"operator payout(s), the rest released · tx {tx[:10]}…",
+                    f"x402 settle → {_amount(total)} paid: {_paid_to(payout_plan)}, the rest released · tx {tx[:10]}…",
                     settlement="settled",
                 )
             if on_settled is not None and delivered_steps:

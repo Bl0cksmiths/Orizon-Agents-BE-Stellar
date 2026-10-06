@@ -220,7 +220,9 @@ def test_a_paid_runs_trace_names_the_asset_and_the_exact_amount(monkeypatch: pyt
     _run(plan, "tsk_px_label_paid")
 
     messages = _messages("tsk_px_label_paid")
-    assert any(m.startswith("x402 settle → 0.0375002 XLM paid to 2 operator payout(s)") for m in messages), messages
+    assert any(m.startswith("x402 settle → 0.0375002 XLM paid: 2 steps to operators, the rest") for m in messages), (
+        messages
+    )
     assert any(m.startswith("workflow sealed — 2 agents · 0.0375002 XLM") for m in messages), messages
     assert not any("USDC" in m for m in messages)
 
