@@ -175,7 +175,7 @@ class CodeArtifact(BaseModel):
 class PlanStep(BaseModel):
     agent_id: str = Field(..., description="Must match a registered agent id")
     agent_name: str | None = None  # backfilled server-side
-    rationale: str = Field(..., description="<= 20 words")
+    rationale: str = Field(..., description="<= 30 words: this step's brief and what it hands to the next step")
     # DEPRECATED — the step's price as a float of the plan's asset (NOT
     # necessarily USDC: see `DecomposeResponse.asset`). Derived from
     # `price_stroops` on every validation, so it can never disagree with it;
