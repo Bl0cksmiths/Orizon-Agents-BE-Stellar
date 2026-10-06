@@ -48,17 +48,19 @@ PLANNER_MODEL = "claude-opus-5-5"
 # fence and security directive, the system prompt, the four guard questions,
 # the AVAILABLE_AGENTS block for the 12 seeded agents.
 FENCE_OVERHEAD = 150
-GUARD_QUESTIONS = 450  # four questions with their criteria text
+GUARD_QUESTIONS = 1_100  # the four questions with their criteria (≈1,220 tokens per call measured)
 FALLBACK_SYSTEM = 1_800  # the fallback's rules plus the rendered question battery
 FALLBACK_OUTPUT = 120
 FALLBACK_MAX_TOKENS = 400  # intent_guard._FALLBACK_MAX_TOKENS
 IMPROVER_SYSTEM = 900
-IMPROVER_OUTPUT = 1_500  # Spec + adaptive thinking at the improver's effort
+IMPROVER_OUTPUT = 600  # Spec + thinking: 319 tokens on average measured, doubled for headroom
 IMPROVER_MAX_TOKENS = 4_000
 SPEC_TOKENS = 400  # the Spec as re-checked and as handed to the planner
 PLANNER_SYSTEM = 1_200
 AGENT_BLOCK = 700
-PLANNER_OUTPUT_BY_EFFORT = {"low": 2_000, "medium": 5_000, "high": 10_000}  # plan + thinking
+# Plan + thinking. Measured 2026-10-06 (88 plans): max 148 / 239 / 509 output
+# tokens at effort low / medium / high; these keep about 2x headroom.
+PLANNER_OUTPUT_BY_EFFORT = {"low": 300, "medium": 500, "high": 1_000}
 PLANNER_MAX_TOKENS = {"low": 4_000, "moderate": 8_000, "complex": 16_000}  # the planner's own budgets
 EFFORT_FOR_TIER = {"low": "low", "moderate": "medium", "complex": "high"}
 
