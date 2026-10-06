@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import math
 import re
 import secrets
 import time
@@ -11,6 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from .. import money
 from ..agents.model_factory import watch_served_models
 from ..agents.registry import get_worker
 from ..agents.workers.base import ModelWorker, Worker
@@ -482,7 +482,11 @@ async def _run(
 ) -> None:
     _live_runs.add(task_id)
     start = time.monotonic()
-    spent = 0.0
+    # In stroops (ADR 0015). `spent` is what the delivered steps' plan prices
+    # add up to — the whole bill of a simulated run. A paid run's bill is
+    # `charged`: what its settle actually moved, set the moment it confirms.
+    spent = 0
+    charged = 0
     succeeded = 0  # steps that returned output; drives the terminal status
     last_artifact: dict | None = None
     charge_tx: str | None = None
@@ -783,7 +787,7 @@ async def _run(
                 continue
 
             succeeded += 1
-            spent += step.est_price_usdc
+            spent += _price_stroops(step)
             delivered_steps.add(step_index)
             # Clears the streak and emits one recovery INFO, so an endpoint that
             # comes back is as visible in Render as one that broke.
@@ -871,12 +875,14 @@ async def _run(
         # Seals that did not confirm, reconciled once the receipt is final.
         pending_seals: list[_PendingSeal] = []
 
-        def _money_moved(settle_tx: str) -> None:
+        def _money_moved(settle_tx: str, moved: int) -> None:
             # Called the moment the settle (v2) or charge (v1) CONFIRMS, before
             # the seal's own poll: the receipt is final, with the hash of what
-            # moved, from that instant. The seal's hash is added when it lands.
-            nonlocal finalized
-            _finalize_task(task_id, status, spent, last_artifact, settle_tx, None)
+            # moved and how much, from that instant. The seal's hash is added
+            # when it lands.
+            nonlocal finalized, charged
+            charged = moved
+            _finalize_task(task_id, status, charged, last_artifact, settle_tx, None)
             finalized = True
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
@@ -940,7 +946,7 @@ async def _run(
                     plan,
                     payer=payer,
                     auth_id_hex=auth_id_hex,
-                    total_usdc=spent,
+                    total_usdc=money.stroops_to_float(spent),
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
                     authorized_max=authorized_max,
@@ -977,7 +983,8 @@ async def _run(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {succeeded} agents · {spent:.3f} USDC · {time.monotonic() - start:.2f}s",
+                f"workflow sealed — {succeeded} agents · {money.stroops_to_float(spent):.3f} USDC · "
+                f"{time.monotonic() - start:.2f}s",
             )
 
         if status != "complete":
@@ -996,7 +1003,7 @@ async def _run(
                 f"workflow incomplete — {succeeded}/{total_steps} agents produced output",
             )
 
-        _finalize_task(task_id, status, spent, last_artifact, charge_tx, proof_tx)
+        _finalize_task(task_id, status, charged if onchain else spent, last_artifact, charge_tx, proof_tx)
         finalized = True
 
         # Follow-up work, in this order because both sign with the one server
@@ -1023,7 +1030,7 @@ async def _run(
         # propagating. shield: a second cancel must not kill the trace line.
         # A task already final keeps what it says (see `finalized`).
         if not finalized:
-            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+            _finalize_task(task_id, "failed", charged if onchain else spent, last_artifact, charge_tx, proof_tx)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
@@ -1031,7 +1038,7 @@ async def _run(
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
         if not finalized:
-            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+            _finalize_task(task_id, "failed", charged if onchain else spent, last_artifact, charge_tx, proof_tx)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
@@ -1094,12 +1101,17 @@ def _terminal_status(total_steps: int, succeeded: int, artifact: dict | None) ->
 def _finalize_task(
     task_id: str,
     status: TaskStatus,
-    spent: float,
+    spent: int,
     artifact: dict | None,
     charge_tx: str | None,
     proof_tx: str | None,
 ) -> None:
-    """Terminal status write shared by the complete / failed / cancelled paths."""
+    """Terminal status write shared by the complete / failed / cancelled paths.
+
+    `spent` is the run's bill in stroops: the delivered prices of a simulated
+    run, or what a paid run's settle moved (0 until one confirms). The legacy
+    float is derived from it, exactly — never rounded to four places.
+    """
     task = state.tasks.get(task_id)
     if task is None:
         return
@@ -1107,7 +1119,8 @@ def _finalize_task(
         task.model_copy(
             update={
                 "status": status,
-                "spent": round(spent, 4),
+                "spent": money.stroops_to_float(spent),
+                "spent_stroops": spent,
                 "artifact": artifact,
                 "charge_tx": charge_tx,
                 "proof_tx": proof_tx,
@@ -1682,10 +1695,9 @@ async def _authorize_for_execute(plan: StoredPlan, auth_id_hex: str, payer: str)
         raise AuthorizationRefusedError(
             409, "authorization_spent", f"this authorization is already spent — {_REAUTHORIZE}"
         )
-    try:
-        plan_total = sum(_stroops(step.est_price_usdc) for step in plan.plan.steps)
-    except _PayoutRefused:
-        plan_total = auth.max_amount + 1  # a price the ledger cannot hold is one no authorization covers
+    # The plan's own total in stroops — exactly what its card showed and what
+    # the buyer was asked to authorize (ADR 0015).
+    plan_total = plan.plan.total_stroops
     if plan_total > auth.max_amount:
         raise AuthorizationRefusedError(
             409, "authorization_insufficient", f"this authorization does not cover the plan — {_REAUTHORIZE}"
@@ -1708,13 +1720,17 @@ async def _authorize_for_execute(plan: StoredPlan, auth_id_hex: str, payer: str)
     return auth.max_amount
 
 
-def _stroops(amount_usdc: float) -> int:
-    """`amount_usdc` in stroops, refusing what the ledger cannot hold."""
-    from ..stellar import client as sc
+def _price_stroops(step: PlanStep) -> int:
+    """The step's price as the plan froze it, in stroops (ADR 0015).
 
-    if not math.isfinite(amount_usdc) or amount_usdc < 0:
-        raise _PayoutRefused(f"price {amount_usdc!r} is not a finite, non-negative amount")
-    return sc.usdc_to_i128(amount_usdc)
+    Never re-read from the registry: an operator who reprices after the plan
+    was built is paid what the buyer authorized. `PlanStep` derives the field
+    on validation, so it is always set; a step that bypassed validation and
+    carries none is refused rather than guessed.
+    """
+    if step.price_stroops is None:
+        raise _PayoutRefused(f"step for {step.agent_id} carries no price in stroops")
+    return step.price_stroops
 
 
 class _PayoutRefused(Exception):
@@ -1739,6 +1755,7 @@ class _PayoutPlan:
     payouts: tuple[Any, ...]  # client.Payout, kept Any so this module imports the client lazily
     steps: tuple[_StepPayout, ...]
     clamped_stroops: int = 0  # how much the authorized cap cut; 0 when it cut nothing
+    authorized: int | None = None  # the authorization's max_amount the payouts were held under
 
     @property
     def total(self) -> int:
@@ -1787,7 +1804,7 @@ def _payout_plan(
     unpaid: list[_StepPayout] = []
     for index in sorted(delivered_steps):
         step = plan.plan.steps[index]
-        amount = _stroops(step.est_price_usdc)
+        amount = _price_stroops(step)
         reason = UNPAID_FREE if amount <= 0 else unpaid_agents.get(step.agent_id)
         if reason is None and remaining is not None:
             if amount > remaining:
@@ -1822,7 +1839,7 @@ def _payout_plan(
                 f"more than the {sc.MAX_SETTLE_PAYOUTS} payouts one settle accepts"
             )
         payouts = [sc.Payout(agent_id, totals[i]) for agent_id, i in slot.items()]
-    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped)
+    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped, cap)
 
 
 def _onchain_owner_sync(agent_id: str) -> str | None:
@@ -2560,6 +2577,7 @@ def _v2_settlement_record(
                 delivered=False,
                 output_summary=None,
                 paid_usdc=0.0,
+                planned_stroops=step.price_stroops,
             )
         amount = payout.amount / stroops
         receipt = (
@@ -2575,6 +2593,7 @@ def _v2_settlement_record(
             paid_usdc=amount,
             receipt_id_hex=receipt,
             unpaid_reason=payout.unpaid_reason,
+            planned_stroops=step.price_stroops,
         )
 
     return SettlementRecord(
@@ -2588,6 +2607,7 @@ def _v2_settlement_record(
         steps=tuple(_step(index, step) for index, step in enumerate(plan.plan.steps)),
         settled_at=settled_at,
         window_closes_at=window_closes_at,
+        authorized_stroops=payout_plan.authorized,
     )
 
 
@@ -2700,6 +2720,7 @@ async def _record_settlement(
                         # undelivered step has no summary" holds where the
                         # record is built rather than only where it was fed.
                         output_summary=output_summaries.get(index) if index in delivered_steps else None,
+                        planned_stroops=step.price_stroops,
                     )
                     for index, step in enumerate(plan.plan.steps)
                 ),
@@ -2781,14 +2802,15 @@ async def _settle_and_record(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None = None,
-    on_money_moved: Callable[[str], None] | None = None,
+    on_money_moved: Callable[[str, int], None] | None = None,
     on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Charge, record the settlement, seal, then record the seal — in that order.
 
-    `on_money_moved(tx)` is called once, the moment the charge or settle
-    CONFIRMS and its settlement is recorded — before the seal is submitted —
-    so the run can make its receipt final without waiting on the seal.
+    `on_money_moved(tx, stroops)` is called once, the moment the charge or
+    settle CONFIRMS and its settlement is recorded — before the seal is
+    submitted — with what it moved, so the run can make its receipt final
+    (and its bill exact) without waiting on the seal.
 
     Against a v2 escrow the charge is `_settle_v2`'s one `settle`, paying each
     delivered step its own amount, and the record keeps those per-step
@@ -2821,6 +2843,9 @@ async def _settle_and_record(
         )
 
     recorded: list[SettlementRecord] = []
+    # What the v1 charge moves, by its own rule (`_settled_usdc`).
+    moved = money.to_stroops(_settled_usdc(total_usdc))
+    told: list[str] = []
 
     async def _on_charged(charge_tx: str, job_id: bytes) -> None:
         record = await _record_settlement(
@@ -2839,11 +2864,16 @@ async def _settle_and_record(
         if record is not None:
             recorded.append(record)
         if on_money_moved is not None:
-            on_money_moved(charge_tx)
+            told.append(charge_tx)
+            on_money_moved(charge_tx, moved)
 
     charge_tx, proof_tx, job_id = await _settle_onchain(
         task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=total_usdc, on_charged=_on_charged
     )
+    if charge_tx is not None and not told and on_money_moved is not None:
+        # A charge hash is only ever returned for a charge that CONFIRMED, so
+        # the money moved even though nobody was told at the moment it did.
+        on_money_moved(charge_tx, moved)
     if recorded:
         if proof_tx is not None:
             await _record_proof(task_id, recorded[0], proof_tx)
@@ -2874,7 +2904,7 @@ async def _settle_and_record_v2(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None,
-    on_money_moved: Callable[[str], None] | None = None,
+    on_money_moved: Callable[[str, int], None] | None = None,
     on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """`_settle_and_record`'s order over `_settle_v2`: settle, record, seal, record the seal."""
@@ -2906,7 +2936,7 @@ async def _settle_and_record_v2(
         if record is not None:
             recorded.append(record)
         if on_money_moved is not None:
-            on_money_moved(settle_tx)
+            on_money_moved(settle_tx, payout_plan.total)
 
     settle_tx, proof_tx, job_id = await _settle_v2(
         task_id,

@@ -644,8 +644,10 @@ def test_the_summary_changes_nothing_else_the_settlement_records(monkeypatch, st
 
     assert len(store.recorded) == 1
     record = store.recorded[0]
+    # ADR 0015's planned price is set aside too: it is added, and is pinned there.
     without_summaries = dataclasses.replace(
-        record, steps=tuple(dataclasses.replace(s, output_summary=None) for s in record.steps)
+        record,
+        steps=tuple(dataclasses.replace(s, output_summary=None, planned_stroops=None) for s in record.steps),
     )
     assert without_summaries == SettlementRecord(
         task_id=task_id,
