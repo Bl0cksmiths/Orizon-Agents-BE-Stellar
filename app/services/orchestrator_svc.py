@@ -7,7 +7,7 @@ import random
 import re
 import secrets
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
 
@@ -627,8 +627,18 @@ def _routable_registry(
     # absent, and it is advice nobody wants acted on.
     notices += _unbound_notices(registry)
 
+    return _Shortlist(render_agents_block(routable, reps), notices, frozenset(offered))
+
+
+def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.RepInfo]) -> str:
+    """The AVAILABLE_AGENTS block for `agents`, one line per agent, in order.
+
+    The planner's whole view of who it may route to. Public so the evals
+    harness can hand `draft_plan` the same block decompose would; decompose
+    itself only ever renders the shortlist `_routable_registry` chose.
+    """
     lines = ["AVAILABLE_AGENTS:"]
-    for a in routable:
+    for a in agents:
         # Live smoothed score on the 0–5 scale the prompt already uses. Never
         # the agent's self-declared `rep`: the planner reads this number as
         # evidence, and an on-chain registrant writes that one about itself.
@@ -648,7 +658,7 @@ def _routable_registry(
             f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
-    return _Shortlist("\n".join(lines), notices, frozenset(offered))
+    return "\n".join(lines)
 
 
 def _registry_prompt_fragment(reps: dict[str, reputation_svc.RepInfo]) -> str:
