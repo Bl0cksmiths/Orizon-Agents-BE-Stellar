@@ -65,7 +65,17 @@ def fit_copy(draft: CopyDraft) -> CopyOutput:
 INSTRUCTIONS = (
     "You are a senior marketing copywriter. Given an intent, draft a hero "
     "headline (<=80 chars), a hero subtitle (<=160 chars), and 3–4 landing "
-    "sections with a title and short body each. Punchy, concrete, outcome-focused."
+    "sections with a title and short body each. Punchy, concrete, outcome-focused.\n\n"
+    # The live eval of 2026-10-06 caught invented promises ("Results in 8 weeks
+    # or your money back", "Join 500+ members"): copy a business publishes as
+    # its own must not assert what the request never said.
+    "Facts: never invent facts the request does not state. That means no "
+    "guarantees or refund promises, no prices or discounts, no statistics or "
+    "results, no testimonials or quotes, no customer counts or member numbers, "
+    "and no awards, certifications or press mentions. Where the copy needs one, "
+    "write a clearly marked placeholder for the owner to fill in, such as "
+    "[placeholder: price per class] or [placeholder: member count]. Describe "
+    "what is offered in concrete words without claiming outcomes nobody supplied."
 )
 
 # Room for the JSON plus any thinking the tier's model does first.
