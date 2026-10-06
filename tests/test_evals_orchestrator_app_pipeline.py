@@ -160,3 +160,16 @@ def test_all_stages_run_through_the_real_raw_planner(cases, tmp_path):
         ModelPlan.model_validate(r["meta"]["plan"])
         assert r["grade"]["plan_valid"] == 1
         assert set(r["meta"]["offered"]) == {a.id for a in seeded_agents()}
+
+
+def test_forced_fallback_answers_on_haiku_and_never_bills_jev(cases, tmp_path):
+    from app.llm.tiers import guard_fallback_model
+
+    pipeline = AppPipeline.create(live=False, cases=cases, noise=0.0, force_fallback=True)
+    rows, errors = _run(cases[:8], pipeline, tmp_path)
+    assert errors == []
+    for r in rows:
+        assert [(c["stage"], c["model"]) for c in r["meta"]["calls"]] == [("guard_fallback", guard_fallback_model())]
+        assert "fallback" in r["meta"]["observed"]["reasons"]
+        assert r["grade"]["verdict_ok"] == 1
+        assert r["meta"]["observed"]["raw_tier"] in ("low", "moderate", "complex")
