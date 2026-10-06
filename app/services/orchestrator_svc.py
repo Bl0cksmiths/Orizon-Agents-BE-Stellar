@@ -45,7 +45,7 @@ from . import intent_screening, reachability, reputation_svc
 from .binding_registry import is_dispatchable
 from .plan_notices import (
     below_floor_exclusion,
-    external_exclusions,
+    external_policy_notice,
     no_image_exclusion,
     no_input_exclusion,
     relaxation,
@@ -631,16 +631,21 @@ def _registry_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
 
     Built-in agents whose worker only simulates its output come first, under
     `simulated_worker`, whichever way the external switch is set. With the
-    switch OFF, every listed on-chain agent is then reported once, under
-    `external_not_routed` — bound or not, healthy or not, since the policy is
-    why it is absent, and "no endpoint bound" would send its operator to fix
-    something that would not get it planned.
+    switch OFF, ONE `external_not_routed` notice states the policy whenever
+    any outside agent is listed — naming none of them (the set is the whole
+    permissionless registry; the ids go to the log) — and no unbound or
+    unreachable notice is given, since the policy is why they are absent.
     """
     simulated = [simulated_exclusion(a) for a in registry.simulated]
     if not registry.route_external:
-        return simulated + external_exclusions(
-            a for a in registry.agents if a.source == "onchain" and _is_listed(a) and _is_external(a.id)
+        outside = sorted(
+            a.id for a in registry.agents if a.source == "onchain" and _is_listed(a) and _is_external(a.id)
         )
+        if not outside:
+            return simulated
+        # The card says the policy once; which agents it covered is ops detail.
+        logger.info("external routing is off: %d listed outside agent(s) not offered: %s", len(outside), outside[:50])
+        return [*simulated, external_policy_notice()]
     unreachable = {a.id for a in registry.unreachable}
     routable = {a.id for a in registry.routable} | unreachable
     return (

@@ -352,27 +352,15 @@ def test_simulated_exclusion_is_policy_not_a_verdict_on_the_agent():
     )
 
 
-def test_external_exclusion_names_the_policy_not_the_agents_standing():
-    n = plan_notices.external_exclusion(_agent("ext_top", "top operator"))
+def test_the_external_policy_notice_names_no_agent():
+    n = plan_notices.external_policy_notice()
 
     assert (n.kind, n.reason_code) == ("excluded", "external_not_routed")
+    assert n.agent_id == plan_notices.EXTERNAL_POLICY_ID and n.agent_name is None
     assert n.lower_bound_bps is None and n.floor_bps == FLOOR
-    assert n.reason == (
-        "an external operator agent (plans currently use only the platform's built-in agents, so the planner "
-        "passed it over)"
-    )
-    # Not the endpoint sentences: a bound, healthy external agent is just as absent.
-    assert "endpoint" not in n.reason and "floor" not in n.reason
-
-
-def test_external_exclusions_order_by_id_then_cap():
-    many = [_agent(f"ext_{i:02d}") for i in reversed(range(plan_notices.UNBOUND_REPORT_CAP + 3))]
-
-    notices = plan_notices.external_exclusions(many)
-
-    assert [n.agent_id for n in notices] == [f"ext_{i:02d}" for i in range(plan_notices.UNBOUND_REPORT_CAP)]
-    assert all(n.reason_code == "external_not_routed" for n in notices)
-    assert plan_notices.external_exclusions([]) == []
+    assert n.reason == "Plans currently use Orizon's built-in agents only; outside operators' agents aren't routed."
+    # A sentinel no Soroban Symbol can spell, so it can never be a real agent's id.
+    assert not plan_notices.EXTERNAL_POLICY_ID.replace("_", "").isalnum()
 
 
 def test_no_image_exclusion_says_there_was_nothing_to_read():

@@ -71,10 +71,7 @@ _SIMULATED_REASON = (
     "work, so the planner passed it over)"
 )
 
-_EXTERNAL_REASON = (
-    "an external operator agent (plans currently use only the platform's built-in agents, so the planner "
-    "passed it over)"
-)
+_EXTERNAL_REASON = "Plans currently use Orizon's built-in agents only; outside operators' agents aren't routed."
 
 
 _NO_IMAGE_REASON = (
@@ -230,17 +227,26 @@ def simulated_exclusion(agent: Agent) -> PlanFloorNotice:
     )
 
 
-def external_exclusion(agent: Agent) -> PlanFloorNotice:
-    """An external operator agent left out while plans use only built-in agents.
+# The one `external_not_routed` notice's `agent_id`. Not a Soroban Symbol
+# (`*` is outside [A-Za-z0-9_]), so no registered agent can ever share it, and
+# a client tells the aggregate apart by `reason_code` without parsing it.
+EXTERNAL_POLICY_ID = "*external"
 
-    The owner's routing policy (`PLANNER_ROUTE_EXTERNAL` off), so the sentence
-    says nothing about the agent's reputation or endpoint — it may have both
-    in order, and neither is why it is absent.
+
+def external_policy_notice() -> PlanFloorNotice:
+    """ONE notice that outside operators' agents are not routed, naming none of them.
+
+    The owner's routing policy (`PLANNER_ROUTE_EXTERNAL` off). The external set
+    is the permissionless registry — potentially thousands of agents — so a
+    notice per agent would bury the plan card in names the buyer never asked
+    about, and would publish operators' ids on every plan. The card says the
+    policy once; which agents it covered goes to the server log only
+    (`orchestrator_svc._registry_notices`).
     """
     return PlanFloorNotice(
         kind="excluded",
-        agent_id=agent.id,
-        agent_name=agent.name,
+        agent_id=EXTERNAL_POLICY_ID,
+        agent_name=None,
         reason=_EXTERNAL_REASON,
         reason_code="external_not_routed",
         lower_bound_bps=None,
@@ -360,14 +366,3 @@ def unreachable_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
     """
     ordered = sorted(agents, key=lambda a: a.id)
     return [unreachable_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]
-
-
-def external_exclusions(agents: Iterable[Agent]) -> list[PlanFloorNotice]:
-    """External-not-routed notices for `agents`, ordered by id and capped.
-
-    The external set is the permissionless registry, so it grows without limit
-    exactly as the unbound set does, and it is held to the same rule: sorted by
-    id before the same cap, so the same registry always names the same agents.
-    """
-    ordered = sorted(agents, key=lambda a: a.id)
-    return [external_exclusion(a) for a in ordered[:UNBOUND_REPORT_CAP]]

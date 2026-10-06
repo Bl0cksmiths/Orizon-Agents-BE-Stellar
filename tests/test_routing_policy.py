@@ -33,6 +33,7 @@ from app.llm.testing import FakeClaude, FakeJev, choice, score
 from app.schemas import Agent, DecomposeResponse, Plan, PlanStep
 from app.seed import seed_registry
 from app.services import binding_registry, orchestrator_svc, reputation_svc
+from app.services.plan_notices import EXTERNAL_POLICY_ID
 from app.services.prompt_improver import SpecDraft
 from app.services.reputation_svc import RepInfo
 from app.state import state
@@ -190,9 +191,11 @@ def test_a_top_rated_external_agent_is_never_offered_or_planned(
     assert f"id={EXTERNAL} " not in call.system and f"id={UNBOUND} " not in call.system
     assert [s.agent_id for s in resp.steps] == ["agt_11c0", "agt_12r0"]
     assert all(s.executor == "built_in" for s in resp.steps)
-    # The card says why, in the policy's own words — not as an endpoint problem.
-    assert _codes(resp)[EXTERNAL] == "external_not_routed"
-    assert _codes(resp)[UNBOUND] == "external_not_routed"
+    # The card says why ONCE, in the policy's own words, naming no outside
+    # agent — not one notice per agent, and not as an endpoint problem.
+    external = [n for n in resp.notices if n.reason_code == "external_not_routed"]
+    assert [(n.agent_id, n.agent_name) for n in external] == [(EXTERNAL_POLICY_ID, None)]
+    assert EXTERNAL not in _codes(resp) and UNBOUND not in _codes(resp)
     assert "unbound_endpoint" not in _codes(resp).values()
     # And its reputation was never even read: nothing could have used it.
     assert all(EXTERNAL not in ids for ids in registry)
@@ -248,7 +251,7 @@ def test_the_legacy_planner_holds_the_same_policy(registry: list[list[str]], mon
 
     assert f"id={EXTERNAL} " not in seen[0] and f"id={SIMULATED} " not in seen[0]
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
-    assert _codes(resp)[EXTERNAL] == "external_not_routed"
+    assert _codes(resp)[EXTERNAL_POLICY_ID] == "external_not_routed"
     assert _codes(resp)[SIMULATED] == "simulated_worker"
 
 
@@ -268,7 +271,7 @@ def test_a_kit_never_promotes_an_external_agent_into_a_slot(
 
     assert EXTERNAL not in [s.agent_id for s in resp.steps]
     assert all(n.replacement_id != EXTERNAL for n in resp.notices)
-    assert _codes(resp)[EXTERNAL] == "external_not_routed"
+    assert _codes(resp)[EXTERNAL_POLICY_ID] == "external_not_routed"
 
     monkeypatch.setattr(settings, "planner_route_external", True)
     resp = _decompose(KIT_INTENT)
@@ -297,6 +300,34 @@ def test_a_kit_holds_the_policy_if_the_switch_turns_off_during_its_pause(
     resp = _decompose(KIT_INTENT)
 
     assert EXTERNAL not in [s.agent_id for s in resp.steps]
+
+
+def test_one_policy_notice_however_many_outside_agents_are_listed(
+    registry: list[list[str]], caplog: pytest.LogCaptureFixture
+) -> None:
+    for i in range(40):
+        state.add_agent(_onchain(f"ext_crowd{i:02d}"))
+    try:
+        with caplog.at_level("INFO", logger="app.services.orchestrator_svc"):
+            shortlist = orchestrator_svc._routable_registry({a.id: _rep(a.id, 8000) for a in state.list_agents()})
+    finally:
+        for i in range(40):
+            state.agents.pop(f"ext_crowd{i:02d}", None)
+
+    external = [n for n in shortlist.notices if n.reason_code == "external_not_routed"]
+    assert len(external) == 1 and external[0].agent_id == EXTERNAL_POLICY_ID
+    assert all(not n.agent_id.startswith("ext_") for n in shortlist.notices)
+    # The per-agent detail is in the server log, not on the card.
+    assert any("ext_crowd00" in r.getMessage() and EXTERNAL in r.getMessage() for r in caplog.records)
+
+
+def test_no_policy_notice_when_no_outside_agent_is_listed(registry: list[list[str]]) -> None:
+    state.agents.pop(EXTERNAL)
+    state.agents.pop(UNBOUND)
+
+    shortlist = orchestrator_svc._routable_registry({a.id: _rep(a.id, 8000) for a in state.list_agents()})
+
+    assert all(n.reason_code != "external_not_routed" for n in shortlist.notices)
 
 
 # ── PLANNER_ROUTE_EXTERNAL on: today's behaviour ───────────────
