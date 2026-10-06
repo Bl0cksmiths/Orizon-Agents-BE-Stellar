@@ -1,0 +1,98 @@
+{
+  "agent_id": "agt_07w3",
+  "worker": "ads.meta",
+  "intent": "Meta ads for our neighbourhood bike repair co-op in Quezon City, open Saturdays",
+  "context_roles": [
+    "seo.brief",
+    "copywrite.v3"
+  ],
+  "step_model": "Claude Haiku 4.5 (tier: low)",
+  "output": {
+    "summary": "5 Meta ad variants — Fix Your Bike Together",
+    "objective": "OUTCOME_AWARENESS",
+    "special_ad_category": "NONE",
+    "ads": [
+      {
+        "primary_text": "Fix your bike, together. Free tools, stands, and volunteer help every Saturday at Spoke & Wrench Co-op.",
+        "headline": "Fix Your Bike Together",
+        "description": "Free Saturday workshop",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Learn basic repairs: flats, brakes, gears. Open workshop Saturdays with expert volunteers at your side.",
+        "headline": "Learn Bike Repair Basics",
+        "description": "Saturdays in Quezon City",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Your bike, our tools, free help. Spoke & Wrench Co-op: community bike repair every Saturday morning.",
+        "headline": "Community Bike Workshop",
+        "description": "Quezon City, Saturdays",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Flat tire? Brake trouble? Come fix it with us. Free workshop, tools and guidance every Saturday.",
+        "headline": "Fix It With Our Help",
+        "description": "Saturday workshops free",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Join our Saturday bike repair sessions. Use our stands, borrow our tools, learn from volunteers at Spoke & Wrench.",
+        "headline": "Spoke & Wrench Co-op",
+        "description": "Saturday workshops",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      }
+    ],
+    "audience": {
+      "summary": "Cyclists in Quezon City who commute by bike or ride on weekends and want to learn basic maintenance and repair skills.",
+      "locations": [
+        "Quezon City",
+        "Philippines"
+      ],
+      "age_min": 18,
+      "age_max": 65,
+      "interests": [
+        "Cycling",
+        "Bike commuting",
+        "DIY and repairs",
+        "Community volunteering",
+        "Sustainable transportation",
+        "Urban cycling",
+        "Mechanical hobbies",
+        "Outdoor activities",
+        "Local communities"
+      ],
+      "exclusions": []
+    },
+    "notes": [],
+    "unverified_figures": [],
+    "counts": {
+      "ads": 5,
+      "interests": 9
+    }
+  },
+  "error": null,
+  "latency_s": 8.87,
+  "calls": [
+    {
+      "purpose": "worker.ads.meta",
+      "model": "claude-haiku-4-5",
+      "served_by": null,
+      "effort": null,
+      "stream": false,
+      "images": 0,
+      "stop_reason": "end_turn",
+      "input_tokens": 2144,
+      "output_tokens": 467,
+      "cache_read_tokens": 0,
+      "cost_usd": 0.004479,
+      "latency_s": 8.87
+    }
+  ],
+  "cost_usd": 0.004479
+}
