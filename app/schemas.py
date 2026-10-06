@@ -523,6 +523,19 @@ class DecomposeResponse(BaseModel):
     # planner failed is logged, never returned. Always False on the demo-kit
     # path, which never asks the planner anything.
     planner_fallback: bool = False
+    # ── Planning pipeline (all null/empty from the legacy planner) ──
+    # The request's overall complexity; every step's `tier` is at most this.
+    tier: Tier | None = None
+    # The improved request the plan was built from, for the buyer to correct
+    # and resubmit as `spec`. Null when the plan was built from the original
+    # words: a curated kit, a failed improver, or a spec that drifted from
+    # what was asked.
+    understood_as: UnderstoodSpec | None = None
+    # The request check's verdict. Null when the check did not run.
+    guard: GuardSummary | None = None
+    models: PlanModels | None = None
+    # One line per planning stage, in order, for the trace.
+    stages: list[PlanStage] = Field(default_factory=list)
 
 
 class ExecuteRequest(BaseModel):
