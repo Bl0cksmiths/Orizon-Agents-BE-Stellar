@@ -17,10 +17,12 @@ from typing import Any
 import pytest
 
 from app.agents.registry import WORKERS
-from app.agents.workers import copywrite, sol_audit
+from app.agents.workers import claude_step, copywrite, sol_audit
+from app.agents.workers.claude_step import ModelStepError
 from app.config import settings
 from app.llm import claude as claude_layer
 from app.llm.claude import ClaudeRequest, Completion
+from app.llm.errors import LLMUnavailable
 from app.llm.testing import FakeClaude
 from app.schemas import Plan, PlanStep, StoredPlan, Task
 from app.services import execution_svc
@@ -192,3 +194,108 @@ def test_a_step_a_fallback_served_names_the_fallback_model(claude: FakeClaude) -
     assert trace[at + 1] == "copywrite.v3 on Claude Opus 5.5 (fallback; tier: moderate)"
     # Collected per step: the next step, answered by its own model, names no fallback.
     assert [line for line in trace if "(fallback" in line] == [trace[at + 1]]
+
+
+# ── our outage is not the agent's failure ───────────────────────────────────
+
+
+def _rated(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fake the settle and capture which steps the ratings were told to skip."""
+    seen: dict[str, Any] = {"totals": [], "undispatched": None}
+
+    async def fake_settle(task_id, start, plan, *, payer, auth_id_hex, total_usdc, on_charged=None):
+        seen["totals"].append(total_usdc)
+        return ("chargehash", "sealhash", b"\x02" * 16)
+
+    async def fake_ratings(*a: Any, undispatched: frozenset[int] = frozenset(), **k: Any) -> None:
+        seen["undispatched"] = undispatched
+
+    monkeypatch.setattr(execution_svc, "_settle_onchain", fake_settle)
+    monkeypatch.setattr(execution_svc, "_submit_ratings", fake_ratings)
+    return seen
+
+
+def test_an_unavailable_provider_is_not_run_not_charged_not_rated(
+    claude: FakeClaude, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _rated(monkeypatch)
+    claude.reply(_copy(), purpose="worker.copywrite.v3")
+    claude.fail(LLMUnavailable("overloaded"), purpose="worker.sol-audit")
+    _, trace = _run("tsk_cw_unavail", _step("agt_01h8", COPY_PRICE), _step("agt_04m1", AUDIT_PRICE), paid=True)
+
+    assert "sol-audit: AI provider unavailable — not charged, not rated" in trace
+    assert not any(line.startswith("sol-audit failed") for line in trace)
+    assert seen["totals"] == [pytest.approx(COPY_PRICE)]
+    assert seen["undispatched"] == frozenset({1})
+    assert ft.consecutive_failures("agt_04m1") == 0
+
+
+def test_a_spent_daily_budget_pauses_every_model_step_unbilled_and_unrated(
+    claude: FakeClaude, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _rated(monkeypatch)
+    monkeypatch.setattr(settings, "llm_daily_spend_cap_usd", 0.0)
+    task, trace = _run("tsk_cw_cap", _step("agt_01h8", COPY_PRICE), _step("agt_04m1", AUDIT_PRICE), paid=True)
+
+    assert "copywrite.v3: paused: daily AI budget reached — not charged, not rated" in trace
+    assert "sol-audit: paused: daily AI budget reached — not charged, not rated" in trace
+    assert claude.calls == []
+    assert seen["totals"] == []  # nothing delivered: nothing charged
+    assert seen["undispatched"] == frozenset({0, 1})
+    assert (ft.consecutive_failures("agt_01h8"), ft.consecutive_failures("agt_04m1")) == (0, 0)
+    assert task.spent == 0.0
+
+
+def test_a_missing_provider_key_is_not_the_agents_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No FakeClaude: the suite's offline transport answers like a deployment with no key."""
+    seen = _rated(monkeypatch)
+    monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
+    _, trace = _run("tsk_cw_nokey", _step("agt_04m1", AUDIT_PRICE), paid=True)
+
+    assert "sol-audit: AI provider not configured — not charged, not rated" in trace
+    assert seen["undispatched"] == frozenset({0})
+    assert ft.consecutive_failures("agt_04m1") == 0
+
+
+def test_a_refusal_is_still_the_agents_failure_and_rated(claude: FakeClaude, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The line between the two: a model that answered "no" did not deliver."""
+    seen = _rated(monkeypatch)
+    claude.refuse(purpose="worker.sol-audit")
+    _, trace = _run("tsk_cw_refused_paid", _step("agt_04m1", AUDIT_PRICE), paid=True)
+
+    assert "sol-audit failed (model_refused)" in trace
+    assert seen["undispatched"] == frozenset()
+    assert ft.consecutive_failures("agt_04m1") == 1
+
+
+def test_the_not_attempted_classes_are_the_ones_the_workers_raise() -> None:
+    assert set(execution_svc._NOT_ATTEMPTED) == {
+        claude_step.SPEND_CAP_REACHED,
+        claude_step.MODEL_NOT_CONFIGURED,
+        claude_step.MODEL_UNAVAILABLE,
+    }
+
+
+class _Outage:
+    """An external-style worker raising one of our classes: still its failure."""
+
+    name = "w.ext"
+    real = True
+
+    async def run(self, intent: str, rationale: str, context: Any = None) -> Any:
+        raise ModelStepError("model_unavailable", "boom")
+
+
+def test_only_a_first_party_step_can_be_excused(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _rated(monkeypatch)
+
+    async def _resolve(agent_id: str) -> Any:
+        return _Outage()
+
+    monkeypatch.setattr(execution_svc, "resolve_worker", _resolve)
+    step = PlanStep(agent_id="agt_x", agent_name="agt_x", rationale="r", est_price_usdc=0.01, est_eta_seconds=1.0)
+    _, trace = _run("tsk_cw_ext", step, paid=True)
+
+    assert "w.ext failed (model_unavailable)" in trace
+    assert seen["undispatched"] == frozenset()
+    assert ft.consecutive_failures("agt_x") == 1
