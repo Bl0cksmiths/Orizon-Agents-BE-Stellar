@@ -236,6 +236,9 @@ class StoredPlan(BaseModel):
     floor_bps: int | None = None
     reputation_degraded: bool = False
     planner_fallback: bool = False
+    # How this plan was reached, one line per planning stage, so the run's
+    # trace can open with them. Empty on a plan built by the legacy planner.
+    stages: list[PlanStage] = Field(default_factory=list)
 
 
 # Why the floor acted on an agent — a CLOSED set, because the plan card renders
