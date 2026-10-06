@@ -3,7 +3,8 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 from ..config import settings
-from ..llm.tiers import Tier
+from ..llm import claude
+from ..llm.tiers import Tier, effort_for, planner_model
 from ..schemas import Plan
 from ..services.prompt_improver import Spec, spec_to_text
 from .model_factory import LazyAgent, lazy_agent
@@ -115,6 +116,12 @@ class ModelPlan(BaseModel):
     steps: list[PlannedStep]
 
 
+# Output budget per tier. Opus thinks before it answers and thinking counts
+# against max_tokens, so the budget scales with the effort the tier asks for;
+# the plan itself is a few hundred tokens.
+_PLANNER_MAX_TOKENS: dict[Tier, int] = {"low": 4_000, "moderate": 8_000, "complex": 16_000}
+
+
 def planner_system(agents_block: str) -> str:
     """The planner's system prompt: the standing instructions, then the agent list.
 
@@ -144,6 +151,33 @@ def planner_user(request: str | Spec, *, tier: Tier) -> str:
 # A spec is bounded field by field well below this; the clamp is the fence's
 # own last line for a spec from anywhere else.
 _UNDERSTOOD_MAX_CHARS = 6_000
+
+
+async def draft_plan(request: str | Spec, *, tier: Tier, agents_block: str) -> claude.LLMResult[ModelPlan]:
+    """The planner's RAW plan: one structured call on the planner model.
+
+    Raw means before `orchestrator_svc.decompose` holds it to anything — ids
+    outside AVAILABLE_AGENTS, duplicates, over-long plans and step tiers above
+    `tier` all come back as the model wrote them. decompose clamps what this
+    returns; the evals harness calls it directly, so plan validity is measured
+    on what the model proposed, not on what survived the clamp.
+
+    `request` is the buyer's intent or a checked `Spec` of it; either is
+    fenced. `agents_block` is an AVAILABLE_AGENTS block
+    (`orchestrator_svc.render_agents_block` builds one from any agent list).
+    Effort follows the tier. Raises the model layer's errors (`LLMRefused`,
+    `LLMTruncated`, `LLMUnavailable`, `SpendCapReached`, ...) — what each
+    means for the buyer is the caller's decision.
+    """
+    return await claude.structured(
+        purpose="planner",
+        model=planner_model(),
+        system=planner_system(agents_block),
+        user=planner_user(request, tier=tier),
+        schema=ModelPlan,
+        max_tokens=_PLANNER_MAX_TOKENS[tier],
+        effort=effort_for(tier),
+    )
 
 
 def _build() -> LazyAgent:
