@@ -24,6 +24,7 @@ from app.llm import claude as claude_layer
 from app.llm.claude import ClaudeRequest, Completion
 from app.llm.errors import LLMUnavailable
 from app.llm.testing import FakeClaude
+from app.llm.tiers import Tier
 from app.schemas import Plan, PlanStage, PlanStep, StoredPlan, Task
 from app.services import execution_svc
 from app.services import failure_tracker as ft
@@ -34,12 +35,6 @@ COPY_PRICE = 0.02
 AUDIT_PRICE = 0.05
 AUTH = "ab" * 16
 PAYER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
-
-
-class _TieredStep(PlanStep):
-    """A plan step carrying a tier, as the planner lane's PlanStep will."""
-
-    tier: str | None = None
 
 
 @pytest.fixture(autouse=True)
@@ -73,8 +68,8 @@ def _audit() -> sol_audit.AuditOutput:
     return sol_audit.AuditOutput(summary="No source; typical risks.", findings=[], cvss_estimate=2.0)
 
 
-def _step(agent_id: str, price: float, tier: str | None = None) -> PlanStep:
-    return _TieredStep(
+def _step(agent_id: str, price: float, tier: Tier | None = None) -> PlanStep:
+    return PlanStep(
         agent_id=agent_id,
         agent_name=WORKERS[agent_id].name,
         rationale="do it",
