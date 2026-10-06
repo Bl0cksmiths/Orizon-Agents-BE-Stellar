@@ -145,15 +145,52 @@ What the tier changes mean in practice:
 - **Lines and validator:** not measured.
 <!-- END narrative:worker_notes -->
 
+## Complex code.gen after the length fix
+
+cpx-001 (barbershop booking system) handed to the real workers as a complex-tier step, after code.gen and code.critic moved to a 250–450-line target, a 9,000-token ceiling, low effort and a 100 s stream budget. Lines, bytes and validator are measured on the saved HTML.
+
+| run | served model | effort | first token | wall time | output tokens (incl. thinking) | cost | lines | bytes | validator violations | hit 9,000-token ceiling | hit 100 s budget | deferred features in summary |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| code.gen#1 | claude-sonnet-5-5 | low | 1.93 s | 39.2 s | 7,058 | $0.0770 | 180 | 14,385 | under 200 lines (180) — feature-incomplete, add depth | no | no | no |
+| code.critic#1 | claude-sonnet-5-5 | low | 0.87 s | 37.7 s | 8,383 | $0.1017 | 192 | 16,886 | under 200 lines (192) — feature-incomplete, add depth | no | no | no |
+
+Summaries as returned:
+
+- **code.gen#1** (`r3-code-length/code_gen_1__index.html`): Brass & Blade — Barbershop Booking — A complete barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard with schedule editing, and email-style confirmations, all persisted locally.
+- **code.critic#1** (`r3-code-length/code_critic_1__index.html`): Brass & Blade — Barbershop Booking · polished: 180L → 192L (+12) · 1 structural issue fixed
+
+<!-- BEGIN narrative:code_length_notes -->
+**Timing is fixed.**
+- Both calls were served by `claude-sonnet-5-5` at effort low. The first token arrived in 1.9 s (code.gen) and 0.9 s (code.critic).
+- Both finished in under 40 s: 39.2 s and 37.7 s. Neither came near the 100 s stream budget.
+- Before the fix, the same request on medium effort was still streaming at 104.8 s when it was cut off. The owner's Opus 5.5 measurement was 268.5 s.
+
+**Code.gen's cost falls; the critic is now the dearer half.**
+- One complex code step on Sonnet (code.gen + code.critic) cost $0.1787, so $10/day covers about 55 such builds.
+- code.gen: $0.077, below the earlier cut-off run's estimated $0.13+.
+- code.critic: $0.1017. It has to write the whole file again (7,615 tokens in, 8,383 out).
+
+**Three problems remain:**
+1. **The validator's own floor rejects both files.** code.gen wrote 180 lines and the polished version 192. Both fall short of the new 250–450-line target and of the validator's 200-line floor, so both are flagged "under 200 lines — feature-incomplete". The lines are dense, about 80 bytes each: the file is 14.4 KB, against 19 KB for the campaign's 355-line expense tracker. Line count is a poor proxy here. Unless the target and the floor are reconciled (or the floor measured in bytes or features), every compact complex draft will carry this violation.
+2. **No deferred features were listed.** The prompt asks a large request to implement the core flow and list what it deferred. The summary instead says "A complete barbershop booking app with services, per-barber schedules, live time-slot picking, an admin dashboard …", with nothing marked deferred.
+3. **The critic is close to its ceiling.** It used 8,383 of its 9,000 output tokens (93%). It shares code.gen's ceiling, but rewrites the whole draft and thinks first, so a somewhat larger draft would end as `model_truncated` at the critic step. A higher critic ceiling, or a polish step that returns changes rather than the full file, would remove that margin risk.
+
+**code.gen#2 was not run.** After code.gen#1 ($0.0770) and code.critic#1 ($0.1017), $0.0213 was left of the $0.20 cap. That is below a second draft's measured cost, so the job was skipped rather than started. Run-to-run variance of the complex draft is therefore unmeasured. A second draft needs about $0.08 more.
+<!-- END narrative:code_length_notes -->
+
 ## Spend
 
 <!-- BEGIN narrative:spend -->
-- **Measured from recorded tokens:** jev guard $0.0086, copywrite.v3 $0.0017, research.pro $0.0088 — **$0.0191** in total.
+**Release re-check (cap $0.15):**
+- Measured from recorded tokens: jev guard $0.0086, copywrite.v3 $0.0017, research.pro $0.0088 — **$0.0191** in total.
 - **The cut-off code.gen stream is not reported by the API.** It was stopped once the guard's running estimate reached $0.1296, the budget then left.
   - That estimate counts the streamed text at 3.5 characters per token and adds 70% for thinking, at Sonnet's output price.
   - The true billed amount could be somewhat higher or lower. It should be checked against the Anthropic Console's usage for this key.
 - **Estimated total ≈ $0.149 against the $0.15 cap.** That is at the cap, not comfortably under it.
-- **No complete code.gen run fits this budget.** A complex request's single Sonnet draft costs more than about $0.13; confirming lines and validator needs about $0.25 more.
+
+**Complex code.gen re-measure (separate cap $0.20):**
+- code.gen#1 $0.0770 and code.critic#1 $0.1017 — **$0.1787 measured.** Both calls completed and were reported by the API, so there is no estimate in this figure.
+- code.gen#2 was not started.
 <!-- END narrative:spend -->
 
 | item | amount |
@@ -163,4 +200,5 @@ What the tier changes mean in practice:
 | **measured total** | **$0.0191** |
 | cut-off stream, code.gen (estimated, unreported) | ≈ $0.1296 |
 | **total including estimates** | **$0.1487** |
+| complex code.gen re-measure (separate $0.20 cap) | $0.1787 |
 
