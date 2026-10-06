@@ -375,9 +375,11 @@ def test_a_tip_read_that_fails_once_is_read_again(chain: Any) -> None:
     assert _fetch({"ext_a": OWNER_A}).complete is True
 
 
-def test_a_page_that_fails_is_resumed_from_not_restarted(chain: Any) -> None:
+@pytest.mark.parametrize("error", [ConnectionError("rpc down"), TimeoutError("read timed out")], ids=["down", "slow"])
+def test_a_page_that_fails_is_resumed_from_not_restarted(chain: Any, error: Exception) -> None:
+    """A read that timed out is a failed read, not the build running out of time."""
     rpc, _views = chain
-    rpc.page_errors = {3: ConnectionError("rpc down"), 4: ConnectionError("rpc down")}
+    rpc.page_errors = {3: error, 4: error}
 
     first = _fetch({"ext_a": OWNER_A})
 
