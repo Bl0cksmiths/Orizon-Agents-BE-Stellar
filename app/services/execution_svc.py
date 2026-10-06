@@ -695,11 +695,12 @@ async def _run(
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
-                not_run = _NOT_ATTEMPTED.get(_failure_class(e))
+                not_run = _not_attempted(worker.name, _failure_class(e))
                 if not_run is not None and get_worker(step.agent_id) is worker:
-                    # Our outage, not the agent's: the daily AI budget is spent,
-                    # or the model provider has no key or is down. The agent was
-                    # never able to try, so — like a step refused at execute —
+                    # Not the agent's failure: the daily AI budget is spent, the
+                    # model provider has no key or is down, or the request gave
+                    # the step nothing to work on. The agent was never able to
+                    # try, so — like a step refused at execute —
                     # it is not billed, not counted in its failure streak and
                     # not rated (ADR 0005 D5: "did not deliver" and "could not
                     # be asked" are different facts). First-party only: the
@@ -3005,15 +3006,34 @@ NOT_A_DICT_FAILURE = "not_a_dict"
 UNUSABLE_OUTPUT_FAILURE = "unusable_output"
 
 
-# Failure classes of a first-party model step that are OUR outage rather than
-# the agent's failure to deliver, with the trace's plain words for each. Spelled
-# here, not imported from the worker that raises them, for the same reason
-# `_failure_class` reads `rule` duck-typed (ADR 0005).
+# Failure classes of a first-party step that the agent could not attempt —
+# OUR outage (budget, provider), or a request that gave the step nothing it can
+# work on (no image to read, nothing to translate, no target language) — rather
+# than the agent's failure to deliver, with the trace's plain words for each.
+# Spelled here, not imported from the worker that raises them, for the same
+# reason `_failure_class` reads `rule` duck-typed (ADR 0005).
 _NOT_ATTEMPTED = {
     "spend_cap_reached": "paused: daily AI budget reached",
     "model_not_configured": "AI provider not configured",
     "model_unavailable": "AI provider unavailable",
+    "no_input": "nothing to work on",
+    "image_unavailable": "no image could be read (refused or unreachable)",
+    "no_target_language": "no target language named",
 }
+
+# Where one class reads better in a particular worker's words.
+_NOT_ATTEMPTED_FOR = {
+    ("vision.ocr", "no_input"): "no image to read",
+    ("translate.42", "no_input"): "nothing to translate",
+}
+
+
+def _not_attempted(worker_name: str, failure_class: str) -> str | None:
+    """The trace's words for a step `worker_name` could not attempt, or None
+    when `failure_class` is the agent's own failure to deliver."""
+    if failure_class not in _NOT_ATTEMPTED:
+        return None
+    return _NOT_ATTEMPTED_FOR.get((worker_name, failure_class), _NOT_ATTEMPTED[failure_class])
 
 
 def _failure_class(exc: BaseException) -> str:
