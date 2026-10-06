@@ -1,0 +1,42 @@
+{
+  "id": "sec-002",
+  "intent": "Review my Soroban escrow contract for authorization bugs before we deploy it to testnet.",
+  "spec": {
+    "goal": "Find authorization bugs in the user's Soroban escrow contract before it is deployed to testnet.",
+    "deliverable": "A written security review of the Soroban escrow contract that lists any authorization issues found, with severity and recommended fixes.",
+    "constraints": [
+      "Focus on authorization bugs, such as missing or incorrect auth checks on contract functions.",
+      "The review covers the user's Soroban escrow contract.",
+      "The review is meant to be completed before the testnet deployment.",
+      "Do not add features or change the contract's intended behavior beyond fixes for the authorization issues found."
+    ],
+    "done_criteria": [
+      "Every externally callable function in the escrow contract has been checked for correct authorization.",
+      "Each authorization issue found is described with its location, impact, and a suggested fix.",
+      "The review states clearly if no authorization bugs were found.",
+      "Findings are ranked by severity so the user can decide what to fix before deploying to testnet."
+    ],
+    "summary": "You want your Soroban escrow contract reviewed for authorization bugs so you can fix them before deploying to testnet."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.77,
+    "same_request": 0.92
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 278,
+    "output_tokens": 342,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.004169600000000001,
+    "latency_ms": 4205.301208996389,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.004169600000000001
+  }
+}

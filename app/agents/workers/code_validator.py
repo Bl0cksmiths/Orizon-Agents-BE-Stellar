@@ -195,6 +195,19 @@ def _is_html_file(f: dict[str, Any]) -> bool:
     return language == "html" or path.endswith((".html", ".htm"))
 
 
+# The depth floor: what separates a stub from an app. Met by EITHER bound.
+#
+# Lines alone misjudged dense output: the live re-measure of 2026-10-06
+# (evals/orchestrator/reports/2026-10-06-recheck/r3-code-length/) flagged two
+# complete apps — code.gen's 180 lines / 14.4 KB and code.critic's 191 lines /
+# 16.9 KB — as "feature-incomplete". 200 readable lines run about 8 KB, so
+# 12 000 characters is half again what the line bound already accepts and still
+# 17% under the smallest complete app measured; a stub (a few KB, or a few
+# lines padded out with blank ones — blank lines do not count) meets neither.
+MIN_DEPTH_LINES = 200
+MIN_DEPTH_SOURCE_CHARS = 12_000
+
+
 def validate_html(html: str) -> list[str]:
     """
     Return a list of human-readable violation strings. Empty list = clean.
@@ -206,10 +219,13 @@ def validate_html(html: str) -> list[str]:
     if not html or not html.strip():
         return ["artifact is empty"]
 
-    # Size / depth
-    line_count = html.count("\n") + 1
-    if line_count < 200:
-        v.append(f"under 200 lines ({line_count}) — feature-incomplete, add depth")
+    # Size / depth — met by either bound; see MIN_DEPTH_SOURCE_CHARS.
+    lines = sum(1 for line in html.splitlines() if line.strip())
+    if lines < MIN_DEPTH_LINES and len(html) < MIN_DEPTH_SOURCE_CHARS:
+        v.append(
+            f"under {MIN_DEPTH_LINES} lines ({lines}) and under {MIN_DEPTH_SOURCE_CHARS // 1000} KB "
+            f"({len(html) / 1000:.1f} KB) — feature-incomplete, add depth"
+        )
 
     # External asset violations (break sandbox, violate 'single-file' rule)
     for m in _EXTERNAL_SCRIPT.finditer(html):

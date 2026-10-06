@@ -1,0 +1,28 @@
+{
+  "agent_id": "agt_09l5",
+  "worker": "research.pro",
+  "case_id": "mod-002",
+  "intent": "Research the top 5 competitors of a meal-prep delivery startup in Manila and write a one-page comparison.",
+  "latency_s": 9.69,
+  "cost_usd": 0.0109635,
+  "calls": [
+    {
+      "model": "claude-sonnet-5-5",
+      "response_model": "claude-sonnet-5-5",
+      "served_by": null,
+      "input_tokens": 273,
+      "output_tokens": 877,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 659,
+      "cost_usd": 0.0109635,
+      "app_cost_usd": 0.0109635,
+      "latency_ms": 9684,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": "ModelStepError: research.pro: claude-sonnet-5-5 returned output outside its schema",
+  "output": {
+    "summary": null,
+    "counts": null
+  }
+}

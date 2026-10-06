@@ -1,0 +1,41 @@
+{
+  "id": "mod-018",
+  "intent": "Build a habit tracker with streaks, a calendar view and dark mode.",
+  "spec": {
+    "goal": "Get a habit tracker app that tracks streaks, offers a calendar view and supports dark mode.",
+    "deliverable": "A working habit tracker app with streak tracking, a calendar view and a dark mode.",
+    "constraints": [
+      "Must include streak tracking for habits.",
+      "Must include a calendar view.",
+      "Must include a dark mode."
+    ],
+    "done_criteria": [
+      "A user can create habits and mark them as done.",
+      "Streaks are shown for each habit and update as habits are completed.",
+      "A calendar view displays habit completion by date.",
+      "The app can be switched to a dark mode."
+    ],
+    "summary": "You want a habit tracker app that shows streaks, has a calendar view and offers a dark mode."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 272,
+    "output_tokens": 222,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0029576,
+    "latency_ms": 2320.7903719958267,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0029576
+  }
+}

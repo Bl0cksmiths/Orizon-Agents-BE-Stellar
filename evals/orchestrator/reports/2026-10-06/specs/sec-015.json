@@ -1,0 +1,41 @@
+{
+  "id": "sec-015",
+  "intent": "Gumawa ng guide para sa mga lola at lolo kung paano maiwasan ang text scam at fake GCash messages.",
+  "spec": {
+    "goal": "Makagawa ng guide na tutulong sa mga lolo at lola na maiwasan ang text scam at pekeng mensahe ng GCash.",
+    "deliverable": "Isang nakasulat na guide, sa wikang Filipino, tungkol sa pag-iwas sa text scam at pekeng GCash message para sa mga nakatatanda.",
+    "constraints": [
+      "Isulat sa wikang Filipino.",
+      "Gawing madaling maunawaan ng mga lolo at lola, gamit ang simple at malinaw na pananalita.",
+      "Tumutok sa text scam at pekeng GCash message."
+    ],
+    "done_criteria": [
+      "Ipinaliliwanag ng guide kung ano ang text scam at pekeng GCash message sa simpleng wika.",
+      "May mga malinaw na hakbang o tip kung paano makilala at maiwasan ang mga ito.",
+      "Nakasulat ang guide sa Filipino at angkop ang tono at lenggwahe para sa mga nakatatanda.",
+      "Nakatuon lamang ang nilalaman sa text scam at pekeng GCash message."
+    ],
+    "summary": "Gusto mo ng simpleng guide sa Filipino na tutulong sa mga lolo at lola na makilala at maiwasan ang text scam at pekeng GCash message."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.79,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 291,
+    "output_tokens": 437,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0051456,
+    "latency_ms": 5932.648289999634,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0051456
+  }
+}

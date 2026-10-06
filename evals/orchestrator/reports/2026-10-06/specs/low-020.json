@@ -1,0 +1,42 @@
+{
+  "id": "low-020",
+  "intent": "Pwede mo ba i-rewrite itong bio ko para mas professional? 'I am a VA na magaling sa admin tasks.'",
+  "spec": {
+    "goal": "Gusto mong i-rewrite ang iyong maikling bio bilang virtual assistant (VA) para mas maging professional ang tunog nito.",
+    "deliverable": "Isang rewritten na bersyon ng bio na mas professional ang tono, batay sa orihinal na linya.",
+    "constraints": [
+      "Panatilihin ang orihinal na kahulugan: isa kang VA na bihasa sa admin tasks.",
+      "Huwag magdagdag ng mga kasanayan, karanasan, kliyente, numero o kredensyal na hindi nabanggit.",
+      "Isulat ito sa wikang ginamit sa request (Taglish/Filipino), maliban kung may ibang hiling ang user.",
+      "Panatilihing maikli ang bio, katulad ng haba ng orihinal na bio."
+    ],
+    "done_criteria": [
+      "Mas pormal at professional ang tono kaysa sa orihinal na bio.",
+      "Malinaw na nakasaad na VA ang user at magaling siya sa admin tasks.",
+      "Walang bagong claim o detalye na wala sa orihinal.",
+      "Malinis ang grammar at handa nang gamitin bilang bio."
+    ],
+    "summary": "Ang naintindihan namin: gusto mong i-rewrite ang bio mong 'I am a VA na magaling sa admin tasks.' para mas professional ang dating, nang hindi nagdaragdag ng mga bagong detalye."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 294,
+    "output_tokens": 477,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0055516,
+    "latency_ms": 6897.390988000552,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0055516
+  }
+}

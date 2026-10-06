@@ -1,0 +1,40 @@
+{
+  "id": "cpx-014",
+  "intent": "Audit my Next.js app's codebase for performance problems, propose fixes, rewrite the slowest components, and write a report of before/after expectations.",
+  "spec": {
+    "goal": "Find and fix performance problems in your Next.js app by auditing its codebase, proposing fixes, rewriting the slowest components, and documenting expected before/after results.",
+    "deliverable": "A performance audit report listing the problems found with proposed fixes and before/after expectations, plus rewritten versions of the slowest components.",
+    "constraints": [
+      "The audit covers the Next.js app's codebase provided by the user.",
+      "Only the slowest components are rewritten; other code is left unchanged apart from proposed fixes.",
+      "The report states before/after expectations as expected outcomes, not as measured results unless measurements are actually taken."
+    ],
+    "done_criteria": [
+      "The report lists the performance problems found in the codebase, each with a proposed fix.",
+      "The slowest components are identified and rewritten versions are provided.",
+      "The report describes before/after expectations for the identified problems and rewrites."
+    ],
+    "summary": "You want your Next.js codebase audited for performance issues, with fixes proposed, the slowest components rewritten, and a report describing expected before/after results."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 295,
+    "output_tokens": 335,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0041336,
+    "latency_ms": 3856.465154000034,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0041336
+  }
+}

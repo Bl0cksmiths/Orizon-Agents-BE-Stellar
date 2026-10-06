@@ -24,13 +24,15 @@ installed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import time
+from collections.abc import AsyncIterator
 
 import pytest
 
-from app.services import binding_registry, binding_store
+from app.services import binding_registry, binding_store, pg_schema
 from app.services.binding_store import BindingRecord, InMemoryBindingStore
 
 STORE_LOGGER = "app.services.binding_store"
@@ -314,10 +316,21 @@ class FakePool:
         self.statements: list[str] = []
         self.rows: list[dict[str, object]] = []
         self.closed = 0
+        self.transactions = 0
 
-    async def execute(self, sql: str, *args: object) -> str:
+    async def execute(self, sql: str, *args: object, timeout: float | None = None) -> str:
         self.statements.append(sql)
         return "CREATE TABLE"
+
+    @contextlib.asynccontextmanager
+    async def acquire(self, *, timeout: float | None = None) -> AsyncIterator[FakePool]:
+        """The DDL's connection (app/services/pg_schema.py): this fake serves as one."""
+        yield self
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        self.transactions += 1
+        yield
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
         self.statements.append(sql)
@@ -432,6 +445,9 @@ def test_the_table_is_created_lazily_and_only_once() -> None:
     ddl = [s for s in pool.statements if "CREATE TABLE" in s]
     assert len(ddl) == 1
     assert "CREATE TABLE IF NOT EXISTS agent_bindings" in ddl[0]
+    # In one transaction, behind the DDL lock (app/services/pg_schema.py).
+    assert pool.statements[:2] == [pg_schema.DDL_LOCK_SQL, binding_store._CREATE_TABLE_SQL]
+    assert pool.transactions == 1
 
 
 def test_a_rebind_appends_a_row_and_never_updates_one() -> None:
@@ -798,3 +814,22 @@ def test_a_bind_after_a_tombstone_reports_no_previous_endpoint() -> None:
     assert current.endpoint_url == URL_THREE
     assert current.previous_endpoint_url is None
     assert len(pool.rows) == 3  # the whole history survives the round trip
+
+
+# ── concurrent first use ──────────────────────────────────────────────────
+
+
+def test_concurrent_first_uses_create_the_schema_without_a_race(pg_dsn: str) -> None:
+    """Several processes creating the schema at once — an old and a new instance
+    across a deploy — must queue on the DDL lock, not fail on the catalog's
+    unique index (app/services/pg_schema.py)."""
+
+    async def first_uses() -> None:
+        stores = [binding_store.PostgresBindingStore(pg_dsn) for _ in range(8)]
+        try:
+            await asyncio.gather(*(store._ready_pool() for store in stores))
+        finally:
+            for store in stores:
+                await store.close()
+
+    asyncio.run(first_uses())

@@ -1,0 +1,43 @@
+{
+  "id": "cpx-018",
+  "intent": "Build a classroom attendance app with QR check-in, teacher dashboard, CSV export, and parent notification templates in English and Filipino.",
+  "spec": {
+    "goal": "Get a classroom attendance app that lets students check in by QR code and gives teachers a dashboard, CSV export, and parent notification templates in English and Filipino.",
+    "deliverable": "A working classroom attendance app with QR check-in, a teacher dashboard, CSV export of attendance records, and parent notification templates in English and Filipino.",
+    "constraints": [
+      "Attendance must be recorded through QR code check-in.",
+      "The app must include a teacher dashboard for viewing attendance.",
+      "Attendance data must be exportable as a CSV file.",
+      "Parent notification templates must be provided in both English and Filipino.",
+      "Only the features named in the request are included; no extra integrations or capabilities are added."
+    ],
+    "done_criteria": [
+      "A student can check in by scanning a QR code and the attendance is recorded.",
+      "The teacher dashboard shows attendance records.",
+      "Attendance records can be exported as a CSV file.",
+      "Parent notification templates exist in both English and Filipino."
+    ],
+    "summary": "You want a classroom attendance app where students check in with a QR code, teachers see a dashboard and export CSV, and parents get notification templates in English and Filipino."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.12,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 293,
+    "output_tokens": 368,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0044596,
+    "latency_ms": 3883.1038549978985,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0044596
+  }
+}

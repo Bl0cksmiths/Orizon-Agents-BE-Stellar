@@ -1,0 +1,41 @@
+{
+  "id": "mod-020",
+  "intent": "Make a simple invoice generator page: enter line items, compute VAT at 12%, export to print.",
+  "spec": {
+    "goal": "Create a simple invoice generator web page where the user enters line items, has VAT calculated at 12%, and can print the invoice.",
+    "deliverable": "A simple invoice generator web page with line item entry, automatic 12% VAT calculation, and a print-ready export.",
+    "constraints": [
+      "The page must stay simple in scope and design.",
+      "VAT must be calculated at a rate of 12%.",
+      "The user must be able to enter line items on the page.",
+      "Export is for print, so the invoice must print cleanly."
+    ],
+    "done_criteria": [
+      "The user can enter one or more line items on the page.",
+      "The page computes the subtotal, the VAT at 12%, and the total from the entered line items.",
+      "The user can print the invoice and the printed output shows the line items and totals clearly."
+    ],
+    "summary": "You want a simple invoice generator page where you enter line items, see VAT calculated at 12%, and print the invoice."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.09,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 279,
+    "output_tokens": 286,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0036116,
+    "latency_ms": 3895.15458799724,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0036116
+  }
+}

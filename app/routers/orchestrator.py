@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -7,10 +8,11 @@ from fastapi.responses import JSONResponse
 from ..config import settings
 from ..demo_kits import detect_kit
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse, StoredPlan
-from ..security import CodedHTTPException, KeyedRateLimiter, client_identity, request_id_var
+from ..security import CodedHTTPException, ErrorEnvelope, KeyedRateLimiter, client_identity, request_id_var
 from ..services import authorization_guard as guard
 from ..services import task_persistence
 from ..services.execution_svc import CapacityExhaustedError, PlanExpiredError, execute_plan, plan_expired
+from ..services.intent_screening import IntentRefused
 from ..services.orchestrator_svc import NoRoutableAgentsError, PlannerBusyError, decompose
 from ..state import state
 
@@ -36,8 +38,46 @@ def _intent_ref(intent: str) -> str:
 _planner_limiter = KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute)
 
 
-@router.post("/decompose", response_model=DecomposeResponse, summary="Decompose an intent into a plan")
-async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse:
+# What each refusal adds to the error envelope, beside `error.message`: the
+# blocked request's reason, or the question to answer before planning. Named
+# fields, so a client renders them without parsing a sentence.
+_REFUSAL_FIELD: dict[str, str] = {"intent_blocked": "reason", "intent_needs_detail": "question"}
+
+
+def _refused(err: IntentRefused) -> JSONResponse:
+    """A pipeline refusal in the app's error envelope, plus its named field.
+
+    Every message here is written for the buyer (`intent_guard_prompts`,
+    `intent_screening`) — plain words, no scores and no model output — which
+    is what makes it safe to return as is.
+    """
+    content: dict[str, Any] = {
+        "detail": err.code,
+        "error": {"code": err.code, "message": err.message, "request_id": request_id_var.get()},
+    }
+    field = _REFUSAL_FIELD.get(err.code)
+    if field is not None:
+        content[field] = err.message
+    headers = {"Retry-After": str(err.retry_after)} if err.retry_after is not None else None
+    return JSONResponse(status_code=err.status, content=content, headers=headers)
+
+
+@router.post(
+    "/decompose",
+    response_model=DecomposeResponse,
+    summary="Decompose an intent into a plan",
+    responses={
+        422: {
+            "model": ErrorEnvelope,
+            "description": "`intent_blocked` (+ `reason`), `intent_needs_detail` (+ `question`), or invalid input.",
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`intent_unavailable` or `planning_paused` (+ Retry-After), `no_routable_agents`",
+        },
+    },
+)
+async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse | JSONResponse:
     # Only an intent that will reach the planner is counted. A kit intent is
     # the demo path and makes no LLM call, so throttling it would cost a demo
     # its safety net to save nothing; `decompose` makes the same call.
@@ -46,7 +86,14 @@ async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> Dec
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
     try:
-        plan = await decompose(req.intent)
+        # `spec` only when sent, so the call is the one it always was otherwise.
+        plan = await (decompose(req.intent, spec=req.spec) if req.spec is not None else decompose(req.intent))
+    except IntentRefused as e:
+        # The request check or the planner declined, or AI planning cannot run
+        # now. An answer for the buyer in plain words, not a fault: logged
+        # without a traceback, and never with the intent's text.
+        logger.info("decompose refused for intent %s: %s", _intent_ref(req.intent), e.code)
+        return _refused(e)
     except TimeoutError as e:
         # asyncio.wait_for tripped decompose_timeout_seconds — the LLM hung,
         # nothing else failed. Distinct from the blanket 502 below.

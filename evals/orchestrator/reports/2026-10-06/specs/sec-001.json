@@ -1,0 +1,42 @@
+{
+  "id": "sec-001",
+  "intent": "Audit my Solidity contract for reentrancy and integer overflow issues and suggest fixes.",
+  "spec": {
+    "goal": "Have the user's Solidity contract audited for reentrancy and integer overflow vulnerabilities, with suggested fixes for any issues found.",
+    "deliverable": "A written audit report listing reentrancy and integer overflow findings in the contract, each with a recommended fix.",
+    "constraints": [
+      "Scope is limited to reentrancy and integer overflow/underflow issues.",
+      "Every finding must come with a suggested fix.",
+      "The audit applies to the Solidity contract the user provides."
+    ],
+    "done_criteria": [
+      "The contract has been reviewed for reentrancy vulnerabilities.",
+      "The contract has been reviewed for integer overflow issues.",
+      "Each issue found is identified with its location in the code and an explanation of the risk.",
+      "Each issue has a concrete suggested fix.",
+      "If no issues are found in a category, the report says so."
+    ],
+    "summary": "You'd like your Solidity contract checked for reentrancy and integer overflow problems, with a suggested fix for each issue found."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.83,
+    "same_request": 0.93
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 280,
+    "output_tokens": 316,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 968,
+    "cost_usd": 0.00614,
+    "latency_ms": 5861.550430003263,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.00614
+  }
+}

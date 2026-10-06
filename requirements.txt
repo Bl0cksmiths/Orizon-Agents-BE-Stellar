@@ -8,3 +8,5 @@ sse-starlette>=3.3,<4
 httpx>=0.28,<1
 stellar-sdk>=13.2,<14
 asyncpg>=0.30,<1
+anthropic>=1.11,<2
+typesafe-sdk>=0.7.2,<0.8

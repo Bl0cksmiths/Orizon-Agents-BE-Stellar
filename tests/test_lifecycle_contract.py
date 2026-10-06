@@ -41,7 +41,9 @@ def _body_fields(path: str) -> set[str]:
 @pytest.mark.parametrize(
     ("path", "fields"),
     [
-        ("/api/orchestrator/decompose", {"intent"}),
+        # `spec` is the optional corrected reading a console resubmits; the
+        # harness plans from an intent alone and never sends one.
+        ("/api/orchestrator/decompose", {"intent", "spec"}),
         ("/api/stellar/build/authorize", {"payer", "agent_id", "max_amount_usdc", "ttl_seconds"}),
         ("/api/stellar/submit", {"signed_xdr"}),
         ("/api/orchestrator/execute", {"plan_id", "auth_id_hex", "payer"}),

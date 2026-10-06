@@ -1,0 +1,41 @@
+{
+  "id": "mod-024",
+  "intent": "Bumuo ng content calendar para sa isang buwan ng TikTok posts ng skincare brand ko.",
+  "spec": {
+    "goal": "Makabuo ng content calendar para sa isang buwan ng mga TikTok post para sa skincare brand ng user.",
+    "deliverable": "Isang nakasulat na content calendar na sumasaklaw sa isang buwan, na may nakaplanong TikTok post para sa bawat nakatakdang araw.",
+    "constraints": [
+      "Dapat para sa TikTok ang lahat ng post.",
+      "Dapat para sa skincare brand ng user ang nilalaman.",
+      "Dapat sumaklaw ang calendar sa isang buong buwan.",
+      "Isulat sa Filipino/Tagalog, ang wika ng request, maliban kung may ibang hinihingi."
+    ],
+    "done_criteria": [
+      "Sumasaklaw ang calendar sa isang buong buwan, na may malinaw na petsa o araw para sa bawat post.",
+      "Bawat entry ay may ideya o paksa ng TikTok post na nauugnay sa skincare.",
+      "Madaling sundan ang format ng calendar at magagamit agad sa pagpaplano ng pag-post."
+    ],
+    "summary": "Naiintindihan namin na gusto mong gumawa ng isang-buwang content calendar ng mga TikTok post para sa iyong skincare brand."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.04,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 285,
+    "output_tokens": 415,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.004913600000000001,
+    "latency_ms": 5636.661039003229,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.004913600000000001
+  }
+}

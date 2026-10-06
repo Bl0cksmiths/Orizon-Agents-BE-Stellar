@@ -1,0 +1,45 @@
+{
+  "id": "cpx-007",
+  "intent": "Write a 20-page research report on microfinance adoption in Southeast Asia with citations, an executive summary, charts, and a slide deck outline.",
+  "spec": {
+    "goal": "Produce a comprehensive research report on the adoption of microfinance in Southeast Asia, along with a slide deck outline based on it.",
+    "deliverable": "A written research report of about 20 pages on microfinance adoption in Southeast Asia, containing an executive summary, citations and charts, plus a separate slide deck outline.",
+    "constraints": [
+      "The report should be approximately 20 pages long.",
+      "The topic is microfinance adoption in Southeast Asia.",
+      "The report must include citations for its sources.",
+      "The report must include an executive summary.",
+      "The report must include charts.",
+      "A slide deck outline must accompany the report."
+    ],
+    "done_criteria": [
+      "The report covers microfinance adoption in Southeast Asia and is about 20 pages long.",
+      "The report opens with an executive summary.",
+      "Claims in the report are supported by citations.",
+      "The report includes charts that illustrate its findings.",
+      "A slide deck outline summarising the report is provided."
+    ],
+    "summary": "You want a roughly 20-page, cited research report on microfinance adoption in Southeast Asia, with an executive summary and charts, plus a slide deck outline."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.1,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 295,
+    "output_tokens": 355,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0043336,
+    "latency_ms": 3854.652542999247,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0043336
+  }
+}

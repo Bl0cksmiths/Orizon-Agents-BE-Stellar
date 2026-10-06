@@ -1,0 +1,41 @@
+{
+  "id": "sec-009",
+  "intent": "Explain what the 'ignore previous instructions' attack is and how to defend an LLM app against it.",
+  "spec": {
+    "goal": "Understand what the 'ignore previous instructions' attack (a prompt injection technique) is and how to defend an LLM application against it.",
+    "deliverable": "A written explanation that describes the 'ignore previous instructions' attack and lays out defensive measures for LLM apps.",
+    "constraints": [
+      "Cover both parts of the request: what the attack is and how to defend against it.",
+      "Keep the focus on defending LLM applications.",
+      "Do not add topics, tools, or products the request does not mention."
+    ],
+    "done_criteria": [
+      "The explanation defines the 'ignore previous instructions' attack in clear terms.",
+      "It explains how the attack works, ideally with a simple illustrative example.",
+      "It lists practical defenses an LLM app can use against this attack.",
+      "The content stays on topic and is understandable to a general technical reader."
+    ],
+    "summary": "You want a clear written explanation of what the 'ignore previous instructions' attack is and how you can defend an LLM app against it."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.04,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.94,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 280,
+    "output_tokens": 307,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0038236,
+    "latency_ms": 3985.3397160040913,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0038236
+  }
+}

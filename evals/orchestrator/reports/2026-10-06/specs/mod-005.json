@@ -1,0 +1,42 @@
+{
+  "id": "mod-005",
+  "intent": "Write an SEO brief and a 600-word blog post about choosing a first electric bike.",
+  "spec": {
+    "goal": "Get an SEO brief and a roughly 600-word blog post that help readers choose their first electric bike.",
+    "deliverable": "An SEO brief for the topic of choosing a first electric bike, plus a written blog post of about 600 words on the same topic.",
+    "constraints": [
+      "The blog post is about 600 words long.",
+      "The topic of both pieces is choosing a first electric bike.",
+      "The blog post is aimed at people buying their first electric bike.",
+      "The blog post should follow the SEO brief."
+    ],
+    "done_criteria": [
+      "An SEO brief for the topic of choosing a first electric bike is included.",
+      "A blog post of approximately 600 words is included.",
+      "The blog post focuses on choosing a first electric bike.",
+      "The blog post is consistent with the SEO brief."
+    ],
+    "summary": "You want an SEO brief and a roughly 600-word blog post about choosing a first electric bike."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 276,
+    "output_tokens": 283,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0035756,
+    "latency_ms": 2855.3263320063706,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0035756
+  }
+}

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'"><!-- orizon-artifact-csp -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Brass &amp; Blade — Barbershop Booking</title>
+<style>
+:root{--bg:#14110f;--panel:#1e1a17;--panel2:#272220;--line:#3a332e;--text:#f3ece4;--muted:#b0a498;--accent:#d4a24c;--accent2:#e8c27a;--ok:#6fbf8b;--bad:#f08072;--ease:200ms ease}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;align-items:flex-start;justify-content:center;background:radial-gradient(circle at 20% 0,#2a2018,var(--bg) 60%);color:var(--text);font-family:"Inter","SF Pro Text",system-ui,sans-serif;font-size:15px;overflow-x:hidden}
+.app{width:100%;max-width:880px;padding:16px;min-height:100%}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:clamp(22px,5vw,30px);margin:0;color:var(--accent2);letter-spacing:.5px}
+h2{font-family:Georgia,serif;font-size:clamp(18px,4vw,22px);margin:0 0 12px}
+nav{display:flex;gap:4px;background:var(--panel);padding:4px;border-radius:12px;border:1px solid var(--line)}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;min-height:40px;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:0 14px;transition:all var(--ease)}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
+nav button{border:0;background:transparent}
+nav button[aria-selected=true]{background:var(--accent);color:#1a1407;font-weight:600}
+.primary{background:linear-gradient(135deg,var(--accent2),var(--accent));color:#1a1407;border-color:var(--accent);font-weight:600}
+button:disabled{opacity:.4;cursor:not-allowed}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 8px 24px #0006;animation:in .3s ease}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
+.steps{display:flex;gap:6px;margin-bottom:6px}
+.steps i{flex:1;height:4px;border-radius:2px;background:var(--line);transition:background var(--ease)}
+.steps i[data-on=true]{background:var(--accent)}
+.stepl{font-size:12px;color:var(--muted);margin:0 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.opt{text-align:left;padding:12px;min-height:64px;display:flex;flex-direction:column;gap:4px}
+.opt[aria-pressed=true]{border-color:var(--accent);background:#3a2e17}
+.opt small,.muted{color:var(--muted)}
+.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px}
+.slots button[disabled]{opacity:.45;text-decoration:line-through}
+.slots button[aria-pressed=true]{background:var(--accent);color:#1a1407;font-weight:600}
+label{display:block;margin:10px 0 4px;color:var(--muted);font-size:13px}
+input,select{width:100%;min-height:42px;padding:0 12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:140px}
+.actions{display:flex;justify-content:space-between;gap:10px;margin-top:14px}
+.err{color:var(--bad);font-size:13px;min-height:18px;margin:6px 0 0}
+.mail{background:#f6f1e9;color:#241d16;border-radius:12px;padding:18px;font-size:14px;line-height:1.55}
+.mail h3{margin:0 0 8px;font-family:Georgia,serif}
+.mail .hd{font-size:12px;color:#6b5f52;border-bottom:1px solid #d9cfc0;padding-bottom:8px;margin-bottom:10px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
+th{color:var(--muted);font-weight:500}
+.tabwrap{overflow-x:auto}
+.badge{padding:2px 8px;border-radius:99px;font-size:12px;background:#47241f;color:var(--bad)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.stat{background:var(--panel2);border-radius:12px;padding:12px}.stat b{display:block;font-size:22px;color:var(--accent2)}
+.tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.tools select{width:auto;min-width:140px}
+fieldset{border:1px solid var(--line);border-radius:12px;margin:0 0 10px;padding:10px}
+.days{display:flex;gap:6px;flex-wrap:wrap}
+.days label{display:flex;align-items:center;gap:4px;margin:0;color:var(--text);background:var(--panel2);padding:6px 10px;border-radius:8px;min-height:36px}
+.days input{width:auto;min-height:0}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--accent);color:#1a1407;padding:10px 16px;border-radius:10px;font-weight:600;z-index:9;display:flex;gap:10px;align-items:center}
+.toast button{min-height:28px;background:#1a1407;color:var(--accent2);padding:0 10px}
+[hidden]{display:none!important}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main class="app">
+<header>
+<h1>Brass &amp; Blade</h1>
+<nav role="tablist" aria-label="Views">
+<button role="tab" id="tab-book" aria-controls="book" data-view="book" aria-selected="true">Book</button>
+<button role="tab" id="tab-admin" aria-controls="admin" data-view="admin" aria-selected="false">Admin</button>
+</nav>
+</header>
+<section id="book" role="tabpanel" aria-labelledby="tab-book"></section>
+<section id="admin" role="tabpanel" aria-labelledby="tab-admin" hidden></section>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</main>
+<script>
+(function(){
+'use strict';
+const KEY='orizon.barber.v1';
+const DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const STEPS=['Service','Barber','Time','Details'];
+const defaults={
+services:[{id:'s1',name:'Classic Cut',min:30,price:35},{id:'s2',name:'Beard Trim',min:20,price:22},{id:'s3',name:'Cut + Beard',min:50,price:55},{id:'s4',name:'Hot Towel Shave',min:30,price:40}],
+staff:[{id:'b1',name:'Marco',days:[2,3,4,5,6],start:9,end:17},{id:'b2',name:'Dre',days:[1,2,3,4,5],start:11,end:19},{id:'b3',name:'Sam',days:[4,5,6],start:10,end:18}],
+bookings:[]};
+const fresh=()=>({step:0,svc:null,barber:null,date:null,time:null,name:'',email:'',done:null,err:''});
+let db=load(),st=fresh(),filter='all',lastCancel=null;
+const $=s=>document.querySelector(s);
+// Validate stored shape so corrupted data cannot break rendering
+function load(){try{const d=JSON.parse(localStorage.getItem(KEY));if(d&&Array.isArray(d.services)&&Array.isArray(d.staff)&&Array.isArray(d.bookings))return d}catch(e){}return JSON.parse(JSON.stringify(defaults))}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(db))}catch(e){}}
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pad=n=>String(n).padStart(2,'0');
+const fmtT=m=>{const h=Math.floor(m/60)%24,mm=m%60;return(h%12||12)+':'+pad(mm)+(h<12?' AM':' PM')};
+const iso=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+const parse=s=>{const[a,b,c]=s.split('-').map(Number);return new Date(a,b-1,c)};
+const fmtD=s=>parse(s).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+const svcOf=id=>db.services.find(s=>s.id===id);
+const stOf=id=>db.staff.find(s=>s.id===id);
+function toast(t,undo){const e=$('#toast');e.textContent=t;if(undo){const u=document.createElement('button');u.textContent='Undo';u.dataset.undo='1';e.appendChild(u)}e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>{e.hidden=true;lastCancel=null},undo?6000:2400)}
+function nextDates(){const out=[],d=new Date();for(let i=0;i<14;i++){out.push(iso(d));d.setDate(d.getDate()+1)}return out}
+// Returns every 30-min start for the barber/day, flagged free or not
+function slotsFor(barber,date,svc){
+const b=stOf(barber);if(!b||!svc)return[];
+if(!b.days.includes(parse(date).getDay()))return[];
+const now=new Date(),isToday=date===iso(now),nowM=now.getHours()*60+now.getMinutes();
+const taken=db.bookings.filter(x=>x.barber===barber&&x.date===date&&x.status==='confirmed').map(x=>[x.start,x.start+x.min]);
+const res=[];
+for(let t=b.start*60;t+svc.min<=b.end*60;t+=30){
+res.push({t,free:!taken.some(([a,e])=>t<e&&t+svc.min>a)&&!(isToday&&t<=nowM)})}
+return res}
+function renderDone(){
+const b=st.done,sv=svcOf(b.svc),sf=stOf(b.barber);
+$('#book').innerHTML=`<div class="card"><h2>You're booked ✓</h2><p class="muted">A confirmation was sent to ${esc(b.email)}.</p>
+<div class="mail"><div class="hd">To: ${esc(b.email)}<br>From: hello@brassandblade.example<br>Subject: Confirmed — ${esc(sv?sv.name:'Appointment')} on ${esc(b.date)}</div>
+<h3>See you soon, ${esc(b.name)}.</h3><p>Your appointment is confirmed:</p>
+<p><b>${esc(sv?sv.name:'')}</b> with <b>${esc(sf?sf.name:'')}</b><br>${esc(fmtD(b.date))} at ${fmtT(b.start)}<br>Duration ${b.min} min · $${b.price}</p>
+<p>Reference: <b>${esc(b.id)}</b><br>Need to cancel? Reply to this email 24h ahead.</p></div>
+<div class="actions"><button id="newb" class="primary">Book another</button></div></div>`}
+function renderBook(){
+if(st.done)return renderDone();
+const dates=nextDates();if(!st.date)st.date=dates[0];
+const steps='<div class="steps" aria-hidden="true">'+STEPS.map((_,i)=>`<i data-on="${i<=st.step}"></i>`).join('')+`</div><p class="stepl">Step ${st.step+1} of 4 · ${STEPS[st.step]}</p>`;
+let body='';
+if(st.step===0){
+body='<h2>Choose a service</h2><div class="grid">'+db.services.map(s=>`<button class="opt" data-svc="${s.id}" aria-pressed="${st.svc===s.id}"><b>${esc(s.name)}</b><small>${s.min} min · $${s.price}</small></button>`).join('')+'</div>'}
+else if(st.step===1){
+body='<h2>Choose your barber</h2><div class="grid">'+db.staff.map(b=>`<button class="opt" data-barber="${b.id}" aria-pressed="${st.barber===b.id}"><b>${esc(b.name)}</b><small>${b.days.length?b.days.map(d=>DAYS[d]).join(' '):'No days set'} · ${fmtT(b.start*60)}–${fmtT(b.end*60)}</small></button>`).join('')+'</div>'}
+else if(st.step===2){
+const sl=slotsFor(st.barber,st.date,svcOf(st.svc));
+body='<h2>Pick a time</h2><label for="dt">Date</label><select id="dt">'+dates.map(d=>`<option value="${d}" ${st.date===d?'selected':''}>${esc(fmtD(d))}</option>`).join('')+'</select><label id="sl">Available slots</label>';
+body+=sl.length?'<div class="slots" role="group" aria-labelledby="sl">'+sl.map(s=>`<button data-time="${s.t}" ${s.free?'':'disabled'} aria-pressed="${st.time===s.t}">${fmtT(s.t)}</button>`).join('')+'</div>':`<p class="muted">${esc(stOf(st.barber).name)} is off this day. Try another date.</p>`;
+if(sl.length&&!sl.some(s=>s.free))body+='<p class="muted">Fully booked — try another date.</p>'}
+else{
+const svc=svcOf(st.svc);
+body=`<h2>Your details</h2><p class="muted">${esc(svc.name)} · ${esc(stOf(st.barber).name)} · ${esc(fmtD(st.date))} ${fmtT(st.time)} · $${svc.price}</p>
+<div class="row"><div><label for="nm">Name</label><input id="nm" autocomplete="name" maxlength="60" required value="${esc(st.name)}"></div><div><label for="em">Email</label><input id="em" type="email" autocomplete="email" maxlength="100" required value="${esc(st.email)}"></div></div><p class="err" role="alert">${esc(st.err)}</p>`}
+const canNext=[st.svc,st.barber,st.time!==null&&st.date,true][st.step];
+$('#book').innerHTML=`<div class="card">${steps}${body}<div class="actions"><button id="back" ${st.step?'':'disabled'}>Back</button><button id="next" class="primary" ${canNext?'':'disabled'}>${st.step===3?'Confirm booking':'Continue'}</button></div></div>`}
+function renderAdmin(){
+const live=db.bookings.filter(b=>b.status==='confirmed'),today=iso(new Date());
+const rev=live.reduce((a,b)=>a+b.price,0);
+const list=db.bookings.filter(b=>filter==='all'||b.barber===filter).sort((a,b)=>(a.date+pad(a.start/60|0)+pad(a.start%60)).localeCompare(b.date+pad(b.start/60|0)+pad(b.start%60)));
+const row=b=>`<tr><td>${esc(b.date)}<br><small class="muted">${fmtT(b.start)}</small></td><td>${esc(b.name)}<br><small class="muted">${esc(b.email)}</small></td><td>${esc(svcOf(b.svc)?.name||'')}</td><td>${esc(stOf(b.barber)?.name||'')}</td><td>${b.status==='confirmed'?`<button data-cancel="${esc(b.id)}" aria-label="Cancel booking ${esc(b.id)}">Cancel</button>`:'<span class="badge">cancelled</span>'}</td></tr>`;
+$('#admin').innerHTML=`<div class="card"><h2>Dashboard</h2><div class="stats">
+<div class="stat"><b>${live.length}</b>Upcoming</div><div class="stat"><b>${live.filter(b=>b.date===today).length}</b>Today</div><div class="stat"><b>$${rev}</b>Booked revenue</div></div>
+<div class="tools"><label for="flt" style="margin:0;align-self:center">Barber</label><select id="flt"><option value="all">All barbers</option>${db.staff.map(s=>`<option value="${s.id}" ${filter===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select><button data-clear="1" ${db.bookings.length?'':'disabled'}>Clear all</button></div>
+<div class="tabwrap"><table><thead><tr><th>When</th><th>Client</th><th>Service</th><th>Barber</th><th><span class="sr" hidden>Action</span></th></tr></thead><tbody>${list.length?list.map(row).join(''):'<tr><td colspan="5" class="muted">No bookings yet.</td></tr>'}</tbody></table></div></div>
+<div class="card"><h2>Staff schedules</h2>${db.staff.map(b=>`<fieldset><legend>${esc(b.name)}</legend>
+<div class="days" data-staff="${b.id}">${DAYS.map((d,i)=>`<label><input type="checkbox" data-day="${i}" ${b.days.includes(i)?'checked':''}>${d}</label>`).join('')}</div>
+<div class="row"><div><label for="s-${b.id}">Start hour</label><input id="s-${b.id}" type="number" min="0" max="23" data-f="start" data-id="${b.id}" value="${b.start}"></div><div><label for="e-${b.id}">End hour</label><input id="e-${b.id}" type="number" min="1" max="24" data-f="end" data-id="${b.id}" value="${b.end}"></div></div></fieldset>`).join('')}</div>`}
+function render(){renderBook();renderAdmin()}
+function confirmBooking(){
+const nm=$('#nm').value.trim(),em=$('#em').value.trim();
+st.name=nm;st.email=em;
+if(!nm||!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)){st.err='Enter your name and a valid email.';return}
+const svc=svcOf(st.svc);
+if(!slotsFor(st.barber,st.date,svc).some(s=>s.t===st.time&&s.free)){toast('That slot was just taken');st.step=2;st.time=null;return}
+const b={id:'BB-'+Math.random().toString(36).slice(2,7).toUpperCase(),svc:st.svc,barber:st.barber,date:st.date,start:st.time,min:svc.min,price:svc.price,name:nm,email:em,status:'confirmed'};
+db.bookings.push(b);save();st.done=b;st.err=''}
+document.addEventListener('click',e=>{
+const t=e.target.closest('button');if(!t)return;
+if(t.dataset.view){document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-selected',b===t));$('#book').hidden=t.dataset.view!=='book';$('#admin').hidden=t.dataset.view!=='admin';return}
+if(t.dataset.undo){if(lastCancel){lastCancel.status='confirmed';save();lastCancel=null;toast('Booking restored')}}
+else if(t.dataset.svc){st.svc=t.dataset.svc;st.time=null}
+else if(t.dataset.barber){st.barber=t.dataset.barber;st.time=null}
+else if(t.dataset.time){st.time=+t.dataset.time}
+else if(t.id==='back'){st.step=Math.max(0,st.step-1);st.err=''}
+else if(t.id==='next'){if(st.step===3)confirmBooking();else st.step++}
+else if(t.id==='newb'){st=fresh()}
+else if(t.dataset.cancel){const b=db.bookings.find(x=>x.id===t.dataset.cancel);if(b&&confirm('Cancel booking '+b.id+' for '+b.name+'?')){b.status='cancelled';save();lastCancel=b;toast('Booking cancelled',true)}}
+else if(t.dataset.clear){if(confirm('Delete ALL bookings? This cannot be undone.')){db.bookings=[];save();toast('All bookings cleared')}}
+else return;
+render()});
+document.addEventListener('change',e=>{
+const t=e.target;
+if(t.id==='dt'){st.date=t.value;st.time=null;render();return}
+if(t.id==='flt'){filter=t.value;renderAdmin();return}
+const wrap=t.closest('[data-staff]');
+if(wrap&&t.dataset.day!==undefined){const b=stOf(wrap.dataset.staff),d=+t.dataset.day;b.days=t.checked?[...new Set([...b.days,d])].sort():b.days.filter(x=>x!==d);save();toast('Schedule saved');return}
+if(t.dataset.f){const b=stOf(t.dataset.id),v=Math.max(0,Math.min(24,Math.round(+t.value)||0));
+if(t.dataset.f==='start')b.start=Math.min(v,b.end-1);else b.end=Math.max(v,b.start+1);
+save();toast('Schedule saved');renderAdmin()}});
+document.addEventListener('input',e=>{if(e.target.id==='nm')st.name=e.target.value;if(e.target.id==='em')st.email=e.target.value});
+// Arrow keys move between tabs
+$('nav').addEventListener('keydown',e=>{if(e.key==='ArrowRight'||e.key==='ArrowLeft'){const tabs=[...document.querySelectorAll('nav button')];const o=tabs.find(b=>b!==document.activeElement)||tabs[0];o.focus();o.click()}});
+render();
+})();
+</script>
+</body>
+</html>

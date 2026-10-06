@@ -1,0 +1,42 @@
+{
+  "id": "cpx-003",
+  "intent": "Gumawa ng complete na online store: product catalog, cart, checkout flow, order summary, tapos SEO copy at Tagalog translation ng lahat ng pages.",
+  "spec": {
+    "goal": "Gumawa ng kumpletong online store na may product catalog, cart, checkout flow, at order summary, kasama ang SEO copy at Tagalog translation ng lahat ng pages.",
+    "deliverable": "Isang kumpletong online store (website) na may product catalog, cart, checkout flow at order summary pages, na may SEO copy at bersyong Tagalog ng lahat ng pages.",
+    "constraints": [
+      "Dapat kasama ang product catalog, cart, checkout flow, at order summary.",
+      "Dapat may SEO copy para sa mga pages ng store.",
+      "Ang lahat ng pages ay dapat may Tagalog translation.",
+      "Walang idinagdag na features, integrations o payment services na hindi binanggit sa request."
+    ],
+    "done_criteria": [
+      "May gumaganang product catalog, cart, checkout flow, at order summary page.",
+      "May SEO copy ang mga pages ng store.",
+      "Ang bawat page ay may kumpletong Tagalog translation.",
+      "Ang daloy mula catalog hanggang order summary ay tuloy-tuloy at kumpleto."
+    ],
+    "summary": "Naiintindihan namin na gusto mong gumawa ng kumpletong online store na may catalog, cart, checkout at order summary, kasama ang SEO copy at Tagalog translation ng lahat ng pages."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.08,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 305,
+    "output_tokens": 445,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.005253600000000001,
+    "latency_ms": 5211.238611998851,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.005253600000000001
+  }
+}

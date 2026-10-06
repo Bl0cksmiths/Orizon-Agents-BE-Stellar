@@ -88,6 +88,41 @@ class Settings(BaseSettings):
     # the router maps a breach to HTTP 504 "decompose_timeout").
     decompose_timeout_seconds: float = 90.0
 
+    # ── Claude + jev (orchestrator v2, app/llm/) ──────────────
+    # Which stack plans and runs the built-in workers: "anthropic", "openai",
+    # or empty for automatic — Claude once ANTHROPIC_API_KEY is set, OpenAI
+    # until then. The OpenAI path stays behind this switch until Claude is
+    # proven live; app/llm/provider.py is the one reader.
+    orchestrator_provider: str = ""
+    # Set on Render at release, never in render.yaml (the dashboard overrides
+    # it, and the file is in git). Empty keeps every Claude and jev call off:
+    # the guard falls back as documented and planning reports unavailable.
+    anthropic_api_key: str = ""
+    typesafe_api_key: str = ""
+    # The jev model the guard asks, pinned so a new release cannot move the
+    # guard's thresholds under it (TYPESAFE_MODEL).
+    typesafe_model: str = "jev-1.13.0"
+    # One model per tier, exact Claude ids. The planner runs on the complex
+    # tier's model, the prompt improver on the moderate one and the fallback
+    # guard on the low one (app/llm/tiers.py).
+    claude_model_low: str = "claude-haiku-4-5"
+    claude_model_moderate: str = "claude-sonnet-5-5"
+    claude_model_complex: str = "claude-opus-5-5"
+    # Per-attempt HTTP bound for a Claude call, and the SDK's own retries of
+    # 408/409/429/5xx and connection errors before the call is unavailable.
+    claude_timeout_seconds: float = 120.0
+    claude_max_retries: int = 2
+    # Server-side refusal fallbacks (beta) on the models that offer them.
+    claude_server_fallbacks: bool = True
+    # jev's whole retry budget per guard question set, retries included —
+    # the guard is on every request's path, so this is short.
+    jev_timeout_seconds: float = 8.0
+    jev_max_retries: int = 2
+    # Daily spend ceiling across Claude and jev, in USD, per UTC day. Once it
+    # is reached AI planning pauses with a notice (curated demo kits still
+    # run); 0 pauses it outright.
+    llm_daily_spend_cap_usd: float = 10.0
+
     # ── Code-generation quality dials (code.gen + code.critic) ─
     # Higher reasoning = better artifacts, more latency + cost.
     # Valid: "low" | "medium" | "high" | "xhigh".
@@ -472,6 +507,32 @@ class Settings(BaseSettings):
                 "PLAN_TTL_SECONDS must be finite and at least 60 — a plan has to outlive "
                 "reading the card, signing the authorisation and executing it"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _llm_settings_are_usable(self) -> "Settings":
+        """Refuse an LLM configuration that would misroute, never answer, or never stop spending.
+
+        An unknown provider would otherwise silently mean "automatic"; a spend
+        cap that is negative or NaN compares false with every total, so it would
+        never pause anything; a timeout of zero, NaN or infinity either fails
+        every call or removes the bound. Names variables, never values that
+        could be secrets.
+        """
+        if self.orchestrator_provider.strip().lower() not in {"", "auto", "anthropic", "openai"}:
+            raise ValueError("ORCHESTRATOR_PROVIDER must be anthropic, openai, auto or empty")
+        if not math.isfinite(self.llm_daily_spend_cap_usd) or self.llm_daily_spend_cap_usd < 0:
+            raise ValueError("LLM_DAILY_SPEND_CAP_USD must be a finite number of USD, 0 or more")
+        for name in ("claude_timeout_seconds", "jev_timeout_seconds"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(f"{name.upper()} must be a positive, finite number of seconds")
+        for name in ("claude_max_retries", "jev_max_retries"):
+            if not 0 <= getattr(self, name) <= 10:
+                raise ValueError(f"{name.upper()} must be between 0 and 10")
+        for name in ("claude_model_low", "claude_model_moderate", "claude_model_complex", "typesafe_model"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"{name.upper()} must name a model")
         return self
 
     @model_validator(mode="after")

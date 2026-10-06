@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ...config import settings
-from ..model_factory import lazy_agent
-from .base import Worker
+from ..model_factory import claude_workers, lazy_agent
+from . import claude_step
+from .base import ModelWorker
+from .bounds import trim_text
 from .prompt_safety import worker_prompt
+
+if TYPE_CHECKING:
+    from ...llm.tiers import Effort, Tier
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +141,7 @@ def coerce_artifact(content: Any) -> CodeArtifact:
     raise TypeError(f"unexpected code.gen content type: {type(content).__name__}")
 
 
-INSTRUCTIONS = """You are Orizon's code-generation agent — the best coding agent in the
+_BRIEF = """You are Orizon's code-generation agent — the best coding agent in the
 network. Your output must feel like something shipped by a senior product
 engineer at a design-led studio, not a demo.
 
@@ -238,7 +244,9 @@ shipping version looks like.
 For curated demo intents (kit context present), aim for **600–1000 lines** of
 production-quality code — the kit deserves polish. For free-form intents,
 **400–700 lines** is the sweet spot.
+"""
 
+_JSON_SHAPE = """
 # OUTPUT SHAPE
 
 Return a CodeArtifact with:
@@ -250,11 +258,188 @@ Return a CodeArtifact with:
 - `preview_html`: EXACT same string as files[0].content.
 """
 
+# The OpenAI path's prompt: the brief, answered as CodeArtifact JSON.
+INSTRUCTIONS = _BRIEF + _JSON_SHAPE
 
-class CodeGen(Worker):
+TAGGED_SHAPE = """
+# OUTPUT SHAPE
+
+Return the CodeArtifact as these tagged sections, in this order, and nothing
+else — no JSON, no markdown fences, no commentary:
+
+<artifact_title>product name</artifact_title>
+<artifact_summary>one sentence</artifact_summary>
+<artifact_deferred>feature one, feature two</artifact_deferred>
+<artifact_html>
+<!doctype html>
+…the full single-file HTML document…
+</artifact_html>
+
+- title: a confident product-style name, at most 80 characters. Use the brand
+  name if provided.
+- summary: one punchy sentence, at most 280 characters, describing what it
+  does + the one thing that makes it feel premium.
+- deferred: REQUIRED whenever the request asked for anything you did not build
+  — a comma-separated list of those features, in a few words each, so the
+  buyer knows what is missing. Leave it empty only when everything requested
+  is built.
+
+The HTML goes in raw: not escaped, not quoted, not wrapped in anything else.
+"""
+
+_AGNO_LENGTH = """# Length target
+
+For curated demo intents (kit context present), aim for **600–1000 lines** of
+production-quality code — the kit deserves polish. For free-form intents,
+**400–700 lines** is the sweet spot.
+"""
+
+# The Claude path's length target. A step must finish inside the run loop's
+# 120 s deadline: measured live, Claude Sonnet 5.5 writes about 110 tokens/s
+# (thinking included), a 282–355-line app took 35–45 s, and a complex request
+# left to the agno target was still streaming at 104.8 s.
+CLAUDE_LENGTH = """# Length target
+
+Write a single self-contained HTML file of about 250–450 lines. Prioritise
+working core features over breadth: for a large request, implement the core
+flow well and list the deferred features in the summary (the
+<artifact_deferred> section below).
+
+Format the source readably so its length reflects the work: one statement or
+declaration per line, normal two-space indentation, no minified CSS or JS and
+no long single-line rules or functions.
+"""
+
+
+def swap_section(prompt: str, old: str, new: str) -> str:
+    """`prompt` with its `old` section replaced by `new` — loudly, so an edit
+    to the shared brief cannot silently leave both length targets in place."""
+    if prompt.count(old) != 1:
+        raise ValueError("the section to replace is not in the prompt exactly once")
+    return prompt.replace(old, new)
+
+
+# Output ceiling for the Claude path, sized to the step deadline. Measured live
+# (evals/orchestrator/reports/2026-10-06-recheck/r3-code-length/): Sonnet 5.5 at
+# low effort writes about 180–220 tokens/s, first token at ~2 s, and a 180-line
+# app took 7 058 tokens. 12 000 tokens at the slowest rate is ~67 s, well inside
+# the 100 s stream budget (claude_step.STREAM_BUDGET_SECONDS), which still
+# guards a slower day. A reply that reaches it fails as `model_truncated`.
+MAX_TOKENS = 12_000
+
+# Thinking tokens are written before the app and count against the same clock.
+CLAUDE_EFFORT: Effort = "low"
+
+# The Claude path's prompt: the same brief with the Claude length target,
+# answered as tagged raw HTML. A whole app escaped into a JSON string costs
+# tokens for every quote and newline and breaks on the first one missed; raw
+# HTML between tags does neither, and it streams as it is written.
+CLAUDE_INSTRUCTIONS = swap_section(_BRIEF, _AGNO_LENGTH, CLAUDE_LENGTH) + TAGGED_SHAPE
+
+_HTML_OPEN = "<artifact_html>"
+_HTML_CLOSE = "</artifact_html>"
+_TITLE_RE = re.compile(r"<artifact_title>(.*?)</artifact_title>", re.DOTALL)
+_SUMMARY_RE = re.compile(r"<artifact_summary>(.*?)</artifact_summary>", re.DOTALL)
+_DEFERRED_RE = re.compile(r"<artifact_deferred>(.*?)</artifact_deferred>", re.DOTALL)
+# What a model writes when it means "nothing was deferred".
+_NOTHING_DEFERRED = {"", "none", "n/a", "na", "nothing", "-"}
+# Room the deferred list may take inside the 280-character summary; the
+# description gives way to it, never the other way round.
+_DEFERRED_MAX = 160
+_TITLE_MAX = 80
+_SUMMARY_MAX = 280
+
+
+_DEFERRED_LABEL = "Deferred: "
+
+
+def _deferred_items(listed: str) -> list[str]:
+    """The features in a comma-separated deferred list; none for "none" and the like."""
+    text = " ".join(listed.split()).rstrip(".")
+    if text.casefold() in _NOTHING_DEFERRED:
+        return []
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def summary_with_deferred(description: str, items: list[str]) -> str:
+    """The summary: `description`, ending "Deferred: a, b." when anything was
+    deferred — the list kept whole and the description trimmed to make room."""
+    if not items:
+        return trim_text(description, _SUMMARY_MAX)
+    listed = trim_text(", ".join(items), _DEFERRED_MAX - len(_DEFERRED_LABEL) - 1).rstrip(".")
+    tail = f"{_DEFERRED_LABEL}{listed}."
+    head = trim_text(description, _SUMMARY_MAX - len(tail) - 1)
+    return f"{head} {tail}" if head else tail
+
+
+def split_deferred(summary: str) -> tuple[str, list[str]]:
+    """A summary's description and its deferred features (see `summary_with_deferred`)."""
+    head, label, listed = summary.rpartition(_DEFERRED_LABEL)
+    if not label:
+        return summary, []
+    return head.rstrip(), _deferred_items(listed)
+
+
+def carry_deferred(summary: str, earlier: str) -> str:
+    """`summary` with the deferred features of an `earlier` summary carried in
+    — first, in their order — merged with its own and de-duplicated (case-
+    insensitively). code.critic uses it so a rewrite never drops what the
+    draft said was left out."""
+    description, own = split_deferred(summary)
+    _, carried = split_deferred(earlier)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*carried, *own]:
+        if item.casefold() not in seen:
+            seen.add(item.casefold())
+            merged.append(item)
+    return summary_with_deferred(description, merged)
+
+
+def parse_tagged_artifact(reply: str) -> CodeArtifact:
+    """A CodeArtifact from a tagged reply (see `TAGGED_SHAPE`).
+
+    The HTML runs from the first opening tag to the LAST closing tag, so an
+    app whose own source mentions the tag cannot cut itself short; the title
+    and summary are read only from the text before it, so the app cannot
+    supply them either. Over-long prose is trimmed rather than failed — the
+    run has been paid for, as with `clamp_artifact_content`. A reply with no
+    HTML section raises ValueError; one in the JSON shape is still accepted.
+    """
+    start = reply.find(_HTML_OPEN)
+    end = reply.rfind(_HTML_CLOSE)
+    if start < 0 or end < start:
+        try:
+            return coerce_artifact(reply)
+        except (ValueError, ValidationError) as e:
+            raise ValueError("reply has no <artifact_html> section") from e
+    html = reply[start + len(_HTML_OPEN) : end].strip()
+    if not html:
+        raise ValueError("reply has an empty <artifact_html> section")
+    head = reply[:start]
+    title_match = _TITLE_RE.search(head)
+    summary_match = _SUMMARY_RE.search(head)
+    deferred_match = _DEFERRED_RE.search(head)
+    title = trim_text(title_match.group(1), _TITLE_MAX) if title_match else ""
+    summary = summary_with_deferred(
+        summary_match.group(1) if summary_match else "",
+        _deferred_items(deferred_match.group(1)) if deferred_match else [],
+    )
+    return CodeArtifact(
+        title=title or "Untitled app",
+        summary=summary,
+        files=[ArtifactFile(path="index.html", language="html", content=html)],
+        entry="index.html",
+        preview_html=html,
+    )
+
+
+class CodeGen(ModelWorker):
     id = "agt_11c0"
     name = "code.gen"
     real = True
+    default_tier = "moderate"
+    max_tier = "moderate"  # see ModelWorker: Opus would outrun the step deadline
 
     def __init__(self) -> None:
         # NOTE: gpt-5.3-codex (and other reasoning-class models) reject the
@@ -367,11 +552,46 @@ class CodeGen(Worker):
             sections=[cls._context_block(context)],
         )
 
+    @staticmethod
+    def _baked(context: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The kit's pre-built artifact, when the run has a kit that ships one."""
+        kit_dict = (context or {}).get("kit")
+        if not (isinstance(kit_dict, dict) and kit_dict.get("artifact_path")):
+            return None
+        from ...demo_kits import kit_by_id
+
+        kit = kit_by_id(kit_dict.get("kit_id", ""))
+        return kit.load_artifact() if kit else None
+
+    def _deterministic(self, context: dict[str, Any] | None) -> bool:
+        return self._baked(context) is not None
+
+    async def _draft(self, prompt: str, tier: Tier | None) -> CodeArtifact:
+        """The model's CodeArtifact for `prompt`, on whichever provider is live."""
+        if not claude_workers():
+            result = await self._agent.arun(prompt)
+            return coerce_artifact(result.content)
+        reply = await claude_step.text(
+            worker=self.name,
+            tier=self.effective_tier(tier),
+            system=CLAUDE_INSTRUCTIONS,
+            user=prompt,
+            max_tokens=MAX_TOKENS,
+            effort=CLAUDE_EFFORT,
+        )
+        try:
+            return parse_tagged_artifact(reply)
+        except (ValueError, ValidationError) as e:
+            logger.warning("code.gen reply could not be read as an artifact: %s", e)
+            raise claude_step.ModelStepError(claude_step.INVALID_OUTPUT, f"code.gen: {e}") from e
+
     async def run(
         self,
         intent: str,
         rationale: str,
         context: dict[str, Any] | None = None,
+        *,
+        tier: Tier | None = None,
     ) -> dict[str, Any]:
         import asyncio
         import random
@@ -382,32 +602,27 @@ class CodeGen(Worker):
         # ── Baked-artifact fast path ───────────────────────────────────────
         # When the kit has a pre-built HTML artifact, skip the LLM and serve
         # it deterministically. Guarantees demo quality + saves ~30s + cost.
-        kit_dict = (context or {}).get("kit")
-        if isinstance(kit_dict, dict) and kit_dict.get("artifact_path"):
-            from ...demo_kits import kit_by_id
-
-            kit = kit_by_id(kit_dict.get("kit_id", ""))
-            baked = kit.load_artifact() if kit else None
-            if baked:
-                # Mimic generation time so the trace doesn't feel instant.
-                await asyncio.sleep(0.4 + random.random() * 0.6)
-                # Baked artifacts are repo-owned and already clean, but they go
-                # through the same hardening so every artifact the frontend
-                # renders carries the same policy.
-                baked = harden_artifact(baked)
-                html = baked["preview_html"]
-                lines = html.count("\n") + 1
-                return {
-                    "summary": f"{baked['title']} — {baked['summary']}",
-                    "artifact": baked,
-                    "counts": {
-                        "files": len(baked["files"]),
-                        "bytes": len(html),
-                        "lines": lines,
-                    },
-                    "validator_violations": [],
-                    "source": "baked",
-                }
+        baked = self._baked(context)
+        if baked:
+            # Mimic generation time so the trace doesn't feel instant.
+            await asyncio.sleep(0.4 + random.random() * 0.6)
+            # Baked artifacts are repo-owned and already clean, but they go
+            # through the same hardening so every artifact the frontend
+            # renders carries the same policy.
+            baked = harden_artifact(baked)
+            html = baked["preview_html"]
+            lines = html.count("\n") + 1
+            return {
+                "summary": f"{baked['title']} — {baked['summary']}",
+                "artifact": baked,
+                "counts": {
+                    "files": len(baked["files"]),
+                    "bytes": len(html),
+                    "lines": lines,
+                },
+                "validator_violations": [],
+                "source": "baked",
+            }
 
         # ── Build the prompt with optional context sections ────────────────
         # The intent is fenced as untrusted data; the upstream context block is
@@ -416,8 +631,7 @@ class CodeGen(Worker):
         prompt = self.build_prompt(intent, rationale, context)
 
         # ── Draft ──────────────────────────────────────────────────────────
-        result = await self._agent.arun(prompt)
-        draft = coerce_artifact(result.content)
+        draft = await self._draft(prompt, tier)
         draft_art = self._artifact_dict(draft)
 
         # ── Validate (no critic here — critic runs as a separate pipeline step) ─

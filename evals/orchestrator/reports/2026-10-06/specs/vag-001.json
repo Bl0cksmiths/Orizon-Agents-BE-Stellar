@@ -1,0 +1,39 @@
+{
+  "id": "vag-001",
+  "intent": "make something cool",
+  "spec": {
+    "goal": "Have the agents make something that comes across as cool, with the specific kind of thing left open because the request does not say.",
+    "deliverable": "A single creative piece of work chosen from the agents' areas of work (such as a web page, app, copy, or visual style), presented with a short note on what it is.",
+    "constraints": [
+      "The request gives no topic, format, audience, or style, so the work should stay general and not assume any of these.",
+      "Keep the scope to one self-contained deliverable rather than several."
+    ],
+    "done_criteria": [
+      "One complete deliverable is handed back and can be used or viewed as is.",
+      "A short note states what was made and what it is meant to be.",
+      "The deliverable adds no features, integrations, links, or payments that the request did not ask for."
+    ],
+    "summary": "You asked for something cool without giving details, so we understood this as a request for one self-contained creative piece, kept general because no topic or format was specified."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.72
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 252,
+    "output_tokens": 283,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0035276,
+    "latency_ms": 4540.444218997436,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0035276
+  }
+}

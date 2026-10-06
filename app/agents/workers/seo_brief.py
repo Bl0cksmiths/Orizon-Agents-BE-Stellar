@@ -2,44 +2,84 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import lazy_agent
-from .base import Worker
+from ..model_factory import claude_workers, lazy_agent
+from . import claude_step
+from .base import ModelWorker
+from .bounds import at_most, trim_items
 from .prompt_safety import worker_prompt
+
+if TYPE_CHECKING:
+    from ...llm.tiers import Tier
+
+
+MAX_KEYWORDS = 12
+MAX_AUDIENCES = 5
 
 
 class SeoBriefOutput(BaseModel):
-    keywords: list[str] = Field(..., max_length=12)
-    audiences: list[str] = Field(..., max_length=5)
+    keywords: list[str] = Field(..., max_length=MAX_KEYWORDS)
+    audiences: list[str] = Field(..., max_length=MAX_AUDIENCES)
     summary: str
 
 
-class SeoBrief(Worker):
+class SeoBriefDraft(BaseModel):
+    """What Claude is asked for: SeoBriefOutput's shape with no hard bounds,
+    which structured outputs cannot enforce (see `bounds`); `fit_seo_brief`
+    applies them."""
+
+    keywords: list[str] = Field(..., description="8 to 12 high-intent keywords.")
+    audiences: list[str] = Field(..., description="2 to 4 audience clusters, concise labels.")
+    summary: str = Field(..., description="One line.")
+
+
+def fit_seo_brief(draft: SeoBriefDraft) -> SeoBriefOutput:
+    """Cap a draft's lists into SeoBriefOutput."""
+    return SeoBriefOutput(
+        keywords=at_most(trim_items(draft.keywords), MAX_KEYWORDS),
+        audiences=at_most(trim_items(draft.audiences), MAX_AUDIENCES),
+        summary=" ".join(draft.summary.split()),
+    )
+
+
+INSTRUCTIONS = (
+    "You are an SEO research agent. Given an intent, return a JSON brief with: "
+    "8–12 high-intent keywords, 2–4 audience clusters (concise labels), and a "
+    "one-line summary. Be concrete, skip fluff."
+)
+
+# Room for the JSON plus any thinking the tier's model does first.
+MAX_TOKENS = 8_000
+
+
+class SeoBrief(ModelWorker):
     id = "agt_05x7"
     name = "seo.brief"
     real = True
+    default_tier = "low"
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
             name="seo.brief",
             model_id=settings.worker_model,
-            instructions=(
-                "You are an SEO research agent. Given an intent, return a JSON brief with: "
-                "8–12 high-intent keywords, 2–4 audience clusters (concise labels), and a "
-                "one-line summary. Be concrete, skip fluff."
-            ),
+            instructions=INSTRUCTIONS,
             output_schema=SeoBriefOutput,
         )
+
+    def _deterministic(self, context: dict[str, Any] | None) -> bool:
+        return bool((context or {}).get("kit"))
 
     async def run(
         self,
         intent: str,
         rationale: str,
         context: dict[str, Any] | None = None,
+        *,
+        tier: Tier | None = None,
     ) -> dict[str, Any]:
         kit = (context or {}).get("kit")
 
@@ -67,8 +107,19 @@ class SeoBrief(Worker):
 
         # ── Free-form path: LLM ─────────────────────────────────────────────
         prompt = worker_prompt(intent, rationale, "Return the SEO brief.")
-        result = await self._agent.arun(prompt)
-        out: SeoBriefOutput = result.content
+        out: SeoBriefOutput
+        if claude_workers():
+            draft = await claude_step.structured(
+                worker=self.name,
+                tier=self.effective_tier(tier),
+                system=INSTRUCTIONS,
+                user=prompt,
+                schema=SeoBriefDraft,
+                max_tokens=MAX_TOKENS,
+            )
+            out = fit_seo_brief(draft)
+        else:
+            out = (await self._agent.arun(prompt)).content
         return {
             "summary": out.summary,
             "keywords": out.keywords,

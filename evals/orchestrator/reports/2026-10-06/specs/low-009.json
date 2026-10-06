@@ -1,0 +1,42 @@
+{
+  "id": "low-009",
+  "intent": "Escribe una descripción corta de producto para una taza de café artesanal.",
+  "spec": {
+    "goal": "Obtener una descripción corta de producto para una taza de café artesanal.",
+    "deliverable": "Un texto breve de descripción de producto, escrito en español, para una taza de café artesanal.",
+    "constraints": [
+      "Debe estar escrito en español.",
+      "Debe ser corta.",
+      "Debe tratar sobre una taza de café artesanal.",
+      "No debe inventar precio, marca ni datos concretos que la solicitud no menciona."
+    ],
+    "done_criteria": [
+      "El texto es una descripción de producto de una taza de café artesanal.",
+      "El texto está en español.",
+      "El texto es breve.",
+      "El texto no incluye precio, marca ni datos específicos inventados."
+    ],
+    "summary": "Entendemos que quieres una descripción corta en español para una taza de café artesanal."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 272,
+    "output_tokens": 252,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0032576,
+    "latency_ms": 3372.7036959971883,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0032576
+  }
+}

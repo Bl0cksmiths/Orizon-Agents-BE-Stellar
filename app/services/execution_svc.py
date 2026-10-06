@@ -11,7 +11,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from ..agents.model_factory import watch_served_models
 from ..agents.registry import get_worker
+from ..agents.workers.base import ModelWorker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
@@ -522,6 +524,11 @@ async def _run(
 
     try:
         await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
+        # How the plan was reached (checked, improved, re-checked, planned), in
+        # the order the stages ran. Server-written lines; a plan from the legacy
+        # planner has none.
+        for stage in plan.stages:
+            await _emit(task_id, start, "exec", stage.msg)
         if kit is not None:
             await _emit(
                 task_id,
@@ -620,10 +627,26 @@ async def _run(
             )
 
             try:
-                output = await asyncio.wait_for(
-                    worker.run(plan.intent, step.rationale, context=context),
-                    timeout=STEP_TIMEOUT_SECONDS,
-                )
+                if isinstance(worker, ModelWorker):
+                    # A built-in LLM worker runs on its step's tier's model, and
+                    # the trace names that model before the step starts (no
+                    # line when the step is served without one, e.g. a kit).
+                    # getattr: a plan stored before steps carried a tier has
+                    # none, and the worker then runs on its own default tier.
+                    tier = getattr(step, "tier", None)
+                    model = worker.step_model(tier, context)
+                    if model:
+                        await _emit(task_id, start, "exec", f"{worker.name} on {model}")
+                    # Collects the model of any call a server-side fallback
+                    # answered, so the trace can name who actually served it.
+                    served = watch_served_models()
+                    step_run = worker.run(plan.intent, step.rationale, context=context, tier=tier)
+                else:
+                    served = []
+                    step_run = worker.run(plan.intent, step.rationale, context=context)
+                output = await asyncio.wait_for(step_run, timeout=STEP_TIMEOUT_SECONDS)
+                if served and isinstance(worker, ModelWorker):
+                    await _emit(task_id, start, "exec", f"{worker.name} on {worker.served_model(tier, served[-1])}")
             except asyncio.TimeoutError:
                 logger.error(
                     "task %s step %s (%s): timed out after %.0fs",
@@ -642,6 +665,22 @@ async def _run(
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
+                not_run = _NOT_ATTEMPTED.get(_failure_class(e))
+                if not_run is not None and get_worker(step.agent_id) is worker:
+                    # Our outage, not the agent's: the daily AI budget is spent,
+                    # or the model provider has no key or is down. The agent was
+                    # never able to try, so — like a step refused at execute —
+                    # it is not billed, not counted in its failure streak and
+                    # not rated (ADR 0005 D5: "did not deliver" and "could not
+                    # be asked" are different facts). First-party only: the
+                    # classes are ours, and an external step's failure is
+                    # classified by its own contract.
+                    undispatched.add(step_index)
+                    logger.warning(
+                        "task %s step %d (%s): not run — %s: %s", task_id, step_index, worker.name, not_run, e
+                    )
+                    await _emit(task_id, start, "error", f"{worker.name}: {not_run} — not charged, not rated")
+                    continue
                 # exc_info: a revoked key / exhausted quota surfaces as a
                 # provider exception several frames down — the traceback is the
                 # only way to tell those apart without a debugger.
@@ -2903,6 +2942,17 @@ UNCLASSIFIED_FAILURE = "unclassified"
 STEP_TIMEOUT_FAILURE = "step_timeout"
 NOT_A_DICT_FAILURE = "not_a_dict"
 UNUSABLE_OUTPUT_FAILURE = "unusable_output"
+
+
+# Failure classes of a first-party model step that are OUR outage rather than
+# the agent's failure to deliver, with the trace's plain words for each. Spelled
+# here, not imported from the worker that raises them, for the same reason
+# `_failure_class` reads `rule` duck-typed (ADR 0005).
+_NOT_ATTEMPTED = {
+    "spend_cap_reached": "paused: daily AI budget reached",
+    "model_not_configured": "AI provider not configured",
+    "model_unavailable": "AI provider unavailable",
+}
 
 
 def _failure_class(exc: BaseException) -> str:

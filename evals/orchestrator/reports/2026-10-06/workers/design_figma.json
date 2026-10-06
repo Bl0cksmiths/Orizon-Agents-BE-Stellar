@@ -1,0 +1,47 @@
+{
+  "agent_id": "agt_02k2",
+  "worker": "design.figma",
+  "case_id": "low-008",
+  "intent": "Create a color palette (5 hex codes) for a calm meditation app.",
+  "latency_s": 6.7,
+  "cost_usd": 0.001401,
+  "calls": [
+    {
+      "model": "claude-haiku-4-5",
+      "response_model": "claude-haiku-4-5-20251001",
+      "served_by": null,
+      "input_tokens": 856,
+      "output_tokens": 109,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cost_usd": 0.001401,
+      "app_cost_usd": 0.007005,
+      "latency_ms": 6696,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "palette #7c9fb0 / #a8d5d8 / #f56565 · system-ui · surface #1a202c",
+    "counts": {
+      "tokens": 13
+    },
+    "palette": {
+      "bg": "#0f1419",
+      "surface": "#1a202c",
+      "surface_2": "#2d3748",
+      "border": "#4a5568",
+      "text": "#e2e8f0",
+      "muted": "#a0aec0",
+      "primary": "#7c9fb0",
+      "accent": "#a8d5d8",
+      "danger": "#f56565"
+    },
+    "typography": {
+      "family_ui": "system-ui, -apple-system, sans-serif",
+      "family_display": "Georgia, serif",
+      "base_size_px": 16,
+      "scale": 1.25
+    }
+  }
+}

@@ -54,6 +54,7 @@ from typing import Any, Protocol
 
 from ..config import settings
 from ..schemas import StoredPlan, Task, TraceLine
+from .pg_schema import create_schema
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +342,13 @@ class PostgresTaskStore:
                 command_timeout=_POOL_COMMAND_TIMEOUT,
             )
             try:
-                await pool.execute(_CREATE_SQL, timeout=_POOL_COMMAND_TIMEOUT)
+                await create_schema(
+                    pool,
+                    "task_records",
+                    _CREATE_SQL,
+                    timeout=_POOL_COMMAND_TIMEOUT,
+                    acquire_timeout=_POOL_ACQUIRE_TIMEOUT,
+                )
             except BaseException:
                 await pool.close()
                 raise

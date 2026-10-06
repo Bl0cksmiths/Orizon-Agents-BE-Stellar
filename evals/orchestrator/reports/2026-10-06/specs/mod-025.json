@@ -1,0 +1,40 @@
+{
+  "id": "mod-025",
+  "intent": "Create a memory card matching game with 16 cards, a move counter and a restart button.",
+  "spec": {
+    "goal": "Build a memory card matching game that the user can play and restart.",
+    "deliverable": "A working memory card matching game app with a 16-card board, a move counter and a restart button.",
+    "constraints": [
+      "The board has exactly 16 cards.",
+      "The game shows a move counter.",
+      "The game has a restart button."
+    ],
+    "done_criteria": [
+      "The game displays 16 cards that can be flipped to find matching pairs.",
+      "The move counter is visible and increases as the player makes moves.",
+      "Pressing the restart button resets the board and sets the move counter back to zero."
+    ],
+    "summary": "You want a memory card matching game with 16 cards, a move counter and a restart button."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 274,
+    "output_tokens": 206,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0028016,
+    "latency_ms": 5574.402310994628,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0028016
+  }
+}

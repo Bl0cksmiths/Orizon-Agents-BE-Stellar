@@ -212,3 +212,22 @@ def test_recent_task_ids_are_the_newest_by_start_time_and_bounded(pg_dsn: str) -
     newest, none = _run(store, go())
     assert newest == [tasks[2].id, tasks[0].id, tasks[3].id]
     assert none == []
+
+
+# ── concurrent first use ──────────────────────────────────────────────────
+
+
+def test_concurrent_first_uses_create_the_schema_without_a_race(pg_dsn: str) -> None:
+    """Several processes creating the schema at once — an old and a new instance
+    across a deploy — must queue on the DDL lock, not fail on the catalog's
+    unique index (app/services/pg_schema.py)."""
+
+    async def first_uses() -> None:
+        stores = [PostgresTaskStore(pg_dsn) for _ in range(8)]
+        try:
+            await asyncio.gather(*(store._ready_pool() for store in stores))
+        finally:
+            for store in stores:
+                await store.close()
+
+    asyncio.run(first_uses())

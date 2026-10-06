@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import time
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, computed_field
+
+from .llm.tiers import Tier
 
 # Agent ids are contract Symbols: short alphanumeric/underscore tokens. Reject
 # garbage at the router edge instead of paying an RPC round-trip to find out.
@@ -195,10 +197,26 @@ class PlanStep(BaseModel):
     # starvation backstop — kept so the plan stays workable, but flagged so the
     # buyer sees it is a degraded choice. Inline mate to substituted_for.
     degraded: bool = False
+    # How hard this step is, which decides the model a built-in worker runs it
+    # on (low → Haiku, moderate → Sonnet, complex → Opus; `models.tiers` on the
+    # decompose response names the exact ids). Never above the plan's own
+    # tier. None on a plan built by the legacy planner, which has no tiers.
+    tier: Tier | None = None
+    # Who runs the step: one of our own workers ("built_in") or an operator's
+    # bound endpoint ("external"). None on a plan stored before this existed.
+    executor: Literal["built_in", "external"] | None = None
+    # The model a built-in worker runs this step on, by exact id, at plan
+    # time: the step tier's Claude model, or the OpenAI worker model on the
+    # legacy provider. None for an external step — its operator chooses — and
+    # on a plan stored before this existed.
+    model: str | None = None
 
 
 class Plan(BaseModel):
     steps: list[PlanStep]
+    # The request's overall complexity as the request check judged it. None
+    # on a plan built by the legacy planner.
+    tier: Tier | None = None
 
 
 class StoredPlan(BaseModel):
@@ -226,6 +244,9 @@ class StoredPlan(BaseModel):
     floor_bps: int | None = None
     reputation_degraded: bool = False
     planner_fallback: bool = False
+    # How this plan was reached, one line per planning stage, so the run's
+    # trace can open with them. Empty on a plan built by the legacy planner.
+    stages: list[PlanStage] = Field(default_factory=list)
 
 
 # Why the floor acted on an agent — a CLOSED set, because the plan card renders
@@ -389,6 +410,78 @@ class OverviewMetrics(BaseModel):
     degraded: bool  # True when any part above could not be fully read, or the registry is not synced
 
 
+# ───── Planning pipeline ───────────────────────────────────
+# Bounds on one understood-request line. A spec reaches the planner as fenced
+# DATA, but a buyer can edit and resubmit it, so it is bounded like the intent:
+# the whole spec stays under a few thousand characters however it is filled.
+SpecLine = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+SPEC_MAX_LINES = 8
+
+
+class UnderstoodSpec(BaseModel):
+    """What the request was understood as: the improved prompt, as data.
+
+    Served on a decompose response as `understood_as` and accepted back as
+    `spec` on the next request once the buyer has corrected it. Either way it
+    is untrusted text — written by a model from the buyer's words, or by the
+    buyer — so it is fenced before any model reads it and re-checked first.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    goal: str = Field(..., min_length=1, max_length=300)
+    deliverable: str = Field(..., min_length=1, max_length=300)
+    constraints: list[SpecLine] = Field(default_factory=list, max_length=SPEC_MAX_LINES)
+    done_criteria: list[SpecLine] = Field(default_factory=list, max_length=SPEC_MAX_LINES)
+    summary: str = Field(..., min_length=1, max_length=300)
+
+
+GuardVerdict = Literal["allow", "block", "needs_detail", "unavailable"]
+
+
+class GuardSummary(BaseModel):
+    """The request check's verdict on this intent, as the buyer may see it.
+
+    Only `allow` is ever served on a plan; the other verdicts are refusals
+    (422 `intent_blocked` / `intent_needs_detail`, 503 `intent_unavailable`).
+    The vocabulary is the check's whole set so a client can share one union
+    between a plan and a refusal. Scores stay server-side.
+    """
+
+    verdict: GuardVerdict
+    tier: Tier
+    reasons: list[str] = Field(default_factory=list)
+
+
+class TierModels(BaseModel):
+    """The model a built-in worker runs a step of each tier on, at plan time."""
+
+    low: str
+    moderate: str
+    complex: str
+
+
+class PlanModels(BaseModel):
+    """Which model did each planning stage, by exact id. None for a stage
+    that did not run: the improver on a buyer-edited spec, the planner on a
+    curated demo kit."""
+
+    planner: str | None = None
+    improver: str | None = None
+    guard: str | None = None
+    tiers: TierModels
+
+
+PlanStageName = Literal["guard", "improve", "recheck", "plan"]
+
+
+class PlanStage(BaseModel):
+    """One line of how a plan was reached, in the order the stages ran."""
+
+    stage: PlanStageName
+    msg: str
+
+
 # ───── Requests ────────────────────────────────────────────
 class DecomposeRequest(BaseModel):
     # Stripped BEFORE the length bounds apply, so whitespace can neither make
@@ -397,6 +490,11 @@ class DecomposeRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     intent: str = Field(..., min_length=3, max_length=500)
+    # The buyer's corrected reading of `intent`, from a previous response's
+    # `understood_as`. It replaces the prompt improver for this request; the
+    # intent is still checked, and the spec is checked against it, before
+    # anything is planned from it.
+    spec: UnderstoodSpec | None = None
 
 
 class DecomposeResponse(BaseModel):
@@ -433,6 +531,19 @@ class DecomposeResponse(BaseModel):
     # planner failed is logged, never returned. Always False on the demo-kit
     # path, which never asks the planner anything.
     planner_fallback: bool = False
+    # ── Planning pipeline (all null/empty from the legacy planner) ──
+    # The request's overall complexity; every step's `tier` is at most this.
+    tier: Tier | None = None
+    # The improved request the plan was built from, for the buyer to correct
+    # and resubmit as `spec`. Null when the plan was built from the original
+    # words: a curated kit, a failed improver, or a spec that drifted from
+    # what was asked.
+    understood_as: UnderstoodSpec | None = None
+    # The request check's verdict. Null when the check did not run.
+    guard: GuardSummary | None = None
+    models: PlanModels | None = None
+    # One line per planning stage, in order, for the trace.
+    stages: list[PlanStage] = Field(default_factory=list)
 
 
 class ExecuteRequest(BaseModel):

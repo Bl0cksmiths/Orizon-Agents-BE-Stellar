@@ -1,0 +1,9 @@
+{
+  "_about": "Validator results on these saved files, computed when this re-measure ran (200-line floor), before the validator changed.",
+  "code_gen_1__index.html": [
+    "under 200 lines (180) — feature-incomplete, add depth"
+  ],
+  "code_critic_1__index.html": [
+    "under 200 lines (192) — feature-incomplete, add depth"
+  ]
+}

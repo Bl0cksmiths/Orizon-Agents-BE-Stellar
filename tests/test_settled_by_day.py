@@ -15,6 +15,8 @@ What is pinned, on both:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 
 import pytest
 from pg_support import run
@@ -80,6 +82,15 @@ class _Pool:
 
     async def execute(self, sql: str, *args: object, timeout: float | None = None) -> None:
         return None
+
+    @contextlib.asynccontextmanager
+    async def acquire(self, *, timeout: float | None = None) -> AsyncIterator[_Pool]:
+        """The schema's DDL connection (app/services/pg_schema.py): this fake serves as one."""
+        yield self
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        yield
 
     async def fetch(self, sql: str, *args: object, timeout: float | None = None) -> list[dict[str, object]]:
         self.sent.append(sql)

@@ -1,0 +1,42 @@
+{
+  "id": "mod-019",
+  "intent": "Create a pitch outline and 8 slide headlines for a seed round deck for an agritech startup.",
+  "spec": {
+    "goal": "Get a pitch outline and slide headlines for a seed round investor deck for an agritech startup.",
+    "deliverable": "A written document containing a pitch outline for the seed round deck and a list of 8 slide headlines.",
+    "constraints": [
+      "The deck is for a seed funding round.",
+      "The company is an agritech startup.",
+      "Exactly 8 slide headlines are provided.",
+      "The output is an outline and headlines only, not full designed slides."
+    ],
+    "done_criteria": [
+      "A pitch outline for a seed round deck is included.",
+      "Exactly 8 slide headlines are listed.",
+      "The outline and headlines suit an agritech startup raising a seed round.",
+      "The headlines follow the order and structure of the outline."
+    ],
+    "summary": "You'd like a pitch outline plus 8 slide headlines for a seed round investor deck for your agritech startup."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.08,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 280,
+    "output_tokens": 269,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0034436,
+    "latency_ms": 3402.165967003384,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0034436
+  }
+}

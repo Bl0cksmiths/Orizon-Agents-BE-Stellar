@@ -1,4 +1,17 @@
-"""Shared OpenAIChat factory — every Agno agent's model is built here.
+"""Shared model factory — every worker's model is chosen here.
+
+Two providers sit behind `ORCHESTRATOR_PROVIDER` (`app/llm/provider.py`):
+Claude, tier-routed through `app/llm/claude.py`, and the older agno +
+OpenAI path below, kept until Claude is proven live. `claude_workers()` is
+the one switch every built-in LLM worker reads, per call, so flipping the
+provider needs no restart and no worker knows how it is decided.
+
+On Claude a step runs on its plan tier's model (`app/llm/tiers.py`): low →
+Claude Haiku 4.5, moderate → Claude Sonnet 5.5, complex → Claude Opus 5.5.
+A step with no tier — a plan stored before steps carried one — runs on the
+worker's own `default_tier` (see `ModelWorker` in `workers/base.py`).
+
+The OpenAI path:
 
 Centralizes the client budget: `timeout` caps a single OpenAI HTTP attempt
 (the SDK default is 600 s) and `max_retries=1` caps the SDK's internal retry
@@ -17,9 +30,11 @@ or run pays it instead, once per process.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from ..config import settings
+from ..llm.tiers import TIERS, Tier, display_name, model_for
 
 if TYPE_CHECKING:
     from agno.models.openai import OpenAIChat
@@ -80,3 +95,65 @@ def lazy_agent(*, model_id: str, **agent_kwargs: Any) -> LazyAgent:
         return Agent(model=build_openai_chat(model_id), **agent_kwargs)
 
     return LazyAgent(build)
+
+
+# ── Claude ────────────────────────────────────────────────────────────────
+
+
+def claude_workers() -> bool:
+    """True when the built-in workers run on Claude rather than agno + OpenAI."""
+    from ..llm.provider import active_provider
+
+    return active_provider() == "anthropic"
+
+
+def worker_tier(tier: object, default: Tier) -> Tier:
+    """The tier a step runs on: its own when it names a known one, else `default`.
+
+    `tier` is read off a stored plan, so it is checked rather than trusted — an
+    unknown value runs on the worker's default instead of failing the model
+    lookup mid-run.
+    """
+    for known in TIERS:
+        if tier == known:
+            return known
+    return default
+
+
+def cap_tier(tier: Tier, ceiling: Tier | None) -> Tier:
+    """`tier`, lowered to `ceiling` when it is above it; `ceiling` None caps nothing."""
+    if ceiling is not None and TIERS.index(tier) > TIERS.index(ceiling):
+        return ceiling
+    return tier
+
+
+def step_model_label(tier: Tier) -> str:
+    """The trace's name for the model a step of `tier` runs on, with the tier."""
+    return f"{display_name(model_for(tier))} (tier: {tier})"
+
+
+# The models a server-side fallback answered with during the current step,
+# collected so the trace names the model that actually served the step. The
+# run loop starts a fresh list per step (`watch_served_models`); the step's
+# task inherits the context, so `note_served_model` appends to that step's
+# list and no other — concurrent runs each have their own.
+_served_models: ContextVar[list[str] | None] = ContextVar("worker_served_models", default=None)
+
+
+def watch_served_models() -> list[str]:
+    """Start collecting, for the step about to run, the fallback models that serve it."""
+    served: list[str] = []
+    _served_models.set(served)
+    return served
+
+
+def note_served_model(model: str) -> None:
+    """Record that a fallback `model` answered a call of the current step."""
+    served = _served_models.get()
+    if served is not None:
+        served.append(model)
+
+
+def served_model_label(tier: Tier, model: str) -> str:
+    """The trace's name for a fallback model that served a step of `tier`."""
+    return f"{display_name(model)} (fallback; tier: {tier})"

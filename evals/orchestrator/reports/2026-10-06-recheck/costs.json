@@ -1,0 +1,16 @@
+{
+  "guard_usd": 0.008598744,
+  "workers_reported_usd": 0.01052,
+  "by_worker_reported_usd": {
+    "code.gen": 0,
+    "copywrite.v3": 0.001714,
+    "research.pro": 0.008806
+  },
+  "cut_off_estimated_usd": {
+    "code.gen": 0.1296
+  },
+  "measured_total_usd": 0.019118744,
+  "total_with_estimates_usd": 0.14871874399999999,
+  "code_length_usd": 0.1787375,
+  "final_usd": 0.2101065
+}

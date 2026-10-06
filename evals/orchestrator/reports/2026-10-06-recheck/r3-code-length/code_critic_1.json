@@ -1,0 +1,47 @@
+{
+  "agent_id": "agt_12r0",
+  "worker": "code.critic",
+  "label": "code.critic#1",
+  "unreported_estimated_usd": 0.0,
+  "case_id": "cpx-001",
+  "tier": "complex",
+  "intent": "Build a full booking system web app for a barbershop: services, staff schedules, time-slot booking, admin view, and email-style confirmations.",
+  "latency_s": 37.69,
+  "cost_usd": 0.10171,
+  "calls": [
+    {
+      "model": "claude-sonnet-5-5",
+      "response_model": "claude-sonnet-5-5",
+      "served_by": null,
+      "input_tokens": 7615,
+      "output_tokens": 8383,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 1060,
+      "cost_usd": 0.10171,
+      "app_cost_usd": 0.10171,
+      "latency_ms": 37682,
+      "first_token_ms": 867,
+      "effort": "low",
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "Brass & Blade — Barbershop Booking · polished: 180L → 192L (+12) · 1 structural issue fixed",
+    "counts": {
+      "violations": 1,
+      "kit_requirements": 0,
+      "notes": 1
+    },
+    "artifact_title": "Brass & Blade — Barbershop Booking",
+    "artifact_files": [
+      "index.html"
+    ],
+    "critic_violations": [
+      "under 200 lines (180) — feature-incomplete, add depth"
+    ],
+    "critic_notes": [
+      "polished: 180L → 192L (+12) · 1 structural issue fixed"
+    ]
+  }
+}

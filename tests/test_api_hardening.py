@@ -8,6 +8,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
 from app.config import settings
+from app.llm.testing import offline_readiness
 from app.security import RateLimitMiddleware
 from app.services import registry_sync
 
@@ -93,6 +94,8 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
+        # No Claude or jev key in the hermetic suite (app/llm/testing.py).
+        "orchestrator": offline_readiness(),
     }
 
 
@@ -124,6 +127,8 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
+        # No Claude or jev key in the hermetic suite (app/llm/testing.py).
+        "orchestrator": offline_readiness(),
     }
 
 

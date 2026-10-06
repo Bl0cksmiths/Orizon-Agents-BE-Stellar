@@ -324,3 +324,22 @@ def test_the_postgres_store_round_trips_upserts_forward_only_and_reopens(pg_dsn:
         None,
         None,
     ]
+
+
+# ── concurrent first use ──────────────────────────────────────────────────
+
+
+def test_concurrent_first_uses_create_the_schema_without_a_race(pg_dsn: str) -> None:
+    """Several processes creating the schema at once — an old and a new instance
+    across a deploy — must queue on the DDL lock, not fail on the catalog's
+    unique index (app/services/pg_schema.py)."""
+
+    async def first_uses() -> None:
+        stores = [PostgresSnapshotStore(pg_dsn) for _ in range(8)]
+        try:
+            await asyncio.gather(*(store._ready_pool() for store in stores))
+        finally:
+            for store in stores:
+                await store.close()
+
+    asyncio.run(first_uses())

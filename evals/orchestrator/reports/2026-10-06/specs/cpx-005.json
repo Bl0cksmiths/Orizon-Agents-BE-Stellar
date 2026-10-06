@@ -1,0 +1,43 @@
+{
+  "id": "cpx-005",
+  "intent": "Create a Soroban smart contract for a simple community savings circle (paluwagan), with tests, a security review, and a web UI to interact with it on testnet.",
+  "spec": {
+    "goal": "Build a simple community savings circle (paluwagan) as a Soroban smart contract, along with tests, a security review, and a web UI for interacting with it on testnet.",
+    "deliverable": "A Soroban smart contract implementing a paluwagan savings circle, a test suite for it, a written security review of the contract, and a web UI that interacts with the contract on the Stellar testnet.",
+    "constraints": [
+      "The smart contract must be written for Soroban.",
+      "The contract should stay simple, covering a basic community savings circle (paluwagan).",
+      "The contract must come with tests.",
+      "A security review of the contract must be included.",
+      "The web UI must let users interact with the contract on testnet."
+    ],
+    "done_criteria": [
+      "A Soroban contract implementing a simple paluwagan savings circle is provided.",
+      "Tests for the contract are provided.",
+      "A security review of the contract is provided.",
+      "A web UI is provided that interacts with the contract on testnet."
+    ],
+    "summary": "You want a simple Soroban paluwagan (community savings circle) contract, with tests, a security review, and a web UI to use it on testnet."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 1.04,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 298,
+    "output_tokens": 350,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0042896,
+    "latency_ms": 4129.818352994334,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0042896
+  }
+}

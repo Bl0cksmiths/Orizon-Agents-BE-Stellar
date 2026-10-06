@@ -1,0 +1,42 @@
+{
+  "id": "low-012",
+  "intent": "Viết một câu giới thiệu ngắn cho trang Instagram tiệm bánh mì của tôi.",
+  "spec": {
+    "goal": "Có một câu giới thiệu ngắn cho trang Instagram của tiệm bánh mì của bạn.",
+    "deliverable": "Một câu giới thiệu (bio) ngắn bằng tiếng Việt dành cho trang Instagram của tiệm bánh mì.",
+    "constraints": [
+      "Chỉ gồm một câu ngắn",
+      "Viết bằng tiếng Việt",
+      "Nội dung phù hợp để giới thiệu một tiệm bánh mì trên Instagram",
+      "Không thêm thông tin cụ thể (tên tiệm, địa chỉ, giá, liên kết) mà yêu cầu không cung cấp"
+    ],
+    "done_criteria": [
+      "Có đúng một câu giới thiệu",
+      "Câu viết bằng tiếng Việt và đủ ngắn để dùng làm bio Instagram",
+      "Câu nói rõ đây là tiệm bánh mì",
+      "Không chứa tên, địa chỉ, giá hay liên kết bịa đặt"
+    ],
+    "summary": "Chúng tôi hiểu bạn muốn một câu giới thiệu ngắn bằng tiếng Việt để dùng cho trang Instagram của tiệm bánh mì của bạn."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.0,
+    "same_request": 0.95
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 286,
+    "output_tokens": 409,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.004855600000000001,
+    "latency_ms": 4583.91222100181,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.004855600000000001
+  }
+}

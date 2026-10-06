@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +28,8 @@ from .config import SERVICE_VERSION, settings
 # below rebinds the name `health` at module scope, which would shadow a
 # `from .routers import health` module import at call time.
 from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
+from .llm import provider as llm_provider
+from .llm.provider import LLMPublicReadiness, LLMReadiness
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -60,6 +62,7 @@ from .security import (
     RequestIdLogFilter,
     SecretRedactionLogFilter,
     SecurityHeadersMiddleware,
+    header_secret_matches,
     request_id_var,
     security_headers,
     strict_cors_origins,
@@ -363,6 +366,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # that has settled a workflow, not only one an operator has bound.
     await close_dispute_store()
     await close_snapshot_store()
+    # The model layer: Claude and jev clients and the spend ledger's pool.
+    await llm_provider.close()
     executor.shutdown(wait=False)
 
 
@@ -800,7 +805,7 @@ class ReadinessResponse(BaseModel):
     `ratings`, which reports the rating writer's last cached chain read."""
 
     status: str  # "ready" | "not_ready"
-    llm: str  # "ok" | "missing_key"
+    llm: str  # "ok" | "missing_key" — the active provider's key (app/llm/provider.py)
     stellar: str  # "configured" | "incomplete"
     signer: str  # "configured" | "absent" — informational, never gates readiness
     pdax: str  # "configured" | "unconfigured" — informational
@@ -809,6 +814,10 @@ class ReadinessResponse(BaseModel):
     disputes: DisputesReadiness  # informational, never gates readiness
     escrow: EscrowReadiness  # informational, never gates readiness
     registry: RegistryReadiness  # informational, never gates readiness
+    # Informational. Anyone: provider and planning active|paused (+ when a
+    # pause lifts). With the operator X-API-Key: keys present, models, and
+    # today's spend against the cap — numbers an abuser must not see.
+    orchestrator: LLMReadiness | LLMPublicReadiness
 
 
 @app.get(
@@ -818,7 +827,14 @@ class ReadinessResponse(BaseModel):
     response_model=ReadinessResponse,
     responses={503: {"model": ReadinessResponse, "description": "A required dependency is not configured."}},
 )
-async def readiness(response: Response) -> ReadinessResponse:
+async def readiness(
+    response: Response,
+    x_api_key: str | None = Header(
+        default=None,
+        alias="X-API-Key",
+        description="Optional. The operator's API_KEY adds the AI spend figures to `orchestrator`.",
+    ),
+) -> ReadinessResponse:
     """503 only when a dependency the API cannot serve without is missing:
     the LLM key or the Stellar contract/RPC config. The signing key is
     deliberately informational — read-only deployments are legitimate — and
@@ -826,7 +842,10 @@ async def readiness(response: Response) -> ReadinessResponse:
     process serves correctly, not a dependency it lacks. `ratings` is
     informational on the signing key's own grounds: a deployment that cannot
     write ratings still serves every request."""
-    llm = "ok" if settings.openai_api_key else "missing_key"
+    # The key of the provider the orchestrator actually runs on: Claude once
+    # ANTHROPIC_API_KEY is set (or ORCHESTRATOR_PROVIDER says so), OpenAI until
+    # then. jev's key never gates — the guard falls back to Claude without it.
+    llm = "ok" if llm_provider.provider_key_present() else "missing_key"
 
     contract_ids = (
         settings.stellar_agent_registry,
@@ -877,4 +896,6 @@ async def readiness(response: Response) -> ReadinessResponse:
             agents=sync.agents,
             last_full_sync_at=sync.last_full_sync_at,
         ),
+        # A wrong or absent key is simply the public view: a probe never 401s.
+        orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )

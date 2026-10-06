@@ -1,0 +1,68 @@
+{
+  "id": "cpx-017",
+  "intent": "Create a full onboarding email sequence (7 emails), the landing page, A/B test variants, and an analytics plan for a SaaS free trial.",
+  "tier": "complex",
+  "offered": [
+    "agt_01h8",
+    "agt_02k2",
+    "agt_03d9",
+    "agt_04m1",
+    "agt_05x7",
+    "agt_06q4",
+    "agt_07w3",
+    "agt_08j2",
+    "agt_09l5",
+    "agt_10b6",
+    "agt_11c0",
+    "agt_12r0"
+  ],
+  "grade": {
+    "plan_schema": 1,
+    "plan_allowlisted": 1,
+    "plan_tiers": 1,
+    "plan_valid": 1
+  },
+  "refused": null,
+  "raw_plan": {
+    "steps": [
+      {
+        "agent_id": "agt_01h8",
+        "rationale": "Writes the 7-email onboarding sequence copy for a generic SaaS free trial.",
+        "est_eta_seconds": 2.4,
+        "tier": "complex"
+      },
+      {
+        "agent_id": "agt_11c0",
+        "rationale": "Builds the free-trial landing page as working HTML/JS, preferred agent for builds.",
+        "est_eta_seconds": 2.6,
+        "tier": "complex"
+      },
+      {
+        "agent_id": "agt_01h8",
+        "rationale": "Produces A/B test variants of landing headlines, CTAs and email subject lines.",
+        "est_eta_seconds": 1.6,
+        "tier": "moderate"
+      },
+      {
+        "agent_id": "agt_09l5",
+        "rationale": "Drafts the analytics plan: trial funnel metrics, events, conversion KPIs and test measurement.",
+        "est_eta_seconds": 2.0,
+        "tier": "moderate"
+      }
+    ]
+  },
+  "planner_call": {
+    "stage": "plan",
+    "model": "claude-opus-5-5",
+    "served_by": null,
+    "input_tokens": 605,
+    "output_tokens": 304,
+    "cache_read_input_tokens": 1981,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0088962,
+    "latency_ms": 4788.581783002883,
+    "stop_reason": "end_turn",
+    "response_model": "claude-opus-5-5",
+    "app_cost_usd": 0.0088962
+  }
+}

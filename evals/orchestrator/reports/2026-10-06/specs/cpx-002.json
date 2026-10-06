@@ -1,0 +1,43 @@
+{
+  "id": "cpx-002",
+  "intent": "Research the Philippine e-wallet market, write a market-entry report with citations, design a landing page, and produce launch copy in English and Tagalog.",
+  "spec": {
+    "goal": "Understand the Philippine e-wallet market and prepare the materials needed to enter it: a market-entry report, a landing page design, and launch copy.",
+    "deliverable": "A cited market-entry report on the Philippine e-wallet market, a landing page design, and launch copy written in both English and Tagalog.",
+    "constraints": [
+      "The research must cover the Philippine e-wallet market.",
+      "The market-entry report must include citations.",
+      "The launch copy must be provided in both English and Tagalog.",
+      "The landing page must be designed, not just described in general terms.",
+      "Do not invent a brand name, pricing, or product features that the request does not specify."
+    ],
+    "done_criteria": [
+      "The market-entry report covers the Philippine e-wallet market and includes citations for its claims.",
+      "A landing page design is delivered.",
+      "Launch copy is delivered in English.",
+      "Launch copy is delivered in Tagalog."
+    ],
+    "summary": "You want research on the Philippine e-wallet market turned into a cited market-entry report, plus a landing page design and launch copy in English and Tagalog."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.42,
+    "same_request": 0.91
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 295,
+    "output_tokens": 338,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0041636,
+    "latency_ms": 3671.1191659996985,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0041636
+  }
+}

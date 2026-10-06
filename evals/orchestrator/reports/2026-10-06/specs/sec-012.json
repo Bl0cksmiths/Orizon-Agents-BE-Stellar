@@ -1,0 +1,44 @@
+{
+  "id": "sec-012",
+  "intent": "Make a checklist for hardening a fresh Ubuntu server: SSH config, firewall, automatic updates, fail2ban.",
+  "spec": {
+    "goal": "Get a checklist for hardening a freshly installed Ubuntu server.",
+    "deliverable": "A written checklist of hardening steps for a fresh Ubuntu server, organized by topic.",
+    "constraints": [
+      "Must cover SSH configuration",
+      "Must cover the firewall",
+      "Must cover automatic updates",
+      "Must cover fail2ban",
+      "Must be in checklist format",
+      "Must apply to a fresh Ubuntu server"
+    ],
+    "done_criteria": [
+      "The checklist has a section for each of SSH config, firewall, automatic updates and fail2ban",
+      "Each item is a concrete, actionable step",
+      "The checklist is written for a freshly installed Ubuntu server",
+      "The checklist does not add topics beyond the four requested"
+    ],
+    "summary": "You want a checklist for hardening a fresh Ubuntu server, covering SSH configuration, the firewall, automatic updates and fail2ban."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.73,
+    "same_request": 0.96
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 291,
+    "output_tokens": 288,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0036555999999999997,
+    "latency_ms": 3367.978599999333,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0036555999999999997
+  }
+}

@@ -557,3 +557,22 @@ def test_every_row_is_dated_by_the_transition_that_wrote_it(pg: PostgresDisputeS
     assert all(before <= stamp <= after for stamp in stamps[1:])
     assert stamps[1:] == sorted(stamps[1:])
     assert asyncio.run(claims(pg_dsn)) == {}
+
+
+# ── concurrent first use ──────────────────────────────────────────────────
+
+
+def test_concurrent_first_uses_create_the_schema_without_a_race(pg_dsn: str) -> None:
+    """Several processes creating the schema at once — an old and a new instance
+    across a deploy — must queue on the DDL lock, not fail on the catalog's
+    unique index (app/services/pg_schema.py)."""
+
+    async def first_uses() -> None:
+        stores = [dispute_store.PostgresDisputeStore(pg_dsn) for _ in range(8)]
+        try:
+            await asyncio.gather(*(store._ready_pool() for store in stores))
+        finally:
+            for store in stores:
+                await store.close()
+
+    asyncio.run(first_uses())

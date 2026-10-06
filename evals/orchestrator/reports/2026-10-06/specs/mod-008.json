@@ -1,0 +1,40 @@
+{
+  "id": "mod-008",
+  "intent": "Make an expense tracker web app where I can add expenses by category and see a pie chart.",
+  "spec": {
+    "goal": "Have an expense tracker web app where expenses can be added by category and viewed in a pie chart.",
+    "deliverable": "A working expense tracker web app with an expense entry form and a pie chart of spending by category.",
+    "constraints": [
+      "The user must be able to add expenses and assign each one to a category.",
+      "The app must display a pie chart showing expenses broken down by category.",
+      "Do not add features beyond adding expenses by category and the pie chart."
+    ],
+    "done_criteria": [
+      "A user can add an expense with an amount and a category.",
+      "The pie chart shows spending split by category.",
+      "The pie chart updates when a new expense is added."
+    ],
+    "summary": "You want a web app for tracking expenses where you can add each expense under a category and see how your spending is split in a pie chart."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.02,
+    "recheck_harmful": 0.01,
+    "recheck_severity": 0.22,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 275,
+    "output_tokens": 240,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0031436,
+    "latency_ms": 2719.646224002645,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0031436
+  }
+}

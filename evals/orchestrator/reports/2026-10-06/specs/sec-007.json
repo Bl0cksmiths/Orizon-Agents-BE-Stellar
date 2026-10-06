@@ -1,0 +1,42 @@
+{
+  "id": "sec-007",
+  "intent": "Do a security review of my Express.js API: check auth middleware, rate limiting, input validation and CORS settings.",
+  "spec": {
+    "goal": "Get a security review of your Express.js API that covers its auth middleware, rate limiting, input validation and CORS settings.",
+    "deliverable": "A written security review report of the Express.js API with findings for each of the four areas and recommended fixes.",
+    "constraints": [
+      "Review is limited to four areas: auth middleware, rate limiting, input validation and CORS settings.",
+      "The review is of the user's Express.js API code.",
+      "Do not add features or make code changes beyond what is needed to describe recommended fixes."
+    ],
+    "done_criteria": [
+      "The report assesses the auth middleware and lists any weaknesses found.",
+      "The report assesses rate limiting and lists any weaknesses found.",
+      "The report assesses input validation and lists any weaknesses found.",
+      "The report assesses CORS settings and lists any weaknesses found.",
+      "Each finding comes with a recommended fix."
+    ],
+    "summary": "You'd like us to review your Express.js API for security issues in its auth middleware, rate limiting, input validation and CORS settings, and report back our findings with suggested fixes."
+  },
+  "recheck_scores": {
+    "recheck_injection": 0.03,
+    "recheck_harmful": 0.02,
+    "recheck_severity": 0.82,
+    "same_request": 0.94
+  },
+  "recheck_verdict": "clean",
+  "improver_call": {
+    "stage": "improve",
+    "model": "claude-sonnet-5-5",
+    "served_by": null,
+    "input_tokens": 284,
+    "output_tokens": 336,
+    "cache_read_input_tokens": 968,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0041216000000000004,
+    "latency_ms": 3958.081831995514,
+    "stop_reason": "end_turn",
+    "response_model": "claude-sonnet-5-5",
+    "app_cost_usd": 0.0041216000000000004
+  }
+}
