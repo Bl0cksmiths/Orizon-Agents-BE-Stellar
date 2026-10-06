@@ -227,6 +227,12 @@ class PlanStep(BaseModel):
     # legacy provider. None for an external step — its operator chooses — and
     # on a plan stored before this existed.
     model: str | None = None
+    # The 1-based positions of earlier steps in THIS plan whose outputs this
+    # step reads, derived in code from the workers' handoff map
+    # (`workers/context.CONSUMES`), never from the model, so a plan card can
+    # name a step's real sources. [] when it reads none; None on a plan stored
+    # before this existed. Additive.
+    inputs_from: list[int] | None = None
 
     @model_validator(mode="after")
     def _price_in_stroops(self) -> PlanStep:
