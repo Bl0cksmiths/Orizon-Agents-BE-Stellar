@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from ..agents.model_factory import watch_served_models
 from ..agents.registry import get_worker
 from ..agents.workers.base import ModelWorker
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
@@ -631,10 +632,16 @@ async def _run(
                     model = worker.step_model(tier, context)
                     if model:
                         await _emit(task_id, start, "exec", f"{worker.name} on {model}")
+                    # Collects the model of any call a server-side fallback
+                    # answered, so the trace can name who actually served it.
+                    served = watch_served_models()
                     step_run = worker.run(plan.intent, step.rationale, context=context, tier=tier)
                 else:
+                    served = []
                     step_run = worker.run(plan.intent, step.rationale, context=context)
                 output = await asyncio.wait_for(step_run, timeout=STEP_TIMEOUT_SECONDS)
+                if served and isinstance(worker, ModelWorker):
+                    await _emit(task_id, start, "exec", f"{worker.name} on {worker.served_model(tier, served[-1])}")
             except asyncio.TimeoutError:
                 logger.error(
                     "task %s step %s (%s): timed out after %.0fs",
