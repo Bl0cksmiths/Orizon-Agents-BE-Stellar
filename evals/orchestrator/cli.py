@@ -94,8 +94,8 @@ def _parser() -> argparse.ArgumentParser:
     wk.add_argument("--out", type=Path, required=True)
     wk.add_argument(
         "--recheck",
-        action="store_true",
-        help="the release re-check jobs, run against --max-usd as a budget (streamed replies cut off at it)",
+        choices=("release", "code-length"),
+        help="a re-check job set, run against --max-usd as a budget (streamed replies cut off at it)",
     )
 
     cp = sub.add_parser("campaign", help="build a live campaign's report and data files from its runs")
@@ -225,17 +225,18 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _workers(args: argparse.Namespace) -> int:
-    from .workers_sample import HEADROOM, JOBS, RECHECK_JOBS, ceiling_usd
+    from .workers_sample import CODE_LENGTH_JOBS, HEADROOM, JOBS, RECHECK_JOBS, ceiling_usd
 
     if not args.live or args.max_usd is None:
         print("refused: the worker sample needs --live and --max-usd N", file=sys.stderr)
         return EXIT_REFUSED
-    jobs = RECHECK_JOBS if args.recheck else JOBS
+    jobs = {"release": RECHECK_JOBS, "code-length": CODE_LENGTH_JOBS}.get(args.recheck or "", JOBS)
     if args.recheck:
         typical = sum(j.typical_usd for j in jobs)
         print(f"[LIVE] worker re-check: {len(jobs)} jobs, last measured {cost.usd(typical)}")
-        if typical * HEADROOM > args.max_usd:
-            print("refused: the jobs' measured cost with its headroom is over --max-usd", file=sys.stderr)
+        # Each job starts only if it still fits, so the gate is the first one.
+        if jobs[0].typical_usd * HEADROOM > args.max_usd:
+            print("refused: the first job's measured cost with its headroom is over --max-usd", file=sys.stderr)
             return EXIT_REFUSED
     else:
         ceiling = ceiling_usd()
