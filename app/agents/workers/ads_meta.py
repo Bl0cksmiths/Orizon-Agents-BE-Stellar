@@ -118,7 +118,9 @@ INSTRUCTIONS = (
     "results, no testimonials or quotes, no customer counts or member numbers, "
     "and no awards, certifications or press mentions. Where the copy needs one, "
     "write a clearly marked placeholder for the owner to fill in, such as "
-    "[placeholder: discount] or [placeholder: price], and list it in the notes."
+    "[placeholder: discount] or [placeholder: price], and list it in the notes. "
+    "Do not embellish either: no qualifiers (expert, certified, award-winning), "
+    "times, places or extras the request and the upstream outputs do not give."
 )
 
 UPSTREAM_GUIDANCE = (
