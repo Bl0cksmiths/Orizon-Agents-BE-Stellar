@@ -1,0 +1,4 @@
+# Run output and the external-benchmark cache stay local: traces carry model
+# output, and the benchmarks are fetched at run time under their own licences.
+runs/
+.cache/
