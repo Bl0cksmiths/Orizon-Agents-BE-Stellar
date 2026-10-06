@@ -52,8 +52,12 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         f"- Pipeline: `{pipeline}`; scored rows: {len(ok)}; truncated (not scored): {truncated}; "
         f"failed attempts (errors.jsonl, not scored): {len(errors)} ({err_txt})",
         f"- Rows answered by a server-side fallback model: {fallback}",
-        f"- Measured spend: {usd(s['total_usd'])} ({usd(s['scored_usd'])} on scored rows, "
-        f"{usd(s['failed_usd'])} on failed attempts)",
+        (
+            f"- Measured spend: {usd(s['total_usd'])} ({usd(s['scored_usd'])} on scored rows, "
+            f"{usd(s['failed_usd'])} on failed attempts)"
+            if live
+            else f"- Nothing billed (the fakes' simulated usage prices at {usd(s['total_usd'])})"
+        ),
         "",
         "## Guard",
         "",
