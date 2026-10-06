@@ -13,11 +13,14 @@ showing both.
 
 Selection rules (all on train):
 
-    injection_block      max injection recall with false-block rate <= target; ties -> higher threshold
-    harmful_block        max harmful recall with false-block rate <= target; ties -> higher threshold
+    injection_block      max injection recall, false-block rate <= max(target, today's)
+    harmful_block        max harmful recall, false-block rate <= max(target, today's)
     severity_block       the same, on the severity score (0..3)
-    real_request_min     max needs-detail recall with false needs-detail rate <= target; ties -> lower threshold
-    complexity_confidence_min  max tier accuracy; ties -> lower under-tier rate, then lower threshold
+    real_request_min     max needs-detail recall, false needs-detail rate <= max(target, today's)
+    complexity_confidence_min  max tier accuracy; ties -> lower under-tier rate
+
+Ties on recall go to the fewest wrong refusals, then to the value nearest
+today's, so a flat curve keeps the current setting.
 """
 
 from __future__ import annotations
@@ -114,35 +117,46 @@ def _within(rate: Rate, target: float) -> bool:
     return rate.value is None or rate.value <= target
 
 
-_Selector = Callable[[list[tuple[float, Point]]], float | None]
+_Selector = Callable[[list[tuple[float, Point]], float], float | None]
 
 
-def _pick_recall(
-    recall: Callable[[Point], Rate], guard: Callable[[Point], Rate], target: float, prefer_high: bool
-) -> _Selector:
-    def select(points: list[tuple[float, Point]]) -> float | None:
+def _pick_recall(recall: Callable[[Point], Rate], guard: Callable[[Point], Rate], target: float) -> _Selector:
+    """Most recall without costing more than the target or than today.
+
+    The guard rate (false blocks, false needs-detail) may not exceed the
+    larger of `target` and its value at the starting threshold: a new line
+    must never wrong more legitimate requests than the current one does, and
+    when today already misses the target it is the bar instead of an
+    unreachable one. Among the points with the most recall, the fewest wrong
+    refusals win, then the one nearest the starting value.
+    """
+
+    def select(points: list[tuple[float, Point]], start: float) -> float | None:
         if not any(recall(p).n for _, p in points):
             return None  # no positive case to tune on: keep the starting value
-        ok = [(v, p) for v, p in points if _within(guard(p), target)] or points
+        at_start = next((p for v, p in points if abs(v - start) < 1e-9), None)
+        bar = max(target, _v(guard(at_start))) if at_start is not None else target
+        ok = [(v, p) for v, p in points if _within(guard(p), bar)] or points
         best = max(_v(recall(p)) for _, p in ok)
-        tied = [v for v, p in ok if _v(recall(p)) == best]
-        return max(tied) if prefer_high else min(tied)
+        tied = [(v, p) for v, p in ok if _v(recall(p)) == best]
+        fewest = min(_v(guard(p)) for _, p in tied)
+        return min((v for v, p in tied if _v(guard(p)) == fewest), key=lambda v: (abs(v - start), v))
 
     return select
 
 
-def _pick_tier(points: list[tuple[float, Point]]) -> float | None:
+def _pick_tier(points: list[tuple[float, Point]], start: float) -> float | None:
     if not any(p.tier_accuracy.n for _, p in points):
         return None
-    return min(points, key=lambda vp: (-_v(vp[1].tier_accuracy), _v(vp[1].under_tier), vp[0]))[0]
+    return min(points, key=lambda vp: (-_v(vp[1].tier_accuracy), _v(vp[1].under_tier), abs(vp[0] - start)))[0]
 
 
 SELECTORS: dict[str, _Selector] = {
-    "injection_block": _pick_recall(lambda p: p.injection_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET, True),
-    "harmful_block": _pick_recall(lambda p: p.harmful_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET, True),
-    "severity_block": _pick_recall(lambda p: p.harmful_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET, True),
+    "injection_block": _pick_recall(lambda p: p.injection_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET),
+    "harmful_block": _pick_recall(lambda p: p.harmful_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET),
+    "severity_block": _pick_recall(lambda p: p.harmful_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET),
     "real_request_min": _pick_recall(
-        lambda p: p.needs_detail_recall, lambda p: p.false_needs_detail, FALSE_NEEDS_DETAIL_TARGET, False
+        lambda p: p.needs_detail_recall, lambda p: p.false_needs_detail, FALSE_NEEDS_DETAIL_TARGET
     ),
     "complexity_confidence_min": _pick_tier,
 }
@@ -179,7 +193,7 @@ def sweep(rows: list[dict[str, Any]], base: Thresholds = STARTING) -> list[KnobR
     out = []
     for knob, grid in KNOBS.items():
         curve = [(v, evaluate(train, base.with_(**{knob: v}))) for v in grid]
-        picked = SELECTORS[knob](curve)
+        picked = SELECTORS[knob](curve, getattr(base, knob))
         at = base if picked is None else base.with_(**{knob: picked})
         out.append(
             KnobResult(
