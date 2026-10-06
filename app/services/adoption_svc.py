@@ -282,13 +282,13 @@ class AdoptionReport(BaseModel):
     """SOW §6.3's answer, with the limits of what was looked at.
 
     `window_days` is how far back `settled_external_workflows` can see. The
-    settled workflows come from `settlement_svc`'s scan of Soroban RPC events,
+    settled workflows come from `charge_window`'s scan of Soroban RPC events,
     which the node keeps for about seven days, so an older settlement is not
     counted. It is the scan's MEASURED span (`SettlementEvidence.window_days`),
-    not a constant: when the per-agent scans cover different spans, it is the
-    smallest, so "settled in the last N days" holds for every agent. Only scans
-    that ran count toward it; an agent whose scan did not run is already named
-    in `unreadable_agents`. 0 when no scan ran, e.g. no external agents.
+    not a constant — one scan answers every agent, and the smallest span is
+    taken regardless, so "settled in the last N days" holds for every agent.
+    An agent the scan did not answer is already named in `unreadable_agents`.
+    0 when no scan ran, e.g. no external agents.
     """
 
     network: str
