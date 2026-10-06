@@ -76,6 +76,8 @@ class StageCall:
     stop_reason: str | None = None
     response_model: str | None = None  # the id the API answered with (a dated snapshot, say)
     app_cost_usd: float | None = None  # what the app's own spend ledger booked for this call
+    effort: str | None = None  # the output effort the request asked for (None: not sent)
+    first_token_ms: float | None = None  # streamed calls: time to the first text delta
 
 
 @dataclass(frozen=True)
