@@ -40,6 +40,7 @@ _FALLBACK_PRICES: dict[str, dict[str, float]] = {
 }
 
 GUARD_MODEL = "jev"
+FALLBACK_MODEL = "claude-haiku-4-5"
 IMPROVER_MODEL = "claude-sonnet-5-5"
 PLANNER_MODEL = "claude-opus-5-5"
 
@@ -48,6 +49,9 @@ PLANNER_MODEL = "claude-opus-5-5"
 # the AVAILABLE_AGENTS block for the 12 seeded agents.
 FENCE_OVERHEAD = 150
 GUARD_QUESTIONS = 450  # four questions with their criteria text
+FALLBACK_SYSTEM = 1_800  # the fallback's rules plus the rendered question battery
+FALLBACK_OUTPUT = 120
+FALLBACK_MAX_TOKENS = 400  # intent_guard._FALLBACK_MAX_TOKENS
 IMPROVER_SYSTEM = 900
 IMPROVER_OUTPUT = 1_500  # Spec + adaptive thinking at the improver's effort
 IMPROVER_MAX_TOKENS = 4_000
@@ -109,19 +113,27 @@ class Estimate:
         )
 
 
-def reservation(case: Case, *, stages: str) -> float:
+def reservation(case: Case, *, stages: str, fallback: bool = False) -> float:
     """What the runner holds back before starting `case`: its ceiling as if
     the guard allowed it. A guard that misses lets an injection through to
     the planner, and that case must not be able to spend past the cap."""
-    return case_estimate(case, stages=stages, assume_allowed=True)[1]
+    return case_estimate(case, stages=stages, assume_allowed=True, fallback=fallback)[1]
 
 
-def case_estimate(case: Case, *, stages: str, assume_allowed: bool = False) -> tuple[dict[str, float], float]:
-    """(expected cost by stage, ceiling) for one case, one rep."""
+def case_estimate(
+    case: Case, *, stages: str, assume_allowed: bool = False, fallback: bool = False
+) -> tuple[dict[str, float], float]:
+    """(expected cost by stage, ceiling) for one case, one rep. `fallback`
+    prices the guard as its Claude Haiku 4.5 stand-in instead of jev."""
     table = prices()
     intent = estimate_tokens(case.intent) + FENCE_OVERHEAD
-    by_stage = {"guard": call_cost(GUARD_MODEL, intent + GUARD_QUESTIONS, 0, table)}
-    ceiling = by_stage["guard"]
+    if fallback:
+        guard_in = FALLBACK_SYSTEM + intent
+        by_stage = {"guard": call_cost(FALLBACK_MODEL, guard_in, FALLBACK_OUTPUT, table)}
+        ceiling = call_cost(FALLBACK_MODEL, guard_in, FALLBACK_MAX_TOKENS, table)
+    else:
+        by_stage = {"guard": call_cost(GUARD_MODEL, intent + GUARD_QUESTIONS, 0, table)}
+        ceiling = by_stage["guard"]
     if stages == "all" and (assume_allowed or case.expected_verdict == "allow"):
         tier = case.expected_tier or "complex"
         effort = EFFORT_FOR_TIER[tier]
@@ -138,13 +150,13 @@ def case_estimate(case: Case, *, stages: str, assume_allowed: bool = False) -> t
     return by_stage, ceiling
 
 
-def estimate(cases: Iterable[Case], *, stages: str, reps: int = 1) -> Estimate:
+def estimate(cases: Iterable[Case], *, stages: str, reps: int = 1, fallback: bool = False) -> Estimate:
     totals: dict[str, float] = {}
     ceiling = 0.0
     n = planned = 0
     for c in cases:
         n += 1
-        by_stage, cap = case_estimate(c, stages=stages)
+        by_stage, cap = case_estimate(c, stages=stages, fallback=fallback)
         planned += "plan" in by_stage
         ceiling += cap
         for k, v in by_stage.items():
