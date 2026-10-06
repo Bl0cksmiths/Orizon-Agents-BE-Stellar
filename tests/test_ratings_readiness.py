@@ -17,6 +17,7 @@ import pytest
 from stellar_sdk import Keypair
 
 from app.config import settings
+from app.llm.testing import offline_readiness
 from app.services import rating_writer as rw
 from app.services import registry_sync
 from app.stellar import client as sc
@@ -105,6 +106,8 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": synced,
+        # No Claude or jev key in the hermetic suite (app/llm/testing.py).
+        "orchestrator": offline_readiness(),
     }
 
 

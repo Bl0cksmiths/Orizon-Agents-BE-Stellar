@@ -28,6 +28,8 @@ from .config import SERVICE_VERSION, settings
 # below rebinds the name `health` at module scope, which would shadow a
 # `from .routers import health` module import at call time.
 from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
+from .llm import provider as llm_provider
+from .llm.provider import LLMReadiness
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -800,7 +802,7 @@ class ReadinessResponse(BaseModel):
     `ratings`, which reports the rating writer's last cached chain read."""
 
     status: str  # "ready" | "not_ready"
-    llm: str  # "ok" | "missing_key"
+    llm: str  # "ok" | "missing_key" — the active provider's key (app/llm/provider.py)
     stellar: str  # "configured" | "incomplete"
     signer: str  # "configured" | "absent" — informational, never gates readiness
     pdax: str  # "configured" | "unconfigured" — informational
@@ -809,6 +811,7 @@ class ReadinessResponse(BaseModel):
     disputes: DisputesReadiness  # informational, never gates readiness
     escrow: EscrowReadiness  # informational, never gates readiness
     registry: RegistryReadiness  # informational, never gates readiness
+    orchestrator: LLMReadiness  # informational: provider, keys present, models, today's spend vs the cap
 
 
 @app.get(
@@ -826,7 +829,10 @@ async def readiness(response: Response) -> ReadinessResponse:
     process serves correctly, not a dependency it lacks. `ratings` is
     informational on the signing key's own grounds: a deployment that cannot
     write ratings still serves every request."""
-    llm = "ok" if settings.openai_api_key else "missing_key"
+    # The key of the provider the orchestrator actually runs on: Claude once
+    # ANTHROPIC_API_KEY is set (or ORCHESTRATOR_PROVIDER says so), OpenAI until
+    # then. jev's key never gates — the guard falls back to Claude without it.
+    llm = "ok" if llm_provider.provider_key_present() else "missing_key"
 
     contract_ids = (
         settings.stellar_agent_registry,
@@ -877,4 +883,5 @@ async def readiness(response: Response) -> ReadinessResponse:
             agents=sync.agents,
             last_full_sync_at=sync.last_full_sync_at,
         ),
+        orchestrator=llm_provider.readiness(),
     )
