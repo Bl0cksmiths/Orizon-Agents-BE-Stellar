@@ -89,7 +89,7 @@ def test_the_replay_agrees_with_the_guard_itself():
     ):
         assert getattr(STARTING, name) == getattr(policy, name), name
     grid = itertools.product(
-        (0.0, 0.34, 0.35, 0.69, 0.70, 1.0),  # injection
+        (0.0, 0.34, 0.35, 0.39, 0.40, 0.69, 0.70, 1.0),  # injection
         (0.0, 0.69, 0.70),  # harmful
         (0.0, 1.0, 2.0, 3.0),  # severity
         (0.0, 0.29, 0.30, 1.0),  # real_request
