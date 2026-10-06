@@ -56,11 +56,20 @@ IMPROVER_SYSTEM = 900
 IMPROVER_OUTPUT = 600  # Spec + thinking: 319 tokens on average measured, doubled for headroom
 IMPROVER_MAX_TOKENS = 4_000
 SPEC_TOKENS = 400  # the Spec as re-checked and as handed to the planner
-PLANNER_SYSTEM = 1_200
-AGENT_BLOCK = 700
-# Plan + thinking. Measured 2026-10-06 (88 plans): max 148 / 239 / 509 output
-# tokens at effort low / medium / high; these keep about 2x headroom.
-PLANNER_OUTPUT_BY_EFFORT = {"low": 300, "medium": 500, "high": 1_000}
+# The pipeline-composing instructions (recipes, handoff rules) and the
+# AVAILABLE_AGENTS block with a role card under each of the 12 built-in agents.
+PLANNER_SYSTEM = 1_600
+AGENT_BLOCK = 1_600
+# Plan + thinking. Measured 2026-10-06 (88 plans, mostly one or two steps): max
+# 148 / 239 / 509 output tokens at effort low / medium / high. Plans are now
+# 3-6 step pipelines with 30-word rationales, so these allow about three times
+# the old maxima until a live run measures them again.
+PLANNER_OUTPUT_BY_EFFORT = {"low": 500, "medium": 800, "high": 1_400}
+# Cache writes bill at 1.25x input; both system prompts are written once per
+# run (per rep: a cache entry outlives one case, not a long gap) and read at
+# the cache-read rate after that — measured on the 2026-10-06 run, where the
+# planner read 1,936 cached tokens and the improver 924 on every call.
+CACHE_WRITE_MULTIPLIER = 1.25
 PLANNER_MAX_TOKENS = {"low": 4_000, "moderate": 8_000, "complex": 16_000}  # the planner's own budgets
 EFFORT_FOR_TIER = {"low": "low", "moderate": "medium", "complex": "high"}
 
@@ -92,10 +101,16 @@ def estimate_tokens(text: str) -> int:
 
 
 def call_cost(
-    model: str, input_tokens: int, output_tokens: int, table: dict[str, dict[str, float]] | None = None
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    table: dict[str, dict[str, float]] | None = None,
+    *,
+    cached_tokens: int = 0,
 ) -> float:
+    """List price of one call; `cached_tokens` of input billed at the cache-read rate."""
     p = (table or prices())[model]
-    return (input_tokens * p["input"] + output_tokens * p["output"]) / 1_000_000
+    return (input_tokens * p["input"] + cached_tokens * p["cache_read"] + output_tokens * p["output"]) / 1_000_000
 
 
 @dataclass(frozen=True)
@@ -140,16 +155,37 @@ def case_estimate(
         tier = case.expected_tier or "complex"
         effort = EFFORT_FOR_TIER[tier]
         improve_in = IMPROVER_SYSTEM + intent
-        by_stage["improve"] = call_cost(IMPROVER_MODEL, improve_in, IMPROVER_OUTPUT, table)
+        # Expected: the system prompts come from the prompt cache; the ceiling
+        # below assumes they do not.
+        by_stage["improve"] = call_cost(IMPROVER_MODEL, intent, IMPROVER_OUTPUT, table, cached_tokens=IMPROVER_SYSTEM)
         by_stage["recheck"] = call_cost(GUARD_MODEL, SPEC_TOKENS + intent + GUARD_QUESTIONS, 0, table)
         plan_in = PLANNER_SYSTEM + AGENT_BLOCK + SPEC_TOKENS + intent
-        by_stage["plan"] = call_cost(PLANNER_MODEL, plan_in, PLANNER_OUTPUT_BY_EFFORT[effort], table)
+        by_stage["plan"] = call_cost(
+            PLANNER_MODEL,
+            SPEC_TOKENS + intent,
+            PLANNER_OUTPUT_BY_EFFORT[effort],
+            table,
+            cached_tokens=PLANNER_SYSTEM + AGENT_BLOCK,
+        )
         ceiling += (
             call_cost(IMPROVER_MODEL, improve_in, IMPROVER_MAX_TOKENS, table)
             + by_stage["recheck"]
             + call_cost(PLANNER_MODEL, plan_in, PLANNER_MAX_TOKENS[tier], table)
         )
     return by_stage, ceiling
+
+
+def cache_write_usd(table: dict[str, dict[str, float]] | None = None) -> float:
+    """Writing the improver's and the planner's system prompts to the cache, once."""
+    table = table or prices()
+    return (
+        CACHE_WRITE_MULTIPLIER
+        * (
+            IMPROVER_SYSTEM * table[IMPROVER_MODEL]["input"]
+            + (PLANNER_SYSTEM + AGENT_BLOCK) * table[PLANNER_MODEL]["input"]
+        )
+        / 1_000_000
+    )
 
 
 def estimate(cases: Iterable[Case], *, stages: str, reps: int = 1, fallback: bool = False) -> Estimate:
@@ -163,5 +199,7 @@ def estimate(cases: Iterable[Case], *, stages: str, reps: int = 1, fallback: boo
         ceiling += cap
         for k, v in by_stage.items():
             totals[k] = totals.get(k, 0.0) + v
+    if planned:
+        totals["cache_write"] = cache_write_usd()
     totals = {k: v * reps for k, v in totals.items()}
     return Estimate(n, planned, reps, sum(totals.values()), ceiling * reps, totals)
