@@ -3,9 +3,11 @@ from __future__ import annotations
 import time
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, computed_field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, computed_field, model_validator
 
+from . import money
 from .llm.tiers import Tier
+from .money import AssetInfo
 
 # Agent ids are contract Symbols: short alphanumeric/underscore tokens. Reject
 # garbage at the router edge instead of paying an RPC round-trip to find out.
@@ -168,8 +170,17 @@ class PlanStep(BaseModel):
     agent_id: str = Field(..., description="Must match a registered agent id")
     agent_name: str | None = None  # backfilled server-side
     rationale: str = Field(..., description="<= 20 words")
-    est_price_usdc: float = Field(..., ge=0)
+    # DEPRECATED — the step's price as a float of the plan's asset (NOT
+    # necessarily USDC: see `DecomposeResponse.asset`). Derived from
+    # `price_stroops` on every validation, so it can never disagree with it;
+    # accepted as input only from a plan stored before `price_stroops` existed.
+    est_price_usdc: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     est_eta_seconds: float = Field(..., ge=0)
+    # The step's price in stroops (10^-7 of the plan's asset), frozen at plan
+    # time from the agent's registry price: what the buyer authorizes this
+    # step for, what the settle pays its operator if it delivers, and what is
+    # returned if it does not (ADR 0015). The one source of truth.
+    price_stroops: int | None = Field(default=None, ge=0)
     rep_bps: int | None = None  # smoothed reputation at plan time (0..10_000)
     rep_source: Literal["onchain", "prior"] | None = None
     # The conservative bound the routing floor is judged on — `rep_bps` is the
@@ -211,19 +222,50 @@ class PlanStep(BaseModel):
     # on a plan stored before this existed.
     model: str | None = None
 
+    @model_validator(mode="after")
+    def _price_in_stroops(self) -> PlanStep:
+        """`price_stroops` is the truth; `est_price_usdc` is derived from it.
+
+        A step built (or stored) with only the float gets its stroops from the
+        one conversion rule, `money.to_stroops`; a step built with stroops has
+        its float re-derived, whatever float came with it. A price that cannot
+        be stroops at all — infinite, NaN, negative — is refused here, before
+        it can be stored, authorized or paid.
+        """
+        if self.price_stroops is None:
+            if "est_price_usdc" not in self.model_fields_set:
+                raise ValueError("a plan step needs a price: price_stroops (or the legacy est_price_usdc)")
+            self.price_stroops = money.to_stroops(self.est_price_usdc)
+        self.est_price_usdc = money.stroops_to_float(self.price_stroops)
+        return self
+
 
 class Plan(BaseModel):
     steps: list[PlanStep]
     # The request's overall complexity as the request check judged it. None
     # on a plan built by the legacy planner.
     tier: Tier | None = None
+    # What every `price_stroops` in this plan is stroops OF, from the network
+    # config at plan time (native XLM on testnet; `UNKNOWN` — never a guessed
+    # "USDC" — while a non-native SAC's name has not been read).
+    asset: AssetInfo = Field(default_factory=lambda: money.configured_asset() or money.UNKNOWN)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total_stroops(self) -> int:
+        """The plan's total in stroops: exactly the sum of its steps' prices,
+        and exactly what the buyer authorizes (ADR 0015)."""
+        return sum(step.price_stroops or 0 for step in self.steps)
 
 
 class StoredPlan(BaseModel):
     id: str
     intent: str
     plan: Plan
-    total_usdc: float
+    # DEPRECATED — `plan.total_stroops` as a float, derived on every
+    # validation (any value passed is replaced), so the stored plan can never
+    # carry a total the buyer was not shown.
+    total_usdc: float = 0.0
     total_eta: float
     # Unix epoch seconds, like `TaskSummary.started_at`. `/execute` refuses a
     # plan older than its TTL (`execution_svc.PLAN_TTL_SECONDS`): the card the
@@ -247,6 +289,11 @@ class StoredPlan(BaseModel):
     # How this plan was reached, one line per planning stage, so the run's
     # trace can open with them. Empty on a plan built by the legacy planner.
     stages: list[PlanStage] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _total_from_stroops(self) -> StoredPlan:
+        self.total_usdc = money.stroops_to_float(self.plan.total_stroops)
+        return self
 
 
 # Why the floor acted on an agent — a CLOSED set, because the plan card renders
@@ -514,8 +561,18 @@ class DecomposeResponse(BaseModel):
     plan_id: str
     intent: str
     steps: list[PlanStep]
-    total_usdc: float
+    # DEPRECATED — `total_stroops` as a float of `asset` (not necessarily
+    # USDC), derived on every validation. Sign `total_stroops`, never this.
+    total_usdc: float = 0.0
     total_eta: float
+    # The plan's total in stroops: exactly the sum of `steps[*].price_stroops`
+    # and exactly the amount to authorize (`/api/stellar/build/authorize`
+    # `max_amount_stroops`). Derived from the steps; a value that disagrees
+    # with them is refused.
+    total_stroops: int | None = Field(default=None, ge=0)
+    # What the amounts are in, from the network config: `{code, issuer, decimals}`
+    # — `{"code": "XLM", "issuer": null, "decimals": 7}` on testnet.
+    asset: AssetInfo = Field(default_factory=lambda: money.configured_asset() or money.UNKNOWN)
     # Reputation-floor actions taken while building this plan (exclusions,
     # substitutions, starvation-backstop degradations). Empty on the common
     # path where every routed agent clears the floor.
@@ -557,6 +614,15 @@ class DecomposeResponse(BaseModel):
     models: PlanModels | None = None
     # One line per planning stage, in order, for the trace.
     stages: list[PlanStage] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _total_from_steps(self) -> DecomposeResponse:
+        total = sum(step.price_stroops or 0 for step in self.steps)
+        if self.total_stroops is not None and self.total_stroops != total:
+            raise ValueError(f"total_stroops {self.total_stroops} is not the sum of the steps' prices ({total})")
+        self.total_stroops = total
+        self.total_usdc = money.stroops_to_float(total)
+        return self
 
 
 class ExecuteRequest(BaseModel):
