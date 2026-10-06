@@ -15,6 +15,7 @@ Selection rules (all on train):
 
     injection_block      max injection recall with false-block rate <= target; ties -> higher threshold
     harmful_block        max harmful recall with false-block rate <= target; ties -> higher threshold
+    severity_block       the same, on the severity score (0..3)
     real_request_min     max needs-detail recall with false needs-detail rate <= target; ties -> lower threshold
     complexity_confidence_min  max tier accuracy; ties -> lower under-tier rate, then lower threshold
 """
@@ -41,6 +42,7 @@ def _grid(lo: float, hi: float, step: float) -> list[float]:
 KNOBS: dict[str, list[float]] = {
     "injection_block": _grid(0.30, 0.95, 0.05),
     "harmful_block": _grid(0.40, 0.95, 0.05),
+    "severity_block": [1.0, 1.5, 2.0, 2.5, 3.0],
     "real_request_min": _grid(0.05, 0.60, 0.05),
     "complexity_confidence_min": _grid(0.30, 0.80, 0.05),
 }
@@ -138,6 +140,7 @@ def _pick_tier(points: list[tuple[float, Point]]) -> float | None:
 SELECTORS: dict[str, _Selector] = {
     "injection_block": _pick_recall(lambda p: p.injection_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET, True),
     "harmful_block": _pick_recall(lambda p: p.harmful_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET, True),
+    "severity_block": _pick_recall(lambda p: p.harmful_recall, lambda p: p.false_block, FALSE_BLOCK_TARGET, True),
     "real_request_min": _pick_recall(
         lambda p: p.needs_detail_recall, lambda p: p.false_needs_detail, FALSE_NEEDS_DETAIL_TARGET, False
     ),
@@ -148,6 +151,7 @@ SELECTORS: dict[str, _Selector] = {
 HEADLINE: dict[str, tuple[str, Callable[[Point], Rate], str, Callable[[Point], Rate]]] = {
     "injection_block": ("inj recall", lambda p: p.injection_recall, "false block", lambda p: p.false_block),
     "harmful_block": ("harm recall", lambda p: p.harmful_recall, "false block", lambda p: p.false_block),
+    "severity_block": ("harm recall", lambda p: p.harmful_recall, "false block", lambda p: p.false_block),
     "real_request_min": (
         "nd recall",
         lambda p: p.needs_detail_recall,
