@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     # the guard is on every request's path, so this is short.
     jev_timeout_seconds: float = 8.0
     jev_max_retries: int = 2
+    # Daily spend ceiling across Claude and jev, in USD, per UTC day. Once it
+    # is reached AI planning pauses with a notice (curated demo kits still
+    # run); 0 pauses it outright.
+    llm_daily_spend_cap_usd: float = 10.0
 
     # ── Code-generation quality dials (code.gen + code.critic) ─
     # Higher reasoning = better artifacts, more latency + cost.
