@@ -16,7 +16,7 @@ from app.llm import testing
 from app.llm.errors import JevUnavailable, LLMError, LLMUnavailable, SpendCapReached
 from app.services import intent_guard_prompts as guard_prompts
 from app.services import prompt_improver_prompts as prompts
-from app.services.intent_guard import GuardDecision
+from app.services.intent_guard import RETRY_AFTER_SECONDS, GuardDecision
 from app.services.prompt_improver import (
     LINK_REMOVED,
     MAX_GOAL_CHARS,
@@ -31,6 +31,7 @@ from app.services.prompt_improver import (
     judge_spec,
     normalize_spec,
     recheck,
+    resolve,
     spec_to_text,
 )
 
@@ -294,3 +295,57 @@ def test_spend_cap_outranks_an_outage_in_the_other_call(fake_jev, fake_claude):
 
 def test_recheck_offline_suite_default_is_unavailable():
     assert asyncio.run(recheck(INTENT, SPEC)).verdict == "unavailable"
+
+
+# --- resolve ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("watch", "user_edited", "check", "action"),
+    [
+        # an ordinary request
+        (False, False, "clean", "use_spec"),
+        (False, False, "watch", "use_original"),
+        (False, False, "drifted", "use_original"),
+        (False, False, "unavailable", "use_original"),
+        (False, False, None, "use_original"),
+        (False, False, "unsafe", "block"),
+        # a watch-band request proceeds ONLY on a clean spec
+        (True, False, "clean", "use_spec"),
+        (True, False, "watch", "block"),
+        (True, False, "drifted", "block"),
+        (True, False, "unavailable", "unavailable"),
+        (True, False, None, "block"),
+        (True, False, "unsafe", "block"),
+        # a user-edited spec must read clean on its own
+        (False, True, "clean", "use_spec"),
+        (False, True, "watch", "block"),
+        (False, True, "drifted", "needs_detail"),
+        (False, True, "unavailable", "unavailable"),
+        (False, True, "unsafe", "block"),
+    ],
+)
+def test_resolve_table(watch, user_edited, check, action):
+    result = resolve(allowed(watch=watch), check_of(check) if check else None, user_edited=user_edited)
+    assert result.action == action
+    if action == "unavailable":
+        assert result.retry_after_s == RETRY_AFTER_SECONDS
+        assert result.message == guard_prompts.UNAVAILABLE_MESSAGE
+    if action == "block":
+        assert result.message in (guard_prompts.BLOCKED_INJECTION, guard_prompts.BLOCKED_HARMFUL)
+    if action == "needs_detail":
+        assert result.message == guard_prompts.EDIT_CHANGED_REQUEST
+
+
+def test_resolve_names_an_unsafe_spec_by_its_hazard():
+    harmful = SpecCheck(verdict="unsafe", reasons=["harmful", "fallback"])
+    assert resolve(allowed(), harmful).message == guard_prompts.BLOCKED_HARMFUL
+    assert resolve(allowed(), harmful).reasons == ["harmful"]
+    injected = SpecCheck(verdict="unsafe", reasons=["injection"])
+    assert resolve(allowed(), injected).message == guard_prompts.BLOCKED_INJECTION
+
+
+@pytest.mark.parametrize("verdict", ["block", "needs_detail", "unavailable"])
+def test_resolve_refuses_a_decision_that_was_not_allowed(verdict):
+    with pytest.raises(ValueError):
+        resolve(GuardDecision(verdict=verdict), check_of("clean"))
