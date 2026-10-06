@@ -32,7 +32,7 @@ from ..schemas import (
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer, reputation_svc, task_persistence
+from . import failure_tracker, platform_treasury, rating_writer, reputation_svc, task_persistence
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 from .orchestrator_svc import _is_listed
@@ -1502,6 +1502,19 @@ _owner_reads: dict[str, tuple[str | None, float]] = {}
 UNPAID_FREE = "free"
 UNPAID_NO_OWNER = "no_onchain_owner"
 UNPAID_OWNER_UNREADABLE = "owner_unreadable"
+# A built-in agent whose on-chain owner is not the platform treasury (ADR 0016):
+# `register` is permissionless and write-once, so an `agt_` id somebody else
+# registered first would otherwise be paid for the platform's own work.
+UNPAID_NOT_TREASURY = "owner_not_platform_treasury"
+
+# The trace line each owner-related reason gives the buyer.
+_UNPAID_FOR_OWNER: dict[str | None, str] = {
+    UNPAID_NO_OWNER: "{agent} has no confirmed on-chain owner — its step is not paid",
+    UNPAID_OWNER_UNREADABLE: "{agent} has no confirmed on-chain owner — its step is not paid",
+    UNPAID_NOT_TREASURY: (
+        "{agent} is registered on-chain to an account that is not the platform treasury — its step is not paid"
+    ),
+}
 UNPAID_OVER_CAP = "over_authorized_cap"
 
 
@@ -1752,6 +1765,7 @@ class _StepPayout:
     amount: int  # stroops; 0 when the step is not paid
     payout_index: int | None  # None when the step is not paid
     unpaid_reason: str | None = None  # one of the UNPAID_* tokens when not paid
+    payee: str | None = None  # the confirmed owner the payout goes to; None when not paid
 
 
 @dataclass(frozen=True)
@@ -1773,6 +1787,7 @@ def _payout_plan(
     delivered_steps: frozenset[int],
     unpaid_agents: Mapping[str, str],
     cap: int | None = None,
+    payees: Mapping[str, str] | None = None,
 ) -> _PayoutPlan:
     """Build `settle`'s payouts from the steps that DELIVERED, and nothing else.
 
@@ -1784,10 +1799,11 @@ def _payout_plan(
     A delivered step is still not paid, and its share goes back to the buyer
     with the remainder, when:
       - it was free: the contract refuses a zero payout;
-      - its agent is in `unpaid_agents` — no on-chain owner (the seeded `agt_*`
-        catalogue), or an owner that could not be confirmed. `settle` pays
-        `owner_of(agent_id)`, and ONE agent the registry does not hold reverts
-        the whole transaction, so only confirmed owners are named;
+      - its agent is in `unpaid_agents` — no on-chain owner, an owner that
+        could not be confirmed, or a built-in agent owned by anyone but the
+        platform treasury. `settle` pays `owner_of(agent_id)`, and ONE agent
+        the registry does not hold reverts the whole transaction, so only
+        confirmed owners are named;
       - `cap`, the authorization's `max_amount`, is already used up. Steps are
         paid in plan order and the one that crosses the cap is cut to what is
         left; `clamped_stroops` says how much was cut, so the caller can say
@@ -1801,8 +1817,14 @@ def _payout_plan(
     than paid in part. The planner caps a plan at six steps, so neither is
     reachable from a planned run today; they bound what a stored plan could
     carry.
+
+    `payees` is each agent's confirmed owner, recorded on its paid steps so the
+    receipt can say who was paid; an agent missing from it is paid all the
+    same (the escrow resolves the owner itself), with no payee recorded.
     """
     from ..stellar import client as sc
+
+    payees = payees or {}
 
     remaining = cap
     clamped = 0
@@ -1828,7 +1850,7 @@ def _payout_plan(
     steps: list[_StepPayout] = list(unpaid)
     if len(paid) <= sc.MAX_SETTLE_PAYOUTS:
         for index, agent_id, amount in paid:
-            steps.append(_StepPayout(index, agent_id, amount, len(payouts)))
+            steps.append(_StepPayout(index, agent_id, amount, len(payouts), payee=payees.get(agent_id)))
             payouts.append(sc.Payout(agent_id, amount))
     else:
         slot: dict[str, int] = {}
@@ -1838,7 +1860,7 @@ def _payout_plan(
                 slot[agent_id] = len(totals)
                 totals.append(0)
             totals[slot[agent_id]] += amount
-            steps.append(_StepPayout(index, agent_id, amount, slot[agent_id]))
+            steps.append(_StepPayout(index, agent_id, amount, slot[agent_id], payee=payees.get(agent_id)))
         if len(totals) > sc.MAX_SETTLE_PAYOUTS:
             raise _PayoutRefused(
                 f"{len(totals)} distinct agents delivered, "
@@ -1873,26 +1895,64 @@ def _onchain_owner_sync(agent_id: str) -> str | None:
     return owner
 
 
-async def _unpaid_agents(agent_ids: set[str]) -> dict[str, str]:
-    """The agents among `agent_ids` a settle must NOT name, and why.
+@dataclass(frozen=True)
+class _SettleOwners:
+    """Who a settle may pay for each agent, and why the rest are not paid."""
+
+    payees: dict[str, str]  # agent id → its confirmed on-chain owner, which the payout goes to
+    unpaid: dict[str, str]  # agent id → one of the UNPAID_* tokens
+
+
+def _treasury_or_none() -> str | None:
+    """The declared platform treasury, or None when the register names none or
+    cannot say which (two declared) — in both cases no built-in step is paid."""
+    try:
+        return platform_treasury.treasury_address()
+    except platform_treasury.TreasuryError as e:
+        logger.error("platform treasury unreadable — no built-in step can be paid: %s", e)
+        return None
+
+
+async def _settle_owners(agent_ids: set[str]) -> _SettleOwners:
+    """The agents among `agent_ids` a settle may name, with their owners, and
+    the ones it must NOT name, with why.
 
     Only a confirmed on-chain owner is paid (interface amendment, S1): one
     payout naming an agent the registry does not hold reverts the whole settle,
     every other operator's pay with it. An owner that could not be READ is
     left out on the same ground — its step is recorded unpaid, with its own
     reason, and its share goes back to the buyer.
-    """
 
-    async def _check(agent_id: str) -> tuple[str, str | None]:
+    A built-in agent is paid only to the platform treasury (ADR 0016). The
+    registry lets anyone register an unclaimed `agt_` id, and the escrow pays
+    whoever did, so any other owner — or no declared treasury at all — leaves
+    the step unpaid and its share returned, never paid to a stranger.
+    """
+    treasury = _treasury_or_none() if any(platform_treasury.is_built_in(a) for a in agent_ids) else None
+
+    async def _check(agent_id: str) -> tuple[str, str | None, str | None]:
         try:
             owner = await asyncio.to_thread(_onchain_owner_sync, agent_id)
         except Exception as e:
             logger.error("owner of %s unreadable before settle — its steps are not paid: %s", agent_id, e)
-            return agent_id, UNPAID_OWNER_UNREADABLE
-        return agent_id, None if owner else UNPAID_NO_OWNER
+            return agent_id, None, UNPAID_OWNER_UNREADABLE
+        if not owner:
+            return agent_id, None, UNPAID_NO_OWNER
+        if platform_treasury.is_built_in(agent_id) and owner != treasury:
+            logger.error(
+                "built-in agent %s is registered on-chain to %s, not the platform treasury %s — its steps are not paid",
+                agent_id,
+                owner,
+                treasury or "(none declared)",
+            )
+            return agent_id, None, UNPAID_NOT_TREASURY
+        return agent_id, owner, None
 
     results = await asyncio.gather(*(_check(a) for a in sorted(agent_ids)))
-    return {agent_id: reason for agent_id, reason in results if reason is not None}
+    return _SettleOwners(
+        payees={agent_id: owner for agent_id, owner, _ in results if owner is not None},
+        unpaid={agent_id: reason for agent_id, _, reason in results if reason is not None},
+    )
 
 
 async def _settle_refused(
@@ -2020,10 +2080,12 @@ async def _settle_v2(
             return (None, None, None)
         authorized_max = auth.max_amount
     try:
-        unpaid_agents = (
-            await _unpaid_agents({plan.plan.steps[i].agent_id for i in delivered_steps}) if delivered_steps else {}
+        owners = (
+            await _settle_owners({plan.plan.steps[i].agent_id for i in delivered_steps})
+            if delivered_steps
+            else _SettleOwners(payees={}, unpaid={})
         )
-        payout_plan = _payout_plan(plan, delivered_steps, unpaid_agents, authorized_max)
+        payout_plan = _payout_plan(plan, delivered_steps, owners.unpaid, authorized_max, owners.payees)
     except _PayoutRefused as e:
         return await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
     total = payout_plan.total
@@ -2038,7 +2100,7 @@ async def _settle_v2(
             payer,
         )
         await _emit(task_id, start, "error", "payouts cut to what the buyer authorized")
-    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in (UNPAID_NO_OWNER, UNPAID_OWNER_UNREADABLE)):
+    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in _UNPAID_FOR_OWNER):
         logger.error(
             "task %s: step %d (%s) delivered but is NOT paid (%s) — its share returns to the buyer (auth %s)",
             task_id,
@@ -2047,9 +2109,7 @@ async def _settle_v2(
             unpaid.unpaid_reason,
             auth_id_hex,
         )
-        await _emit(
-            task_id, start, "error", f"{unpaid.agent_id} has no confirmed on-chain owner — its step is not paid"
-        )
+        await _emit(task_id, start, "error", _UNPAID_FOR_OWNER[unpaid.unpaid_reason].format(agent=unpaid.agent_id))
 
     if total > sc.usdc_to_i128(settings.max_charge_usdc):
         return await _settle_refused(
@@ -2600,6 +2660,7 @@ def _v2_settlement_record(
             receipt_id_hex=receipt,
             unpaid_reason=payout.unpaid_reason,
             planned_stroops=step.price_stroops,
+            payee=payout.payee,
         )
 
     return SettlementRecord(
