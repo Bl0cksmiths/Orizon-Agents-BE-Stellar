@@ -461,6 +461,16 @@ class PlanModels(BaseModel):
     tiers: TierModels
 
 
+PlanStageName = Literal["guard", "improve", "recheck", "plan"]
+
+
+class PlanStage(BaseModel):
+    """One line of how a plan was reached, in the order the stages ran."""
+
+    stage: PlanStageName
+    msg: str
+
+
 # ───── Requests ────────────────────────────────────────────
 class DecomposeRequest(BaseModel):
     # Stripped BEFORE the length bounds apply, so whitespace can neither make
