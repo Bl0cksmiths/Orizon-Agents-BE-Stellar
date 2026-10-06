@@ -198,12 +198,18 @@ class OrizonApi:
         decompose. Retried: a lost answer costs one unused plan, never money."""
         return self._read("POST", "/api/orchestrator/decompose", json={"intent": intent})
 
-    def build_authorize(self, payer: str, max_amount_usdc: float, ttl_seconds: int, agent_id: str) -> dict[str, Any]:
-        """POST /api/stellar/build/authorize {payer, agent_id, max_amount_usdc,
-        ttl_seconds} -> {xdr, expires_at} — app/routers/stellar.py:707-743;
-        lib/api.ts buildAuthorize as execution-plan.tsx:124-129 calls it.
+    def build_authorize(self, payer: str, max_amount_stroops: int, ttl_seconds: int, agent_id: str) -> dict[str, Any]:
+        """POST /api/stellar/build/authorize {payer, agent_id, max_amount_stroops,
+        ttl_seconds} -> {xdr, expires_at} — app/routers/stellar.py build_authorize.
+        The amount is exact stroops, the plan's `total_stroops` (ADR 0015); the
+        route refuses any other amount for a plan it holds.
         Retried: it builds an unsigned envelope and nothing else."""
-        body = {"payer": payer, "agent_id": agent_id, "max_amount_usdc": max_amount_usdc, "ttl_seconds": ttl_seconds}
+        body = {
+            "payer": payer,
+            "agent_id": agent_id,
+            "max_amount_stroops": max_amount_stroops,
+            "ttl_seconds": ttl_seconds,
+        }
         return self._read("POST", "/api/stellar/build/authorize", json=body)
 
     def submit(self, signed_xdr: str) -> dict[str, Any]:

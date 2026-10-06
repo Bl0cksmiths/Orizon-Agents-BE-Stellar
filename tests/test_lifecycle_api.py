@@ -142,12 +142,14 @@ def test_headers_and_bodies_are_the_dapps() -> None:
     api.task_disputes("tsk_1", None, "grant")
     api.dispute("dsp_1", grant="grant")
     api.uphold("dsp_1", "opkey")
-    api.build_authorize("GB", 0.07, 600, "orizon_batch")
+    api.build_authorize("GB", 700_000, 600, "orizon_batch")
     assert captured[0].headers["x-task-token"] == "tok"
     assert captured[1].headers["x-dispute-read-grant"] == "grant" and "x-task-token" not in captured[1].headers
     assert captured[2].headers["x-dispute-read-grant"] == "grant"
     assert captured[3].headers["x-api-key"] == "opkey" and captured[3].url.path == "/api/disputes/dsp_1/uphold"
-    assert captured[4].read() == (b'{"payer":"GB","agent_id":"orizon_batch","max_amount_usdc":0.07,"ttl_seconds":600}')
+    assert captured[4].read() == (
+        b'{"payer":"GB","agent_id":"orizon_batch","max_amount_stroops":700000,"ttl_seconds":600}'
+    )
 
 
 def test_readiness_is_best_effort() -> None:

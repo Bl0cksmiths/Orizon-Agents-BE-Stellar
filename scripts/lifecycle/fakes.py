@@ -339,8 +339,16 @@ class FakeWorld:
                     "est_price_usdc": self.agent_price,
                 },
             )
-        total = round(sum(s["est_price_usdc"] for s in steps), 7)
-        self.plan = {"plan_id": "pln_0a1b2c3d", "intent": body["intent"], "steps": steps, "total_usdc": total}
+        for s in steps:
+            s["price_stroops"] = usdc_to_stroops(s["est_price_usdc"])
+        total_stroops = sum(s["price_stroops"] for s in steps)
+        self.plan = {
+            "plan_id": "pln_0a1b2c3d",
+            "intent": body["intent"],
+            "steps": steps,
+            "total_stroops": total_stroops,
+            "total_usdc": total_stroops / 10_000_000,
+        }
         return _json(200, {**self.plan, "total_eta": 10.0, "notices": [], "floor_bps": 5500})
 
     def build_authorize(self, body: dict[str, Any]) -> httpx.Response:
@@ -354,7 +362,11 @@ class FakeWorld:
                 [
                     scval.to_address(body["payer"]),
                     scval.to_symbol(body["agent_id"]),
-                    scval.to_int128(usdc_to_stroops(body["max_amount_usdc"])),
+                    scval.to_int128(
+                        int(body["max_amount_stroops"])
+                        if "max_amount_stroops" in body
+                        else usdc_to_stroops(body["max_amount_usdc"])
+                    ),
                     scval.to_uint64(expires_at),
                 ],
             )
