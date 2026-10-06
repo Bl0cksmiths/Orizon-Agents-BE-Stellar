@@ -24,7 +24,7 @@ Properties the numbers depend on:
   retries live in the app's model layer, where production has them too.
 * Spend is metered from each call's measured cost. A case is not started when
   measured spend, plus what cases in flight may still spend, plus this case's
-  ceiling would pass `max_usd`.
+  ceiling (as if the guard allowed it) would pass `max_usd`.
 """
 
 from __future__ import annotations
@@ -267,7 +267,7 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
             if stop.is_set():
                 outcome.skipped_budget += 1
                 return
-            _, ceiling = cost.case_estimate(case, stages=cfg.stages)
+            ceiling = cost.reservation(case, stages=cfg.stages)
             if not meter.try_reserve(ceiling):
                 outcome.skipped_budget += 1
                 outcome.stopped = outcome.stopped or f"spend cap ${cfg.max_usd:.2f} reached"
