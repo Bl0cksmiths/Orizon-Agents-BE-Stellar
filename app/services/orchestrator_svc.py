@@ -9,7 +9,7 @@ import secrets
 from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 from ..agents.orchestrator import orchestrator_agent
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
@@ -1011,6 +1011,179 @@ def _planner_plan(result: Any) -> Plan | None:
     return None
 
 
+class _ProposedStep(Protocol):
+    """A step as a planner proposed it."""
+
+    @property
+    def agent_id(self) -> str: ...
+    @property
+    def rationale(self) -> str: ...
+    @property
+    def est_eta_seconds(self) -> float: ...
+
+
+class _Clamped(NamedTuple):
+    steps: list[PlanStep]
+    # Offered agents whose endpoint was found dead WHILE the planner ran.
+    went_unreachable: dict[str, Agent]
+
+
+def _clamp(
+    proposed: Sequence[_ProposedStep],
+    shortlist: _Shortlist,
+    reps: dict[str, reputation_svc.RepInfo],
+) -> _Clamped:
+    """Hold a planner's proposal to the shortlist; backfill names, snap prices to registry truth.
+
+    A planner that produced no plan proposes no steps, so it lands in the
+    empty-plan fallback by the same road as a plan the clamp emptied. Every
+    planner goes through here, so the floor, the allowlist and the
+    dead-endpoint check cannot differ between them.
+    """
+    cleaned: list[PlanStep] = []
+    # (agent, rationale) pairs already kept. A repeated pair is the same paid
+    # work bought twice — whitespace and case are the model's, not the task's.
+    seen: set[tuple[str, str]] = set()
+    # Offered agents whose endpoint was found dead WHILE the planner ran — a
+    # background probe (`reachability.refresh_stale`) landing mid-call. Their
+    # steps are dropped like any other no-longer-routable pick, and the buyer
+    # is told, so the card accounts for every agent it lost (D-084).
+    went_unreachable: dict[str, Agent] = {}
+    for step in proposed:
+        if len(cleaned) >= _MAX_PLAN_STEPS:
+            # Capped on the steps KEPT, so an invented id the clamp drops
+            # never costs the plan a legitimate step.
+            break
+        if step.agent_id not in shortlist.offered:
+            # The planner may only route to what it was OFFERED. The block is
+            # what it was SHOWN and this is what it RETURNED, and the two are
+            # not the same set: the model invents ids, repeats ones from an
+            # earlier turn, and names agents it knows by reputation or from its
+            # instructions even when the floor just removed them. Any of those
+            # would be stored, dispatched and paid for — a sub-floor agent
+            # sailing past the trust gate with a `below_floor` notice about it
+            # on the very same plan card. Holding the plan to `offered` is what
+            # makes the floor a gate rather than a suggestion, and it is also
+            # why no step can ever share an agent with an exclusion notice:
+            # every excluded agent is, by construction, not offered.
+            continue
+        agent = state.agents.get(step.agent_id)
+        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
+            # Offered, but no longer routable at the point of use. The
+            # shortlist was built BEFORE the planning call, and that call can
+            # take tens of seconds, during which an operator can delist the
+            # agent or unbind its endpoint. This is the last gate before the
+            # step is stored and later dispatched, so the registry is asked
+            # again here rather than trusted from the snapshot: a delisted
+            # agent reaching /execute is the whole bug, and a step with nothing
+            # to execute it would only reach /execute's unknown-agent skip.
+            continue
+        if reachability.is_failing(agent.id):
+            went_unreachable[agent.id] = agent
+            continue
+        rationale = step.rationale.strip()
+        if (agent.id, rationale.casefold()) in seen:
+            continue
+        seen.add((agent.id, rationale.casefold()))
+        info = reps.get(agent.id)
+        cleaned.append(
+            PlanStep(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                rationale=rationale,
+                est_price_usdc=agent.price,
+                est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
+                # An OFFERED agent below the floor can only be one the
+                # starvation backstop re-admitted, which already carries a
+                # `floor_relaxed` notice — so the inline flag and the notice
+                # agree, as they do on the kit path. Recomputed from the same
+                # snapshot rather than trusted from the model's output, whose
+                # copy of this field is whatever it chose to write.
+                degraded=not reputation_svc.passes_floor(info),
+                **_rep_fields(info),
+            )
+        )
+    return _Clamped(cleaned, went_unreachable)
+
+
+def _finish_free_form(
+    intent: str,
+    shortlist: _Shortlist,
+    reps: dict[str, reputation_svc.RepInfo],
+    clamped: _Clamped,
+) -> DecomposeResponse:
+    """Serve a clamped free-form plan: the fallback if it is empty, then store and answer."""
+    cleaned = clamped.steps
+    # Whatever left `cleaned` empty — a planner that failed, or one whose every
+    # step the clamp discarded — the steps served from here on are not the
+    # model's plan, and the response has to say so.
+    planner_fallback = not cleaned
+    if planner_fallback:
+        # Fall back to a minimal safe plan so the UI never gets stuck — drawn
+        # from the shortlist like any model step, never from outside it. The
+        # copywriter used to be hardcoded here on the grounds that nothing
+        # on-chain can delist it; true, but the FLOOR can exclude it, and the
+        # fallback then routed to an agent the plan card was simultaneously
+        # reporting as below the floor.
+        fallback = _fallback_agent(shortlist.offered, reps)
+        if fallback is None:
+            # Everything offered was delisted or unbound while the planner ran.
+            raise NoRoutableAgentsError("every offered agent left the registry during planning")
+        info = reps.get(fallback.id)
+        cleaned = [
+            PlanStep(
+                agent_id=fallback.id,
+                agent_name=fallback.name,
+                rationale=(
+                    "fallback: generate copy for the intent"
+                    if fallback.id == _FALLBACK_AGENT_ID
+                    else "fallback: the planner returned no usable step, so the top-ranked shortlisted agent takes it"
+                ),
+                est_price_usdc=fallback.price,
+                est_eta_seconds=0.8,
+                degraded=not reputation_svc.passes_floor(info),
+                **_rep_fields(info),
+            )
+        ]
+
+    notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
+
+    plan_id = f"pln_{secrets.token_hex(4)}"
+    total_price = sum(s.est_price_usdc for s in cleaned)
+    total_eta = sum(s.est_eta_seconds for s in cleaned)
+
+    stored = StoredPlan(
+        id=plan_id,
+        intent=intent,
+        plan=Plan(steps=cleaned),
+        total_usdc=total_price,
+        total_eta=total_eta,
+        notices=notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
+        planner_fallback=planner_fallback,
+    )
+    state.add_plan(stored)
+
+    return DecomposeResponse(
+        plan_id=plan_id,
+        intent=intent,
+        steps=cleaned,
+        total_usdc=authorizable_total_usdc(cleaned),
+        total_eta=round(total_eta, 2),
+        # The floor acted BEFORE the planner was asked anything, so these
+        # describe the shortlist the model chose from, not the model's choice.
+        # An agent that cleared the floor and simply was not picked is absent
+        # from `notices` by construction — see `_routable_registry`. The one
+        # addition is an offered agent whose endpoint was found dead during
+        # the call, which the clamp dropped.
+        notices=notices,
+        floor_bps=settings.reputation_floor_bps,
+        reputation_degraded=_reputation_degraded(reps),
+        planner_fallback=planner_fallback,
+    )
+
+
 async def decompose(intent: str) -> DecomposeResponse:
     # One registry snapshot and one live reputation snapshot per decompose,
     # shared by the kit path, the routing prompt and the per-step stamps.
@@ -1083,139 +1256,4 @@ async def decompose(intent: str) -> DecomposeResponse:
     else:
         plan = _planner_plan(result)
 
-    # Clamp to the shortlist; backfill names + snap price to registry truth.
-    # A planner that produced no plan proposes no steps, so it lands in the
-    # empty-plan fallback below by the same road as a plan the clamp emptied.
-    proposed = plan.steps if plan is not None else []
-    cleaned: list[PlanStep] = []
-    # (agent, rationale) pairs already kept. A repeated pair is the same paid
-    # work bought twice — whitespace and case are the model's, not the task's.
-    seen: set[tuple[str, str]] = set()
-    # Offered agents whose endpoint was found dead WHILE the planner ran — a
-    # background probe (`reachability.refresh_stale`) landing mid-call. Their
-    # steps are dropped like any other no-longer-routable pick, and the buyer
-    # is told, so the card accounts for every agent it lost (D-084).
-    went_unreachable: dict[str, Agent] = {}
-    for step in proposed:
-        if len(cleaned) >= _MAX_PLAN_STEPS:
-            # Capped on the steps KEPT, so an invented id the clamp drops
-            # never costs the plan a legitimate step.
-            break
-        if step.agent_id not in shortlist.offered:
-            # The planner may only route to what it was OFFERED. The block is
-            # what it was SHOWN and this is what it RETURNED, and the two are
-            # not the same set: the model invents ids, repeats ones from an
-            # earlier turn, and names agents it knows by reputation or from its
-            # instructions even when the floor just removed them. Any of those
-            # would be stored, dispatched and paid for — a sub-floor agent
-            # sailing past the trust gate with a `below_floor` notice about it
-            # on the very same plan card. Holding the plan to `offered` is what
-            # makes the floor a gate rather than a suggestion, and it is also
-            # why no step can ever share an agent with an exclusion notice:
-            # every excluded agent is, by construction, not offered.
-            continue
-        agent = state.agents.get(step.agent_id)
-        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
-            # Offered, but no longer routable at the point of use. The
-            # shortlist was built BEFORE the planning call, and that call can
-            # take tens of seconds, during which an operator can delist the
-            # agent or unbind its endpoint. This is the last gate before the
-            # step is stored and later dispatched, so the registry is asked
-            # again here rather than trusted from the snapshot: a delisted
-            # agent reaching /execute is the whole bug, and a step with nothing
-            # to execute it would only reach /execute's unknown-agent skip.
-            continue
-        if reachability.is_failing(agent.id):
-            went_unreachable[agent.id] = agent
-            continue
-        rationale = step.rationale.strip()
-        if (agent.id, rationale.casefold()) in seen:
-            continue
-        seen.add((agent.id, rationale.casefold()))
-        info = reps.get(agent.id)
-        cleaned.append(
-            PlanStep(
-                agent_id=agent.id,
-                agent_name=agent.name,
-                rationale=rationale,
-                est_price_usdc=agent.price,
-                est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
-                # An OFFERED agent below the floor can only be one the
-                # starvation backstop re-admitted, which already carries a
-                # `floor_relaxed` notice — so the inline flag and the notice
-                # agree, as they do on the kit path. Recomputed from the same
-                # snapshot rather than trusted from the model's output, whose
-                # copy of this field is whatever it chose to write.
-                degraded=not reputation_svc.passes_floor(info),
-                **_rep_fields(info),
-            )
-        )
-
-    # Whatever left `cleaned` empty — a planner that failed, or one whose every
-    # step the clamp discarded — the steps served from here on are not the
-    # model's plan, and the response has to say so.
-    planner_fallback = not cleaned
-    if planner_fallback:
-        # Fall back to a minimal safe plan so the UI never gets stuck — drawn
-        # from the shortlist like any model step, never from outside it. The
-        # copywriter used to be hardcoded here on the grounds that nothing
-        # on-chain can delist it; true, but the FLOOR can exclude it, and the
-        # fallback then routed to an agent the plan card was simultaneously
-        # reporting as below the floor.
-        fallback = _fallback_agent(shortlist.offered, reps)
-        if fallback is None:
-            # Everything offered was delisted or unbound while the planner ran.
-            raise NoRoutableAgentsError("every offered agent left the registry during planning")
-        info = reps.get(fallback.id)
-        cleaned = [
-            PlanStep(
-                agent_id=fallback.id,
-                agent_name=fallback.name,
-                rationale=(
-                    "fallback: generate copy for the intent"
-                    if fallback.id == _FALLBACK_AGENT_ID
-                    else "fallback: the planner returned no usable step, so the top-ranked shortlisted agent takes it"
-                ),
-                est_price_usdc=fallback.price,
-                est_eta_seconds=0.8,
-                degraded=not reputation_svc.passes_floor(info),
-                **_rep_fields(info),
-            )
-        ]
-
-    notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(went_unreachable.items())]
-
-    plan_id = f"pln_{secrets.token_hex(4)}"
-    total_price = sum(s.est_price_usdc for s in cleaned)
-    total_eta = sum(s.est_eta_seconds for s in cleaned)
-
-    stored = StoredPlan(
-        id=plan_id,
-        intent=intent,
-        plan=Plan(steps=cleaned),
-        total_usdc=total_price,
-        total_eta=total_eta,
-        notices=notices,
-        floor_bps=settings.reputation_floor_bps,
-        reputation_degraded=_reputation_degraded(reps),
-        planner_fallback=planner_fallback,
-    )
-    state.add_plan(stored)
-
-    return DecomposeResponse(
-        plan_id=plan_id,
-        intent=intent,
-        steps=cleaned,
-        total_usdc=authorizable_total_usdc(cleaned),
-        total_eta=round(total_eta, 2),
-        # The floor acted BEFORE the planner was asked anything, so these
-        # describe the shortlist the model chose from, not the model's choice.
-        # An agent that cleared the floor and simply was not picked is absent
-        # from `notices` by construction — see `_routable_registry`. The one
-        # addition is an offered agent whose endpoint was found dead during
-        # the call, which the clamp dropped.
-        notices=notices,
-        floor_bps=settings.reputation_floor_bps,
-        reputation_degraded=_reputation_degraded(reps),
-        planner_fallback=planner_fallback,
-    )
+    return _finish_free_form(intent, shortlist, reps, _clamp(plan.steps if plan is not None else [], shortlist, reps))
