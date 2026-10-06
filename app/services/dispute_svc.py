@@ -51,6 +51,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .. import money
 from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
@@ -557,11 +558,12 @@ async def open_dispute(
         # The cleaned text, which is what every reader of this record gets.
         reason=reason,
         status="open",
-        # The step's price as the settlement recorded it — which is the
-        # PLAN'S ESTIMATE (`est_price_usdc`), not a per-step charge: the charge
-        # moves one total for the whole workflow. The credit is therefore
-        # never paid from this alone; `refund_svc.creditable_for` bounds it by
-        # what the charge actually settled, net of the job's other credits.
+        # The step's price as the settlement recorded it: on a v2 settlement
+        # what its payout actually moved (ADR 0010 D5), on a v1 one the plan's
+        # price for it, since v1 moved one total for the whole workflow. The
+        # credit is never paid from this alone either way:
+        # `refund_svc.creditable_for` bounds it by what was actually settled,
+        # net of the job's other credits.
         charged_usdc=step.price_usdc,
         creditable_usdc=refund_svc.credited_amount_usdc(step.price_usdc, settings.dispute_credited_fraction),
         opened_at=time.time(),
@@ -906,7 +908,8 @@ async def _note_credit_on_workflow(dispute: DisputeRecord, amount_usdc: float, t
         dispute,
         "cost",
         "credit",
-        f"dispute {dispute.id} upheld — step {dispute.step_index} credited {amount_usdc:.7f} USDC "
+        f"dispute {dispute.id} upheld — step {dispute.step_index} credited "
+        f"{money.format_amount(money.to_stroops(amount_usdc))} {money.asset_code()} "
         f"to the buyer, funded by the platform, not clawed back from agent {dispute.agent_id}"
         + (f" · tx {tx_hash}" if tx_hash else ""),
     )
