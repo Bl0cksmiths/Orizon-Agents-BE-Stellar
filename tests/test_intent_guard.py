@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from app.llm import testing
 from app.services import intent_guard_prompts as prompts
 from app.services.intent_guard import (
     MAX_STATE_CHARS,
     GuardDecision,
+    GuardPolicy,
     IntentAssessment,
     check_intent,
 )
@@ -108,3 +111,100 @@ def test_blank_intent_needs_detail_without_spending_a_call(fake_jev, fake_claude
     assert decision.verdict == "needs_detail"
     assert decision.message == prompts.NEEDS_DETAIL_QUESTION
     assert fake_jev.calls == [] and fake_claude.calls == []
+
+
+# --- verdicts ------------------------------------------------------------------------
+
+
+def test_clean_request_is_allowed_with_its_tier(fake_jev):
+    fake_jev.answer(battery(complexity="moderate"), purpose="guard.intent")
+    decision = check()
+    assert decision.verdict == "allow"
+    assert decision.tier == "moderate"
+    assert decision.watch is False
+    assert decision.reasons == []
+    assert decision.message is None
+    assert decision.source == "jev"
+    assert decision.model == "jev-1.13.0"
+    assert decision.scores["injection"] == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize(
+    ("injection", "verdict", "watch"),
+    [(0.34, "allow", False), (0.35, "allow", True), (0.69, "allow", True), (0.70, "block", False)],
+)
+def test_injection_edges(fake_jev, injection, verdict, watch):
+    fake_jev.answer(battery(injection=injection), purpose="guard.intent")
+    decision = check()
+    assert decision.verdict == verdict
+    assert decision.watch is watch
+    if verdict == "block":
+        assert decision.reasons == ["injection"]
+        assert decision.message == prompts.BLOCKED_INJECTION
+        assert decision.tier is None
+    elif watch:
+        assert "watch" in decision.reasons
+
+
+@pytest.mark.parametrize(("harmful", "blocked"), [(0.69, False), (0.70, True)])
+def test_harmful_edge(fake_jev, harmful, blocked):
+    fake_jev.answer(battery(harmful=harmful), purpose="guard.intent")
+    decision = check()
+    assert (decision.verdict == "block") is blocked
+    if blocked:
+        assert decision.reasons == ["harmful"]
+        assert decision.message == prompts.BLOCKED_HARMFUL
+
+
+@pytest.mark.parametrize(("severity", "blocked"), [(1.99, False), (2.0, True)])
+def test_severity_alone_blocks_at_two(fake_jev, severity, blocked):
+    fake_jev.answer(battery(harmful=0.2, severity=severity), purpose="guard.intent")
+    decision = check()
+    assert (decision.verdict == "block") is blocked
+    if blocked:
+        assert decision.reasons == ["severity"]
+        assert decision.message == prompts.BLOCKED_HARMFUL
+
+
+def test_injection_that_is_also_harmful_is_named_as_injection(fake_jev):
+    fake_jev.answer(battery(injection=0.9, harmful=0.9, severity=2.5), purpose="guard.intent")
+    decision = check()
+    assert decision.reasons == ["injection", "harmful", "severity"]
+    assert decision.message == prompts.BLOCKED_INJECTION
+
+
+@pytest.mark.parametrize(("real", "verdict"), [(0.29, "needs_detail"), (0.30, "allow")])
+def test_real_request_edge(fake_jev, real, verdict):
+    fake_jev.answer(battery(real=real), purpose="guard.intent")
+    decision = check("asdf")
+    assert decision.verdict == verdict
+    if verdict == "needs_detail":
+        assert decision.message == prompts.NEEDS_DETAIL_QUESTION
+        assert decision.reasons == ["unclear"]
+        assert decision.tier is None
+
+
+def test_block_outranks_needs_detail(fake_jev):
+    fake_jev.answer(battery(injection=0.95, real=0.05), purpose="guard.intent")
+    assert check().verdict == "block"
+
+
+@pytest.mark.parametrize(
+    ("complexity", "confidence", "tier", "rounded"),
+    [
+        ("low", 0.49, "moderate", True),
+        ("moderate", 0.49, "complex", True),
+        ("complex", 0.2, "complex", False),  # saturates; nothing was rounded
+        ("low", 0.50, "low", False),
+    ],
+)
+def test_low_confidence_rounds_the_tier_up(fake_jev, complexity, confidence, tier, rounded):
+    fake_jev.answer(battery(complexity=complexity, confidence=confidence), purpose="guard.intent")
+    decision = check()
+    assert decision.tier == tier
+    assert ("tier_rounded_up" in decision.reasons) is rounded
+
+
+def test_policy_is_overridable_for_threshold_sweeps(fake_jev):
+    fake_jev.answer(battery(injection=0.6), purpose="guard.intent")
+    assert check(policy=GuardPolicy(injection_block=0.5)).verdict == "block"
