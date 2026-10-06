@@ -266,7 +266,7 @@ def test_the_first_request_after_boot_is_a_prompt_202_never_the_scan(
         "status": "computing",
         "message": (
             "The adoption report is being computed from on-chain data "
-            "(a settlement scan per external agent). Ask again shortly."
+            "(one scan of settlement events for every external agent). Ask again shortly."
         ),
         "retry_after_seconds": adoption_svc.REPORT_PENDING_RETRY_AFTER_SECONDS,
     }
