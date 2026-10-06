@@ -19,6 +19,14 @@ services:
       # ── Secrets — set these in the Render dashboard, never in git ──────
       - key: OPENAI_API_KEY
         sync: false
+      # Claude (planner, prompt improver, workers) and jev (the intent guard).
+      # With ANTHROPIC_API_KEY set the orchestrator runs on Claude
+      # (ORCHESTRATOR_PROVIDER=auto); without TYPESAFE_API_KEY the guard falls
+      # back to Claude Haiku 4.5 and never fails open.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TYPESAFE_API_KEY
+        sync: false
       - key: STELLAR_SIGNING_KEY
         sync: false
       # REQUIRED whenever this service holds money-capable credentials — a
@@ -65,6 +73,43 @@ services:
         value: gpt-5.3-codex
       - key: WORKER_MODEL
         value: gpt-5.3-codex
+      # Orchestrator v2 (app/llm/). The values are the code's defaults,
+      # spelled out so the dashboard shows what is in force. auto = Claude once
+      # ANTHROPIC_API_KEY is set, OpenAI until then; anthropic/openai force one.
+      - key: ORCHESTRATOR_PROVIDER
+        value: auto
+      # One exact Claude id per tier; the planner runs on the complex tier's
+      # model, the prompt improver on the moderate one, the fallback guard on
+      # the low one.
+      - key: CLAUDE_MODEL_LOW
+        value: claude-haiku-4-5
+      - key: CLAUDE_MODEL_MODERATE
+        value: claude-sonnet-5-5
+      - key: CLAUDE_MODEL_COMPLEX
+        value: claude-opus-5-5
+      # Per-attempt HTTP bound and the SDK's retries of 408/409/429/5xx.
+      - key: CLAUDE_TIMEOUT_SECONDS
+        value: "120"
+      - key: CLAUDE_MAX_RETRIES
+        value: "2"
+      # Server-side refusal fallbacks (beta) on Opus 5.5 / Sonnet 5.5. Set
+      # false if the org is not enabled for server-side-fallback-2026-07-01:
+      # every Opus and Sonnet call would otherwise be refused with a 400.
+      - key: CLAUDE_SERVER_FALLBACKS
+        value: "true"
+      # The jev model the guard asks, pinned so a release cannot move the
+      # guard's thresholds; and jev's whole retry budget per question set.
+      - key: TYPESAFE_MODEL
+        value: jev-1.13.0
+      - key: JEV_TIMEOUT_SECONDS
+        value: "8"
+      - key: JEV_MAX_RETRIES
+        value: "2"
+      # Daily AI spend ceiling in USD per UTC day, Claude and jev together.
+      # At the cap AI planning pauses with a notice; curated demo kits still
+      # run. 0 pauses it outright.
+      - key: LLM_DAILY_SPEND_CAP_USD
+        value: "10"
 
       # ── Stellar (mainnet — production) ─────────────────────────────────
       # Mainnet is the production target; testnet values live in
