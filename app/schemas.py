@@ -202,6 +202,14 @@ class PlanStep(BaseModel):
     # decompose response names the exact ids). Never above the plan's own
     # tier. None on a plan built by the legacy planner, which has no tiers.
     tier: Tier | None = None
+    # Who runs the step: one of our own workers ("built_in") or an operator's
+    # bound endpoint ("external"). None on a plan stored before this existed.
+    executor: Literal["built_in", "external"] | None = None
+    # The model a built-in worker runs this step on, by exact id, at plan
+    # time: the step tier's Claude model, or the OpenAI worker model on the
+    # legacy provider. None for an external step — its operator chooses — and
+    # on a plan stored before this existed.
+    model: str | None = None
 
 
 class Plan(BaseModel):
