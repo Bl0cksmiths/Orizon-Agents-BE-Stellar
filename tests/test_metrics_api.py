@@ -34,7 +34,15 @@ from app.main import app
 from app.routers import metrics as metrics_router
 from app.schemas import Agent, OverviewMetrics, Task
 from app.security import EXEMPT_PATHS, RateLimitMiddleware
-from app.services import adoption_svc, binding_registry, registry_sync, reputation_svc, settlement_svc, snapshots
+from app.services import (
+    adoption_svc,
+    binding_registry,
+    charge_window,
+    registry_sync,
+    reputation_svc,
+    settlement_svc,
+    snapshots,
+)
 from app.services.dispute_store import SECONDS_PER_DAY, InMemoryDisputeStore
 from app.services.reputation_svc import RepInfo
 from app.state import state
@@ -427,7 +435,8 @@ def test_the_overview_never_runs_the_adoption_settlement_scan(registry, monkeypa
     for owner, name, fake in (
         (settlement_svc, "fetch_settlement", ascan),
         (settlement_svc, "_scan_sync", scan),
-        (adoption_svc, "_settlement", ascan),
+        (charge_window, "fetch_settlements", ascan),
+        (adoption_svc, "_window", ascan),
         (adoption_svc, "_unmirrored", ascan),
         (adoption_svc, "build_report", ascan),
         (adoption_svc, "report_snapshot", ascan),

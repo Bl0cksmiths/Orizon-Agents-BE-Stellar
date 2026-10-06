@@ -15,7 +15,12 @@ Design notes, each deliberate:
     registry is the source of truth being mirrored, so a stale cached read
     only delays the mirror it exists to provide; and each read occupies a
     thread in the shared 8-thread executor, so fanning out one read per agent
-    would starve the money-moving paths that share it.
+    would starve the money-moving paths that share it. They are BATCHED:
+    the records are read straight from the registry's storage, 200 ids per
+    getLedgerEntries call (`sc.read_agent_records`), and only an id that
+    batch could not vouch for is read with a simulated `get`. One `get` per
+    id — two round trips each — made the first full pass of a 1,000-agent
+    registry take ~29 minutes, and every later pass as long.
   - The gate reads `settings.stellar_agent_registry` LIVE on every pass and
     never `sc.contract_ids()` — that helper is lru_cached, so it would pin
     whatever id (or blank) it saw first for the life of the process and
@@ -360,6 +365,10 @@ async def _pass() -> int:
         return 0
 
     ids = await asyncio.to_thread(sc.simulate_read, contract_id, "list_ids", [])
+    # Every record in a handful of storage reads (one per 200 ids), not one
+    # simulated `get` — two round trips — per id. An id the batch does not
+    # vouch for is read with `get` below, exactly as before.
+    batched = await asyncio.to_thread(sc.read_agent_records, contract_id, [i for i in ids if not i.startswith("agt_")])
     synced = 0
     for agent_id in ids:
         if agent_id.startswith("agt_"):
@@ -374,7 +383,12 @@ async def _pass() -> int:
                 )
             continue
         try:
-            raw = await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+            known = batched.get(agent_id)
+            raw = (
+                known
+                if known is not None
+                else await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+            )
             # Answered: whatever the mapper makes of it, the chain has told
             # us about this id, so it no longer holds the mirror partial.
             _answered_ids.add(agent_id)

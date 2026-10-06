@@ -27,6 +27,7 @@ from test_adoption_svc import (
     QA_OPERATOR,
     REGISTER,
     _entry,
+    _evidence,
     _hash,
     _job,
     _Store,
@@ -159,6 +160,17 @@ def test_the_response_is_exactly_the_frozen_shape(world: _World, monkeypatch: py
         ),
         "degraded": True,
         "unreadable_agents": ["unread"],
+        # Added for D-091 at scale; the frontend's guard ignores keys it does
+        # not know, so these are additive.
+        "complete": True,
+        "coverage": {
+            "agents_listed": 5,
+            "agents_accounted": 5,
+            "settlement_ledgers_scanned": 120_960,
+            "settlement_ledgers_in_window": 120_960,
+            "external_charges": 2,
+            "external_charges_unattributed": 0,
+        },
     }
 
 
@@ -254,7 +266,7 @@ def test_the_first_request_after_boot_is_a_prompt_202_never_the_scan(
         "status": "computing",
         "message": (
             "The adoption report is being computed from on-chain data "
-            "(a settlement scan per external agent). Ask again shortly."
+            "(one scan of settlement events for every external agent). Ask again shortly."
         ),
         "retry_after_seconds": adoption_svc.REPORT_PENDING_RETRY_AFTER_SECONDS,
     }
@@ -364,3 +376,50 @@ def test_no_build_starts_from_a_mirror_still_filling_but_boot_does_not_wait_fore
     monkeypatch.setattr(state, "started_at", time.time())
     monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=True))
     assert adoption_svc._may_build() is True
+
+
+# ── partial builds (out of time at scale) ───────────────────────────────────
+def _run_out_of_time(world: _World, agent_id: str) -> None:
+    """The next build's window read stops at its deadline, part-way through."""
+    world.out_of_time = True
+    world.settlements[agent_id] = _evidence(agent_id, truncated=True, window_days=1.0)
+
+
+def test_with_nothing_complete_to_serve_a_partial_build_is_published_marked(world: _World) -> None:
+    world.agent("ext_a1", EXT_A, _entry(1))
+    _run_out_of_time(world, "ext_a1")
+
+    body = _get(TestClient(app)).json()
+
+    assert (body["complete"], body["degraded"], body["unreadable_agents"]) == (False, True, ["ext_a1"])
+    assert body["totals"]["external_agents"] == 1
+
+
+def test_a_partial_build_never_replaces_a_recent_complete_report(world: _World) -> None:
+    world.agent("ext_a1", EXT_A, _entry(1))
+    client = TestClient(app)
+    first = _get(client)
+    assert first.json()["complete"] is True
+
+    _run_out_of_time(world, "ext_a1")
+    rcache.clear()
+    asyncio.run(_build())
+
+    again = client.get("/api/ecosystem/adoption")
+    assert again.json() == first.json()
+    assert "partial" in (adoption_svc.report_cell.status().last_error or "")
+
+
+def test_a_partial_build_replaces_a_complete_report_past_the_hold(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.agent("ext_a1", EXT_A, _entry(1))
+    client = TestClient(app)
+    assert _get(client).json()["complete"] is True
+
+    monkeypatch.setattr(adoption_svc, "REPORT_PARTIAL_KEEPS_COMPLETE_SECONDS", -1.0)
+    _run_out_of_time(world, "ext_a1")
+    rcache.clear()
+    asyncio.run(_build())
+
+    assert client.get("/api/ecosystem/adoption").json()["complete"] is False

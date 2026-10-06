@@ -176,6 +176,20 @@ def test_a_row_that_cannot_be_trusted_is_not_restored(
     assert cell.current() is None, why
 
 
+def test_without_an_age_limit_a_row_of_any_age_is_restored(store: InMemorySnapshotStore) -> None:
+    cell = _cell(_Builds())
+    snapshot_store.persist(cell, _decode, max_restore_age_seconds=None)
+    at = time.time() - 30 * 86_400
+    asyncio.run(store.save("doc", snapshot_store.deployment_scope(), at, _encode(_Doc(7, at))))
+
+    asyncio.run(_boot())
+
+    snap = cell.current()
+    assert snap is not None and snap.value.n == 7
+    assert snap.source == "persisted"
+    assert snap.age_seconds() >= 30 * 86_400 - 1
+
+
 class _BrokenStore:
     async def load(self, name: str, scope: str) -> StoredSnapshot | None:
         raise ConnectionError("neon asleep")
@@ -247,6 +261,41 @@ def test_after_a_restart_the_last_adoption_report_is_served_at_once(monkeypatch:
     assert int(response.headers["x-snapshot-age"]) >= 119
     assert response.json() == json.loads(report.model_dump_json())
     assert adoption_svc.report_cell.building() is False
+
+
+def test_an_adoption_report_of_any_age_is_served_marked_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once any report has been built, a restart never answers 202 or 503
+    while one is stored: the stored one is served, dated, until the first
+    build of the new process lands. It may be from before `complete` and
+    `coverage` existed — such a report was complete by construction."""
+    store = InMemorySnapshotStore()
+    monkeypatch.setattr(snapshot_store, "_store", store)
+    generated_at = int(time.time()) - 3 * 86_400
+    body = {
+        "network": "testnet",
+        "generated_at": generated_at,
+        "window_days": 6.9,
+        "targets": adoption_svc.TARGETS.model_dump(),
+        "totals": {"external_agents": 1, "unique_operator_wallets": 1, "settled_external_workflows": 0},
+        "met": {"external_agents": False, "unique_operator_wallets": False, "settled_external_workflows": False},
+        "operators": [],
+        "excluded": [],
+        "degraded": False,
+        "unreadable_agents": [],
+    }
+    asyncio.run(store.save("adoption", snapshot_store.deployment_scope(), generated_at, json.dumps(body).encode()))
+    monkeypatch.setattr(registry_sync, "status", lambda: registry_sync.SyncStatus(synced=False))
+    monkeypatch.setattr(state, "started_at", time.time())
+    restore = next(h for h in snapshots._boot_hooks if h.__name__ == "restore_adoption_snapshot")
+    asyncio.run(restore())
+
+    response = TestClient(app).get("/api/ecosystem/adoption")
+
+    assert response.status_code == 200
+    assert response.headers["x-snapshot-source"] == "persisted"
+    assert int(response.headers["x-snapshot-age"]) >= 3 * 86_400 - 1
+    assert response.json()["generated_at"] == generated_at
+    assert (response.json()["complete"], response.json()["coverage"]) == (True, None)
 
 
 # ── Postgres, for real ──────────────────────────────────────────────────────
