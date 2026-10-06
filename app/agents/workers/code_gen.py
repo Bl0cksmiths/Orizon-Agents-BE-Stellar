@@ -319,11 +319,13 @@ def swap_section(prompt: str, old: str, new: str) -> str:
     return prompt.replace(old, new)
 
 
-# Output ceiling for the Claude path, sized to the step deadline: 9 000 tokens
-# at ~100 tokens/s plus first-token latency is about 93 s, under the 100 s
-# stream budget (claude_step.STREAM_BUDGET_SECONDS) — while a 450-line app is
-# roughly 5 500 tokens. A reply that reaches it fails as `model_truncated`.
-MAX_TOKENS = 9_000
+# Output ceiling for the Claude path, sized to the step deadline. Measured live
+# (evals/orchestrator/reports/2026-10-06-recheck/r3-code-length/): Sonnet 5.5 at
+# low effort writes about 180–220 tokens/s, first token at ~2 s, and a 180-line
+# app took 7 058 tokens. 12 000 tokens at the slowest rate is ~67 s, well inside
+# the 100 s stream budget (claude_step.STREAM_BUDGET_SECONDS), which still
+# guards a slower day. A reply that reaches it fails as `model_truncated`.
+MAX_TOKENS = 12_000
 
 # Thinking tokens are written before the app and count against the same clock.
 CLAUDE_EFFORT: Effort = "low"
