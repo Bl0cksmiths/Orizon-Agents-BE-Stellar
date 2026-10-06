@@ -13,28 +13,43 @@ the original draft so the user is never worse off.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .base import Worker
-from .code_critic import CodeCritic
+from .base import ModelWorker
+from .claude_step import ModelStepError
+from .code_critic import CRITIC_DEFAULT_TIER, CodeCritic
 from .code_validator import harden_artifact, validate_html
+
+if TYPE_CHECKING:
+    from ...llm.tiers import Tier
 
 logger = logging.getLogger(__name__)
 
 
-class CodeCriticWorker(Worker):
+class CodeCriticWorker(ModelWorker):
     id = "agt_12r0"
     name = "code.critic"
     real = True
+    default_tier = CRITIC_DEFAULT_TIER
 
     def __init__(self) -> None:
         self._critic = CodeCritic()
+
+    def _deterministic(self, context: dict[str, Any] | None) -> bool:
+        # No draft to refine, or code.gen served a baked artifact: either way
+        # the step answers without asking a model (see run()).
+        prior = (context or {}).get("code.gen") or {}
+        if not isinstance(prior, dict) or not isinstance(prior.get("artifact"), dict):
+            return True
+        return prior.get("source") == "baked"
 
     async def run(
         self,
         intent: str,
         rationale: str,
         context: dict[str, Any] | None = None,
+        *,
+        tier: Tier | None = None,
     ) -> dict[str, Any]:
         import asyncio
         import random
@@ -108,6 +123,7 @@ class CodeCriticWorker(Worker):
                 rationale=rationale,
                 draft_html=draft_html,
                 violations=violations_for_critic,
+                tier=tier,
             )
             revised_html = revised.get("preview_html") or ""
             post_violations = validate_html(revised_html)
@@ -132,6 +148,13 @@ class CodeCriticWorker(Worker):
                         f"applied {len(kit_required)} kit requirement{'s' if len(kit_required) != 1 else ''}"
                     )
                 final_artifact = revised
+        except ModelStepError:
+            # On Claude, a polish the model did not deliver (declined, cut off,
+            # unreachable, over the spend cap, unreadable) is this STEP's
+            # failure: unbilled, and the run loop keeps code.gen's draft as the
+            # run's artifact, so the buyer still gets the app — without paying
+            # for a polish pass that never happened.
+            raise
         except Exception as e:  # pragma: no cover — never fail the workflow
             logger.warning("code.critic refine failed, keeping draft artifact: %s", e, exc_info=True)
             critic_notes.append(f"critic failed: {type(e).__name__}: {str(e)[:80]}")
