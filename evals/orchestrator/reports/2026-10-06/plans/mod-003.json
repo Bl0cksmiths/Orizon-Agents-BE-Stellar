@@ -1,0 +1,62 @@
+{
+  "id": "mod-003",
+  "intent": "Gumawa ng landing page para sa tutoring service ko, may testimonials at FAQ section, tapos SEO-friendly ang copy.",
+  "tier": "moderate",
+  "offered": [
+    "agt_01h8",
+    "agt_02k2",
+    "agt_03d9",
+    "agt_04m1",
+    "agt_05x7",
+    "agt_06q4",
+    "agt_07w3",
+    "agt_08j2",
+    "agt_09l5",
+    "agt_10b6",
+    "agt_11c0",
+    "agt_12r0"
+  ],
+  "grade": {
+    "plan_schema": 1,
+    "plan_allowlisted": 1,
+    "plan_tiers": 1,
+    "plan_valid": 1
+  },
+  "refused": null,
+  "raw_plan": {
+    "steps": [
+      {
+        "agent_id": "agt_05x7",
+        "rationale": "Researches Filipino tutoring keywords and heading structure for SEO-friendly landing page copy.",
+        "est_eta_seconds": 0.8,
+        "tier": "low"
+      },
+      {
+        "agent_id": "agt_01h8",
+        "rationale": "Writes SEO-friendly Tagalog copy, testimonials and FAQ content for the tutoring service.",
+        "est_eta_seconds": 1.5,
+        "tier": "moderate"
+      },
+      {
+        "agent_id": "agt_11c0",
+        "rationale": "Builds the HTML landing page with hero, testimonials and FAQ sections using the copy.",
+        "est_eta_seconds": 2.2,
+        "tier": "moderate"
+      }
+    ]
+  },
+  "planner_call": {
+    "stage": "plan",
+    "model": "claude-opus-5-5",
+    "served_by": null,
+    "input_tokens": 591,
+    "output_tokens": 239,
+    "cache_read_input_tokens": 1981,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 0.0075401999999999995,
+    "latency_ms": 3253.255914001784,
+    "stop_reason": "end_turn",
+    "response_model": "claude-opus-5-5",
+    "app_cost_usd": 0.0075401999999999995
+  }
+}
