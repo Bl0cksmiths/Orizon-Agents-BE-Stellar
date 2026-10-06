@@ -512,15 +512,13 @@ came back all-degraded. What holds now:
   served that read, stale, and the floor still judges it. Only an agent with no
   read that recent falls to the prior.
 - **Pre-warmed.** Every agent in the registry at boot is read once in the
-  background, so the first plan after a deploy is not routed on priors. Boot
-  first waits for the registry sync's first pass, up to
-  `REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS` (5 s), so on-chain agents are in the
-  registry the pre-warm reads and in the first plans after a restart. A pass
-  slower than that is not cancelled: boot goes ahead with a WARNING, the sync
-  loop finishes it, and the agents it indexes are read on first use. Nothing is
-  served until boot finishes — `/health` included — which is why the wait is
-  bounded (at most 60 s, refused at boot otherwise) and kept well inside
-  Render's health-check grace.
+  background, so the first plan after a deploy is not routed on priors. The
+  pre-warm first waits, in the background, for the registry sync's first pass,
+  up to `REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS` (5 s), so on-chain agents are in
+  the registry it reads. A pass slower than that is not cancelled: the pre-warm
+  goes ahead with a WARNING, the sync loop finishes the pass, and the agents it
+  indexes are read on first use. Boot itself never waits on any of it — the
+  service answers, `/health` included, from the moment it starts.
 - **Just rated, never the prior.** An agent a rating has just landed on keeps
   its last read, superseded and refused, while the post-rating read it
   triggered is in flight — see "What an upheld dispute does to an agent".

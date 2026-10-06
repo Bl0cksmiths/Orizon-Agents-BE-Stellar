@@ -290,7 +290,7 @@ the dashboard:
 | `DATABASE_URL` | **set** (a secret: the Postgres connection string, Neon) | without it settlements, disputes and bindings live in memory and are lost on the next deploy or sleep |
 | `API_KEY` | **set** (a secret: the operator key; 8+ printable ASCII characters per the demo script) | mandatory as soon as `DISPUTE_REFUNDS_ENABLED=true`; the process refuses to boot without it |
 | `STELLAR_SIGNING_KEY` | **set** (a secret: the `S…` whose public half is `$SETTLER`) | settles, rates, seals and pays credits |
-| `REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS` | `5` (add it if missing) | how long boot waits for the first registry sync before pre-warming reputation; 0–60, and the config refuses anything else |
+| `REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS` | `5` (add it if missing) | how long the reputation pre-warm waits, in the background, for the first registry sync (boot never waits on it); 0–60, and the config refuses anything else |
 | `DISPUTE_REFUNDS_ENABLED` | `false` | stays off until step 6 |
 | `REFUND_RECONCILE_ENABLED` | `false` | stays off until step 6 |
 | `MAX_REFUND_USDC` | note its value | step 6 funds the signer against it; no public route reports it (default `1.0`) |
