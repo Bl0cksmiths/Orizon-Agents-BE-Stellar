@@ -19,13 +19,13 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, Security
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .. import http_cache
+from .. import http_cache, money
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
 from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key, require_seal_key
-from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc, snapshots
+from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc, snapshots, task_persistence
 from ..services.dispatch_signing import dispatch_signer_address
 from ..services.snapshots import KeepWarm, SnapshotCell
 from ..state import state
@@ -190,6 +190,15 @@ READ_TTL_SECONDS = 3.0
 
 
 # ── meta ────────────────────────────────────────────────────────
+def _sac_name(asset: money.AssetInfo) -> str:
+    """`asset` as the SAC's own `name()` spells it: "native", or "CODE:ISSUER"."""
+    if asset == money.NATIVE:
+        return "native"
+    if asset.issuer is None:
+        return asset.code.lower()  # "unknown": the SAC could not be read
+    return f"{asset.code}:{asset.issuer}"
+
+
 @router.get("/network", response_model=NetworkInfo)
 async def network() -> NetworkInfo:
     ids = sc.contract_ids()
@@ -199,7 +208,7 @@ async def network() -> NetworkInfo:
         network_passphrase=sc.network_passphrase(),
         admin=settings.stellar_admin_address,
         dispatch_signer=dispatch_signer_address(),
-        asset="native",
+        asset=_sac_name(await money.current_asset()),
         asset_sac=ids.asset_sac,
         contracts={
             "agent_registry": ids.agent_registry,
@@ -811,12 +820,24 @@ async def build_set_active(req: SetActiveReq) -> XdrResponse:
         raise HTTPException(400, "build_failed") from e
 
 
+# The authorize route's ceiling on one authorization: 10 000 whole units of the
+# asset, as the legacy float field has always been bounded.
+MAX_AUTHORIZE_STROOPS = 10_000 * money.STROOPS_PER_UNIT
+
+
 class AuthorizeReq(BaseModel):
     payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
     # Same Symbol charset rule as registration — a bad id here also only
     # fails on-chain, after the payer signed the authorization envelope.
+    # The console labels the authorization with the PLAN id (finding S2).
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
-    max_amount_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
+    # The amount to put in custody, exactly: the plan's `total_stroops` (ADR
+    # 0015). Send this.
+    max_amount_stroops: int | None = Field(default=None, gt=0, le=MAX_AUTHORIZE_STROOPS)
+    # DEPRECATED — the same amount as a float of the asset, converted by the
+    # one rule (`money.to_stroops`). Accepted alone, or beside
+    # `max_amount_stroops` when the two agree to the stroop.
+    max_amount_usdc: float | None = Field(default=None, gt=0, le=10_000, allow_inf_nan=False)
     # 1800 s by default. On escrow v2, `/execute` refuses an authorization whose
     # remaining life cannot cover a worst-case run of its plan: the reputation
     # re-check (2.5 s), 125 s per step and 150 s for the settle — 902.5 s for
@@ -828,6 +849,55 @@ class AuthorizeReq(BaseModel):
     # run ever used stays locked for up to this long (a refused execute hands
     # it back at once; ADR 0011).
     ttl_seconds: int = Field(default=1800, ge=30, le=3600)
+
+    @model_validator(mode="after")
+    def _one_amount(self) -> AuthorizeReq:
+        if self.max_amount_stroops is None and self.max_amount_usdc is None:
+            raise ValueError("send max_amount_stroops (the plan's total_stroops)")
+        if self.max_amount_usdc is not None:
+            from_float = money.to_stroops(self.max_amount_usdc)
+            if from_float <= 0:
+                raise ValueError("max_amount_usdc is less than one stroop")
+            if self.max_amount_stroops is not None and from_float != self.max_amount_stroops:
+                raise ValueError("max_amount_usdc and max_amount_stroops disagree")
+            self.max_amount_stroops = from_float
+        return self
+
+    @property
+    def amount_stroops(self) -> int:
+        """The amount to authorize, in stroops — set by the validator, always."""
+        assert self.max_amount_stroops is not None
+        return self.max_amount_stroops
+
+
+async def _refuse_if_not_the_plans_total(req: AuthorizeReq) -> None:
+    """Refuse an authorization of anything but its plan's total, when we hold the plan.
+
+    The label IS the plan id, so the plan card this buyer was shown can be read
+    back and the amount checked against it to the stroop (ADR 0015). Less
+    than the total and `/execute` would refuse the run after the wallet put it
+    in custody; more, and custody beyond what any step can be paid is locked
+    up for the run. A label that names no held plan, and a plan store that
+    cannot answer, are left to `/execute`'s own check — this one exists so the
+    wallet is never asked to sign the wrong number, not to replace that one.
+    """
+    if not req.agent_id.startswith("pln_"):
+        return
+    try:
+        plan = await task_persistence.load_plan(req.agent_id)
+    except task_persistence.TaskStoreUnavailable as e:
+        logger.warning("authorize build: plan %s unreadable, amount not checked: %s", req.agent_id, e)
+        return
+    if plan is None:
+        return
+    total = plan.plan.total_stroops
+    if total > 0 and req.amount_stroops != total:
+        raise CodedHTTPException(
+            409,
+            "authorization_amount_mismatch",
+            f"plan {plan.id} totals {total} stroops ({money.format_amount(total)} {money.asset_code()}); "
+            f"authorize exactly that amount, not {req.amount_stroops} stroops",
+        )
 
 
 @router.post("/build/authorize", response_model=AuthorizeXdrResponse)
@@ -852,13 +922,18 @@ async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
     maximum), so a run it starts is never racing a reclaim. The default of
     1800 s covers that with room for the wallet signature and the authorize to
     confirm.
+
+    The amount is exact stroops (`max_amount_stroops`, ADR 0015) and, when this
+    service holds the plan the label names, must be that plan's total: anything
+    else is a 409 `authorization_amount_mismatch` before anything is built.
     """
+    await _refuse_if_not_the_plans_total(req)
     try:
         expires_at = int(time.time()) + req.ttl_seconds
         args = [
             sc.addr(req.payer),
             sc.sym(req.agent_id),
-            sc.i128(sc.usdc_to_i128(req.max_amount_usdc)),
+            sc.i128(req.amount_stroops),
             sc.u64(expires_at),
         ]
         xdr = await asyncio.to_thread(

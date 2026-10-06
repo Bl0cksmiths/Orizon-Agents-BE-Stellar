@@ -26,6 +26,10 @@ from app.state import state
 from app.stellar import cache as rcache
 from app.stellar import client as sc
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 
 def _smoothed(sum_w: int, weight: int) -> int:
     from app.services.reputation_svc import smoothed_bps

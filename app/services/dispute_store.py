@@ -200,8 +200,13 @@ CREATE TABLE IF NOT EXISTS workflow_settlements (
     settled_usdc     DOUBLE PRECISION NOT NULL,
     steps            JSONB NOT NULL,
     settled_at       DOUBLE PRECISION NOT NULL,
-    window_closes_at DOUBLE PRECISION NOT NULL
+    window_closes_at DOUBLE PRECISION NOT NULL,
+    authorized_stroops NUMERIC(39, 0)
 );
+-- ADR 0015, on a table live since 4.02: NULLABLE, so every row already
+-- written reads "not recorded", never an authorization of zero. NUMERIC
+-- because the escrow's amount is an i128, which no BIGINT can hold.
+ALTER TABLE workflow_settlements ADD COLUMN IF NOT EXISTS authorized_stroops NUMERIC(39, 0);
 CREATE INDEX IF NOT EXISTS workflow_settlements_job_idx
     ON workflow_settlements (job_id_hex, id DESC);
 CREATE INDEX IF NOT EXISTS workflow_settlements_task_idx
@@ -379,7 +384,7 @@ ORDER BY claimed_at, dispute_id
 # parses, whatever json codec a future caller may set on the pool.
 _SELECT_SETTLEMENT_BY_JOB_SQL = """
 SELECT task_id, payer, auth_id_hex, job_id_hex, charge_tx, proof_tx,
-       settled_usdc, steps::text AS steps, settled_at, window_closes_at
+       settled_usdc, steps::text AS steps, settled_at, window_closes_at, authorized_stroops
 FROM workflow_settlements
 WHERE job_id_hex = $1
 ORDER BY id DESC
@@ -388,7 +393,7 @@ LIMIT 1
 
 _SELECT_SETTLEMENT_BY_TASK_SQL = """
 SELECT task_id, payer, auth_id_hex, job_id_hex, charge_tx, proof_tx,
-       settled_usdc, steps::text AS steps, settled_at, window_closes_at
+       settled_usdc, steps::text AS steps, settled_at, window_closes_at, authorized_stroops
 FROM workflow_settlements
 WHERE task_id = $1
 ORDER BY id DESC
@@ -426,8 +431,8 @@ ORDER BY day
 _INSERT_SETTLEMENT_SQL = """
 INSERT INTO workflow_settlements (
     task_id, payer, auth_id_hex, job_id_hex, charge_tx, proof_tx,
-    settled_usdc, steps, settled_at, window_closes_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+    settled_usdc, steps, settled_at, window_closes_at, authorized_stroops
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
 """
 
 
@@ -918,6 +923,19 @@ class SettlementStep:
     # or "over_authorized_cap". None for a paid step, an undelivered one, and
     # every v1 record.
     unpaid_reason: str | None = None
+    # The step's price as the PLAN froze it, in stroops (ADR 0015): what the
+    # buyer authorized for this step, whether or not it was then paid. Kept
+    # because `price_usdc` above is the credit basis — on a v2 record it is
+    # what was PAID, 0.0 for a delivered step nobody could be paid for — so
+    # the planned figure, and with it what was returned, would otherwise be
+    # lost. None on every record written before it existed.
+    planned_stroops: int | None = None
+    # The account escrow v2's `settle` paid this step to — `owner_of` its agent,
+    # read before the settle and unchangeable after it (the registry has no
+    # transfer). The platform treasury for a built-in agent (ADR 0016), the
+    # operator's wallet otherwise. None for a step that was not paid, and on
+    # every record written before ADR 0016.
+    payee: str | None = None
 
 
 @dataclass(frozen=True)
@@ -944,6 +962,11 @@ class SettlementRecord:
     steps: tuple[SettlementStep, ...]
     settled_at: float
     window_closes_at: float
+    # The authorization's `max_amount` the settle spent from, in stroops (ADR
+    # 0015): with the payouts it proves settled + returned = authorized, and
+    # anything above the plan's total is the surplus the settle returned. None
+    # on a v1 record and on every record written before it existed.
+    authorized_stroops: int | None = None
 
     def step(self, step_index: int) -> SettlementStep | None:
         """The settled step at `step_index`, or None if this job has no such step."""
@@ -1523,6 +1546,8 @@ def steps_to_json(steps: tuple[SettlementStep, ...]) -> str:
                 "paid_usdc": s.paid_usdc,
                 "receipt_id_hex": s.receipt_id_hex,
                 "unpaid_reason": s.unpaid_reason,
+                "planned_stroops": s.planned_stroops,
+                "payee": s.payee,
             }
             for s in steps
         ],
@@ -1551,6 +1576,10 @@ def steps_from_json(raw: str) -> tuple[SettlementStep, ...]:
             paid_usdc=None if s.get("paid_usdc") is None else float(s["paid_usdc"]),
             receipt_id_hex=s.get("receipt_id_hex"),
             unpaid_reason=s.get("unpaid_reason"),
+            # `.get` again: absent on every row written before ADR 0015.
+            planned_stroops=None if s.get("planned_stroops") is None else int(s["planned_stroops"]),
+            # `.get` again: absent on every row written before ADR 0016.
+            payee=s.get("payee"),
         )
         for s in json.loads(raw)
     )
@@ -1652,6 +1681,7 @@ class PostgresDisputeStore:
             steps_to_json(record.steps),
             record.settled_at,
             record.window_closes_at,
+            record.authorized_stroops,
             timeout=_POOL_COMMAND_TIMEOUT,
         )
 
@@ -1690,6 +1720,8 @@ class PostgresDisputeStore:
             steps=steps_from_json(row["steps"]),
             settled_at=float(row["settled_at"]),
             window_closes_at=float(row["window_closes_at"]),
+            # NUMERIC comes back as a Decimal: whole stroops, made an int.
+            authorized_stroops=None if row["authorized_stroops"] is None else int(row["authorized_stroops"]),
         )
 
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:

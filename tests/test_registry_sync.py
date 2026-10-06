@@ -56,11 +56,14 @@ def clean_registry_sync():
     """Restore state.agents and the service's module-level once-flags, so no
     test observes another's injected agents or spent log guards."""
     agents_before = dict(state.agents)
+    registry_sync._platform_logged.clear()
     yield
     state.agents.clear()
     state.agents.update(agents_before)
     registry_sync._disabled_logged = False
     registry_sync._skipped_agt_ids.clear()
+    registry_sync._platform.clear()
+    registry_sync._platform_logged.clear()
     registry_sync._failing = False
     registry_sync._task = None
 
@@ -147,6 +150,9 @@ def test_seeded_namespace_is_never_clobbered(registry_configured, monkeypatch, c
     # would visibly replace the seeded agent.
     records = {"agt_01h8": _raw("agt_01h8", name="CLOBBERED"), "ext_b": _raw("ext_b")}
     calls = _fake_registry(monkeypatch, records)
+    # The batch read vouches for both records; the squatted built-in one is
+    # only checked against the catalog (ADR 0016), never upserted.
+    monkeypatch.setattr(registry_sync.sc, "read_agent_records", lambda _c, ids: {i: records[i] for i in ids})
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
         assert asyncio.run(registry_sync.sync_once()) == 1

@@ -44,7 +44,9 @@ def _body_fields(path: str) -> set[str]:
         # `spec` is the optional corrected reading a console resubmits; the
         # harness plans from an intent alone and never sends one.
         ("/api/orchestrator/decompose", {"intent", "spec"}),
-        ("/api/stellar/build/authorize", {"payer", "agent_id", "max_amount_usdc", "ttl_seconds"}),
+        # `max_amount_stroops` is the exact amount (ADR 0015); the harness still
+        # sends the legacy float, which converts by the same rule.
+        ("/api/stellar/build/authorize", {"payer", "agent_id", "max_amount_stroops", "max_amount_usdc", "ttl_seconds"}),
         ("/api/stellar/submit", {"signed_xdr"}),
         ("/api/orchestrator/execute", {"plan_id", "auth_id_hex", "payer"}),
         ("/api/disputes/challenge", {"job_id_hex", "step_index"}),
@@ -126,7 +128,7 @@ def test_the_harness_signature_verifies_as_the_backend_verifies_it() -> None:
 
 
 # ── the stroop conversion and the trace lines ───────────────────
-@pytest.mark.parametrize("amount", [0.001, 0.012, 0.05, 0.07, 1.2345678, 12.5])
+@pytest.mark.parametrize("amount", [0.001, 0.012, 0.05, 0.07, 1.2345678, 12.5, 0.00000125, 0.00000455])
 def test_stroops_are_the_backends_stroops(amount: float) -> None:
     assert signing.usdc_to_stroops(amount) == sc.usdc_to_i128(amount)
 

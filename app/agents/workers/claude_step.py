@@ -34,6 +34,9 @@ from ...llm.tiers import display_name, effort_for, model_for
 from ..model_factory import note_served_model
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ...llm.claude import ImageBlock
     from ...llm.tiers import Effort, Tier
 
 logger = logging.getLogger(__name__)
@@ -99,11 +102,12 @@ async def structured(
     user: str,
     schema: type[T],
     max_tokens: int,
+    images: Sequence[ImageBlock] = (),
 ) -> T:
     """Ask the tier's model for one `schema` object (structured output).
 
     The tier's effort is always passed; `app/llm/claude.py` leaves it off for a
-    model that takes none (Claude Haiku 4.5).
+    model that takes none (Claude Haiku 4.5). `images` go ahead of `user`.
     """
     from ...llm import claude
 
@@ -117,6 +121,7 @@ async def structured(
             schema=schema,
             max_tokens=max_tokens,
             effort=effort_for(tier),
+            images=images,
         )
     except LLMError as e:
         raise _step_error(worker, model, e) from e

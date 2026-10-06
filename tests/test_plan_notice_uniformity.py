@@ -47,6 +47,10 @@ from app.services import orchestrator_svc, reputation_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 # A curated intent, and one that must never match a kit. Which path each takes
 # is decompose()'s business, not this file's — that is the point of the story.
 KIT_INTENT = "tetris game in html"
@@ -421,8 +425,27 @@ def test_exclusion_reason_vocabulary_is_closed() -> None:
     the marketplace and the plan that the buyer needs explained, exactly like
     an unbound one — and routing to it made the buyer pay for a run that could
     not be delivered.
+
+    `simulated_worker` and `external_not_routed` were the next two, made for
+    the agent-pipelines work: routing policy the buyer needs explained — a
+    built-in agent left out because its worker would only simulate the paid
+    step, and an external agent left out while plans use only the built-in
+    agents. Appended, so the first four keep their positions. `no_image_input`
+    followed: a vision.ocr step dropped because the request has no image; and
+    `no_step_input`, any other proposed step dropped for want of its input;
+    and `provider_unavailable`, a Claude-only agent while workers are off Claude.
     """
-    assert get_args(ExclusionReason) == ("below_floor", "unbound_endpoint", "floor_relaxed", "unreachable_endpoint")
+    assert get_args(ExclusionReason) == (
+        "below_floor",
+        "unbound_endpoint",
+        "floor_relaxed",
+        "unreachable_endpoint",
+        "simulated_worker",
+        "external_not_routed",
+        "no_image_input",
+        "no_step_input",
+        "provider_unavailable",
+    )
 
     # And the model actually enforces it — a Literal that is never validated
     # against is a comment.

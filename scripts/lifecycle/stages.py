@@ -96,6 +96,15 @@ def asset_label(asset: str | None) -> str:
     return "XLM (native)" if asset in (None, "native") else str(asset)
 
 
+def plan_total_stroops(plan: dict[str, Any]) -> int:
+    """The plan's total in stroops: `total_stroops` when the backend sends it,
+    else the legacy `total_usdc` by the backend's own conversion."""
+    exact = plan.get("total_stroops")
+    if isinstance(exact, int) and not isinstance(exact, bool) and exact >= 0:
+        return exact
+    return usdc_to_stroops(float(plan.get("total_usdc") or 0))
+
+
 def fmt_amount(value: float | int | None) -> str | None:
     return None if value is None else f"{float(value):.7f}"
 
@@ -454,7 +463,7 @@ class Runner:
             "authorize": (
                 f"POST /api/stellar/build/authorize {{payer: {buyer}, "
                 f"agent_id: {authorize_label(self.state.escrow_version or 1, '<plan_id>')}, "
-                f"max_amount_usdc: plan.total_usdc or {MIN_AUTHORIZE_AMOUNT}, "
+                f"max_amount_stroops: plan.total_stroops or {usdc_to_stroops(MIN_AUTHORIZE_AMOUNT)}, "
                 f"ttl_seconds: {authorize_ttl(self.state.escrow_version or 1)}}}; "
                 f"check it is PaymentEscrow({self.contracts.get('payment_escrow')}).authorize; sign with "
                 f"${self.cfg.buyer_secret_env}; POST /api/stellar/submit {{signed_xdr}} ONCE"
@@ -601,17 +610,20 @@ class Runner:
     def stage_authorize(self) -> None:
         chain, kp = self.need_chain(), self.need_buyer()
         plan = self.state.plan or {}
-        # `plan.total_usdc > 0 ? plan.total_usdc : MIN_CAP`
-        max_amount = float(plan.get("total_usdc") or 0) or MIN_AUTHORIZE_AMOUNT
+        # The plan's exact `total_stroops` (ADR 0015); a backend from before it
+        # sends only `total_usdc`, converted by the same one rule. A zero total
+        # still needs a positive authorization: the console's MIN_CAP.
+        max_stroops = plan_total_stroops(plan) or usdc_to_stroops(MIN_AUTHORIZE_AMOUNT)
+        max_amount = max_stroops / 10_000_000
         version = self.state.escrow_version or 1
         label = authorize_label(version, str(plan.get("plan_id")))
         ttl = authorize_ttl(version)
-        built = self.api.build_authorize(kp.public_key, max_amount, ttl, label)
+        built = self.api.build_authorize(kp.public_key, max_stroops, ttl, label)
         expect = AuthorizeCall(
             escrow=self.contracts["payment_escrow"],
             payer=kp.public_key,
             agent_id=label,
-            max_stroops=usdc_to_stroops(max_amount),
+            max_stroops=max_stroops,
         )
         signed = sign_authorize(str(built["xdr"]), kp, TESTNET_PASSPHRASE, expect)
         self.console.redactor.register(signed.signed_xdr)

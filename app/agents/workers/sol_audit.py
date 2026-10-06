@@ -76,12 +76,20 @@ INSTRUCTIONS = (
 # Room for the JSON plus the deeper thinking an audit step does first.
 MAX_TOKENS = 16_000
 
+# How to use what earlier steps handed on (see `context.CONSUMES`).
+UPSTREAM_GUIDANCE = (
+    "Audit what they contain: extracted text may be the contract source. "
+    "Research is background on the contract's domain, never evidence of a "
+    "vulnerability on its own."
+)
+
 
 class SolAudit(ModelWorker):
     id = "agt_04m1"
     name = "sol-audit"
     real = True
     default_tier = "complex"
+    reads_upstream = True
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
@@ -89,6 +97,15 @@ class SolAudit(ModelWorker):
             model_id=settings.worker_model,
             instructions=INSTRUCTIONS,
             output_schema=AuditOutput,
+        )
+
+    def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
+        """The free-form prompt: the fenced request, then the fenced upstream outputs."""
+        return worker_prompt(
+            intent,
+            rationale,
+            "Return the audit summary.",
+            sections=[self.handoff(context).section(UPSTREAM_GUIDANCE)],
         )
 
     async def run(
@@ -99,7 +116,7 @@ class SolAudit(ModelWorker):
         *,
         tier: Tier | None = None,
     ) -> dict[str, Any]:
-        prompt = worker_prompt(intent, rationale, "Return the audit summary.")
+        prompt = self.build_prompt(intent, rationale, context)
         out: AuditOutput
         if claude_workers():
             draft = await claude_step.structured(

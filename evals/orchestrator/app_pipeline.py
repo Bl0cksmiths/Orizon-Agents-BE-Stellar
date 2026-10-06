@@ -208,13 +208,18 @@ def seeded_agents() -> list[Any]:
 
 def _default_planner() -> tuple[PlanFn, str, frozenset[str]]:
     """The planner lane's raw planner and the AVAILABLE_AGENTS block decompose
-    would show it for the seeded catalog (no reputation history: the prior)."""
+    would show it for the seeded catalog (no reputation history: the prior),
+    held to the same routing policy (`orchestrator_svc.plannable`): an agent
+    whose worker only simulates is not offered here either."""
     try:
         draft_plan = importlib.import_module("app.agents.orchestrator").draft_plan
-        render_agents_block = importlib.import_module("app.services.orchestrator_svc").render_agents_block
+        svc = importlib.import_module("app.services.orchestrator_svc")
+        render_agents_block = svc.render_agents_block
+        plannable = svc.plannable
     except AttributeError as e:  # the planner lane's raw planner is not on this branch yet
         raise ImportError(str(e)) from e
-    agents = seeded_agents()
+    # The Claude planner's view: it only runs where the workers run on Claude.
+    agents = [a for a in seeded_agents() if plannable(a, on_claude=True)]
     return draft_plan, render_agents_block(agents, {}), frozenset(a.id for a in agents)
 
 

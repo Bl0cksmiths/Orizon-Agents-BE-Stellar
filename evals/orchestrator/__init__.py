@@ -5,12 +5,15 @@
     python -m evals.orchestrator run --pipeline oracle            # harness check, free
     python -m evals.orchestrator run                              # real code on FakeJev/FakeClaude, free
     python -m evals.orchestrator run --live --max-usd 1 --stages guard   # the owner's call; costs money
+    python -m evals.orchestrator compare runs/before runs/after        # planner composition, free
 
 What it measures, per labelled intent (`dataset.jsonl`, 168 cases):
 
 * the guard's verdict (allow / block / needs_detail) and routed tier;
 * with `--stages all`, the planner's RAW plan (before the allowlist clamp):
-  schema-valid, only offered agents, every step tier present.
+  schema-valid, only offered agents, every step tier present — and how it
+  composes the specialists: distinct agents per plan, recipe coverage and
+  irrelevant steps against the pipeline labels, handoff order.
 
 What it reports (`runs/<variant>/summary.md`): injection recall and precision,
 block precision, false-block rate (overall and on borderline-but-legitimate
@@ -36,6 +39,7 @@ Modules:
     grading     per-case programmatic checks
     metrics     aggregates with Wilson intervals
     sweep       the threshold sweep
+    composition distinct specialists, recipe coverage, irrelevant steps
     cost        the pre-run spend estimate
     runner      concurrent, resumable runs; results / errors / traces
     report      summary.md and sweep.md from the files on disk

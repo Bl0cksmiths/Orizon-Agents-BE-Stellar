@@ -283,10 +283,11 @@ def test_trace_tells_the_buyer_the_window_is_open(monkeypatch, store):
 
 # ── the amount is what moved, and the steps are what was bought ─────────
 def test_settled_amount_is_what_moved_not_what_was_estimated(monkeypatch, store):
-    """`spent` is a sum of the plan's ESTIMATES; the charge sends
-    `usdc_to_i128(max(total, 0.000001))`, which rounds to the ledger's 7
-    decimals. A credit computed from the estimate would therefore hand back
-    more than ever left escrow, so the record carries the charged number."""
+    """The charge sends `usdc_to_i128(max(total, 0.000001))`, which rounds to
+    the ledger's 7 decimals, and a credit must never be computed from more than
+    moved. Since ADR 0015 a step's price is stroops from the moment it is
+    planned, so a sub-stroop price is rounded THERE — and the estimate the
+    record keeps is exactly what moved, not a figure above it."""
     _resolves_to(monkeypatch, lambda agent_id: _OkWorker())
     _patch_settlement(monkeypatch)
     task_id = "tsk_capture_amount"
@@ -294,10 +295,10 @@ def test_settled_amount_is_what_moved_not_what_was_estimated(monkeypatch, store)
     _run_paid(_plan((0.050000049,)), task_id)
 
     record = store.recorded[0]
-    # round(0.050000049 * 10**7) = 500_000 stroops = 0.05 USDC exactly.
-    assert record.settled_usdc == pytest.approx(0.05)
+    # 0.050000049 is 500_000.49 stroops: the plan holds 500_000 = 0.05 exactly.
+    assert record.settled_usdc == 0.05
     assert record.settled_usdc < 0.050000049
-    assert record.settled_usdc < sum(s.price_usdc for s in record.steps)
+    assert sum(s.price_usdc for s in record.steps) == record.settled_usdc
 
 
 def test_a_free_plan_records_the_dust_the_charge_floors_to(monkeypatch, store):
@@ -643,8 +644,10 @@ def test_the_summary_changes_nothing_else_the_settlement_records(monkeypatch, st
 
     assert len(store.recorded) == 1
     record = store.recorded[0]
+    # ADR 0015's planned price is set aside too: it is added, and is pinned there.
     without_summaries = dataclasses.replace(
-        record, steps=tuple(dataclasses.replace(s, output_summary=None) for s in record.steps)
+        record,
+        steps=tuple(dataclasses.replace(s, output_summary=None, planned_stroops=None) for s in record.steps),
     )
     assert without_summaries == SettlementRecord(
         task_id=task_id,

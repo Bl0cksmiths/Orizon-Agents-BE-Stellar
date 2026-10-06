@@ -30,6 +30,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from stellar_sdk import Address, Keypair, TransactionEnvelope, scval
@@ -46,9 +47,10 @@ class SigningRefused(Exception):
 
 
 def usdc_to_stroops(amount: float) -> int:
-    """`app/stellar/client.py` usdc_to_i128: `round(amount * 10_000_000)`.
+    """`app/stellar/client.py` usdc_to_i128, i.e. `app/money.to_stroops`: the
+    float's shortest decimal, half-to-even to the stroop (ADR 0015).
     Re-stated rather than imported; the suite pins the two together."""
-    return round(amount * 10_000_000)
+    return int((Decimal(repr(float(amount))) * 10_000_000).to_integral_value(rounding=ROUND_HALF_EVEN))
 
 
 def load_keypair(env_name: str, redactor: Redactor, environ: Mapping[str, str] | None = None) -> Keypair:

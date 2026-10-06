@@ -49,6 +49,10 @@ METRICS = [
     {"id": "plan_allowlisted", "label": "allowlisted", "kind": "binary"},
     {"id": "plan_schema", "label": "schema", "kind": "binary"},
     {"id": "plan_tiers", "label": "step tiers", "kind": "binary"},
+    {"id": "plan_recipe_full", "label": "full recipe", "kind": "binary"},
+    {"id": "plan_no_irrelevant", "label": "no irrelevant step", "kind": "binary"},
+    {"id": "plan_order_ok", "label": "handoff order", "kind": "binary"},
+    {"id": "plan_one_builder", "label": "one code builder", "kind": "binary"},
 ]
 PERF_FIELDS = [
     {"id": "cost_usd", "label": "cost", "unit": "$"},

@@ -37,9 +37,13 @@ Design notes, each deliberate:
     hold the agent to account — is refused outright, and a refused record
     DELISTS any copy an earlier pass indexed, so the re-read above cannot be
     turned into a way to leave a stale believable price standing.
-  - On-chain ids in the `agt_` namespace are SKIPPED: that namespace is the
-    seeded catalog, and `state.add_agent` is an upsert, so indexing one would
-    clobber a worker-backed agent with a chain record that has no worker.
+  - On-chain ids in the `agt_` namespace are NEVER MIRRORED: that namespace is
+    the seeded catalog, and `state.add_agent` is an upsert, so indexing one
+    would clobber a worker-backed agent with a chain record that has no worker.
+    The built-in ones are registered to the platform treasury (ADR 0016), so
+    their records are read — in the same batch, never with `get` — and CHECKED
+    against the terms `platform_treasury` derives from the catalog; the verdict
+    per id is `platform_agents()`. The rest of the namespace is skipped.
   - The loop fails OPEN and never dies: a bad pass logs and waits for the
     next tick. Failures coalesce to ONE warning per outage (then DEBUG, then
     an INFO on recovery) — the `reputation_svc._log_degraded` discipline; a
@@ -60,13 +64,14 @@ import contextlib
 import dataclasses
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 from ..agents.workers.prompt_safety import sanitize_untrusted
 from ..config import settings
 from ..schemas import Agent
 from ..state import state
 from ..stellar import client as sc
+from . import platform_treasury
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +197,100 @@ class SyncStatus:
 
 
 _status = SyncStatus()
+
+# What the registry says about each built-in agent, as of the latest pass that
+# listed the registry (ADR 0016):
+#   registered     owned by the platform treasury, on the catalog's own terms
+#   mismatch       owned by the treasury, but a term differs from the catalog's
+#   foreign_owner  owned by someone else, so its steps are never paid
+#   unregistered   not in `list_ids`
+#   unread         not read yet, or the batch could not vouch for its record
+# Informational: a plan prices from the catalog whatever this says, and the
+# settle names a built-in agent only when `owner_of` is the treasury.
+PlatformVerdict = Literal["registered", "mismatch", "foreign_owner", "unregistered", "unread"]
+
+
+@dataclasses.dataclass(frozen=True)
+class _PlatformCheck:
+    verdict: PlatformVerdict
+    issues: tuple[str, ...] = ()
+
+
+_platform: dict[str, _PlatformCheck] = {}
+# The verdict each id was last logged at, so a 15 s loop logs a change once.
+_platform_logged: dict[str, PlatformVerdict] = {}
+
+
+def platform_agents() -> dict[str, PlatformVerdict]:
+    """Every built-in agent's on-chain verdict, by id."""
+    return {
+        agent_id: (_platform[agent_id].verdict if agent_id in _platform else "unread")
+        for agent_id in platform_treasury.built_in_ids()
+    }
+
+
+def platform_issues() -> dict[str, tuple[str, ...]]:
+    """What differs, for each built-in agent whose record does not match."""
+    return {agent_id: check.issues for agent_id, check in _platform.items() if check.issues}
+
+
+def _check_platform_record(agent_id: str, raw: dict[str, Any] | None, treasury: str | None) -> _PlatformCheck:
+    """Compare one built-in agent's on-chain record with the catalog's terms."""
+    if raw is None:
+        return _PlatformCheck("unread")
+    if treasury is None or raw.get("owner") != treasury:
+        return _PlatformCheck("foreign_owner", (f"owned by {raw.get('owner')}, not the platform treasury",))
+    terms = platform_treasury.registration_for(agent_id)
+    issues: list[str] = []
+    if raw.get("name") != terms.name:
+        issues.append(f"name {raw.get('name')!r}, the catalog's is {terms.name!r}")
+    if list(raw.get("skills") or []) != list(terms.skills):
+        issues.append(f"skills {list(raw.get('skills') or [])}, the catalog's are {list(terms.skills)}")
+    if raw.get("price") != terms.price_stroops:
+        issues.append(f"price {raw.get('price')} stroops, the catalog's is {terms.price_stroops}")
+    if not raw.get("active"):
+        issues.append("inactive on-chain")
+    return _PlatformCheck("mismatch", tuple(issues)) if issues else _PlatformCheck("registered")
+
+
+def _note_platform(agent_id: str, check: _PlatformCheck) -> None:
+    """Keep `check` and log it once per change of verdict."""
+    _platform[agent_id] = check
+    if _platform_logged.get(agent_id) == check.verdict:
+        return
+    _platform_logged[agent_id] = check.verdict
+    if check.verdict == "registered":
+        logger.info("registry sync: built-in agent %r is registered to the platform treasury", agent_id)
+    elif check.verdict == "foreign_owner":
+        logger.warning(
+            "registry sync: built-in agent %r is registered on-chain but %s — its steps are never paid; "
+            "the catalog agent is kept",
+            agent_id,
+            check.issues[0],
+        )
+    elif check.verdict == "mismatch":
+        logger.warning(
+            "registry sync: built-in agent %r is registered to the platform treasury with different terms (%s) — "
+            "plans keep the catalog's",
+            agent_id,
+            "; ".join(check.issues),
+        )
+
+
+def _check_platform(ids: list[str], records: dict[str, dict[str, Any]]) -> None:
+    """Record a verdict for every built-in agent from one listing and its batch read."""
+    try:
+        treasury = platform_treasury.treasury_address()
+    except platform_treasury.TreasuryError as e:
+        logger.warning("registry sync: platform treasury unreadable — %s", e)
+        treasury = None
+    listed = set(ids)
+    for agent_id in platform_treasury.built_in_ids():
+        if agent_id not in listed:
+            _note_platform(agent_id, _PlatformCheck("unregistered"))
+        else:
+            _note_platform(agent_id, _check_platform_record(agent_id, records.get(agent_id), treasury))
+
 
 # Every id whose `get` has answered since boot, refused or not. A pass is full
 # only when every id `list_ids` returned is in here: an id that has never
@@ -367,10 +466,17 @@ async def _pass() -> int:
     ids = await asyncio.to_thread(sc.simulate_read, contract_id, "list_ids", [])
     # Every record in a handful of storage reads (one per 200 ids), not one
     # simulated `get` — two round trips — per id. An id the batch does not
-    # vouch for is read with `get` below, exactly as before.
-    batched = await asyncio.to_thread(sc.read_agent_records, contract_id, [i for i in ids if not i.startswith("agt_")])
+    # vouch for is read with `get` below, exactly as before. The built-in
+    # agents' records ride in the same batch, to be checked, never mirrored.
+    built_in = [i for i in ids if i.startswith("agt_") and platform_treasury.is_built_in(i)]
+    batched = await asyncio.to_thread(
+        sc.read_agent_records, contract_id, [i for i in ids if not i.startswith("agt_")] + built_in
+    )
+    _check_platform(ids, batched)
     synced = 0
     for agent_id in ids:
+        if agent_id in built_in:
+            continue  # checked above; never upserted over the catalog agent
         if agent_id.startswith("agt_"):
             # Seeded namespace: add_agent is an upsert, so indexing this
             # id would clobber a worker-backed catalog agent.

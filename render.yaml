@@ -110,6 +110,12 @@ services:
       # run. 0 pauses it outright.
       - key: LLM_DAILY_SPEND_CAP_USD
         value: "10"
+      # Whether plans may route to external operator agents. false: only the
+      # platform's built-in agents, and each listed external agent is named on
+      # the plan card as external_not_routed; true: externals compete under
+      # the reputation floor and the reachability check.
+      - key: PLANNER_ROUTE_EXTERNAL
+        value: "false"
 
       # ── Stellar (mainnet — production) ─────────────────────────────────
       # Mainnet is the production target; testnet values live in

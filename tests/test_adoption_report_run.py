@@ -204,7 +204,7 @@ def test_the_committed_register_loads_with_every_declared_wallet() -> None:
     committed = Path(__file__).resolve().parents[1] / "app" / "data" / "team_wallets.json"
     declared = {entry["address"] for entry in json.loads(committed.read_text())["wallets"]}
     assert load(committed).accounts == frozenset(declared)
-    assert len(declared) == 12
+    assert len(declared) == 13
 
 
 def test_empty_or_missing_register_is_refused(tmp_path: Path) -> None:

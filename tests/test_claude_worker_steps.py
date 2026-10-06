@@ -278,11 +278,61 @@ def test_a_refusal_is_still_the_agents_failure_and_rated(claude: FakeClaude, mon
 
 
 def test_the_not_attempted_classes_are_the_ones_the_workers_raise() -> None:
+    from app.agents.workers import code_critic_worker, translate, vision_ocr
+
     assert set(execution_svc._NOT_ATTEMPTED) == {
         claude_step.SPEND_CAP_REACHED,
         claude_step.MODEL_NOT_CONFIGURED,
         claude_step.MODEL_UNAVAILABLE,
+        vision_ocr.NO_INPUT,
+        vision_ocr.IMAGE_UNAVAILABLE,
+        translate.NO_INPUT,
+        translate.NO_TARGET_LANGUAGE,
+        code_critic_worker.UNSUPPORTED_ARTIFACT,
     }
+    # Every per-worker wording names a worker that exists and a class in the table.
+    names = {w.name for w in WORKERS.values()}
+    for worker_name, failure_class in execution_svc._NOT_ATTEMPTED_FOR:
+        assert worker_name in names
+        assert failure_class in execution_svc._NOT_ATTEMPTED
+
+
+def test_a_request_with_no_image_is_not_ocrs_failure(claude: FakeClaude, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _rated(monkeypatch)
+    claude.reply(_copy(), purpose="worker.copywrite.v3")
+    _, trace = _run("tsk_cw_noimage", _step("agt_01h8", COPY_PRICE), _step("agt_06q4", AUDIT_PRICE), paid=True)
+
+    assert "vision.ocr: no image to read — not charged, not rated" in trace
+    assert not any(line.startswith("vision.ocr failed") for line in trace)
+    assert claude.calls_for("worker.vision.ocr") == []
+    assert seen["undispatched"] == frozenset({1})
+    assert ft.consecutive_failures("agt_06q4") == 0
+
+
+@pytest.mark.parametrize(
+    ("reply", "line"),
+    [
+        (
+            {"source_language": "en", "source_text": "Fix it together", "languages": []},
+            "translate.42: no target language named — not charged, not rated",
+        ),
+        (
+            {"source_language": "en", "source_text": "", "languages": []},
+            "translate.42: nothing to translate — not charged, not rated",
+        ),
+    ],
+    ids=["no-target-language", "nothing-to-translate"],
+)
+def test_a_translation_the_request_gave_nothing_for_is_not_the_agents_failure(
+    claude: FakeClaude, monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any], line: str
+) -> None:
+    seen = _rated(monkeypatch)
+    claude.reply(reply, purpose="worker.translate.42")
+    _, trace = _run("tsk_cw_notarget", _step("agt_10b6", COPY_PRICE), paid=True)
+
+    assert line in trace
+    assert seen["undispatched"] == frozenset({0})
+    assert ft.consecutive_failures("agt_10b6") == 0
 
 
 class _Outage:

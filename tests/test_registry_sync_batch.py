@@ -89,6 +89,8 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Any:
     registry_sync._status = status_before
     registry_sync._skipped_agt_ids.clear()
     registry_sync._refused_price_ids.clear()
+    registry_sync._platform.clear()
+    registry_sync._platform_logged.clear()
 
 
 def _onchain() -> dict[str, Any]:
@@ -151,10 +153,13 @@ def test_a_batched_record_meets_the_same_trust_boundary(registry: Any) -> None:
     assert fake.gets == []
 
 
-def test_the_seeded_namespace_is_never_requested(registry: Any) -> None:
+def test_the_seeded_namespace_is_read_only_to_be_checked(registry: Any) -> None:
+    """A built-in id rides in the batch so its record can be checked against the
+    catalog (ADR 0016); it is never read with `get` and never mirrored."""
     fake = registry({"agt_01h8": _raw("agt_01h8"), "ext_a": _raw("ext_a")})
 
     asyncio.run(registry_sync.sync_once())
 
-    assert fake.batches == [["ext_a"]]
+    assert fake.batches == [["ext_a", "agt_01h8"]]
     assert fake.gets == []
+    assert sorted(_onchain()) == ["ext_a"]

@@ -197,7 +197,7 @@ def test_a_hung_endpoint_is_not_charged_and_the_workflow_still_seals(monkeypatch
     assert scval.to_native(seal[4]) == [DELIVERS]
     assert scval.to_native(seal[5]) == [_receipt(0)]
     assert scval.to_native(seal[6]) == 300_000
-    assert any(m.startswith("workflow sealed — 1 agents · 0.030 USDC") for m in _messages(task_id))
+    assert any(m.startswith("workflow sealed — 1 agents · 0.030 XLM") for m in _messages(task_id))
 
     # The settlement a dispute is judged against says the same thing.
     record = store.recorded[-1]

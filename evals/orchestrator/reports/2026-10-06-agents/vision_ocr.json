@@ -1,0 +1,64 @@
+{
+  "agent_id": "agt_06q4",
+  "worker": "vision.ocr",
+  "intent": "Read all the text on these two images: https://dummyimage.com/640x240/1d4ed8/ffffff.png?text=CO-OP+BIKE+REPAIR+-+Open+Sat+9:00-17:00 and https://www.w3.org/Icons/w3c_home.png",
+  "context_roles": [],
+  "step_model": "Claude Haiku 4.5 (tier: low)",
+  "output": {
+    "summary": "CO-OP bike repair service open Saturdays 9:00-17:00, plus W3C logo with no readable text.",
+    "text": "[image 1]\nCO-OP BIKE REPAIR - Open Sat 9:00-17:00",
+    "language": "en",
+    "images": [
+      {
+        "index": 1,
+        "source": "dummyimage.com",
+        "description": "Blue background with white text advertising bike repair service",
+        "language": "en",
+        "text": "CO-OP BIKE REPAIR - Open Sat 9:00-17:00",
+        "blocks": [
+          {
+            "kind": "heading",
+            "text": "CO-OP BIKE REPAIR - Open Sat 9:00-17:00"
+          }
+        ],
+        "tables": []
+      },
+      {
+        "index": 2,
+        "source": "www.w3.org",
+        "description": "W3C logo icon with circular design and interlocking W3C letters",
+        "language": "und",
+        "text": "",
+        "blocks": [],
+        "tables": []
+      }
+    ],
+    "skipped": [],
+    "counts": {
+      "images": 2,
+      "skipped": 0,
+      "chars": 49,
+      "blocks": 1,
+      "tables": 0
+    }
+  },
+  "error": null,
+  "latency_s": 6.4,
+  "calls": [
+    {
+      "purpose": "worker.vision.ocr",
+      "model": "claude-haiku-4-5",
+      "served_by": null,
+      "effort": null,
+      "stream": false,
+      "images": 2,
+      "stop_reason": "end_turn",
+      "input_tokens": 1713,
+      "output_tokens": 181,
+      "cache_read_tokens": 0,
+      "cost_usd": 0.002618,
+      "latency_s": 5.52
+    }
+  ],
+  "cost_usd": 0.002618
+}

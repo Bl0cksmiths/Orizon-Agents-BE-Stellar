@@ -11,6 +11,7 @@ the request text reaches the model only inside a fence.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -121,11 +122,49 @@ def test_the_claude_instructions_keep_the_allowlist_rules() -> None:
     assert "Use ONLY agent_ids listed in AVAILABLE_AGENTS" in text
     assert "even one named elsewhere in these instructions" in text
     assert "any step naming it is discarded" in text
-    assert "if `code.gen` (agt_11c0) appears in AVAILABLE_AGENTS, prefer it" in text
-    assert "if it does not appear, it is unavailable for this request" in text
-    assert text.count("agt_11c0") == 1
+    # No standing order names an agent id: the list is the only authority on
+    # what may be routed to, so no sentence here can fight the floor or the
+    # routing policy for a particular agent.
+    assert "agt_" not in text
     # Tiers are asked for, and capped by the request's own.
     assert "A step's tier is never above the request's overall complexity" in text
+
+
+def test_the_instructions_compose_pipelines_instead_of_one_code_step() -> None:
+    text = _text()
+
+    # The old default — prefer code.gen, often as a single step — is gone.
+    assert "single-step plan" not in text and "prefer it" not in text
+    assert "Use every listed specialist whose work makes this deliverable better, and no other" in text
+    assert "Order the steps so each one's output flows into the steps after it" in text
+    assert "Never add a step that contributes nothing to this request" in text
+    # The handoffs the plan is also held to in code (orchestrator_svc._compose).
+    assert "code.critic only after code.gen (it does not review code.next projects)" in text
+    assert "deploy.v0 only after a build, as the last step" in text
+    assert "vision.ocr only when the request includes an image or an https image link" in text
+    # One builder per plan: the two are alternatives, not a sequence.
+    assert "Use one code builder, never both: code.next when the buyer asks for React, Next.js or TypeScript" in text
+    # The rationale is the step's brief: what it contributes and hands on.
+    assert "what it hands to the next step" in text
+    for recipe in (
+        "Website or landing page: research.pro, seo.brief, copywrite.v3, design.figma, code.gen, code.critic",
+        "Web app, tool or game: design.figma, code.gen, code.critic, deploy.v0",
+        "design.figma, code.next, deploy.v0",
+        "Marketing or ads: research.pro, seo.brief, copywrite.v3, ads.meta",
+        "Research or report: research.pro, copywrite.v3",
+        "Smart contract: sol-audit",
+        "Text in an image: vision.ocr",
+    ):
+        assert recipe in text
+
+
+def test_the_instructions_name_only_agents_the_catalog_has() -> None:
+    from app.seed import _SEED
+
+    names = {row[1] for row in _SEED}
+    named = set(re.findall(r"\b[a-z]+(?:\.[a-z0-9]+)+\b", CLAUDE_INSTRUCTIONS))
+
+    assert named <= names, named - names
 
 
 def test_the_instructions_carry_nothing_per_request() -> None:

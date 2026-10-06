@@ -772,6 +772,7 @@ _SETTLEMENT_COLUMNS = (
     "steps",
     "settled_at",
     "window_closes_at",
+    "authorized_stroops",
 )
 _DISPUTE_COLUMNS = (
     "dispute_id",

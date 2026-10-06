@@ -1,0 +1,70 @@
+{
+  "agent_id": "agt_10b6",
+  "worker": "translate.42",
+  "intent": "Translate the sign's text into Tagalog and Spanish for our shop window",
+  "context_roles": [
+    "vision.ocr"
+  ],
+  "step_model": "Claude Haiku 4.5 (tier: low)",
+  "output": {
+    "summary": "Translated 1 segment(s) from en into Tagalog, Spanish.",
+    "source_language": "en",
+    "translations": [
+      {
+        "language": "tl",
+        "lang": "tl",
+        "name": "Tagalog",
+        "text": "CO-OP BIKE REPAIR - Bukas Sat 9:00-17:00",
+        "segments": [
+          {
+            "id": "S1",
+            "role": "vision.ocr",
+            "label": "Text read from the image",
+            "source": "[image 1]\nCO-OP BIKE REPAIR - Open Sat 9:00-17:00",
+            "text": "CO-OP BIKE REPAIR - Bukas Sat 9:00-17:00"
+          }
+        ]
+      },
+      {
+        "language": "es",
+        "lang": "es",
+        "name": "Spanish",
+        "text": "CO-OP BIKE REPAIR - Abierto sáb 9:00-17:00",
+        "segments": [
+          {
+            "id": "S1",
+            "role": "vision.ocr",
+            "label": "Text read from the image",
+            "source": "[image 1]\nCO-OP BIKE REPAIR - Open Sat 9:00-17:00",
+            "text": "CO-OP BIKE REPAIR - Abierto sáb 9:00-17:00"
+          }
+        ]
+      }
+    ],
+    "issues": [],
+    "counts": {
+      "languages": 2,
+      "segments": 1,
+      "issues": 0
+    }
+  },
+  "error": null,
+  "latency_s": 4.58,
+  "calls": [
+    {
+      "purpose": "worker.translate.42",
+      "model": "claude-haiku-4-5",
+      "served_by": null,
+      "effort": null,
+      "stream": false,
+      "images": 0,
+      "stop_reason": "end_turn",
+      "input_tokens": 1446,
+      "output_tokens": 131,
+      "cache_read_tokens": 0,
+      "cost_usd": 0.002101,
+      "latency_s": 4.58
+    }
+  ],
+  "cost_usd": 0.002101
+}

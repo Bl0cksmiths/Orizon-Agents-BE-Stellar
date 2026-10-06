@@ -70,6 +70,7 @@ from .security import (
 from .seed import seed_registry
 from .services import (
     execution_svc,
+    platform_treasury,
     rating_writer,
     refund_reconcile,
     registry_sync,
@@ -779,6 +780,32 @@ class RegistryReadiness(BaseModel):
     last_full_sync_at: float | None  # epoch seconds, this process's clock
 
 
+class TreasuryReadiness(BaseModel):
+    """The platform treasury and what the registry says of each built-in agent (ADR 0016).
+
+    `address` is the team register's platform treasury — the owner the built-in
+    agents are registered to, and the only account a built-in step is ever
+    paid to — or null when the register names none (or names two). `agents`
+    is each built-in agent's verdict from the registry mirror's latest pass:
+    registered | mismatch | foreign_owner | unregistered | unread. From memory,
+    never a read on the probe's path. Informational: a plan prices from the
+    catalog whatever it says, and a step is paid only when the settle-time
+    `owner_of` is the treasury.
+    """
+
+    address: str | None
+    agents: dict[str, registry_sync.PlatformVerdict]
+
+
+def _treasury_readiness() -> TreasuryReadiness:
+    try:
+        address = platform_treasury.treasury_address()
+    except platform_treasury.TreasuryError as e:
+        logger.warning("readiness: %s", e)
+        address = None
+    return TreasuryReadiness(address=address, agents=registry_sync.platform_agents())
+
+
 _escrow_version_probe: asyncio.Task | None = None
 
 
@@ -814,6 +841,7 @@ class ReadinessResponse(BaseModel):
     disputes: DisputesReadiness  # informational, never gates readiness
     escrow: EscrowReadiness  # informational, never gates readiness
     registry: RegistryReadiness  # informational, never gates readiness
+    treasury: TreasuryReadiness  # informational, never gates readiness
     # Informational. Anyone: provider and planning active|paused (+ when a
     # pause lifts). With the operator X-API-Key: keys present, models, and
     # today's spend against the cap — numbers an abuser must not see.
@@ -896,6 +924,7 @@ async def readiness(
             agents=sync.agents,
             last_full_sync_at=sync.last_full_sync_at,
         ),
+        treasury=_treasury_readiness(),
         # A wrong or absent key is simply the public view: a probe never 401s.
         orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )

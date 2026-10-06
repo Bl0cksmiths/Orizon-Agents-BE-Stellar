@@ -27,6 +27,10 @@ from app.services import binding_registry, orchestrator_svc
 from app.services.prompt_improver import SpecDraft
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 INTENT = "build a landing page for my bakery with opening hours"
 KIT_INTENT = "make me a tetris game"
 EXTERNAL = "ext_exec1"

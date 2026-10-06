@@ -1070,8 +1070,15 @@ def bytes32(b: bytes) -> SCVal:
 
 
 def usdc_to_i128(amount_usdc: float) -> int:
-    """0.012 → 120_000 (Stellar uses 7 decimals)."""
-    return round(amount_usdc * 10_000_000)
+    """0.012 → 120_000 (Stellar uses 7 decimals) — `money.to_stroops`, the one rule.
+
+    The name is historical: the amount is in whatever asset the escrow's SAC
+    wraps (native XLM on testnet). Raises `ValueError` for an amount the ledger
+    cannot hold — non-finite, negative, past i128 — rather than rounding it.
+    """
+    from .. import money
+
+    return money.to_stroops(amount_usdc)
 
 
 # ── read-only transaction lookup (the refund reconcile sweep) ───────────

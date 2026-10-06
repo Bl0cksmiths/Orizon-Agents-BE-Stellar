@@ -1,7 +1,8 @@
 """deploy.v0 worker — seals the final artifact and synthesizes a preview URL.
 
-Deterministic, no LLM. Reads the prior `code.gen` (and optionally `code.critic`)
-artifact from `context`, computes file count + total byte size, and returns a
+Deterministic, no LLM. Reads the artifact the latest code step delivered —
+code.gen, code.next, code.critic, or a bound operator's — from `context`
+(`context.latest_output`), computes file count + total byte size, and returns a
 believable "preview URL" string for the trace. The actual on-chain attestation
 still happens in execution_svc._settle_onchain() — this worker only emits the
 display-layer "sealed · preview ready" message that makes the pipeline feel
@@ -17,6 +18,7 @@ import re
 from typing import Any
 
 from .base import Worker
+from .context import CODE_ROLES, latest_output
 
 
 def _slugify(s: str, max_len: int = 24) -> str:
@@ -32,10 +34,21 @@ def _short_id(seed: str) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
 
 
+def _sealable(context: dict[str, Any] | None) -> tuple[str, dict[str, Any]] | None:
+    """The role and output of the build to seal: the last artifact delivered,
+    which is also the one the run hands the buyer (`execution_svc` keeps the
+    last artifact any step returned)."""
+    return latest_output(context, CODE_ROLES, include_external=True)
+
+
 class DeployV0(Worker):
     id = "agt_08j2"
     name = "deploy.v0"
     real = True
+
+    def upstream_sources(self, context: dict[str, Any] | None) -> list[str]:
+        sealed = _sealable(context)
+        return [sealed[0]] if sealed else []
 
     async def run(
         self,
@@ -47,9 +60,8 @@ class DeployV0(Worker):
         await asyncio.sleep(0.28 + random.random() * 0.18)
 
         ctx = context or {}
-        # Prefer critic output if it ran, else fall back to code.gen.
-        prior = ctx.get("code.critic") or ctx.get("code.gen") or {}
-        artifact = prior.get("artifact") if isinstance(prior, dict) else None
+        sealed = _sealable(ctx)
+        artifact = sealed[1].get("artifact") if sealed else None
 
         if not isinstance(artifact, dict):
             # No artifact to seal — emit a soft, honest summary so the

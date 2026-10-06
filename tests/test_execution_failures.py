@@ -251,7 +251,7 @@ def test_partial_run_that_still_produced_an_artifact_is_complete(monkeypatch):
     # The simulated seal counts the one agent that delivered, not the plan's
     # two (D-086's rule, on the run that moves no money).
     sealed = [line.msg for line in state.traces[task_id] if line.msg.startswith("workflow sealed")]
-    assert len(sealed) == 1 and sealed[0].startswith("workflow sealed — 1 agents · 0.010 USDC")
+    assert len(sealed) == 1 and sealed[0].startswith("workflow sealed — 1 agents · 0.010 XLM")
 
 
 def test_partial_run_without_an_artifact_is_failed(monkeypatch):

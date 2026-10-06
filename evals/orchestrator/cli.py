@@ -88,6 +88,11 @@ def _parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=f"{helptext} from a variant directory's results")
         p.add_argument("variant_dir", type=Path)
 
+    cmp = sub.add_parser("compare", help="planner composition before and after, from two variants' results")
+    cmp.add_argument("before", type=Path)
+    cmp.add_argument("after", type=Path)
+    cmp.add_argument("--out", type=Path, help="also write the comparison here")
+
     wk = sub.add_parser("workers", help="run each built-in Claude worker once (live only)")
     wk.add_argument("--live", action="store_true", help="required: this calls the real Claude API")
     wk.add_argument("--max-usd", type=float, help="refused unless every worker's full budget fits under it")
@@ -276,6 +281,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.cmd in ("report", "sweep"):
             summary, sweep_md = report.write(args.variant_dir)
             print(summary if args.cmd == "report" else sweep_md)
+            return EXIT_OK
+        if args.cmd == "compare":
+            text = report.compare(args.before, args.after)
+            if args.out:
+                args.out.write_text(text, encoding="utf-8")
+            print(text)
             return EXIT_OK
         if args.cmd == "campaign":
             from .campaign import build

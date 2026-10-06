@@ -421,12 +421,24 @@ def test_code_critic_asks_nothing_for_a_baked_draft_or_no_draft(claude: FakeClau
 
 
 def test_every_llm_worker_is_tier_aware() -> None:
-    """The seven LLM workers, and only they, take a tier from the run loop."""
+    """The LLM workers, and only they, take a tier from the run loop."""
     from app.agents.workers.base import ModelWorker
 
     tiered = sorted(w.name for w in WORKERS.values() if isinstance(w, ModelWorker))
     assert tiered == sorted(
-        ["code.gen", "code.critic", "copywrite.v3", "seo.brief", "research.pro", "design.figma", "sol-audit"]
+        [
+            "code.gen",
+            "code.critic",
+            "copywrite.v3",
+            "seo.brief",
+            "research.pro",
+            "design.figma",
+            "sol-audit",
+            "vision.ocr",
+            "ads.meta",
+            "translate.42",
+            "code.next",
+        ]
     )
     defaults = {w.name: w.default_tier for w in WORKERS.values() if isinstance(w, ModelWorker)}
     assert defaults == {
@@ -437,4 +449,8 @@ def test_every_llm_worker_is_tier_aware() -> None:
         "code.gen": "moderate",
         "code.critic": "moderate",
         "sol-audit": "complex",
+        "vision.ocr": "low",
+        "ads.meta": "low",
+        "translate.42": "low",
+        "code.next": "moderate",
     }

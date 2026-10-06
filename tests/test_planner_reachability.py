@@ -36,6 +36,10 @@ from app.services.reputation_svc import RepInfo
 from app.state import state
 from app.stellar import cache as rcache
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 DEAD = "ext_dead"
 ALIVE = "ext_alive"
 FREE_FORM_INTENT = "write a launch announcement for a neighbourhood bakery"

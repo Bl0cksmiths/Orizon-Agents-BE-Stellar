@@ -37,6 +37,10 @@ from app.state import state
 from app.stellar import cache as rcache
 from app.stellar import client as sc
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 FREE_FORM_INTENT = "write a haiku about databases"
 KIT_INTENT = "tetris game in html"
 SEEDED = 12

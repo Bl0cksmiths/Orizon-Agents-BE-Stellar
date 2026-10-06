@@ -42,6 +42,10 @@ from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 # A build intent that matches no DemoKit, so decompose() takes the free-form
 # path — and the kind of intent the planner is told to hand to code.gen.
 BUILD_INTENT = "build a habit tracker web app"
@@ -184,8 +188,11 @@ def test_no_plan_carries_a_step_and_an_exclusion_for_the_same_agent(
 
     # The inline flag and the notices agree step by step: a kept step is
     # `degraded` exactly when the backstop re-admitted it below the floor.
+    # A re-admitted agent the plan holds no step for is still reported — the
+    # notices describe the shortlist — which happens here when the composition
+    # rules drop its step (code.critic re-admitted with no builder to review).
     relaxed = {n.agent_id for n in resp.notices if n.reason_code == "floor_relaxed"}
-    assert {s.agent_id for s in resp.steps if s.degraded} == relaxed
+    assert {s.agent_id for s in resp.steps if s.degraded} == relaxed & stepped
 
 
 # ── the empty-plan fallback ─────────────────────────────────────
@@ -443,7 +450,7 @@ def test_a_repeated_step_is_kept_once(seeded: object, monkeypatch: pytest.Monkey
     planner = _planner_returning(
         ("agt_11c0", "build the app", 1.0),
         ("agt_11c0", "  Build the APP ", 1.0),
-        ("agt_12r0", "review it", 1.0),
+        ("agt_02k2", "style it", 1.0),
         ("agt_11c0", "build the app", 1.0),
         ("agt_11c0", "write the tests", 1.0),
     )
@@ -452,7 +459,7 @@ def test_a_repeated_step_is_kept_once(seeded: object, monkeypatch: pytest.Monkey
 
     assert [(s.agent_id, s.rationale) for s in resp.steps] == [
         ("agt_11c0", "build the app"),
-        ("agt_12r0", "review it"),
+        ("agt_02k2", "style it"),
         ("agt_11c0", "write the tests"),
     ]
 

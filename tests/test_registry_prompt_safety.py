@@ -47,6 +47,10 @@ from app.services import binding_registry, orchestrator_svc, registry_sync
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 LOGGER_NAME = "app.services.registry_sync"
 REGISTRY_ID = "CFAKEREGISTRY"
 OWNER = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"

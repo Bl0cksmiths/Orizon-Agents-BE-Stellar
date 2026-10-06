@@ -136,6 +136,32 @@ def test_haiku_gets_no_effort_and_no_fallbacks(api: Callable[..., Recorder]) -> 
     assert "anthropic-beta" not in recorder.requests[0].headers
 
 
+def test_images_go_ahead_of_the_user_text_as_base64_blocks(api: Callable[..., Recorder]) -> None:
+    recorder = api(_ok(_message(model="claude-haiku-4-5")))
+    images = [claude.ImageBlock("image/png", "iVBORw0KGgo="), claude.ImageBlock("image/webp", "UklGRg==")]
+    _plan(model="claude-haiku-4-5", images=images)
+    assert recorder.body()["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "UklGRg=="}},
+                {"type": "text", "text": "build a todo app"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("image", [("image/svg+xml", "PHN2Zz4="), ("image/png", "")], ids=["svg", "empty"])
+def test_an_image_claude_cannot_read_is_refused_before_anything_is_sent(
+    api: Callable[..., Recorder], image: tuple[str, str]
+) -> None:
+    recorder = api()
+    with pytest.raises(ValueError, match="image"):
+        _plan(images=[claude.ImageBlock(*image)])
+    assert recorder.requests == []
+
+
 def test_the_dated_id_the_api_serves_haiku_under_is_priced_as_haiku(api: Callable[..., Recorder]) -> None:
     """The API answers a `claude-haiku-4-5` request as `claude-haiku-4-5-20251001`."""
     api(_ok(_message(model="claude-haiku-4-5-20251001", usage={"input_tokens": 1000, "output_tokens": 500})))

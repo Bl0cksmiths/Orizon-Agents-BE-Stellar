@@ -65,6 +65,27 @@ _UNREACHABLE_REASON = (
 )
 
 
+# Routing policy, not a verdict on the agent, so neither sentence blames it.
+_SIMULATED_REASON = (
+    "its built-in worker only simulates this agent's output so far (a buyer is never charged for simulated "
+    "work, so the planner passed it over)"
+)
+
+_EXTERNAL_REASON = "Plans currently use Orizon's built-in agents only; outside operators' agents aren't routed."
+
+
+_NO_IMAGE_REASON = (
+    "the plan asked it to read an image, but the request has no image or https image link (nothing to read, so "
+    "the step was left out)"
+)
+
+
+_PROVIDER_REASON = (
+    "it runs on Claude only, and the platform's AI work is not running on Claude right now (so the planner "
+    "passed it over)"
+)
+
+
 def _floor_reason(info: RepInfo | None) -> str:
     """Why the floor acted on an agent, with the deciding lower-bound bps.
 
@@ -188,6 +209,106 @@ def unreachable_exclusion(agent: Agent) -> PlanFloorNotice:
         agent_name=agent.name,
         reason=_UNREACHABLE_REASON,
         reason_code="unreachable_endpoint",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def simulated_exclusion(agent: Agent) -> PlanFloorNotice:
+    """A built-in agent left out because its worker would only simulate the step.
+
+    The platform's own catalog lists agents ahead of their workers, and a
+    simulated step is still a paid step: the buyer would be charged for
+    placeholder output. Not a reputation verdict, so `lower_bound_bps` stays
+    None, as on the endpoint notices.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_SIMULATED_REASON,
+        reason_code="simulated_worker",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+# The one `external_not_routed` notice's `agent_id`. Not a Soroban Symbol
+# (`*` is outside [A-Za-z0-9_]), so no registered agent can ever share it, and
+# a client tells the aggregate apart by `reason_code` without parsing it.
+EXTERNAL_POLICY_ID = "*external"
+
+
+def external_policy_notice() -> PlanFloorNotice:
+    """ONE notice that outside operators' agents are not routed, naming none of them.
+
+    The owner's routing policy (`PLANNER_ROUTE_EXTERNAL` off). The external set
+    is the permissionless registry — potentially thousands of agents — so a
+    notice per agent would bury the plan card in names the buyer never asked
+    about, and would publish operators' ids on every plan. The card says the
+    policy once; which agents it covered goes to the server log only
+    (`orchestrator_svc._registry_notices`).
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=EXTERNAL_POLICY_ID,
+        agent_name=None,
+        reason=_EXTERNAL_REASON,
+        reason_code="external_not_routed",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def provider_exclusion(agent: Agent) -> PlanFloorNotice:
+    """A Claude-only built-in agent left out while the workers are not on Claude.
+
+    Its worker would fail the step unattempted (`model_not_configured`), so it
+    is not offered at all; the agent is fine, the provider is the reason.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_PROVIDER_REASON,
+        reason_code="provider_unavailable",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def no_image_exclusion(agent: Agent) -> PlanFloorNotice:
+    """vision.ocr left out of a plan that proposed it, for want of an image to read.
+
+    Emitted only when the planner put the step in the plan, like an endpoint
+    found dead mid-plan: an OCR agent that was merely not picked gets no
+    notice, so a plan card for an ordinary text request stays quiet.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=_NO_IMAGE_REASON,
+        reason_code="no_image_input",
+        lower_bound_bps=None,
+        floor_bps=settings.reputation_floor_bps,
+    )
+
+
+def no_input_exclusion(agent: Agent, missing: str) -> PlanFloorNotice:
+    """A proposed step left out because it would have nothing to work on.
+
+    `missing` says what, in a clause ("there is no code.gen build to review");
+    the run loop would not attempt the step, so leaving it in would only show
+    the buyer a price they authorize for nothing. Emitted only for a step the
+    planner proposed, like `no_image_exclusion`.
+    """
+    return PlanFloorNotice(
+        kind="excluded",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        reason=f"the plan asked it for a step, but {missing} (nothing to work on, so the step was left out)",
+        reason_code="no_step_input",
         lower_bound_bps=None,
         floor_bps=settings.reputation_floor_bps,
     )

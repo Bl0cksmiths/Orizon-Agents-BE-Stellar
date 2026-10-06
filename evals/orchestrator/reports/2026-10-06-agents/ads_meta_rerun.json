@@ -1,0 +1,101 @@
+{
+  "agent_id": "agt_07w3",
+  "worker": "ads.meta",
+  "intent": "Meta ads for our neighbourhood bike repair co-op in Quezon City, open Saturdays",
+  "context_roles": [
+    "seo.brief",
+    "copywrite.v3"
+  ],
+  "step_model": "Claude Haiku 4.5 (tier: low)",
+  "output": {
+    "summary": "5 Meta ad variants — Fix Your Bike Together",
+    "objective": "OUTCOME_AWARENESS",
+    "special_ad_category": "NONE",
+    "ads": [
+      {
+        "primary_text": "Fix your bike, together. Free bike repair Saturdays at Spoke & Wrench Co-op in Quezon City.",
+        "headline": "Fix Your Bike Together",
+        "description": "Free Saturdays",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Learn to repair your own bike. Spoke & Wrench Co-op teaches flats, brakes, gears every Saturday.",
+        "headline": "Learn Bike Repair",
+        "description": "Free workshops",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Bring your bike Saturdays. Use our stands and tools with a volunteer mentor at your side.",
+        "headline": "Community Bike Workshop",
+        "description": "Open Saturdays",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Flat tires, brake issues, gear trouble? Join Spoke & Wrench Co-op Saturdays for free repair help and hands-on learning in…",
+        "headline": "Bike Repair Help Here",
+        "description": "",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      },
+      {
+        "primary_text": "Stop paying for simple repairs. Spoke & Wrench Co-op gives you the tools, stands, and knowledge to fix your bike yourself…",
+        "headline": "Repair Your Own Bike",
+        "description": "Free co-op access",
+        "cta": "LEARN_MORE",
+        "cta_label": "Learn more"
+      }
+    ],
+    "audience": {
+      "summary": "Bike commuters and weekend riders in Quezon City who want to learn repair skills or need help fixing their bikes without high shop costs.",
+      "locations": [
+        "Quezon City"
+      ],
+      "age_min": 18,
+      "age_max": 65,
+      "interests": [
+        "Cycling",
+        "Bicycle maintenance",
+        "DIY and crafts",
+        "Community involvement",
+        "Urban commuting",
+        "Sustainable transportation",
+        "Weekend hobbies",
+        "Local community groups",
+        "Outdoor activities",
+        "Environmental consciousness"
+      ],
+      "exclusions": []
+    },
+    "notes": [
+      "Verify exact Saturday hours and location address for landing page",
+      "Confirm if volunteer availability varies by week"
+    ],
+    "unverified_figures": [],
+    "counts": {
+      "ads": 5,
+      "interests": 10
+    }
+  },
+  "error": null,
+  "latency_s": 6.82,
+  "calls": [
+    {
+      "purpose": "worker.ads.meta",
+      "model": "claude-haiku-4-5",
+      "served_by": null,
+      "effort": null,
+      "stream": false,
+      "images": 0,
+      "stop_reason": "end_turn",
+      "input_tokens": 2178,
+      "output_tokens": 474,
+      "cache_read_tokens": 0,
+      "cost_usd": 0.004548,
+      "latency_s": 6.36
+    }
+  ],
+  "cost_usd": 0.004548
+}

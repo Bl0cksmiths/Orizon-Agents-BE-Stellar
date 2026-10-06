@@ -44,6 +44,10 @@ DECLARED = {
     # QA test agents counted as outside operators.
     "GBE6AUTEQDC7HN2453JY4SCPMMGDVAXIX7IOXLQM7K3KTVLL5R3UOQ4J",
     "GAGOZVEZ43HDMIU367HADCNRD6O425JUX3PQOEZEDYZP5HFKXXJ7HJNC",
+    # The platform treasury (ADR 0016): the owner the built-in agents are
+    # registered to, so escrow v2 pays it for their steps. Left out, every
+    # built-in agent would read as an outside operator's once registered.
+    "GDOGIRT73NAQ7VRCIOK7G76EK7MAOC55EDT5GG4EKRE4VPVWSWG7KSP3",
 }
 
 GOOD = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
@@ -64,7 +68,7 @@ def test_the_committed_register_loads_and_holds_every_declared_wallet() -> None:
     wallets = load_team_register()
 
     assert {w.address for w in wallets} == DECLARED
-    assert len(wallets) == len(DECLARED) == 12
+    assert len(wallets) == len(DECLARED) == 13
     assert all(w.role and w.evidence for w in wallets)
     assert adoption_svc.TEAM_REGISTER == wallets
 

@@ -40,11 +40,12 @@ def _critic_context() -> dict[str, Any]:
     return {"code.gen": {"artifact": CodeGen()._artifact_dict(parse_tagged_artifact(TAGGED))}}
 
 
-def test_only_the_two_code_workers_are_capped_and_at_moderate() -> None:
+def test_only_the_code_workers_are_capped_and_at_moderate() -> None:
     caps = {w.name: w.max_tier for w in WORKERS.values() if isinstance(w, ModelWorker)}
     assert {name: cap for name, cap in caps.items() if cap is not None} == {
         "code.gen": "moderate",
         "code.critic": "moderate",
+        "code.next": "moderate",
     }
 
 

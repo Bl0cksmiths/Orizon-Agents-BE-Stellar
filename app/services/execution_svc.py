@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import math
 import re
 import secrets
 import time
@@ -11,9 +10,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from .. import money
 from ..agents.model_factory import watch_served_models
 from ..agents.registry import get_worker
-from ..agents.workers.base import ModelWorker
+from ..agents.workers.base import ModelWorker, Worker
+from ..agents.workers.context import delivered_roles
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
 from ..demo_kits import detect_kit
@@ -31,7 +32,7 @@ from ..schemas import (
 from ..security import CodedHTTPException
 from ..state import state
 from ..trace_bus import bus
-from . import failure_tracker, rating_writer, reputation_svc, task_persistence
+from . import failure_tracker, platform_treasury, rating_writer, reputation_svc, task_persistence
 from .binding_registry import resolve_worker
 from .dispute_store import OUTPUT_SUMMARY_MAX_CHARS, SettlementRecord, SettlementStep, get_dispute_store
 from .orchestrator_svc import _is_listed
@@ -254,6 +255,28 @@ def _fenced_for_context(output: dict) -> dict[str, Any]:
     return fenced
 
 
+def _upstream_line(worker: Worker, context: dict[str, Any], *, first_party: bool) -> str | None:
+    """The trace line naming the earlier steps this step builds on, or None.
+
+    A first-party worker names the roles its handoff carries — the same
+    `Worker.handoff` its prompt is built from, so the line cannot name a step
+    the prompt did not use. A bound operator is sent the whole `context` in its
+    dispatch envelope (ADR 0001, unchanged), so its line names everything that
+    envelope carries, and says "receives": what the operator then uses is its
+    own business. A line is commentary, never the step's work: a failure to
+    build one is logged and the step runs without it.
+    """
+    try:
+        sources = worker.upstream_sources(context) if first_party else delivered_roles(context)
+    except Exception:
+        logger.exception("could not name the upstream outputs of %s", worker.name)
+        return None
+    if not sources:
+        return None
+    verb = "uses" if first_party else "receives"
+    return f"{worker.name} {verb} output from: {', '.join(sources)}"
+
+
 def _trace_url(value: object) -> str | None:
     """An operator-supplied preview URL, when it is safe to put in a trace line.
 
@@ -459,7 +482,11 @@ async def _run(
 ) -> None:
     _live_runs.add(task_id)
     start = time.monotonic()
-    spent = 0.0
+    # In stroops (ADR 0015). `spent` is what the delivered steps' plan prices
+    # add up to — the whole bill of a simulated run. A paid run's bill is
+    # `charged`: what its settle actually moved, set the moment it confirms.
+    spent = 0
+    charged = 0
     succeeded = 0  # steps that returned output; drives the terminal status
     last_artifact: dict | None = None
     charge_tx: str | None = None
@@ -625,6 +652,9 @@ async def _run(
                 "exec",
                 f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
             )
+            upstream_line = _upstream_line(worker, context, first_party=get_worker(step.agent_id) is worker)
+            if upstream_line:
+                await _emit(task_id, start, "exec", upstream_line)
 
             try:
                 if isinstance(worker, ModelWorker):
@@ -665,11 +695,12 @@ async def _run(
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
-                not_run = _NOT_ATTEMPTED.get(_failure_class(e))
+                not_run = _not_attempted(worker.name, _failure_class(e))
                 if not_run is not None and get_worker(step.agent_id) is worker:
-                    # Our outage, not the agent's: the daily AI budget is spent,
-                    # or the model provider has no key or is down. The agent was
-                    # never able to try, so — like a step refused at execute —
+                    # Not the agent's failure: the daily AI budget is spent, the
+                    # model provider has no key or is down, or the request gave
+                    # the step nothing to work on. The agent was never able to
+                    # try, so — like a step refused at execute —
                     # it is not billed, not counted in its failure streak and
                     # not rated (ADR 0005 D5: "did not deliver" and "could not
                     # be asked" are different facts). First-party only: the
@@ -757,7 +788,7 @@ async def _run(
                 continue
 
             succeeded += 1
-            spent += step.est_price_usdc
+            spent += _price_stroops(step)
             delivered_steps.add(step_index)
             # Clears the streak and emits one recovery INFO, so an endpoint that
             # comes back is as visible in Render as one that broke.
@@ -767,7 +798,7 @@ async def _run(
                     task_id,
                     start,
                     "cost",
-                    f"x402 payment → {step.agent_id} :: {step.est_price_usdc:.3f} USDC (simulated)",
+                    f"x402 payment → {step.agent_id} :: {_amount(_price_stroops(step))} (simulated)",
                 )
             summary = _summarize(output)
             await _emit(task_id, start, "out", f"{worker.name}: {summary}")
@@ -845,12 +876,14 @@ async def _run(
         # Seals that did not confirm, reconciled once the receipt is final.
         pending_seals: list[_PendingSeal] = []
 
-        def _money_moved(settle_tx: str) -> None:
+        def _money_moved(settle_tx: str, moved: int) -> None:
             # Called the moment the settle (v2) or charge (v1) CONFIRMS, before
             # the seal's own poll: the receipt is final, with the hash of what
-            # moved, from that instant. The seal's hash is added when it lands.
-            nonlocal finalized
-            _finalize_task(task_id, status, spent, last_artifact, settle_tx, None)
+            # moved and how much, from that instant. The seal's hash is added
+            # when it lands.
+            nonlocal finalized, charged
+            charged = moved
+            _finalize_task(task_id, status, charged, last_artifact, settle_tx, None)
             finalized = True
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
@@ -914,7 +947,7 @@ async def _run(
                     plan,
                     payer=payer,
                     auth_id_hex=auth_id_hex,
-                    total_usdc=spent,
+                    total_usdc=money.stroops_to_float(spent),
                     delivered_steps=frozenset(delivered_steps),
                     output_summaries=output_summaries,
                     authorized_max=authorized_max,
@@ -951,7 +984,7 @@ async def _run(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {succeeded} agents · {spent:.3f} USDC · {time.monotonic() - start:.2f}s",
+                f"workflow sealed — {succeeded} agents · {_amount(spent)} · {time.monotonic() - start:.2f}s",
             )
 
         if status != "complete":
@@ -970,7 +1003,7 @@ async def _run(
                 f"workflow incomplete — {succeeded}/{total_steps} agents produced output",
             )
 
-        _finalize_task(task_id, status, spent, last_artifact, charge_tx, proof_tx)
+        _finalize_task(task_id, status, charged if onchain else spent, last_artifact, charge_tx, proof_tx)
         finalized = True
 
         # Follow-up work, in this order because both sign with the one server
@@ -997,7 +1030,7 @@ async def _run(
         # propagating. shield: a second cancel must not kill the trace line.
         # A task already final keeps what it says (see `finalized`).
         if not finalized:
-            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+            _finalize_task(task_id, "failed", charged if onchain else spent, last_artifact, charge_tx, proof_tx)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
@@ -1005,7 +1038,7 @@ async def _run(
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
         if not finalized:
-            _finalize_task(task_id, "failed", spent, last_artifact, charge_tx, proof_tx)
+            _finalize_task(task_id, "failed", charged if onchain else spent, last_artifact, charge_tx, proof_tx)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
@@ -1068,12 +1101,17 @@ def _terminal_status(total_steps: int, succeeded: int, artifact: dict | None) ->
 def _finalize_task(
     task_id: str,
     status: TaskStatus,
-    spent: float,
+    spent: int,
     artifact: dict | None,
     charge_tx: str | None,
     proof_tx: str | None,
 ) -> None:
-    """Terminal status write shared by the complete / failed / cancelled paths."""
+    """Terminal status write shared by the complete / failed / cancelled paths.
+
+    `spent` is the run's bill in stroops: the delivered prices of a simulated
+    run, or what a paid run's settle moved (0 until one confirms). The legacy
+    float is derived from it, exactly — never rounded to four places.
+    """
     task = state.tasks.get(task_id)
     if task is None:
         return
@@ -1081,7 +1119,8 @@ def _finalize_task(
         task.model_copy(
             update={
                 "status": status,
-                "spent": round(spent, 4),
+                "spent": money.stroops_to_float(spent),
+                "spent_stroops": spent,
                 "artifact": artifact,
                 "charge_tx": charge_tx,
                 "proof_tx": proof_tx,
@@ -1181,7 +1220,8 @@ async def _settle_onchain(
             task_id,
             start,
             "error",
-            f"charge {total_usdc:.3f} USDC exceeds cap {settings.max_charge_usdc:.3f} — skipping on-chain charge/seal",
+            f"charge {_amount(money.to_stroops(total_usdc))} exceeds cap "
+            f"{_amount(money.to_stroops(settings.max_charge_usdc))} — skipping on-chain charge/seal",
             settlement="failed",
         )
         return (None, None, None)
@@ -1213,7 +1253,7 @@ async def _settle_onchain(
                 task_id,
                 start,
                 "cost",
-                f"x402 charge → {total_usdc:.3f} USDC settled · tx {charge_tx[:10]}…",
+                f"x402 charge → {_amount(total_i128)} settled · tx {charge_tx[:10]}…",
                 settlement="settled",
             )
             if on_charged is not None:
@@ -1349,7 +1389,7 @@ async def _settle_onchain(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {len(plan.plan.steps)} agents · {total_usdc:.3f} USDC · "
+                f"workflow sealed — {len(plan.plan.steps)} agents · {_amount(total_i128)} · "
                 f"{time.monotonic() - start:.2f}s",
             )
         else:
@@ -1462,6 +1502,19 @@ _owner_reads: dict[str, tuple[str | None, float]] = {}
 UNPAID_FREE = "free"
 UNPAID_NO_OWNER = "no_onchain_owner"
 UNPAID_OWNER_UNREADABLE = "owner_unreadable"
+# A built-in agent whose on-chain owner is not the platform treasury (ADR 0016):
+# `register` is permissionless and write-once, so an `agt_` id somebody else
+# registered first would otherwise be paid for the platform's own work.
+UNPAID_NOT_TREASURY = "owner_not_platform_treasury"
+
+# The trace line each owner-related reason gives the buyer.
+_UNPAID_FOR_OWNER: dict[str | None, str] = {
+    UNPAID_NO_OWNER: "{agent} has no confirmed on-chain owner — its step is not paid",
+    UNPAID_OWNER_UNREADABLE: "{agent} has no confirmed on-chain owner — its step is not paid",
+    UNPAID_NOT_TREASURY: (
+        "{agent} is registered on-chain to an account that is not the platform treasury — its step is not paid"
+    ),
+}
 UNPAID_OVER_CAP = "over_authorized_cap"
 
 
@@ -1656,10 +1709,9 @@ async def _authorize_for_execute(plan: StoredPlan, auth_id_hex: str, payer: str)
         raise AuthorizationRefusedError(
             409, "authorization_spent", f"this authorization is already spent — {_REAUTHORIZE}"
         )
-    try:
-        plan_total = sum(_stroops(step.est_price_usdc) for step in plan.plan.steps)
-    except _PayoutRefused:
-        plan_total = auth.max_amount + 1  # a price the ledger cannot hold is one no authorization covers
+    # The plan's own total in stroops — exactly what its card showed and what
+    # the buyer was asked to authorize (ADR 0015).
+    plan_total = plan.plan.total_stroops
     if plan_total > auth.max_amount:
         raise AuthorizationRefusedError(
             409, "authorization_insufficient", f"this authorization does not cover the plan — {_REAUTHORIZE}"
@@ -1682,13 +1734,22 @@ async def _authorize_for_execute(plan: StoredPlan, auth_id_hex: str, payer: str)
     return auth.max_amount
 
 
-def _stroops(amount_usdc: float) -> int:
-    """`amount_usdc` in stroops, refusing what the ledger cannot hold."""
-    from ..stellar import client as sc
+def _price_stroops(step: PlanStep) -> int:
+    """The step's price as the plan froze it, in stroops (ADR 0015).
 
-    if not math.isfinite(amount_usdc) or amount_usdc < 0:
-        raise _PayoutRefused(f"price {amount_usdc!r} is not a finite, non-negative amount")
-    return sc.usdc_to_i128(amount_usdc)
+    Never re-read from the registry: an operator who reprices after the plan
+    was built is paid what the buyer authorized. `PlanStep` derives the field
+    on validation, so it is always set; a step that bypassed validation and
+    carries none is refused rather than guessed.
+    """
+    if step.price_stroops is None:
+        raise _PayoutRefused(f"step for {step.agent_id} carries no price in stroops")
+    return step.price_stroops
+
+
+def _amount(stroops: int) -> str:
+    """Money as a trace line shows it: every decimal it carries, and the asset it is in."""
+    return f"{money.format_amount(stroops)} {money.asset_code()}"
 
 
 class _PayoutRefused(Exception):
@@ -1704,6 +1765,7 @@ class _StepPayout:
     amount: int  # stroops; 0 when the step is not paid
     payout_index: int | None  # None when the step is not paid
     unpaid_reason: str | None = None  # one of the UNPAID_* tokens when not paid
+    payee: str | None = None  # the confirmed owner the payout goes to; None when not paid
 
 
 @dataclass(frozen=True)
@@ -1713,6 +1775,7 @@ class _PayoutPlan:
     payouts: tuple[Any, ...]  # client.Payout, kept Any so this module imports the client lazily
     steps: tuple[_StepPayout, ...]
     clamped_stroops: int = 0  # how much the authorized cap cut; 0 when it cut nothing
+    authorized: int | None = None  # the authorization's max_amount the payouts were held under
 
     @property
     def total(self) -> int:
@@ -1724,6 +1787,7 @@ def _payout_plan(
     delivered_steps: frozenset[int],
     unpaid_agents: Mapping[str, str],
     cap: int | None = None,
+    payees: Mapping[str, str] | None = None,
 ) -> _PayoutPlan:
     """Build `settle`'s payouts from the steps that DELIVERED, and nothing else.
 
@@ -1735,10 +1799,11 @@ def _payout_plan(
     A delivered step is still not paid, and its share goes back to the buyer
     with the remainder, when:
       - it was free: the contract refuses a zero payout;
-      - its agent is in `unpaid_agents` — no on-chain owner (the seeded `agt_*`
-        catalogue), or an owner that could not be confirmed. `settle` pays
-        `owner_of(agent_id)`, and ONE agent the registry does not hold reverts
-        the whole transaction, so only confirmed owners are named;
+      - its agent is in `unpaid_agents` — no on-chain owner, an owner that
+        could not be confirmed, or a built-in agent owned by anyone but the
+        platform treasury. `settle` pays `owner_of(agent_id)`, and ONE agent
+        the registry does not hold reverts the whole transaction, so only
+        confirmed owners are named;
       - `cap`, the authorization's `max_amount`, is already used up. Steps are
         paid in plan order and the one that crosses the cap is cut to what is
         left; `clamped_stroops` says how much was cut, so the caller can say
@@ -1752,8 +1817,14 @@ def _payout_plan(
     than paid in part. The planner caps a plan at six steps, so neither is
     reachable from a planned run today; they bound what a stored plan could
     carry.
+
+    `payees` is each agent's confirmed owner, recorded on its paid steps so the
+    receipt can say who was paid; an agent missing from it is paid all the
+    same (the escrow resolves the owner itself), with no payee recorded.
     """
     from ..stellar import client as sc
+
+    payees = payees or {}
 
     remaining = cap
     clamped = 0
@@ -1761,7 +1832,7 @@ def _payout_plan(
     unpaid: list[_StepPayout] = []
     for index in sorted(delivered_steps):
         step = plan.plan.steps[index]
-        amount = _stroops(step.est_price_usdc)
+        amount = _price_stroops(step)
         reason = UNPAID_FREE if amount <= 0 else unpaid_agents.get(step.agent_id)
         if reason is None and remaining is not None:
             if amount > remaining:
@@ -1779,7 +1850,7 @@ def _payout_plan(
     steps: list[_StepPayout] = list(unpaid)
     if len(paid) <= sc.MAX_SETTLE_PAYOUTS:
         for index, agent_id, amount in paid:
-            steps.append(_StepPayout(index, agent_id, amount, len(payouts)))
+            steps.append(_StepPayout(index, agent_id, amount, len(payouts), payee=payees.get(agent_id)))
             payouts.append(sc.Payout(agent_id, amount))
     else:
         slot: dict[str, int] = {}
@@ -1789,14 +1860,33 @@ def _payout_plan(
                 slot[agent_id] = len(totals)
                 totals.append(0)
             totals[slot[agent_id]] += amount
-            steps.append(_StepPayout(index, agent_id, amount, slot[agent_id]))
+            steps.append(_StepPayout(index, agent_id, amount, slot[agent_id], payee=payees.get(agent_id)))
         if len(totals) > sc.MAX_SETTLE_PAYOUTS:
             raise _PayoutRefused(
                 f"{len(totals)} distinct agents delivered, "
                 f"more than the {sc.MAX_SETTLE_PAYOUTS} payouts one settle accepts"
             )
         payouts = [sc.Payout(agent_id, totals[i]) for agent_id, i in slot.items()]
-    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped)
+    return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped, cap)
+
+
+def _paid_to(payout_plan: _PayoutPlan) -> str:
+    """Who a settle paid, in steps: "1 step to the platform treasury and 2 steps to operators".
+
+    A paid built-in step went to the platform treasury — `_settle_owners`
+    names one only when its owner IS the treasury (ADR 0016) — and every
+    other paid step to its operator. Counted in steps, not payouts, because
+    payouts merge per agent past the settle's limit.
+    """
+    paid = [s for s in payout_plan.steps if s.payout_index is not None]
+    treasury = sum(1 for s in paid if platform_treasury.is_built_in(s.agent_id))
+    operators = len(paid) - treasury
+    parts = []
+    if treasury:
+        parts.append(f"{treasury} step{'' if treasury == 1 else 's'} to the platform treasury")
+    if operators:
+        parts.append("1 step to an operator" if operators == 1 else f"{operators} steps to operators")
+    return " and ".join(parts)
 
 
 def _onchain_owner_sync(agent_id: str) -> str | None:
@@ -1824,26 +1914,64 @@ def _onchain_owner_sync(agent_id: str) -> str | None:
     return owner
 
 
-async def _unpaid_agents(agent_ids: set[str]) -> dict[str, str]:
-    """The agents among `agent_ids` a settle must NOT name, and why.
+@dataclass(frozen=True)
+class _SettleOwners:
+    """Who a settle may pay for each agent, and why the rest are not paid."""
+
+    payees: dict[str, str]  # agent id → its confirmed on-chain owner, which the payout goes to
+    unpaid: dict[str, str]  # agent id → one of the UNPAID_* tokens
+
+
+def _treasury_or_none() -> str | None:
+    """The declared platform treasury, or None when the register names none or
+    cannot say which (two declared) — in both cases no built-in step is paid."""
+    try:
+        return platform_treasury.treasury_address()
+    except platform_treasury.TreasuryError as e:
+        logger.error("platform treasury unreadable — no built-in step can be paid: %s", e)
+        return None
+
+
+async def _settle_owners(agent_ids: set[str]) -> _SettleOwners:
+    """The agents among `agent_ids` a settle may name, with their owners, and
+    the ones it must NOT name, with why.
 
     Only a confirmed on-chain owner is paid (interface amendment, S1): one
     payout naming an agent the registry does not hold reverts the whole settle,
     every other operator's pay with it. An owner that could not be READ is
     left out on the same ground — its step is recorded unpaid, with its own
     reason, and its share goes back to the buyer.
-    """
 
-    async def _check(agent_id: str) -> tuple[str, str | None]:
+    A built-in agent is paid only to the platform treasury (ADR 0016). The
+    registry lets anyone register an unclaimed `agt_` id, and the escrow pays
+    whoever did, so any other owner — or no declared treasury at all — leaves
+    the step unpaid and its share returned, never paid to a stranger.
+    """
+    treasury = _treasury_or_none() if any(platform_treasury.is_built_in(a) for a in agent_ids) else None
+
+    async def _check(agent_id: str) -> tuple[str, str | None, str | None]:
         try:
             owner = await asyncio.to_thread(_onchain_owner_sync, agent_id)
         except Exception as e:
             logger.error("owner of %s unreadable before settle — its steps are not paid: %s", agent_id, e)
-            return agent_id, UNPAID_OWNER_UNREADABLE
-        return agent_id, None if owner else UNPAID_NO_OWNER
+            return agent_id, None, UNPAID_OWNER_UNREADABLE
+        if not owner:
+            return agent_id, None, UNPAID_NO_OWNER
+        if platform_treasury.is_built_in(agent_id) and owner != treasury:
+            logger.error(
+                "built-in agent %s is registered on-chain to %s, not the platform treasury %s — its steps are not paid",
+                agent_id,
+                owner,
+                treasury or "(none declared)",
+            )
+            return agent_id, None, UNPAID_NOT_TREASURY
+        return agent_id, owner, None
 
     results = await asyncio.gather(*(_check(a) for a in sorted(agent_ids)))
-    return {agent_id: reason for agent_id, reason in results if reason is not None}
+    return _SettleOwners(
+        payees={agent_id: owner for agent_id, owner, _ in results if owner is not None},
+        unpaid={agent_id: reason for agent_id, _, reason in results if reason is not None},
+    )
 
 
 async def _settle_refused(
@@ -1971,10 +2099,12 @@ async def _settle_v2(
             return (None, None, None)
         authorized_max = auth.max_amount
     try:
-        unpaid_agents = (
-            await _unpaid_agents({plan.plan.steps[i].agent_id for i in delivered_steps}) if delivered_steps else {}
+        owners = (
+            await _settle_owners({plan.plan.steps[i].agent_id for i in delivered_steps})
+            if delivered_steps
+            else _SettleOwners(payees={}, unpaid={})
         )
-        payout_plan = _payout_plan(plan, delivered_steps, unpaid_agents, authorized_max)
+        payout_plan = _payout_plan(plan, delivered_steps, owners.unpaid, authorized_max, owners.payees)
     except _PayoutRefused as e:
         return await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
     total = payout_plan.total
@@ -1989,7 +2119,7 @@ async def _settle_v2(
             payer,
         )
         await _emit(task_id, start, "error", "payouts cut to what the buyer authorized")
-    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in (UNPAID_NO_OWNER, UNPAID_OWNER_UNREADABLE)):
+    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in _UNPAID_FOR_OWNER):
         logger.error(
             "task %s: step %d (%s) delivered but is NOT paid (%s) — its share returns to the buyer (auth %s)",
             task_id,
@@ -1998,9 +2128,7 @@ async def _settle_v2(
             unpaid.unpaid_reason,
             auth_id_hex,
         )
-        await _emit(
-            task_id, start, "error", f"{unpaid.agent_id} has no confirmed on-chain owner — its step is not paid"
-        )
+        await _emit(task_id, start, "error", _UNPAID_FOR_OWNER[unpaid.unpaid_reason].format(agent=unpaid.agent_id))
 
     if total > sc.usdc_to_i128(settings.max_charge_usdc):
         return await _settle_refused(
@@ -2052,8 +2180,7 @@ async def _settle_v2(
                     task_id,
                     start,
                     "cost",
-                    f"x402 settle → {total_usdc:.3f} USDC paid to {len(payout_plan.payouts)} "
-                    f"operator payout(s), the rest released · tx {tx[:10]}…",
+                    f"x402 settle → {_amount(total)} paid: {_paid_to(payout_plan)}, the rest released · tx {tx[:10]}…",
                     settlement="settled",
                 )
             if on_settled is not None and delivered_steps:
@@ -2314,7 +2441,7 @@ async def _sealed(
         if kind == "delivery_only":
             line = f"workflow sealed — {agents} agents delivered, no payment was made · {elapsed}"
         else:
-            line = f"workflow sealed — {agents} agents · {total_usdc:.3f} USDC · {elapsed}"
+            line = f"workflow sealed — {agents} agents · {_amount(money.to_stroops(total_usdc))} · {elapsed}"
         await _emit(task_id, start, "proof", line)
     else:
         await _emit(task_id, start, "proof", "attestation found on-chain for this job")
@@ -2534,6 +2661,7 @@ def _v2_settlement_record(
                 delivered=False,
                 output_summary=None,
                 paid_usdc=0.0,
+                planned_stroops=step.price_stroops,
             )
         amount = payout.amount / stroops
         receipt = (
@@ -2549,6 +2677,8 @@ def _v2_settlement_record(
             paid_usdc=amount,
             receipt_id_hex=receipt,
             unpaid_reason=payout.unpaid_reason,
+            planned_stroops=step.price_stroops,
+            payee=payout.payee,
         )
 
     return SettlementRecord(
@@ -2562,6 +2692,7 @@ def _v2_settlement_record(
         steps=tuple(_step(index, step) for index, step in enumerate(plan.plan.steps)),
         settled_at=settled_at,
         window_closes_at=window_closes_at,
+        authorized_stroops=payout_plan.authorized,
     )
 
 
@@ -2674,6 +2805,7 @@ async def _record_settlement(
                         # undelivered step has no summary" holds where the
                         # record is built rather than only where it was fed.
                         output_summary=output_summaries.get(index) if index in delivered_steps else None,
+                        planned_stroops=step.price_stroops,
                     )
                     for index, step in enumerate(plan.plan.steps)
                 ),
@@ -2755,14 +2887,15 @@ async def _settle_and_record(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None = None,
-    on_money_moved: Callable[[str], None] | None = None,
+    on_money_moved: Callable[[str, int], None] | None = None,
     on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """Charge, record the settlement, seal, then record the seal — in that order.
 
-    `on_money_moved(tx)` is called once, the moment the charge or settle
-    CONFIRMS and its settlement is recorded — before the seal is submitted —
-    so the run can make its receipt final without waiting on the seal.
+    `on_money_moved(tx, stroops)` is called once, the moment the charge or
+    settle CONFIRMS and its settlement is recorded — before the seal is
+    submitted — with what it moved, so the run can make its receipt final
+    (and its bill exact) without waiting on the seal.
 
     Against a v2 escrow the charge is `_settle_v2`'s one `settle`, paying each
     delivered step its own amount, and the record keeps those per-step
@@ -2795,6 +2928,9 @@ async def _settle_and_record(
         )
 
     recorded: list[SettlementRecord] = []
+    # What the v1 charge moves, by its own rule (`_settled_usdc`).
+    moved = money.to_stroops(_settled_usdc(total_usdc))
+    told: list[str] = []
 
     async def _on_charged(charge_tx: str, job_id: bytes) -> None:
         record = await _record_settlement(
@@ -2813,11 +2949,16 @@ async def _settle_and_record(
         if record is not None:
             recorded.append(record)
         if on_money_moved is not None:
-            on_money_moved(charge_tx)
+            told.append(charge_tx)
+            on_money_moved(charge_tx, moved)
 
     charge_tx, proof_tx, job_id = await _settle_onchain(
         task_id, start, plan, payer=payer, auth_id_hex=auth_id_hex, total_usdc=total_usdc, on_charged=_on_charged
     )
+    if charge_tx is not None and not told and on_money_moved is not None:
+        # A charge hash is only ever returned for a charge that CONFIRMED, so
+        # the money moved even though nobody was told at the moment it did.
+        on_money_moved(charge_tx, moved)
     if recorded:
         if proof_tx is not None:
             await _record_proof(task_id, recorded[0], proof_tx)
@@ -2848,7 +2989,7 @@ async def _settle_and_record_v2(
     delivered_steps: frozenset[int],
     output_summaries: Mapping[int, str | None],
     authorized_max: int | None,
-    on_money_moved: Callable[[str], None] | None = None,
+    on_money_moved: Callable[[str, int], None] | None = None,
     on_seal_pending: Callable[[_PendingSeal], None] | None = None,
 ) -> tuple[str | None, str | None, bytes | None]:
     """`_settle_and_record`'s order over `_settle_v2`: settle, record, seal, record the seal."""
@@ -2880,7 +3021,7 @@ async def _settle_and_record_v2(
         if record is not None:
             recorded.append(record)
         if on_money_moved is not None:
-            on_money_moved(settle_tx)
+            on_money_moved(settle_tx, payout_plan.total)
 
     settle_tx, proof_tx, job_id = await _settle_v2(
         task_id,
@@ -2944,15 +3085,36 @@ NOT_A_DICT_FAILURE = "not_a_dict"
 UNUSABLE_OUTPUT_FAILURE = "unusable_output"
 
 
-# Failure classes of a first-party model step that are OUR outage rather than
-# the agent's failure to deliver, with the trace's plain words for each. Spelled
-# here, not imported from the worker that raises them, for the same reason
-# `_failure_class` reads `rule` duck-typed (ADR 0005).
+# Failure classes of a first-party step that the agent could not attempt —
+# OUR outage (budget, provider), or a request that gave the step nothing it can
+# work on (no image to read, nothing to translate, no target language, a
+# Next.js project for the HTML critic) — rather
+# than the agent's failure to deliver, with the trace's plain words for each.
+# Spelled here, not imported from the worker that raises them, for the same
+# reason `_failure_class` reads `rule` duck-typed (ADR 0005).
 _NOT_ATTEMPTED = {
     "spend_cap_reached": "paused: daily AI budget reached",
     "model_not_configured": "AI provider not configured",
     "model_unavailable": "AI provider unavailable",
+    "no_input": "nothing to work on",
+    "image_unavailable": "no image could be read (refused or unreachable)",
+    "no_target_language": "no target language named",
+    "unsupported_artifact": "reviews single-file HTML apps, not a Next.js project",
 }
+
+# Where one class reads better in a particular worker's words.
+_NOT_ATTEMPTED_FOR = {
+    ("vision.ocr", "no_input"): "no image to read",
+    ("translate.42", "no_input"): "nothing to translate",
+}
+
+
+def _not_attempted(worker_name: str, failure_class: str) -> str | None:
+    """The trace's words for a step `worker_name` could not attempt, or None
+    when `failure_class` is the agent's own failure to deliver."""
+    if failure_class not in _NOT_ATTEMPTED:
+        return None
+    return _NOT_ATTEMPTED_FOR.get((worker_name, failure_class), _NOT_ATTEMPTED[failure_class])
 
 
 def _failure_class(exc: BaseException) -> str:

@@ -227,17 +227,18 @@ def test_binding_store_read_failure_loses_the_step_not_the_run(monkeypatch, capl
     _add_task(task_id, steps=2)
 
     with caplog.at_level(logging.ERROR):
-        # Second step is a local worker: it needs no store read, so it proves
-        # the run survived the failed one rather than unwinding at it.
-        asyncio.run(execution_svc._run(_plan("pln_bound_unreadable", "ext_bound1", "agt_03d9"), task_id))
+        # Second step is a local worker that needs no store read and no model
+        # (deploy.v0 is deterministic), so it proves the run survived the
+        # failed one rather than unwinding at it.
+        asyncio.run(execution_svc._run(_plan("pln_bound_unreadable", "ext_bound1", "agt_08j2"), task_id))
 
     assert seen == []
     task = state.tasks[task_id]
     assert task.spent == PRICE  # only the step that ran was billed
     lines = state.traces[task_id]
     assert any(ln.level == "error" and ln.msg == "unknown agent: ext_bound1" for ln in lines)
-    assert any("match agent: code.next (agt_03d9)" in ln.msg for ln in lines)
-    assert any(ln.level == "out" and ln.msg.startswith("code.next:") for ln in lines)
+    assert any("match agent: deploy.v0 (agt_08j2)" in ln.msg for ln in lines)
+    assert any(ln.level == "out" and ln.msg.startswith("deploy.v0:") for ln in lines)
     # The run reached its own terminal accounting instead of the run-level
     # handler — a read failure is never a crashed workflow.
     assert not any("workflow failed" in ln.msg for ln in lines)

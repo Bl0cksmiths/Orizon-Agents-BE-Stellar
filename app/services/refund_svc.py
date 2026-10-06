@@ -36,6 +36,7 @@ from typing import Any, Literal
 
 from stellar_sdk.xdr import SCVal
 
+from .. import money
 from ..config import settings
 from ..stellar import client as sc
 from .dispute_store import DisputeRecord, SettlementRecord
@@ -217,10 +218,21 @@ def _refuse_above_cap(dispute: DisputeRecord, amount_usdc: float) -> None:
 
 
 def credited_amount_usdc(step_charged_usdc: float, fraction: float = DEFAULT_CREDITED_FRACTION) -> float:
-    """The USDC credited back to the buyer for a disputed step, clamped to
-    [0, the step charge]. `fraction` outside [0, 1] is clamped."""
+    """The amount credited back to the buyer for a disputed step, clamped to
+    [0, the step charge]. `fraction` outside [0, 1] is clamped.
+
+    Computed on stroops and rounded DOWN to the stroop (`money.fraction_of`,
+    ADR 0015): the float `round(charged × fraction, 7)` it replaces rounded to
+    nearest, so a share between two stroops was paid the one above it — 90% of
+    a 2-stroop charge credited all 2. A charge or fraction that is not a finite
+    number keeps the old arithmetic, so it stays not-a-number and
+    `creditable_for` refuses it by name rather than this raising.
+    """
     fraction = min(max(fraction, 0.0), 1.0)
-    return round(max(step_charged_usdc, 0.0) * fraction, 7)
+    charged = max(step_charged_usdc, 0.0)
+    if not (math.isfinite(charged) and math.isfinite(fraction)):
+        return round(charged * fraction, 7)
+    return money.stroops_to_float(money.fraction_of(money.to_stroops(charged), fraction))
 
 
 def creditable_for(

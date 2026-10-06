@@ -146,7 +146,13 @@ def test_v2_lifecycle_records_every_hash_with_the_ledgers_status(
 def test_the_authorize_is_labelled_with_the_plan_id_on_v2(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     run(world, buyer, tmp_path)
     body = world.call_log("/api/stellar/build/authorize")[0]["json"]
-    assert body == {"payer": buyer.public_key, "agent_id": "pln_0a1b2c3d", "max_amount_usdc": 0.07, "ttl_seconds": 1800}
+    # The plan's exact total_stroops (ADR 0015), not a float.
+    assert body == {
+        "payer": buyer.public_key,
+        "agent_id": "pln_0a1b2c3d",
+        "max_amount_stroops": 700_000,
+        "ttl_seconds": 1800,
+    }
 
 
 def test_v1_authorizes_the_batch_label_the_console_sends(buyer: Keypair, tmp_path: Path) -> None:
@@ -693,3 +699,18 @@ def test_a_backend_that_never_wakes_is_a_refusal(buyer: Keypair, tmp_path: Path)
     result = run(world, buyer, tmp_path)
     assert result.code == EXIT_REFUSED
     assert "did not wake" in result.out
+
+
+@pytest.mark.parametrize(
+    ("plan", "stroops"),
+    [
+        ({"total_stroops": 700_000, "total_usdc": 0.9}, 700_000),  # the exact field wins
+        ({"total_usdc": 0.021}, 210_000),  # a backend from before ADR 0015
+        ({"total_usdc": 0.020999999999999998}, 210_000),  # its float sum, read by the one rule
+        ({}, 0),
+    ],
+)
+def test_the_harness_authorizes_the_plans_total_in_stroops(plan: dict[str, Any], stroops: int) -> None:
+    from scripts.lifecycle.stages import plan_total_stroops
+
+    assert plan_total_stroops(plan) == stroops

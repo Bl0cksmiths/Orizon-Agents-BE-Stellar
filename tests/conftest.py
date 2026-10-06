@@ -81,6 +81,24 @@ def no_live_rpc(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_platform_verdicts():
+    """Every test starts with no built-in agent verdicts (ADR 0016).
+
+    Any registry pass over a configured registry records one for every
+    built-in agent, and they live for the process like the mirror's other
+    state, so without this the readiness probe would report the last such
+    test's registry to the next.
+    """
+    from app.services import registry_sync
+
+    registry_sync._platform.clear()
+    registry_sync._platform_logged.clear()
+    yield
+    registry_sync._platform.clear()
+    registry_sync._platform_logged.clear()
+
+
+@pytest.fixture(autouse=True)
 def fresh_planner_limiter(monkeypatch):
     """Every test starts with an empty per-client /decompose budget.
 
@@ -131,6 +149,28 @@ def isolated_snapshots(monkeypatch):
     snapshots.reset_all()
     yield
     snapshots.reset_all()
+
+
+@pytest.fixture
+def pre_pipeline_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routing policy as it stood before the agent-pipelines work.
+
+    External operator agents compete on merit (`PLANNER_ROUTE_EXTERNAL` on),
+    the seeded catalog's simulated workers count as real, and its Claude-only
+    workers count as available on whatever provider the test runs. For suites whose
+    subject is the floor, delisting, binding or reachability rules rather than
+    the policy, so they keep testing those rules on the agents they were
+    written against — and keep doing so once the simulated agents get real
+    workers. tests/test_routing_policy.py covers the policy itself.
+    """
+    from app.agents.workers.mock import MockWorker
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "planner_route_external", True)
+    monkeypatch.setattr(MockWorker, "real", True)
+    from app.services import orchestrator_svc
+
+    monkeypatch.setattr(orchestrator_svc, "claude_workers", lambda: True)
 
 
 @pytest.fixture()

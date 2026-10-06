@@ -55,12 +55,20 @@ INSTRUCTIONS = (
 # Room for the JSON plus any thinking the tier's model does first.
 MAX_TOKENS = 8_000
 
+# How to use what earlier steps handed on (see `context.CONSUMES`).
+UPSTREAM_GUIDANCE = (
+    "Build the brief on them: draw keywords and audience clusters from the "
+    "research findings and from any extracted text or translation. The "
+    "buyer's request still decides the topic."
+)
+
 
 class SeoBrief(ModelWorker):
     id = "agt_05x7"
     name = "seo.brief"
     real = True
     default_tier = "low"
+    reads_upstream = True
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
@@ -72,6 +80,15 @@ class SeoBrief(ModelWorker):
 
     def _deterministic(self, context: dict[str, Any] | None) -> bool:
         return bool((context or {}).get("kit"))
+
+    def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
+        """The free-form prompt: the fenced request, then the fenced upstream outputs."""
+        return worker_prompt(
+            intent,
+            rationale,
+            "Return the SEO brief.",
+            sections=[self.handoff(context).section(UPSTREAM_GUIDANCE)],
+        )
 
     async def run(
         self,
@@ -106,7 +123,7 @@ class SeoBrief(ModelWorker):
             }
 
         # ── Free-form path: LLM ─────────────────────────────────────────────
-        prompt = worker_prompt(intent, rationale, "Return the SEO brief.")
+        prompt = self.build_prompt(intent, rationale, context)
         out: SeoBriefOutput
         if claude_workers():
             draft = await claude_step.structured(

@@ -14,10 +14,21 @@ from typing import Any, NamedTuple, Protocol
 
 from pydantic import ValidationError
 
+from .. import money
+from ..agents.model_factory import claude_workers
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
+from ..agents.role_cards import card_for
 from ..agents.workers.base import ModelWorker
+from ..agents.workers.claude_only import ClaudeOnlyWorker
+from ..agents.workers.context import CODE_GEN as CODE_GEN_ROLE
+from ..agents.workers.context import CODE_NEXT as CODE_NEXT_ROLE
+from ..agents.workers.context import CODE_ROLES, CONSUMES, EXTERNAL_PREFIX
+from ..agents.workers.context import DEPLOY as DEPLOY_ROLE
+from ..agents.workers.context import RESEARCH as RESEARCH_ROLE
+from ..agents.workers.context import SEO as SEO_ROLE
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
+from ..agents.workers.vision_input import has_image_input
 from ..config import settings
 from ..demo_kits import DemoKit, detect_kit
 from ..llm import provider
@@ -42,7 +53,12 @@ from . import intent_screening, reachability, reputation_svc
 from .binding_registry import is_dispatchable
 from .plan_notices import (
     below_floor_exclusion,
+    external_policy_notice,
+    no_image_exclusion,
+    no_input_exclusion,
+    provider_exclusion,
     relaxation,
+    simulated_exclusion,
     substitution,
     unbound_exclusions,
     unreachable_exclusion,
@@ -50,6 +66,7 @@ from .plan_notices import (
 )
 from .prompt_improver import Spec
 from .registry_sync import MAX_AGENT_NAME_CHARS
+from .request_signals import has_translation_target
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +271,19 @@ class _RegistrySnapshot(NamedTuple):
     agents: tuple[Agent, ...]
     routable: tuple[Agent, ...]
     unreachable: tuple[Agent, ...] = ()
+    # Listed and dispatchable, but held out by routing policy before anything
+    # else judged them (`_plannable`): built-in agents whose worker only
+    # simulates its output, and — while `PLANNER_ROUTE_EXTERNAL` is off —
+    # external operator agents. No backstop re-admits either: relaxing the
+    # floor cannot make a simulation real or reverse the owner's policy.
+    simulated: tuple[Agent, ...] = ()
+    external: tuple[Agent, ...] = ()
+    # `PLANNER_ROUTE_EXTERNAL` as this snapshot applied it, so the notices
+    # describe the same policy the routable set was cut with.
+    route_external: bool = False
+    # Built-in agents that run on Claude only, held out while the workers are
+    # not on Claude (`_needs_absent_provider`).
+    off_provider: tuple[Agent, ...] = ()
 
 
 def _with_executor(step: PlanStep) -> PlanStep:
@@ -284,14 +314,114 @@ def _with_executor(step: PlanStep) -> PlanStep:
     return step.model_copy(update={"executor": "built_in", "model": model_for(tier) if tier else None})
 
 
+def _is_simulated(agent_id: str) -> bool:
+    """Whether a built-in worker exists for `agent_id` but only simulates its output.
+
+    Read off the worker itself (`Worker.real`), so the day an agent's real
+    worker replaces its simulation in `app/agents/registry.py`, the agent
+    becomes plannable with no change here.
+    """
+    worker = get_worker(agent_id)
+    return worker is not None and worker.real is not True
+
+
+def _needs_absent_provider(agent_id: str, on_claude: bool | None = None) -> bool:
+    """Whether `agent_id`'s built-in worker runs on Claude only while the workers
+    are not on Claude — so every step it took would fail unattempted
+    (`claude_step.MODEL_NOT_CONFIGURED`). Asked of the worker's class, so a new
+    Claude-only worker is covered with no change here."""
+    claude = claude_workers() if on_claude is None else on_claude
+    return isinstance(get_worker(agent_id), ClaudeOnlyWorker) and not claude
+
+
+def _is_external(agent_id: str) -> bool:
+    """Whether `agent_id` runs anywhere but on a built-in worker (a bound operator endpoint)."""
+    return get_worker(agent_id) is None
+
+
+def plannable(agent: Agent, *, on_claude: bool | None = None) -> bool:
+    """Whether routing POLICY lets a plan use `agent` at all — before the floor,
+    the endpoint checks and the planner have any say.
+
+    Three rules, all enforced here in code rather than asked of the model:
+
+      * a built-in agent whose worker only simulates its output is never
+        planned — a buyer must never be charged for simulated work;
+      * a built-in agent that runs on Claude only is not planned while the
+        workers are off Claude — its step could not run;
+      * an external operator agent is planned only while
+        `PLANNER_ROUTE_EXTERNAL` is on (owner decision: plans use the
+        platform's own agents).
+
+    Public so the evals harness offers the planner exactly the set decompose
+    would; `on_claude` lets it ask as the Claude pipeline would, whatever
+    provider the harness process happens to resolve (None: the active one).
+    """
+    if _is_simulated(agent.id) or _needs_absent_provider(agent.id, on_claude):
+        return False
+    return not _is_external(agent.id) or settings.planner_route_external
+
+
+def _role(agent_id: str) -> str:
+    """The `context` key a step's output is filed under: its worker's name, or
+    `external.<id>` for a bound operator (`execution_svc`, `workers/context`)."""
+    worker = get_worker(agent_id)
+    return worker.name if worker is not None else f"{EXTERNAL_PREFIX}{agent_id}"
+
+
+def _with_inputs(steps: list[PlanStep], *, kit: bool = False) -> list[PlanStep]:
+    """`steps` with `inputs_from` set: which earlier steps each one reads.
+
+    Mirrors the run loop's handoff rather than restating it:
+
+      * a built-in step reads the roles `CONSUMES` maps it to, plus every
+        earlier operator step when it reads upstream at all, never its own
+        role (`context.upstream`); on a kit plan the code builders leave out
+        the research and brand briefs the kit itself supplies
+        (`code_gen.code_handoff`);
+      * deploy.v0 seals the latest code artifact — the latest earlier code
+        step or operator step (`context.latest_output`);
+      * an operator step is sent the whole run context, so it reads every
+        earlier step.
+
+    A role run twice is read from its latest earlier run, whose output is the
+    one `context` holds at that point. Computed on the FINAL step list (after
+    `_compose`), so the positions are the ones the card shows.
+    """
+    roles = [_role(s.agent_id) for s in steps]
+    out: list[PlanStep] = []
+    for i, step in enumerate(steps):
+        earlier = list(range(i))
+        role = roles[i]
+        if role.startswith(EXTERNAL_PREFIX):
+            sources = earlier
+        elif role == DEPLOY_ROLE:
+            artifact = [j for j in earlier if roles[j] in CODE_ROLES or roles[j].startswith(EXTERNAL_PREFIX)]
+            sources = artifact[-1:]
+        else:
+            wanted = set(CONSUMES.get(role, ())) - {role}
+            if kit and role in (CODE_GEN_ROLE, CODE_NEXT_ROLE):
+                wanted -= {SEO_ROLE, RESEARCH_ROLE}
+            latest = {roles[j]: j for j in earlier if roles[j] in wanted}
+            operators = [j for j in earlier if roles[j].startswith(EXTERNAL_PREFIX)] if CONSUMES.get(role) else []
+            sources = sorted({*latest.values(), *operators})
+        out.append(step.model_copy(update={"inputs_from": [j + 1 for j in sources]}))
+    return out
+
+
 def _snapshot_registry() -> _RegistrySnapshot:
     """Read the registry once and split out what planning may route to."""
     agents = tuple(state.list_agents())
     dispatchable = [a for a in agents if _is_listed(a) and is_dispatchable(a.id)]
+    eligible = [a for a in dispatchable if plannable(a)]
     return _RegistrySnapshot(
         agents,
-        tuple(a for a in dispatchable if not reachability.is_failing(a.id)),
-        tuple(a for a in dispatchable if reachability.is_failing(a.id)),
+        tuple(a for a in eligible if not reachability.is_failing(a.id)),
+        tuple(a for a in eligible if reachability.is_failing(a.id)),
+        tuple(a for a in dispatchable if _is_simulated(a.id)),
+        tuple(a for a in dispatchable if _is_external(a.id) and not plannable(a)),
+        settings.planner_route_external,
+        tuple(a for a in dispatchable if not _is_simulated(a.id) and _needs_absent_provider(a.id)),
     )
 
 
@@ -306,7 +436,11 @@ def _still_routable(agent_id: str) -> bool:
     """
     agent = state.agents.get(agent_id)
     return (
-        agent is not None and _is_listed(agent) and is_dispatchable(agent_id) and not reachability.is_failing(agent_id)
+        agent is not None
+        and _is_listed(agent)
+        and is_dispatchable(agent_id)
+        and plannable(agent)
+        and not reachability.is_failing(agent_id)
     )
 
 
@@ -433,7 +567,7 @@ def _kit_step(
         agent_id=agent.id,
         agent_name=agent.name,
         rationale=rationale,
-        est_price_usdc=agent.price,
+        price_stroops=money.to_stroops(agent.price),
         est_eta_seconds=eta,
         substituted_for=substituted_for,
         degraded=degraded,
@@ -543,8 +677,8 @@ class _Shortlist(NamedTuple):
     offered: frozenset[str]
 
 
-def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
-    """`unbound_endpoint` notices for the registry as it stands — both paths.
+def _registry_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
+    """The registry's own exclusion notices as it stands — both paths.
 
     Unbound on-chain agents are a registry fact, not a floor verdict, so they
     are read from the whole catalog rather than from a routable subset (which
@@ -566,11 +700,35 @@ def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     endpoint, which ARE bound and are reported first, under their own code
     (D-084). Calling one "unbound" would send its operator to fix the wrong
     thing.
+
+    Built-in agents whose worker only simulates its output come first, under
+    `simulated_worker`, then Claude-only agents while the workers are off
+    Claude, under `provider_unavailable` — whichever way the external switch is
+    set. With the
+    switch OFF, ONE `external_not_routed` notice states the policy whenever
+    any outside agent is listed — naming none of them (the set is the whole
+    permissionless registry; the ids go to the log) — and no unbound or
+    unreachable notice is given, since the policy is why they are absent.
     """
+    simulated = [simulated_exclusion(a) for a in registry.simulated]
+    simulated += [provider_exclusion(a) for a in registry.off_provider]
+    if not registry.route_external:
+        outside = sorted(
+            a.id for a in registry.agents if a.source == "onchain" and _is_listed(a) and _is_external(a.id)
+        )
+        if not outside:
+            return simulated
+        # The card says the policy once; which agents it covered is ops detail.
+        logger.info("external routing is off: %d listed outside agent(s) not offered: %s", len(outside), outside[:50])
+        return [*simulated, external_policy_notice()]
     unreachable = {a.id for a in registry.unreachable}
     routable = {a.id for a in registry.routable} | unreachable
-    return unreachable_exclusions(registry.unreachable) + unbound_exclusions(
-        a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
+    return (
+        simulated
+        + unreachable_exclusions(registry.unreachable)
+        + unbound_exclusions(
+            a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
+        )
     )
 
 
@@ -665,7 +823,7 @@ def _routable_registry(
         for a in routable
         if not reputation_svc.passes_floor(reps.get(a.id))
     ]
-    # Unbound on-chain agents, which `_unbound_notices` selects the same way
+    # Unbound on-chain agents, which `_registry_notices` selects the same way
     # for both paths, come last.
     #
     # Delisted agents are skipped there for a related but distinct reason, and
@@ -690,19 +848,39 @@ def _routable_registry(
     # Concretely, that means a delisted-AND-unbound agent is filtered rather
     # than reported: "no endpoint bound" is true of it but is not why it is
     # absent, and it is advice nobody wants acted on.
-    notices += _unbound_notices(registry)
+    notices += _registry_notices(registry)
 
     return _Shortlist(render_agents_block(routable, reps), notices, frozenset(offered))
 
 
+def _prompt_price(price: float) -> str:
+    """An agent's price as the block shows it: its exact stroops, formatted.
+
+    A price the ledger cannot hold (an on-chain registrant's negative or
+    non-finite figure) renders as `unpriced` rather than raising: one bad
+    registry row must not take planning down for everyone while it is listed.
+    """
+    try:
+        return money.format_amount(money.to_stroops(price))
+    except money.MoneyError:
+        return "unpriced"
+
+
 def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.RepInfo]) -> str:
-    """The AVAILABLE_AGENTS block for `agents`, one line per agent, in order.
+    """The AVAILABLE_AGENTS block for `agents`, one entry per agent, in order.
+
+    An entry is one `- id=…` line, then — for a built-in agent — its role card
+    on an indented line of its own.
 
     The planner's whole view of who it may route to. Public so the evals
     harness can hand `draft_plan` the same block decompose would; decompose
     itself only ever renders the shortlist `_routable_registry` chose.
     """
-    lines = ["AVAILABLE_AGENTS:"]
+    # Prices are the exact registry amounts (`money.format_amount` of the
+    # stroops, every decimal that carries something — 0.0125 is never 0.013),
+    # in the network's real asset, named once: XLM on testnet, never an assumed
+    # USDC. The asset is fixed per deployment, so the block stays byte-stable.
+    lines = ["AVAILABLE_AGENTS:", f"(price = what one step costs the buyer, exactly, in {money.asset_code()})"]
     for a in agents:
         # Live smoothed score on the 0–5 scale the prompt already uses. Never
         # the agent's self-declared `rep`: the planner reads this number as
@@ -720,9 +898,16 @@ def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.
         # because nothing here can contain a separator; an untrusted writer
         # into `skills` would change that.
         lines.append(
-            f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
+            f"- id={a.id} name={_prompt_name(a.name)} price={_prompt_price(a.price)} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
+        # A built-in agent's role card, indented under its entry: what it
+        # does, reads and hands on, so the planner can compose a pipeline
+        # whose handoffs exist. Static first-party text (`role_cards`), so the
+        # block stays as cacheable as before; an external agent has none.
+        card = card_for(a.id)
+        if card is not None and not _is_external(a.id):
+            lines.append(f"  {card.render()}")
     return "\n".join(lines)
 
 
@@ -911,18 +1096,18 @@ async def _build_kit_plan(
     # the floor did first, then registry entries nothing could dispatch. This
     # path used to report none, so a demo intent showed a marketplace with
     # agents its plan card never accounted for.
-    notices += _unbound_notices(registry)
-    steps = [_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])]
+    notices += _registry_notices(registry)
+    steps = _with_inputs([_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])], kit=True)
 
     plan_id = f"pln_{secrets.token_hex(4)}"
-    total_price = sum(s.est_price_usdc for s in steps)
     total_eta = sum(s.est_eta_seconds for s in steps)
 
     stored = StoredPlan(
         id=plan_id,
         intent=intent,
+        # Priced in stroops step by step; the plan's total and the legacy
+        # `total_usdc` are derived from those integers (ADR 0015).
         plan=Plan(steps=steps, tier=plan_tier),
-        total_usdc=total_price,
         total_eta=total_eta,
         # What the buyer is about to be shown, kept with the plan so
         # `/execute` judges the plan the buyer actually authorised.
@@ -937,7 +1122,6 @@ async def _build_kit_plan(
         plan_id=plan_id,
         intent=intent,
         steps=steps,
-        total_usdc=authorizable_total_usdc(steps),
         total_eta=round(total_eta, 2),
         notices=notices,
         # Both paths answer the same two questions, because a buyer cannot tell
@@ -986,37 +1170,24 @@ def _fallback_agent(offered: frozenset[str], reps: dict[str, reputation_svc.RepI
     )
 
 
+def authorizable_total_usdc(steps: list[PlanStep]) -> float:
+    """The plan's total as the legacy float: `Σ price_stroops`, exactly.
+
+    The console signs the authorization's `max_amount` from the plan's total,
+    and escrow v2 pays each delivered step its own price in stroops, refusing
+    the whole settle when their sum passes the max (S6). Since ADR 0015 every
+    step IS priced in stroops, so the total is their integer sum and this float
+    is only its legacy spelling — `DecomposeResponse.total_usdc` derives the
+    same number itself. Sign `total_stroops`, never a float.
+    """
+    return money.stroops_to_float(sum(s.price_stroops or 0 for s in steps))
+
+
 # The most steps a free-form plan may carry, matching the "1–6 ordered steps"
 # the planner is instructed to return (app/agents/orchestrator.py). Every step
 # is a paid dispatch and `/execute` runs them all, so the count is the buyer's
 # bill: the model is asked for six, and the clamp is what makes six a limit
 # rather than a request. A 200-step plan was storable before this.
-# The ledger's unit: 7 decimals.
-_STROOPS_PER_USDC = 10_000_000
-
-
-def authorizable_total_usdc(steps: list[PlanStep]) -> float:
-    """The plan's total as the buyer should authorize it: EXACTLY what paying
-    every step would move, not a rounded estimate of it.
-
-    The console signs this number as the escrow authorization's `max_amount`,
-    and escrow v2 pays each delivered step its own price in stroops, refusing
-    the whole settle when their sum passes the max. Rounded to four decimals it
-    could land below that sum — a 0.037002 plan authorized as 0.037 (370000
-    stroops against 370020) — and every fully delivered run of it would fail to
-    pay anyone (S6). So it is the sum of the per-step stroop amounts, in the
-    same rounding the settle uses, back in USDC: a float the authorize route
-    turns into exactly that many stroops again.
-    """
-    try:
-        stroops = sum(round(s.est_price_usdc * _STROOPS_PER_USDC) for s in steps)
-    except (OverflowError, ValueError):
-        # A price the ledger cannot hold. Nothing can authorize it, and the
-        # v2 execute check refuses it; the card shows the raw sum.
-        return sum(s.est_price_usdc for s in steps)
-    return stroops / _STROOPS_PER_USDC
-
-
 _MAX_PLAN_STEPS = 6
 
 
@@ -1164,11 +1335,12 @@ def _clamp(
             # every excluded agent is, by construction, not offered.
             continue
         agent = state.agents.get(step.agent_id)
-        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
+        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id) or not plannable(agent):
             # Offered, but no longer routable at the point of use. The
             # shortlist was built BEFORE the planning call, and that call can
             # take tens of seconds, during which an operator can delist the
-            # agent or unbind its endpoint. This is the last gate before the
+            # agent or unbind its endpoint (or a worker swap or the external
+            # switch can change `plannable`). This is the last gate before the
             # step is stored and later dispatched, so the registry is asked
             # again here rather than trusted from the snapshot: a delisted
             # agent reaching /execute is the whole bug, and a step with nothing
@@ -1187,7 +1359,7 @@ def _clamp(
                 agent_id=agent.id,
                 agent_name=agent.name,
                 rationale=rationale,
-                est_price_usdc=agent.price,
+                price_stroops=money.to_stroops(agent.price),
                 est_eta_seconds=max(0.3, min(step.est_eta_seconds, 3.0)),
                 # The model's own tier, never above the plan's: a step cannot be
                 # harder than the request it is part of, and the cap is what keeps
@@ -1206,6 +1378,115 @@ def _clamp(
     return _Clamped(cleaned, went_unreachable)
 
 
+# ── Plan composition: the handoffs a step depends on must exist ───────────
+#
+# A pipeline step that refines or ships another step's output is paid work on
+# nothing when that output is missing: code.critic reviews a code builder's
+# draft and deploy.v0 seals one, and without a builder in the plan both
+# answer "nothing to do" — for the buyer's money. vision.ocr likewise reads an
+# image the request must supply. The planner is told all of this (its role
+# cards); these rules hold the plan to it in code, after the clamp, on both
+# planners. They only ever DROP or REORDER the model's own steps — never add
+# one, so they cannot put an agent in a plan the floor or the policy kept out.
+_CODE_BUILDER_IDS: frozenset[str] = frozenset({"agt_11c0", "agt_03d9"})  # code.gen, code.next
+_CRITIC_ID = "agt_12r0"
+_DEPLOY_ID = "agt_08j2"
+_OCR_ID = "agt_06q4"
+_TRANSLATE_ID = "agt_10b6"
+
+# A step dropped unless the plan holds at least one of these, with what the
+# buyer is told it lacked. code.critic reviews code.gen's single-file HTML
+# only: it declines a code.next project (`code_critic_worker.UNSUPPORTED_ARTIFACT`),
+# so code.next alone gives it nothing to review. deploy.v0 seals either build.
+_NEEDS_ONE_OF: dict[str, tuple[frozenset[str], str]] = {
+    _CRITIC_ID: (frozenset({"agt_11c0"}), "there is no code.gen build to review (it does not review code.next)"),
+    _DEPLOY_ID: (_CODE_BUILDER_IDS, "there is no build to seal"),
+}
+
+# A step moved after every one of these the plan holds: the critic after the
+# draft it reviews, the seal after the build it seals and the review of it.
+_RUNS_AFTER: dict[str, frozenset[str]] = {
+    _CRITIC_ID: _CODE_BUILDER_IDS,
+    _DEPLOY_ID: _CODE_BUILDER_IDS | {_CRITIC_ID},
+}
+
+
+def _handoff_order(steps: list[PlanStep]) -> list[PlanStep]:
+    """`steps` reordered so each runs after what `_RUNS_AFTER` says it reads.
+
+    A stable topological sort: at every position, the earliest step (in the
+    model's order) whose producers are all placed goes next, so a plan that
+    already flows forward comes back unchanged and any other moves only the
+    steps it must. Always total: the edges only point from builders to the
+    critic and from both to the seal, so there is no cycle to stall on.
+    """
+    waiting = list(range(len(steps)))
+    after = [
+        {j for j in waiting if steps[j].agent_id in _RUNS_AFTER.get(steps[i].agent_id, frozenset())} for i in waiting
+    ]
+    placed: set[int] = set()
+    order: list[PlanStep] = []
+    while waiting:
+        nxt = next(i for i in waiting if after[i] <= placed)
+        waiting.remove(nxt)
+        placed.add(nxt)
+        order.append(steps[nxt])
+    return order
+
+
+class _Composed(NamedTuple):
+    steps: list[PlanStep]
+    # One notice per agent whose proposed steps were dropped for want of their
+    # input (`no_image_input`, `no_step_input`), in id order — the buyer is
+    # told, as for an agent found unreachable mid-plan.
+    notices: list[PlanFloorNotice]
+
+
+def _missing_input(agent_id: str, present: set[str], intent: str) -> str | None:
+    """What a proposed step on `agent_id` would lack — None when it has its input.
+
+    Every check is one the run loop would otherwise make at dispatch, failing
+    the step unbilled; made here, before the buyer authorizes its price. All
+    pure: `has_image_input` judges an image link without fetching it (and with
+    no upload context, since decompose takes none), and the translation check
+    is `request_signals.has_translation_target`, which only says no when sure.
+    """
+    needs = _NEEDS_ONE_OF.get(agent_id)
+    if needs is not None and not needs[0] & present:
+        return needs[1]
+    if agent_id == _OCR_ID and not has_image_input(intent, None):
+        return _NO_IMAGE
+    if agent_id == _TRANSLATE_ID and not has_translation_target(intent):
+        return "the request names no language to translate into"
+    return None
+
+
+_NO_IMAGE = "no image"
+
+
+def _compose(steps: list[PlanStep], intent: str) -> _Composed:
+    """The clamped plan held to its handoffs: steps with nothing to work on are
+    dropped (and the buyer told), and steps that read another step's output
+    run after it."""
+    present = {s.agent_id for s in steps}
+    kept: list[PlanStep] = []
+    dropped: dict[str, str] = {}
+    for step in steps:
+        missing = _missing_input(step.agent_id, present, intent)
+        if missing is None:
+            kept.append(step)
+        else:
+            dropped[step.agent_id] = missing
+    notices = []
+    for agent_id, missing in sorted(dropped.items()):
+        agent = state.agents.get(agent_id)
+        if agent is None:
+            continue
+        logger.info("dropped a %s step: %s", agent.name, missing)
+        notices.append(no_image_exclusion(agent) if missing is _NO_IMAGE else no_input_exclusion(agent, missing))
+    return _Composed(_handoff_order(kept), notices)
+
+
 def _finish_free_form(
     intent: str,
     shortlist: _Shortlist,
@@ -1221,10 +1502,11 @@ def _finish_free_form(
     request check, the understood request, the models, the stage lines); the
     legacy planner passes none and its answer is exactly what it always was.
     """
-    cleaned = clamped.steps
+    composed = _compose(clamped.steps, intent)
+    cleaned = composed.steps
     # Whatever left `cleaned` empty — a planner that failed, or one whose every
-    # step the clamp discarded — the steps served from here on are not the
-    # model's plan, and the response has to say so.
+    # step the clamp or the composition rules discarded — the steps served
+    # from here on are not the model's plan, and the response has to say so.
     planner_fallback = not cleaned
     if planner_fallback:
         # Fall back to a minimal safe plan so the UI never gets stuck — drawn
@@ -1247,7 +1529,7 @@ def _finish_free_form(
                     if fallback.id == _FALLBACK_AGENT_ID
                     else "fallback: the planner returned no usable step, so the top-ranked shortlisted agent takes it"
                 ),
-                est_price_usdc=fallback.price,
+                price_stroops=money.to_stroops(fallback.price),
                 est_eta_seconds=0.8,
                 tier=plan_tier,
                 degraded=not reputation_svc.passes_floor(info),
@@ -1255,18 +1537,21 @@ def _finish_free_form(
             )
         ]
 
-    cleaned = [_with_executor(step) for step in cleaned]
-    notices = shortlist.notices + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
+    cleaned = _with_inputs([_with_executor(step) for step in cleaned])
+    notices = (
+        shortlist.notices
+        + [unreachable_exclusion(a) for _, a in sorted(clamped.went_unreachable.items())]
+        + composed.notices
+    )
 
     plan_id = f"pln_{secrets.token_hex(4)}"
-    total_price = sum(s.est_price_usdc for s in cleaned)
     total_eta = sum(s.est_eta_seconds for s in cleaned)
 
     stored = StoredPlan(
         id=plan_id,
         intent=intent,
+        # Totals derive from the steps' stroops (ADR 0015), as on the kit path.
         plan=Plan(steps=cleaned, tier=plan_tier),
-        total_usdc=total_price,
         total_eta=total_eta,
         notices=notices,
         floor_bps=settings.reputation_floor_bps,
@@ -1280,7 +1565,6 @@ def _finish_free_form(
         plan_id=plan_id,
         intent=intent,
         steps=cleaned,
-        total_usdc=authorizable_total_usdc(cleaned),
         total_eta=round(total_eta, 2),
         # The floor acted BEFORE the planner was asked anything, so these
         # describe the shortlist the model chose from, not the model's choice.
@@ -1357,6 +1641,10 @@ async def decompose(intent: str, *, spec: UnderstoodSpec | None = None) -> Decom
     legacy agno planner runs exactly as before and `spec` is ignored, since
     nothing on that path ever offered one to correct.
     """
+    # What the plan's stroops are stroops OF (`Plan.asset`). Decided from the
+    # config alone on testnet; a non-native SAC is read once and remembered,
+    # so the plan built below can name it (ADR 0015).
+    await money.current_asset()
     if provider.active_provider() == "anthropic":
         return await _decompose_claude(intent, spec)
     return await _decompose_legacy(intent)

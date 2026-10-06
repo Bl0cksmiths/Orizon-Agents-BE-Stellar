@@ -1,0 +1,82 @@
+{
+  "agent_id": "agt_03d9",
+  "worker": "code.next",
+  "intent": "A Next.js membership pricing page for our bike repair co-op with a monthly/yearly toggle",
+  "context_roles": [
+    "design.figma",
+    "copywrite.v3"
+  ],
+  "step_model": "Claude Sonnet 5.5 (tier: moderate)",
+  "output": {
+    "summary": "Bike Repair Co-op Membership Pricing Page — A dark-themed pricing page with an accessible monthly/yearly toggle, using the supplied tokens and copy. Deferred: Real prices and plan names, sign-up or checkout flow, brand name in page metadata, FAQ section.",
+    "artifact": {
+      "title": "Bike Repair Co-op Membership Pricing Page",
+      "summary": "A dark-themed pricing page with an accessible monthly/yearly toggle, using the supplied tokens and copy. Deferred: Real prices and plan names, sign-up or checkout flow, brand name in page metadata, FAQ section.",
+      "files": [
+        {
+          "path": "app/layout.tsx",
+          "language": "tsx",
+          "content": "import type { Metadata } from 'next';\nimport type { ReactNode } from 'react';\nimport './globals.css';\n\nexport const metadata: Metadata = {\n  title: 'Membership | Bike Repair Co-op',\n  description: 'Stands, tools and know-how, free on Saturdays.',\n};\n\nexport default function RootLayout({ children }: { children: ReactNode }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n"
+        },
+        {
+          "path": "app/globals.css",
+          "language": "css",
+          "content": ":root {\n  --bg: #0B0414;\n  --surface: #140A24;\n  --text: #F4F0FF;\n  --primary: #7C5CFF;\n  --accent: #22D3EE;\n  --font-ui: Inter, system-ui, sans-serif;\n  --font-display: Inter, system-ui, sans-serif;\n}\n\n* { box-sizing: border-box; }\n\nbody {\n  margin: 0;\n  background: var(--bg);\n  color: var(--text);\n  font-family: var(--font-ui);\n  line-height: 1.5;\n}\n\n:focus-visible {\n  outline: 3px solid var(--accent);\n  outline-offset: 2px;\n}\n\n@media (prefers-reduced-motion: reduce) {\n  * { transition: none !important; animation: none !important; }\n}\n"
+        },
+        {
+          "path": "lib/plans.ts",
+          "language": "ts",
+          "content": "export type Plan = {\n  id: string;\n  name: string;\n  blurb: string;\n  monthly: string;\n  yearly: string;\n};\n\n// All figures below are placeholders: replace with the co-op's real pricing.\nexport const PLANS: Plan[] = [\n  {\n    id: 'open-workshop',\n    name: '[placeholder: plan name]',\n    blurb: 'Bring your bike and use our stands and tools with a volunteer beside you.',\n    monthly: '[placeholder: monthly price]',\n    yearly: '[placeholder: yearly price]',\n  },\n  {\n    id: 'learn-basics',\n    name: '[placeholder: plan name]',\n    blurb: 'Flats, brakes and gears: learn the fixes you will use every week.',\n    monthly: '[placeholder: monthly price]',\n    yearly: '[placeholder: yearly price]',\n  },\n];\n"
+        },
+        {
+          "path": "components/PricingPlans.tsx",
+          "language": "tsx",
+          "content": "'use client';\n\nimport { useState } from 'react';\nimport { PLANS } from '@/lib/plans';\nimport styles from './PricingPlans.module.css';\n\ntype Billing = 'monthly' | 'yearly';\n\nexport default function PricingPlans() {\n  const [billing, setBilling] = useState<Billing>('monthly');\n  const options: { value: Billing; label: string }[] = [\n    { value: 'monthly', label: 'Monthly' },\n    { value: 'yearly', label: 'Yearly' },\n  ];\n\n  return (\n    <div>\n      <div className={styles.toggle} role=\"group\" aria-label=\"Billing period\">\n        {options.map((o) => (\n          <button\n            key={o.value}\n            type=\"button\"\n            aria-pressed={billing === o.value}\n            className={styles.toggleBtn}\n            onClick={() => setBilling(o.value)}\n          >\n            {o.label}\n          </button>\n        ))}\n      </div>\n\n      <ul className={styles.grid}>\n        {PLANS.map((p) => (\n          <li key={p.id} className={styles.card}>\n            <h3 className={styles.name}>{p.name}</h3>\n            <p>{p.blurb}</p>\n            <p className={styles.price} aria-live=\"polite\">\n              {billing === 'monthly' ? p.monthly : p.yearly}\n              <span className={styles.per}>\n                {billing === 'monthly' ? ' per month' : ' per year'}\n              </span>\n            </p>\n          </li>\n        ))}\n      </ul>\n    </div>\n  );\n}\n"
+        },
+        {
+          "path": "components/PricingPlans.module.css",
+          "language": "css",
+          "content": ".toggle {\n  display: inline-flex;\n  background: var(--surface);\n  border: 1px solid var(--primary);\n  border-radius: 999px;\n  padding: 4px;\n  margin-bottom: 1.5rem;\n}\n\n.toggleBtn {\n  font: inherit;\n  color: var(--text);\n  background: transparent;\n  border: 0;\n  border-radius: 999px;\n  padding: 0.5rem 1.25rem;\n  min-height: 44px;\n  cursor: pointer;\n  transition: background 0.2s;\n}\n\n.toggleBtn[aria-pressed='true'] {\n  background: #5B3CE0;\n  font-weight: 600;\n}\n\n.grid {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: grid;\n  gap: 1rem;\n  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));\n}\n\n.card {\n  background: var(--surface);\n  border: 1px solid #2c1d4a;\n  border-radius: 16px;\n  padding: 1.5rem;\n}\n\n.name {\n  margin: 0 0 0.5rem;\n  font-family: var(--font-display);\n  color: var(--accent);\n}\n\n.price {\n  font-size: 1.25rem;\n  font-weight: 700;\n  overflow-wrap: anywhere;\n}\n\n.per {\n  font-size: 0.9rem;\n  font-weight: 400;\n}\n"
+        },
+        {
+          "path": "app/page.tsx",
+          "language": "tsx",
+          "content": "import PricingPlans from '@/components/PricingPlans';\nimport styles from './page.module.css';\n\nexport default function Page() {\n  return (\n    <main className={styles.main}>\n      <header className={styles.hero}>\n        <h1 className={styles.title}>Fix your bike, together</h1>\n        <p className={styles.sub}>Stands, tools and know-how, free on Saturdays.</p>\n      </header>\n      <section aria-labelledby=\"plans-heading\">\n        <h2 id=\"plans-heading\" className={styles.heading}>Membership</h2>\n        <PricingPlans />\n      </section>\n    </main>\n  );\n}\n"
+        },
+        {
+          "path": "app/page.module.css",
+          "language": "css",
+          "content": ".main {\n  max-width: 960px;\n  margin: 0 auto;\n  padding: 2rem 1rem 4rem;\n}\n\n.hero {\n  padding: 2rem 0;\n}\n\n.title {\n  font-family: var(--font-display);\n  font-size: clamp(2rem, 8vw, 3.5rem);\n  line-height: 1.1;\n  margin: 0 0 1rem;\n}\n\n.sub {\n  font-size: 1.125rem;\n  max-width: 40ch;\n  margin: 0;\n}\n\n.heading {\n  font-family: var(--font-display);\n  margin: 2rem 0 1rem;\n}\n"
+        }
+      ],
+      "entry": "app/page.tsx",
+      "preview_html": "<!doctype html>\n<html lang=\"en\"><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'\"><!-- orizon-artifact-csp --><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>Bike Repair Co-op Membership Pricing Page</title>\n<style>\n:root{--bg:#0b0d12;--surface:#151922;--text:#e8ebf2;--muted:#9aa3b5;--accent:#7c9cff}\nhtml,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}\nmain{max-width:960px;margin:0 auto;padding:24px 16px}\nh1{font-size:1.4rem;margin:0 0 4px} p{color:var(--muted);margin:0 0 8px}\n.note{border-left:3px solid var(--accent);padding:8px 12px;background:var(--surface);margin:16px 0}\nh2{font-size:.95rem;margin:24px 0 8px;font-family:ui-monospace,monospace}\nh2 span{color:var(--muted);font-weight:400}\npre{background:var(--surface);padding:12px;border-radius:8px;overflow:auto;font:13px/1.45 ui-monospace,monospace}\n</style></head>\n<body><main>\n<h1>Bike Repair Co-op Membership Pricing Page</h1>\n<p>A dark-themed pricing page with an accessible monthly/yearly toggle, using the supplied tokens and copy. Deferred: Real prices and plan names, sign-up or checkout flow, brand name in page metadata, FAQ section.</p>\n<p class=\"note\">A Next.js App Router project in TypeScript: 7 file(s). It needs <code>next build</code>\nto run, so this preview shows its source. Download the files to use them.</p>\n<section><h2>app/layout.tsx <span>tsx · 16 lines</span></h2><pre><code>import type { Metadata } from &#x27;next&#x27;;\nimport type { ReactNode } from &#x27;react&#x27;;\nimport &#x27;./globals.css&#x27;;\n\nexport const metadata: Metadata = {\n  title: &#x27;Membership | Bike Repair Co-op&#x27;,\n  description: &#x27;Stands, tools and know-how, free on Saturdays.&#x27;,\n};\n\nexport default function RootLayout({ children }: { children: ReactNode }) {\n  return (\n    &lt;html lang=&quot;en&quot;&gt;\n      &lt;body&gt;{children}&lt;/body&gt;\n    &lt;/html&gt;\n  );\n}\n</code></pre></section>\n<section><h2>app/globals.css <span>css · 28 lines</span></h2><pre><code>:root {\n  --bg: #0B0414;\n  --surface: #140A24;\n  --text: #F4F0FF;\n  --primary: #7C5CFF;\n  --accent: #22D3EE;\n  --font-ui: Inter, system-ui, sans-serif;\n  --font-display: Inter, system-ui, sans-serif;\n}\n\n* { box-sizing: border-box; }\n\nbody {\n  margin: 0;\n  background: var(--bg);\n  color: var(--text);\n  font-family: var(--font-ui);\n  line-height: 1.5;\n}\n\n:focus-visible {\n  outline: 3px solid var(--accent);\n  outline-offset: 2px;\n}\n\n@media (prefers-reduced-motion: reduce) {\n  * { transition: none !important; animation: none !important; }\n}\n</code></pre></section>\n<section><h2>lib/plans.ts <span>ts · 25 lines</span></h2><pre><code>export type Plan = {\n  id: string;\n  name: string;\n  blurb: string;\n  monthly: string;\n  yearly: string;\n};\n\n// All figures below are placeholders: replace with the co-op&#x27;s real pricing.\nexport const PLANS: Plan[] = [\n  {\n    id: &#x27;open-workshop&#x27;,\n    name: &#x27;[placeholder: plan name]&#x27;,\n    blurb: &#x27;Bring your bike and use our stands and tools with a volunteer beside you.&#x27;,\n    monthly: &#x27;[placeholder: monthly price]&#x27;,\n    yearly: &#x27;[placeholder: yearly price]&#x27;,\n  },\n  {\n    id: &#x27;learn-basics&#x27;,\n    name: &#x27;[placeholder: plan name]&#x27;,\n    blurb: &#x27;Flats, brakes and gears: learn the fixes you will use every week.&#x27;,\n    monthly: &#x27;[placeholder: monthly price]&#x27;,\n    yearly: &#x27;[placeholder: yearly price]&#x27;,\n  },\n];\n</code></pre></section>\n<section><h2>components/PricingPlans.tsx <span>tsx · 48 lines</span></h2><pre><code>&#x27;use client&#x27;;\n\nimport { useState } from &#x27;react&#x27;;\nimport { PLANS } from &#x27;@/lib/plans&#x27;;\nimport styles from &#x27;./PricingPlans.module.css&#x27;;\n\ntype Billing = &#x27;monthly&#x27; | &#x27;yearly&#x27;;\n\nexport default function PricingPlans() {\n  const [billing, setBilling] = useState&lt;Billing&gt;(&#x27;monthly&#x27;);\n  const options: { value: Billing; label: string }[] = [\n    { value: &#x27;monthly&#x27;, label: &#x27;Monthly&#x27; },\n    { value: &#x27;yearly&#x27;, label: &#x27;Yearly&#x27; },\n  ];\n\n  return (\n    &lt;div&gt;\n      &lt;div className={styles.toggle} role=&quot;group&quot; aria-label=&quot;Billing period&quot;&gt;\n        {options.map((o) =&gt; (\n          &lt;button\n            key={o.value}\n            type=&quot;button&quot;\n            aria-pressed={billing === o.value}\n            className={styles.toggleBtn}\n            onClick={() =&gt; setBilling(o.value)}\n          &gt;\n            {o.label}\n          &lt;/button&gt;\n        ))}\n      &lt;/div&gt;\n\n      &lt;ul className={styles.grid}&gt;\n        {PLANS.map((p) =&gt; (\n          &lt;li key={p.id} className={styles.card}&gt;\n            &lt;h3 className={styles.name}&gt;{p.name}&lt;/h3&gt;\n            &lt;p&gt;{p.blurb}&lt;/p&gt;\n            &lt;p className={styles.price} aria-live=&quot;polite&quot;&gt;\n              {billing === &#x27;monthly&#x27; ? p.monthly : p.yearly}\n              &lt;span className={styles.per}&gt;\n                {billing === &#x27;monthly&#x27; ? &#x27; per month&#x27; : &#x27; per year&#x27;}\n              &lt;/span&gt;\n            &lt;/p&gt;\n          &lt;/li&gt;\n        ))}\n      &lt;/ul&gt;\n    &lt;/div&gt;\n  );\n}\n</code></pre></section>\n<section><h2>components/PricingPlans.module.css <span>css · 58 lines</span></h2><pre><code>.toggle {\n  display: inline-flex;\n  background: var(--surface);\n  border: 1px solid var(--primary);\n  border-radius: 999px;\n  padding: 4px;\n  margin-bottom: 1.5rem;\n}\n\n.toggleBtn {\n  font: inherit;\n  color: var(--text);\n  background: transparent;\n  border: 0;\n  border-radius: 999px;\n  padding: 0.5rem 1.25rem;\n  min-height: 44px;\n  cursor: pointer;\n  transition: background 0.2s;\n}\n\n.toggleBtn[aria-pressed=&#x27;true&#x27;] {\n  background: #5B3CE0;\n  font-weight: 600;\n}\n\n.grid {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: grid;\n  gap: 1rem;\n  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));\n}\n\n.card {\n  background: var(--surface);\n  border: 1px solid #2c1d4a;\n  border-radius: 16px;\n  padding: 1.5rem;\n}\n\n.name {\n  margin: 0 0 0.5rem;\n  font-family: var(--font-display);\n  color: var(--accent);\n}\n\n.price {\n  font-size: 1.25rem;\n  font-weight: 700;\n  overflow-wrap: anywhere;\n}\n\n.per {\n  font-size: 0.9rem;\n  font-weight: 400;\n}\n</code></pre></section>\n<section><h2>app/page.tsx <span>tsx · 17 lines</span></h2><pre><code>import PricingPlans from &#x27;@/components/PricingPlans&#x27;;\nimport styles from &#x27;./page.module.css&#x27;;\n\nexport default function Page() {\n  return (\n    &lt;main className={styles.main}&gt;\n      &lt;header className={styles.hero}&gt;\n        &lt;h1 className={styles.title}&gt;Fix your bike, together&lt;/h1&gt;\n        &lt;p className={styles.sub}&gt;Stands, tools and know-how, free on Saturdays.&lt;/p&gt;\n      &lt;/header&gt;\n      &lt;section aria-labelledby=&quot;plans-heading&quot;&gt;\n        &lt;h2 id=&quot;plans-heading&quot; className={styles.heading}&gt;Membership&lt;/h2&gt;\n        &lt;PricingPlans /&gt;\n      &lt;/section&gt;\n    &lt;/main&gt;\n  );\n}\n</code></pre></section>\n<section><h2>app/page.module.css <span>css · 27 lines</span></h2><pre><code>.main {\n  max-width: 960px;\n  margin: 0 auto;\n  padding: 2rem 1rem 4rem;\n}\n\n.hero {\n  padding: 2rem 0;\n}\n\n.title {\n  font-family: var(--font-display);\n  font-size: clamp(2rem, 8vw, 3.5rem);\n  line-height: 1.1;\n  margin: 0 0 1rem;\n}\n\n.sub {\n  font-size: 1.125rem;\n  max-width: 40ch;\n  margin: 0;\n}\n\n.heading {\n  font-family: var(--font-display);\n  margin: 2rem 0 1rem;\n}\n</code></pre></section>\n</main></body></html>\n",
+      "framework": "next"
+    },
+    "counts": {
+      "files": 7,
+      "bytes": 4922,
+      "lines": 219
+    },
+    "validator_violations": []
+  },
+  "error": null,
+  "latency_s": 12.1,
+  "calls": [
+    {
+      "purpose": "worker.code.next",
+      "model": "claude-sonnet-5-5",
+      "served_by": null,
+      "effort": "low",
+      "stream": true,
+      "images": 0,
+      "stop_reason": "end_turn",
+      "input_tokens": 855,
+      "output_tokens": 2453,
+      "cache_read_tokens": 0,
+      "cost_usd": 0.029398,
+      "latency_s": 12.1
+    }
+  ],
+  "cost_usd": 0.029398
+}
