@@ -9,7 +9,9 @@ state — a clearly marked placeholder stands in for one.
 Lengths follow Meta's recommended character counts for feed placements, past
 which the text is cut off behind "See more" or an ellipsis: primary text 125,
 headline 40, description 30. Structured outputs cannot enforce lengths, so the
-model drafts unbounded (`AdSetDraft`) and `fit_ad_set` trims in code. The CTA
+model drafts unbounded (`AdSetDraft`) and `fit_ad_set` fits in code — at a
+sentence or clause boundary only, never mid-sentence; a variant that cannot be
+fitted that way is dropped and listed in `issues`. The CTA
 is one of Meta's call-to-action button types, the objective one of its six
 campaign objectives (the API's `OUTCOME_*` values). A special ad category
 (credit, employment, housing, social issues) gets Meta's restricted targeting:
@@ -143,22 +145,72 @@ def cta_label(cta: str) -> str:
     return cta.replace("_", " ").capitalize()
 
 
+# A boundary further back than this share of the limit leaves too little copy:
+# the variant is dropped rather than shipped as a stub.
+MIN_KEPT_SHARE = 0.4
+_SENTENCE_ENDS = ".!?"
+_CLAUSE_BREAKS = (", ", "; ", ": ", " — ", " – ", " - ")
+_OPENERS, _CLOSERS = "([", ")]"
+
+
+def fit_at_boundary(text: str, limit: int) -> str | None:
+    """`text` (spacing collapsed) if it fits in `limit`; else the longest prefix
+    that ends a sentence or a clause and fits, or None when no boundary leaves
+    at least `MIN_KEPT_SHARE` of the limit. Never cuts inside brackets — a
+    "[placeholder: …]" is kept whole or not at all — and never mid-sentence."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    floor = limit * MIN_KEPT_SHARE
+    best: str | None = None
+    depth = 0
+    for i, ch in enumerate(text[: limit + 1]):
+        if depth == 0 and i <= limit and any(text.startswith(sep, i) for sep in _CLAUSE_BREAKS):
+            clause = text[:i].rstrip(" ,;:—–-")
+            if len(clause) >= floor and (best is None or len(clause) > len(best)):
+                best = clause
+        if ch in _OPENERS:
+            depth += 1
+        elif ch in _CLOSERS and depth:
+            depth -= 1
+        elif depth == 0 and ch in _SENTENCE_ENDS and i + 1 <= limit and (i + 1 == len(text) or text[i + 1] == " "):
+            sentence = text[: i + 1]
+            if len(sentence) >= floor and (best is None or len(sentence) > len(best)):
+                best = sentence
+    return best
+
+
 def fit_ad_set(draft: AdSetDraft) -> dict[str, Any]:
-    """The draft inside Meta's lengths and ranges; fewer than two usable ads stays invalid."""
+    """The draft inside Meta's lengths and ranges.
+
+    Over-long text is cut back to a sentence or clause boundary
+    (`fit_at_boundary`), never mid-sentence; a variant with a field no boundary
+    can fit is dropped and listed in `issues`, as is a duplicate. Fewer than
+    two usable variants stays invalid."""
     ads: list[dict[str, str]] = []
+    issues: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for ad in draft.ads:
-        primary = trim_text(ad.primary_text, PRIMARY_TEXT_MAX)
-        headline = trim_text(ad.headline, HEADLINE_MAX)
+    limits = {"primary_text": PRIMARY_TEXT_MAX, "headline": HEADLINE_MAX, "description": DESCRIPTION_MAX}
+    for index, ad in enumerate(draft.ads, 1):
+        fitted = {field: fit_at_boundary(getattr(ad, field), limit) for field, limit in limits.items()}
+        unfit = [field for field, value in fitted.items() if value is None]
+        if unfit:
+            issues.append({"variant": index, "problem": "dropped_no_boundary_fits", "fields": unfit})
+            continue
+        primary, headline = fitted["primary_text"] or "", fitted["headline"] or ""
+        if not (primary and headline):
+            issues.append({"variant": index, "problem": "dropped_empty"})
+            continue
         key = f"{primary.casefold()}|{headline.casefold()}"
-        if not (primary and headline) or key in seen:
+        if key in seen:
+            issues.append({"variant": index, "problem": "dropped_duplicate"})
             continue
         seen.add(key)
         ads.append(
             {
                 "primary_text": primary,
                 "headline": headline,
-                "description": trim_text(ad.description, DESCRIPTION_MAX),
+                "description": fitted["description"] or "",
                 "cta": ad.cta,
                 "cta_label": cta_label(ad.cta),
             }
@@ -186,6 +238,7 @@ def fit_ad_set(draft: AdSetDraft) -> dict[str, Any]:
             "exclusions": at_most(trim_items(audience.exclusions, 120), MAX_INTERESTS),
         },
         "notes": at_most(trim_items(draft.notes, MAX_NOTE_CHARS), MAX_NOTES),
+        "issues": issues,
     }
 
 

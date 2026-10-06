@@ -86,7 +86,7 @@ def test_an_ad_set_is_written_on_haiku_and_handed_on(claude: FakeClaude) -> None
         out["audience"]["age_max"],
     ) == (18, 45)
     assert out["counts"] == {"ads": 3, "interests": 2}
-    assert out["unverified_figures"] == []
+    assert out["unverified_figures"] == [] and out["issues"] == []
 
 
 def test_the_steps_tier_picks_the_model(claude: FakeClaude) -> None:
@@ -95,19 +95,54 @@ def test_the_steps_tier_picks_the_model(claude: FakeClaude) -> None:
     assert (claude.calls[0].model, claude.calls[0].effort) == ("claude-sonnet-5-5", "medium")
 
 
-def test_the_copy_is_fitted_to_metas_lengths(claude: FakeClaude) -> None:
+def test_the_copy_is_fitted_to_metas_lengths_at_a_boundary(claude: FakeClaude) -> None:
     long = _ad(
-        "A headline that runs well past the forty characters Meta shows",
-        primary_text="Bring your bike. " * 20,
-        description="A description far past thirty characters",
+        "Fix your bike, together — free on Saturdays at the co-op",
+        primary_text="Bring your bike on Saturday. " * 10,
+        description="Open Saturdays, all morning long",
     )
     claude.reply(_draft(long, _ad("Second"), _ad("Third"), _ad("Fourth"), _ad("Fifth"), _ad("Sixth")))
     out = run()
     ad = out["ads"][0]
-    assert len(ad["primary_text"]) <= ads_meta.PRIMARY_TEXT_MAX
-    assert len(ad["headline"]) <= ads_meta.HEADLINE_MAX
-    assert len(ad["description"]) <= ads_meta.DESCRIPTION_MAX
+    assert ad["primary_text"] == ("Bring your bike on Saturday. " * 4).strip()  # whole sentences
+    assert ad["headline"] == "Fix your bike, together"  # a clause, its separator dropped
+    assert ad["description"] == "Open Saturdays"
+    assert not any(a[f].endswith("…") for a in out["ads"] for f in ("primary_text", "headline", "description"))
     assert len(out["ads"]) == ads_meta.MAX_ADS
+    assert out["issues"] == []
+
+
+def test_a_variant_no_boundary_can_fit_is_dropped_and_listed(claude: FakeClaude) -> None:
+    unfit = _ad("A headline that runs well past the forty characters Meta shows")
+    claude.reply(_draft(_ad(), unfit, _ad("Third"), _ad()))
+    out = run()
+    assert [a["headline"] for a in out["ads"]] == ["Fix your bike, together", "Third"]
+    assert out["issues"] == [
+        {"variant": 2, "problem": "dropped_no_boundary_fits", "fields": ["headline"]},
+        {"variant": 4, "problem": "dropped_duplicate"},
+    ]
+
+
+def test_too_few_fitting_variants_fail_the_step(claude: FakeClaude) -> None:
+    unfit = _ad("Ok", primary_text="An unbroken run of words that never reaches a sentence end " * 3)
+    claude.reply(_draft(_ad(), unfit))
+    assert _failure().rule == "invalid_output"
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("Short enough.", 40, "Short enough."),
+        ("First sentence here. Second one runs on and on and on.", 30, "First sentence here."),
+        ("Flat tires? Brake trouble? Come fix it with us every Saturday.", 30, "Flat tires? Brake trouble?"),
+        ("Tools, stands and help; free every Saturday all year", 30, "Tools, stands and help"),
+        ("Save on [placeholder: price, per class] and more fun", 30, None),  # never inside brackets
+        ("A run of words with no boundary anywhere in it at all", 30, None),
+        ("Hi. Then a very long run of words with no boundary at all", 30, None),  # "Hi." is a stub
+    ],
+)
+def test_fit_at_boundary_never_cuts_mid_sentence(text: str, limit: int, expected: str | None) -> None:
+    assert ads_meta.fit_at_boundary(text, limit) == expected
 
 
 def test_ages_are_held_to_metas_range_and_a_special_category_is_not_narrowed(claude: FakeClaude) -> None:
