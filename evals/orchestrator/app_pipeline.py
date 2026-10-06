@@ -155,6 +155,13 @@ def _answer_json(answer: Any) -> Any:
     return repr(answer)
 
 
+class _JevDown:
+    """A jev transport in outage: every call fails before anything is billed."""
+
+    async def system_one(self, request: jev.JevRequest) -> jev.JevReply:
+        raise JevUnavailable("forced_fallback")
+
+
 def seeded_agents() -> list[Any]:
     """The built-in catalog as `Agent`s — what AVAILABLE_AGENTS lists on a fresh boot."""
     from app.schemas import Agent
@@ -188,12 +195,22 @@ class AppPipeline:
 
     @classmethod
     def create(
-        cls, *, live: bool, cases: list[Case], stages: str = "guard", noise: float = 0.1, seed: int = 0
+        cls,
+        *,
+        live: bool,
+        cases: list[Case],
+        stages: str = "guard",
+        noise: float = 0.1,
+        seed: int = 0,
+        force_fallback: bool = False,
     ) -> AppPipeline:
         """Install the recording transports (around fakes unless `live`).
 
         With `stages == "all"` the planner is resolved here, so a branch that
-        does not have it yet fails before the run, not once per case."""
+        does not have it yet fails before the run, not once per case. With
+        `force_fallback` every jev call fails as an outage would, so the guard
+        takes its Claude Haiku 4.5 fallback path — the backup's own quality,
+        measured through the guard's real fallback code."""
         planner, block, offered = _default_planner() if stages == "all" else (None, "", frozenset[str]())
         if live:
             spend.set_ledger(spend.SpendLedger(spend.InMemorySpendStore()))
@@ -201,11 +218,12 @@ class AppPipeline:
             jev_inner: Any = jev.get_transport()
         else:
             claude_inner, jev_inner = scripted_fakes(cases, noise=noise, seed=seed)
+        if force_fallback:
+            jev_inner = _JevDown()
         claude.set_transport(RecordingClaude(claude_inner))
         jev.set_transport(RecordingJev(jev_inner))
-        return cls(
-            name="app-live" if live else "app-fake", live=live, planner=planner, agents_block=block, offered=offered
-        )
+        name = ("app-live" if live else "app-fake") + ("-fallback" if force_fallback else "")
+        return cls(name=name, live=live, planner=planner, agents_block=block, offered=offered)
 
     def _planner(self) -> PlanFn:
         if self.planner is None:
@@ -350,6 +368,23 @@ def scripted_fakes(cases: list[Case], *, noise: float, seed: int) -> tuple[Any, 
             ]
         }
 
+    def fallback_assessment(request: Any) -> dict[str, Any]:
+        # The fallback reads the fenced intent; answer from the case it names.
+        case = max(
+            (c for c in cases if sanitize_untrusted(c.intent)[:80] in request.user),
+            key=lambda c: len(c.intent),
+        )
+        s, tier = noisy_scores(case, noise, seed)
+        return {
+            "injection": s["injection"],
+            "harmful": s["harmful"],
+            "severity": int(round(s["severity"])),
+            "real_request": s["real_request"],
+            "complexity": tier,
+            "complexity_confidence": s.get("complexity_confidence", 0.9),
+        }
+
+    fake_claude.respond_with(fallback_assessment, purpose="guard.intent.fallback")
     fake_jev.respond_with(guard_answers, purpose="guard.intent")
     fake_jev.respond_with(spec_answers, purpose="guard.spec")
     fake_jev.respond_with(spec_answers, purpose="guard.spec.same")
