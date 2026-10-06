@@ -218,7 +218,8 @@ def _default_planner() -> tuple[PlanFn, str, frozenset[str]]:
         plannable = svc.plannable
     except AttributeError as e:  # the planner lane's raw planner is not on this branch yet
         raise ImportError(str(e)) from e
-    agents = [a for a in seeded_agents() if plannable(a)]
+    # The Claude planner's view: it only runs where the workers run on Claude.
+    agents = [a for a in seeded_agents() if plannable(a, on_claude=True)]
     return draft_plan, render_agents_block(agents, {}), frozenset(a.id for a in agents)
 
 

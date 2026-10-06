@@ -27,6 +27,7 @@ import pytest
 
 from app.agents import registry as worker_registry
 from app.agents.orchestrator import ModelPlan, PlannedStep
+from app.agents.workers.claude_only import ClaudeOnlyWorker
 from app.agents.workers.mock import MockWorker
 from app.config import settings
 from app.llm.testing import FakeClaude, FakeJev, choice, score
@@ -414,4 +415,66 @@ def test_the_seeded_catalog_is_offered_exactly_where_a_real_worker_stands(regist
     for agent in seeded:
         worker = worker_registry.get_worker(agent.id)
         assert worker is not None
-        assert orchestrator_svc.plannable(agent) is (worker.real is True), agent.id
+        assert orchestrator_svc.plannable(agent, on_claude=True) is (worker.real is True), agent.id
+
+
+# ── Claude-only workers while the workers are off Claude ───────
+
+CLAUDE_ONLY = [aid for aid, w in worker_registry.WORKERS.items() if isinstance(w, ClaudeOnlyWorker)]
+
+
+def test_the_claude_only_workers_are_the_four_new_agents() -> None:
+    assert sorted(CLAUDE_ONLY) == ["agt_03d9", "agt_06q4", "agt_07w3", "agt_10b6"]
+
+
+def test_off_claude_the_claude_only_agents_are_not_offered_and_the_card_says_why(
+    registry: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "orchestrator_provider", "openai")
+    seen: list[str] = []
+
+    async def arun(prompt: str) -> SimpleNamespace:
+        seen.append(prompt)
+        steps = [
+            PlanStep(agent_id=a, rationale="model step", est_price_usdc=0.0, est_eta_seconds=1.0)
+            for a in ("agt_07w3", "agt_10b6", "agt_01h8")
+        ]
+        return SimpleNamespace(content=Plan(steps=steps))
+
+    monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", arun)
+
+    resp = _decompose("write ads for my bakery in Spanish")
+
+    assert all(f"id={aid} " not in seen[0] for aid in CLAUDE_ONLY)
+    assert [s.agent_id for s in resp.steps] == ["agt_01h8"]
+    assert {aid: _codes(resp).get(aid) for aid in CLAUDE_ONLY} == dict.fromkeys(CLAUDE_ONLY, "provider_unavailable")
+    assert all(aid not in ids for ids in registry for aid in CLAUDE_ONLY)
+
+
+def test_on_claude_the_claude_only_agents_are_offered(
+    registry: list[list[str]], claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev
+) -> None:
+    _screened(fake_claude, fake_jev, _plan("agt_09l5", "agt_01h8", "agt_07w3"))
+
+    resp = _decompose()
+
+    (call,) = fake_claude.calls_for("planner")
+    assert all(f"id={aid} " in call.system for aid in CLAUDE_ONLY)
+    assert [s.agent_id for s in resp.steps] == ["agt_09l5", "agt_01h8", "agt_07w3"]
+    assert "provider_unavailable" not in _codes(resp).values()
+
+
+def test_off_claude_a_kit_never_substitutes_a_claude_only_agent(
+    registry: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # code.gen below the floor; code.next shares its "code"-adjacent role on
+    # Claude, but off Claude nothing that runs on Claude only may stand in.
+    monkeypatch.setattr(settings, "orchestrator_provider", "openai")
+    designated = state.agents["agt_02k2"]
+    state.agents["agt_03d9"] = state.agents["agt_03d9"].model_copy(update={"skills": ["figma"]})
+    reps = {a.id: _rep(a.id, 8000) for a in state.list_agents()}
+    reps[designated.id] = _rep(designated.id, 0)
+    reps["agt_03d9"] = _rep("agt_03d9", 9999)
+
+    assert orchestrator_svc._floor_substitute(designated, reps, taken=set()) is None
+    assert orchestrator_svc.plannable(state.agents["agt_03d9"], on_claude=True)

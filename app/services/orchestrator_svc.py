@@ -15,10 +15,12 @@ from typing import Any, NamedTuple, Protocol
 from pydantic import ValidationError
 
 from .. import money
+from ..agents.model_factory import claude_workers
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
 from ..agents.role_cards import card_for
 from ..agents.workers.base import ModelWorker
+from ..agents.workers.claude_only import ClaudeOnlyWorker
 from ..agents.workers.prompt_safety import fence_user_input, sanitize_untrusted
 from ..agents.workers.vision_input import has_image_input
 from ..config import settings
@@ -48,6 +50,7 @@ from .plan_notices import (
     external_policy_notice,
     no_image_exclusion,
     no_input_exclusion,
+    provider_exclusion,
     relaxation,
     simulated_exclusion,
     substitution,
@@ -272,6 +275,9 @@ class _RegistrySnapshot(NamedTuple):
     # `PLANNER_ROUTE_EXTERNAL` as this snapshot applied it, so the notices
     # describe the same policy the routable set was cut with.
     route_external: bool = False
+    # Built-in agents that run on Claude only, held out while the workers are
+    # not on Claude (`_needs_absent_provider`).
+    off_provider: tuple[Agent, ...] = ()
 
 
 def _with_executor(step: PlanStep) -> PlanStep:
@@ -313,27 +319,39 @@ def _is_simulated(agent_id: str) -> bool:
     return worker is not None and worker.real is not True
 
 
+def _needs_absent_provider(agent_id: str, on_claude: bool | None = None) -> bool:
+    """Whether `agent_id`'s built-in worker runs on Claude only while the workers
+    are not on Claude — so every step it took would fail unattempted
+    (`claude_step.MODEL_NOT_CONFIGURED`). Asked of the worker's class, so a new
+    Claude-only worker is covered with no change here."""
+    claude = claude_workers() if on_claude is None else on_claude
+    return isinstance(get_worker(agent_id), ClaudeOnlyWorker) and not claude
+
+
 def _is_external(agent_id: str) -> bool:
     """Whether `agent_id` runs anywhere but on a built-in worker (a bound operator endpoint)."""
     return get_worker(agent_id) is None
 
 
-def plannable(agent: Agent) -> bool:
+def plannable(agent: Agent, *, on_claude: bool | None = None) -> bool:
     """Whether routing POLICY lets a plan use `agent` at all — before the floor,
     the endpoint checks and the planner have any say.
 
-    Two rules, both enforced here in code rather than asked of the model:
+    Three rules, all enforced here in code rather than asked of the model:
 
       * a built-in agent whose worker only simulates its output is never
         planned — a buyer must never be charged for simulated work;
+      * a built-in agent that runs on Claude only is not planned while the
+        workers are off Claude — its step could not run;
       * an external operator agent is planned only while
         `PLANNER_ROUTE_EXTERNAL` is on (owner decision: plans use the
         platform's own agents).
 
     Public so the evals harness offers the planner exactly the set decompose
-    would.
+    would; `on_claude` lets it ask as the Claude pipeline would, whatever
+    provider the harness process happens to resolve (None: the active one).
     """
-    if _is_simulated(agent.id):
+    if _is_simulated(agent.id) or _needs_absent_provider(agent.id, on_claude):
         return False
     return not _is_external(agent.id) or settings.planner_route_external
 
@@ -348,8 +366,9 @@ def _snapshot_registry() -> _RegistrySnapshot:
         tuple(a for a in eligible if not reachability.is_failing(a.id)),
         tuple(a for a in eligible if reachability.is_failing(a.id)),
         tuple(a for a in dispatchable if _is_simulated(a.id)),
-        tuple(a for a in dispatchable if not plannable(a) and not _is_simulated(a.id)),
+        tuple(a for a in dispatchable if _is_external(a.id) and not plannable(a)),
         settings.planner_route_external,
+        tuple(a for a in dispatchable if not _is_simulated(a.id) and _needs_absent_provider(a.id)),
     )
 
 
@@ -630,13 +649,16 @@ def _registry_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     thing.
 
     Built-in agents whose worker only simulates its output come first, under
-    `simulated_worker`, whichever way the external switch is set. With the
+    `simulated_worker`, then Claude-only agents while the workers are off
+    Claude, under `provider_unavailable` — whichever way the external switch is
+    set. With the
     switch OFF, ONE `external_not_routed` notice states the policy whenever
     any outside agent is listed — naming none of them (the set is the whole
     permissionless registry; the ids go to the log) — and no unbound or
     unreachable notice is given, since the policy is why they are absent.
     """
     simulated = [simulated_exclusion(a) for a in registry.simulated]
+    simulated += [provider_exclusion(a) for a in registry.off_provider]
     if not registry.route_external:
         outside = sorted(
             a.id for a in registry.agents if a.source == "onchain" and _is_listed(a) and _is_external(a.id)
