@@ -24,8 +24,11 @@ import re
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.workers.prompt_safety import sanitize_untrusted
+from app.llm import claude
 from app.llm.errors import LLMError
-from app.llm.tiers import Effort, Tier
+from app.llm.tiers import Effort, Tier, improver_model
+
+from . import prompt_improver_prompts as prompts
 
 logger = logging.getLogger(__name__)
 
@@ -124,3 +127,25 @@ def spec_to_text(spec: Spec) -> str:
         lines.extend(f"- {c}" for c in spec.done_criteria)
     lines.append(f"Summary: {spec.summary}")
     return "\n".join(lines)
+
+
+async def improve(intent: str, tier: Tier) -> Spec:
+    """Rewrite ``intent`` as a ``Spec`` on Claude Sonnet 5.5.
+
+    Raises the model layer's errors unchanged (``LLMRefused``,
+    ``LLMUnavailable``, ``LLMTruncated``, ``SpendCapReached``) plus
+    ``ImproverOutputInvalid`` (an ``LLMError``). The planner should treat any
+    ``LLMError`` other than ``SpendCapReached`` as "no improved spec" and plan
+    from the fenced original — the guard has already cleared it — except when
+    the guard decision is ``watch``, which requires a clean spec to proceed.
+    """
+    result = await claude.structured(
+        purpose="improve.spec",
+        model=improver_model(),
+        system=prompts.SYSTEM,
+        user=prompts.user_prompt(intent, tier),
+        schema=SpecDraft,
+        max_tokens=_IMPROVER_MAX_TOKENS,
+        effort=_IMPROVER_EFFORT[tier],
+    )
+    return normalize_spec(result.value, intent)
