@@ -800,6 +800,19 @@ def _routable_registry(
     return _Shortlist(render_agents_block(routable, reps), notices, frozenset(offered))
 
 
+def _prompt_price(price: float) -> str:
+    """An agent's price as the block shows it: its exact stroops, formatted.
+
+    A price the ledger cannot hold (an on-chain registrant's negative or
+    non-finite figure) renders as `unpriced` rather than raising: one bad
+    registry row must not take planning down for everyone while it is listed.
+    """
+    try:
+        return money.format_amount(money.to_stroops(price))
+    except money.MoneyError:
+        return "unpriced"
+
+
 def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.RepInfo]) -> str:
     """The AVAILABLE_AGENTS block for `agents`, one entry per agent, in order.
 
@@ -810,7 +823,11 @@ def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.
     harness can hand `draft_plan` the same block decompose would; decompose
     itself only ever renders the shortlist `_routable_registry` chose.
     """
-    lines = ["AVAILABLE_AGENTS:"]
+    # Prices are the exact registry amounts (`money.format_amount` of the
+    # stroops, every decimal that carries something — 0.0125 is never 0.013),
+    # in the network's real asset, named once: XLM on testnet, never an assumed
+    # USDC. The asset is fixed per deployment, so the block stays byte-stable.
+    lines = ["AVAILABLE_AGENTS:", f"(price = what one step costs the buyer, exactly, in {money.asset_code()})"]
     for a in agents:
         # Live smoothed score on the 0–5 scale the prompt already uses. Never
         # the agent's self-declared `rep`: the planner reads this number as
@@ -828,7 +845,7 @@ def render_agents_block(agents: Sequence[Agent], reps: dict[str, reputation_svc.
         # because nothing here can contain a separator; an untrusted writer
         # into `skills` would change that.
         lines.append(
-            f"- id={a.id} name={_prompt_name(a.name)} price={a.price:.3f} "
+            f"- id={a.id} name={_prompt_name(a.name)} price={_prompt_price(a.price)} "
             f"rep={rep_display:.2f} skills={','.join(a.skills)}"
         )
         # A built-in agent's role card, indented under its entry: what it

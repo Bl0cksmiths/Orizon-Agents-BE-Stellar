@@ -88,6 +88,7 @@ def _pinned_reps() -> dict[str, RepInfo]:
 # comma-joined skills. Written out rather than rebuilt from a format string: a
 # pin that recomputes the thing it pins cannot catch the thing it is for.
 PINNED_ENTRIES = """AVAILABLE_AGENTS:
+(price = what one step costs the buyer, exactly, in XLM)
 - id=agt_01h8 name="copywrite.v3" price=0.012 rep=3.00 skills=copy,seo,en
 - id=agt_02k2 name="design.figma" price=0.018 rep=3.05 skills=ui,tokens,figma
 - id=agt_03d9 name="code.next" price=0.066 rep=3.10 skills=ts,react,next
@@ -106,6 +107,7 @@ PINNED_ENTRIES = """AVAILABLE_AGENTS:
 # best-first order would read to the planner as a ranking the floor never
 # endorsed, so the order is pinned too.
 PINNED_STARVED_ENTRIES = """AVAILABLE_AGENTS:
+(price = what one step costs the buyer, exactly, in XLM)
 - id=agt_10b6 name="translate.42" price=0.007 rep=0.55 skills=i18n,42 langs
 - id=agt_11c0 name="code.gen" price=0.054 rep=0.55 skills=code,html,js,build
 - id=agt_12r0 name="code.critic" price=0.052 rep=0.56 skills=a11y,polish,review"""

@@ -68,7 +68,66 @@ def test_the_block_sets_a_built_in_agents_card_under_its_entry_and_gives_an_exte
     assert lines == [
         "AVAILABLE_AGENTS:",
         lines[1],
+        lines[2],
         "  " + ROLE_CARDS["agt_11c0"].render(),
-        lines[3],
+        lines[4],
     ]
-    assert lines[1].startswith("- id=agt_11c0 ") and lines[3].startswith("- id=ext_op ")
+    assert lines[2].startswith("- id=agt_11c0 ") and lines[4].startswith("- id=ext_op ")
+
+
+# ── prices in the block: exact, in the real asset ───────────────
+
+
+def _priced(price: float):
+    from app.schemas import Agent
+
+    return Agent(id="agt_01h8", name="copywrite.v3", skills=["copy"], price=price, rep=4.0, status="online", runs=1)
+
+
+@pytest.mark.parametrize(
+    ("price", "shown"),
+    [(0.054, "0.054"), (0.0125, "0.0125"), (0.0000001, "0.0000001"), (1.5, "1.500"), (0.0, "0.000")],
+)
+def test_the_block_shows_each_price_exactly(price: float, shown: str) -> None:
+    from app.services.orchestrator_svc import render_agents_block
+
+    entry = render_agents_block([_priced(price)], {}).splitlines()[2]
+
+    assert f" price={shown} " in entry
+
+
+def test_the_block_names_the_networks_asset_never_an_assumed_usdc() -> None:
+    from app.services.orchestrator_svc import render_agents_block
+
+    block = render_agents_block([_priced(0.054)], {})
+
+    assert block.splitlines()[:2] == [
+        "AVAILABLE_AGENTS:",
+        "(price = what one step costs the buyer, exactly, in XLM)",
+    ]
+    assert "USDC" not in block
+
+
+def test_the_block_names_whatever_asset_the_deployment_settles_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import money
+    from app.services.orchestrator_svc import render_agents_block
+
+    monkeypatch.setattr(money, "asset_code", lambda: "USDC")
+
+    assert "exactly, in USDC)" in render_agents_block([_priced(0.054)], {})
+
+
+def test_a_price_the_ledger_cannot_hold_is_shown_unpriced_not_raised() -> None:
+    from app.services.orchestrator_svc import render_agents_block
+
+    agent = _priced(0.054).model_copy(update={"price": float("nan")})
+
+    assert " price=unpriced " in render_agents_block([agent], {})
+
+
+def test_the_block_is_byte_stable_between_calls() -> None:
+    from app.services.orchestrator_svc import render_agents_block
+
+    agents = [_priced(0.0125)]
+
+    assert render_agents_block(agents, {}) == render_agents_block(agents, {})
