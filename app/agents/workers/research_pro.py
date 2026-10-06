@@ -77,12 +77,20 @@ INSTRUCTIONS = (
 # Room for the JSON plus the thinking a synthesis step does first.
 MAX_TOKENS = 12_000
 
+# How to use what earlier steps handed on (see `context.CONSUMES`).
+UPSTREAM_GUIDANCE = (
+    "Research what they contain: extracted text or a translation is the "
+    "material to research, and an audit's findings are context to explain. "
+    "Mark confidence low for anything you cannot vouch for beyond them."
+)
+
 
 class ResearchPro(ModelWorker):
     id = "agt_09l5"
     name = "research.pro"
     real = True
     default_tier = "moderate"
+    reads_upstream = True
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
@@ -94,6 +102,15 @@ class ResearchPro(ModelWorker):
 
     def _deterministic(self, context: dict[str, Any] | None) -> bool:
         return bool((context or {}).get("kit"))
+
+    def build_prompt(self, intent: str, rationale: str, context: dict[str, Any] | None = None) -> str:
+        """The free-form prompt: the fenced request, then the fenced upstream outputs."""
+        return worker_prompt(
+            intent,
+            rationale,
+            "Return the research brief.",
+            sections=[self.handoff(context).section(UPSTREAM_GUIDANCE)],
+        )
 
     async def run(
         self,
@@ -137,7 +154,7 @@ class ResearchPro(ModelWorker):
             }
 
         # ── Free-form path: LLM ─────────────────────────────────────────────
-        prompt = worker_prompt(intent, rationale, "Return the research brief.")
+        prompt = self.build_prompt(intent, rationale, context)
         out: ResearchOutput
         if claude_workers():
             draft = await claude_step.structured(

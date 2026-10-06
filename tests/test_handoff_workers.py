@@ -148,3 +148,32 @@ def test_seo_brief_builds_on_the_research(claude: FakeClaude) -> None:
     prompt = claude.calls_for("worker.seo.brief")[0].user
     assert "RESEARCH-CLAIM riders want same-week fixes." in fenced_body(prompt)
     assert prompt.rstrip().endswith("Return the SEO brief.")
+
+
+def _research_reply() -> dict[str, Any]:
+    return {
+        "findings": [{"claim": f"c{i}", "confidence": 0.5} for i in range(3)],
+        "sources": ["s"],
+        "summary": "sum",
+    }
+
+
+def test_research_researches_the_extracted_text_and_the_audit(claude: FakeClaude) -> None:
+    claude.reply(_research_reply(), purpose="worker.research.pro")
+    audit = {"summary": "AUDIT-SUMMARY reentrancy", "findings": [], "cvss_estimate": 6.0}
+    run("agt_09l5", ctx(**{"vision.ocr": ocr(), "sol-audit": audit}))
+    body = fenced_body(claude.calls_for("worker.research.pro")[0].user)
+    assert "OCR-TEXT pragma solidity ^0.8.0;" in body
+    assert "AUDIT-SUMMARY reentrancy" in body
+    assert body.index("vision.ocr") < body.index("sol-audit")  # map order: the source text first
+
+
+def test_research_on_a_kit_asks_no_model_and_reads_nothing_upstream(claude: FakeClaude) -> None:
+    from app.demo_kits import ALL_KITS
+
+    kit = ALL_KITS[0].model_dump()
+    worker = WORKERS["agt_09l5"]
+    context = {"kit": kit, "intent": INTENT, "vision.ocr": ocr()}
+    assert worker.upstream_sources(context) == []
+    run("agt_09l5", context)
+    assert claude.calls == []
