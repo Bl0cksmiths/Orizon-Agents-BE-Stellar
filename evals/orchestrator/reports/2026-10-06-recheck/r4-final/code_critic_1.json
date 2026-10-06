@@ -1,0 +1,45 @@
+{
+  "agent_id": "agt_12r0",
+  "worker": "code.critic",
+  "label": "code.critic#1",
+  "unreported_estimated_usd": 0.0,
+  "case_id": "cpx-001",
+  "tier": "complex",
+  "intent": "Build a full booking system web app for a barbershop: services, staff schedules, time-slot booking, admin view, and email-style confirmations.",
+  "latency_s": 40.7,
+  "cost_usd": 0.116649,
+  "calls": [
+    {
+      "model": "claude-sonnet-5-5",
+      "response_model": "claude-sonnet-5-5",
+      "served_by": null,
+      "input_tokens": 9157,
+      "output_tokens": 9526,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 1230,
+      "cost_usd": 0.116649,
+      "app_cost_usd": 0.116649,
+      "latency_ms": 40693,
+      "first_token_ms": 767,
+      "effort": "low",
+      "stop_reason": "end_turn"
+    }
+  ],
+  "error": null,
+  "output": {
+    "summary": "Clipper & Co. — Barbershop Booking · polished: 394L → 445L (+51) · 0 structural issues fixed",
+    "counts": {
+      "violations": 0,
+      "kit_requirements": 0,
+      "notes": 1
+    },
+    "artifact_title": "Clipper & Co. — Barbershop Booking",
+    "artifact_files": [
+      "index.html"
+    ],
+    "critic_violations": [],
+    "critic_notes": [
+      "polished: 394L → 445L (+51) · 0 structural issues fixed"
+    ]
+  }
+}

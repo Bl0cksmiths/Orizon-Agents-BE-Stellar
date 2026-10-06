@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'"><!-- orizon-artifact-csp -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clipper &amp; Co. — Barbershop Booking</title>
+<style>
+  :root {
+    --bg: #14110f;
+    --panel: #1e1a17;
+    --panel2: #272220;
+    --text: #f3ece4;
+    --muted: #b4a89c;
+    --accent: #e0a458;
+    --accent-ink: #1a1208;
+    --ok: #7bc88f;
+    --bad: #f08a8a;
+    --line: #3a332e;
+    --ease: 200ms ease;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Inter", "SF Pro Text", system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+  .app { width: 100%; max-width: 880px; padding: 16px; min-height: 100%; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-family: Georgia, serif; font-size: clamp(1.3rem, 4vw, 1.8rem); margin: 0; letter-spacing: .02em; }
+  h1 span { color: var(--accent); }
+  h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  nav { display: flex; gap: 4px; background: var(--panel); padding: 4px; border-radius: 12px; }
+  button, input, select {
+    font: inherit;
+    color: inherit;
+    transition: background var(--ease), border-color var(--ease), transform var(--ease), opacity var(--ease);
+  }
+  button { cursor: pointer; min-height: 40px; }
+  nav button { background: none; border: 0; padding: 0 16px; border-radius: 9px; color: var(--muted); }
+  nav button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .steps { display: flex; gap: 6px; margin-bottom: 14px; }
+  .steps i { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+  .steps i[data-on="1"] { background: var(--accent); }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 14px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.3);
+    animation: rise .3s ease;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+  .opt {
+    text-align: left;
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px;
+    display: block;
+    width: 100%;
+  }
+  .opt:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .opt[aria-pressed="true"] { border-color: var(--accent); background: #3a2d1c; }
+  .opt small { display: block; color: var(--muted); margin-top: 4px; }
+  .opt b { display: flex; justify-content: space-between; gap: 8px; }
+  .slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+  .slot { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; }
+  .slot:hover:not(:disabled) { border-color: var(--accent); }
+  .slot[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .slot:disabled { opacity: .5; text-decoration: line-through; cursor: not-allowed; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    width: 100%;
+    min-height: 42px;
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0 12px;
+  }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .row.flush { margin: 0; }
+  .primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 10px; padding: 0 20px; font-weight: 600; }
+  .primary:hover:not(:disabled) { transform: translateY(-1px); }
+  .primary:disabled { opacity: .4; cursor: not-allowed; }
+  .ghost { background: none; border: 1px solid var(--line); border-radius: 10px; padding: 0 14px; }
+  .ghost:hover { border-color: var(--accent); }
+  .danger { color: var(--bad); }
+  .summary { color: var(--muted); font-size: .9rem; margin: 0 0 12px; }
+  .actions { display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; margin-bottom: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--panel2); border-radius: 12px; padding: 12px; }
+  .stat b { display: block; font-size: 1.5rem; color: var(--accent); }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  .days { display: flex; gap: 6px; flex-wrap: wrap; }
+  .days label { display: flex; align-items: center; gap: 4px; margin: 0; color: var(--text); }
+  .days input { width: auto; min-height: 0; }
+  .mail { background: #f6f1ea; color: #231d17; border-radius: 12px; padding: 16px; font-size: .92rem; line-height: 1.5; }
+  .mail .hd { color: #5c5147; font-size: .8rem; border-bottom: 1px solid #ddd2c5; padding-bottom: 8px; margin-bottom: 10px; }
+  .inbox { display: grid; gap: 10px; }
+  .empty { color: var(--muted); text-align: center; padding: 20px; }
+  .toast {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--ok);
+    color: #0c2012;
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-weight: 600;
+    max-width: 90%;
+  }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main class="app">
+  <header>
+    <h1>Clipper <span>&amp;</span> Co.</h1>
+    <nav role="tablist" aria-label="Views">
+      <button role="tab" data-view="book" aria-selected="true">Book</button>
+      <button role="tab" data-view="admin" aria-selected="false">Admin</button>
+      <button role="tab" data-view="inbox" aria-selected="false">Inbox</button>
+    </nav>
+  </header>
+  <section id="view" role="tabpanel" aria-live="polite"></section>
+</main>
+<div class="toast" id="toast" hidden role="status"></div>
+<script>
+(function () {
+  'use strict';
+  var KEY = 'orizon.barbershop.v1';
+  var SERVICES = [
+    { id: 's1', name: 'Classic Cut', mins: 30, price: 28 },
+    { id: 's2', name: 'Skin Fade', mins: 45, price: 38 },
+    { id: 's3', name: 'Beard Trim', mins: 20, price: 18 },
+    { id: 's4', name: 'Cut + Beard', mins: 60, price: 52 },
+    { id: 's5', name: 'Hot Towel Shave', mins: 30, price: 32 }
+  ];
+  var DAYNAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var STEP = 15;
+  var defaults = {
+    staff: [
+      { id: 'b1', name: 'Marco', days: [2, 3, 4, 5, 6], start: '09:00', end: '17:00' },
+      { id: 'b2', name: 'Dee', days: [1, 2, 3, 4, 5], start: '10:00', end: '18:00' },
+      { id: 'b3', name: 'Jonas', days: [4, 5, 6], start: '11:00', end: '19:00' }
+    ],
+    bookings: [],
+    mails: []
+  };
+  var db = load();
+  var view = 'book';
+  var draft = newDraft();
+  var root = document.getElementById('view');
+
+  function newDraft() {
+    return { step: 1, service: null, staff: 'any', date: todayStr(), time: null, name: '', email: '' };
+  }
+  function load() {
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (raw) {
+        var d = JSON.parse(raw);
+        if (d && Array.isArray(d.staff) && Array.isArray(d.bookings) && Array.isArray(d.mails)) {
+          // drop bookings referencing unknown services so rendering never throws
+          d.bookings = d.bookings.filter(function (k) {
+            return k && SERVICES.some(function (s) { return s.id === k.service; });
+          });
+          return d;
+        }
+      }
+    } catch (e) {}
+    return JSON.parse(JSON.stringify(defaults));
+  }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {}
+  }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function todayStr() {
+    var d = new Date();
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+  function toMin(t) { var p = t.split(':'); return +p[0] * 60 + +p[1]; }
+  function toTime(m) { return pad(Math.floor(m / 60)) + ':' + pad(m % 60); }
+  function dayOf(s) { var p = s.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]).getDay(); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function svc(id) { return SERVICES.filter(function (s) { return s.id === id; })[0]; }
+  function barber(id) { return db.staff.filter(function (s) { return s.id === id; })[0]; }
+  function fmtDate(s) {
+    var p = s.split('-');
+    return DAYNAMES[dayOf(s)] + ' ' + p[2] + '/' + p[1] + '/' + p[0];
+  }
+
+  // A barber is free if on shift, not in the past, and not overlapping a booking
+  function slotFree(b, date, startMin, dur) {
+    if (!b || b.days.indexOf(dayOf(date)) < 0) { return false; }
+    if (startMin < toMin(b.start) || startMin + dur > toMin(b.end)) { return false; }
+    if (date === todayStr()) {
+      var now = new Date();
+      if (startMin <= now.getHours() * 60 + now.getMinutes()) { return false; }
+    }
+    return !db.bookings.some(function (k) {
+      if (k.staff !== b.id || k.date !== date) { return false; }
+      var ks = toMin(k.time);
+      var ke = ks + svc(k.service).mins;
+      return startMin < ke && startMin + dur > ks;
+    });
+  }
+  function slotsFor(date, staffId, dur) {
+    var out = [];
+    var pool = staffId === 'any' ? db.staff : db.staff.filter(function (s) { return s.id === staffId; });
+    for (var m = 6 * 60; m < 22 * 60; m += STEP) {
+      var onShift = pool.some(function (b) {
+        return b.days.indexOf(dayOf(date)) >= 0 && m >= toMin(b.start) && m + dur <= toMin(b.end);
+      });
+      if (!onShift) { continue; }
+      var who = pool.filter(function (b) { return slotFree(b, date, m, dur); })[0];
+      out.push({ time: toTime(m), who: who || null });
+    }
+    return out;
+  }
+
+  function renderBook() {
+    var d = draft;
+    var h = '<div class="steps" role="img" aria-label="Step ' + d.step + ' of 4">';
+    for (var i = 1; i <= 4; i++) { h += '<i data-on="' + (i <= d.step ? 1 : 0) + '"></i>'; }
+    h += '</div>';
+    if (d.step === 1) {
+      h += '<div class="card"><h2>1. Choose a service</h2><div class="grid">';
+      SERVICES.forEach(function (s) {
+        h += '<button class="opt" data-act="pick-service" data-id="' + s.id + '" aria-pressed="' + (d.service === s.id) + '"><b>' + esc(s.name) + '<span>$' + s.price + '</span></b><small>' + s.mins + ' min</small></button>';
+      });
+      h += '</div></div><div class="actions"><span></span><button class="primary" data-act="next" ' + (d.service ? '' : 'disabled') + '>Continue</button></div>';
+    } else if (d.step === 2) {
+      h += '<div class="card"><h2>2. Barber &amp; date</h2><div class="row"><div><label for="bs">Barber</label><select id="bs"><option value="any">Any available</option>';
+      db.staff.forEach(function (b) {
+        h += '<option value="' + esc(b.id) + '"' + (d.staff === b.id ? ' selected' : '') + '>' + esc(b.name) + '</option>';
+      });
+      h += '</select></div><div><label for="bd">Date</label><input id="bd" type="date" min="' + todayStr() + '" value="' + esc(d.date) + '"></div></div></div>';
+      h += '<div class="actions"><button class="ghost" data-act="back">Back</button><button class="primary" data-act="next">Continue</button></div>';
+    } else if (d.step === 3) {
+      var dur = svc(d.service).mins;
+      var slots = slotsFor(d.date, d.staff, dur);
+      var anyFree = slots.some(function (s) { return s.who; });
+      h += '<div class="card"><h2>3. Pick a time — ' + fmtDate(d.date) + '</h2>';
+      if (!slots.length) { h += '<div class="empty">No barber works this day. Try another date.</div>'; }
+      else {
+        if (!anyFree) { h += '<div class="empty">Fully booked. Try another date or barber.</div>'; }
+        h += '<div class="slots">';
+        slots.forEach(function (s) {
+          h += '<button class="slot" data-act="pick-time" data-t="' + s.time + '" ' + (s.who ? '' : 'disabled') + ' aria-pressed="' + (d.time === s.time) + '">' + s.time + '</button>';
+        });
+        h += '</div>';
+      }
+      h += '</div><div class="actions"><button class="ghost" data-act="back">Back</button><button class="primary" data-act="next" ' + (d.time ? '' : 'disabled') + '>Continue</button></div>';
+    } else {
+      var sv = svc(d.service);
+      h += '<div class="card"><h2>4. Your details</h2><p class="summary">' + esc(sv.name) + ' · ' + fmtDate(d.date) + ' at ' + esc(d.time) + ' · $' + sv.price + '</p>';
+      h += '<div class="row"><div><label for="nm">Name</label><input id="nm" maxlength="60" autocomplete="name" required value="' + esc(d.name) + '"></div><div><label for="em">Email</label><input id="em" type="email" maxlength="120" autocomplete="email" required value="' + esc(d.email) + '"></div></div></div>';
+      h += '<div class="actions"><button class="ghost" data-act="back">Back</button><button class="primary" data-act="confirm">Confirm booking</button></div>';
+    }
+    root.innerHTML = h;
+  }
+
+  function renderAdmin() {
+    var today = todayStr();
+    var upcoming = db.bookings.filter(function (b) { return b.date >= today; });
+    var revenue = upcoming.reduce(function (a, b) { return a + svc(b.service).price; }, 0);
+    var h = '<div class="stats"><div class="stat"><b>' + db.bookings.length + '</b>Total bookings</div><div class="stat"><b>' + upcoming.length + '</b>Upcoming</div><div class="stat"><b>$' + revenue + '</b>Upcoming revenue</div></div>';
+    h += '<div class="card"><h2>Bookings</h2>';
+    if (!db.bookings.length) { h += '<div class="empty">No bookings yet.</div>'; }
+    else {
+      h += '<div class="tablewrap"><table><tr><th>Date</th><th>Time</th><th>Client</th><th>Service</th><th>Barber</th><th><span class="sr">Action</span></th></tr>';
+      db.bookings.slice().sort(function (a, b) { return (a.date + a.time).localeCompare(b.date + b.time); }).forEach(function (b) {
+        var bb = barber(b.staff);
+        h += '<tr><td>' + fmtDate(b.date) + '</td><td>' + esc(b.time) + '</td><td>' + esc(b.name) + '</td><td>' + esc(svc(b.service).name) + '</td><td>' + esc(bb ? bb.name : '?') + '</td><td><button class="ghost danger" data-act="cancel" data-id="' + esc(b.id) + '" aria-label="Cancel booking for ' + esc(b.name) + '">Cancel</button></td></tr>';
+      });
+      h += '</table></div>';
+    }
+    h += '</div><div class="card"><h2>Staff schedules</h2>';
+    db.staff.forEach(function (b) {
+      h += '<div class="row" data-staff="' + esc(b.id) + '"><div><label>' + esc(b.name) + '</label><div class="days">';
+      DAYNAMES.forEach(function (n, i) {
+        h += '<label><input type="checkbox" data-f="day" data-d="' + i + '"' + (b.days.indexOf(i) >= 0 ? ' checked' : '') + '>' + n + '</label>';
+      });
+      h += '</div></div><div class="row flush"><div><label>Start<input type="time" data-f="start" value="' + esc(b.start) + '"></label></div><div><label>End<input type="time" data-f="end" value="' + esc(b.end) + '"></label></div></div></div>';
+    });
+    h += '</div>';
+    root.innerHTML = h;
+  }
+
+  function renderInbox() {
+    var h = '<div class="card"><h2>Sent confirmations</h2>';
+    if (!db.mails.length) { h += '<div class="empty">No emails yet. Book a cut to see one.</div>'; }
+    else {
+      h += '<div class="inbox">';
+      db.mails.slice().reverse().forEach(function (m) {
+        h += '<article class="mail"><div class="hd">To: ' + esc(m.to) + '<br>Subject: ' + esc(m.subject) + '</div>' + esc(m.body).replace(/\n/g, '<br>') + '</article>';
+      });
+      h += '</div>';
+    }
+    root.innerHTML = h + '</div>';
+  }
+
+  function render() {
+    if (view === 'book') { renderBook(); }
+    else if (view === 'admin') { renderAdmin(); }
+    else { renderInbox(); }
+    document.querySelectorAll('nav button').forEach(function (b) {
+      var on = b.dataset.view === view;
+      b.setAttribute('aria-selected', String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+  }
+
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toast.t);
+    toast.t = setTimeout(function () { t.hidden = true; }, 2400);
+  }
+
+  function confirmBooking() {
+    var d = draft;
+    var name = document.getElementById('nm').value.trim().slice(0, 60);
+    var email = document.getElementById('em').value.trim().slice(0, 120);
+    d.name = name;
+    d.email = email;
+    if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      toast('Enter a name and a valid email');
+      return;
+    }
+    var sv = svc(d.service);
+    var pool = d.staff === 'any' ? db.staff : [barber(d.staff)];
+    var who = pool.filter(function (b) { return slotFree(b, d.date, toMin(d.time), sv.mins); })[0];
+    if (!who) {
+      toast('That slot was just taken');
+      d.step = 3;
+      d.time = null;
+      render();
+      return;
+    }
+    var id = 'k' + Date.now().toString(36) + Math.floor(Math.random() * 36).toString(36);
+    db.bookings.push({ id: id, service: d.service, staff: who.id, date: d.date, time: d.time, name: name, email: email });
+    db.mails.push({
+      to: email,
+      subject: 'Booking confirmed: ' + sv.name + ' on ' + fmtDate(d.date),
+      body: 'Hi ' + name + ',\n\nYou are booked in at Clipper & Co.\n\nService: ' + sv.name + ' ($' + sv.price + ')\nBarber: ' + who.name + '\nWhen: ' + fmtDate(d.date) + ' at ' + d.time + '\nDuration: ' + sv.mins + ' min\nRef: ' + id.toUpperCase() + '\n\nSee you soon!'
+    });
+    save();
+    draft = newDraft();
+    toast('Booked! Confirmation sent.');
+    view = 'inbox';
+    render();
+  }
+
+  var nav = document.querySelector('nav');
+  nav.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (b) { view = b.dataset.view; render(); }
+  });
+  // Arrow-key navigation between tabs
+  nav.addEventListener('keydown', function (e) {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') { return; }
+    var tabs = Array.prototype.slice.call(nav.querySelectorAll('button'));
+    var i = tabs.findIndex(function (b) { return b.dataset.view === view; });
+    i = (i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+    view = tabs[i].dataset.view;
+    render();
+    nav.querySelectorAll('button')[i].focus();
+  });
+  root.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-act]');
+    if (!b || b.disabled) { return; }
+    var a = b.dataset.act;
+    if (a === 'pick-service') { draft.service = b.dataset.id; draft.time = null; }
+    else if (a === 'pick-time') { draft.time = b.dataset.t; }
+    else if (a === 'next') { draft.step = Math.min(4, draft.step + 1); }
+    else if (a === 'back') { draft.step = Math.max(1, draft.step - 1); }
+    else if (a === 'confirm') { confirmBooking(); return; }
+    else if (a === 'cancel') {
+      if (!window.confirm('Cancel this booking?')) { return; }
+      db.bookings = db.bookings.filter(function (k) { return k.id !== b.dataset.id; });
+      save();
+      toast('Booking cancelled');
+    }
+    render();
+  });
+  root.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'bs') { draft.staff = t.value; draft.time = null; return; }
+    if (t.id === 'bd') {
+      if (t.value && t.value >= todayStr()) { draft.date = t.value; draft.time = null; }
+      else { t.value = draft.date; }
+      return;
+    }
+    var row = t.closest('[data-staff]');
+    if (row) {
+      var b = barber(row.dataset.staff);
+      var f = t.dataset.f;
+      if (!b) { return; }
+      if (f === 'day') {
+        var d = +t.dataset.d;
+        var i = b.days.indexOf(d);
+        if (t.checked && i < 0) { b.days.push(d); }
+        if (!t.checked && i >= 0) { b.days.splice(i, 1); }
+      } else if (f === 'start' || f === 'end') {
+        if (t.value) { b[f] = t.value; }
+      }
+      if (toMin(b.end) <= toMin(b.start)) {
+        b.end = toTime(Math.min(24 * 60 - 1, toMin(b.start) + 60));
+        renderAdmin();
+      }
+      save();
+      toast('Schedule saved');
+    }
+  });
+  root.addEventListener('input', function (e) {
+    if (e.target.id === 'nm') { draft.name = e.target.value; }
+    if (e.target.id === 'em') { draft.email = e.target.value; }
+  });
+  render();
+})();
+</script>
+</body>
+</html>
