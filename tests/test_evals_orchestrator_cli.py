@@ -90,6 +90,8 @@ def _mock_hf(rows_by_offset, *, sha=external.BENCHMARKS["deepset"].revision, csv
         if "/api/datasets/" in url:
             return httpx.Response(200, json={"sha": sha})
         if "datasets-server" in url:
+            if request.url.params["split"] != "test":
+                return httpx.Response(200, json={"rows": []})
             offset = int(request.url.params["offset"])
             return httpx.Response(200, json={"rows": rows_by_offset.get(offset, [])})
         for name, body in (csvs or {}).items():
