@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
+from app.llm.testing import fake_claude, fake_jev, llm_offline, spend_ledger  # noqa: F401 — the model layer's fixtures
 from app.main import app
 from app.stellar import client as _stellar_client
 
