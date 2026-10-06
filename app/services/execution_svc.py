@@ -660,6 +660,22 @@ async def _run(
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
+                not_run = _NOT_ATTEMPTED.get(_failure_class(e))
+                if not_run is not None and get_worker(step.agent_id) is worker:
+                    # Our outage, not the agent's: the daily AI budget is spent,
+                    # or the model provider has no key or is down. The agent was
+                    # never able to try, so — like a step refused at execute —
+                    # it is not billed, not counted in its failure streak and
+                    # not rated (ADR 0005 D5: "did not deliver" and "could not
+                    # be asked" are different facts). First-party only: the
+                    # classes are ours, and an external step's failure is
+                    # classified by its own contract.
+                    undispatched.add(step_index)
+                    logger.warning(
+                        "task %s step %d (%s): not run — %s: %s", task_id, step_index, worker.name, not_run, e
+                    )
+                    await _emit(task_id, start, "error", f"{worker.name}: {not_run} — not charged, not rated")
+                    continue
                 # exc_info: a revoked key / exhausted quota surfaces as a
                 # provider exception several frames down — the traceback is the
                 # only way to tell those apart without a debugger.
@@ -2921,6 +2937,17 @@ UNCLASSIFIED_FAILURE = "unclassified"
 STEP_TIMEOUT_FAILURE = "step_timeout"
 NOT_A_DICT_FAILURE = "not_a_dict"
 UNUSABLE_OUTPUT_FAILURE = "unusable_output"
+
+
+# Failure classes of a first-party model step that are OUR outage rather than
+# the agent's failure to deliver, with the trace's plain words for each. Spelled
+# here, not imported from the worker that raises them, for the same reason
+# `_failure_class` reads `rule` duck-typed (ADR 0005).
+_NOT_ATTEMPTED = {
+    "spend_cap_reached": "paused: daily AI budget reached",
+    "model_not_configured": "AI provider not configured",
+    "model_unavailable": "AI provider unavailable",
+}
 
 
 def _failure_class(exc: BaseException) -> str:
