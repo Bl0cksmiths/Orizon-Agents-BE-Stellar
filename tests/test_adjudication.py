@@ -45,6 +45,7 @@ import pytest
 from stellar_sdk import Keypair
 
 import app.stellar.client as sc
+from app import money
 from app.config import settings
 from app.schemas import Task
 from app.services import dispute_rating, dispute_store, dispute_svc, refund_svc, reputation_svc
@@ -1213,7 +1214,8 @@ def test_a_credit_is_traced_on_the_workflow_while_it_is_still_on_screen(monkeypa
     assert streamed.level == "cost"
     assert streamed.t.startswith("7200.")  # elapsed since the run began, not 00.000
     assert dispute.id in streamed.msg
-    assert "0.0500000 USDC" in streamed.msg
+    # ADR 0015: exact, in the asset the escrow moves — never labelled "USDC".
+    assert f"credited 0.050 {money.asset_code()} to the buyer" in streamed.msg
     assert "funded by the platform" in streamed.msg
     assert "not clawed back from agent agt_writer" in streamed.msg
     assert "tx_credit" in streamed.msg
