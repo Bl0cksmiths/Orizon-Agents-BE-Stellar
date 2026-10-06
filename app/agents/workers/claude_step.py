@@ -15,6 +15,7 @@ explanation goes to the server log, never to the world-readable trace.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
@@ -47,6 +48,12 @@ MODEL_NOT_CONFIGURED = "model_not_configured"
 SPEND_CAP_REACHED = "spend_cap_reached"
 MODEL_ERROR = "model_error"
 INVALID_OUTPUT = "invalid_output"
+
+# Wall-clock budget for one streamed code reply. Under the run loop's 120 s
+# step deadline (execution_svc.STEP_TIMEOUT_SECONDS) with room for the
+# validator, the hardening and the trace around it, so a slow stream ends as
+# this worker's clean `model_truncated` rather than the loop's `step_timeout`.
+STREAM_BUDGET_SECONDS = 100.0
 
 
 class ModelStepError(Exception):
@@ -126,7 +133,7 @@ async def text(
     max_tokens: int,
     effort: Effort,
 ) -> str:
-    """Ask the tier's model for a long text answer, streamed.
+    """Ask the tier's model for a long text answer, streamed, inside a wall-clock budget.
 
     Streamed because the answer is a whole HTML app: a request that size must
     stream (the SDK refuses a non-streamed one it expects to outlast its idle
@@ -135,20 +142,33 @@ async def text(
     `effort` is the caller's, not the tier's: thinking time counts against the
     step deadline, so the code workers ask for "low" (and `app/llm/claude.py`
     leaves it off for a model that takes none).
+
+    A stream still running at `STREAM_BUDGET_SECONDS` is aborted and the step
+    fails as `model_truncated` — unbilled, and before the run loop's deadline
+    would fail it as `step_timeout`, which is rated against the agent.
     """
     from ...llm import claude
 
     model = model_for(tier)
+    budget = STREAM_BUDGET_SECONDS
     try:
-        result = await claude.text(
-            purpose=f"worker.{worker}",
-            model=model,
-            system=system,
-            user=user,
-            max_tokens=max_tokens,
-            effort=effort,
-            stream=True,
+        result = await asyncio.wait_for(
+            claude.text(
+                purpose=f"worker.{worker}",
+                model=model,
+                system=system,
+                user=user,
+                max_tokens=max_tokens,
+                effort=effort,
+                stream=True,
+            ),
+            timeout=budget,
         )
+    except TimeoutError as e:
+        # The aborted stream's tokens are billed by Anthropic but never reach
+        # the spend ledger, which records completed calls only.
+        logger.warning("%s: %s still streaming after %.0f s — aborted", worker, model, budget)
+        raise ModelStepError(MODEL_TRUNCATED, f"{worker}: {model} did not finish within {budget:.0f} s") from e
     except LLMError as e:
         raise _step_error(worker, model, e) from e
     _note_fallback(worker, model, result.served_by)
