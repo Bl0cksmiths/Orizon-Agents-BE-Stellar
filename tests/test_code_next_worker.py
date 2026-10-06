@@ -124,6 +124,12 @@ def test_the_upstream_design_and_copy_are_fenced_into_the_prompt(claude: FakeCla
     assert WORKER.upstream_sources({"design.figma": design, "copywrite.v3": copy}) == ["design.figma", "copywrite.v3"]
 
 
+def test_the_facts_rule_is_part_of_the_brief() -> None:
+    """The live smoke of 2026-10-06 showed made-up plan prices on a pricing page."""
+    assert "never invent prices" in code_next.CLAUDE_INSTRUCTIONS
+    assert "[placeholder: monthly price]" in code_next.CLAUDE_INSTRUCTIONS
+
+
 def test_the_deferred_list_reaches_the_summary(claude: FakeClaude) -> None:
     claude.reply(_tagged(deferred="currency switcher, coupon codes"))
     assert run()["artifact"]["summary"] == "A pricing toggle. Deferred: currency switcher, coupon codes."

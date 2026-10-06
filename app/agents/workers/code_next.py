@@ -125,6 +125,10 @@ At most 8 files, typically 2 to 5.
 7. Accessible: semantic elements, labelled controls, keyboard support,
    visible focus, WCAG AA contrast, `prefers-reduced-motion` respected.
 8. Responsive from 320px up.
+9. Facts: never invent prices, statistics, testimonials, customer counts,
+   guarantees or awards the request and upstream outputs do not state. Where
+   the UI needs one, show a visibly marked placeholder such as
+   `[placeholder: monthly price]`, kept in one clearly named constant.
 
 # Untrusted input
 
