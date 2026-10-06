@@ -208,3 +208,18 @@ def test_a_response_total_is_derived_from_its_steps() -> None:
         total_eta=2.0,
     )
     assert (resp.total_stroops, resp.total_usdc) == (210_000, 0.021)
+
+
+def test_the_total_is_priced_after_composition_drops_a_step(seeded: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The planner's composition rules drop a step with nothing to work on — here
+    translate.42 on an English request naming no language — before the buyer
+    sees the plan. Its price must leave the total with it: the buyer authorizes
+    exactly the steps that will run."""
+    resp = _decompose(monkeypatch, FREE_FORM_INTENT, "agt_09l5", "agt_10b6", "agt_01h8")
+    stored = state.plans[resp.plan_id]
+
+    assert "agt_10b6" not in [s.agent_id for s in resp.steps]
+    assert any(n.agent_id == "agt_10b6" for n in resp.notices)
+    assert resp.total_stroops == 240_000 + 120_000 == sum(s.price_stroops for s in resp.steps)
+    assert stored.plan.total_stroops == resp.total_stroops
+    assert stored.total_usdc == resp.total_usdc == 0.036
