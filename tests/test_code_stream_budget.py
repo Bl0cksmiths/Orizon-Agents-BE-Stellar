@@ -42,10 +42,15 @@ TAGGED = f"<artifact_title>T</artifact_title><artifact_summary>s</artifact_summa
 AGNO_CODE_GEN = "2d4367206271f12f13a955f45da992bf40a897bbdea9f3384c27a85c63f7eb2a"
 AGNO_CODE_CRITIC = "d081bb9551069a0e5acfb3028c8546a6b5c97a7c433b7df95aa6a5c403d9927f"
 
-# The planning figures the ceiling is sized on.
-TOKENS_PER_SECOND = 100.0
-FIRST_TOKEN_SECONDS = 3.0
-TARGET_SECONDS = 95.0
+# What the ceiling is sized on. The live re-measure of 2026-10-06
+# (evals/orchestrator/reports/2026-10-06-recheck/r3-code-length/) clocked
+# Sonnet 5.5 at low effort at about 180–220 output tokens/s (code.gen: 7 058
+# tokens in 39.2 s, first token at 1.9 s). The ceiling must finish at the
+# SLOWEST measured rate with first-token latency doubled and 15% of the stream
+# budget still to spare; the budget itself guards anything slower.
+SLOWEST_MEASURED_TOKENS_PER_SECOND = 180.0
+FIRST_TOKEN_SECONDS = 2 * 1.9
+BUDGET_SHARE = 0.85
 
 
 @pytest.fixture
@@ -83,6 +88,9 @@ def test_the_claude_prompts_ask_for_a_bounded_app_core_first(prompt: str) -> Non
     assert "about 250–450 lines" in flat
     assert "prioritise working core features over breadth" in flat
     assert "list the deferred features in the summary" in flat
+    # Readable source, so the line count reflects the work done.
+    assert "one statement or declaration per line" in flat
+    assert "no minified css or js" in flat
     # The agno length targets would contradict it, so they are not in it.
     for longer in ("400–700", "600–1000", "500–900"):
         assert longer not in flat
@@ -92,10 +100,19 @@ def test_the_claude_prompts_ask_for_a_bounded_app_core_first(prompt: str) -> Non
 
 
 @pytest.mark.parametrize("module", [code_gen, code_critic], ids=["gen", "critic"])
-def test_the_output_ceiling_fits_inside_the_deadline(module: Any) -> None:
-    assert module.MAX_TOKENS / TOKENS_PER_SECOND + FIRST_TOKEN_SECONDS <= TARGET_SECONDS
-    # …and still leaves room for a 450-line app (~40 chars a line, ~3.3 chars a token).
-    assert module.MAX_TOKENS >= 450 * 40 / 3.3
+def test_the_output_ceiling_fits_inside_the_stream_budget(module: Any) -> None:
+    seconds = module.MAX_TOKENS / SLOWEST_MEASURED_TOKENS_PER_SECOND + FIRST_TOKEN_SECONDS
+    assert seconds <= claude_step.STREAM_BUDGET_SECONDS * BUDGET_SHARE
+    # …and leaves room for a 450-line app written readably (~40 characters a
+    # line) at the measured density: 14 385 characters for 7 058 tokens,
+    # thinking included.
+    assert module.MAX_TOKENS >= 450 * 40 / (14_385 / 7_058)
+
+
+def test_the_ceilings_are_the_measured_ones() -> None:
+    """code.critic reads the draft and rewrites it whole, so it gets the
+    larger ceiling (it used 93% of the old 9 000 in the live re-measure)."""
+    assert (code_gen.MAX_TOKENS, code_critic.MAX_TOKENS) == (12_000, 14_000)
 
 
 @pytest.mark.parametrize(("agent_id", "context"), CODE_STEPS)
