@@ -25,7 +25,7 @@ def test_a_clean_request_is_allowed_at_its_tier():
     assert (d.verdict, d.tier, d.watched) == ("allow", "moderate", False)
 
 
-@pytest.mark.parametrize(("score", "verdict"), [(0.70, "block"), (0.6999, "allow")])
+@pytest.mark.parametrize(("score", "verdict"), [(0.40, "block"), (0.3999, "allow")])
 def test_injection_blocks_at_the_line(score, verdict):
     assert decide(_with(injection=score), "low").verdict == verdict
 
@@ -52,10 +52,10 @@ def test_low_confidence_rounds_the_tier_up_and_complex_stays_complex():
 
 
 def test_the_watch_band_rests_on_the_recheck():
-    watched = decide(_with(injection=0.5), "low")
+    watched = decide(_with(injection=0.37), "low")
     assert (watched.verdict, watched.watched) == ("allow", True)
-    assert decide(_with(injection=0.5, recheck_injection=0.1), "low").verdict == "allow"
-    blocked = decide(_with(injection=0.5, recheck_injection=0.35), "low")
+    assert decide(_with(injection=0.37, recheck_injection=0.1), "low").verdict == "allow"
+    blocked = decide(_with(injection=0.37, recheck_injection=0.35), "low")
     assert (blocked.verdict, blocked.reasons) == ("block", ("injection", "watch"))
 
 
@@ -71,7 +71,7 @@ def test_starting_values_are_the_documented_table():
         STARTING.severity_block,
         STARTING.real_request_min,
         STARTING.complexity_confidence_min,
-    ) == (0.70, 0.35, 0.70, 2.0, 0.30, 0.50)
+    ) == (0.40, 0.35, 0.70, 2.0, 0.30, 0.50)
 
 
 def test_the_replay_agrees_with_the_guard_itself():
