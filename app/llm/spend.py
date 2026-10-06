@@ -89,15 +89,37 @@ JEV_INPUT_USD_PER_MTOK = 0.042
 _warned_unknown: set[str] = set()
 
 
+# Longest first, so a served id is matched to the most specific listed model:
+# claude-opus-5 is a prefix of claude-opus-5-5.
+_FAMILIES = sorted(PRICES, key=len, reverse=True)
+
+
+def listed_model(model: str) -> str | None:
+    """The PRICES entry a served model id belongs to, or None for a truly unknown model.
+
+    The API does not always echo the id it was asked for: `response.model`
+    for a `claude-haiku-4-5` request is `claude-haiku-4-5-20251001` (seen in
+    the live eval of 2026-10-06). A listed id followed by a version suffix —
+    `-YYYYMMDD`, `@YYYYMMDD`, `-latest` — is that listed model. The suffix
+    must start at a separator, so `claude-haiku-4-55` is not Haiku 4.5.
+    """
+    served = model.strip()
+    for listed in _FAMILIES:
+        if served == listed or served.startswith((f"{listed}-", f"{listed}@")):
+            return listed
+    return None
+
+
 def price_for(model: str) -> Price:
-    """The model's price; an unknown model gets the dearest known rate, with one warning."""
-    price = PRICES.get(model)
-    if price is None:
-        if model not in _warned_unknown:
-            _warned_unknown.add(model)
-            logger.warning("llm spend: no price for model %r; charging it at the highest known rate", model)
-        return _UNKNOWN
-    return price
+    """The model's price, by its listed family; a truly unknown model gets the
+    dearest known rate, with one warning per id."""
+    listed = listed_model(model)
+    if listed is not None:
+        return PRICES[listed]
+    if model not in _warned_unknown:
+        _warned_unknown.add(model)
+        logger.warning("llm spend: no price for model %r; charging it at the highest known rate", model)
+    return _UNKNOWN
 
 
 def cost_usd(model: str, usage: Usage) -> float:

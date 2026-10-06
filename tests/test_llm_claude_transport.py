@@ -136,6 +136,14 @@ def test_haiku_gets_no_effort_and_no_fallbacks(api: Callable[..., Recorder]) -> 
     assert "anthropic-beta" not in recorder.requests[0].headers
 
 
+def test_the_dated_id_the_api_serves_haiku_under_is_priced_as_haiku(api: Callable[..., Recorder]) -> None:
+    """The API answers a `claude-haiku-4-5` request as `claude-haiku-4-5-20251001`."""
+    api(_ok(_message(model="claude-haiku-4-5-20251001", usage={"input_tokens": 1000, "output_tokens": 500})))
+    result = _plan(model="claude-haiku-4-5")
+    # $1/MTok in + $5/MTok out — not the highest known rate.
+    assert result.cost_usd == pytest.approx(0.0035)
+
+
 def test_fallbacks_can_be_switched_off(api: Callable[..., Recorder], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "claude_server_fallbacks", False)
     recorder = api(_ok(_message()))

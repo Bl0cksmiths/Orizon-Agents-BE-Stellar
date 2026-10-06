@@ -51,6 +51,42 @@ def test_an_unknown_model_is_charged_the_dearest_rate_with_one_warning(caplog: p
     assert sum("claude-mystery-9" in r.getMessage() for r in caplog.records) == 1
 
 
+@pytest.mark.parametrize(
+    ("served", "listed"),
+    [
+        # What the API returns in `response.model`: Haiku 4.5 comes back dated
+        # (the live eval of 2026-10-06 recorded exactly this id).
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        ("claude-sonnet-5-5-20260915", "claude-sonnet-5-5"),
+        ("claude-opus-5-5-20260901", "claude-opus-5-5"),
+        ("claude-opus-5-20260601", "claude-opus-5"),
+        # A pinned-version spelling of a known family is still that family.
+        ("claude-haiku-4-5@20251001", "claude-haiku-4-5"),
+        ("claude-sonnet-5-5-latest", "claude-sonnet-5-5"),
+    ],
+)
+def test_a_served_model_id_is_priced_as_its_listed_model(
+    served: str, listed: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    with caplog.at_level(logging.WARNING, logger="app.llm.spend"):
+        assert spend.price_for(served) == spend.PRICES[listed]
+        assert spend.cost_usd(served, usage) == spend.cost_usd(listed, usage)
+    assert not caplog.records  # a known family is never "unknown"
+
+
+def test_the_longest_listed_family_wins() -> None:
+    """claude-opus-5 is a prefix of claude-opus-5-5; a dated Opus 5.5 is Opus 5.5."""
+    assert spend.price_for("claude-opus-5-5-20260901").input == 4.0
+    assert spend.price_for("claude-opus-5-20260601").input == 5.0
+
+
+def test_a_lookalike_is_not_a_known_family(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="app.llm.spend"):
+        assert spend.price_for("claude-haiku-4-55") == spend.price_for("claude-mystery-9")
+    assert any("claude-haiku-4-55" in r.getMessage() for r in caplog.records)
+
+
 # ── the ledger ─────────────────────────────────────────────────────────────
 
 
