@@ -797,7 +797,7 @@ async def _run(
                     task_id,
                     start,
                     "cost",
-                    f"x402 payment → {step.agent_id} :: {step.est_price_usdc:.3f} USDC (simulated)",
+                    f"x402 payment → {step.agent_id} :: {_amount(_price_stroops(step))} (simulated)",
                 )
             summary = _summarize(output)
             await _emit(task_id, start, "out", f"{worker.name}: {summary}")
@@ -983,8 +983,7 @@ async def _run(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {succeeded} agents · {money.stroops_to_float(spent):.3f} USDC · "
-                f"{time.monotonic() - start:.2f}s",
+                f"workflow sealed — {succeeded} agents · {_amount(spent)} · {time.monotonic() - start:.2f}s",
             )
 
         if status != "complete":
@@ -1220,7 +1219,8 @@ async def _settle_onchain(
             task_id,
             start,
             "error",
-            f"charge {total_usdc:.3f} USDC exceeds cap {settings.max_charge_usdc:.3f} — skipping on-chain charge/seal",
+            f"charge {_amount(money.to_stroops(total_usdc))} exceeds cap "
+            f"{_amount(money.to_stroops(settings.max_charge_usdc))} — skipping on-chain charge/seal",
             settlement="failed",
         )
         return (None, None, None)
@@ -1252,7 +1252,7 @@ async def _settle_onchain(
                 task_id,
                 start,
                 "cost",
-                f"x402 charge → {total_usdc:.3f} USDC settled · tx {charge_tx[:10]}…",
+                f"x402 charge → {_amount(total_i128)} settled · tx {charge_tx[:10]}…",
                 settlement="settled",
             )
             if on_charged is not None:
@@ -1388,7 +1388,7 @@ async def _settle_onchain(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {len(plan.plan.steps)} agents · {total_usdc:.3f} USDC · "
+                f"workflow sealed — {len(plan.plan.steps)} agents · {_amount(total_i128)} · "
                 f"{time.monotonic() - start:.2f}s",
             )
         else:
@@ -1731,6 +1731,11 @@ def _price_stroops(step: PlanStep) -> int:
     if step.price_stroops is None:
         raise _PayoutRefused(f"step for {step.agent_id} carries no price in stroops")
     return step.price_stroops
+
+
+def _amount(stroops: int) -> str:
+    """Money as a trace line shows it: every decimal it carries, and the asset it is in."""
+    return f"{money.format_amount(stroops)} {money.asset_code()}"
 
 
 class _PayoutRefused(Exception):
@@ -2095,7 +2100,7 @@ async def _settle_v2(
                     task_id,
                     start,
                     "cost",
-                    f"x402 settle → {total_usdc:.3f} USDC paid to {len(payout_plan.payouts)} "
+                    f"x402 settle → {_amount(total)} paid to {len(payout_plan.payouts)} "
                     f"operator payout(s), the rest released · tx {tx[:10]}…",
                     settlement="settled",
                 )
@@ -2357,7 +2362,7 @@ async def _sealed(
         if kind == "delivery_only":
             line = f"workflow sealed — {agents} agents delivered, no payment was made · {elapsed}"
         else:
-            line = f"workflow sealed — {agents} agents · {total_usdc:.3f} USDC · {elapsed}"
+            line = f"workflow sealed — {agents} agents · {_amount(money.to_stroops(total_usdc))} · {elapsed}"
         await _emit(task_id, start, "proof", line)
     else:
         await _emit(task_id, start, "proof", "attestation found on-chain for this job")
