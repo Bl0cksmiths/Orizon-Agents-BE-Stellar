@@ -42,6 +42,10 @@ from app.services import orchestrator_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 # A build intent that matches no DemoKit, so decompose() takes the free-form
 # path — and the kind of intent the planner is told to hand to code.gen.
 BUILD_INTENT = "build a habit tracker web app"

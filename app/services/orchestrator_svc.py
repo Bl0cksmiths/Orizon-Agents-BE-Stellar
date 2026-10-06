@@ -42,7 +42,9 @@ from . import intent_screening, reachability, reputation_svc
 from .binding_registry import is_dispatchable
 from .plan_notices import (
     below_floor_exclusion,
+    external_exclusions,
     relaxation,
+    simulated_exclusion,
     substitution,
     unbound_exclusions,
     unreachable_exclusion,
@@ -254,6 +256,16 @@ class _RegistrySnapshot(NamedTuple):
     agents: tuple[Agent, ...]
     routable: tuple[Agent, ...]
     unreachable: tuple[Agent, ...] = ()
+    # Listed and dispatchable, but held out by routing policy before anything
+    # else judged them (`_plannable`): built-in agents whose worker only
+    # simulates its output, and — while `PLANNER_ROUTE_EXTERNAL` is off —
+    # external operator agents. No backstop re-admits either: relaxing the
+    # floor cannot make a simulation real or reverse the owner's policy.
+    simulated: tuple[Agent, ...] = ()
+    external: tuple[Agent, ...] = ()
+    # `PLANNER_ROUTE_EXTERNAL` as this snapshot applied it, so the notices
+    # describe the same policy the routable set was cut with.
+    route_external: bool = False
 
 
 def _with_executor(step: PlanStep) -> PlanStep:
@@ -284,14 +296,54 @@ def _with_executor(step: PlanStep) -> PlanStep:
     return step.model_copy(update={"executor": "built_in", "model": model_for(tier) if tier else None})
 
 
+def _is_simulated(agent_id: str) -> bool:
+    """Whether a built-in worker exists for `agent_id` but only simulates its output.
+
+    Read off the worker itself (`Worker.real`), so the day an agent's real
+    worker replaces its simulation in `app/agents/registry.py`, the agent
+    becomes plannable with no change here.
+    """
+    worker = get_worker(agent_id)
+    return worker is not None and worker.real is not True
+
+
+def _is_external(agent_id: str) -> bool:
+    """Whether `agent_id` runs anywhere but on a built-in worker (a bound operator endpoint)."""
+    return get_worker(agent_id) is None
+
+
+def plannable(agent: Agent) -> bool:
+    """Whether routing POLICY lets a plan use `agent` at all — before the floor,
+    the endpoint checks and the planner have any say.
+
+    Two rules, both enforced here in code rather than asked of the model:
+
+      * a built-in agent whose worker only simulates its output is never
+        planned — a buyer must never be charged for simulated work;
+      * an external operator agent is planned only while
+        `PLANNER_ROUTE_EXTERNAL` is on (owner decision: plans use the
+        platform's own agents).
+
+    Public so the evals harness offers the planner exactly the set decompose
+    would.
+    """
+    if _is_simulated(agent.id):
+        return False
+    return not _is_external(agent.id) or settings.planner_route_external
+
+
 def _snapshot_registry() -> _RegistrySnapshot:
     """Read the registry once and split out what planning may route to."""
     agents = tuple(state.list_agents())
     dispatchable = [a for a in agents if _is_listed(a) and is_dispatchable(a.id)]
+    eligible = [a for a in dispatchable if plannable(a)]
     return _RegistrySnapshot(
         agents,
-        tuple(a for a in dispatchable if not reachability.is_failing(a.id)),
-        tuple(a for a in dispatchable if reachability.is_failing(a.id)),
+        tuple(a for a in eligible if not reachability.is_failing(a.id)),
+        tuple(a for a in eligible if reachability.is_failing(a.id)),
+        tuple(a for a in dispatchable if _is_simulated(a.id)),
+        tuple(a for a in dispatchable if not plannable(a) and not _is_simulated(a.id)),
+        settings.planner_route_external,
     )
 
 
@@ -306,7 +358,11 @@ def _still_routable(agent_id: str) -> bool:
     """
     agent = state.agents.get(agent_id)
     return (
-        agent is not None and _is_listed(agent) and is_dispatchable(agent_id) and not reachability.is_failing(agent_id)
+        agent is not None
+        and _is_listed(agent)
+        and is_dispatchable(agent_id)
+        and plannable(agent)
+        and not reachability.is_failing(agent_id)
     )
 
 
@@ -543,8 +599,8 @@ class _Shortlist(NamedTuple):
     offered: frozenset[str]
 
 
-def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
-    """`unbound_endpoint` notices for the registry as it stands — both paths.
+def _registry_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
+    """The registry's own exclusion notices as it stands — both paths.
 
     Unbound on-chain agents are a registry fact, not a floor verdict, so they
     are read from the whole catalog rather than from a routable subset (which
@@ -566,11 +622,27 @@ def _unbound_notices(registry: _RegistrySnapshot) -> list[PlanFloorNotice]:
     endpoint, which ARE bound and are reported first, under their own code
     (D-084). Calling one "unbound" would send its operator to fix the wrong
     thing.
+
+    Built-in agents whose worker only simulates its output come first, under
+    `simulated_worker`, whichever way the external switch is set. With the
+    switch OFF, every listed on-chain agent is then reported once, under
+    `external_not_routed` — bound or not, healthy or not, since the policy is
+    why it is absent, and "no endpoint bound" would send its operator to fix
+    something that would not get it planned.
     """
+    simulated = [simulated_exclusion(a) for a in registry.simulated]
+    if not registry.route_external:
+        return simulated + external_exclusions(
+            a for a in registry.agents if a.source == "onchain" and _is_listed(a) and _is_external(a.id)
+        )
     unreachable = {a.id for a in registry.unreachable}
     routable = {a.id for a in registry.routable} | unreachable
-    return unreachable_exclusions(registry.unreachable) + unbound_exclusions(
-        a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
+    return (
+        simulated
+        + unreachable_exclusions(registry.unreachable)
+        + unbound_exclusions(
+            a for a in registry.agents if a.source == "onchain" and _is_listed(a) and a.id not in routable
+        )
     )
 
 
@@ -665,7 +737,7 @@ def _routable_registry(
         for a in routable
         if not reputation_svc.passes_floor(reps.get(a.id))
     ]
-    # Unbound on-chain agents, which `_unbound_notices` selects the same way
+    # Unbound on-chain agents, which `_registry_notices` selects the same way
     # for both paths, come last.
     #
     # Delisted agents are skipped there for a related but distinct reason, and
@@ -690,7 +762,7 @@ def _routable_registry(
     # Concretely, that means a delisted-AND-unbound agent is filtered rather
     # than reported: "no endpoint bound" is true of it but is not why it is
     # absent, and it is advice nobody wants acted on.
-    notices += _unbound_notices(registry)
+    notices += _registry_notices(registry)
 
     return _Shortlist(render_agents_block(routable, reps), notices, frozenset(offered))
 
@@ -911,7 +983,7 @@ async def _build_kit_plan(
     # the floor did first, then registry entries nothing could dispatch. This
     # path used to report none, so a demo intent showed a marketplace with
     # agents its plan card never accounted for.
-    notices += _unbound_notices(registry)
+    notices += _registry_notices(registry)
     steps = [_with_executor(step) for _, step in sorted(placed, key=lambda p: p[0])]
 
     plan_id = f"pln_{secrets.token_hex(4)}"
@@ -1164,11 +1236,12 @@ def _clamp(
             # every excluded agent is, by construction, not offered.
             continue
         agent = state.agents.get(step.agent_id)
-        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id):
+        if not agent or not _is_listed(agent) or not is_dispatchable(agent.id) or not plannable(agent):
             # Offered, but no longer routable at the point of use. The
             # shortlist was built BEFORE the planning call, and that call can
             # take tens of seconds, during which an operator can delist the
-            # agent or unbind its endpoint. This is the last gate before the
+            # agent or unbind its endpoint (or a worker swap or the external
+            # switch can change `plannable`). This is the last gate before the
             # step is stored and later dispatched, so the registry is asked
             # again here rather than trusted from the snapshot: a delisted
             # agent reaching /execute is the whole bug, and a step with nothing

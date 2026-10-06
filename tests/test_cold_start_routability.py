@@ -36,6 +36,10 @@ from app.services import binding_registry, orchestrator_svc, reputation_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 # Matches a DemoKit, so decompose() takes the curated kit path.
 KIT_INTENT = "tetris game in html"
 # Matches none, so decompose() takes the free-form model path.

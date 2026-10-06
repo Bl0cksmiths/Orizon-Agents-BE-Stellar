@@ -22,6 +22,10 @@ from app.services import binding_registry, orchestrator_svc
 from app.services.reputation_svc import RepInfo
 from app.state import state
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 KIT_INTENT = "tetris game in html"
 
 

@@ -24,6 +24,10 @@ from app.services import reputation_svc as rep
 from app.stellar import cache as rcache
 from app.stellar import client as sc
 
+# The floor, delisting, binding and endpoint rules, on the routing policy they
+# were written against (see the fixture).
+pytestmark = pytest.mark.usefixtures("pre_pipeline_routing")
+
 USDC = rep.STROOPS_PER_USDC
 LEDGER = "CFAKELEDGER"
 # Heavy negative evidence: 20 USDC of 10/100 ratings, well under the floor.

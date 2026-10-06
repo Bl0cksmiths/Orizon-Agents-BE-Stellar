@@ -133,6 +133,24 @@ def isolated_snapshots(monkeypatch):
     snapshots.reset_all()
 
 
+@pytest.fixture
+def pre_pipeline_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routing policy as it stood before the agent-pipelines work.
+
+    External operator agents compete on merit (`PLANNER_ROUTE_EXTERNAL` on),
+    and the seeded catalog's simulated workers count as real. For suites whose
+    subject is the floor, delisting, binding or reachability rules rather than
+    the policy, so they keep testing those rules on the agents they were
+    written against — and keep doing so once the simulated agents get real
+    workers. tests/test_routing_policy.py covers the policy itself.
+    """
+    from app.agents.workers.mock import MockWorker
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "planner_route_external", True)
+    monkeypatch.setattr(MockWorker, "real", True)
+
+
 @pytest.fixture()
 def client():
     with TestClient(app) as c:
