@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..model_factory import lazy_agent
-from .base import Worker
+from ..model_factory import claude_workers, lazy_agent, worker_tier
+from . import claude_step
+from .base import ModelWorker
 from .prompt_safety import worker_prompt
+
+if TYPE_CHECKING:
+    from ...llm.tiers import Tier
 
 
 class SeoBriefOutput(BaseModel):
@@ -18,28 +22,40 @@ class SeoBriefOutput(BaseModel):
     summary: str
 
 
-class SeoBrief(Worker):
+INSTRUCTIONS = (
+    "You are an SEO research agent. Given an intent, return a JSON brief with: "
+    "8–12 high-intent keywords, 2–4 audience clusters (concise labels), and a "
+    "one-line summary. Be concrete, skip fluff."
+)
+
+# Room for the JSON plus any thinking the tier's model does first.
+MAX_TOKENS = 8_000
+
+
+class SeoBrief(ModelWorker):
     id = "agt_05x7"
     name = "seo.brief"
     real = True
+    default_tier = "low"
 
     def __init__(self) -> None:
         self._agent = lazy_agent(
             name="seo.brief",
             model_id=settings.worker_model,
-            instructions=(
-                "You are an SEO research agent. Given an intent, return a JSON brief with: "
-                "8–12 high-intent keywords, 2–4 audience clusters (concise labels), and a "
-                "one-line summary. Be concrete, skip fluff."
-            ),
+            instructions=INSTRUCTIONS,
             output_schema=SeoBriefOutput,
         )
+
+    def _deterministic(self, context: dict[str, Any] | None) -> bool:
+        return bool((context or {}).get("kit"))
 
     async def run(
         self,
         intent: str,
         rationale: str,
         context: dict[str, Any] | None = None,
+        *,
+        tier: Tier | None = None,
     ) -> dict[str, Any]:
         kit = (context or {}).get("kit")
 
@@ -67,8 +83,18 @@ class SeoBrief(Worker):
 
         # ── Free-form path: LLM ─────────────────────────────────────────────
         prompt = worker_prompt(intent, rationale, "Return the SEO brief.")
-        result = await self._agent.arun(prompt)
-        out: SeoBriefOutput = result.content
+        out: SeoBriefOutput
+        if claude_workers():
+            out = await claude_step.structured(
+                worker=self.name,
+                tier=worker_tier(tier, self.default_tier),
+                system=INSTRUCTIONS,
+                user=prompt,
+                schema=SeoBriefOutput,
+                max_tokens=MAX_TOKENS,
+            )
+        else:
+            out = (await self._agent.arun(prompt)).content
         return {
             "summary": out.summary,
             "keywords": out.keywords,
