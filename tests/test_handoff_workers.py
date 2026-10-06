@@ -338,3 +338,37 @@ def test_code_critic_on_a_baked_draft_names_the_draft_and_asks_no_model(claude: 
 
 def test_code_critic_with_no_draft_uses_nothing() -> None:
     assert WORKERS["agt_12r0"].upstream_sources(ctx(**{"copywrite.v3": copy_out()})) == []
+
+
+# ── deploy.v0 ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("outputs", "sealed_role", "title"),
+    [
+        ({"code.gen": code(title="Draft")}, "code.gen", "Draft"),
+        ({"code.gen": code(title="Draft"), "code.critic": code(title="Polished")}, "code.critic", "Polished"),
+        ({"code.next": code(title="NextApp")}, "code.next", "NextApp"),
+        (
+            {"code.gen": code(title="Draft"), "code.critic": {"summary": "no draft", "artifact": None}},
+            "code.gen",
+            "Draft",
+        ),
+        ({"code.gen": code(title="Draft"), "external.agt_op": code(title="Operator")}, "external.agt_op", "Operator"),
+    ],
+    ids=["code.gen", "critic-over-draft", "code.next", "critic-without-artifact", "operator-build"],
+)
+def test_deploy_seals_what_the_latest_code_step_produced(outputs: dict[str, Any], sealed_role: str, title: str) -> None:
+    context = ctx(**outputs)
+    assert WORKERS["agt_08j2"].upstream_sources(context) == [sealed_role]
+    out = run("agt_08j2", context)
+    assert out["summary"].startswith(f"sealed {title} · 1 file")
+    assert out["preview_url"]
+
+
+def test_deploy_with_no_build_seals_nothing_and_names_no_source() -> None:
+    context = ctx(**{"copywrite.v3": copy_out()})
+    assert WORKERS["agt_08j2"].upstream_sources(context) == []
+    out = run("agt_08j2", context)
+    assert out["preview_url"] is None
+    assert out["files"] == 0
