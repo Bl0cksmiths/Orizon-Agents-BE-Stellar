@@ -17,8 +17,11 @@ from pydantic import ValidationError
 
 from app import origin_lock
 from app.config import Settings, settings
+from app.main import app
+from tests.route_inventory import concrete, operator_guard
 
 TOKEN = "frontend-proxy-token-" + "k" * 24
+OPERATOR_KEY = "operator-key-" + "o" * 32
 
 
 def _settings(**overrides) -> Settings:
@@ -110,3 +113,114 @@ def test_a_preflight_is_never_locked(frontend_token):
 
 def test_only_http_is_locked(frontend_token):
     assert not origin_lock.locked_out({"type": "lifespan"})
+
+
+# ── the allowlist ───────────────────────────────────────────────
+
+OPEN = [e for e in origin_lock.EXEMPTIONS if not e.keyed]
+KEYED = [e for e in origin_lock.EXEMPTIONS if e.keyed]
+
+
+def _ids(exemptions):
+    return [f"{e.method} {e.template}" for e in exemptions]
+
+
+@pytest.fixture
+def operator_key(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
+    return OPERATOR_KEY
+
+
+def test_the_open_allowlist_is_the_webhook_and_the_proxied_probe():
+    assert {(e.method, e.template) for e in OPEN} == {
+        ("POST", "/api/pdax/webhooks/receive"),
+        ("GET", "/api/health"),
+    }
+
+
+@pytest.mark.parametrize("exemption", OPEN, ids=_ids(OPEN))
+def test_an_open_route_needs_no_token(frontend_token, exemption):
+    assert not origin_lock.locked_out(_scope(concrete(exemption.template), exemption.method))
+
+
+@pytest.mark.parametrize("exemption", KEYED, ids=_ids(KEYED))
+def test_a_keyed_route_is_open_to_a_caller_with_the_operator_key(frontend_token, operator_key, exemption):
+    scope = _scope(concrete(exemption.template), exemption.method, {"X-API-Key": operator_key})
+    assert not origin_lock.locked_out(scope)
+
+
+@pytest.mark.parametrize("key", [None, "", "wrong-" + "o" * 40], ids=["absent", "empty", "wrong"])
+@pytest.mark.parametrize("exemption", KEYED, ids=_ids(KEYED))
+def test_a_keyed_route_without_the_operator_key_is_locked(frontend_token, operator_key, exemption, key):
+    headers = {} if key is None else {"X-API-Key": key}
+    assert origin_lock.locked_out(_scope(concrete(exemption.template), exemption.method, headers))
+
+
+@pytest.mark.parametrize("exemption", KEYED, ids=_ids(KEYED))
+def test_with_no_operator_key_configured_a_keyed_route_stays_locked(frontend_token, exemption):
+    """`require_api_key` waves everyone through while API_KEY is empty, so the
+    lock must not: an empty key opens nothing, whatever header is sent."""
+    settings.api_key = ""  # hermetic_settings restores it
+    scope = _scope(concrete(exemption.template), exemption.method, {"X-API-Key": ""})
+    assert origin_lock.locked_out(scope)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        # The right path, the wrong method.
+        ("GET", "/api/pdax/webhooks/receive"),
+        ("POST", "/api/health"),
+        # A template is exact: no prefix match, no extra or missing segment.
+        ("POST", "/api/pdax/webhooks/receive/extra"),
+        ("POST", "/api/pdax/webhooks"),
+        ("GET", "/api/healthz"),
+        ("POST", "/api/disputes/a/b/uphold"),
+        ("POST", "/api/disputes//uphold"),
+        # A neighbour of an exempt route is not exempt.
+        ("POST", "/api/pdax/webhooks/register"),
+    ],
+)
+def test_a_near_miss_of_the_allowlist_is_locked(frontend_token, method, path):
+    assert origin_lock.locked_out(_scope(path, method))
+
+
+# Reads that take the operator key as an optional ELEVATION, not as their
+# guard: anyone holding the task's read token (or nothing, for a binding's
+# public half) reads them, and the key only widens what they see. They are the
+# console's own reads, so they stay behind the lock; an operator reading one
+# goes through orizons.xyz, which forwards X-API-Key untouched. The OpenAPI
+# cannot tell an optional header from a guard's, so they are named here.
+OPTIONAL_KEY_READS = {
+    ("GET", "/api/agents/{agent_id}/binding"),
+    ("GET", "/api/tasks/{task_id}"),
+    ("GET", "/api/tasks/{task_id}/artifact"),
+    ("GET", "/api/tasks/{task_id}/disputes"),
+    ("GET", "/api/disputes/{dispute_id}"),
+    ("GET", "/api/trace/{task_id}"),
+    ("GET", "/api/trace/{task_id}/stream"),
+}
+
+
+def _openapi_key_operations() -> set[tuple[str, str]]:
+    """Every /api operation that takes the operator key, guarded or optional, read off the OpenAPI."""
+    spec = app.openapi()
+    return {
+        (method.upper(), path)
+        for path, item in spec["paths"].items()
+        if path.startswith(origin_lock.API_PREFIX)
+        for method, operation in item.items()
+        if isinstance(operation, dict) and operator_guard(operation) is not None
+    }
+
+
+def test_the_keyed_allowlist_is_exactly_the_operator_keyed_routes():
+    """Drift guard: every route behind an operator key is reachable with it,
+    and nothing else rides on that exemption. A new keyed route, or a key
+    taken off one, fails here until EXEMPTIONS (or OPTIONAL_KEY_READS) says so."""
+    assert {(e.method, e.template) for e in KEYED} == _openapi_key_operations() - OPTIONAL_KEY_READS
+
+
+def test_the_optional_key_reads_are_reads_and_still_take_the_key():
+    assert OPTIONAL_KEY_READS <= _openapi_key_operations()
+    assert {method for method, _ in OPTIONAL_KEY_READS} == {"GET"}
