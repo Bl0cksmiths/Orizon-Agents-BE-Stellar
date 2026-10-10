@@ -201,6 +201,14 @@ Read one after the first deploy: `identity=` should be the visitor's address and
 
 **For the frontend.** Set the same random `FRONTEND_PROXY_TOKEN` (at least 32 characters; config refuses a weaker one) on Render and on Vercel. Server-side route handlers send it as `X-Frontend-Proxy-Token`, plus `X-Orizon-Client-Ip` with the visitor's address whenever the call is made for one visitor. Browser traffic through a plain `/api` rewrite carries neither, so it arrives keyed by Vercel's egress until the frontend adds them (Next.js middleware can, on the rewrite's request headers).
 
+### Origin lock
+
+`https://orizons.xyz` is the API's front door: Vercel's firewall sits in front of it and its middleware forwards every `/api/*` request here with `X-Frontend-Proxy-Token`. This host is reachable directly too, so `OriginLockMiddleware` (`app/origin_lock.py`, ADR 0017) decides what happens to an `/api/*` request without the token: nothing (`ORIGIN_LOCK_MODE=off`), a coalesced WARNING per route per minute and a count on `/readiness` under `origin_lock` (`log`, the default), or `403 origin_forbidden` (`enforce`).
+
+Never locked: everything outside `/api/` (`/health`, `/readiness`, `/`, the docs), CORS preflights, `POST /api/pdax/webhooks/receive` (PDAX signs it; it cannot hold our token), `GET /api/health`, and — only with the operator's `X-API-Key` — the operator-keyed routes: dispute uphold/reject, reputation invalidate, `/api/stellar/server/*` and the keyed `/api/pdax/*` routes. Anything else, our own scripts included, goes through `https://orizons.xyz`.
+
+Rollout: deploy in `log`, watch `/readiness` → `origin_lock.would_block_last_hour` and the `origin lock would refuse` lines until only strays remain, then set `ORIGIN_LOCK_MODE=enforce` (with `FRONTEND_PROXY_TOKEN` set on Render and Vercel alike) and `DOCS_ENABLED=false`.
+
 ## Deploy — Render (recommended)
 
 The repo ships a `render.yaml` blueprint + a `runtime.txt` pinning Python 3.12. Render reads them on first connect.
