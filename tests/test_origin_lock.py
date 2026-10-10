@@ -224,3 +224,47 @@ def test_the_keyed_allowlist_is_exactly_the_operator_keyed_routes():
 def test_the_optional_key_reads_are_reads_and_still_take_the_key():
     assert OPTIONAL_KEY_READS <= _openapi_key_operations()
     assert {method for method, _ in OPTIONAL_KEY_READS} == {"GET"}
+
+
+# ── the counter ─────────────────────────────────────────────────
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_the_counter_keeps_a_total_and_the_last_hour():
+    clock = _Clock()
+    counted = origin_lock.LockStats(clock)
+    for _ in range(3):
+        counted.record()
+    clock.now += 30 * 60
+    counted.record()
+    assert (counted.total, counted.last_hour()) == (4, 4)
+    clock.now += 45 * 60  # the first three are now 75 minutes old
+    assert (counted.total, counted.last_hour()) == (4, 1)
+    clock.now += 60 * 60
+    assert (counted.total, counted.last_hour()) == (4, 0)
+
+
+def test_the_counter_stays_small_however_long_it_runs():
+    clock = _Clock()
+    counted = origin_lock.LockStats(clock)
+    for _ in range(24 * 60):  # a day of one refusal a minute
+        counted.record()
+        clock.now += 60
+    assert counted.total == 24 * 60
+    assert len(counted._buckets) <= 61
+    clock.now -= 60  # back to the minute of the last refusal
+    assert counted.last_hour() == 60
+
+
+def test_the_counter_resets():
+    counted = origin_lock.LockStats(_Clock())
+    counted.record()
+    counted.reset()
+    assert (counted.total, counted.last_hour()) == (0, 0)
