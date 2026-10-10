@@ -35,7 +35,8 @@ def _intent_ref(intent: str) -> str:
 
 
 # Per-client budget for the planner. The global limiter is sized for polling,
-# and every free-form decompose is an LLM call.
+# and every decompose that reaches a model is a paid call: every free-form
+# one, and on Claude every kit one too (`_spends_model_calls`).
 _planner_limiter = KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute)
 
 
