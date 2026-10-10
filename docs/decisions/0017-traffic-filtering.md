@@ -124,3 +124,50 @@ wants one goes through `orizons.xyz`, which forwards `X-API-Key` unchanged.
 `tests/test_origin_lock.py` pins the keyed rows to the operations the OpenAPI
 says take the operator key, less those seven: a newly keyed route, or a key
 taken off one, fails the suite until this list says so.
+
+## Rollout
+
+1. **Token on both sides.** Confirm `FRONTEND_PROXY_TOKEN` is set, to the same
+   value, on Render and on Vercel (Production and Preview). Without it on
+   Vercel the frontend sends nothing and every request it makes counts as
+   locked out.
+2. **Deploy in `log`** (the default). Nothing is refused.
+3. **Watch.** `/readiness` → `origin_lock.would_block_last_hour`, and the
+   `origin lock would refuse …` WARNING lines in Render's log, which name the
+   route and the client. Expected: scanners and stray direct calls. Not
+   expected: steady traffic on routes the console uses (a proxy path that
+   drops the token), or a script of ours. Fix each at the caller.
+4. **Enforce.** Set `ORIGIN_LOCK_MODE=enforce` in the Render dashboard (it
+   overrides `render.yaml`) and redeploy. The process refuses to boot if the
+   token is missing, so a bad switch fails the deploy rather than the site.
+5. **Docs dark.** Set `DOCS_ENABLED=false` in production so `/docs`, `/redoc`
+   and `/openapi.json` stop advertising the routes. They sit outside `/api/`
+   and the lock never covers them.
+
+Back out by setting `ORIGIN_LOCK_MODE=log` (or `off`); no code change.
+
+## Consequences
+
+- Direct calls to `orizon-agents-be-stellar.onrender.com/api/*` are counted,
+  then refused. Every legitimate caller uses `https://orizons.xyz/api/*`, or
+  presents the operator key on a keyed route.
+- **Our own scripts.** Those that default to `https://orizons.xyz`
+  (`lifecycle`, `adoption_report`, `demo_preflight`'s API checks,
+  `sow_metrics`' API checks, `verify_external_settlement`) are unaffected.
+  `scripts/uphold_dispute.py` calls the invalidate route with the key and
+  passes. `verify_registration.py --api-base` must be given `orizons.xyz`,
+  not the Render host. `demo_preflight` and `sow_metrics` read `/readiness`
+  from the Render host, which stays open; `sow_metrics` also reads
+  `/openapi.json` there, which stops answering once `DOCS_ENABLED=false`.
+- A refused request costs one header compare and no rate-limit budget; a
+  flood of them costs one log line per route per minute and one counter
+  increment each.
+- `/readiness` gains `origin_lock` (additive). The counts are this process's,
+  since its boot; Render's free tier restarts on wake, so they cover the
+  current instance only.
+- The frontend token now gates access, not only rate-limit identity. Rotating
+  it means setting the new value on both sides; until both match, `enforce`
+  refuses the frontend. Rotate in `log`.
+- The allowlist is code. A new direct caller (a second webhook provider, a
+  new operator route) needs an entry here and in `app/origin_lock.py`, and
+  the drift test enforces that for keyed routes.
