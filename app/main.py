@@ -30,7 +30,8 @@ from .config import SERVICE_VERSION, settings
 from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
 from .llm import provider as llm_provider
 from .llm.provider import LLMPublicReadiness, LLMReadiness
-from .origin_lock import OriginLockMiddleware
+from .origin_lock import OriginLockMiddleware, OriginLockReadiness
+from .origin_lock import readiness as origin_lock_readiness
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -856,6 +857,7 @@ class ReadinessResponse(BaseModel):
     escrow: EscrowReadiness  # informational, never gates readiness
     registry: RegistryReadiness  # informational, never gates readiness
     treasury: TreasuryReadiness  # informational, never gates readiness
+    origin_lock: OriginLockReadiness  # informational, never gates readiness
     # Informational. Anyone: provider and planning active|paused (+ when a
     # pause lifts). With the operator X-API-Key: keys present, models, and
     # today's spend against the cap — numbers an abuser must not see.
@@ -939,6 +941,8 @@ async def readiness(
             last_full_sync_at=sync.last_full_sync_at,
         ),
         treasury=_treasury_readiness(),
+        # From memory: the mode and this process's refusal counts (ADR 0017).
+        origin_lock=origin_lock_readiness(),
         # A wrong or absent key is simply the public view: a probe never 401s.
         orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )
