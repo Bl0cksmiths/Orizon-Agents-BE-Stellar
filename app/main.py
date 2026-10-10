@@ -30,6 +30,7 @@ from .config import SERVICE_VERSION, settings
 from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
 from .llm import provider as llm_provider
 from .llm.provider import LLMPublicReadiness, LLMReadiness
+from .origin_lock import OriginLockMiddleware
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -431,6 +432,19 @@ app.add_middleware(RouteRateLimitMiddleware)
 # Registered before CORS so CORS wraps it and 429 responses still carry
 # the Access-Control-Allow-Origin header the browser needs to read them.
 app.add_middleware(RateLimitMiddleware)
+
+# The origin lock (app/origin_lock.py, ADR 0017): /api/* answers our frontend
+# only. Starlette runs middleware in the REVERSE of the order added, so being
+# added here puts it inside SecurityHeaders, CORS, GZip and RequestContext and
+# outside both rate limiters and the body cap. That is the order it needs:
+#   * outside the limiters and the body cap, so a refused request costs a
+#     header compare — it spends no visitor's rate budget (a flood of direct
+#     calls cannot 429 the real frontend's shared buckets) and no body is read;
+#   * inside RequestContext, so its log line and its 403 carry the request id;
+#   * inside SecurityHeaders and CORS, so the 403 is stamped with the
+#     hardening headers and, for an allowed origin, the CORS header a browser
+#     needs to read it. CORS also answers preflights before they reach it.
+app.add_middleware(OriginLockMiddleware)
 
 # Wraps the rate limiter (and everything inside it), so the limiter's 429
 # short-circuits — and the body limiter's 413s — carry the hardening
