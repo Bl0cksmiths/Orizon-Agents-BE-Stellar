@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from ..config import settings
 from ..demo_kits import detect_kit
+from ..llm import provider
 from ..schemas import DecomposeRequest, DecomposeResponse, ExecuteRequest, ExecuteResponse, StoredPlan
 from ..security import CodedHTTPException, ErrorEnvelope, KeyedRateLimiter, client_identity, request_id_var
 from ..services import authorization_guard as guard
@@ -36,6 +37,19 @@ def _intent_ref(intent: str) -> str:
 # Per-client budget for the planner. The global limiter is sized for polling,
 # and every free-form decompose is an LLM call.
 _planner_limiter = KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute)
+
+
+def _spends_model_calls(intent: str) -> bool:
+    """Whether this decompose costs a paid model call, and so spends the planner budget.
+
+    A free-form intent always does. A curated kit does on Claude, where
+    `screen_kit` puts every kit intent through the jev guard (and the Claude
+    fallback guard when jev is down) — calls the daily spend cap does not
+    stop, so without this budget a script could drive them unthrottled. Only
+    on the legacy provider is a kit free: its plan reads no model at all.
+    `decompose` makes the same two decisions.
+    """
+    return detect_kit(intent) is None or provider.active_provider() == "anthropic"
 
 
 # What each refusal adds to the error envelope, beside `error.message`: the
@@ -78,10 +92,7 @@ def _refused(err: IntentRefused) -> JSONResponse:
     },
 )
 async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse | JSONResponse:
-    # Only an intent that will reach the planner is counted. A kit intent is
-    # the demo path and makes no LLM call, so throttling it would cost a demo
-    # its safety net to save nothing; `decompose` makes the same call.
-    if detect_kit(req.intent) is None:
+    if _spends_model_calls(req.intent):
         retry_after = _planner_limiter.hit(client_identity(dict(request.scope)))
         if retry_after is not None:
             raise HTTPException(429, "decompose_rate_limited", headers={"Retry-After": str(retry_after)})
