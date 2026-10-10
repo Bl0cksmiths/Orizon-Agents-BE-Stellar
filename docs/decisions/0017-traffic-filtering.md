@@ -89,3 +89,38 @@ anything. Frontend lane; nothing here changes for it.
 Unchanged. They are what holds a real visitor, or a compromised frontend, to
 a fair share. They are not a substitute for T1–T3 and T1–T3 do not replace
 them.
+
+## The allowlist
+
+Inventoried from every router on 2026-10-10 (`Depends(require_…)`,
+`Security(…)` and the webhook receiver). Exact method and template each —
+`{param}` is one path segment — never a prefix, so a route added beside one
+of these is not exempt by accident.
+
+| Method | Path | Open to | Why |
+| --- | --- | --- | --- |
+| `POST` | `/api/pdax/webhooks/receive` | anyone | PDAX's servers deliver events here and cannot hold our token. Every delivery is authenticated by its HMAC signature (`PDAX_WEBHOOK_SECRET`) and the body is capped at 64 KiB. |
+| `GET` | `/api/health` | anyone | The liveness probe re-served under `/api` for monitors. Says nothing `/health` does not. |
+| `POST` | `/api/disputes/{dispute_id}/uphold`, `/reject` | operator key | `require_adjudicator`. Decided from an operator's terminal. |
+| `POST` | `/api/stellar/reputation/{agent_id}/invalidate` | operator key | `require_operator_key`. Called directly by `scripts/uphold_dispute.py`. |
+| `POST` | `/api/stellar/server/charge`, `/server/seal` | operator key | `require_api_key` / `require_seal_key`. Backend-signed contract calls. |
+| various | the 24 keyed `/api/pdax/*` routes (trade, funding, withdrawals, ramps, balances, webhook registration, deep health) | operator key | The `secured` router's `require_api_key`. Money-moving and account-revealing, driven by operator tooling. |
+
+**"Operator key" means the lock checks it too.** A keyed route passes the lock
+only when the request carries `X-API-Key` equal to `API_KEY` (the same
+constant-time `header_secret_matches` the routes use). Exempting those routes
+outright would have left a gap: while `API_KEY` is empty, `require_api_key` is
+a no-op, so the PDAX and charge routes would have stayed open to any direct
+caller behind the lock's back. With the check, an empty `API_KEY` opens none
+of them.
+
+**Not on the list.** Seven reads take the operator key only as an optional
+elevation — `GET /api/tasks/{task_id}`, `/artifact`, `/disputes`,
+`GET /api/disputes/{dispute_id}`, `GET /api/trace/{task_id}` and `/stream`,
+`GET /api/agents/{agent_id}/binding`. They are the console's own reads, served
+to anyone with the task's read token, so they stay locked; an operator who
+wants one goes through `orizons.xyz`, which forwards `X-API-Key` unchanged.
+
+`tests/test_origin_lock.py` pins the keyed rows to the operations the OpenAPI
+says take the operator key, less those seven: a newly keyed route, or a key
+taken off one, fails the suite until this list says so.
