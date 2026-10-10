@@ -24,6 +24,8 @@ which DOCS_ENABLED governs), CORS preflights, and the allowlist below.
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .config import settings
@@ -161,3 +163,46 @@ def locked_out(scope: dict) -> bool:
     if scope.get("method") == "OPTIONS":
         return False
     return not is_frontend(scope) and not exempt(scope)
+
+
+class LockStats:
+    """How many requests the lock has refused — or, in `log`, would have.
+
+    Since boot and over the last hour, for /readiness. The hour is sixty
+    one-minute buckets, so a flood costs one integer increment per request
+    and the table never holds more than about sixty entries, however long the
+    process runs or whatever arrives. In-process, like the rate limiters: a
+    restart starts the count again.
+    """
+
+    _BUCKET_SECONDS = 60
+    _BUCKETS_PER_HOUR = 60
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self.total = 0
+        self._buckets: dict[int, int] = {}
+
+    def _minute(self) -> int:
+        return int(self._clock() // self._BUCKET_SECONDS)
+
+    def record(self) -> None:
+        minute = self._minute()
+        self.total += 1
+        self._buckets[minute] = self._buckets.get(minute, 0) + 1
+        if len(self._buckets) > self._BUCKETS_PER_HOUR:
+            cutoff = minute - self._BUCKETS_PER_HOUR
+            for stale in [m for m in self._buckets if m <= cutoff]:
+                del self._buckets[stale]
+
+    def last_hour(self) -> int:
+        cutoff = self._minute() - self._BUCKETS_PER_HOUR
+        return sum(count for minute, count in self._buckets.items() if minute > cutoff)
+
+    def reset(self) -> None:
+        self.total = 0
+        self._buckets.clear()
+
+
+# One per process, read by /readiness.
+stats = LockStats()
