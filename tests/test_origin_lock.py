@@ -477,3 +477,37 @@ def test_enforce_refuses_a_keyed_route_without_the_key(client, mode, operator_ke
     response = client.post("/api/disputes/dsp_0000000000000000/uphold", headers={"X-API-Key": "wrong-" + "o" * 40})
     assert response.status_code == 403
     assert "wrong-" not in response.text
+
+
+# ── /readiness ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("lock_mode", ["off", "log", "enforce"])
+def test_readiness_reports_the_mode(client, mode, lock_mode):
+    mode(lock_mode)
+    assert client.get("/readiness").json()["origin_lock"] == {
+        "mode": lock_mode,
+        "would_block_total": 0,
+        "would_block_last_hour": 0,
+    }
+
+
+def test_readiness_counts_what_log_would_have_refused(client, mode, frontend_token):
+    mode("log")
+    for _ in range(3):
+        client.get("/api/agents")
+    client.get("/api/agents", headers={"X-Frontend-Proxy-Token": frontend_token})
+    client.get("/health")
+    assert client.get("/readiness").json()["origin_lock"] == {
+        "mode": "log",
+        "would_block_total": 3,
+        "would_block_last_hour": 3,
+    }
+
+
+def test_readiness_counts_what_enforce_refused(client, mode):
+    mode("enforce")
+    client.get("/api/agents")
+    client.post("/api/orchestrator/execute", json={})
+    lock = client.get("/readiness").json()["origin_lock"]
+    assert (lock["mode"], lock["would_block_total"]) == ("enforce", 2)
