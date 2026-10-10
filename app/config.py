@@ -2,6 +2,7 @@ import base64
 import binascii
 import logging
 import math
+from typing import Literal
 
 from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -202,6 +203,15 @@ class Settings(BaseSettings):
     # header (a cached, shared read) no per-client budget applies at all. See
     # `security.client_identity`. At least 32 characters, random.
     frontend_proxy_token: str = ""
+    # Whether /api/* answers only our frontend — the requests that carry
+    # FRONTEND_PROXY_TOKEN — so nobody can call Render directly and walk past
+    # the Vercel firewall (app/origin_lock.py, ADR 0017). `off` serves
+    # everyone as before; `log` (the default) still serves everyone but logs
+    # and counts each request it would refuse, so /readiness's `origin_lock`
+    # shows who would be locked out before anyone is; `enforce` answers those
+    # 403 `origin_forbidden`. A short allowlist (the PDAX webhook, and the
+    # operator-keyed routes when the operator key is presented) stays open.
+    origin_lock_mode: Literal["off", "log", "enforce"] = "log"
     # /api/stellar/server/seal makes the platform's sealer sign an attestation
     # with whatever the caller sends, so it FAILS CLOSED while API_KEY is
     # empty. A local or CI testnet run that wants it open without a key sets
