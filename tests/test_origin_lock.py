@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from app import origin_lock
 from app.config import Settings, settings
 from app.main import app
+from app.security import security_headers
 from tests.route_inventory import concrete, operator_guard
 
 TOKEN = "frontend-proxy-token-" + "k" * 24
@@ -372,3 +373,107 @@ def test_log_does_not_count_the_frontend(client, mode, frontend_token):
     mode("log")
     assert client.get("/api/agents", headers={"X-Frontend-Proxy-Token": frontend_token}).status_code == 200
     assert origin_lock.stats.total == 0
+
+
+def test_enforce_refuses_a_direct_call_in_the_error_envelope(client, mode, caplog):
+    mode("enforce")
+    with caplog.at_level("WARNING", logger=LOGGER):
+        response = client.get("/api/agents", headers={"X-Frontend-Proxy-Token": "forged-" + "x" * 40})
+    assert response.status_code == 403
+    request_id = response.headers["x-request-id"]
+    assert response.json() == {
+        "detail": "origin_forbidden",
+        "error": {
+            "code": "origin_forbidden",
+            "message": "This API is only available through orizons.xyz.",
+            "request_id": request_id,
+        },
+    }
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["cache-control"] == "no-store"
+    # Inside the hardening headers, so the refusal is stamped like any response.
+    for name, value in security_headers("/api/agents"):
+        assert response.headers[name.decode()] == value.decode()
+    # Outside the rate limiter: a refusal spends nobody's budget.
+    assert "x-ratelimit-remaining" not in response.headers
+    # Nothing of what was sent comes back, in the body or the log.
+    assert "forged" not in response.text
+    assert origin_lock.stats.total == 1
+    (line,) = _lock_lines(caplog)
+    assert line.startswith("origin lock refused GET /api/agents: not from the frontend")
+    assert "forged" not in caplog.text
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+def test_enforce_refuses_without_reading_the_route(client, mode, method):
+    """A refused request never reaches routing: an unknown route is 403, not 404."""
+    mode("enforce")
+    response = client.request(method, "/api/no-such-route")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "origin_forbidden"
+
+
+def test_enforce_serves_the_frontend(client, mode, frontend_token):
+    mode("enforce")
+    response = client.get("/api/agents", headers={"X-Frontend-Proxy-Token": frontend_token})
+    assert response.status_code == 200
+    assert origin_lock.stats.total == 0
+
+
+@pytest.mark.parametrize("path", ["/", "/health", "/readiness", "/docs", "/openapi.json"])
+def test_enforce_leaves_paths_outside_api_alone(client, mode, path):
+    mode("enforce")
+    assert client.get(path).status_code != 403
+    assert origin_lock.stats.total == 0
+
+
+def test_enforce_lets_a_cors_preflight_through(client, mode):
+    mode("enforce")
+    response = client.options(
+        "/api/orchestrator/execute",
+        headers={
+            "Origin": "https://orizon-agents-fe-stellar.vercel.app",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://orizon-agents-fe-stellar.vercel.app"
+    assert origin_lock.stats.total == 0
+
+
+def test_a_refusal_carries_cors_for_an_allowed_origin(client, mode):
+    """So the console's browser can read the 403 rather than see an opaque CORS failure."""
+    mode("enforce")
+    origin = "https://orizon-agents-fe-stellar.vercel.app"
+    response = client.get("/api/agents", headers={"Origin": origin})
+    assert response.status_code == 403
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_enforce_leaves_the_proxied_probe_open(client, mode):
+    mode("enforce")
+    assert client.get("/api/health").status_code == 200
+
+
+def test_enforce_leaves_the_pdax_webhook_to_its_signature(client, mode):
+    """PDAX cannot hold our token: the webhook reaches its own HMAC check, which refuses an unsigned delivery."""
+    mode("enforce")
+    response = client.post("/api/pdax/webhooks/receive", content=b"{}")
+    assert response.status_code != 403
+    assert response.json()["error"]["code"] != "origin_forbidden"
+    assert origin_lock.stats.total == 0
+
+
+def test_enforce_leaves_a_keyed_route_to_the_operator_with_the_key(client, mode, operator_key):
+    mode("enforce")
+    response = client.post("/api/disputes/dsp_0000000000000000/uphold", headers={"X-API-Key": operator_key}, json={})
+    # Past the lock: whatever the route answers, it is the route's answer.
+    assert response.status_code != 403
+    assert origin_lock.stats.total == 0
+
+
+def test_enforce_refuses_a_keyed_route_without_the_key(client, mode, operator_key):
+    mode("enforce")
+    response = client.post("/api/disputes/dsp_0000000000000000/uphold", headers={"X-API-Key": "wrong-" + "o" * 40})
+    assert response.status_code == 403
+    assert "wrong-" not in response.text
