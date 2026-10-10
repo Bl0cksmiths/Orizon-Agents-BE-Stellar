@@ -268,3 +268,44 @@ def test_the_counter_resets():
     counted.record()
     counted.reset()
     assert (counted.total, counted.last_hour()) == (0, 0)
+
+
+# ── what the log names, and how often ───────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("path", "template"),
+    [
+        ("/api/agents", "/api/agents"),
+        ("/api/agents/agt_01h8", "/api/agents/{agent_id}"),
+        # A literal route is not mistaken for a template's parameter.
+        ("/api/agents/bind/endpoint-check", "/api/agents/bind/endpoint-check"),
+        ("/api/tasks/t_secret/artifact", "/api/tasks/{task_id}/artifact"),
+        ("/api/no-such-route", origin_lock.UNROUTED),
+        ("/api/agents/a/b/c/d", origin_lock.UNROUTED),
+    ],
+)
+def test_a_path_is_logged_as_its_route_template(path, template):
+    assert origin_lock.RouteTemplates().resolve(app, path) == template
+
+
+def test_unreadable_templates_log_every_path_as_unrouted(caplog):
+    class _Broken:
+        def openapi(self):
+            raise RuntimeError("schema failed")
+
+    with caplog.at_level("ERROR", logger="app.origin_lock"):
+        assert origin_lock.RouteTemplates().resolve(_Broken(), "/api/agents") == origin_lock.UNROUTED
+    assert "could not read the route templates" in caplog.text
+
+
+def test_the_coalescer_logs_once_per_template_per_window_and_counts_the_rest():
+    clock = _Clock()
+    coalescer = origin_lock.WarningCoalescer(60.0, clock)
+    assert coalescer.admit("/api/agents") == 0
+    assert [coalescer.admit("/api/agents") for _ in range(5)] == [None] * 5
+    # Another template has a window of its own.
+    assert coalescer.admit("/api/tasks") == 0
+    clock.now += 60
+    assert coalescer.admit("/api/agents") == 5
+    assert coalescer.admit("/api/agents") is None
