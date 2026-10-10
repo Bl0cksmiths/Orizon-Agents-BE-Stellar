@@ -23,13 +23,17 @@ which DOCS_ENABLED governs), CORS preflights, and the allowlist below.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from .config import settings
 from .security import header_secret_matches, is_frontend
+
+logger = logging.getLogger(__name__)
 
 # Only what the frontend proxies is locked. Everything else on this host is a
 # probe, the root ping or the docs, none of which the frontend forwards.
@@ -206,3 +210,48 @@ class LockStats:
 
 # One per process, read by /readiness.
 stats = LockStats()
+
+
+# What a path that matches no /api route is logged as. One name for all of
+# them, so a scan of random paths is one log key, not one per path.
+UNROUTED = "<unrouted>"
+
+
+class RouteTemplates:
+    """Which /api route template a path belongs to — what the lock logs instead of the path.
+
+    A template (`/api/tasks/{task_id}`) never carries an id or a capability
+    from the URL into the log, and there are only as many of them as routes,
+    so the log coalescer keyed on it cannot be grown by a caller inventing
+    paths.
+
+    Read off the app's OpenAPI rather than by walking `app.routes`: FastAPI
+    0.140 stopped flattening included routers into that list, and the schema
+    is the shape that stayed put (tests/route_inventory.py makes the same
+    call). Built once, on the first request that needs it, then reused;
+    literal routes are tried before templated ones, so
+    `/api/agents/bind/endpoint-check` is not mistaken for an agent id.
+    """
+
+    def __init__(self) -> None:
+        self._compiled: list[tuple[str, re.Pattern[str]]] | None = None
+
+    def resolve(self, app: Any, path: str) -> str:
+        if self._compiled is None:
+            self._compiled = self._compile(app)
+        for template, pattern in self._compiled:
+            if pattern.fullmatch(path):
+                return template
+        return UNROUTED
+
+    @staticmethod
+    def _compile(app: Any) -> list[tuple[str, re.Pattern[str]]]:
+        try:
+            paths = app.openapi().get("paths", {})
+        except Exception:
+            # Logging falls back to UNROUTED for everything; the lock itself
+            # never depends on a template, so it keeps working regardless.
+            logger.exception("origin lock: could not read the route templates; logging every path as %s", UNROUTED)
+            paths = {}
+        templates = sorted((t for t in paths if t.startswith(API_PREFIX)), key=lambda t: (t.count("{"), t))
+        return [(template, template_regex(template)) for template in templates]
