@@ -309,3 +309,66 @@ def test_the_coalescer_logs_once_per_template_per_window_and_counts_the_rest():
     clock.now += 60
     assert coalescer.admit("/api/agents") == 5
     assert coalescer.admit("/api/agents") is None
+
+
+# ── the middleware, through the app ─────────────────────────────
+
+LOGGER = "app.origin_lock"
+
+
+@pytest.fixture(autouse=True)
+def fresh_lock_state():
+    """The counter and the log window are process-wide; every test starts from zero."""
+    origin_lock.stats.reset()
+    origin_lock.log_coalescer.reset()
+    yield
+    origin_lock.stats.reset()
+    origin_lock.log_coalescer.reset()
+
+
+@pytest.fixture
+def mode(monkeypatch, frontend_token):
+    def _set(value: str) -> None:
+        monkeypatch.setattr(settings, "origin_lock_mode", value)
+
+    return _set
+
+
+def _lock_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == LOGGER and r.levelname == "WARNING"]
+
+
+def test_off_serves_everyone_and_counts_nothing(client, mode, caplog):
+    mode("off")
+    assert client.get("/api/agents").status_code == 200
+    assert origin_lock.stats.total == 0
+    assert _lock_lines(caplog) == []
+
+
+def test_log_serves_a_direct_call_but_counts_and_logs_it(client, mode, caplog):
+    mode("log")
+    with caplog.at_level("WARNING", logger=LOGGER):
+        response = client.get("/api/agents/agt_01h8?token=never-logged")
+    assert response.status_code != 403
+    assert origin_lock.stats.total == 1
+    (line,) = _lock_lines(caplog)
+    assert line.startswith("origin lock would refuse GET /api/agents/{agent_id}: not from the frontend [")
+    # The template, never the path or its query string.
+    assert "agt_01h8" not in line and "never-logged" not in line
+    assert f"[{response.headers['x-request-id']}]" in line
+
+
+def test_log_coalesces_a_flood_into_one_line_per_route(client, mode, caplog):
+    mode("log")
+    with caplog.at_level("WARNING", logger=LOGGER):
+        for _ in range(20):
+            client.get("/api/agents")
+        client.get("/api/flow/default")
+    assert origin_lock.stats.total == 21
+    assert len(_lock_lines(caplog)) == 2
+
+
+def test_log_does_not_count_the_frontend(client, mode, frontend_token):
+    mode("log")
+    assert client.get("/api/agents", headers={"X-Frontend-Proxy-Token": frontend_token}).status_code == 200
+    assert origin_lock.stats.total == 0
