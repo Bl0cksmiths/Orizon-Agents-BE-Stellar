@@ -44,6 +44,13 @@ services:
       # frontend is just another caller keyed by Vercel's shared egress.
       - key: FRONTEND_PROXY_TOKEN
         sync: false
+      # Whether /api/* answers only our frontend — the requests carrying
+      # FRONTEND_PROXY_TOKEN — so a direct call to this host cannot skip the
+      # Vercel firewall (ADR 0017). `log` serves everyone and counts who would
+      # be refused (/readiness -> origin_lock); move to `enforce` once that
+      # count is only strays. `enforce` refuses to boot without the token.
+      - key: ORIGIN_LOCK_MODE
+        value: "log"
       # The rate limiters find the visitor past Render's own hops by address
       # (non-public, then one Cloudflare edge), so they need no hop count; this
       # only shapes the access log's client= field, and 0 is right here.
