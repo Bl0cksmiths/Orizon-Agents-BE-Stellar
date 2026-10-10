@@ -168,6 +168,7 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 | `RATE_LIMIT_PER_MINUTE` | `1200` | request budget per client (sliding 60 s window), and the ceiling for requests no client can be named for — see below |
 | `TRUSTED_PROXY_HOPS` | `0` | how many **trailing** `X-Forwarded-For` entries the access log's `client=` skips; the rate limiters do not read it (see below) |
 | `FRONTEND_PROXY_TOKEN` | *(unset)* | shared secret our frontend's server sends as `X-Frontend-Proxy-Token`; with it, `X-Orizon-Client-Ip` names the visitor for rate limiting — see below |
+| `ORIGIN_LOCK_MODE` | `log` | whether `/api/*` answers only requests carrying `FRONTEND_PROXY_TOKEN`: `off`, `log` (serve, but log and count who would be refused) or `enforce` (403 `origin_forbidden`; refuses to boot without the token) — see "Origin lock" below |
 | `ALLOW_KEYLESS_SERVER_SEAL` | `false` | `/api/stellar/server/seal` **fails closed** while `API_KEY` is unset; a local or CI testnet run may set this to keep it open. Refused on mainnet |
 | `FORWARDED_CHAIN_SAMPLES` | `5` | log the raw forwarded chain + resolved key for the first N non-exempt requests after each restart (`0` disables) |
 | `MAX_CHARGE_USDC` | `100` | server-side ceiling for a single `PaymentEscrow.charge` (v1) or one `settle`'s payouts (v2), in USDC |
