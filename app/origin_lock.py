@@ -23,6 +23,7 @@ which DOCS_ENABLED governs), CORS preflights, and the allowlist below.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -40,6 +41,12 @@ logger = logging.getLogger(__name__)
 API_PREFIX = "/api/"
 
 _OPERATOR_KEY_HEADER = b"x-api-key"
+
+# The refusal, in the unified error envelope. The message names the way in and
+# nothing about why: not which header was missing, not the mode, never a
+# header value — so a refusal teaches a prober nothing it could use.
+REFUSAL_CODE = "origin_forbidden"
+REFUSAL_MESSAGE = "This API is only available through orizons.xyz."
 
 
 def template_regex(template: str) -> re.Pattern[str]:
@@ -321,7 +328,33 @@ class OriginLockMiddleware:
             return
         self.counter.record()
         self._report(scope, refused=mode == "enforce")
+        if mode == "enforce":
+            await self._refuse(send)
+            return
         await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _refuse(send: Any) -> None:
+        """403 in the envelope every other refusal uses (BodyLimitMiddleware's 413, the limiter's 429)."""
+        body = json.dumps(
+            {
+                "detail": REFUSAL_CODE,
+                "error": {"code": REFUSAL_CODE, "message": REFUSAL_MESSAGE, "request_id": request_id_var.get()},
+            }
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    # The answer depends on a header a shared cache cannot see.
+                    (b"cache-control", b"no-store"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
     def _report(self, scope: dict, *, refused: bool) -> None:
         """One coalesced WARNING: method, route template, who, and the request id.
