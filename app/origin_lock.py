@@ -29,7 +29,9 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel
 
 from .config import settings
 from .security import client_identity, header_secret_matches, is_frontend, request_id_var
@@ -217,6 +219,29 @@ class LockStats:
 
 # One per process, read by /readiness.
 stats = LockStats()
+
+
+class OriginLockReadiness(BaseModel):
+    """The origin lock's mode and what it has refused, for /readiness (ADR 0017).
+
+    In `log` the counts are the requests it WOULD have refused — the number
+    to watch go to zero, apart from strays, before switching to `enforce`. In
+    `enforce` they are the refusals. From memory, this process only, since
+    its boot. Informational, like the rest of the probe: a lock in any mode
+    serves its frontend.
+    """
+
+    mode: Literal["off", "log", "enforce"]
+    would_block_total: int
+    would_block_last_hour: int
+
+
+def readiness() -> OriginLockReadiness:
+    return OriginLockReadiness(
+        mode=settings.origin_lock_mode,
+        would_block_total=stats.total,
+        would_block_last_hour=stats.last_hour(),
+    )
 
 
 # What a path that matches no /api route is logged as. One name for all of
