@@ -468,11 +468,13 @@ class Settings(BaseSettings):
     # decompose_timeout_seconds; past this many, a request is refused at once
     # with 503 "planner_busy" instead of joining the queue.
     decompose_max_queued: int = 16
-    # Free-form (LLM) decompose calls one client may make per minute, on top
-    # of the global rate_limit_per_minute, keyed by security.client_identity()
-    # (the visitor behind Render's proxies, or the one our frontend names with
-    # FRONTEND_PROXY_TOKEN). A breach is 429 "decompose_rate_limited" with
-    # Retry-After; kit intents make no LLM call and are not counted. 0 disables
+    # Decompose calls that reach a paid model, which one client may make per
+    # minute, on top of the global rate_limit_per_minute, keyed by
+    # security.client_identity() (the visitor behind Render's proxies, or the
+    # one our frontend names with FRONTEND_PROXY_TOKEN): every free-form call,
+    # and on Claude every kit call too, since `screen_kit` runs the paid guard
+    # on it. Legacy-provider kit calls make no model call and are not counted.
+    # A breach is 429 "decompose_rate_limited" with Retry-After. 0 disables
     # it. A caller with no identity has no budget here; the planner's
     # concurrency gate and bounded queue hold those. Browser traffic through
     # the frontend's plain /api rewrite arrives from Vercel's shared egress, so
