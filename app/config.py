@@ -750,6 +750,24 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _enforced_origin_lock_has_a_key(self) -> "Settings":
+        """Refuse to enforce the origin lock with no frontend token to recognise.
+
+        The lock lets through only requests carrying FRONTEND_PROXY_TOKEN, and
+        `security.is_frontend` matches nothing while it is empty — so an
+        enforced lock with no token would answer 403 to every /api request,
+        our own frontend's included. That is an outage, not a lock: refuse to
+        boot instead, and say which of the two settings to change.
+        """
+        if self.origin_lock_mode == "enforce" and not self.frontend_proxy_token:
+            raise ValueError(
+                "ORIGIN_LOCK_MODE=enforce needs FRONTEND_PROXY_TOKEN: without it no request can prove it came "
+                "from our frontend, so every /api call would be refused. Set the same token on Render and "
+                "Vercel, or use ORIGIN_LOCK_MODE=log."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _api_key_is_usable_on_the_wire(self) -> "Settings":
         """Refuse a key that would lock the operator out, or leak into the log.
 
