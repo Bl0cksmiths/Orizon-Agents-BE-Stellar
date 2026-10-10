@@ -255,3 +255,34 @@ class RouteTemplates:
             paths = {}
         templates = sorted((t for t in paths if t.startswith(API_PREFIX)), key=lambda t: (t.count("{"), t))
         return [(template, template_regex(template)) for template in templates]
+
+
+class WarningCoalescer:
+    """At most one log line per route template per window; the rest are counted into the next.
+
+    A flood of direct calls must not become a flood of log lines — Render's
+    log is what an operator reads during that very flood. The first refusal
+    on a template in a window is logged; the others in that window are only
+    counted, and the next line for the template says how many it stands for.
+    Keyed on the template, so the table has at most one entry per route.
+    """
+
+    def __init__(self, window_seconds: float = 60.0, clock: Callable[[], float] = time.monotonic) -> None:
+        self._window = window_seconds
+        self._clock = clock
+        self._last_logged: dict[str, float] = {}
+        self._suppressed: dict[str, int] = {}
+
+    def admit(self, key: str) -> int | None:
+        """None to stay quiet; otherwise log, saying how many went unlogged since the last line."""
+        now = self._clock()
+        last = self._last_logged.get(key)
+        if last is not None and now - last < self._window:
+            self._suppressed[key] = self._suppressed.get(key, 0) + 1
+            return None
+        self._last_logged[key] = now
+        return self._suppressed.pop(key, 0)
+
+    def reset(self) -> None:
+        self._last_logged.clear()
+        self._suppressed.clear()
