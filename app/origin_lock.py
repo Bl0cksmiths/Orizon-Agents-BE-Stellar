@@ -295,6 +295,11 @@ class WarningCoalescer:
         self._suppressed.clear()
 
 
+# One per process, like `stats`: the window is the process's, whichever
+# middleware instance a request passes through.
+log_coalescer = WarningCoalescer()
+
+
 class OriginLockMiddleware:
     """Pure-ASGI origin lock over /api/* (see the module docstring).
 
@@ -319,7 +324,7 @@ class OriginLockMiddleware:
         self.app = app
         self.counter = stats if counter is None else counter
         self.templates = RouteTemplates() if templates is None else templates
-        self.coalescer = WarningCoalescer() if coalescer is None else coalescer
+        self.coalescer = log_coalescer if coalescer is None else coalescer
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         mode = settings.origin_lock_mode
