@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import settings
-from .security import header_secret_matches, is_frontend
+from .security import client_identity, header_secret_matches, is_frontend, request_id_var
 
 logger = logging.getLogger(__name__)
 
@@ -286,3 +286,73 @@ class WarningCoalescer:
     def reset(self) -> None:
         self._last_logged.clear()
         self._suppressed.clear()
+
+
+class OriginLockMiddleware:
+    """Pure-ASGI origin lock over /api/* (see the module docstring).
+
+    Registered inside the hardening headers and CORS, outside both rate
+    limiters and the body cap (app/main.py says why): a refused request
+    spends no rate-limit budget and has no body read, while its 403 still
+    carries the request id, the hardening headers and, for an allowed
+    origin, the CORS header a browser needs to read it.
+
+    The mode is read per request, like the token `is_frontend` checks, so the
+    tests and a settings reload see the current value.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        counter: LockStats | None = None,
+        templates: RouteTemplates | None = None,
+        coalescer: WarningCoalescer | None = None,
+    ) -> None:
+        self.app = app
+        self.counter = stats if counter is None else counter
+        self.templates = RouteTemplates() if templates is None else templates
+        self.coalescer = WarningCoalescer() if coalescer is None else coalescer
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        mode = settings.origin_lock_mode
+        if mode == "off" or not locked_out(scope):
+            await self.app(scope, receive, send)
+            return
+        self.counter.record()
+        self._report(scope, refused=mode == "enforce")
+        await self.app(scope, receive, send)
+
+    def _report(self, scope: dict, *, refused: bool) -> None:
+        """One coalesced WARNING: method, route template, who, and the request id.
+
+        Never the path itself, the query string or any header — a URL can carry
+        a task id or a `?token=`, and the token being checked is a secret.
+        """
+        template = self.templates.resolve(scope.get("app"), str(scope.get("path", "")))
+        suppressed = self.coalescer.admit(template)
+        if suppressed is None:
+            return
+        # Only token characters reach a method, but cap it anyway: it is the
+        # caller's text.
+        method = str(scope.get("method", "-"))[:16]
+        identity = client_identity(scope) or "-"
+        verdict = "refused" if refused else "would refuse"
+        logger.warning(
+            "origin lock %s %s %s: not from the frontend [%s] client=%s%s",
+            verdict,
+            method,
+            template,
+            request_id_var.get(),
+            identity,
+            f" (+{suppressed} more on this route since the last line)" if suppressed else "",
+            extra={
+                "http": {
+                    "method": method,
+                    "route": template,
+                    "identity": identity,
+                    "origin_lock": "refused" if refused else "would_refuse",
+                    "suppressed": suppressed,
+                }
+            },
+        )
