@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import ANY
+
 from fastapi.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
@@ -102,6 +104,9 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
         "treasury": _TREASURY_UNREAD,
+        # The mode in force; the counts are whatever earlier requests in this
+        # process left, so only their presence is pinned (tests/test_origin_lock.py).
+        "origin_lock": {"mode": settings.origin_lock_mode, "would_block_total": ANY, "would_block_last_hour": ANY},
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }
@@ -136,6 +141,9 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
         "treasury": _TREASURY_UNREAD,
+        # The mode in force; the counts are whatever earlier requests in this
+        # process left, so only their presence is pinned (tests/test_origin_lock.py).
+        "origin_lock": {"mode": settings.origin_lock_mode, "would_block_total": ANY, "would_block_last_hour": ANY},
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }
