@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from unittest.mock import ANY
 
 import pytest
 from stellar_sdk import Keypair
@@ -111,6 +112,9 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
             "address": platform_treasury.treasury_address(),
             "agents": dict.fromkeys(platform_treasury.built_in_ids(), "unread"),
         },
+        # The mode in force; the counts are whatever earlier requests in this
+        # process left, so only their presence is pinned (tests/test_origin_lock.py).
+        "origin_lock": {"mode": settings.origin_lock_mode, "would_block_total": ANY, "would_block_last_hour": ANY},
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }

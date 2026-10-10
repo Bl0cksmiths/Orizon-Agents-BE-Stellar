@@ -30,6 +30,8 @@ from .config import SERVICE_VERSION, settings
 from .http_cache import SNAPSHOT_AGE_HEADER, SNAPSHOT_SOURCE_HEADER
 from .llm import provider as llm_provider
 from .llm.provider import LLMPublicReadiness, LLMReadiness
+from .origin_lock import OriginLockMiddleware, OriginLockReadiness
+from .origin_lock import readiness as origin_lock_readiness
 from .pdax.client import aclose_pdax_client
 from .rate_limit import RouteRateLimitMiddleware
 from .routers import (
@@ -431,6 +433,19 @@ app.add_middleware(RouteRateLimitMiddleware)
 # Registered before CORS so CORS wraps it and 429 responses still carry
 # the Access-Control-Allow-Origin header the browser needs to read them.
 app.add_middleware(RateLimitMiddleware)
+
+# The origin lock (app/origin_lock.py, ADR 0017): /api/* answers our frontend
+# only. Starlette runs middleware in the REVERSE of the order added, so being
+# added here puts it inside SecurityHeaders, CORS, GZip and RequestContext and
+# outside both rate limiters and the body cap. That is the order it needs:
+#   * outside the limiters and the body cap, so a refused request costs a
+#     header compare — it spends no visitor's rate budget (a flood of direct
+#     calls cannot 429 the real frontend's shared buckets) and no body is read;
+#   * inside RequestContext, so its log line and its 403 carry the request id;
+#   * inside SecurityHeaders and CORS, so the 403 is stamped with the
+#     hardening headers and, for an allowed origin, the CORS header a browser
+#     needs to read it. CORS also answers preflights before they reach it.
+app.add_middleware(OriginLockMiddleware)
 
 # Wraps the rate limiter (and everything inside it), so the limiter's 429
 # short-circuits — and the body limiter's 413s — carry the hardening
@@ -842,6 +857,7 @@ class ReadinessResponse(BaseModel):
     escrow: EscrowReadiness  # informational, never gates readiness
     registry: RegistryReadiness  # informational, never gates readiness
     treasury: TreasuryReadiness  # informational, never gates readiness
+    origin_lock: OriginLockReadiness  # informational, never gates readiness
     # Informational. Anyone: provider and planning active|paused (+ when a
     # pause lifts). With the operator X-API-Key: keys present, models, and
     # today's spend against the cap — numbers an abuser must not see.
@@ -925,6 +941,8 @@ async def readiness(
             last_full_sync_at=sync.last_full_sync_at,
         ),
         treasury=_treasury_readiness(),
+        # From memory: the mode and this process's refusal counts (ADR 0017).
+        origin_lock=origin_lock_readiness(),
         # A wrong or absent key is simply the public view: a probe never 401s.
         orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )

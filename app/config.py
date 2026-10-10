@@ -2,6 +2,7 @@ import base64
 import binascii
 import logging
 import math
+from typing import Literal
 
 from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -202,6 +203,15 @@ class Settings(BaseSettings):
     # header (a cached, shared read) no per-client budget applies at all. See
     # `security.client_identity`. At least 32 characters, random.
     frontend_proxy_token: str = ""
+    # Whether /api/* answers only our frontend — the requests that carry
+    # FRONTEND_PROXY_TOKEN — so nobody can call Render directly and walk past
+    # the Vercel firewall (app/origin_lock.py, ADR 0017). `off` serves
+    # everyone as before; `log` (the default) still serves everyone but logs
+    # and counts each request it would refuse, so /readiness's `origin_lock`
+    # shows who would be locked out before anyone is; `enforce` answers those
+    # 403 `origin_forbidden`. A short allowlist (the PDAX webhook, and the
+    # operator-keyed routes when the operator key is presented) stays open.
+    origin_lock_mode: Literal["off", "log", "enforce"] = "log"
     # /api/stellar/server/seal makes the platform's sealer sign an attestation
     # with whatever the caller sends, so it FAILS CLOSED while API_KEY is
     # empty. A local or CI testnet run that wants it open without a key sets
@@ -458,11 +468,13 @@ class Settings(BaseSettings):
     # decompose_timeout_seconds; past this many, a request is refused at once
     # with 503 "planner_busy" instead of joining the queue.
     decompose_max_queued: int = 16
-    # Free-form (LLM) decompose calls one client may make per minute, on top
-    # of the global rate_limit_per_minute, keyed by security.client_identity()
-    # (the visitor behind Render's proxies, or the one our frontend names with
-    # FRONTEND_PROXY_TOKEN). A breach is 429 "decompose_rate_limited" with
-    # Retry-After; kit intents make no LLM call and are not counted. 0 disables
+    # Decompose calls that reach a paid model, which one client may make per
+    # minute, on top of the global rate_limit_per_minute, keyed by
+    # security.client_identity() (the visitor behind Render's proxies, or the
+    # one our frontend names with FRONTEND_PROXY_TOKEN): every free-form call,
+    # and on Claude every kit call too, since `screen_kit` runs the paid guard
+    # on it. Legacy-provider kit calls make no model call and are not counted.
+    # A breach is 429 "decompose_rate_limited" with Retry-After. 0 disables
     # it. A caller with no identity has no budget here; the planner's
     # concurrency gate and bounded queue hold those. Browser traffic through
     # the frontend's plain /api rewrite arrives from Vercel's shared egress, so
@@ -736,6 +748,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "FRONTEND_PROXY_TOKEN must be at least 32 ascii characters with no surrounding whitespace "
                 "(generate one with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`), or be unset."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforced_origin_lock_has_a_key(self) -> "Settings":
+        """Refuse to enforce the origin lock with no frontend token to recognise.
+
+        The lock lets through only requests carrying FRONTEND_PROXY_TOKEN, and
+        `security.is_frontend` matches nothing while it is empty — so an
+        enforced lock with no token would answer 403 to every /api request,
+        our own frontend's included. That is an outage, not a lock: refuse to
+        boot instead, and say which of the two settings to change.
+        """
+        if self.origin_lock_mode == "enforce" and not self.frontend_proxy_token:
+            raise ValueError(
+                "ORIGIN_LOCK_MODE=enforce needs FRONTEND_PROXY_TOKEN: without it no request can prove it came "
+                "from our frontend, so every /api call would be refused. Set the same token on Render and "
+                "Vercel, or use ORIGIN_LOCK_MODE=log."
             )
         return self
 

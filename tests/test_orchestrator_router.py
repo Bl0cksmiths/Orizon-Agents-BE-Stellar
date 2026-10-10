@@ -96,8 +96,12 @@ def test_a_caller_nobody_can_attribute_has_no_planner_budget_to_share(
     assert _post(client)[0] == 429
 
 
-def test_kit_intents_do_not_spend_the_planner_budget(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The demo path makes no LLM call, so it is never throttled by this budget.
+def test_kit_intents_do_not_spend_the_planner_budget_on_the_legacy_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The legacy demo path makes no model call, so it is never throttled by
+    # this budget. On Claude a kit is screened, and counts (test_decompose_kit_limit).
+    monkeypatch.setattr(settings, "orchestrator_provider", "openai")
     monkeypatch.setattr(settings, "decompose_rate_limit_per_minute", 1)
     monkeypatch.setattr(router, "decompose", _answering([]))
 
