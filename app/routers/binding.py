@@ -494,7 +494,6 @@ async def read_binding(
 
 @router.get(
     "/{agent_id}/readiness",
-    response_model=ReadinessResponse,
     summary="Operator readiness self-check: the next thing to fix",
 )
 async def readiness(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> ReadinessResponse:
