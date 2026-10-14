@@ -253,6 +253,17 @@ async def _improve(intent: str, reasons: list[str]) -> prompt_improver.Spec | No
         return None
 
 
+async def _recheck(
+    intent: str, spec: prompt_improver.Spec | None, scores: dict[str, float]
+) -> prompt_improver.SpecCheck | None:
+    """jev's re-check of the spec against the intent, its scores merged into
+    `scores`; None when there is no spec to check."""
+    check = await prompt_improver.recheck(intent, spec) if spec is not None else None
+    if check is not None:
+        _merge_recheck_scores(scores, check)
+    return check
+
+
 @dataclass
 class AppPipeline:
     name: str
@@ -322,9 +333,7 @@ class AppPipeline:
 
         if stages == "all" and verdict == "allow" and tier is not None:
             spec = await _improve(intent, reasons)
-            check = await prompt_improver.recheck(intent, spec) if spec is not None else None
-            if check is not None:
-                _merge_recheck_scores(scores, check)
+            check = await _recheck(intent, spec, scores)
             resolution = prompt_improver.resolve(decision, check)
             if resolution.action == "unavailable":
                 raise PipelineUnavailable("guard_unavailable", "the spec re-check could not run", log.calls)
