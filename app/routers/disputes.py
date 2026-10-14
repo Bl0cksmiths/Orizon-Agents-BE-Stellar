@@ -753,7 +753,6 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
 
 @router.post(
     "/disputes/challenge",
-    response_model=DisputeChallengeResponse,
     summary="Mint a dispute challenge to sign",
 )
 async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> DisputeChallengeResponse:
