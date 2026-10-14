@@ -75,16 +75,20 @@ def block_problems(block: Any) -> list[str]:
         if not isinstance(entry, dict):
             problems.append(f"{where}: not an object")
             continue
-        keys = tuple(entry)
-        expected = BLOCK_KEYS if entry.get("status") == NOT_MET else tuple(k for k in BLOCK_KEYS if k != "reason")
-        if keys != expected:
-            problems.append(f"{where}: keys {keys} are not {expected}")
+        problems.extend(_key_problems(where, entry))
         problems.extend(_wording_problems(where, row, entry))
         if entry.get("status") not in (MET, NOT_MET):
             problems.append(f"{where}: status {entry.get('status')!r}")
         problems.extend(_text_problems(where, entry))
         problems.extend(_links_problems(where, entry.get("links")))
     return problems
+
+
+def _key_problems(where: str, entry: dict[str, Any]) -> list[str]:
+    """The entry's keys, in the frozen order: `reason` only on a miss."""
+    keys = tuple(entry)
+    expected = BLOCK_KEYS if entry.get("status") == NOT_MET else tuple(k for k in BLOCK_KEYS if k != "reason")
+    return [] if keys == expected else [f"{where}: keys {keys} are not {expected}"]
 
 
 def _wording_problems(where: str, row: SowRow, entry: dict[str, Any]) -> list[str]:
