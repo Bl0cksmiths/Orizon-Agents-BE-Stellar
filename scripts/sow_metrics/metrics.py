@@ -43,7 +43,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from .collect import AgentRecord, DisputeRating, EscrowScan, ReceiptRecord, Snapshot, Transfer
+from .collect import AgentRecord, DisputeRating, EscrowScan, ReceiptRecord, Registration, Snapshot, Transfer
 from .config import (
     DEMO_MAX_SECONDS,
     DEMO_MIN_SECONDS,
@@ -338,6 +338,13 @@ EXTERNAL_RULE = (
 )
 
 
+def _registered_on(reg: Registration | None, agent: AgentRecord) -> str:
+    """The registration transaction's day, else the registry's own timestamp's, else "" when neither is known."""
+    if reg:
+        return reg.date
+    return day(agent.registered_at) if agent.registered_at else ""
+
+
 def m01(snap: Snapshot, rules: Rules) -> Metric:
     row = SOW_ROWS[0]
     method = (
@@ -352,7 +359,7 @@ def m01(snap: Snapshot, rules: Rules) -> Metric:
         party = rules.party(agent.owner)
         verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
         reg = snap.registrations.get(agent.id)
-        date = reg.date if reg else (day(agent.registered_at) if agent.registered_at else "")
+        date = _registered_on(reg, agent)
         label = f"Registration of {agent.id} by {party.phrase}" + (f" — {date}" if date else "") + f" ({verdict})"
         if reg:
             item_links.append(tx_link(label, reg.tx_hash, reg.date, external=party.exclusion is None))
