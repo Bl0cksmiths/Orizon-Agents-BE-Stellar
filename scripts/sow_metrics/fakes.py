@@ -354,17 +354,7 @@ class FakeWorld:
             return self.api(path)
         if url.startswith(BACKEND):
             self.calls.append(f"backend {path}")
-            if path in self.api_down:
-                return _json(503, {"error": "down"})
-            if path == "/readiness":
-                return _json(200, self.readiness)
-            if path == "/openapi.json":
-                paths: dict[str, dict[str, Any]] = {}
-                for route in self.routes:
-                    method, route_path = route.split(" ", 1)
-                    paths.setdefault(route_path, {})[method.lower()] = {}
-                return _json(200, {"openapi": "3.1.0", "paths": paths})
-            return _json(404, {"detail": "Not Found"})
+            return self.backend(path)
         if url.startswith(FRONTEND):
             self.calls.append(f"frontend {path}")
             status, body = self.pages.get(path, (404, "<html>not found</html>"))
@@ -391,6 +381,20 @@ class FakeWorld:
             self.calls.append(f"horizon {path}")
             return self.horizon(request)
         raise AssertionError(f"unexpected request {request.method} {url}")
+
+    def backend(self, path: str) -> httpx.Response:
+        """The backend's own host: /readiness and /openapi.json (the route list built from `routes`)."""
+        if path in self.api_down:
+            return _json(503, {"error": "down"})
+        if path == "/readiness":
+            return _json(200, self.readiness)
+        if path == "/openapi.json":
+            paths: dict[str, dict[str, Any]] = {}
+            for route in self.routes:
+                method, route_path = route.split(" ", 1)
+                paths.setdefault(route_path, {})[method.lower()] = {}
+            return _json(200, {"openapi": "3.1.0", "paths": paths})
+        return _json(404, {"detail": "Not Found"})
 
     def api(self, path: str) -> httpx.Response:
         if path in self.api_down:
