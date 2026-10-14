@@ -859,7 +859,6 @@ async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadCh
 
 @router.post(
     "/disputes/read-grant",
-    response_model=DisputeReadGrantResponse,
     summary="Exchange the payer's read signature for a read grant",
     responses=_READ_GRANT_RESPONSES,
 )
