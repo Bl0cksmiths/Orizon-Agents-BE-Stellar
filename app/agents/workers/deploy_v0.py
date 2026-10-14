@@ -11,12 +11,11 @@ like a real CI/CD step.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import random
 import re
 from typing import Any
 
+from ... import pacing
 from .base import Worker
 from .context import CODE_ROLES, latest_output
 
@@ -57,7 +56,7 @@ class DeployV0(Worker):
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # ~300ms of simulated "deploy" work so the trace feels alive.
-        await asyncio.sleep(0.28 + random.random() * 0.18)
+        await pacing.pause(0.28, 0.18)
 
         ctx = context or {}
         sealed = _sealable(ctx)
