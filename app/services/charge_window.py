@@ -260,6 +260,23 @@ def _read_past_dense(
     return events, end
 
 
+def _new_charges(events: list[EventInfo], seen: set[str]) -> list[_Indexed]:
+    """The charges in `events` not already in `seen`, each added to it as it is taken.
+
+    Every event is decoded, so an undecodable one is logged even when it names
+    no agent; one that names no agent or decodes to no charge is skipped.
+    """
+    taken: list[_Indexed] = []
+    for event in events:
+        agent_id = _agent_of(event)
+        charge = settlement_svc._decode_charged(event)
+        if agent_id is None or charge is None or event.id in seen:
+            continue
+        seen.add(event.id)
+        taken.append(_Indexed(agent_id, event.id, charge))
+    return taken
+
+
 def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Advance:
     """Bring `held` up to the node's tip, as far as the deadline allows. Blocking.
 
@@ -302,13 +319,7 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
         except Exception as e:
             logger.warning("[charges] page [%d, %d) failed: %s: %s", cursor, end, type(e).__name__, e)
             break
-        for event in events:
-            agent_id = _agent_of(event)
-            charge = settlement_svc._decode_charged(event)
-            if agent_id is None or charge is None or event.id in seen:
-                continue
-            seen.add(event.id)
-            found.append(_Indexed(agent_id, event.id, charge))
+        found.extend(_new_charges(events, seen))
         cursor = end
 
     index = replace(index, next_ledger=cursor, charges=tuple(found), lossy_ledger=lossy)
