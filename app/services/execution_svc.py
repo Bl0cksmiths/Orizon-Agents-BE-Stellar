@@ -2202,6 +2202,8 @@ def _treasury_or_none() -> str | None:
     try:
         return platform_treasury.treasury_address()
     except platform_treasury.TreasuryError as e:
+        # No traceback, deliberately: a register naming two treasuries is a
+        # configuration refusal whose message says all there is to say.
         logger.error("platform treasury unreadable — no built-in step can be paid: %s", e)
         return None
 
