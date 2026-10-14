@@ -34,7 +34,7 @@ from .config import (
     normalize_base,
     parse_pending_link,
 )
-from .metrics import MET, measure, withhold_external
+from .metrics import MET, Metric, measure, withhold_external
 from .register import RegisterError
 from .register import load as load_register
 from .report import RunFacts, block_problems, dump_block, render_block, render_markdown, render_raw, write
@@ -167,6 +167,13 @@ def confirm_testnet(reads: Reads, chain: ChainReader) -> dict[str, object]:
     return network
 
 
+def _status_word(m: Metric) -> str:
+    """The metric's console status, padded to one width."""
+    if m.status == MET:
+        return "MET    "
+    return "NOT MET" if m.measured else "UNREAD "
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -227,8 +234,7 @@ def main(
         withheld_external=cfg.withhold_external,
     )
     for m in metrics:
-        status = "MET    " if m.status == MET else ("UNREAD " if not m.measured else "NOT MET")
-        say(f"[{status}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
+        say(f"[{_status_word(m)}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
     for source, failure in sorted(snap.failures.items()):
         say(f"read failed: {source}: {failure}")
     for warning in snap.warnings:
