@@ -507,6 +507,11 @@ def read_bound(snap: Snapshot, reads: Reads) -> None:
             f"the adoption report answered HTTP {answer.status} without its operators, so no bound count is stated"
         )
         return
+    snap.bound = _bound_flags(operators)
+
+
+def _bound_flags(operators: list[Any]) -> dict[str, bool | None]:
+    """Agent id -> the report's `bound` flag (None when not a boolean); entries of the wrong shape are skipped."""
     bound: dict[str, bool | None] = {}
     for operator in operators:
         agents = operator.get("agents") if isinstance(operator, dict) else None
@@ -514,7 +519,7 @@ def read_bound(snap: Snapshot, reads: Reads) -> None:
             if isinstance(agent, dict) and isinstance(agent.get("agent_id"), str):
                 flag = agent.get("bound")
                 bound[agent["agent_id"]] = flag if isinstance(flag, bool) else None
-    snap.bound = bound
+    return bound
 
 
 def read_deployment(snap: Snapshot, reads: Reads) -> None:
