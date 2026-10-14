@@ -954,21 +954,26 @@ class BodyLimitMiddleware:
         )
         await send({"type": "http.response.body", "body": body})
 
+    @staticmethod
+    def _declares_over(scope: dict, limit: int) -> bool:
+        """Whether the request's Content-Length declares more than `limit`."""
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared is None:
+            return False
+        try:
+            return int(declared) > limit
+        except ValueError:
+            return False  # malformed length — the server rejects it downstream
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
         limit = self.path_limits.get(scope.get("path", ""), self.limit)
-        headers = dict(scope.get("headers") or [])
-        declared = headers.get(b"content-length")
-        if declared is not None:
-            try:
-                if int(declared) > limit:
-                    await self._send_413(send)
-                    return
-            except ValueError:
-                pass  # malformed length — the server rejects it downstream
+        if self._declares_over(scope, limit):
+            await self._send_413(send)
+            return
 
         # Chunked (or lying) bodies: meter the bytes the app actually reads.
         received = 0
