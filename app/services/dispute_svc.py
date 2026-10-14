@@ -1634,6 +1634,30 @@ async def _price_claim(store: DisputeStore, claimed: DisputeRecord) -> tuple[Set
     return settlement, amount_usdc
 
 
+async def _after_a_lost_uphold(dispute_id: str, *, on_rating: RatingObserver | None) -> DisputeRecord:
+    """The answer when the `open → upheld` compare-and-set lost: the one the dispute now has, or a refusal."""
+    # The record moved under the read this decision was made on, so
+    # nothing may be decided from it: it is read again and asked the
+    # same three questions. A dispute that is merely `upheld` by now
+    # has another adjudication running on it this instant — one that
+    # is about to claim — and this caller refuses rather than racing
+    # it, because the claim is the last gate and nothing should arrive
+    # at it holding a record it already knows is stale.
+    current = await _load_for_adjudication(dispute_id)
+    settled = await _already_adjudicated(current, on_rating=on_rating)
+    if settled is not None:
+        return settled
+    raise _refuse_credit(
+        current,
+        "adjudication_in_progress",
+        409,
+        "another adjudication of this dispute is already running and may be paying it —"
+        " nothing was signed here; read the dispute back before deciding again",
+        amount_usdc=current.creditable_usdc,
+        tx_hash=current.refund_tx,
+    )
+
+
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
@@ -1779,26 +1803,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     if dispute.status == "open":
         upheld = await store.append_status(dispute_id, "upheld", expected_status="open")
         if upheld is None:
-            # The record moved under the read this decision was made on, so
-            # nothing may be decided from it: it is read again and asked the
-            # same three questions. A dispute that is merely `upheld` by now
-            # has another adjudication running on it this instant — one that
-            # is about to claim — and this caller refuses rather than racing
-            # it, because the claim is the last gate and nothing should arrive
-            # at it holding a record it already knows is stale.
-            current = await _load_for_adjudication(dispute_id)
-            settled = await _already_adjudicated(current, on_rating=on_rating)
-            if settled is not None:
-                return settled
-            raise _refuse_credit(
-                current,
-                "adjudication_in_progress",
-                409,
-                "another adjudication of this dispute is already running and may be paying it —"
-                " nothing was signed here; read the dispute back before deciding again",
-                amount_usdc=current.creditable_usdc,
-                tx_hash=current.refund_tx,
-            )
+            return await _after_a_lost_uphold(dispute_id, on_rating=on_rating)
         dispute = upheld
 
     claimed = await store.claim_refund(dispute_id)
