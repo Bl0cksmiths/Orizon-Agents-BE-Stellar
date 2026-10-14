@@ -16,6 +16,7 @@ from .dataset import TIERS
 from .metrics import TIER_COLUMNS
 
 NARRATIVES = ("summary", "recommendations", "limitations", "diagnoses", "stage_notes", "worker_notes")
+_TO_BE_WRITTEN = "_(to be written)_"
 
 
 def _block(name: str, keep: dict[str, str], placeholder: str) -> str:
@@ -448,7 +449,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("")
     add("## 1. Executive summary")
     add("")
-    add(_block("summary", keep, "_(to be written)_"))
+    add(_block("summary", keep, _TO_BE_WRITTEN))
     add("")
     add("### Headline numbers")
     add("")
@@ -656,11 +657,11 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("")
     add("Recommendations only; no production threshold or rule was changed by this work.")
     add("")
-    add(_block("recommendations", keep, "_(to be written)_"))
+    add(_block("recommendations", keep, _TO_BE_WRITTEN))
     add("")
     add("## 13. Limitations")
     add("")
-    add(_block("limitations", keep, "_(to be written)_"))
+    add(_block("limitations", keep, _TO_BE_WRITTEN))
     add("")
     add("## 14. Files")
     add("")
