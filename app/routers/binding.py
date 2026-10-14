@@ -23,7 +23,6 @@ The order of checks in `bind` is load-bearing, not stylistic; see its docstring.
 from __future__ import annotations
 
 import base64
-import binascii
 import logging
 import secrets
 from typing import Annotated, Literal
@@ -427,7 +426,7 @@ async def unbind(
     """
     try:
         raw_signature = base64.b64decode(body.signature, validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:  # binascii.Error, which b64decode raises, is a ValueError
         raise HTTPException(422, "signature_malformed") from None
     if len(raw_signature) != _SIGNATURE_BYTES:
         raise HTTPException(422, "signature_malformed")
