@@ -815,18 +815,7 @@ async def _run(
             art = output.get("artifact") if isinstance(output, dict) else None
             if art:
                 last_artifact = art
-                # Operator-chosen text: coerced and capped like every other
-                # traced value, so a title cannot flood the buyer's trace.
-                title = str(art.get("title", "artifact"))[:180]
-                files = art.get("files", [])
-                total_bytes = sum(len(f.get("content", "")) for f in files)
-                total_lines = sum(f.get("content", "").count("\n") + 1 for f in files)
-                await _emit(
-                    task_id,
-                    start,
-                    "artifact",
-                    f"▣ {title} — {len(files)} file(s) · {total_lines:,} lines · {total_bytes:,} bytes",
-                )
+                await _emit_artifact(task_id, start, art)
 
             # Persist this step's output under the agent name so later workers
             # can read it. e.g. context["code.gen"] = {...}.
@@ -1033,6 +1022,22 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _emit_artifact(task_id: str, start: float, art: dict) -> None:
+    """Trace the artifact a step delivered: its title, files, lines and bytes."""
+    # Operator-chosen text: coerced and capped like every other
+    # traced value, so a title cannot flood the buyer's trace.
+    title = str(art.get("title", "artifact"))[:180]
+    files = art.get("files", [])
+    total_bytes = sum(len(f.get("content", "")) for f in files)
+    total_lines = sum(f.get("content", "").count("\n") + 1 for f in files)
+    await _emit(
+        task_id,
+        start,
+        "artifact",
+        f"▣ {title} — {len(files)} file(s) · {total_lines:,} lines · {total_bytes:,} bytes",
+    )
 
 
 async def _emit_output_notes(task_id: str, start: float, worker_name: str, output: dict) -> None:
