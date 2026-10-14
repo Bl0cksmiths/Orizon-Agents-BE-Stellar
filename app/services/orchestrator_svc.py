@@ -91,6 +91,9 @@ class NoRoutableAgentsError(RuntimeError):
     """
 
 
+_NO_ROUTABLE_AGENTS = "no listed, dispatchable agent to plan with"
+
+
 class PlannerBusyError(RuntimeError):
     """Every planning slot is taken and the wait queue is full.
 
@@ -1694,7 +1697,7 @@ async def _decompose_claude(intent: str, user_spec: UnderstoodSpec | None) -> De
     kit = detect_kit(intent)
     if kit is None and not registry.routable:
         # Before any paid call, as on the legacy path: no agent, nothing to screen for.
-        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+        raise NoRoutableAgentsError(_NO_ROUTABLE_AGENTS)
     reading = asyncio.create_task(reputation_svc.fetch_reps([a.id for a in registry.routable]))
     try:
         if kit is not None:
@@ -1725,7 +1728,7 @@ async def _screen_and_plan(
         reps = await reading
         shortlist = _routable_registry(reps, registry)
         if not shortlist.offered:
-            raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+            raise NoRoutableAgentsError(_NO_ROUTABLE_AGENTS)
         request: str | Spec = screening.spec if screening.spec is not None else intent
         try:
             result = await draft_plan(request, tier=tier, agents_block=shortlist.block)
@@ -1796,7 +1799,7 @@ async def _decompose_legacy(intent: str) -> DecomposeResponse:
         # Checked before the gate, not after the call: an empty AVAILABLE_AGENTS
         # block can only produce steps the clamp discards, so the LLM call would
         # be paid for, hold a planning slot, and change nothing.
-        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+        raise NoRoutableAgentsError(_NO_ROUTABLE_AGENTS)
     prompt = build_planning_prompt(shortlist.block, intent)
 
     async def _bounded_plan() -> Any:
