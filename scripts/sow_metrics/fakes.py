@@ -168,6 +168,19 @@ def _escrow_record(
     return _sim_value(ok, _authorization_map(fields, e.version))
 
 
+def _escrow_view(
+    e: Escrow, fn: str, args: list[stellar_xdr.SCVal], ok: Callable[[Any], httpx.Response]
+) -> httpx.Response | None:
+    """An escrow's `version` (v1 has none), `receipt(id)` and `authorization(id)`; None for any other function."""
+    if fn == "version":
+        if e.version < 2:
+            return _sim_fail(ok, "HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
+        return _sim_value(ok, scval.to_uint32(e.version))
+    if fn in ("receipt", "authorization"):
+        return _escrow_record(e, fn, args, ok)
+    return None
+
+
 def demo_html(state: str | None, seconds: int | None = None) -> str:
     marker = f' data-demo="{state}"' if state else ""
     duration = ""
@@ -588,13 +601,9 @@ class FakeWorld:
             if answer is not None:
                 return answer
         if contract in self.escrows:
-            e = self.escrows[contract]
-            if fn == "version":
-                if e.version < 2:
-                    return _sim_fail(ok, "HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
-                return _sim_value(ok, scval.to_uint32(e.version))
-            if fn in ("receipt", "authorization"):
-                return _escrow_record(e, fn, args, ok)
+            answer = _escrow_view(self.escrows[contract], fn, args, ok)
+            if answer is not None:
+                return answer
         if contract == LEDGER and fn == "rep_state":
             agent_id = scval.from_symbol(args[0])
             return _sim_value(
