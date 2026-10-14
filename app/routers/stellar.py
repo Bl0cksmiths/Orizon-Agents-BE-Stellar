@@ -1095,7 +1095,15 @@ class SubmitReq(BaseModel):
     signed_xdr: str = Field(..., min_length=1, max_length=32_768)
 
 
-@router.post("/submit")
+@router.post(
+    "/submit",
+    responses={
+        400: {
+            "model": ErrorEnvelope,
+            "description": "`submit_failed` — the submit itself failed. A transaction that FAILED on-chain is a 200.",
+        },
+    },
+)
 async def submit_signed(req: SubmitReq) -> dict:
     """Submit a Freighter-signed transaction XDR."""
     # Identify the transaction WITHOUT logging the envelope: signed XDR is
