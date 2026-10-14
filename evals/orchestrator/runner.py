@@ -239,35 +239,35 @@ def _claim_variant(vdir: Path, meta: dict[str, Any]) -> None:
     meta_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
 
 
-async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> RunOutcome:
-    if pipeline.live and cfg.max_usd is None:
-        raise RunRefused("a live pipeline needs a spend cap (max_usd)")
-    vdir = cfg.variant_dir
-    (vdir / "traces").mkdir(parents=True, exist_ok=True)
-    splits = assign_splits(cases)
-    write_state(cfg.flow_dir, cases, splits)
-    _claim_variant(vdir, {"pipeline": pipeline.name, "live": pipeline.live, "stages": cfg.stages})
-    bind = getattr(pipeline, "bind", None)
-    if callable(bind):
-        bind(cases)
+class _CaseRunner:
+    """One run's shared state; each case's task runs through `one`.
 
-    results_path, errors_path = vdir / "results.jsonl", vdir / "errors.jsonl"
-    done = _done_keys(results_path)
-    outcome = RunOutcome()
-    meter = _Meter(cfg.max_usd)
-    write_lock = asyncio.Lock()
-    sem = asyncio.Semaphore(max(1, cfg.concurrency))
-    stop = asyncio.Event()
+    Concurrency is bounded by the semaphore, appends to the JSONL files are
+    serialised by the write lock, and the spend meter reserves each case's
+    ceiling before it starts and settles it with what the case really cost."""
 
-    async def append(path: Path, row: dict[str, Any]) -> None:
-        async with write_lock:
+    def __init__(self, pipeline: Pipeline, cfg: RunConfig, splits: dict[str, str]) -> None:
+        self.pipeline = pipeline
+        self.cfg = cfg
+        self.splits = splits
+        self.vdir = cfg.variant_dir
+        self.results_path, self.errors_path = self.vdir / "results.jsonl", self.vdir / "errors.jsonl"
+        self.outcome = RunOutcome()
+        self.meter = _Meter(cfg.max_usd)
+        self.write_lock = asyncio.Lock()
+        self.sem = asyncio.Semaphore(max(1, cfg.concurrency))
+        self.stop = asyncio.Event()
+
+    async def append(self, path: Path, row: dict[str, Any]) -> None:
+        async with self.write_lock:
             await asyncio.to_thread(_append_line, path, row)
 
-    async def record_error(case: Case, rep: int, cls: str, detail: str, calls: list[StageCall]) -> None:
+    async def record_error(self, case: Case, rep: int, cls: str, detail: str, calls: list[StageCall]) -> None:
+        outcome = self.outcome
         outcome.errors += 1
         outcome.error_classes[cls] = outcome.error_classes.get(cls, 0) + 1
-        await append(
-            errors_path,
+        await self.append(
+            self.errors_path,
             {
                 "prompt_id": case.id,
                 "rep": rep,
@@ -280,43 +280,61 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
             },
         )
 
-    async def one(case: Case, rep: int) -> None:
-        async with sem:
-            if stop.is_set():
+    async def one(self, case: Case, rep: int) -> None:
+        cfg, outcome, pipeline = self.cfg, self.outcome, self.pipeline
+        async with self.sem:
+            if self.stop.is_set():
                 outcome.skipped_budget += 1
                 return
             ceiling = cost.reservation(case, stages=cfg.stages, fallback=cfg.guard_fallback)
-            if not meter.try_reserve(ceiling):
+            if not self.meter.try_reserve(ceiling):
                 outcome.skipped_budget += 1
                 outcome.stopped = outcome.stopped or f"spend cap ${cfg.max_usd:.2f} reached"
-                stop.set()
+                self.stop.set()
                 return
             actual = 0.0
             started = time.perf_counter()
             try:
                 run = await asyncio.wait_for(pipeline.run(case.intent, stages=cfg.stages), timeout=cfg.timeout_s)
             except TimeoutError:
-                await record_error(case, rep, "timeout", f"no answer within {cfg.timeout_s:.0f}s", [])
+                await self.record_error(case, rep, "timeout", f"no answer within {cfg.timeout_s:.0f}s", [])
             except PipelineUnavailable as e:
                 actual = sum(c.cost_usd for c in e.calls)
-                await record_error(case, rep, e.failure_class, e.detail, e.calls)
+                await self.record_error(case, rep, e.failure_class, e.detail, e.calls)
             except SpendCapReached as e:
-                await record_error(case, rep, "spend_cap", str(e), [])
+                await self.record_error(case, rep, "spend_cap", str(e), [])
                 outcome.stopped = "the app's daily spend cap stopped planning"
-                stop.set()
+                self.stop.set()
             except Exception as e:  # the harness must not die on one case
-                await record_error(case, rep, "harness_error", f"{type(e).__name__}: {e}", [])
+                await self.record_error(case, rep, "harness_error", f"{type(e).__name__}: {e}", [])
             else:
                 actual = run.cost_usd
                 latency = time.perf_counter() - started
-                row = build_row(case, rep, splits[case.id], run, pipeline.name, latency)
-                trace = vdir / "traces" / f"{case.id}_rep{rep}.json"
+                row = build_row(case, rep, self.splits[case.id], run, pipeline.name, latency)
+                trace = self.vdir / "traces" / f"{case.id}_rep{rep}.json"
                 body = json.dumps(run.transcript, ensure_ascii=False, indent=1)
                 await asyncio.to_thread(trace.write_text, body, encoding="utf-8")
-                await append(results_path, row)
+                await self.append(self.results_path, row)
                 outcome.scored += 1
             finally:
-                meter.settle(ceiling, actual)
+                self.meter.settle(ceiling, actual)
+
+
+async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> RunOutcome:
+    if pipeline.live and cfg.max_usd is None:
+        raise RunRefused("a live pipeline needs a spend cap (max_usd)")
+    vdir = cfg.variant_dir
+    (vdir / "traces").mkdir(parents=True, exist_ok=True)
+    splits = assign_splits(cases)
+    write_state(cfg.flow_dir, cases, splits)
+    _claim_variant(vdir, {"pipeline": pipeline.name, "live": pipeline.live, "stages": cfg.stages})
+    bind = getattr(pipeline, "bind", None)
+    if callable(bind):
+        bind(cases)
+
+    done = _done_keys(vdir / "results.jsonl")
+    runner = _CaseRunner(pipeline, cfg, splits)
+    outcome = runner.outcome
 
     jobs = []
     for case in cases:
@@ -324,9 +342,9 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
             if (case.id, rep) in done:
                 outcome.skipped_resume += 1
                 continue
-            jobs.append(one(case, rep))
+            jobs.append(runner.one(case, rep))
     await asyncio.gather(*jobs)
-    outcome.spent_usd = meter.spent
+    outcome.spent_usd = runner.meter.spent
     return outcome
 
 
