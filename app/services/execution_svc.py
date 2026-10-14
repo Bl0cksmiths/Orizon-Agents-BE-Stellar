@@ -657,26 +657,7 @@ async def _run(
                 await _emit(task_id, start, "exec", upstream_line)
 
             try:
-                if isinstance(worker, ModelWorker):
-                    # A built-in LLM worker runs on its step's tier's model, and
-                    # the trace names that model before the step starts (no
-                    # line when the step is served without one, e.g. a kit).
-                    # getattr: a plan stored before steps carried a tier has
-                    # none, and the worker then runs on its own default tier.
-                    tier = getattr(step, "tier", None)
-                    model = worker.step_model(tier, context)
-                    if model:
-                        await _emit(task_id, start, "exec", f"{worker.name} on {model}")
-                    # Collects the model of any call a server-side fallback
-                    # answered, so the trace can name who actually served it.
-                    served = watch_served_models()
-                    step_run = worker.run(plan.intent, step.rationale, context=context, tier=tier)
-                else:
-                    served = []
-                    step_run = worker.run(plan.intent, step.rationale, context=context)
-                output = await asyncio.wait_for(step_run, timeout=STEP_TIMEOUT_SECONDS)
-                if served and isinstance(worker, ModelWorker):
-                    await _emit(task_id, start, "exec", f"{worker.name} on {worker.served_model(tier, served[-1])}")
+                output = await _dispatch_step(task_id, start, plan, step, worker, context)
             except asyncio.TimeoutError:
                 logger.error(
                     "task %s step %s (%s): timed out after %.0fs",
@@ -1022,6 +1003,34 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _dispatch_step(
+    task_id: str, start: float, plan: StoredPlan, step: PlanStep, worker: Worker, context: dict[str, Any]
+) -> Any:
+    """Run one step on its worker, bounded by `STEP_TIMEOUT_SECONDS`, and
+    return what it produced. Raises whatever the step raised, a timeout included."""
+    if isinstance(worker, ModelWorker):
+        # A built-in LLM worker runs on its step's tier's model, and
+        # the trace names that model before the step starts (no
+        # line when the step is served without one, e.g. a kit).
+        # getattr: a plan stored before steps carried a tier has
+        # none, and the worker then runs on its own default tier.
+        tier = getattr(step, "tier", None)
+        model = worker.step_model(tier, context)
+        if model:
+            await _emit(task_id, start, "exec", f"{worker.name} on {model}")
+        # Collects the model of any call a server-side fallback
+        # answered, so the trace can name who actually served it.
+        served = watch_served_models()
+        step_run = worker.run(plan.intent, step.rationale, context=context, tier=tier)
+    else:
+        served = []
+        step_run = worker.run(plan.intent, step.rationale, context=context)
+    output = await asyncio.wait_for(step_run, timeout=STEP_TIMEOUT_SECONDS)
+    if served and isinstance(worker, ModelWorker):
+        await _emit(task_id, start, "exec", f"{worker.name} on {worker.served_model(tier, served[-1])}")
+    return output
 
 
 async def _emit_artifact(task_id: str, start: float, art: dict) -> None:
