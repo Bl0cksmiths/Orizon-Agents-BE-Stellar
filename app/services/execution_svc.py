@@ -1388,6 +1388,11 @@ async def _report_charge_unconfirmed(
     )
 
 
+# The trace line for a settlement (v1 or v2) that raised: generic, because
+# the trace is world-readable and the exception's text stays in the log.
+_SETTLEMENT_FAILED_LINE = "on-chain settlement failed"
+
+
 async def _report_charge_failure(task_id: str, start: float, e: Exception, *, charged: bool) -> None:
     """Trace a v1 settlement that raised, by whether its charge had confirmed."""
     from ..stellar import client as sc
@@ -1395,7 +1400,7 @@ async def _report_charge_failure(task_id: str, start: float, e: Exception, *, ch
     if charged:
         # The charge confirmed and something after it failed — the seal,
         # or the settlement write. The money moved; the line is as it was.
-        await _emit(task_id, start, "error", "on-chain settlement failed")
+        await _emit(task_id, start, "error", _SETTLEMENT_FAILED_LINE)
     elif isinstance(e, sc.InFlightError):
         # Sent, then lost: the charge may still land, exactly as an
         # unconfirmed charge whose poll timed out (`_report_charge_unconfirmed`).
@@ -1407,7 +1412,7 @@ async def _report_charge_failure(task_id: str, start: float, e: Exception, *, ch
             settlement="unconfirmed",
         )
     else:
-        await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+        await _emit(task_id, start, "error", _SETTLEMENT_FAILED_LINE, settlement="failed")
 
 
 def _charge_receipt_id(receipt_rv: object) -> bytes | None:
@@ -2633,7 +2638,7 @@ async def _report_v2_settle_failure(
     from ..stellar import client as sc
 
     if settled:
-        await _emit(task_id, start, "error", "on-chain settlement failed")
+        await _emit(task_id, start, "error", _SETTLEMENT_FAILED_LINE)
     elif isinstance(e, sc.InFlightError):
         await _emit(
             task_id,
@@ -2653,7 +2658,7 @@ async def _report_v2_settle_failure(
             settlement="failed",
         )
     else:
-        await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+        await _emit(task_id, start, "error", _SETTLEMENT_FAILED_LINE, settlement="failed")
         if isinstance(e, sc.NotSubmittedError) and not release:
             # Refused before it was sent — by the simulation, the signer or
             # the RPC — so nothing is in flight, and the custody would sit
