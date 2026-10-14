@@ -268,6 +268,32 @@ def _final_row(r: dict[str, Any], ceil: dict[str, int]) -> str:
     )
 
 
+def _code_length_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
+    """The complex code.gen re-measure after the length fix: each run, then the summaries."""
+    L = [
+        "## Complex code.gen after the length fix",
+        "",
+        "cpx-001 (barbershop booking system) handed to the real workers as a complex-tier step, after code.gen and "
+        f"code.critic moved to a 250–450-line target, a {CODE_CEILING_TOKENS:,}-token ceiling, low effort and a "
+        f"{STREAM_BUDGET_S:.0f} s stream budget. Lines and bytes are measured on the saved HTML; validator violations "
+        "are as found when this re-measure ran (the validator has changed since; see the final check).",
+        "",
+        "| run | served model | effort | first token | wall time | output tokens (incl. thinking) | cost | lines | bytes | validator violations | hit 9,000-token ceiling | hit 100 s budget | deferred features in summary |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in a["code_length"]:
+        if "skipped" in r:
+            L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
+            continue
+        L.append(_code_length_row(r))
+    L += ["", "Summaries as returned:", ""]
+    for r in a["code_length"]:
+        if "skipped" not in r:
+            L.append(f"- **{r['label']}** (`r3-code-length/{r['html']}`): {_cell(r['summary'])}")
+    L += ["", _block("code_length_notes", keep), ""]
+    return L
+
+
 def _final_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
     """The final check: each run against the ceilings as they stand now, then the summaries."""
     ceil = a["final_ceilings"]
@@ -411,27 +437,7 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
         )
     L += ["", _block("worker_notes", keep), ""]
     if a.get("code_length"):
-        L += [
-            "## Complex code.gen after the length fix",
-            "",
-            "cpx-001 (barbershop booking system) handed to the real workers as a complex-tier step, after code.gen and "
-            f"code.critic moved to a 250–450-line target, a {CODE_CEILING_TOKENS:,}-token ceiling, low effort and a "
-            f"{STREAM_BUDGET_S:.0f} s stream budget. Lines and bytes are measured on the saved HTML; validator violations "
-            "are as found when this re-measure ran (the validator has changed since; see the final check).",
-            "",
-            "| run | served model | effort | first token | wall time | output tokens (incl. thinking) | cost | lines | bytes | validator violations | hit 9,000-token ceiling | hit 100 s budget | deferred features in summary |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-        ]
-        for r in a["code_length"]:
-            if "skipped" in r:
-                L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
-                continue
-            L.append(_code_length_row(r))
-        L += ["", "Summaries as returned:", ""]
-        for r in a["code_length"]:
-            if "skipped" not in r:
-                L.append(f"- **{r['label']}** (`r3-code-length/{r['html']}`): {_cell(r['summary'])}")
-        L += ["", _block("code_length_notes", keep), ""]
+        L += _code_length_section(a, keep)
     if a.get("final"):
         L += _final_section(a, keep)
     L += _spend_section(a, keep)
