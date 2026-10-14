@@ -20,7 +20,17 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .campaign import RESULTS_FILE, TIER_MODEL, _jsonable, guard_block, list_price, misclassified, narratives, tier_misses, usd
+from .campaign import (
+    RESULTS_FILE,
+    TIER_MODEL,
+    _jsonable,
+    guard_block,
+    list_price,
+    misclassified,
+    narratives,
+    tier_misses,
+    usd,
+)
 from .dataset import TIERS
 from .metrics import TIER_COLUMNS, ok_rows
 from .runner import read_jsonl
