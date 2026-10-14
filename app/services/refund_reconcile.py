@@ -313,6 +313,31 @@ async def _after_a_lost_write(dispute_id: str, tx_hash: str, base: dict[str, Any
     )
 
 
+async def _decide_final_answer(
+    dispute: DisputeRecord,
+    tx_hash: str,
+    found: sc.LedgerTransaction,
+    base: dict[str, Any],
+    *,
+    settler: str,
+    asset_sac: str,
+) -> Decision:
+    """SUCCESS or FAILED: act only on this dispute's own transfer, and only for the amount on record."""
+    transfer, why_not = _identify(dispute, found, settler=settler, asset_sac=asset_sac)
+    if transfer is None:
+        return Decision(**base, action="not_this_refund", detail=why_not)
+    if dispute.inflight_usdc is not None and sc.usdc_to_i128(dispute.inflight_usdc) != transfer.stroops:
+        return Decision(
+            **base,
+            action="amount_mismatch",
+            detail=f"the chain's transfer is {transfer.stroops} stroops, the record's in-flight amount"
+            f" {sc.usdc_to_i128(dispute.inflight_usdc)}",
+        )
+    if found.status == "SUCCESS":
+        return await _record_landed(dispute, tx_hash, transfer.stroops, base)
+    return await _release(dispute, tx_hash, "released", base, "the ledger answered FAILED, so no funds moved")
+
+
 async def reconcile_claim(claim: RefundClaim, *, now: float, settler: str, asset_sac: str) -> Decision:
     """Decide one claim from the chain, act on it, and return what was done.
 
@@ -367,19 +392,7 @@ async def reconcile_claim(claim: RefundClaim, *, now: float, settler: str, asset
     base: dict[str, Any] = {"dispute_id": dispute.id, "claim_age_s": age, "tx_hash": tx_hash, "chain": found.status}
 
     if found.status in ("SUCCESS", "FAILED"):
-        transfer, why_not = _identify(dispute, found, settler=settler, asset_sac=asset_sac)
-        if transfer is None:
-            return Decision(**base, action="not_this_refund", detail=why_not)
-        if dispute.inflight_usdc is not None and sc.usdc_to_i128(dispute.inflight_usdc) != transfer.stroops:
-            return Decision(
-                **base,
-                action="amount_mismatch",
-                detail=f"the chain's transfer is {transfer.stroops} stroops, the record's in-flight amount"
-                f" {sc.usdc_to_i128(dispute.inflight_usdc)}",
-            )
-        if found.status == "SUCCESS":
-            return await _record_landed(dispute, tx_hash, transfer.stroops, base)
-        return await _release(dispute, tx_hash, "released", base, "the ledger answered FAILED, so no funds moved")
+        return await _decide_final_answer(dispute, tx_hash, found, base, settler=settler, asset_sac=asset_sac)
 
     if found.status != "NOT_FOUND":
         return Decision(**base, action="rpc_error", detail="an answer this sweep does not know — nothing was changed")
