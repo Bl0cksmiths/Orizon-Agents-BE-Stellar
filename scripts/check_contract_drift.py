@@ -73,6 +73,7 @@ CANONICAL_FILES: Mapping[str, str] = {
 
 # This repo's env-style sources, each reported under its file name.
 ENV_EXAMPLE = ".env.example"
+RENDER_YAML = "render.yaml"
 
 # Printed in place of an id a source does not carry. An omission is drift too:
 # it produces the same unconfigured read, only reached by absence.
@@ -238,7 +239,7 @@ def parse_env_example(text: str, source: str = ENV_EXAMPLE) -> NetworkMap:
     return _attribute(source, [live, commented])
 
 
-def parse_render_yaml(text: str, source: str = "render.yaml") -> NetworkMap:
+def parse_render_yaml(text: str, source: str = RENDER_YAML) -> NetworkMap:
     """Pull the contract ids out of the Render blueprint's envVars block.
 
     A line scanner rather than a YAML parser: PyYAML is not a declared
@@ -369,7 +370,7 @@ def load_sources(repo_root: Path, contracts_dir: Path) -> dict[str, NetworkMap]:
     return {
         "canonical": load_canonical(contracts_dir),
         ENV_EXAMPLE: parse_env_example(_read(repo_root / ENV_EXAMPLE)),
-        "render.yaml": parse_render_yaml(_read(repo_root / "render.yaml")),
+        RENDER_YAML: parse_render_yaml(_read(repo_root / RENDER_YAML)),
     }
 
 
