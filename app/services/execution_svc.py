@@ -1135,6 +1135,80 @@ async def _finish_stream(task_id: str) -> None:
     await bus.close(task_id)
 
 
+async def _report_charge_unconfirmed(
+    task_id: str,
+    start: float,
+    charge_status: str,
+    charge_tx: str | None,
+    *,
+    total_usdc: float,
+    job_hex: str,
+    auth_id_hex: str,
+    payer: str,
+) -> None:
+    """Say how a v1 charge that did not CONFIRM ended: rejected by the ledger,
+    or unknown — submitted and lost track of, so it may still settle."""
+    if charge_status == "FAILED":
+        # The ledger rejected it after simulation passed: nothing moved.
+        logger.error(
+            "task %s: PaymentEscrow.charge did not settle — status=%s hash=%s (auth %s, payer %s, %.6f USDC, job %s)",
+            task_id,
+            charge_status,
+            charge_tx,
+            auth_id_hex,
+            payer,
+            total_usdc,
+            job_hex,
+        )
+        await _emit(
+            task_id,
+            start,
+            "error",
+            f"charge status={charge_status} hash={charge_tx}",
+            settlement="failed",
+        )
+        return
+    # NOT a failure: `"timeout"` is the client's word for submitted and
+    # then lost track of, and a SUCCESS with no hash is the same
+    # unknown. The charge may settle two ledgers from now, and the
+    # epic says so everywhere else — `RefundStatus.TIMEOUT` and the
+    # CancelledError handler in `_settle_onchain` both spell out that the
+    # transfer may still land. It is called out separately here because the
+    # consequence is one-sided: we return no job id, `_record_settlement`
+    # writes nothing, and if the charge DOES land the buyer is charged
+    # for a run `issue_dispute_challenge` answers `unknown_job` for,
+    # until the 24-hour window closes on a door that never opened.
+    # Recording the settlement anyway would open a dispute window over
+    # money that may never have moved, which is a different wrong — so
+    # this lane leaves the operator a line they can reconcile from and
+    # refund by hand, and the choice between the two is a story of its
+    # own.
+    logger.error(
+        "task %s: PaymentEscrow.charge is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+        "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=%s hash=%s "
+        "(auth %s, payer %s, %.6f USDC, job %s)",
+        task_id,
+        charge_status or "missing",
+        charge_tx,
+        auth_id_hex,
+        payer,
+        total_usdc,
+        job_hex,
+    )
+    # The buyer is told too, in the terms that matter to them: their
+    # money may be gone and this run has no dispute window. The job id
+    # stays out — trace lines are world-readable when TASK_AUTH_REQUIRED
+    # is off, and a dispute is filed against that id.
+    await _emit(
+        task_id,
+        start,
+        "error",
+        f"charge unconfirmed status={charge_status or 'missing'} hash={charge_tx} — it may still "
+        "settle, and this run cannot be disputed",
+        settlement="unconfirmed",
+    )
+
+
 def _charge_receipt_id(receipt_rv: object) -> bytes | None:
     """The 16-byte receipt id a v1 `charge` returned, or None when it did not decode to one."""
     receipt_id: bytes | None = None
@@ -1273,66 +1347,16 @@ async def _settle_onchain(
             )
             if on_charged is not None:
                 await on_charged(charge_tx, job_id)
-        elif charge_status == "FAILED":
-            # The ledger rejected it after simulation passed: nothing moved.
-            logger.error(
-                "task %s: PaymentEscrow.charge did not settle — status=%s hash=%s "
-                "(auth %s, payer %s, %.6f USDC, job %s)",
+        else:
+            await _report_charge_unconfirmed(
                 task_id,
+                start,
                 charge_status,
                 charge_tx,
-                auth_id_hex,
-                payer,
-                total_usdc,
-                job_id.hex(),
-            )
-            await _emit(
-                task_id,
-                start,
-                "error",
-                f"charge status={charge_status} hash={charge_tx}",
-                settlement="failed",
-            )
-            return (None, None, None)
-        else:
-            # NOT a failure: `"timeout"` is the client's word for submitted and
-            # then lost track of, and a SUCCESS with no hash is the same
-            # unknown. The charge may settle two ledgers from now, and the
-            # epic says so everywhere else — `RefundStatus.TIMEOUT` and the
-            # CancelledError handler below both spell out that the transfer may
-            # still land. It is called out separately here because the
-            # consequence is one-sided: we return no job id, `_record_settlement`
-            # writes nothing, and if the charge DOES land the buyer is charged
-            # for a run `issue_dispute_challenge` answers `unknown_job` for,
-            # until the 24-hour window closes on a door that never opened.
-            # Recording the settlement anyway would open a dispute window over
-            # money that may never have moved, which is a different wrong — so
-            # this lane leaves the operator a line they can reconcile from and
-            # refund by hand, and the choice between the two is a story of its
-            # own.
-            logger.error(
-                "task %s: PaymentEscrow.charge is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
-                "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=%s hash=%s "
-                "(auth %s, payer %s, %.6f USDC, job %s)",
-                task_id,
-                charge_status or "missing",
-                charge_tx,
-                auth_id_hex,
-                payer,
-                total_usdc,
-                job_id.hex(),
-            )
-            # The buyer is told too, in the terms that matter to them: their
-            # money may be gone and this run has no dispute window. The job id
-            # stays out — trace lines are world-readable when TASK_AUTH_REQUIRED
-            # is off, and a dispute is filed against that id.
-            await _emit(
-                task_id,
-                start,
-                "error",
-                f"charge unconfirmed status={charge_status or 'missing'} hash={charge_tx} — it may still "
-                "settle, and this run cannot be disputed",
-                settlement="unconfirmed",
+                total_usdc=total_usdc,
+                job_hex=job_id.hex(),
+                auth_id_hex=auth_id_hex,
+                payer=payer,
             )
             return (None, None, None)
 
