@@ -95,6 +95,20 @@ _UPSTREAM_UNAVAILABLE: dict[str, Any] = {
     "model": ErrorEnvelope,
     "description": "`upstream_unavailable` — PDAX failed, or refused this backend's own credentials.",
 }
+# `require_api_key`'s refusal, on the `secured` routes.
+_INVALID_API_KEY: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`invalid_api_key` — API_KEY is set and `X-API-Key` does not match it.",
+}
+# The two ramp pricing routes check the amount before PDAX is asked.
+_RAMP_PRICING_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: _INVALID_API_KEY,
+    422: {
+        "model": ErrorEnvelope,
+        "description": "The amount is not a positive decimal within its cap, or invalid input.",
+    },
+    502: _UPSTREAM_UNAVAILABLE,
+}
 
 
 def _fail(e: PdaxError) -> HTTPException:
@@ -487,7 +501,7 @@ async def reference_countries() -> dict:
 
 
 # ── ramp (PHP <-> USDCXLM orchestration) ────────────────────────
-@secured.post("/ramp/estimate")
+@secured.post("/ramp/estimate", responses=_RAMP_PRICING_RESPONSES)
 async def ramp_estimate(
     direction: Literal["onramp", "offramp"],
     amount: str = Query(..., max_length=32),
