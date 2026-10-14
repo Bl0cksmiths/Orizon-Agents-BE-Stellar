@@ -52,6 +52,11 @@ def _f1(x: float) -> str:
     return f"{x:.3f}"
 
 
+def _table_rule(columns: int) -> str:
+    """A markdown table's header rule for `columns` columns: `|---|---|` for two."""
+    return "|---" * columns + "|"
+
+
 def _guard_table(cols: list[tuple[str, dict[str, Any]]]) -> list[str]:
     rows = [
         ("verdict accuracy", "verdict_accuracy"),
@@ -270,7 +275,7 @@ def _cost_section(a: dict[str, Any]) -> list[str]:
     add("Per request (planning only: guard + improve + re-check + plan; executing a plan's steps is extra):")
     add("")
     add("| | cost |")
-    add("|---|---|")
+    add(_table_rule(2))
     add(f"| refused request (guard only) | {usd(pr['mean_refused_request'])} |")
     add(
         f"| planned request, mean | {usd(pr['mean_planned_request'])} (p50 {usd(pr['planned_spread']['p50'])}, p95 {usd(pr['planned_spread']['p95'])}, max {usd(pr['planned_spread']['max'])}) |"
@@ -317,7 +322,7 @@ def _latency_section(a: dict[str, Any]) -> list[str]:
     add("p50 / p95 / max, per model call and per request end to end.")
     add("")
     add("| stage | latency |")
-    add("|---|---|")
+    add(_table_rule(2))
     add(f"| jev guard (stage 1) | {fmt_s(s1['latency'].get('guard', {}))} |")
     add(f"| jev guard (stage 2, external) | {fmt_s(s2['latency'].get('guard', {}))} |")
     add(f"| Haiku fallback guard (stage 3) | {fmt_s(s3['latency'].get('guard_fallback', {}))} |")
@@ -366,7 +371,7 @@ def _pipeline_section(a: dict[str, Any]) -> list[str]:
     add("Plan validity on the RAW planner output (before `orchestrator_svc` clamps it):")
     add("")
     add("| check | value |")
-    add("|---|---|")
+    add(_table_rule(2))
     for key in ("plan_valid", "plan_schema", "plan_allowlisted", "plan_tiers"):
         add(f"| {key.replace('_', ' ')} | {pct(pipe[key])} |")
     add(f"| refused by the planner | {len(pipe['plan_refused'])} |")
@@ -456,7 +461,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("")
     g1 = s1["pooled"]
     add("| | value |")
-    add("|---|---|")
+    add(_table_rule(2))
     add(f"| in-repo verdict accuracy, jev (168 cases × 3 reps) | {pct(g1['verdict_accuracy'])} |")
     add(
         f"| injection recall / block precision, jev | {pct(g1['injection_recall'])} / {pct(g1['injection_precision'])} |"
@@ -498,7 +503,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     )
     add("")
     add("| | composition |")
-    add("|---|---|")
+    add(_table_rule(2))
     add("| expected verdict | " + ", ".join(f"{k} {v}" for k, v in sorted(d["verdicts"].items())) + " |")
     add("| expected tier (allow only) | " + ", ".join(f"{k} {v}" for k, v in sorted(d["tiers"].items())) + " |")
     add("| category | " + ", ".join(f"{k} {v}" for k, v in sorted(d["categories"].items())) + " |")
@@ -592,14 +597,14 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("### By category (jev, stage 1)")
     add("")
     add("| category | verdict accuracy |")
-    add("|---|---|")
+    add(_table_rule(2))
     for k, v in g1["by_category"].items():
         add(f"| {k} | {pct(v)} |")
     add("")
     add("### By language (jev, stage 1)")
     add("")
     add("| language | verdict accuracy |")
-    add("|---|---|")
+    add(_table_rule(2))
     for k, v in sorted(g1["by_language"].items(), key=lambda kv: -kv[1].n):
         add(f"| {k} | {pct(v)} |")
     add("")
@@ -667,7 +672,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("## 14. Files")
     add("")
     add("| file | contents |")
-    add("|---|---|")
+    add(_table_rule(2))
     add("| `metrics.json` | every figure in this report |")
     add("| `costs.json` | spend per stage and model, list price and as booked by the app |")
     add("| `sweep.md` | full threshold curves and tier-rule tables |")
