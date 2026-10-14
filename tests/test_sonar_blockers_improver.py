@@ -19,7 +19,7 @@ import pytest
 
 from app.llm import testing
 from app.llm.errors import JevUnavailable, SpendCapReached
-from app.services.prompt_improver import Spec, recheck
+from app.services.prompt_improver import Spec, _error_to_raise, recheck
 
 INTENT = "Build a landing page for my bakery in Cebu, with the menu and opening hours."
 SPEC = Spec(
@@ -115,3 +115,30 @@ def test_both_calls_answering_is_judged_from_jev(fake_jev, fake_claude):
     assert result.source == "jev"
     assert result.scores == {"same_request": 0.95, "injection": 0.02, "harmful": 0.01, "severity": 0}
     assert fake_claude.calls == []
+
+
+def test_the_raised_error_carries_no_chain_of_its_own(fake_jev):
+    # Raised outside any `except`, so nothing is chained onto it: the log shows
+    # the failure jev returned, not a second exception wrapped around it.
+    failure = RuntimeError("same failed")
+    _answer(fake_jev, SAFETY)
+    fake_jev.fail(failure, purpose=SAME)
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(recheck(INTENT, SPEC))
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_error_to_raise_prefers_the_spend_cap_then_call_order():
+    first, second, cap = RuntimeError("first"), JevUnavailable("timeout"), _spend_cap()
+
+    assert _error_to_raise([first]) is first
+    assert _error_to_raise([first, second]) is first
+    assert _error_to_raise([second, first]) is second
+    assert _error_to_raise([first, cap]) is cap
+    assert _error_to_raise([cap, first]) is cap
+    # Not only Exceptions: gather hands back any BaseException, cancellation included.
+    cancelled = asyncio.CancelledError()
+    assert _error_to_raise([cancelled, first]) is cancelled
