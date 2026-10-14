@@ -98,6 +98,7 @@ D039 = (
 # What a check skipped behind an earlier one says, and the check to fix first.
 _NO_ANSWER = "the backend never answered"
 _FIX_WARM = "Fix network.warm first."
+_FIX_READINESS = "Fix build.readiness first."
 
 
 class Refused(Exception):
@@ -420,7 +421,7 @@ def check_escrow_settler(chain: ChainReader, facts: Facts) -> Check:
     if escrow is None or facts.escrow_version != ESCROW_V2:
         return check.skipped("the escrow is not a readable v2", "Fix escrow.version first.")
     if facts.readiness is None:
-        return check.skipped("/readiness was not read", "Fix build.readiness first.")
+        return check.skipped("/readiness was not read", _FIX_READINESS)
     signer = facts.signer
     if signer is None:
         return check.failed(
@@ -447,7 +448,7 @@ def check_refunds_enabled(facts: Facts) -> Check:
     disputes = (facts.readiness or {}).get("disputes")
     reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
     if not isinstance(reconcile, dict) or "enabled" not in reconcile:
-        return check.skipped("/readiness has no disputes.reconcile block", "Fix build.readiness first.")
+        return check.skipped("/readiness has no disputes.reconcile block", _FIX_READINESS)
     if reconcile.get("enabled") is not True:
         return check.failed(
             "disputes.reconcile.enabled is false: DISPUTE_REFUNDS_ENABLED or REFUND_RECONCILE_ENABLED is off, "
@@ -467,7 +468,7 @@ def check_dispute_store(facts: Facts) -> Check:
     disputes = (facts.readiness or {}).get("disputes")
     store = disputes.get("store") if isinstance(disputes, dict) else None
     if store is None:
-        return check.skipped("/readiness has no disputes.store", "Fix build.readiness first.")
+        return check.skipped("/readiness has no disputes.store", _FIX_READINESS)
     if store != "postgres":
         return check.failed(
             f"disputes.store is {store!r}, not a durable store: a restart between the settle and the dispute "
