@@ -241,6 +241,25 @@ def _resume_or_start(escrow_id: str, held: _Index | None, window_start: int, sec
     return _Index(escrow_id, window_start, window_start, (), seconds_per_ledger)
 
 
+def _read_past_dense(
+    server: Any, filters: list[EventFilter], dense: _Dense, cursor: int, end: int, deadline: float
+) -> tuple[list[EventInfo], int]:
+    """The page `[cursor, end)` around a dense ledger: what that ledger returned, then the rest of the range.
+
+    Returns the events and the end the page may claim: `end` when the rest was
+    read, or just past the dense ledger when that read failed.
+    """
+    logger.warning("[charges] %s; the charges read from it are a subset", dense)
+    events = dense.events
+    # The rest of the range is still readable: carry on past the ledger.
+    try:
+        events += _read_range(server, filters, dense.ledger + 1, end, deadline) if dense.ledger + 1 < end else []
+    except Exception as e:
+        logger.warning("[charges] page [%d, %d) failed after a dense ledger: %s", cursor, end, e)
+        end = dense.ledger + 1
+    return events, end
+
+
 def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Advance:
     """Bring `held` up to the node's tip, as far as the deadline allows. Blocking.
 
@@ -275,16 +294,8 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
         try:
             events = _read_range(server, filters, cursor, end, deadline)
         except _Dense as dense:
-            logger.warning("[charges] %s; the charges read from it are a subset", dense)
-            events, lossy = dense.events, max(lossy, dense.ledger)
-            # The rest of the range is still readable: carry on past the ledger.
-            try:
-                events += (
-                    _read_range(server, filters, dense.ledger + 1, end, deadline) if dense.ledger + 1 < end else []
-                )
-            except Exception as e:
-                logger.warning("[charges] page [%d, %d) failed after a dense ledger: %s", cursor, end, e)
-                end = dense.ledger + 1
+            events, end = _read_past_dense(server, filters, dense, cursor, end, deadline)
+            lossy = max(lossy, dense.ledger)
         except _OutOfTime:
             out_of_time = True
             break
