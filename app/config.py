@@ -2,7 +2,7 @@ import base64
 import binascii
 import logging
 import math
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -1157,8 +1157,16 @@ class Settings(BaseSettings):
     # variable and what breaks, so the operator does not have to trace a 500
     # three layers down at request time.
 
-    @model_validator(mode="after")
-    def _report_unknown_pdax_environment(self) -> "Settings":
+    def model_post_init(self, context: Any, /) -> None:
+        """Run the startup reports once the fields are validated.
+
+        Pydantic calls this hook once per construction, so each report logs
+        exactly once per Settings().
+        """
+        super().model_post_init(context)
+        self._report_unknown_pdax_environment()
+
+    def _report_unknown_pdax_environment(self) -> None:
         """Name a mistyped PDAX_ENVIRONMENT at startup, not at first use.
 
         base_url() (app/pdax/config.py) raises RuntimeError lazily when the
@@ -1183,7 +1191,6 @@ class Settings(BaseSettings):
                 self.pdax_environment,
                 ", ".join(PDAX_ENVIRONMENTS),
             )
-        return self
 
     @model_validator(mode="after")
     def _report_malformed_pdax_otp_secret(self) -> "Settings":
