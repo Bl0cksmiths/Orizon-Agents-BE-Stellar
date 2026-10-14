@@ -1216,6 +1216,37 @@ class Runner:
         self.console.redactor.register(self.grant)
 
     # ── 7. uphold ───────────────────────────────────────────────
+    def uphold_unanswered(self, dispute_id: str, exc: UnknownOutcome | ApiError) -> Stop:
+        """The stop after an uphold whose answer was lost or refused; it is never retried.
+
+        The dispute is read back first, and what it shows is recorded, with any
+        credit the interrupted uphold left behind.
+        """
+        after = self.api.dispute(dispute_id, grant=self.grant)
+        unknown = isinstance(exc, UnknownOutcome)
+        self.note(
+            "uphold",
+            "uphold_unknown" if unknown else "uphold_refused",
+            f"{exc}; the dispute now reads {after.get('status')}",
+            dispute_id=dispute_id,
+            status=after.get("status"),
+            refund_tx=after.get("refund_tx"),
+        )
+        if after.get("refund_tx"):
+            self.tx(
+                "uphold",
+                "refund",
+                self.need_chain().observe(str(after["refund_tx"]), self.budgets.tx_observe),
+                contract=self.network.get("asset_sac"),
+                amount=after.get("credited_usdc") or after.get("creditable_usdc"),
+                summary="the credit the interrupted uphold left behind",
+            )
+        return Stop(
+            EXIT_UNKNOWN_OUTCOME if unknown else EXIT_STAGE_FAILED,
+            f"uphold {'outcome unknown' if unknown else 'refused'} ({exc}); dispute reads {after.get('status')}. "
+            "Not retried.",
+        )
+
     def stage_uphold(self) -> None:
         dispute_id = str((self.state.dispute or {}).get("id") or "")
         current = self.api.dispute(dispute_id, grant=self.grant)
@@ -1234,30 +1265,7 @@ class Runner:
         try:
             upheld = self.api.uphold(dispute_id, self.adjudicator_key)
         except (UnknownOutcome, ApiError) as exc:
-            after = self.api.dispute(dispute_id, grant=self.grant)
-            unknown = isinstance(exc, UnknownOutcome)
-            self.note(
-                "uphold",
-                "uphold_unknown" if unknown else "uphold_refused",
-                f"{exc}; the dispute now reads {after.get('status')}",
-                dispute_id=dispute_id,
-                status=after.get("status"),
-                refund_tx=after.get("refund_tx"),
-            )
-            if after.get("refund_tx"):
-                self.tx(
-                    "uphold",
-                    "refund",
-                    self.need_chain().observe(str(after["refund_tx"]), self.budgets.tx_observe),
-                    contract=self.network.get("asset_sac"),
-                    amount=after.get("credited_usdc") or after.get("creditable_usdc"),
-                    summary="the credit the interrupted uphold left behind",
-                )
-            raise Stop(
-                EXIT_UNKNOWN_OUTCOME if unknown else EXIT_STAGE_FAILED,
-                f"uphold {'outcome unknown' if unknown else 'refused'} ({exc}); dispute reads {after.get('status')}. "
-                "Not retried.",
-            ) from exc
+            raise self.uphold_unanswered(dispute_id, exc) from exc
         self.state.dispute = {**(self.state.dispute or {}), "status": upheld.get("status")}
         self.save()
         self.say(f"  upheld: dispute {dispute_id} is {upheld.get('status')}")
