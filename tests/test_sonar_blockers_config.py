@@ -16,7 +16,7 @@ import logging
 
 import pytest
 
-from app.config import PDAX_ENVIRONMENTS, Settings
+from app.config import PDAX_ENVIRONMENTS, ConfigurationError, Settings, _load_settings
 
 CONFIG_LOGGER = "app.config"
 
@@ -130,3 +130,19 @@ def test_no_startup_report_is_a_model_validator():
     # run from `model_post_init` instead, and none may drift back.
     validators = Settings.__pydantic_decorators__.model_validators
     assert [name for name in validators if name.startswith("_report_")] == []
+
+
+def test_a_refused_boot_still_reports_and_still_echoes_no_secret(caplog):
+    # The reports run before the refusing validators, so a deploy that fails
+    # on one variable still names the merely-wrong ones in the same log. That
+    # log is the deploy log, so the credentials around it must stay out.
+    otp_secret = "not-base32!!"
+    signing_key = "SBADKEY" + "Z" * 49
+    with caplog.at_level(logging.DEBUG, logger=CONFIG_LOGGER), pytest.raises(ConfigurationError):
+        _load_settings(_env_file=None, api_key="sh", pdax_otp_secret=otp_secret, stellar_signing_key=signing_key)
+
+    logged = [r.getMessage() for r in _config_records(caplog)]
+    assert logged == [_MALFORMED_OTP_SECRET, _MALFORMED_SIGNING_KEY]
+    for message in logged:
+        assert otp_secret not in message
+        assert signing_key not in message
