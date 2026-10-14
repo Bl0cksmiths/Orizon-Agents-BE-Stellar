@@ -994,6 +994,55 @@ def _kit_backstop(
     return readmitted, notices
 
 
+def _kit_candidate(
+    agent_id: str,
+    by_id: dict[str, Agent],
+    routable: set[str],
+    reps: dict[str, reputation_svc.RepInfo],
+) -> tuple[Agent, reputation_svc.RepInfo] | None:
+    """The kit role's agent and its reputation, when a step can be planned for
+    it at all; None when the step is dropped before the floor is consulted."""
+    agent = by_id.get(agent_id)
+    if agent is None:
+        # The kit pipeline references an agent that isn't seeded — this
+        # is a programmer error. Skip the step rather than crash the
+        # whole pipeline.
+        return None
+
+    if not _is_listed(agent):
+        # Delisted by its operator: for routing purposes as absent as an id
+        # that is not in the registry at all, so it is handled the same way
+        # — the step is dropped, with no substitute and no notice.
+        #
+        # The placement is the load-bearing part. It sits BEFORE the floor
+        # check and outside `dropped`, which is the list the starvation
+        # backstop re-admits from, so no combination of bad ratings can put
+        # a withdrawn agent back into a kit slot.
+        #
+        # No substitute, because a substitution is a FLOOR action: it emits
+        # `kind="substituted"` with `reason_code="below_floor"` and a
+        # sentence naming the bps the designated agent failed on. A delisted
+        # agent failed nothing, so the only honest notice here is none —
+        # which is also this lane's reporting decision (see
+        # `_routable_registry`). Quietly promoting a stand-in with no notice
+        # would be the silently reshuffled pipeline story 3.02 forbids.
+        return None
+
+    if agent.id not in routable or not _still_routable(agent.id):
+        # Listed but with nothing to execute it — a seeded worker missing
+        # from this deployment — or delisted or unbound during the pause.
+        # No step can run it, so it is dropped the same silent way.
+        return None
+
+    info = reps.get(agent.id)
+    if info is None:
+        # Routable but unscored: the floor cannot judge it, so it is not
+        # offered — the same rule `_scored` applies to the free-form path.
+        logger.warning("kit agent %s had no reputation entry and was not planned", agent.id)
+        return None
+    return agent, info
+
+
 async def _build_kit_plan(
     intent: str,
     kit: DemoKit,
@@ -1048,44 +1097,10 @@ async def _build_kit_plan(
     dropped: list[_DroppedKitRole] = []
 
     for position, (agent_id, rationale) in enumerate(_KIT_PIPELINE):
-        agent = by_id.get(agent_id)
-        if agent is None:
-            # The kit pipeline references an agent that isn't seeded — this
-            # is a programmer error. Skip the step rather than crash the
-            # whole pipeline.
+        candidate = _kit_candidate(agent_id, by_id, routable, reps)
+        if candidate is None:
             continue
-
-        if not _is_listed(agent):
-            # Delisted by its operator: for routing purposes as absent as an id
-            # that is not in the registry at all, so it is handled the same way
-            # — the step is dropped, with no substitute and no notice.
-            #
-            # The placement is the load-bearing part. It sits BEFORE the floor
-            # check and outside `dropped`, which is the list the starvation
-            # backstop re-admits from, so no combination of bad ratings can put
-            # a withdrawn agent back into a kit slot.
-            #
-            # No substitute, because a substitution is a FLOOR action: it emits
-            # `kind="substituted"` with `reason_code="below_floor"` and a
-            # sentence naming the bps the designated agent failed on. A delisted
-            # agent failed nothing, so the only honest notice here is none —
-            # which is also this lane's reporting decision (see
-            # `_routable_registry`). Quietly promoting a stand-in with no notice
-            # would be the silently reshuffled pipeline story 3.02 forbids.
-            continue
-
-        if agent.id not in routable or not _still_routable(agent.id):
-            # Listed but with nothing to execute it — a seeded worker missing
-            # from this deployment — or delisted or unbound during the pause.
-            # No step can run it, so it is dropped the same silent way.
-            continue
-
-        info = reps.get(agent.id)
-        if info is None:
-            # Routable but unscored: the floor cannot judge it, so it is not
-            # offered — the same rule `_scored` applies to the free-form path.
-            logger.warning("kit agent %s had no reputation entry and was not planned", agent.id)
-            continue
+        agent, info = candidate
 
         eta = _KIT_ETAS.get(agent_id, 1.0)
         if reputation_svc.passes_floor(info):
