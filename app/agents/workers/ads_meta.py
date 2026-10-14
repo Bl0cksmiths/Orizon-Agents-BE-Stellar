@@ -186,6 +186,39 @@ def fit_at_boundary(text: str, limit: int) -> str | None:
     return best
 
 
+_FIELD_LIMITS = {"primary_text": PRIMARY_TEXT_MAX, "headline": HEADLINE_MAX, "description": DESCRIPTION_MAX}
+
+
+def _fit_variant(index: int, ad: AdDraft, seen: set[str], issues: list[dict[str, Any]]) -> dict[str, str] | None:
+    """Variant `index` inside Meta's lengths, or None when it is dropped.
+
+    Each drop, and a blanked description, is listed in `issues`; a kept
+    variant's copy is added to `seen`, so a later duplicate of it is dropped."""
+    fitted = {field: fit_at_boundary(getattr(ad, field), limit) for field, limit in _FIELD_LIMITS.items()}
+    unfit = [field for field in ("primary_text", "headline") if fitted[field] is None]
+    if unfit:
+        issues.append({"variant": index, "problem": "dropped_no_boundary_fits", "fields": unfit})
+        return None
+    primary, headline = fitted["primary_text"] or "", fitted["headline"] or ""
+    if not (primary and headline):
+        issues.append({"variant": index, "problem": "dropped_empty"})
+        return None
+    key = f"{primary.casefold()}|{headline.casefold()}"
+    if key in seen:
+        issues.append({"variant": index, "problem": "dropped_duplicate"})
+        return None
+    seen.add(key)
+    if fitted["description"] is None:
+        issues.append({"variant": index, "problem": "description_dropped_no_boundary_fits"})
+    return {
+        "primary_text": primary,
+        "headline": headline,
+        "description": fitted["description"] or "",
+        "cta": ad.cta,
+        "cta_label": cta_label(ad.cta),
+    }
+
+
 def fit_ad_set(draft: AdSetDraft) -> dict[str, Any]:
     """The draft inside Meta's lengths and ranges.
 
@@ -198,33 +231,10 @@ def fit_ad_set(draft: AdSetDraft) -> dict[str, Any]:
     ads: list[dict[str, str]] = []
     issues: list[dict[str, Any]] = []
     seen: set[str] = set()
-    limits = {"primary_text": PRIMARY_TEXT_MAX, "headline": HEADLINE_MAX, "description": DESCRIPTION_MAX}
     for index, ad in enumerate(draft.ads, 1):
-        fitted = {field: fit_at_boundary(getattr(ad, field), limit) for field, limit in limits.items()}
-        unfit = [field for field in ("primary_text", "headline") if fitted[field] is None]
-        if unfit:
-            issues.append({"variant": index, "problem": "dropped_no_boundary_fits", "fields": unfit})
-            continue
-        primary, headline = fitted["primary_text"] or "", fitted["headline"] or ""
-        if not (primary and headline):
-            issues.append({"variant": index, "problem": "dropped_empty"})
-            continue
-        key = f"{primary.casefold()}|{headline.casefold()}"
-        if key in seen:
-            issues.append({"variant": index, "problem": "dropped_duplicate"})
-            continue
-        seen.add(key)
-        if fitted["description"] is None:
-            issues.append({"variant": index, "problem": "description_dropped_no_boundary_fits"})
-        ads.append(
-            {
-                "primary_text": primary,
-                "headline": headline,
-                "description": fitted["description"] or "",
-                "cta": ad.cta,
-                "cta_label": cta_label(ad.cta),
-            }
-        )
+        fitted = _fit_variant(index, ad, seen, issues)
+        if fitted is not None:
+            ads.append(fitted)
     if len(ads) < MIN_ADS:
         raise claude_step.ModelStepError(
             claude_step.INVALID_OUTPUT, f"ads.meta: {len(ads)} usable ad variants, needs {MIN_ADS}"
