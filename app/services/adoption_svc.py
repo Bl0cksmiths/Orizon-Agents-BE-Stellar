@@ -722,6 +722,25 @@ def _mirrored_owners(mirrored: dict[str, Agent]) -> tuple[dict[str, str], set[st
     return owners, ownerless
 
 
+def _split_unmirrored(
+    agent_ids: list[str], owners: dict[str, str], rule: OwnerRule
+) -> tuple[dict[str, str], list[str]]:
+    """Ids the mirror lacks, split: those whose owner was read and is ours,
+    with that owner (listed under `excluded`, never counted), and the rest."""
+    ours: dict[str, str] = {}
+    unknown: list[str] = []
+    for agent_id in agent_ids:
+        owner = owners.get(agent_id)
+        if owner is not None and rule.classify(owner) is not None:
+            ours[agent_id] = owner
+        else:
+            # An on-chain agent the mirror does not hold and that is not ours:
+            # we cannot say whether it is operated, so it is not counted — and
+            # not silently dropped either.
+            unknown.append(agent_id)
+    return ours, unknown
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -745,15 +764,9 @@ async def build_report() -> AdoptionReport:
     if not gap.listed:
         degraded = True
     gap_owners, owners_left = await _owners_of(gap.ids, deadline)
-    for agent_id in gap.ids:
-        owner = gap_owners.get(agent_id)
-        if owner is not None and classify(owner) is not None:
-            owners[agent_id] = owner  # ours: listed under `excluded`, never counted
-        else:
-            # An on-chain agent the mirror does not hold and that is not ours:
-            # we cannot say whether it is operated, so it is not counted — and
-            # not silently dropped either.
-            unreadable.add(agent_id)
+    ours, unknown = _split_unmirrored(gap.ids, gap_owners, rule)
+    owners.update(ours)
+    unreadable.update(unknown)
 
     excluded: dict[str, ExcludedOwner] = {}
     external: dict[str, list[Agent]] = {}
