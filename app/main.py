@@ -631,8 +631,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Log the full traceback server-side; never leak exception text to clients."""
     logger.exception("unhandled error on %s %s", request.method, request.url.path)
-    # This handler runs on the OUTERMOST layer (ServerErrorMiddleware), so the
-    # security-header, rate-limit, and CORS middleware never see the response.
+    # This handler runs on the OUTERMOST layer (ServerErrorMiddleware, which
+    # Starlette always puts outside the registered middleware — CORS included,
+    # outermost of those though it is), so the security-header, rate-limit,
+    # and CORS middleware never see the response.
     # Stamp the hardening headers — and the CORS header for known origins —
     # by hand, or browsers report an opaque CORS failure instead of letting
     # the frontend read this JSON envelope.
