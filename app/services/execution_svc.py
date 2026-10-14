@@ -1135,6 +1135,21 @@ async def _finish_stream(task_id: str) -> None:
     await bus.close(task_id)
 
 
+def _charge_receipt_id(receipt_rv: object) -> bytes | None:
+    """The 16-byte receipt id a v1 `charge` returned, or None when it did not decode to one."""
+    receipt_id: bytes | None = None
+    if isinstance(receipt_rv, str):
+        try:
+            receipt_id = bytes.fromhex(receipt_rv)
+        except ValueError:
+            receipt_id = None
+    elif isinstance(receipt_rv, (bytes, bytearray)):
+        receipt_id = bytes(receipt_rv)
+    if receipt_id is not None and len(receipt_id) == 16:
+        return receipt_id
+    return None
+
+
 async def _settle_onchain(
     task_id: str,
     start: float,
@@ -1331,16 +1346,9 @@ async def _settle_onchain(
         # user-signed path), and bytes have already been converted with
         # .hex() — so the receipt id arrives as a 32-char hex string.
         receipt_rv = charge.get("result")
-        receipt_id: bytes | None = None
-        if isinstance(receipt_rv, str):
-            try:
-                receipt_id = bytes.fromhex(receipt_rv)
-            except ValueError:
-                receipt_id = None
-        elif isinstance(receipt_rv, (bytes, bytearray)):
-            receipt_id = bytes(receipt_rv)
+        receipt_id = _charge_receipt_id(receipt_rv)
         receipts = []
-        if receipt_id is not None and len(receipt_id) == 16:
+        if receipt_id is not None:
             receipts.append(sc.bytes16(receipt_id))
         else:
             # Sealing without the receipt severs the attestation's only
