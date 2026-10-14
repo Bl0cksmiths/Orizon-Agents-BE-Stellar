@@ -89,13 +89,15 @@ def block_problems(block: Any) -> list[str]:
                 problems.append(f"{where}: {key} is empty")
         if entry.get("status") == NOT_MET and (not isinstance(entry.get("reason"), str) or not entry["reason"].strip()):
             problems.append(f"{where}: a miss needs a reason")
-        links = entry.get("links")
-        if not isinstance(links, list):
-            problems.append(f"{where}: links is not a list")
-            continue
-        for i, link in enumerate(links):
-            problems.extend(f"{where} link {i}: {p}" for p in link_problems(link))
+        problems.extend(_links_problems(where, entry.get("links")))
     return problems
+
+
+def _links_problems(where: str, links: Any) -> list[str]:
+    """An entry's `links`: a list, each link of the frozen shape."""
+    if not isinstance(links, list):
+        return [f"{where}: links is not a list"]
+    return [f"{where} link {i}: {p}" for i, link in enumerate(links) for p in link_problems(link)]
 
 
 def link_problems(link: Any) -> list[str]:
