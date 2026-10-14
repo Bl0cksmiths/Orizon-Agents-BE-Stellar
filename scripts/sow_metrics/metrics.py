@@ -43,7 +43,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from .collect import AgentRecord, DisputeRating, ReceiptRecord, Snapshot, Transfer
+from .collect import AgentRecord, DisputeRating, EscrowScan, ReceiptRecord, Snapshot, Transfer
 from .config import (
     DEMO_MAX_SECONDS,
     DEMO_MIN_SECONDS,
@@ -251,20 +251,20 @@ class Rules:
             return f"self-payment (the payer is the platform's {self.snap.platform[payer]})"
         return None
 
+    def _classify(self, escrow: EscrowScan, r: ReceiptRecord) -> Charge:
+        """One receipt as a charge: its payer and owner, why it does not count, and the transaction that made it."""
+        auth = escrow.auths.get(r.auth_id)
+        payer = auth.payer if auth else None
+        owner = self.owner_of.get(r.agent_id)
+        payer_reason = self._payer_exclusion(payer, owner, escrow.settler)
+        reasons = [payer_reason] if payer_reason else []
+        if iso(r.settled_at) < SPRINT_ISO:
+            reasons.append(f"settled before the sprint began on {SPRINT_DAY}")
+        tx = self.snap.charge_txs.get((r.escrow, r.id_hex))
+        return Charge(r, payer, owner, reasons, tx.tx_hash if tx else None, tx.date if tx else None)
+
     def _classify_charges(self) -> list[Charge]:
-        out: list[Charge] = []
-        for escrow in self.snap.escrows:
-            for r in escrow.receipts:
-                auth = escrow.auths.get(r.auth_id)
-                payer = auth.payer if auth else None
-                owner = self.owner_of.get(r.agent_id)
-                payer_reason = self._payer_exclusion(payer, owner, escrow.settler)
-                reasons = [payer_reason] if payer_reason else []
-                if iso(r.settled_at) < SPRINT_ISO:
-                    reasons.append(f"settled before the sprint began on {SPRINT_DAY}")
-                tx = self.snap.charge_txs.get((r.escrow, r.id_hex))
-                out.append(Charge(r, payer, owner, reasons, tx.tx_hash if tx else None, tx.date if tx else None))
-        return out
+        return [self._classify(escrow, r) for escrow in self.snap.escrows for r in escrow.receipts]
 
 
 def _role(role: str) -> str:
