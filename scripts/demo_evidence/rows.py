@@ -154,6 +154,26 @@ def _records(path: Path) -> tuple[list[tuple[str, dict[str, Any]]], int]:
     return records, unreadable
 
 
+def _tx_row(raw: dict[str, Any], detail: dict[str, Any], where: str, tx_hash: str) -> TxRow:
+    """A harness row with a (normalised) hash, as the transaction the video shows."""
+    seq = raw.get("seq")
+    return TxRow(
+        source=where,
+        run_id=str(raw.get("run_id") or ""),
+        seq=seq if isinstance(seq, int) else None,
+        stage=str(raw.get("stage") or ""),
+        event=str(raw.get("event") or ""),
+        utc=str(raw.get("utc") or ""),
+        tx_hash=tx_hash,
+        agent=_str(raw.get("agent")),
+        amount=_str(raw.get("amount")),
+        asset=_str(raw.get("asset")),
+        contract=_str(raw.get("contract")),
+        recorded_status=_str(raw.get("onchain_status")),
+        summary=str(detail.get("summary") or ""),
+    )
+
+
 def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     """Every transaction row of every input, in input order then file order. Raises on another network.
 
@@ -190,24 +210,7 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
                 duplicates += 1
                 continue
             seen.add(tx_hash)
-            seq = raw.get("seq")
-            rows.append(
-                TxRow(
-                    source=where,
-                    run_id=str(raw.get("run_id") or ""),
-                    seq=seq if isinstance(seq, int) else None,
-                    stage=str(raw.get("stage") or ""),
-                    event=str(raw.get("event") or ""),
-                    utc=str(raw.get("utc") or ""),
-                    tx_hash=tx_hash,
-                    agent=_str(raw.get("agent")),
-                    amount=_str(raw.get("amount")),
-                    asset=_str(raw.get("asset")),
-                    contract=_str(raw.get("contract")),
-                    recorded_status=_str(raw.get("onchain_status")),
-                    summary=str(detail.get("summary") or ""),
-                )
-            )
+            rows.append(_tx_row(raw, detail, where, tx_hash))
     if not rows and require_rows:
         raise InputError(f"no transaction rows in {', '.join(str(f) for f in files)}")
     return Loaded(
