@@ -39,7 +39,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 
 from fastapi import Header, HTTPException, Security
 from fastapi.security import APIKeyHeader
@@ -332,7 +332,13 @@ def client_key(scope: dict, hops: int | None = None) -> str:
 # serves every *.onrender.com service through Cloudflare, so the hop Render's
 # proxy appends to X-Forwarded-For is a Cloudflare edge. They change rarely;
 # a missing range degrades to "no identity" (see below), never to a spoofable one.
-_CLOUDFLARE_NETWORKS = tuple(
+#
+# Hard-coded on purpose: these are public, vendor-published network ranges used
+# only to RECOGNISE an edge hop, never addresses we connect to, so there is no
+# host to make configurable. Last checked 2026-10-15 against
+# https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6
+# (15 IPv4 + 7 IPv6 CIDRs, identical to the list below).
+_CLOUDFLARE_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = tuple(
     ipaddress.ip_network(net)
     for net in (
         "173.245.48.0/20",
