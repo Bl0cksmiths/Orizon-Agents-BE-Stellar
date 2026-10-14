@@ -200,6 +200,30 @@ def test_at_most_four_languages(claude: FakeClaude) -> None:
     assert [t["language"] for t in out["translations"]] == codes[: translate.MAX_LANGUAGES]
 
 
+def test_fit_translations_skips_blank_source_and_repeated_codes_and_bounds_a_segment() -> None:
+    segments = [translate.Segment(id="S1", role="copywrite.v3", label="Hero headline", text="Fix it")]
+    long = "a" * (translate.MAX_SEGMENT_CHARS * 2 + 10)
+    draft = translate.TranslateDraft.model_validate(
+        {
+            "source_language": " EN ",
+            "source_text": "",
+            "languages": [
+                {"code": "  ", "name": "Blank", "segments": [{"id": "S1", "text": "x"}]},
+                {"code": "en", "name": "English", "segments": [{"id": "S1", "text": "x"}]},
+                {"code": "es  MX", "name": "", "segments": [{"id": " S1 ", "text": f"  {long}  "}]},
+                {"code": "ES mx", "name": "Spanish", "segments": [{"id": "S1", "text": "y"}]},
+            ],
+        }
+    )
+    languages, issues = translate.fit_translations(draft, segments)
+    assert issues == []
+    assert [(t["language"], t["name"]) for t in languages] == [("es MX", "es MX")]  # the code stands in for a name
+    assert languages[0]["text"] == "a" * (translate.MAX_SEGMENT_CHARS * 2) + "…"
+    assert languages[0]["segments"] == [
+        {"id": "S1", "role": "copywrite.v3", "label": "Hero headline", "source": "Fix it", "text": languages[0]["text"]}
+    ]
+
+
 @pytest.mark.parametrize(
     ("script", "kw", "rule"),
     [
