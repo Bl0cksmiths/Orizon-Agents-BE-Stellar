@@ -256,6 +256,35 @@ def _final_row(r: dict[str, Any], ceil: dict[str, int]) -> str:
     )
 
 
+def _final_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
+    """The final check: each run against the ceilings as they stand now, then the summaries."""
+    ceil = a["final_ceilings"]
+    L = [
+        "### Final check",
+        "",
+        "The same cpx-001 complex step after the follow-up fixes: ceilings raised to the measured "
+        f"{ceil['code.gen']:,} (code.gen) and {ceil['code.critic']:,} (code.critic) tokens, readably formatted "
+        "source asked for, a depth floor met by readable lines or source size, and deferred features named in "
+        "the summary. Validator results are the current validator run on the saved HTML.",
+        "",
+        "| run | served model | effort | first token | wall time | output tokens (incl. thinking) / ceiling | cost | lines | bytes | chars per line | validator (new floor) | hit ceiling | hit 100 s budget |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in a["final"]:
+        if "skipped" in r:
+            L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
+            continue
+        L.append(_final_row(r, ceil))
+    L += ["", "Summaries as returned, and the deferred list:", ""]
+    for r in a["final"]:
+        if "skipped" in r:
+            continue
+        quote = f"“{r['deferred_quote']}”" if r["deferred_quote"] else "no “Deferred: …” list"
+        L.append(f"- **{r['label']}** (`r4-final/{r['html']}`): {_cell(r['summary'])} — {quote}")
+    L += ["", _block("final_notes", keep), ""]
+    return L
+
+
 def _spend_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
     """The spend table: measured, estimated, and each separately capped re-measure."""
     sp = a["spend"]
@@ -399,29 +428,6 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
                 L.append(f"- **{r['label']}** (`r3-code-length/{r['html']}`): {_cell(r['summary'])}")
         L += ["", _block("code_length_notes", keep), ""]
     if a.get("final"):
-        ceil = a["final_ceilings"]
-        L += [
-            "### Final check",
-            "",
-            "The same cpx-001 complex step after the follow-up fixes: ceilings raised to the measured "
-            f"{ceil['code.gen']:,} (code.gen) and {ceil['code.critic']:,} (code.critic) tokens, readably formatted "
-            "source asked for, a depth floor met by readable lines or source size, and deferred features named in "
-            "the summary. Validator results are the current validator run on the saved HTML.",
-            "",
-            "| run | served model | effort | first token | wall time | output tokens (incl. thinking) / ceiling | cost | lines | bytes | chars per line | validator (new floor) | hit ceiling | hit 100 s budget |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-        ]
-        for r in a["final"]:
-            if "skipped" in r:
-                L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
-                continue
-            L.append(_final_row(r, ceil))
-        L += ["", "Summaries as returned, and the deferred list:", ""]
-        for r in a["final"]:
-            if "skipped" in r:
-                continue
-            quote = f"“{r['deferred_quote']}”" if r["deferred_quote"] else "no “Deferred: …” list"
-            L.append(f"- **{r['label']}** (`r4-final/{r['html']}`): {_cell(r['summary'])} — {quote}")
-        L += ["", _block("final_notes", keep), ""]
+        L += _final_section(a, keep)
     L += _spend_section(a, keep)
     return "\n".join(L) + "\n"
