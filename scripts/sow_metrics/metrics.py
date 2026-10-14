@@ -551,28 +551,32 @@ def m03(snap: Snapshot, rules: Rules) -> Metric:
         for (escrow, job), cs in sorted(workflows.items())
     ]
     n = len(counted)
-    external_agents = [a for a in snap.agents if rules.external(a.owner)]
-    reason = None
-    if n < 3:
-        if n == 0 and not external_agents:
-            reason = (
-                "No agent owned by an outside operator exists yet, so no workflow could be routed to one and settled. "
-                f"None of the {plural(len(rules.charges), 'charge')} on record paid one."
-            )
-        elif n == 0:
-            reason = (
-                f"{plural(len(external_agents), 'agent')} owned by outside operators "
-                f"{'is' if len(external_agents) == 1 else 'are'} registered, but no workflow paid to one has "
-                f"settled since the sprint began on {SPRINT_DAY}. " + bound_sentence(snap, external_agents)
-            )
-        else:
-            reason = (
-                f"Only {plural(n, 'workflow')} paid to agents owned by outside operators "
-                f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3. "
-                + bound_sentence(snap, external_agents)
-            )
+    reason = _m03_reason(snap, rules, n)
     return Metric(
         row, str(n), MET if n >= 3 else NOT_MET, method, links + _by_date(item_links), reason, counted, excluded
+    )
+
+
+def _m03_reason(snap: Snapshot, rules: Rules, n: int) -> str | None:
+    """Why fewer than 3 workflows to outside operators' agents settled; None when the target is met."""
+    if n >= 3:
+        return None
+    external_agents = [a for a in snap.agents if rules.external(a.owner)]
+    if n == 0 and not external_agents:
+        return (
+            "No agent owned by an outside operator exists yet, so no workflow could be routed to one and settled. "
+            f"None of the {plural(len(rules.charges), 'charge')} on record paid one."
+        )
+    if n == 0:
+        return (
+            f"{plural(len(external_agents), 'agent')} owned by outside operators "
+            f"{'is' if len(external_agents) == 1 else 'are'} registered, but no workflow paid to one has "
+            f"settled since the sprint began on {SPRINT_DAY}. " + bound_sentence(snap, external_agents)
+        )
+    return (
+        f"Only {plural(n, 'workflow')} paid to agents owned by outside operators "
+        f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3. "
+        + bound_sentence(snap, external_agents)
     )
 
 
