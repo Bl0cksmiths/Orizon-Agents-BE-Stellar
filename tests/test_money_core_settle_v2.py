@@ -290,3 +290,17 @@ def test_a_settle_that_did_not_confirm_is_logged_with_its_job(
     assert _errors(caplog)[0] == line.format(task=TASK, tx=SETTLE_TX, auth=AUTH_ID_HEX, payer=PAYER, job=job)
     assert len(chain.named("settle")) == calls
     assert state.tasks[TASK].settlement == settlement
+
+
+def test_an_unreadable_owner_is_logged_with_its_traceback_and_left_unpaid(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install(monkeypatch, _Chain(owners={"ext_op": RuntimeError("rpc down")}))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        owners = asyncio.run(execution_svc._settle_owners({"ext_op"}))
+
+    assert (owners.payees, owners.unpaid) == ({}, {"ext_op": execution_svc.UNPAID_OWNER_UNREADABLE})
+    [record] = caplog.records
+    assert record.getMessage() == "owner of ext_op unreadable before settle — its steps are not paid: rpc down"
+    assert record.exc_info is not None and record.exc_info[1] is not None

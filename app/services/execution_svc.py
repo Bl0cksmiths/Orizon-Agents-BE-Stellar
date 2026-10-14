@@ -2227,7 +2227,7 @@ async def _settle_owners(agent_ids: set[str]) -> _SettleOwners:
         try:
             owner = await asyncio.to_thread(_onchain_owner_sync, agent_id)
         except Exception as e:
-            logger.error("owner of %s unreadable before settle — its steps are not paid: %s", agent_id, e)
+            logger.exception("owner of %s unreadable before settle — its steps are not paid: %s", agent_id, e)
             return agent_id, None, UNPAID_OWNER_UNREADABLE
         if not owner:
             return agent_id, None, UNPAID_NO_OWNER
