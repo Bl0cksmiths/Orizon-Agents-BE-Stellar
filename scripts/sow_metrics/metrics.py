@@ -678,6 +678,20 @@ def _claim_refund(snap: Snapshot, charge: Charge, used: set[tuple[str, str, int]
     return None
 
 
+def _dispute_refund(
+    snap: Snapshot, charge: Charge | None, used: set[tuple[str, str, int]]
+) -> tuple[Transfer | None, str | None]:
+    """(the refund that answers a dispute of this charge, None) or (None, why none counts)."""
+    if charge is None:
+        return None, "its job id traces back to no charge on record"
+    if not charge.counts:
+        return None, "the charge it disputes does not count (" + "; ".join(charge.reasons) + ")"
+    refund = _claim_refund(snap, charge, used)
+    if refund is None:
+        return None, "no refund from the platform to the charge's payer followed it"
+    return refund, None
+
+
 def pair_refunds(snap: Snapshot, rules: Rules) -> tuple[list[RefundPair], list[dict[str, Any]], list[Transfer]]:
     """(refunded disputes, disputes that did not count with why, transfers left over)."""
     used: set[tuple[str, str, int]] = set()
@@ -685,16 +699,7 @@ def pair_refunds(snap: Snapshot, rules: Rules) -> tuple[list[RefundPair], list[d
     rejected: list[dict[str, Any]] = []
     for rating in snap.dispute_ratings:
         charge = trace_dispute(rating, rules.charges)
-        why: str | None = None
-        refund: Transfer | None = None
-        if charge is None:
-            why = "its job id traces back to no charge on record"
-        elif not charge.counts:
-            why = "the charge it disputes does not count (" + "; ".join(charge.reasons) + ")"
-        else:
-            refund = _claim_refund(snap, charge, used)
-            if refund is None:
-                why = "no refund from the platform to the charge's payer followed it"
+        refund, why = _dispute_refund(snap, charge, used)
         if refund is not None and charge is not None:
             pairs.append(RefundPair(rating, charge, refund))
         else:
