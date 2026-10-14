@@ -272,7 +272,6 @@ async def unbind_challenge(
 
 @router.post(
     "/{agent_id}/bind/challenge",
-    response_model=BindChallengeResponse,
     summary="Mint a binding challenge to sign",
 )
 async def bind_challenge(
