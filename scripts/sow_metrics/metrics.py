@@ -1063,7 +1063,7 @@ def demo_state(html: str) -> tuple[str | None, int | None]:
     return (state.group(1) if state else None), seconds
 
 
-def m10(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
+def m10(snap: Snapshot, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[9]
     method = (
         f"Opened the {DEMO_PAGE} page on the live dApp with no login and read the published marker the page renders "
@@ -1179,6 +1179,6 @@ def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None)
         m07(snap),
         m08(snap, refunds),
         m09(snap, pending.get("m09")),
-        m10(snap, rules, pending.get("m10")),
+        m10(snap, pending.get("m10")),
         m11(snap, rules),
     ]
