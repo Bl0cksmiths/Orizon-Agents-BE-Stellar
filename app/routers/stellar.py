@@ -902,7 +902,7 @@ async def _refuse_if_not_the_plans_total(req: AuthorizeReq) -> None:
         )
 
 
-@router.post("/build/authorize", response_model=AuthorizeXdrResponse)
+@router.post("/build/authorize")
 async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
     """Build unsigned XDR for PaymentEscrow.authorize (x402 pre-auth).
 
