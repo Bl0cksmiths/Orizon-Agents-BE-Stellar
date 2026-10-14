@@ -76,19 +76,19 @@ async def check_rate_limiter() -> None:
 
 
 def check_validation() -> None:
-    base = dict(
-        amount="1000",
-        method="instapay_upay_cashin",
-        identifier="d1",
-        sender_first_name="A",
-        sender_last_name="B",
-        sender_country_origin="Philippines",
-        source_of_funds="Compensation",
-        beneficiary_first_name="A",
-        beneficiary_last_name="B",
-        purpose="Purchase of Goods",
-        relationship_of_sender_to_beneficiary="Myself",
-    )
+    base = {
+        "amount": "1000",
+        "method": "instapay_upay_cashin",
+        "identifier": "d1",
+        "sender_first_name": "A",
+        "sender_last_name": "B",
+        "sender_country_origin": "Philippines",
+        "source_of_funds": "Compensation",
+        "beneficiary_first_name": "A",
+        "beneficiary_last_name": "B",
+        "purpose": "Purchase of Goods",
+        "relationship_of_sender_to_beneficiary": "Myself",
+    }
     validation.validate_fiat_deposit(FiatDepositRequest(**base))  # valid → no raise
 
     for bad in [
