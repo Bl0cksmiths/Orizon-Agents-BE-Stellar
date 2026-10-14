@@ -1995,6 +1995,42 @@ async def _settle_refused(
     return (None, None, None)
 
 
+async def _hand_off_v2_seal(
+    task_id: str,
+    start: float,
+    pending: _PendingSeal,
+    on_seal_pending: Callable[[_PendingSeal], None] | None,
+    *,
+    total: int,
+    settle_tx: str | None,
+    auth_id_hex: str,
+    payer: str,
+) -> None:
+    """Say that a v2 seal (its one submission so far) did not confirm, then
+    hand it to the run to reconcile."""
+    submission = pending.submissions[0]
+    logger.error(
+        "task %s: AttestationRegistry.seal did not confirm — %s, hash=%s; reconciling "
+        "(job %s settled %d stroops via tx %s, auth %s, payer %s)",
+        task_id,
+        submission.outcome,
+        submission.tx_hash,
+        pending.job_id.hex(),
+        total,
+        settle_tx,
+        auth_id_hex,
+        payer,
+    )
+    await _emit(
+        task_id,
+        start,
+        "error",
+        f"seal {submission.outcome} hash={submission.tx_hash} — checking the ledger before trying again",
+    )
+    if on_seal_pending is not None:
+        on_seal_pending(pending)
+
+
 async def _report_v2_settle_failure(
     task_id: str, start: float, e: Exception, *, settled: bool, release: bool, auth_id_hex: str
 ) -> None:
@@ -2319,35 +2355,23 @@ async def _settle_v2(
             proof_tx = seal_tx
             await _sealed(task_id, start, seal_tx, agents=len(sealed_agents), total_usdc=total_usdc, kind=kind)
         else:
-            logger.error(
-                "task %s: AttestationRegistry.seal did not confirm — %s, hash=%s; reconciling "
-                "(job %s settled %d stroops via tx %s, auth %s, payer %s)",
-                task_id,
-                submission.outcome,
-                submission.tx_hash,
-                job_hex,
-                total,
-                settle_tx,
-                auth_id_hex,
-                payer,
-            )
-            await _emit(
+            await _hand_off_v2_seal(
                 task_id,
                 start,
-                "error",
-                f"seal {submission.outcome} hash={submission.tx_hash} — checking the ledger before trying again",
+                _PendingSeal(
+                    job_id=job_id,
+                    args=seal_args,
+                    agents=len(sealed_agents),
+                    total_usdc=total_usdc,
+                    kind=kind,
+                    submissions=[submission],
+                ),
+                on_seal_pending,
+                total=total,
+                settle_tx=settle_tx,
+                auth_id_hex=auth_id_hex,
+                payer=payer,
             )
-            if on_seal_pending is not None:
-                on_seal_pending(
-                    _PendingSeal(
-                        job_id=job_id,
-                        args=seal_args,
-                        agents=len(sealed_agents),
-                        total_usdc=total_usdc,
-                        kind=kind,
-                        submissions=[submission],
-                    )
-                )
     except asyncio.CancelledError:
         logger.error(
             "task %s: on-chain settle cancelled mid-flight (job %s, auth %s, payer %s, %d stroops, "
