@@ -3868,7 +3868,7 @@ async def _submit_ratings(
             # Both ids: the sealed one ties the line to the run, and the one
             # the rating was submitted under is what an operator searches the
             # ledger with. They are the same id only for step 0.
-            logger.error(
+            logger.exception(
                 "task %s: reputation submit failed for %s (%s): %s "
                 "(job %s, step %d under %s, rating %d, weight %d, payer %s)",
                 task_id,
@@ -3881,7 +3881,6 @@ async def _submit_ratings(
                 rating,
                 weight,
                 payer,
-                exc_info=True,
             )
             # The reason is a closed vocabulary — the ledger's own error name,
             # or "rpc error" — never `e`'s text: the trace is world-readable
