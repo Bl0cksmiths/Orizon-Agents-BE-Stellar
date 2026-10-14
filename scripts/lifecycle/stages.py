@@ -289,15 +289,7 @@ class Runner:
             self.load_adjudicator_key()
 
         start = self.resume_point()
-        version, how = chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
-        run_escrow = (self.state.authorize or {}).get("escrow")
-        if run_escrow and run_escrow != self.contracts["payment_escrow"]:
-            # A resume across the escrow switch: this run's money went through
-            # the escrow it authorized against, so that is what gets verified.
-            self.say(
-                f"NOTE: this run authorized against {run_escrow}; the API now names {self.contracts['payment_escrow']}"
-            )
-            version, how = chain.escrow_version(run_escrow, self.need_buyer().public_key)
+        version, how = self.read_escrow_version(chain)
         self.state.escrow_version = version
         self.state.network = str(self.network.get("network") or "testnet")
         self.state.agent = self.cfg.agent
@@ -348,6 +340,19 @@ class Runner:
             )
         self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
         return start
+
+    def read_escrow_version(self, chain: ChainReader) -> tuple[int, str]:
+        """(version, how it was decided) of the escrow this run's money goes through."""
+        version, how = chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
+        run_escrow = (self.state.authorize or {}).get("escrow")
+        if run_escrow and run_escrow != self.contracts["payment_escrow"]:
+            # A resume across the escrow switch: this run's money went through
+            # the escrow it authorized against, so that is what gets verified.
+            self.say(
+                f"NOTE: this run authorized against {run_escrow}; the API now names {self.contracts['payment_escrow']}"
+            )
+            version, how = chain.escrow_version(run_escrow, self.need_buyer().public_key)
+        return version, how
 
     def load_adjudicator_key(self) -> None:
         """The operator key a run through 'uphold' adjudicates with."""
