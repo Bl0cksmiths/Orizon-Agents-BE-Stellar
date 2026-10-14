@@ -144,3 +144,28 @@ def test_a_secret_in_a_traceback_is_masked_and_the_record_still_emitted(
     assert rendered.startswith("pdax login failed\nTraceback")
     # Folded into the message, so no formatter can render the raw traceback.
     assert emitted.exc_info is None
+
+
+def test_a_malformed_record_is_still_emitted_unchanged(
+    redacting_logger: tuple[logging.Logger, _CollectingHandler],
+) -> None:
+    # `getMessage()` raises on these args. Reporting that is logging's job
+    # (Handler.handleError, at format time); the filter must not drop it.
+    logger, handler = redacting_logger
+    args = ("many",)
+    msg = "plan has %d steps"
+
+    logger.error(msg, *args)
+
+    [emitted] = handler.records
+    assert emitted.msg is msg
+    assert emitted.args == args
+    with pytest.raises(TypeError):
+        emitted.getMessage()
+
+
+def test_the_filter_returns_a_malformed_record_as_given() -> None:
+    record = logging.LogRecord("pdax", logging.ERROR, __file__, 1, "plan has %d steps", ("many",), None)
+
+    assert SecretRedactionLogFilter().filter(record) is record
+    assert record.args == ("many",)
