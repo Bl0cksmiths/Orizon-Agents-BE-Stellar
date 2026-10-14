@@ -710,6 +710,18 @@ def _external_agent(
 
 
 # ── the report ────────────────────────────────────────────────────────────
+def _mirrored_owners(mirrored: dict[str, Agent]) -> tuple[dict[str, str], set[str]]:
+    """The owner of each mirrored agent, and the ids of those with none recorded."""
+    owners: dict[str, str] = {}
+    ownerless: set[str] = set()
+    for agent in mirrored.values():
+        if agent.owner:
+            owners[agent.id] = agent.owner
+        else:
+            ownerless.add(agent.id)
+    return owners, ownerless
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -725,15 +737,9 @@ async def build_report() -> AdoptionReport:
     classify = rule.classify
     team_roles = rule.team_roles
     degraded = bool(rule.unreadable)
-    unreadable: set[str] = set()
 
     mirrored = onchain_mirror()
-    owners: dict[str, str] = {}
-    for agent in mirrored.values():
-        if agent.owner:
-            owners[agent.id] = agent.owner
-        else:
-            unreadable.add(agent.id)
+    owners, unreadable = _mirrored_owners(mirrored)
 
     gap = await _unmirrored(set(mirrored))
     if not gap.listed:
