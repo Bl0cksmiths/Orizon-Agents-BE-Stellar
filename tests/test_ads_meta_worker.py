@@ -133,6 +133,16 @@ def test_an_unfittable_description_is_blanked_and_the_variant_kept(claude: FakeC
     assert out["issues"] == [{"variant": 1, "problem": "description_dropped_no_boundary_fits"}]
 
 
+def test_a_variant_with_blank_copy_is_dropped_as_empty(claude: FakeClaude) -> None:
+    claude.reply(_draft(_ad(primary_text="   "), _ad("  "), _ad("Second"), _ad("Third")))
+    out = run()
+    assert [a["headline"] for a in out["ads"]] == ["Second", "Third"]
+    assert out["issues"] == [
+        {"variant": 1, "problem": "dropped_empty"},
+        {"variant": 2, "problem": "dropped_empty"},
+    ]
+
+
 def test_too_few_fitting_variants_fail_the_step(claude: FakeClaude) -> None:
     unfit = _ad("Ok", primary_text="An unbroken run of words that never reaches a sentence end " * 3)
     claude.reply(_draft(_ad(), unfit))
@@ -149,6 +159,10 @@ def test_too_few_fitting_variants_fail_the_step(claude: FakeClaude) -> None:
         ("Save on [placeholder: price, per class] and more fun", 30, None),  # never inside brackets
         ("A run of words with no boundary anywhere in it at all", 30, None),
         ("Hi. Then a very long run of words with no boundary at all", 30, None),  # "Hi." is a stub
+        # A closed bracket reopens the boundaries after it; a stray closer is plain text.
+        ("Save on [placeholder: price] today. More words follow on", 40, "Save on [placeholder: price] today."),
+        ("Save (a lot) on tools, with friends and neighbours every week", 40, "Save (a lot) on tools"),
+        ("Closing ] stray, then words keep going on and on and on", 30, "Closing ] stray"),
     ],
 )
 def test_fit_at_boundary_never_cuts_mid_sentence(text: str, limit: int, expected: str | None) -> None:
