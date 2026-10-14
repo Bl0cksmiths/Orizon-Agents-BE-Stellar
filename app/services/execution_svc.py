@@ -1426,6 +1426,45 @@ def _charge_receipt_id(receipt_rv: object) -> bytes | None:
     return None
 
 
+async def _charge_receipts(
+    task_id: str,
+    start: float,
+    receipt_rv: object,
+    *,
+    job_hex: str,
+    charge_tx: str | None,
+    auth_id_hex: str,
+    payer: str,
+) -> list[Any]:
+    """The receipts a v1 seal links: the charge's receipt id, or none — said
+    loudly — when it did not decode."""
+    from ..stellar import client as sc
+
+    receipt_id = _charge_receipt_id(receipt_rv)
+    if receipt_id is not None:
+        return [sc.bytes16(receipt_id)]
+    # Sealing without the receipt severs the attestation's only
+    # on-chain link to the payment that funded it — never do that
+    # silently.
+    logger.error(
+        "task %s: charge result did not decode to a 16-byte receipt id — "
+        "sealing without receipt link (result=%r, job %s, charge_tx %s, auth %s, payer %s)",
+        task_id,
+        receipt_rv,
+        job_hex,
+        charge_tx,
+        auth_id_hex,
+        payer,
+    )
+    await _emit(
+        task_id,
+        start,
+        "error",
+        "charge receipt id missing — sealing attestation without receipt link",
+    )
+    return []
+
+
 async def _settle_onchain(
     task_id: str,
     start: float,
@@ -1571,31 +1610,15 @@ async def _settle_onchain(
         # under "result" ("return_value" is _finalize_submit's key, on the
         # user-signed path), and bytes have already been converted with
         # .hex() — so the receipt id arrives as a 32-char hex string.
-        receipt_rv = charge.get("result")
-        receipt_id = _charge_receipt_id(receipt_rv)
-        receipts = []
-        if receipt_id is not None:
-            receipts.append(sc.bytes16(receipt_id))
-        else:
-            # Sealing without the receipt severs the attestation's only
-            # on-chain link to the payment that funded it — never do that
-            # silently.
-            logger.error(
-                "task %s: charge result did not decode to a 16-byte receipt id — "
-                "sealing without receipt link (result=%r, job %s, charge_tx %s, auth %s, payer %s)",
-                task_id,
-                receipt_rv,
-                job_id.hex(),
-                charge_tx,
-                auth_id_hex,
-                payer,
-            )
-            await _emit(
-                task_id,
-                start,
-                "error",
-                "charge receipt id missing — sealing attestation without receipt link",
-            )
+        receipts = await _charge_receipts(
+            task_id,
+            start,
+            charge.get("result"),
+            job_hex=job_id.hex(),
+            charge_tx=charge_tx,
+            auth_id_hex=auth_id_hex,
+            payer=payer,
+        )
         receipts_vec = _sv.to_vec(receipts)
 
         seal = await sc.invoke_with_server_key_async(
