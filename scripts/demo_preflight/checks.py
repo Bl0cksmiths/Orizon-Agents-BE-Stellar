@@ -737,6 +737,15 @@ def routable(agent: dict[str, Any]) -> bool:
     return agent.get("source") == "onchain" and agent.get("bound") is True
 
 
+def _not_a_verdict(rep: dict[str, Any]) -> str | None:
+    """`degraded` or `stale` when this reputation read is no verdict on its agent, else None."""
+    if rep.get("degraded") is True:
+        return "degraded"
+    if rep.get("stale") is True:
+        return "stale"
+    return None
+
+
 def check_routable_count(facts: Facts) -> Check:
     check = Check(
         "exclusion.routable_count",
@@ -759,8 +768,8 @@ def check_routable_count(facts: Facts) -> Check:
         # A degraded read is the prior served because the ledger could not be
         # read, and a stale one may predate a rating: neither is a verdict, so
         # neither is counted as clearing the floor.
-        if rep.get("degraded") is True or rep.get("stale") is True:
-            why = "degraded" if rep.get("degraded") is True else "stale"
+        why = _not_a_verdict(rep)
+        if why is not None:
             unjudged.append(f"{agent_id} ({why})")
             continue
         if rep["lower_bound_bps"] >= floor:
