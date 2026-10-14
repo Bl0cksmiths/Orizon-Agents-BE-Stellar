@@ -128,6 +128,52 @@ def _matching_charge(named: list[ChainEvent], want_amount: int, want_job: str) -
     return None
 
 
+def _event_proof(
+    tx: TxRecord, events: list[ChainEvent], escrow: str, agent_id: str, want_amount: int, want_job: str, subject: str
+) -> tuple[Check, str | None, str]:
+    """The proof inside the RPC's event window: an escrow `charged` event
+    naming the agent, with the claimed amount and job in its data."""
+    charged = [e for e in events if e.contract_id == escrow and e.topics and e.topics[0] == "charged"]
+    named = [e for e in charged if len(e.topics) > 1 and e.topics[1] == agent_id]
+    if not named:
+        others = sorted({str(e.topics[1]) for e in charged if len(e.topics) > 1})
+        return (
+            Check(
+                subject,
+                "charged_names_agent",
+                False,
+                f"tx {tx.tx_hash} emitted {len(charged)} charged event(s) from the escrow, naming {others}; "
+                f"none names agent {agent_id}",
+            ),
+            None,
+            "",
+        )
+    data = _matching_charge(named, want_amount, want_job)
+    if data is not None:
+        return (
+            Check(
+                subject,
+                "charged_names_agent",
+                True,
+                f"charged({agent_id}) for {want_amount} stroops, job {want_job} (RPC contract events)",
+            ),
+            str(data[1]),
+            "charged event",
+        )
+    seen = [(int(d[2]), str(d[3])) for d in (e.value for e in named) if isinstance(d, list) and len(d) > 3]
+    return (
+        Check(
+            subject,
+            "charged_names_agent",
+            False,
+            f"charged event(s) for {agent_id} in tx {tx.tx_hash} carry (stroops, job) {seen}; "
+            f"the API claims ({want_amount}, {want_job})",
+        ),
+        None,
+        "",
+    )
+
+
 def _settle_proof(
     tx: TxRecord, escrow: str, agent_id: str, want_amount: int, want_job: str, subject: str
 ) -> tuple[Check, str | None, str]:
@@ -177,45 +223,7 @@ def _charged_proof(
     want_amount = usdc_to_stroops(claim.amount_usdc)
     want_job = claim.job_id_hex.lower()
     if tx.events is not None:
-        charged = [e for e in tx.events if e.contract_id == escrow and e.topics and e.topics[0] == "charged"]
-        named = [e for e in charged if len(e.topics) > 1 and e.topics[1] == agent_id]
-        if not named:
-            others = sorted({str(e.topics[1]) for e in charged if len(e.topics) > 1})
-            return (
-                Check(
-                    subject,
-                    "charged_names_agent",
-                    False,
-                    f"tx {tx.tx_hash} emitted {len(charged)} charged event(s) from the escrow, naming {others}; "
-                    f"none names agent {agent_id}",
-                ),
-                None,
-                "",
-            )
-        data = _matching_charge(named, want_amount, want_job)
-        if data is not None:
-            return (
-                Check(
-                    subject,
-                    "charged_names_agent",
-                    True,
-                    f"charged({agent_id}) for {want_amount} stroops, job {want_job} (RPC contract events)",
-                ),
-                str(data[1]),
-                "charged event",
-            )
-        seen = [(int(d[2]), str(d[3])) for d in (e.value for e in named) if isinstance(d, list) and len(d) > 3]
-        return (
-            Check(
-                subject,
-                "charged_names_agent",
-                False,
-                f"charged event(s) for {agent_id} in tx {tx.tx_hash} carry (stroops, job) {seen}; "
-                f"the API claims ({want_amount}, {want_job})",
-            ),
-            None,
-            "",
-        )
+        return _event_proof(tx, tx.events, escrow, agent_id, want_amount, want_job, subject)
 
     # Horizon answered: no events. The settle invocation's own arguments.
     return _settle_proof(tx, escrow, agent_id, want_amount, want_job, subject)
