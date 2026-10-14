@@ -176,10 +176,7 @@ class FakeWorld:
             return self.api(request.method, path)
         if url.startswith(BACKEND):
             self.calls.append(f"backend {request.method} {path}")
-            if path == "/readiness" and self.readiness is not None:
-                status = 200 if self.readiness.get("status") == "ready" else 503
-                return _json(status, self.readiness)
-            return _json(404, {"detail": "Not Found"})
+            return self.backend(path)
         if url.startswith(FRONTEND):
             self.calls.append(f"frontend {request.method} {path}")
             status = self.pages.get(path, 404)
@@ -199,6 +196,13 @@ class FakeWorld:
             self.calls.append(f"horizon {request.method} {path}")
             return self.horizon(path)
         raise AssertionError(f"unexpected request {request.method} {url}")
+
+    def backend(self, path: str) -> httpx.Response:
+        """The backend host: only the root-level /readiness, 503 with its report unless ready."""
+        if path == "/readiness" and self.readiness is not None:
+            status = 200 if self.readiness.get("status") == "ready" else 503
+            return _json(status, self.readiness)
+        return _json(404, {"detail": "Not Found"})
 
     def api(self, method: str, path: str) -> httpx.Response:
         not_found = _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
