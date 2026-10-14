@@ -138,7 +138,7 @@ def _errors_section(a: dict[str, Any], keep: dict[str, str], diag: dict[str, str
     add("## 10. Error analysis — every misclassified in-repo case")
     add("")
     add("| case | stage (reps wrong) | expected → got | reasons | key scores | intent | diagnosis |")
-    add("|---|---|---|---|---|---|---|")
+    add(_table_rule(7))
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for m in a["misclassified"]:
         grouped.setdefault((m["id"], m["stage"]), []).append(m)
@@ -207,7 +207,7 @@ def _sweep_section(a: dict[str, Any]) -> list[str]:
     add(
         "| rule | tier accuracy | under-tier | over-tier | Haiku / Sonnet / Opus | held-out tier accuracy | planning $/request |"
     )
-    add("|---|---|---|---|---|---|---|")
+    add(_table_rule(7))
     held = {r["rule"]: r for r in a["tier_rules_s1_test"]}
     for r in a["tier_rules_s1"]:
         m = r["routed"]
@@ -266,7 +266,7 @@ def _cost_section(a: dict[str, Any]) -> list[str]:
     add("By model in stage 4:")
     add("")
     add("| model | calls | input | output | cache read | cache write | list price |")
-    add("|---|---|---|---|---|---|---|")
+    add(_table_rule(7))
     for m, v in costs["s4-full"]["by_model"].items():
         add(
             f"| {m} | {int(v['calls'])} | {int(v['input_tokens'])} | {int(v['output_tokens'])} | {int(v['cache_read_input_tokens'])} | {int(v['cache_creation_input_tokens'])} | {usd(v['usd'])} |"
