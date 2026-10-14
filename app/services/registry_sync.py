@@ -427,6 +427,21 @@ def _refuse_price(agent_id: str, reason: UnbelievablePrice) -> None:
     )
 
 
+def _skip_seeded(agent_id: str) -> None:
+    """Leave an on-chain `agt_` id unindexed, warning about it once per process.
+
+    Seeded namespace: add_agent is an upsert, so indexing this id would
+    clobber a worker-backed catalog agent.
+    """
+    if agent_id not in _skipped_agt_ids:
+        _skipped_agt_ids.add(agent_id)
+        logger.warning(
+            "registry sync: skipping on-chain id %r — the agt_ namespace is the "
+            "seeded catalog, and upserting it would clobber a worker-backed agent",
+            agent_id,
+        )
+
+
 async def sync_once() -> int:
     """Run one full sync pass; returns the number of agents upserted.
 
@@ -478,15 +493,7 @@ async def _pass() -> int:
         if agent_id in built_in:
             continue  # checked above; never upserted over the catalog agent
         if agent_id.startswith("agt_"):
-            # Seeded namespace: add_agent is an upsert, so indexing this
-            # id would clobber a worker-backed catalog agent.
-            if agent_id not in _skipped_agt_ids:
-                _skipped_agt_ids.add(agent_id)
-                logger.warning(
-                    "registry sync: skipping on-chain id %r — the agt_ namespace is the "
-                    "seeded catalog, and upserting it would clobber a worker-backed agent",
-                    agent_id,
-                )
+            _skip_seeded(agent_id)
             continue
         try:
             known = batched.get(agent_id)
