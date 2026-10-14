@@ -345,6 +345,12 @@ def _registered_on(reg: Registration | None, agent: AgentRecord) -> str:
     return day(agent.registered_at) if agent.registered_at else ""
 
 
+def _registration_label(agent: AgentRecord, party: Party, date: str) -> str:
+    """Whose registration it is, when, and whether it counts."""
+    verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
+    return f"Registration of {agent.id} by {party.phrase}" + (f" — {date}" if date else "") + f" ({verdict})"
+
+
 def m01(snap: Snapshot, rules: Rules) -> Metric:
     row = SOW_ROWS[0]
     method = (
@@ -357,10 +363,9 @@ def m01(snap: Snapshot, rules: Rules) -> Metric:
     counted, excluded, item_links = [], [], []
     for agent in sorted(snap.agents, key=lambda a: (a.registered_at or 0, a.id)):
         party = rules.party(agent.owner)
-        verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
         reg = snap.registrations.get(agent.id)
         date = _registered_on(reg, agent)
-        label = f"Registration of {agent.id} by {party.phrase}" + (f" — {date}" if date else "") + f" ({verdict})"
+        label = _registration_label(agent, party, date)
         if reg:
             item_links.append(tx_link(label, reg.tx_hash, reg.date, external=party.exclusion is None))
         item = {"agent_id": agent.id, "owner": agent.owner, "active": agent.active, "registered": date, "label": label}
