@@ -160,3 +160,23 @@ def test_an_unhandled_500_carries_cors_and_a_request_id():
     assert r.json()["error"]["request_id"] == "req-sonar-500"
     assert foreign.status_code == 500
     assert "access-control-allow-origin" not in foreign.headers
+
+
+# ── the order that makes the above hold ───────────────────────────────────
+
+
+def test_the_middleware_order_is_pinned():
+    """Outermost first. CORS outermost is what puts its header on everything
+    the layers inside it make; app/main.py says why each of the rest sits
+    where it does. Starlette's ServerErrorMiddleware still wraps all of these,
+    which is why the 500 handler stamps CORS by hand."""
+    assert [m.cls.__name__ for m in app.user_middleware] == [
+        "CORSMiddleware",
+        "RequestContextMiddleware",
+        "GZipMiddleware",
+        "SecurityHeadersMiddleware",
+        "OriginLockMiddleware",
+        "RateLimitMiddleware",
+        "RouteRateLimitMiddleware",
+        "BodyLimitMiddleware",
+    ]
