@@ -227,6 +227,9 @@ async def network() -> NetworkInfo:
 # a malformed one is a 422 with no RPC round-trip and no stack trace.
 ID16_HEX_PATTERN = r"^[0-9a-fA-F]{32}$"
 
+# A Stellar account (G…) address, StrKey-encoded: 56 base32 chars.
+STELLAR_ADDRESS_PATTERN = r"^G[A-Z2-7]{55}$"
+
 
 # ── reads ───────────────────────────────────────────────────────
 @router.get("/agent/{agent_id}", response_model=AgentRead)
@@ -650,7 +653,7 @@ async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -
 
 # ── writes (user signs via Freighter) ───────────────────────────
 class RegisterAgentReq(BaseModel):
-    owner: str = Field(..., pattern=r"^G[A-Z2-7]{55}$", description="G... address of the agent owner")
+    owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the agent owner")
     # Soroban Symbol charset — anything outside it would only fail on-chain,
     # AFTER the user has already signed. Reject it at the API instead.
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
@@ -742,7 +745,7 @@ async def _agent_exists(agent_id: str) -> bool:
 
 
 class UpdatePriceReq(BaseModel):
-    owner: str = Field(..., pattern=r"^G[A-Z2-7]{55}$", description="G... address of the owner (the signer)")
+    owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the owner (the signer)")
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
@@ -783,7 +786,7 @@ async def build_update_price(req: UpdatePriceReq) -> XdrResponse:
 
 
 class SetActiveReq(BaseModel):
-    owner: str = Field(..., pattern=r"^G[A-Z2-7]{55}$", description="G... address of the owner (the signer)")
+    owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the owner (the signer)")
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
     active: bool = Field(..., description="True relists the agent, False delists it")
 
@@ -826,7 +829,7 @@ MAX_AUTHORIZE_STROOPS = 10_000 * money.STROOPS_PER_UNIT
 
 
 class AuthorizeReq(BaseModel):
-    payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
+    payer: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN)
     # Same Symbol charset rule as registration — a bad id here also only
     # fails on-chain, after the payer signed the authorization envelope.
     # The console labels the authorization with the PLAN id (finding S2).
@@ -950,7 +953,7 @@ async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
 
 
 class ReclaimReq(BaseModel):
-    payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
+    payer: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN)
     # Lowercase only: the id as the escrow's events and our receipts print it.
     auth_id_hex: str = Field(..., pattern=r"^[0-9a-f]{32}$")
 
@@ -1086,7 +1089,7 @@ async def server_charge(req: ChargeReq) -> dict:
 
 class SealReq(BaseModel):
     job_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
-    orchestrator: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")  # G-address of the workflow owner
+    orchestrator: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN)  # G-address of the workflow owner
     intent_hash_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{64}$")
     agents: list[Annotated[str, Field(min_length=1, max_length=32)]] = Field(..., max_length=32)
     receipts_hex: list[Annotated[str, Field(pattern=ID16_HEX_PATTERN)]] = Field(..., max_length=32)
