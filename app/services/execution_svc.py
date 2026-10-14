@@ -1995,6 +1995,34 @@ async def _settle_refused(
     return (None, None, None)
 
 
+async def _report_payout_cuts(
+    task_id: str, start: float, payout_plan: _PayoutPlan, authorized_max: int | None, *, payer: str, auth_id_hex: str
+) -> None:
+    """Say, loudly, what the payouts leave out: the cut the authorized max
+    forced, then each delivered step whose agent is not paid for its owner."""
+    if payout_plan.clamped_stroops:
+        logger.error(
+            "task %s: payouts CLAMPED by %d stroops to the authorized max %s — the plan priced more than the "
+            "buyer authorized (auth %s, payer %s)",
+            task_id,
+            payout_plan.clamped_stroops,
+            authorized_max,
+            auth_id_hex,
+            payer,
+        )
+        await _emit(task_id, start, "error", "payouts cut to what the buyer authorized")
+    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in _UNPAID_FOR_OWNER):
+        logger.error(
+            "task %s: step %d (%s) delivered but is NOT paid (%s) — its share returns to the buyer (auth %s)",
+            task_id,
+            unpaid.step_index,
+            unpaid.agent_id,
+            unpaid.unpaid_reason,
+            auth_id_hex,
+        )
+        await _emit(task_id, start, "error", _UNPAID_FOR_OWNER[unpaid.unpaid_reason].format(agent=unpaid.agent_id))
+
+
 async def _read_authorized_max(
     task_id: str, start: float, plan: StoredPlan, escrow: str, *, payer: str, auth_id_hex: str
 ) -> int | None:
@@ -2254,27 +2282,7 @@ async def _settle_v2(
     except _PayoutRefused as e:
         return await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
     total = payout_plan.total
-    if payout_plan.clamped_stroops:
-        logger.error(
-            "task %s: payouts CLAMPED by %d stroops to the authorized max %s — the plan priced more than the "
-            "buyer authorized (auth %s, payer %s)",
-            task_id,
-            payout_plan.clamped_stroops,
-            authorized_max,
-            auth_id_hex,
-            payer,
-        )
-        await _emit(task_id, start, "error", "payouts cut to what the buyer authorized")
-    for unpaid in (s for s in payout_plan.steps if s.unpaid_reason in _UNPAID_FOR_OWNER):
-        logger.error(
-            "task %s: step %d (%s) delivered but is NOT paid (%s) — its share returns to the buyer (auth %s)",
-            task_id,
-            unpaid.step_index,
-            unpaid.agent_id,
-            unpaid.unpaid_reason,
-            auth_id_hex,
-        )
-        await _emit(task_id, start, "error", _UNPAID_FOR_OWNER[unpaid.unpaid_reason].format(agent=unpaid.agent_id))
+    await _report_payout_cuts(task_id, start, payout_plan, authorized_max, payer=payer, auth_id_hex=auth_id_hex)
 
     if total > sc.usdc_to_i128(settings.max_charge_usdc):
         return await _settle_refused(
