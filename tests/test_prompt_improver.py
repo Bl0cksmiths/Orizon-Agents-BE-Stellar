@@ -346,6 +346,48 @@ def test_resolve_names_an_unsafe_spec_by_its_hazard():
     assert resolve(allowed(), injected).message == guard_prompts.BLOCKED_INJECTION
 
 
+def test_an_unsafe_spec_with_only_the_fallback_reason_is_named_harmful():
+    result = resolve(allowed(), SpecCheck(verdict="unsafe", reasons=["fallback"]))
+    assert (result.action, result.reasons, result.message) == ("block", ["harmful"], guard_prompts.BLOCKED_HARMFUL)
+
+
+# Every watch x edited x re-check combination, with the reasons each carries
+# (a check that names reasons carries ["injection", "fallback"]).
+@pytest.mark.parametrize(
+    ("watch", "user_edited", "check", "action", "reasons"),
+    [
+        (False, False, "clean", "use_spec", []),
+        (False, False, "watch", "use_original", ["watch"]),
+        (False, False, "drifted", "use_original", ["drifted"]),
+        (False, False, "unavailable", "use_original", ["recheck_unavailable"]),
+        (False, False, "unsafe", "block", ["injection"]),
+        (False, False, None, "use_original", ["no_spec"]),
+        (False, True, "clean", "use_spec", []),
+        (False, True, "watch", "block", ["injection", "watch"]),
+        (False, True, "drifted", "needs_detail", ["drifted"]),
+        (False, True, "unavailable", "unavailable", ["guard_unavailable"]),
+        (False, True, "unsafe", "block", ["injection"]),
+        (False, True, None, "unavailable", ["guard_unavailable"]),
+        (True, False, "clean", "use_spec", []),
+        (True, False, "watch", "block", ["injection", "watch", "watch"]),
+        (True, False, "drifted", "block", ["injection", "watch", "drifted"]),
+        (True, False, "unavailable", "unavailable", ["guard_unavailable"]),
+        (True, False, "unsafe", "block", ["injection"]),
+        (True, False, None, "block", ["watch", "no_spec"]),
+        (True, True, "clean", "use_spec", []),
+        (True, True, "watch", "block", ["injection", "watch", "watch"]),
+        (True, True, "drifted", "block", ["injection", "watch", "drifted"]),
+        (True, True, "unavailable", "unavailable", ["guard_unavailable"]),
+        (True, True, "unsafe", "block", ["injection"]),
+        (True, True, None, "block", ["watch", "no_spec"]),
+    ],
+)
+def test_resolve_full_table_with_reasons(watch, user_edited, check, action, reasons):
+    spec_check = SpecCheck(verdict=check, reasons=["injection", "fallback"]) if check else None
+    result = resolve(allowed(watch=watch), spec_check, user_edited=user_edited)
+    assert (result.action, result.reasons) == (action, reasons)
+
+
 @pytest.mark.parametrize("verdict", ["block", "needs_detail", "unavailable"])
 def test_resolve_refuses_a_decision_that_was_not_allowed(verdict):
     with pytest.raises(ValueError):
