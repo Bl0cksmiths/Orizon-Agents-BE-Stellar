@@ -226,16 +226,7 @@ class Runner:
             start = self.preflight()
             if self.cfg.dry_run:
                 return self.dry_run(start)
-            last = stage_index(self.cfg.until)
-            for name in STAGES[stage_index(start) : last + 1]:
-                self.say(f"== {name}")
-                getattr(self, f"stage_{name}")()
-                self.state.done(name)
-                self.save()
-            self.state.stopped = None
-            self.save()
-            self.say(f"done through '{self.cfg.until}'. Evidence: {self.log.jsonl} and {self.log.markdown}")
-            return EXIT_OK
+            return self.run_stages(start)
         except SigningRefused as exc:
             return self.stopped(Stop(EXIT_STAGE_FAILED if self.state.run_id else EXIT_REFUSED, str(exc)))
         except Stop as exc:
@@ -251,6 +242,19 @@ class Runner:
             if self.state.run_id and not self.cfg.dry_run:
                 self.note("run", "run_crashed", f"{type(exc).__name__}: {self.console.redactor.scrub(str(exc))}")
             raise
+
+    def run_stages(self, start: str) -> int:
+        """Run each stage from `start` through `--until`, saving state after every one."""
+        last = stage_index(self.cfg.until)
+        for name in STAGES[stage_index(start) : last + 1]:
+            self.say(f"== {name}")
+            getattr(self, f"stage_{name}")()
+            self.state.done(name)
+            self.save()
+        self.state.stopped = None
+        self.save()
+        self.say(f"done through '{self.cfg.until}'. Evidence: {self.log.jsonl} and {self.log.markdown}")
+        return EXIT_OK
 
     def dry_run(self, start: str) -> int:
         """Print the plan. A dry run that found blockers stops, naming each, as the real run would."""
