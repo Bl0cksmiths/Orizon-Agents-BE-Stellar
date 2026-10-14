@@ -483,9 +483,25 @@ def _deposit_covers_declared(record: RampRecord, deposited: float) -> bool:
     return True
 
 
-def _match(
-    event: CryptoEvent | FiatEvent,
-) -> tuple[RampRecord | None, Callable[[PdaxClient, RampRecord], Awaitable[RampRecord]] | None]:
+# What a settlement event resolves to: its ramp and the advance that settles
+# it, or (None, None) when it belongs to none.
+_Matched = tuple[RampRecord | None, Callable[[PdaxClient, RampRecord], Awaitable[RampRecord]] | None]
+
+
+def _match_fiat(event: FiatEvent) -> _Matched:
+    """An on-ramp, by the identifier a completed fiat deposit carries."""
+    if "DEPOSIT" not in event.transaction_type.upper():
+        return None, None
+    if str(event.status).upper() != "COMPLETED":
+        return None, None
+    record = ramp_store.find_by_identifier(event.identifier) if event.identifier else None
+    if record and record.direction == "onramp":
+        return record, advance_onramp
+    _warn_unmatched(event, None)
+    return None, None
+
+
+def _match(event: CryptoEvent | FiatEvent) -> _Matched:
     """Find the ramp + advance function a settlement event belongs to.
 
     Events we were never going to act on (withdrawals, non-final statuses) are
@@ -493,15 +509,7 @@ def _match(
     about, because that one means unclaimed funds.
     """
     if isinstance(event, FiatEvent):
-        if "DEPOSIT" not in event.transaction_type.upper():
-            return None, None
-        if str(event.status).upper() != "COMPLETED":
-            return None, None
-        record = ramp_store.find_by_identifier(event.identifier) if event.identifier else None
-        if record and record.direction == "onramp":
-            return record, advance_onramp
-        _warn_unmatched(event, None)
-        return None, None
+        return _match_fiat(event)
 
     # CryptoEvent — match an off-ramp by its USDCXLM deposit address (+ tag).
     if "DEPOSIT" not in event.transaction_type.upper():
