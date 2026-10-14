@@ -762,6 +762,19 @@ def _partition_owners(
     return excluded, external
 
 
+def _coverage(gap: _Unmirrored, accounted: int, window: charge_window.WindowSettlements | None) -> AdoptionCoverage:
+    """What this build read: the registry listing (None when it could not be
+    read) and the settlement window scan (zeros when it never ran)."""
+    return AdoptionCoverage(
+        agents_listed=gap.total if gap.listed else None,
+        agents_accounted=accounted,
+        settlement_ledgers_scanned=window.ledgers_scanned if window is not None else 0,
+        settlement_ledgers_in_window=window.ledgers_in_window if window is not None else 0,
+        external_charges=window.charges if window is not None else 0,
+        external_charges_unattributed=window.unattributed if window is not None else 0,
+    )
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -820,14 +833,7 @@ async def build_report() -> AdoptionReport:
         unique_operator_wallets=len(external),
         settled_external_workflows=len(jobs),
     )
-    coverage = AdoptionCoverage(
-        agents_listed=gap.total if gap.listed else None,
-        agents_accounted=len(owners),
-        settlement_ledgers_scanned=window.ledgers_scanned if window is not None else 0,
-        settlement_ledgers_in_window=window.ledgers_in_window if window is not None else 0,
-        external_charges=window.charges if window is not None else 0,
-        external_charges_unattributed=window.unattributed if window is not None else 0,
-    )
+    coverage = _coverage(gap, len(owners), window)
     report = AdoptionReport(
         network=_network(),
         generated_at=int(time.time()),
