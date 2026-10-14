@@ -472,6 +472,7 @@ def per_request_costs(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # ── tier rules and the recommended policy ───────────────────────────────────
 
 CURRENT_TIER_RULE = "round up below 0.50 (current)"
+RECOMMENDED_TIER_RULE = "only low->moderate below 0.50"
 
 
 def _rule(name: str) -> Callable[[str, float], str]:
@@ -483,7 +484,7 @@ def _rule(name: str) -> Callable[[str, float], str]:
         "round up below 0.35": below(0.35),
         "round up below 0.25": below(0.25),
         "never round up": lambda tier, conf: tier,
-        "only low->moderate below 0.50": lambda tier, conf: "moderate" if tier == "low" and conf < 0.50 else tier,
+        RECOMMENDED_TIER_RULE: lambda tier, conf: "moderate" if tier == "low" and conf < 0.50 else tier,
     }
     return rules[name]
 
@@ -493,7 +494,7 @@ TIER_RULES = (
     "round up below 0.35",
     "round up below 0.25",
     "never round up",
-    "only low->moderate below 0.50",
+    RECOMMENDED_TIER_RULE,
 )
 
 
@@ -569,9 +570,9 @@ def watch_sweep(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # The policy this campaign recommends: the train-picked injection line (the
 # only knob whose held-out result improved without a cost), and the tier rule
-# with the best accuracy and fewest over-tiered requests. Everything else stays.
+# with the best accuracy and fewest over-tiered requests (RECOMMENDED_TIER_RULE,
+# named with the tier rules above). Everything else stays.
 RECOMMENDED = STARTING.with_(injection_block=0.40)
-RECOMMENDED_TIER_RULE = "only low->moderate below 0.50"
 
 
 def recommended(sweep_rows: list[dict[str, Any]], tier_test_rows: list[dict[str, Any]]) -> dict[str, Any]:
