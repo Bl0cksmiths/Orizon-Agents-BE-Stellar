@@ -2845,7 +2845,7 @@ async def _settle_v2(
         )
         raise
     except Exception as e:
-        logger.error(
+        logger.exception(
             "task %s: on-chain settle failed: %s (job %s, auth %s, payer %s, %d stroops, settle_tx=%s, proof_tx=%s)",
             task_id,
             e,
@@ -2855,7 +2855,6 @@ async def _settle_v2(
             total,
             settle_tx,
             proof_tx,
-            exc_info=True,
         )
         await _report_v2_settle_failure(
             task_id, start, e, settled=settled_job_id is not None, release=release, auth_id_hex=auth_id_hex
