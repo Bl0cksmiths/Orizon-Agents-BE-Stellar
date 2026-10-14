@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from typing import Annotated
 
 from fastapi import APIRouter, Header, Response
 
@@ -14,7 +15,7 @@ router = APIRouter(tags=["payments"])
 async def x402(
     req: X402Request,
     response: Response,
-    x_orizon_payment: str | None = Header(default=None),
+    x_orizon_payment: Annotated[str | None, Header()] = None,
 ) -> X402Response:
     """Simulated HTTP 402 flow.
 
