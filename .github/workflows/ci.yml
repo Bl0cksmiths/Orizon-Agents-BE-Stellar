@@ -103,5 +103,5 @@ jobs:
       - name: Test (with coverage gate)
         run: python -m pytest -q --cov
         env:
-          ORIZON_TEST_PG_DSN: postgresql://orizon:orizon@localhost:5432/orizon_test
+          ORIZON_TEST_PG_DSN: postgresql://orizon@localhost:5432/orizon_test
           ORIZON_TEST_PG_REQUIRED: "1"
