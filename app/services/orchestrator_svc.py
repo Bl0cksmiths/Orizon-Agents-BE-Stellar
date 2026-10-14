@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import random
 import re
 import secrets
 from collections import deque
@@ -14,7 +13,7 @@ from typing import Any, NamedTuple, Protocol
 
 from pydantic import ValidationError
 
-from .. import money
+from .. import money, pacing
 from ..agents.model_factory import claude_workers
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
@@ -939,7 +938,7 @@ async def _kit_thinking() -> None:
     1.4–2.4 s of real sleep per kit plan or patching `asyncio.sleep` for the
     whole process.
     """
-    await asyncio.sleep(1.4 + random.random() * 1.0)
+    await pacing.pause(1.4, 1.0)
 
 
 class _DroppedKitRole(NamedTuple):
