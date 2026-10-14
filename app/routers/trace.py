@@ -17,7 +17,6 @@ router = APIRouter(tags=["trace"])
 
 @router.get(
     "/trace/{task_id}",
-    response_model=list[TraceLine],
     summary="Get a task's recorded trace",
     dependencies=[Depends(require_task_read)],
 )
