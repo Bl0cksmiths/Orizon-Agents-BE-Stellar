@@ -519,7 +519,7 @@ async def ramp_estimate(
         raise _fail(e) from e
 
 
-@secured.post("/ramp/funding-quote")
+@secured.post("/ramp/funding-quote", responses=_RAMP_PRICING_RESPONSES)
 async def ramp_funding_quote(usdc: str = Query(..., max_length=32)) -> FundingQuote:
     """Pesos to pay to fund a workflow costing `usdc` USDC — buffered + rounded
     up so the amount always covers it."""
