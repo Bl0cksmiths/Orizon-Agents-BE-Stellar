@@ -1,5 +1,4 @@
 import base64
-import binascii
 import logging
 import math
 from typing import Any, Literal
@@ -1230,7 +1229,7 @@ class Settings(BaseSettings):
         padded = secret + ("=" * (8 - remainder)) if remainder else secret
         try:
             base64.b32decode(padded)
-        except (binascii.Error, ValueError):
+        except ValueError:  # binascii.Error is a ValueError
             # The seed itself is a credential: name the variable, never echo
             # the value or the decoder's message (which quotes the input).
             logger.error(
