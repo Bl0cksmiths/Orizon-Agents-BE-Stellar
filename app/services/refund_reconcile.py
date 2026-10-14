@@ -338,6 +338,49 @@ async def _decide_final_answer(
     return await _release(dispute, tx_hash, "released", base, "the ledger answered FAILED, so no funds moved")
 
 
+async def _decide_not_found(
+    claim: RefundClaim, dispute: DisputeRecord, tx_hash: str, found: sc.LedgerTransaction, base: dict[str, Any]
+) -> Decision:
+    """NOT_FOUND: release only once the ledger's own clock is past the last moment it could land."""
+    # NOT_FOUND is evidence only inside the window the RPC answers for. Its
+    # oldest ledger must predate the claim: a transaction cannot land before
+    # its claim existed, so a history that starts earlier covers every ledger
+    # it could be in. One that starts later may simply have forgotten it —
+    # which is how a refund that landed reads once it is a week old.
+    if found.oldest_ledger_close_time > claim.claimed_at - HISTORY_MARGIN_SECONDS:
+        return Decision(
+            **base,
+            action="history_gap",
+            detail=f"the RPC's history starts at ledger {found.oldest_ledger} (closed"
+            f" {found.oldest_ledger_close_time}), after this claim was taken ({claim.claimed_at:.0f}) — NOT_FOUND"
+            " cannot tell 'never landed' from 'forgotten'; read the payer's account by hand",
+        )
+    # The latest moment the transaction could be valid. Its maxTime is the
+    # builder's clock plus the timeout, and the builder ran BEFORE the row
+    # that recorded this hash was written — so that row's `updated_at` (or any
+    # later one's) plus the timeout is at or past the real maxTime. It is our
+    # clock's number, and so is maxTime: the network compares both with the
+    # ledger's close time, and so does this.
+    if dispute.updated_at is None:
+        return Decision(**base, action="no_expiry_bound", detail="nothing on record dates the submission")
+    can_land_until = dispute.updated_at + REFUND_TX_TIMEOUT_SECONDS
+    if found.latest_ledger_close_time <= can_land_until + EXPIRY_MARGIN_SECONDS:
+        return Decision(
+            **base,
+            action="pending",
+            detail=f"the ledger closed at {found.latest_ledger_close_time}; the transaction may land until"
+            f" {can_land_until:.0f}, and is left alone until {can_land_until + EXPIRY_MARGIN_SECONDS:.0f}",
+        )
+    return await _release(
+        dispute,
+        tx_hash,
+        "expired_released",
+        base,
+        f"not on the ledger, and ledger {found.latest_ledger} closed at {found.latest_ledger_close_time}, past its"
+        f" last valid moment {can_land_until:.0f} + {EXPIRY_MARGIN_SECONDS}s — it can never land",
+    )
+
+
 async def reconcile_claim(claim: RefundClaim, *, now: float, settler: str, asset_sac: str) -> Decision:
     """Decide one claim from the chain, act on it, and return what was done.
 
@@ -397,43 +440,7 @@ async def reconcile_claim(claim: RefundClaim, *, now: float, settler: str, asset
     if found.status != "NOT_FOUND":
         return Decision(**base, action="rpc_error", detail="an answer this sweep does not know — nothing was changed")
 
-    # NOT_FOUND is evidence only inside the window the RPC answers for. Its
-    # oldest ledger must predate the claim: a transaction cannot land before
-    # its claim existed, so a history that starts earlier covers every ledger
-    # it could be in. One that starts later may simply have forgotten it —
-    # which is how a refund that landed reads once it is a week old.
-    if found.oldest_ledger_close_time > claim.claimed_at - HISTORY_MARGIN_SECONDS:
-        return Decision(
-            **base,
-            action="history_gap",
-            detail=f"the RPC's history starts at ledger {found.oldest_ledger} (closed"
-            f" {found.oldest_ledger_close_time}), after this claim was taken ({claim.claimed_at:.0f}) — NOT_FOUND"
-            " cannot tell 'never landed' from 'forgotten'; read the payer's account by hand",
-        )
-    # The latest moment the transaction could be valid. Its maxTime is the
-    # builder's clock plus the timeout, and the builder ran BEFORE the row
-    # that recorded this hash was written — so that row's `updated_at` (or any
-    # later one's) plus the timeout is at or past the real maxTime. It is our
-    # clock's number, and so is maxTime: the network compares both with the
-    # ledger's close time, and so does this.
-    if dispute.updated_at is None:
-        return Decision(**base, action="no_expiry_bound", detail="nothing on record dates the submission")
-    can_land_until = dispute.updated_at + REFUND_TX_TIMEOUT_SECONDS
-    if found.latest_ledger_close_time <= can_land_until + EXPIRY_MARGIN_SECONDS:
-        return Decision(
-            **base,
-            action="pending",
-            detail=f"the ledger closed at {found.latest_ledger_close_time}; the transaction may land until"
-            f" {can_land_until:.0f}, and is left alone until {can_land_until + EXPIRY_MARGIN_SECONDS:.0f}",
-        )
-    return await _release(
-        dispute,
-        tx_hash,
-        "expired_released",
-        base,
-        f"not on the ledger, and ledger {found.latest_ledger} closed at {found.latest_ledger_close_time}, past its"
-        f" last valid moment {can_land_until:.0f} + {EXPIRY_MARGIN_SECONDS}s — it can never land",
-    )
+    return await _decide_not_found(claim, dispute, tx_hash, found, base)
 
 
 _run_lock = asyncio.Lock()
