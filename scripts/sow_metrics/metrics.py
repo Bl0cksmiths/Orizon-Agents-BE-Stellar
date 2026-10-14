@@ -976,7 +976,7 @@ def _m08_shortfalls(
     return parts
 
 
-def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
+def m08(snap: Snapshot, refunds: Metric) -> Metric:
     row = SOW_ROWS[7]
     method = (
         "Checked that the live backend publishes the dispute routes (open, read, uphold, reject); that a dispute "
@@ -1177,7 +1177,7 @@ def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None)
         refunds,
         m06(snap, rules, pending.get("m06")),
         m07(snap),
-        m08(snap, rules, refunds),
+        m08(snap, refunds),
         m09(snap, rules, pending.get("m09")),
         m10(snap, rules, pending.get("m10")),
         m11(snap, rules),
