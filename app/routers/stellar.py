@@ -607,7 +607,7 @@ async def invalidate_reputation(
     )
 
 
-@router.get("/attestation/{job_id_hex}", response_model=AttestationRead)
+@router.get("/attestation/{job_id_hex}")
 async def read_attestation(job_id_hex: str = Path(..., pattern=ID16_HEX_PATTERN)) -> AttestationRead:
     """Read an on-chain Attestation by hex-encoded 16-byte job_id."""
     try:
