@@ -1125,6 +1125,13 @@ async def submit_signed(req: SubmitReq) -> dict:
 
 
 # ── writes (backend signs with STELLAR_SIGNING_KEY) ──────────────
+# `require_api_key`'s and `require_seal_key`'s refusal of a wrong key.
+_INVALID_API_KEY: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`invalid_api_key` — API_KEY is set and `X-API-Key` does not match it.",
+}
+
+
 class ChargeReq(BaseModel):
     auth_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
     amount_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
@@ -1151,7 +1158,16 @@ async def _refuse_charge_on_v2() -> None:
         )
 
 
-@router.post("/server/charge", dependencies=[Depends(require_api_key)])
+@router.post(
+    "/server/charge",
+    dependencies=[Depends(require_api_key)],
+    responses={
+        400: {"model": ErrorEnvelope, "description": "`amount_exceeds_charge_cap`, or `charge_failed`."},
+        401: _INVALID_API_KEY,
+        409: {"model": ErrorEnvelope, "description": "`charge_unsupported_on_v2` — a v2 escrow has no charge."},
+        503: {"model": ErrorEnvelope, "description": "The backend signing key is not configured."},
+    },
+)
 async def server_charge(req: ChargeReq) -> dict:
     """Backend-signed PaymentEscrow.charge (the backend is the `settler` role). v1 only.
 
