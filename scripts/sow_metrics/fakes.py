@@ -44,6 +44,7 @@ RPC = "https://rpc.test"
 HORIZON = "https://horizon.test"
 GITHUB = "https://github-api.test"
 MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
+NOT_FOUND = "Not Found"  # the body text of a 404 from FastAPI and from GitHub
 
 
 def _contract(tag: str) -> str:
@@ -449,7 +450,7 @@ class FakeWorld:
                 method, route_path = route.split(" ", 1)
                 paths.setdefault(route_path, {})[method.lower()] = {}
             return _json(200, {"openapi": "3.1.0", "paths": paths})
-        return _json(404, {"detail": "Not Found"})
+        return _json(404, {"detail": NOT_FOUND})
 
     def frontend(self, path: str) -> httpx.Response:
         """A frontend page from `pages`: a redirect points at the login page, a missing page answers 404."""
@@ -465,7 +466,7 @@ class FakeWorld:
             return _json(self.github_status, {"message": "API rate limit exceeded"})
         status, spdx = self.repos.get(name, (404, None))
         if status != 200:
-            return _json(status, {"message": "Not Found"})
+            return _json(status, {"message": NOT_FOUND})
         license_ = None if spdx is None else {"spdx_id": spdx, "key": spdx.lower()}
         return _json(200, {"full_name": name, "private": False, "license": license_})
 
@@ -495,7 +496,7 @@ class FakeWorld:
             return _json(200, self.params)
         if path == "/api/ecosystem/adoption":
             return _json(200, {"network": "testnet", "operators": self._adoption_operators()})
-        return _json(404, {"detail": "Not Found"})
+        return _json(404, {"detail": NOT_FOUND})
 
     def _adoption_operators(self) -> list[dict[str, Any]]:
         """Every agent grouped by owner, with its `bound` flag. The generator reads only the flags."""
