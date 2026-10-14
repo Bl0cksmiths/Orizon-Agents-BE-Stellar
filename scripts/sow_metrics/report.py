@@ -128,10 +128,9 @@ def link_problems(link: Any) -> list[str]:
     kind, url = link.get("kind"), link.get("url")
     if kind not in LINK_KINDS:
         out.append(f"kind {kind!r}")
-    if not isinstance(url, str) or not url.startswith("https://"):
-        out.append(f"url {url!r} is not https")
-    elif kind in EXPLORER_URL and not EXPLORER_URL[kind].fullmatch(url):
-        out.append(f"url {url!r} is not a testnet explorer {kind} link")
+    problem = _url_problem(kind, url)
+    if problem:
+        out.append(problem)
     problem = label_problem(link.get("label"))
     if problem:
         out.append(f"label {problem}")
@@ -145,6 +144,15 @@ def link_problems(link: Any) -> list[str]:
     if "date" in link and not _DATE.fullmatch(str(link["date"])):
         out.append(f"date {link['date']!r} is not YYYY-MM-DD")
     return out
+
+
+def _url_problem(kind: Any, url: Any) -> str | None:
+    """An https URL, and for an explorer kind exactly the testnet explorer's."""
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return f"url {url!r} is not https"
+    if kind in EXPLORER_URL and not EXPLORER_URL[kind].fullmatch(url):
+        return f"url {url!r} is not a testnet explorer {kind} link"
+    return None
 
 
 def _cell(value: object) -> str:
