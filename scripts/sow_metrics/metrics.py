@@ -740,21 +740,25 @@ def _m05_story(snap: Snapshot, rules: Rules, rejected: list[dict[str, Any]], lef
     if not any(c.counts for c in rules.charges):
         out.append(f"No charge has settled since the sprint began on {SPRINT_DAY} that a dispute could refund.")
     if leftover:
-        to_team = all(rules.party(t.destination).exclusion for t in leftover)
-        dates = _join(sorted({t.created_at[:10] for t in leftover}))
-        if len(leftover) == 1:
-            out.append(
-                f"The only transfer out of a platform key on record, on {dates}, went to "
-                + ("a team key" if to_team else "an account")
-                + " with no dispute behind it."
-            )
-        else:
-            out.append(
-                f"The {len(leftover)} transfers out of platform keys on record ({dates}) went to "
-                + ("team keys" if to_team else "accounts")
-                + " with no dispute behind them."
-            )
+        out.append(_leftover_sentence(rules, leftover))
     return out
+
+
+def _leftover_sentence(rules: Rules, leftover: list[Transfer]) -> str:
+    """The transfers out of platform keys that no dispute stands behind, and whether they all went to team keys."""
+    to_team = all(rules.party(t.destination).exclusion for t in leftover)
+    dates = _join(sorted({t.created_at[:10] for t in leftover}))
+    if len(leftover) == 1:
+        return (
+            f"The only transfer out of a platform key on record, on {dates}, went to "
+            + ("a team key" if to_team else "an account")
+            + " with no dispute behind it."
+        )
+    return (
+        f"The {len(leftover)} transfers out of platform keys on record ({dates}) went to "
+        + ("team keys" if to_team else "accounts")
+        + " with no dispute behind them."
+    )
 
 
 def m05(snap: Snapshot, rules: Rules) -> Metric:
