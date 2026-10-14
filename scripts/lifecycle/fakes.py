@@ -842,6 +842,14 @@ class FakeWorld:
             return ok(self.simulate(params["transaction"]))
         return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601, "message": "no"}})
 
+    def _sim_value(self, v: stellar_xdr.SCVal) -> dict[str, Any]:
+        """A simulation that returned `v`."""
+        return {"results": [{"xdr": _b64(v), "auth": []}], "latestLedger": self.ledger}
+
+    def _sim_fail(self, msg: str) -> dict[str, Any]:
+        """A simulation that failed with `msg`."""
+        return {"error": msg, "latestLedger": self.ledger}
+
     def simulate(self, tx_xdr: str) -> dict[str, Any]:
         env = TransactionEnvelope.from_xdr(tx_xdr, self.passphrase)
         op = env.transaction.operations[0]
@@ -851,29 +859,24 @@ class FakeWorld:
         contract = Address.from_xdr_sc_address(invoke.contract_address).address
         fn = invoke.function_name.sc_symbol.decode()
         args: list[Any] = [scval.to_native(a) for a in invoke.args]
-
-        def value(v: stellar_xdr.SCVal) -> dict[str, Any]:
-            return {"results": [{"xdr": _b64(v), "auth": []}], "latestLedger": self.ledger}
-
-        def fail(msg: str) -> dict[str, Any]:
-            return {"error": msg, "latestLedger": self.ledger}
-
         if contract == ESCROW and fn == "version":
             return (
-                value(scval.to_uint32(2))
+                self._sim_value(scval.to_uint32(2))
                 if self.escrow_version >= 2
-                else fail("HostError: Error(WasmVm, MissingValue)")
+                else self._sim_fail("HostError: Error(WasmVm, MissingValue)")
             )
         if contract == SAC and fn == "balance":
             if args[0].address not in self.balances:
                 # testnet's native SAC traps on a missing account (seen live)
-                return fail("HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing")
-            return value(scval.to_int128(self.balances[args[0].address]))
+                return self._sim_fail(
+                    "HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing"
+                )
+            return self._sim_value(scval.to_int128(self.balances[args[0].address]))
         if contract == ATTEST and fn == "get":
             a = self.attestations.get(bytes(args[0]).hex())
             if a is None:
-                return fail("HostError: Error(Contract, #2)")
-            return value(
+                return self._sim_fail("HostError: Error(Contract, #2)")
+            return self._sim_value(
                 scval.to_map(
                     {
                         scval.to_symbol("agents"): scval.to_vec([scval.to_symbol(x) for x in a["agents"]]),
@@ -889,13 +892,13 @@ class FakeWorld:
             )
         if contract == ESCROW and fn == "settler":
             if self.escrow_version < 2:
-                return fail("HostError: Error(WasmVm, MissingValue)")
-            return value(scval.to_address(self.settler))
+                return self._sim_fail("HostError: Error(WasmVm, MissingValue)")
+            return self._sim_value(scval.to_address(self.settler))
         if contract == ESCROW and fn == "authorization":
             a = self.authorizations.get(bytes(args[0]).hex())
             if a is None:
-                return fail("HostError: Error(Contract, #2)")
-            return value(
+                return self._sim_fail("HostError: Error(Contract, #2)")
+            return self._sim_value(
                 scval.to_map(
                     {
                         scval.to_symbol("agent_id"): scval.to_symbol(a["agent_id"]),
@@ -908,7 +911,7 @@ class FakeWorld:
                     }
                 )
             )
-        return fail(f"no fake for {contract}.{fn}")
+        return self._sim_fail(f"no fake for {contract}.{fn}")
 
     # ── Horizon ─────────────────────────────────────────────────
     def horizon(self, path: str) -> httpx.Response:
