@@ -1430,7 +1430,7 @@ async def _hand_back(
         await store.release_refund_claim(claimed.id)
         return True
     except Exception:
-        logger.error(
+        logger.exception(
             "dispute %s: NOTHING WAS PAID (%s) but the refund claim could NOT be released — it stays crediting;"
             " release it by hand (job %s, payer %s, failed tx %s)",
             claimed.id,
@@ -1438,7 +1438,6 @@ async def _hand_back(
             claimed.job_id_hex,
             claimed.payer,
             failed_tx or "-",
-            exc_info=True,
         )
     if failed_tx is not None:
         try:
@@ -1450,11 +1449,10 @@ async def _hand_back(
                 expected_status="crediting",
             )
         except Exception:
-            logger.error(
+            logger.exception(
                 "dispute %s: the FAILED refund tx %s could not be recorded either — it is in this line only",
                 claimed.id,
                 failed_tx,
-                exc_info=True,
             )
     return False
 
