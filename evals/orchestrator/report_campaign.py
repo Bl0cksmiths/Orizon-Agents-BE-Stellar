@@ -177,7 +177,7 @@ def _sweep_section(a: dict[str, Any]) -> list[str]:
     )
     add("")
     add("| knob | today | picked on train | held-out today | held-out at pick |")
-    add("|---|---|---|---|---|")
+    add(_table_rule(5))
     heads = {
         "injection_block": ("injection_recall", "false_block"),
         "harmful_block": ("harmful_recall", "false_block"),
@@ -303,7 +303,7 @@ def _cost_section(a: dict[str, Any]) -> list[str]:
     add("### Prompt caching")
     add("")
     add("| stage | calls | calls reading the cache | calls writing it | share of prompt tokens served from cache |")
-    add("|---|---|---|---|---|")
+    add(_table_rule(5))
     for k, v in s4["caching"].items():
         add(
             f"| {k} | {v['calls']} | {pct(v['calls_with_cache_read'])} | {v['calls_with_cache_write']} | {100 * v['cached_share_of_prompt_tokens']:.1f}% |"
@@ -421,7 +421,7 @@ def _external_section(a: dict[str, Any]) -> list[str]:
         add(f"| {src} | {n} | {pct(p['precision'])} | {pct(p['recall'])} | {pct(p['specificity'])} | {_f1(p['f1'])} |")
     add("")
     add("| source / label | n | blocked | needs detail | allowed |")
-    add("|---|---|---|---|---|")
+    add(_table_rule(5))
     for src, v in ext.items():
         if src == "all":
             continue
