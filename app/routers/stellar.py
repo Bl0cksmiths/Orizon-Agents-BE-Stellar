@@ -439,7 +439,10 @@ reputation_svc.on_change(lambda _agent_id: reputation_cell.invalidate())
 @router.get(
     "/reputation",
     response_model=ReputationBatch,
-    responses={304: {"description": "Not modified: the `If-None-Match` ETag is current."}},
+    responses={
+        304: {"description": "Not modified: the `If-None-Match` ETag is current."},
+        503: {"model": ErrorEnvelope, "description": "`reputation_unavailable` — no reputation batch could be built."},
+    },
 )
 async def read_reputations(request: Request) -> Response:
     """Smoothed reputation for every registered agent, plus the routing
