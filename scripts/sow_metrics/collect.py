@@ -369,6 +369,23 @@ def _match_charges(snap: Snapshot, op: Operation) -> None:
         snap.charge_txs.setdefault((r.escrow, r.id_hex), TxRef(op.tx_hash, op.date))
 
 
+def _record_rating(snap: Snapshot, op: Operation) -> None:
+    """A ledger `submit(caller, agent_id, job_id, rating, weight, payer, kind)`: counted by kind, kept if a dispute."""
+    kind = str(op.args[6])
+    snap.rating_kinds[kind] = snap.rating_kinds.get(kind, 0) + 1
+    if op.args[6] == "dispute":
+        snap.dispute_ratings.append(
+            DisputeRating(
+                agent_id=str(op.args[1]),
+                job_id=str(op.args[2]),
+                payer=op.args[5] if _is_account(op.args[5]) else None,
+                rating=op.args[3] if isinstance(op.args[3], int) else None,
+                tx_hash=op.tx_hash,
+                created_at=op.created_at,
+            )
+        )
+
+
 def _record_transfers(snap: Snapshot, op: Operation) -> None:
     """Every asset movement of one asset-contract transfer that a platform key paid out: refund candidates."""
     for change in op.balance_changes:
@@ -415,20 +432,7 @@ def read_histories(snap: Snapshot, chain: ChainReader) -> None:
                 continue
             _match_charges(snap, op)
             if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7:
-                kind = str(op.args[6])
-                snap.rating_kinds[kind] = snap.rating_kinds.get(kind, 0) + 1
-            if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7 and op.args[6] == "dispute":
-                # submit(caller, agent_id, job_id, rating, weight, payer, kind)
-                snap.dispute_ratings.append(
-                    DisputeRating(
-                        agent_id=str(op.args[1]),
-                        job_id=str(op.args[2]),
-                        payer=op.args[5] if _is_account(op.args[5]) else None,
-                        rating=op.args[3] if isinstance(op.args[3], int) else None,
-                        tx_hash=op.tx_hash,
-                        created_at=op.created_at,
-                    )
-                )
+                _record_rating(snap, op)
             if op.contract_id == sac and op.function == "transfer":
                 _record_transfers(snap, op)
     snap.dispute_ratings.sort(key=lambda d: (d.created_at, d.tx_hash))
