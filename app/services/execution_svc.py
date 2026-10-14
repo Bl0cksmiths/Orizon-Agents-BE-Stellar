@@ -676,49 +676,7 @@ async def _run(
                 await _emit(task_id, start, "error", f"{worker.name} timed out")
                 continue
             except Exception as e:
-                not_run = _not_attempted(worker.name, _failure_class(e))
-                if not_run is not None and get_worker(step.agent_id) is worker:
-                    # Not the agent's failure: the daily AI budget is spent, the
-                    # model provider has no key or is down, or the request gave
-                    # the step nothing to work on. The agent was never able to
-                    # try, so — like a step refused at execute —
-                    # it is not billed, not counted in its failure streak and
-                    # not rated (ADR 0005 D5: "did not deliver" and "could not
-                    # be asked" are different facts). First-party only: the
-                    # classes are ours, and an external step's failure is
-                    # classified by its own contract.
-                    undispatched.add(step_index)
-                    logger.warning(
-                        "task %s step %d (%s): not run — %s: %s", task_id, step_index, worker.name, not_run, e
-                    )
-                    await _emit(task_id, start, "error", f"{worker.name}: {not_run} — not charged, not rated")
-                    continue
-                # exc_info: a revoked key / exhausted quota surfaces as a
-                # provider exception several frames down — the traceback is the
-                # only way to tell those apart without a debugger.
-                logger.error(
-                    "task %s step %s (%s): failed: %s",
-                    task_id,
-                    step.agent_id,
-                    worker.name,
-                    e,
-                    exc_info=True,
-                )
-                # Trace lines are world-readable when TASK_AUTH_REQUIRED is
-                # off — the raw exception text stays in the server log above.
-                # The CLASS is safe to surface and is the whole point: twelve
-                # distinct failures used to render as this one line, so an
-                # operator could not tell "you are down" from "you are slow"
-                # from "your body is the wrong shape" — three different fixes.
-                #
-                # Read duck-typed, not by importing a worker's module: the run
-                # loop stays worker-agnostic, an unclassified exception falls
-                # back to a generic token rather than crashing the classifier,
-                # and a future worker classifies itself for free. Same shape as
-                # pdax.errors.orizon_code's default (ADR 0005).
-                rule = _failure_class(e)
-                failure_tracker.record_failure(step.agent_id, rule)
-                await _emit(task_id, start, "error", f"{worker.name} failed ({rule})")
+                await _step_raised(task_id, start, step_index, step, worker, e, undispatched)
                 continue
 
             if not isinstance(output, dict):
@@ -1003,6 +961,64 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _step_raised(
+    task_id: str,
+    start: float,
+    step_index: int,
+    step: PlanStep,
+    worker: Worker,
+    e: Exception,
+    undispatched: set[int],
+) -> None:
+    """Account for a step whose worker raised: not attempted (added to
+    `undispatched`, neither counted nor rated) or the agent's own failure.
+
+    Called from inside the run loop's handler, so the log's traceback is the
+    exception's own.
+    """
+    not_run = _not_attempted(worker.name, _failure_class(e))
+    if not_run is not None and get_worker(step.agent_id) is worker:
+        # Not the agent's failure: the daily AI budget is spent, the
+        # model provider has no key or is down, or the request gave
+        # the step nothing to work on. The agent was never able to
+        # try, so — like a step refused at execute —
+        # it is not billed, not counted in its failure streak and
+        # not rated (ADR 0005 D5: "did not deliver" and "could not
+        # be asked" are different facts). First-party only: the
+        # classes are ours, and an external step's failure is
+        # classified by its own contract.
+        undispatched.add(step_index)
+        logger.warning("task %s step %d (%s): not run — %s: %s", task_id, step_index, worker.name, not_run, e)
+        await _emit(task_id, start, "error", f"{worker.name}: {not_run} — not charged, not rated")
+        return
+    # exc_info: a revoked key / exhausted quota surfaces as a
+    # provider exception several frames down — the traceback is the
+    # only way to tell those apart without a debugger.
+    logger.error(
+        "task %s step %s (%s): failed: %s",
+        task_id,
+        step.agent_id,
+        worker.name,
+        e,
+        exc_info=True,
+    )
+    # Trace lines are world-readable when TASK_AUTH_REQUIRED is
+    # off — the raw exception text stays in the server log above.
+    # The CLASS is safe to surface and is the whole point: twelve
+    # distinct failures used to render as this one line, so an
+    # operator could not tell "you are down" from "you are slow"
+    # from "your body is the wrong shape" — three different fixes.
+    #
+    # Read duck-typed, not by importing a worker's module: the run
+    # loop stays worker-agnostic, an unclassified exception falls
+    # back to a generic token rather than crashing the classifier,
+    # and a future worker classifies itself for free. Same shape as
+    # pdax.errors.orizon_code's default (ADR 0005).
+    rule = _failure_class(e)
+    failure_tracker.record_failure(step.agent_id, rule)
+    await _emit(task_id, start, "error", f"{worker.name} failed ({rule})")
 
 
 async def _dispatch_step(
