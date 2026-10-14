@@ -66,26 +66,30 @@ class FakeLedger:
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
+    def _rpc(self, request: httpx.Request) -> httpx.Response:
+        """A JSON-RPC call: `getNetwork`, `getTransaction`, else method-not-found."""
+        payload = json.loads(request.content)
+        method, params = payload.get("method"), payload.get("params") or {}
+        self.calls.append(f"rpc {method}")
+
+        def ok(result: Any) -> httpx.Response:
+            return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "result": result})
+
+        if method == "getNetwork":
+            return ok({"passphrase": self.rpc_passphrase})
+        if method == "getTransaction":
+            if self.rpc_down:
+                return _json(503, {"error": "unavailable"})
+            tx = self.txs.get(params["hash"])
+            if tx is None or not tx.rpc_visible:
+                return ok({"status": "NOT_FOUND", "latestLedger": 5000})
+            return ok({"status": tx.status, "ledger": tx.ledger, "latestLedger": 5000})
+        return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601}})
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url.startswith(RPC):
-            payload = json.loads(request.content)
-            method, params = payload.get("method"), payload.get("params") or {}
-            self.calls.append(f"rpc {method}")
-
-            def ok(result: Any) -> httpx.Response:
-                return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "result": result})
-
-            if method == "getNetwork":
-                return ok({"passphrase": self.rpc_passphrase})
-            if method == "getTransaction":
-                if self.rpc_down:
-                    return _json(503, {"error": "unavailable"})
-                tx = self.txs.get(params["hash"])
-                if tx is None or not tx.rpc_visible:
-                    return ok({"status": "NOT_FOUND", "latestLedger": 5000})
-                return ok({"status": tx.status, "ledger": tx.ledger, "latestLedger": 5000})
-            return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601}})
+            return self._rpc(request)
         if url.startswith(HORIZON):
             path = request.url.path
             self.calls.append(f"horizon {request.method} {path}")
