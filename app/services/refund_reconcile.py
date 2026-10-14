@@ -474,7 +474,7 @@ async def _pass(started: float) -> SweepReport:
         asset_sac = sc.contract_ids().asset_sac
         claims = await get_dispute_store().list_refund_claims()
     except Exception as exc:
-        logger.error("refund reconcile: pass failed before any claim was read: %s", exc, exc_info=True)
+        logger.exception("refund reconcile: pass failed before any claim was read: %s", exc)
         return SweepReport(started, time.time(), skipped=f"{type(exc).__name__}")
     counts: Counter[str] = Counter()
     for claim in claims:
