@@ -617,7 +617,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         # outage at `load_account` wedged every uphold it met, and only a hand
         # edit could pay the buyer. Anything else still falls through to the
         # catch-all, because only this type carries that proof.
-        logger.error(
+        logger.exception(
             "dispute %s: refund transfer was refused before it was sent — no funds moved: %s "
             "(job %s, payer %s, %.7f USDC)",
             dispute.id,
