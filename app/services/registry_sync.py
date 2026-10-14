@@ -465,6 +465,19 @@ async def _read_agent(contract_id: str, agent_id: str, batched: dict[str, dict[s
         return None
 
 
+def _close_pass(ids: list[str]) -> None:
+    """Record the pass as full when every listed non-`agt_` id has answered, or name those that have not."""
+    unanswered = [i for i in ids if not i.startswith("agt_") and i not in _answered_ids]
+    if unanswered:
+        logger.debug(
+            "registry sync: pass not full — %d listed id(s) have never answered a read: %s",
+            len(unanswered),
+            ", ".join(unanswered[:5]),
+        )
+    else:
+        _record_full_pass()
+
+
 async def sync_once() -> int:
     """Run one full sync pass; returns the number of agents upserted.
 
@@ -526,15 +539,7 @@ async def _pass() -> int:
         _refused_price_ids.discard(agent_id)
         state.add_agent(agent)
         synced += 1
-    unanswered = [i for i in ids if not i.startswith("agt_") and i not in _answered_ids]
-    if unanswered:
-        logger.debug(
-            "registry sync: pass not full — %d listed id(s) have never answered a read: %s",
-            len(unanswered),
-            ", ".join(unanswered[:5]),
-        )
-    else:
-        _record_full_pass()
+    _close_pass(ids)
     return synced
 
 
