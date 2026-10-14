@@ -64,6 +64,15 @@ _DEFERRED_LIST = re.compile(r"Deferred:.*$")
 _DEFERRED = re.compile(r"\b(defer|deferred|later|not yet|out of scope|omitted|left out|future)\b", re.I)
 
 
+def _saved_html(d: Path, stem: str) -> tuple[str | None, str]:
+    """The run's saved HTML file name and text: the first `<stem>__*.html`
+    in `d`, or (None, "") when the run saved none."""
+    html_files = sorted(d.glob(f"{stem}__*.html"))
+    if not html_files:
+        return None, ""
+    return html_files[0].name, html_files[0].read_text(encoding="utf-8")
+
+
 def _code_length(d: Path, *, revalidate: bool) -> list[dict[str, Any]]:
     """Per run of a complex code.gen re-measure: what the record and the saved
     HTML say. With `revalidate`, the validator as it stands now is run over the
@@ -86,9 +95,7 @@ def _code_length(d: Path, *, revalidate: bool) -> list[dict[str, Any]]:
             out.append({"label": rec.get("label"), "skipped": rec["skipped"]})
             continue
         call = rec["calls"][0] if rec["calls"] else {}
-        stem = p.stem
-        html_files = sorted(d.glob(f"{stem}__*.html"))
-        html = html_files[0].read_text(encoding="utf-8") if html_files else ""
+        html_name, html = _saved_html(d, p.stem)
         summary = str((rec.get("output") or {}).get("summary") or "")
         out.append(
             {
@@ -105,14 +112,14 @@ def _code_length(d: Path, *, revalidate: bool) -> list[dict[str, Any]]:
                 "bytes": len(html.encode()) if html else None,
                 "validator": (validate_html(html) if html else None)
                 if revalidate
-                else frozen.get(html_files[0].name if html_files else "", _recorded_violations(rec)),
+                else frozen.get(html_name or "", _recorded_violations(rec)),
                 "hit_token_ceiling": call.get("stop_reason") == "max_tokens",
                 "hit_stream_budget": "did not finish within" in str(rec.get("error") or ""),
                 "summary": summary,
                 "deferred_listed": bool(_DEFERRED.search(summary)),
                 "deferred_quote": m.group(0).strip() if (m := _DEFERRED_LIST.search(summary)) else None,
                 "chars_per_line": round(len(html) / len(html.splitlines()), 1) if html else None,
-                "html": html_files[0].name if html_files else None,
+                "html": html_name,
                 "error": rec.get("error"),
             }
         )
