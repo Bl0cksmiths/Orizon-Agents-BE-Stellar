@@ -1167,6 +1167,7 @@ class Settings(BaseSettings):
         self._report_unknown_pdax_environment()
         self._report_malformed_pdax_otp_secret()
         self._report_malformed_stellar_signing_key()
+        self._report_contract_reads_without_a_source_address()
 
     def _report_unknown_pdax_environment(self) -> None:
         """Name a mistyped PDAX_ENVIRONMENT at startup, not at first use.
@@ -1266,8 +1267,7 @@ class Settings(BaseSettings):
                 "/server/seal will answer 400 charge_failed. Re-inject the key from host secrets."
             )
 
-    @model_validator(mode="after")
-    def _report_contract_reads_without_a_source_address(self) -> "Settings":
+    def _report_contract_reads_without_a_source_address(self) -> None:
         """Name a missing STELLAR_ADMIN_ADDRESS at startup, not per request.
 
         Every simulate_read needs a source account, and app/stellar/client.py
@@ -1285,7 +1285,7 @@ class Settings(BaseSettings):
         /readiness already calls incomplete on the contract ids alone.
         """
         if self.stellar_admin_address.strip():
-            return self
+            return
         configured = [
             name
             for name, value in (
@@ -1305,7 +1305,6 @@ class Settings(BaseSettings):
                 "not_ready. Set STELLAR_ADMIN_ADDRESS to the G… address that funds simulation.",
                 ", ".join(configured),
             )
-        return self
 
     @property
     def cors_origin_list(self) -> list[str]:
