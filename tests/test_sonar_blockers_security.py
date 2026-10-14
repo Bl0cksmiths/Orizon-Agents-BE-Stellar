@@ -125,3 +125,22 @@ def test_a_secret_in_the_message_is_masked_and_the_record_still_emitted(
     [emitted] = handler.records
     assert emitted.getMessage() == f"login failed with {REDACTED}"
     assert SECRET not in handler.format(emitted)
+
+
+def test_a_secret_in_a_traceback_is_masked_and_the_record_still_emitted(
+    redacting_logger: tuple[logging.Logger, _CollectingHandler],
+) -> None:
+    logger, handler = redacting_logger
+
+    try:
+        raise ConnectionError(f"pdax rejected {SECRET}")
+    except ConnectionError:
+        logger.exception("pdax login failed")
+
+    [emitted] = handler.records
+    rendered = handler.format(emitted)
+    assert SECRET not in rendered
+    assert f"pdax rejected {REDACTED}" in rendered
+    assert rendered.startswith("pdax login failed\nTraceback")
+    # Folded into the message, so no formatter can render the raw traceback.
+    assert emitted.exc_info is None
