@@ -193,6 +193,28 @@ def test_an_unconfirmed_seal_with_nobody_to_hand_it_to_still_returns_the_settle(
     )
 
 
+def test_an_unconfirmed_seal_is_logged_and_handed_to_the_run(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    chain = _install(monkeypatch, _Chain(auth=_auth(), seal={"hash": "5a" * 32, "status": "FAILED"}))
+    handed: list[execution_svc._PendingSeal] = []
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        settle_tx, _, job_id = _settle((0.01, 0.02), frozenset({0, 1}), on_seal_pending=handed.append)
+
+    assert job_id is not None
+    [pending] = handed
+    [seal] = chain.named("seal")
+    assert (pending.job_id, pending.agents, pending.kind, pending.record) == (job_id, 2, "paid", None)
+    assert pending.total_usdc == pytest.approx(0.03)
+    assert [a.to_xdr() for a in pending.args] == [a.to_xdr() for a in seal]
+    assert [(s.tx_hash, s.outcome) for s in pending.submissions] == [("5a" * 32, "rejected")]
+    assert _errors(caplog) == [
+        f"task {TASK}: AttestationRegistry.seal did not confirm — rejected, hash={'5a' * 32}; reconciling "
+        f"(job {job_id.hex()} settled 300000 stroops via tx {settle_tx}, auth {AUTH_ID_HEX}, payer {PAYER})"
+    ]
+
+
 def test_a_failure_after_the_settle_confirmed_keeps_its_hash_and_settlement(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
