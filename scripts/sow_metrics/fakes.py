@@ -357,10 +357,7 @@ class FakeWorld:
             return self.backend(path)
         if url.startswith(FRONTEND):
             self.calls.append(f"frontend {path}")
-            status, body = self.pages.get(path, (404, "<html>not found</html>"))
-            if status in (301, 302, 307, 308):
-                return httpx.Response(status, headers={"location": f"{FRONTEND}/login"})
-            return httpx.Response(status, text=body, headers={"content-type": "text/html"})
+            return self.frontend(path)
         if url.startswith(GITHUB):
             self.calls.append(f"github {path}")
             name = path.removeprefix("/repos/")
@@ -395,6 +392,13 @@ class FakeWorld:
                 paths.setdefault(route_path, {})[method.lower()] = {}
             return _json(200, {"openapi": "3.1.0", "paths": paths})
         return _json(404, {"detail": "Not Found"})
+
+    def frontend(self, path: str) -> httpx.Response:
+        """A frontend page from `pages`: a redirect points at the login page, a missing page answers 404."""
+        status, body = self.pages.get(path, (404, "<html>not found</html>"))
+        if status in (301, 302, 307, 308):
+            return httpx.Response(status, headers={"location": f"{FRONTEND}/login"})
+        return httpx.Response(status, text=body, headers={"content-type": "text/html"})
 
     def api(self, path: str) -> httpx.Response:
         if path in self.api_down:
