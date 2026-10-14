@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from stellar_sdk import Account, Address, Keypair, TransactionBuilder, TransactionEnvelope, scval
+from stellar_sdk import Account, Address, Keypair, Network, TransactionBuilder, TransactionEnvelope, scval
 from stellar_sdk import xdr as stellar_xdr
 from stellar_sdk.operation import InvokeHostFunction
 
@@ -45,7 +45,7 @@ REGISTRY = "CAPHXWU53UZUZJGV7IAE57NNMH3YYB5MTWO6YA53KKMXSFVLOITBJ3GQ"
 LEDGER = "CDCSOBEVZUPQZV5GV4D6KYHZCLNGW2KXY74RUHSZ3EZUXF34DPW422ZT"
 ATTEST = "CBYUZKOET43UXTBXZUJIBBJW5ODGD2J2AZVVXCR3QONGOCAHOXQQHEGK"
 SAC = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 AGENT = "ext_agent"
 AGENT_NAME = "External Agent"
