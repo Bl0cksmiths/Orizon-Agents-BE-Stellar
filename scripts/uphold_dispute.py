@@ -727,6 +727,33 @@ def check_config() -> int:
     )
 
 
+def _report_credited(dispute: DisputeRecord, refund_tx: str, amount: float | None, fallback: int) -> int:
+    """`report` for a dispute credited with its refund on record: whose payment
+    it was (this run's, an earlier run's, or a concurrent adjudication's), and
+    the evidence for it."""
+    say()
+    if fallback == EXIT_ADJUDICATION_RACE:
+        # This run planned an amount and never signed it: the adjudication
+        # it lost the race to has since paid. Crediting it to this run's
+        # own preview would put a figure this process computed beside a
+        # hash it had no part in.
+        say(f"  CREDITED — {dispute.payer} was paid by the adjudication running alongside this one;")
+        say("             this run signed no transfer, and the hash below is not its doing.")
+    elif amount is None:
+        say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
+    else:
+        say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
+    say(f"  status:    {dispute.status}")
+    say(f"  tx:        {refund_tx}")
+    say(f"  evidence:  {expert_url('tx', refund_tx)}")
+    say(f"  payer:     {expert_url('account', dispute.payer)}")
+    say()
+    say("  Funded by the platform's settler wallet. The disputed agent was NOT charged —")
+    say("  label it that way wherever this hash is quoted.")
+    say()
+    return EXIT_OK
+
+
 def _report_upheld(dispute: DisputeRecord, fallback: int) -> int:
     """`report` for a dispute the store still reads `upheld`: no credit was paid.
 
@@ -829,27 +856,7 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         return unresolved_credit(dispute, EXIT_TIMEOUT, "THE TRANSFER TIMED OUT — IT MAY STILL LAND.", amount)
 
     if dispute.status == "credited" and dispute.refund_tx:
-        say()
-        if fallback == EXIT_ADJUDICATION_RACE:
-            # This run planned an amount and never signed it: the adjudication
-            # it lost the race to has since paid. Crediting it to this run's
-            # own preview would put a figure this process computed beside a
-            # hash it had no part in.
-            say(f"  CREDITED — {dispute.payer} was paid by the adjudication running alongside this one;")
-            say("             this run signed no transfer, and the hash below is not its doing.")
-        elif amount is None:
-            say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
-        else:
-            say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
-        say(f"  status:    {dispute.status}")
-        say(f"  tx:        {dispute.refund_tx}")
-        say(f"  evidence:  {expert_url('tx', dispute.refund_tx)}")
-        say(f"  payer:     {expert_url('account', dispute.payer)}")
-        say()
-        say("  Funded by the platform's settler wallet. The disputed agent was NOT charged —")
-        say("  label it that way wherever this hash is quoted.")
-        say()
-        return EXIT_OK
+        return _report_credited(dispute, dispute.refund_tx, amount, fallback)
 
     if dispute.status == "upheld":
         return _report_upheld(dispute, fallback)
