@@ -51,7 +51,9 @@ _HAS_VIEWPORT = re.compile(
 # handlers, and javascript: URLs. Prose and markup are ignored by construction.
 _SCRIPT_BLOCK = re.compile(r"<script\b[^>]*>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
 _INLINE_HANDLER = re.compile(r"""\son[a-z]{2,}\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-_JS_URL = re.compile(r"""(?:href|src|action)\s*=\s*["']?\s*javascript:([^"'>]*)""", re.IGNORECASE)
+# The optional quote owns the whitespace after it, so no two quantifiers can
+# share a run of spaces and an unterminated attribute is rejected in linear time.
+_JS_URL = re.compile(r"""(?:href|src|action)\s*=\s*(?:["']\s*)?javascript:([^"'>]*)""", re.IGNORECASE)
 
 # (regex, short human-readable label). Deliberately narrow: `localStorage` is
 # NOT here — all four demo kits persist state with it, it is the documented
