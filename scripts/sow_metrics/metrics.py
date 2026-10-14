@@ -1108,7 +1108,7 @@ def _licence_verdict(answer: Answer) -> tuple[Any, str, str | None]:
     return spdx, f"licence detected: {spdx}, not MIT", f"licence {spdx}"
 
 
-def m11(snap: Snapshot, rules: Rules) -> Metric:
+def m11(snap: Snapshot) -> Metric:
     row = SOW_ROWS[10]
     method = (
         "Asked GitHub which licence it detects on each repository: the frontend, backend and smart contracts the "
@@ -1180,5 +1180,5 @@ def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None)
         m08(snap, refunds),
         m09(snap, pending.get("m09")),
         m10(snap, pending.get("m10")),
-        m11(snap, rules),
+        m11(snap),
     ]
