@@ -293,6 +293,20 @@ async def unbind_challenge(
 @router.post(
     "/{agent_id}/bind/challenge",
     summary="Mint a binding challenge to sign",
+    responses={
+        **_OWNER_RESPONSES,
+        422: {
+            "model": ErrorEnvelope,
+            "description": "`endpoint_not_allowed` — the endpoint fails the endpoint policy; or invalid input.",
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`registry_unavailable` — the owner could not be read on-chain; or `challenge_capacity_bind` — "
+                "every bind challenge slot is live. Retry."
+            ),
+        },
+    },
 )
 async def bind_challenge(
     body: BindChallengeReq,
