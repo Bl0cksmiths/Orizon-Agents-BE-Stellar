@@ -242,6 +242,34 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     return analysis
 
 
+def _spend_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
+    """The spend table: measured, estimated, and each separately capped re-measure."""
+    sp = a["spend"]
+    return [
+        "## Spend",
+        "",
+        _block("spend", keep),
+        "",
+        "| item | amount |",
+        "|---|---|",
+        f"| jev guard, 168 calls (from recorded tokens) | {usd(sp['guard_usd'])} |",
+        f"| workers, as reported by the API | {usd(sp['workers_reported_usd'])} |",
+        f"| **measured total** | **{usd(sp['measured_total_usd'])}** |",
+        *[
+            f"| cut-off stream, {k} (estimated, unreported) | ≈ {usd(v)} |"
+            for k, v in sp["cut_off_estimated_usd"].items()
+        ],
+        f"| **total including estimates** | **{usd(sp['total_with_estimates_usd'])}** |",
+        *(
+            [f"| complex code.gen re-measure (separate $0.20 cap) | {usd(sp['code_length_usd'])} |"]
+            if a.get("code_length")
+            else []
+        ),
+        *([f"| final check (separate $0.25 cap) | {usd(sp['final_usd'])} |"] if a.get("final") else []),
+        "",
+    ]
+
+
 def render(a: dict[str, Any], keep: dict[str, str]) -> str:
     old, pool, new = a["campaign_rep0"], a["campaign_pooled"], a["recheck"]
     L = [
@@ -389,25 +417,5 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
             quote = f"“{r['deferred_quote']}”" if r["deferred_quote"] else "no “Deferred: …” list"
             L.append(f"- **{r['label']}** (`r4-final/{r['html']}`): {_cell(r['summary'])} — {quote}")
         L += ["", _block("final_notes", keep), ""]
-    L += ["## Spend", "", _block("spend", keep), ""]
-    sp = a["spend"]
-    L += [
-        "| item | amount |",
-        "|---|---|",
-        f"| jev guard, 168 calls (from recorded tokens) | {usd(sp['guard_usd'])} |",
-        f"| workers, as reported by the API | {usd(sp['workers_reported_usd'])} |",
-        f"| **measured total** | **{usd(sp['measured_total_usd'])}** |",
-        *[
-            f"| cut-off stream, {k} (estimated, unreported) | ≈ {usd(v)} |"
-            for k, v in sp["cut_off_estimated_usd"].items()
-        ],
-        f"| **total including estimates** | **{usd(sp['total_with_estimates_usd'])}** |",
-        *(
-            [f"| complex code.gen re-measure (separate $0.20 cap) | {usd(sp['code_length_usd'])} |"]
-            if a.get("code_length")
-            else []
-        ),
-        *([f"| final check (separate $0.25 cap) | {usd(sp['final_usd'])} |"] if a.get("final") else []),
-        "",
-    ]
+    L += _spend_section(a, keep)
     return "\n".join(L) + "\n"
