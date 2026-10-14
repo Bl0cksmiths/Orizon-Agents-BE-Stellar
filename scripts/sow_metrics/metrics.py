@@ -913,7 +913,7 @@ def m06(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Met
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m07(snap: Snapshot, rules: Rules) -> Metric:
+def m07(snap: Snapshot) -> Metric:
     row = SOW_ROWS[6]
     method = (
         "Read the live reputation settings the router applies (whether the floor is on, and its value) from the "
@@ -1176,7 +1176,7 @@ def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None)
         m04(snap, rules),
         refunds,
         m06(snap, rules, pending.get("m06")),
-        m07(snap, rules),
+        m07(snap),
         m08(snap, rules, refunds),
         m09(snap, rules, pending.get("m09")),
         m10(snap, rules, pending.get("m10")),
