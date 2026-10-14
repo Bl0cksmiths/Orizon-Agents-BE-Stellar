@@ -257,7 +257,7 @@ def _wallet(body: bytes, fields: tuple[str, ...]) -> str | None:
     """
     try:
         payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError are both ValueErrors
         return None
     if not isinstance(payload, dict):
         return None
