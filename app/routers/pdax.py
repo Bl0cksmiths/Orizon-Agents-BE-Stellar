@@ -109,6 +109,7 @@ _RAMP_PRICING_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     502: _UPSTREAM_UNAVAILABLE,
 }
+_RAMP_NOT_FOUND: dict[str, Any] = {"model": ErrorEnvelope, "description": "No ramp with this id in this process."}
 
 
 def _fail(e: PdaxError) -> HTTPException:
@@ -585,7 +586,7 @@ async def ramp_list(
     }
 
 
-@secured.get("/ramp/{ramp_id}")
+@secured.get("/ramp/{ramp_id}", responses={401: _INVALID_API_KEY, 404: _RAMP_NOT_FOUND})
 async def ramp_status(ramp_id: str) -> RampRecord:
     """Current state + stage history of a single ramp."""
     record = pr.ramp_store.get(ramp_id)
