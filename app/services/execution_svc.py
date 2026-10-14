@@ -542,6 +542,11 @@ class _RunState:
     # after the settle) may rewrite it as `failed` with no hash.
     finalized: bool = False
 
+    def bill(self, *, onchain: bool) -> int:
+        """The run's bill in stroops: what a paid run's settle moved, or what a
+        simulated run's delivered steps are priced at."""
+        return self.charged if onchain else self.spent
+
 
 async def _run(
     plan: StoredPlan,
@@ -572,76 +577,7 @@ async def _run(
         fresh = await _recheck_reputation(task_id, start, plan)
 
         for step_index, step in enumerate(plan.plan.steps):
-            refusal = _execute_refusal(step, fresh.get(step.agent_id))
-            if refusal is not None:
-                # Story 2.03's rule for a step that fails, applied to a step
-                # that is refused: it is skipped, nothing is added to `spent`
-                # (so neither the simulated total nor the on-chain charge
-                # includes it), the settlement records it as not delivered,
-                # and the run carries on with the steps that remain. It is
-                # also NOT rated and NOT counted as a failure — the agent was
-                # never asked, and a withdrawal is its operator's decision,
-                # not a delivery it failed (ADR 0005 D5). By index, like every
-                # other per-step set here.
-                run.undispatched.add(step_index)
-                logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
-                await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
-                continue
-
-            # Resolution deliberately stays OUTSIDE the per-step try/except
-            # below. It is a lookup, not the step's work: resolve_worker fails
-            # OPEN — an unreadable binding store logs and returns None — so the
-            # only thing left that could raise here is a bug in resolution
-            # itself, which would repeat on every step anyway. Letting that
-            # reach the run-level handler (status "failed", stream closed) is
-            # therefore the honest outcome, and is what the suite pins.
-            worker = await resolve_worker(step.agent_id)
-            if worker is None:
-                # No local worker and no resolvable binding. A bound agent
-                # that could not be resolved degrades identically to one nobody
-                # ever registered — the step is skipped, unbilled, and the run
-                # continues. Trace lines only reach the SSE viewer and are
-                # dropped with the task; every step failure also goes to the
-                # server log so an outage is diagnosable after the fact.
-                # Never dispatched, so never rated. resolve_worker fails OPEN,
-                # which means this branch is also where OUR outage lands — an
-                # unreadable binding store returns None exactly like a missing
-                # binding, and the read failure is negative-cached, so one blip
-                # can hit several steps. Rating here would write a permanent
-                # on-chain 20/100 against an operator who was never asked to
-                # deliver. "Did not deliver" and "was never asked" are
-                # different facts and only the first is theirs (ADR 0005 D5).
-                # THIS step, not this agent: the same agent may be resolvable
-                # at another step of the plan, and that step's delivery is its
-                # own evidence.
-                run.undispatched.add(step_index)
-                logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
-                await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
-                continue
-
-            await _emit(
-                task_id,
-                start,
-                "exec",
-                f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
-            )
-            upstream_line = _upstream_line(worker, run.context, first_party=get_worker(step.agent_id) is worker)
-            if upstream_line:
-                await _emit(task_id, start, "exec", upstream_line)
-
-            try:
-                output = await _dispatch_step(task_id, start, plan, step, worker, run.context)
-            except asyncio.TimeoutError:
-                await _step_timed_out(task_id, start, step, worker)
-                continue
-            except Exception as e:
-                await _step_raised(task_id, start, step_index, step, worker, e, run.undispatched)
-                continue
-
-            if await _rejected_output(task_id, start, step, worker, output):
-                continue
-
-            await _record_delivery(task_id, start, step_index, step, worker, output, run, onchain=onchain)
+            await _run_step(task_id, start, plan, step_index, step, fresh.get(step.agent_id), run, onchain=onchain)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, run.succeeded, run.last_artifact)
@@ -655,174 +591,48 @@ async def _run(
         # Seals that did not confirm, reconciled once the receipt is final.
         pending_seals: list[_PendingSeal] = []
 
-        def _money_moved(settle_tx: str, moved: int) -> None:
-            # Called the moment the settle (v2) or charge (v1) CONFIRMS, before
-            # the seal's own poll: the receipt is final, with the hash of what
-            # moved and how much, from that instant. The seal's hash is added
-            # when it lands.
-            run.charged = moved
-            _finalize_task(task_id, status, run.charged, run.last_artifact, settle_tx, None)
-            run.finalized = True
-
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
-            if run.succeeded == 0 and await _escrow_version() >= 2:
-                # v2 holds the buyer's funds in custody from `authorize`, so
-                # "bill nothing" is not the same as "do nothing": an empty
-                # `settle` releases every stroop back to them now, instead of
-                # leaving it locked until they reclaim it after expiry. Nothing
-                # is recorded or sealed — there is no delivered work.
-                run.settle_attempted = True
-                run.charge_tx, _, _ = await _settle_v2(
-                    task_id,
-                    start,
-                    plan,
-                    payer=payer,
-                    auth_id_hex=auth_id_hex,
-                    delivered_steps=frozenset(),
-                    authorized_max=authorized_max,
-                )
-                rate_under = unsettled_job_id(task_id)
-            elif run.succeeded == 0:
-                # Same rule as the simulated branch below — a workflow that
-                # produced nothing has nothing to attest to, and nothing to
-                # bill: charging here would consume the payer's escrow
-                # authorization for a dust amount (max(total, 0.000001)) and
-                # seal an attestation for an empty job.
-                logger.info(
-                    "task %s: no step produced output — charge/seal skipped, ratings still submitted"
-                    " (auth %s, payer %s)",
-                    task_id,
-                    auth_id_hex,
-                    payer,
-                )
-                await _emit(
-                    task_id,
-                    start,
-                    "exec",
-                    "no agent produced output — skipping on-chain charge/seal",
-                    settlement="skipped",
-                )
-                # Ratings are NOT skipped with them (ADR 0005 D2). Charge and
-                # seal are correctly withheld, but ratings run the other way:
-                # a run where every step failed is precisely the evidence the
-                # routing floor needs, and withholding it meant the canonical
-                # broken endpoint — down, failing everything — accumulated no
-                # negative evidence at all and stayed routable forever.
-                rate_under = unsettled_job_id(task_id)
-            else:
-                # The settlement is recorded inside this, the moment the charge
-                # confirms and before the seal — and so before the ratings
-                # below, which are a SEQUENTIAL run of on-chain submits, one per
-                # step, each waiting up to ~30s on a status poll. A process that
-                # dies partway through any of them (a Render redeploy, an idle
-                # spin-down) would otherwise take the buyer's only evidence of
-                # what they paid for with it. It touches no chain, and a store
-                # that is down cannot fail the run — see `_record_settlement`.
-                run.settle_attempted = True
-                run.charge_tx, run.proof_tx, job_id = await _settle_and_record(
-                    task_id,
-                    start,
-                    plan,
-                    payer=payer,
-                    auth_id_hex=auth_id_hex,
-                    total_usdc=money.stroops_to_float(run.spent),
-                    delivered_steps=frozenset(run.delivered_steps),
-                    output_summaries=run.output_summaries,
-                    authorized_max=authorized_max,
-                    on_money_moved=_money_moved,
-                    on_seal_pending=pending_seals.append,
-                )
-                # Rated whether or not the money moved, exactly as the
-                # no-success branch above is (ADR 0005 D2). This used to sit
-                # behind `if charge_tx and job_id`, which made every rating a
-                # partial run could produce conditional on a settlement that
-                # never happens: _settle_onchain returns (None, None, None)
-                # when the charge raises and (charge_tx, None, None) when it
-                # comes back non-SUCCESS, so a run where one agent delivered
-                # and another did not submitted NOTHING. The agent that failed
-                # kept its prior and stayed routable, and the operator who did
-                # deliver earned no positive evidence either — the exact
-                # asymmetry the story exists to remove. Settlement answers
-                # "who gets paid"; a rating answers "who delivered", and the
-                # second does not depend on the first.
-                #
-                # The job id is minted by the charge, so a run that did not
-                # settle has none. Falling back to the task-derived id is what
-                # lets the evidence land anyway, and it is derived rather than
-                # random so the ledger's (agent_id, job_id) replay guard still
-                # counts one run exactly once.
-                rate_under = job_id or unsettled_job_id(task_id)
+            rate_under = await _settle_paid_run(
+                task_id,
+                start,
+                plan,
+                run,
+                status,
+                pending_seals,
+                auth_id_hex=auth_id_hex,
+                payer=payer,
+                authorized_max=authorized_max,
+            )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
-            # workflow that produced nothing has nothing to attest to — and it
-            # counts the agents that delivered, never the plan's (D-086).
-            sim_hash = "0x" + secrets.token_hex(16)
-            await _emit(task_id, start, "proof", f"ERC-8004 attestation: {sim_hash} (simulated)")
-            await _emit(
-                task_id,
-                start,
-                "proof",
-                f"workflow sealed — {run.succeeded} agents · {_amount(run.spent)} · {time.monotonic() - start:.2f}s",
-            )
+            # workflow that produced nothing has nothing to attest to.
+            await _emit_simulated_seal(task_id, start, run)
 
         if status != "complete":
-            logger.error(
-                "task %s finalized as %s: %d/%d steps produced output, artifact=%s",
-                task_id,
-                status,
-                run.succeeded,
-                total_steps,
-                run.last_artifact is not None,
-            )
-            await _emit(
-                task_id,
-                start,
-                "error",
-                f"workflow incomplete — {run.succeeded}/{total_steps} agents produced output",
-            )
+            await _report_incomplete(task_id, start, status, run, total_steps)
 
-        _finalize_task(
-            task_id, status, run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-        )
+        _finalize_task(task_id, status, run.bill(onchain=onchain), run.last_artifact, run.charge_tx, run.proof_tx)
         run.finalized = True
 
         # Follow-up work, in this order because both sign with the one server
         # account and parallel submits collide on its sequence number: first
         # the seal reconciliation (the attestation of money that moved), then
         # the ratings.
-        for pending in pending_seals:
-            await _reconcile_seal(task_id, start, pending)
-        if rate_under is not None and payer:
-            await _submit_ratings(
-                task_id,
-                start,
-                plan,
-                run.delivered,
-                payer=payer,
-                job_id=rate_under,
-                undispatched=frozenset(run.undispatched),
-                first_party_ids=frozenset(run.first_party_ids),
-            )
+        await _follow_up(task_id, start, plan, run, pending_seals, rate_under, payer)
 
     except asyncio.CancelledError:
         # Shutdown or external cancel: leave the task terminal instead of
         # "running" forever, tell the stream, and keep the cancellation
         # propagating. shield: a second cancel must not kill the trace line.
         # A task already final keeps what it says (see `finalized`).
-        if not run.finalized:
-            _finalize_task(
-                task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-            )
+        _finalize_on_exit(task_id, run, onchain=onchain)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not run.settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
         raise
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
-        if not run.finalized:
-            _finalize_task(
-                task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-            )
+        _finalize_on_exit(task_id, run, onchain=onchain)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not run.settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
@@ -836,6 +646,274 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _follow_up(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    run: _RunState,
+    pending_seals: list[_PendingSeal],
+    rate_under: bytes | None,
+    payer: str | None,
+) -> None:
+    """The run's work after its task is final: reconcile each seal that did
+    not confirm, then submit the ratings (a paid run only)."""
+    for pending in pending_seals:
+        await _reconcile_seal(task_id, start, pending)
+    if rate_under is not None and payer:
+        await _submit_ratings(
+            task_id,
+            start,
+            plan,
+            run.delivered,
+            payer=payer,
+            job_id=rate_under,
+            undispatched=frozenset(run.undispatched),
+            first_party_ids=frozenset(run.first_party_ids),
+        )
+
+
+def _finalize_on_exit(task_id: str, run: _RunState, *, onchain: bool) -> None:
+    """Write a run that ended early (cancelled, or failed by a bug) as `failed`
+    with what it had — unless its task is already final, in which case the
+    receipt keeps what it says (see `_RunState.finalized`)."""
+    if run.finalized:
+        return
+    _finalize_task(task_id, "failed", run.bill(onchain=onchain), run.last_artifact, run.charge_tx, run.proof_tx)
+
+
+async def _report_incomplete(task_id: str, start: float, status: TaskStatus, run: _RunState, total_steps: int) -> None:
+    """Say, in the log and the trace, that a run ended short of its plan."""
+    logger.error(
+        "task %s finalized as %s: %d/%d steps produced output, artifact=%s",
+        task_id,
+        status,
+        run.succeeded,
+        total_steps,
+        run.last_artifact is not None,
+    )
+    await _emit(
+        task_id,
+        start,
+        "error",
+        f"workflow incomplete — {run.succeeded}/{total_steps} agents produced output",
+    )
+
+
+async def _emit_simulated_seal(task_id: str, start: float, run: _RunState) -> None:
+    """A simulated run's seal: a made-up attestation hash and the run's
+    total, counting the agents that delivered, never the plan's (D-086)."""
+    sim_hash = "0x" + secrets.token_hex(16)
+    await _emit(task_id, start, "proof", f"ERC-8004 attestation: {sim_hash} (simulated)")
+    await _emit(
+        task_id,
+        start,
+        "proof",
+        f"workflow sealed — {run.succeeded} agents · {_amount(run.spent)} · {time.monotonic() - start:.2f}s",
+    )
+
+
+async def _settle_paid_run(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    run: _RunState,
+    status: TaskStatus,
+    pending_seals: list[_PendingSeal],
+    *,
+    auth_id_hex: str,
+    payer: str,
+    authorized_max: int | None,
+) -> bytes:
+    """Settle a paid run that reached the end of its plan, and return the job
+    id its ratings are written under.
+
+    `run` records the settle's hashes, whether one was attempted, and — the
+    moment money moves — what it moved, with the task made final then. A seal
+    that did not confirm is appended to `pending_seals`.
+    """
+
+    def _money_moved(settle_tx: str, moved: int) -> None:
+        # Called the moment the settle (v2) or charge (v1) CONFIRMS, before
+        # the seal's own poll: the receipt is final, with the hash of what
+        # moved and how much, from that instant. The seal's hash is added
+        # when it lands.
+        run.charged = moved
+        _finalize_task(task_id, status, run.charged, run.last_artifact, settle_tx, None)
+        run.finalized = True
+
+    if run.succeeded == 0 and await _escrow_version() >= 2:
+        # v2 holds the buyer's funds in custody from `authorize`, so
+        # "bill nothing" is not the same as "do nothing": an empty
+        # `settle` releases every stroop back to them now, instead of
+        # leaving it locked until they reclaim it after expiry. Nothing
+        # is recorded or sealed — there is no delivered work.
+        run.settle_attempted = True
+        run.charge_tx, _, _ = await _settle_v2(
+            task_id,
+            start,
+            plan,
+            payer=payer,
+            auth_id_hex=auth_id_hex,
+            delivered_steps=frozenset(),
+            authorized_max=authorized_max,
+        )
+        return unsettled_job_id(task_id)
+    if run.succeeded == 0:
+        # Same rule as a simulated run — a workflow that
+        # produced nothing has nothing to attest to, and nothing to
+        # bill: charging here would consume the payer's escrow
+        # authorization for a dust amount (max(total, 0.000001)) and
+        # seal an attestation for an empty job.
+        logger.info(
+            "task %s: no step produced output — charge/seal skipped, ratings still submitted (auth %s, payer %s)",
+            task_id,
+            auth_id_hex,
+            payer,
+        )
+        await _emit(
+            task_id,
+            start,
+            "exec",
+            "no agent produced output — skipping on-chain charge/seal",
+            settlement="skipped",
+        )
+        # Ratings are NOT skipped with them (ADR 0005 D2). Charge and
+        # seal are correctly withheld, but ratings run the other way:
+        # a run where every step failed is precisely the evidence the
+        # routing floor needs, and withholding it meant the canonical
+        # broken endpoint — down, failing everything — accumulated no
+        # negative evidence at all and stayed routable forever.
+        return unsettled_job_id(task_id)
+    # The settlement is recorded inside this, the moment the charge
+    # confirms and before the seal — and so before the ratings
+    # that follow, which are a SEQUENTIAL run of on-chain submits, one per
+    # step, each waiting up to ~30s on a status poll. A process that
+    # dies partway through any of them (a Render redeploy, an idle
+    # spin-down) would otherwise take the buyer's only evidence of
+    # what they paid for with it. It touches no chain, and a store
+    # that is down cannot fail the run — see `_record_settlement`.
+    run.settle_attempted = True
+    run.charge_tx, run.proof_tx, job_id = await _settle_and_record(
+        task_id,
+        start,
+        plan,
+        payer=payer,
+        auth_id_hex=auth_id_hex,
+        total_usdc=money.stroops_to_float(run.spent),
+        delivered_steps=frozenset(run.delivered_steps),
+        output_summaries=run.output_summaries,
+        authorized_max=authorized_max,
+        on_money_moved=_money_moved,
+        on_seal_pending=pending_seals.append,
+    )
+    # Rated whether or not the money moved, exactly as the
+    # no-success branch above is (ADR 0005 D2). This used to sit
+    # behind `if charge_tx and job_id`, which made every rating a
+    # partial run could produce conditional on a settlement that
+    # never happens: _settle_onchain returns (None, None, None)
+    # when the charge raises and (charge_tx, None, None) when it
+    # comes back non-SUCCESS, so a run where one agent delivered
+    # and another did not submitted NOTHING. The agent that failed
+    # kept its prior and stayed routable, and the operator who did
+    # deliver earned no positive evidence either — the exact
+    # asymmetry the story exists to remove. Settlement answers
+    # "who gets paid"; a rating answers "who delivered", and the
+    # second does not depend on the first.
+    #
+    # The job id is minted by the charge, so a run that did not
+    # settle has none. Falling back to the task-derived id is what
+    # lets the evidence land anyway, and it is derived rather than
+    # random so the ledger's (agent_id, job_id) replay guard still
+    # counts one run exactly once.
+    return job_id or unsettled_job_id(task_id)
+
+
+async def _run_step(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    step_index: int,
+    step: PlanStep,
+    info: reputation_svc.RepInfo | None,
+    run: _RunState,
+    *,
+    onchain: bool,
+) -> None:
+    """One step of the run: refused, unresolved, failed or delivered, each
+    accounted for on `run`. A step's own failure never escapes; a bug in
+    resolving its worker does, to the run-level handler."""
+    refusal = _execute_refusal(step, info)
+    if refusal is not None:
+        # Story 2.03's rule for a step that fails, applied to a step
+        # that is refused: it is skipped, nothing is added to `spent`
+        # (so neither the simulated total nor the on-chain charge
+        # includes it), the settlement records it as not delivered,
+        # and the run carries on with the steps that remain. It is
+        # also NOT rated and NOT counted as a failure — the agent was
+        # never asked, and a withdrawal is its operator's decision,
+        # not a delivery it failed (ADR 0005 D5). By index, like every
+        # other per-step set here.
+        run.undispatched.add(step_index)
+        logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
+        await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
+        return
+
+    # Resolution deliberately stays OUTSIDE the per-step try/except
+    # below. It is a lookup, not the step's work: resolve_worker fails
+    # OPEN — an unreadable binding store logs and returns None — so the
+    # only thing left that could raise here is a bug in resolution
+    # itself, which would repeat on every step anyway. Letting that
+    # reach the run-level handler (status "failed", stream closed) is
+    # therefore the honest outcome, and is what the suite pins.
+    worker = await resolve_worker(step.agent_id)
+    if worker is None:
+        # No local worker and no resolvable binding. A bound agent
+        # that could not be resolved degrades identically to one nobody
+        # ever registered — the step is skipped, unbilled, and the run
+        # continues. Trace lines only reach the SSE viewer and are
+        # dropped with the task; every step failure also goes to the
+        # server log so an outage is diagnosable after the fact.
+        # Never dispatched, so never rated. resolve_worker fails OPEN,
+        # which means this branch is also where OUR outage lands — an
+        # unreadable binding store returns None exactly like a missing
+        # binding, and the read failure is negative-cached, so one blip
+        # can hit several steps. Rating here would write a permanent
+        # on-chain 20/100 against an operator who was never asked to
+        # deliver. "Did not deliver" and "was never asked" are
+        # different facts and only the first is theirs (ADR 0005 D5).
+        # THIS step, not this agent: the same agent may be resolvable
+        # at another step of the plan, and that step's delivery is its
+        # own evidence.
+        run.undispatched.add(step_index)
+        logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
+        await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
+        return
+
+    await _emit(
+        task_id,
+        start,
+        "exec",
+        f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
+    )
+    upstream_line = _upstream_line(worker, run.context, first_party=get_worker(step.agent_id) is worker)
+    if upstream_line:
+        await _emit(task_id, start, "exec", upstream_line)
+
+    try:
+        output = await _dispatch_step(task_id, start, plan, step, worker, run.context)
+    except asyncio.TimeoutError:
+        await _step_timed_out(task_id, start, step, worker)
+        return
+    except Exception as e:
+        await _step_raised(task_id, start, step_index, step, worker, e, run.undispatched)
+        return
+
+    if await _rejected_output(task_id, start, step, worker, output):
+        return
+
+    await _record_delivery(task_id, start, step_index, step, worker, output, run, onchain=onchain)
 
 
 async def _record_delivery(
@@ -1348,6 +1426,45 @@ def _charge_receipt_id(receipt_rv: object) -> bytes | None:
     return None
 
 
+async def _charge_receipts(
+    task_id: str,
+    start: float,
+    receipt_rv: object,
+    *,
+    job_hex: str,
+    charge_tx: str | None,
+    auth_id_hex: str,
+    payer: str,
+) -> list[Any]:
+    """The receipts a v1 seal links: the charge's receipt id, or none — said
+    loudly — when it did not decode."""
+    from ..stellar import client as sc
+
+    receipt_id = _charge_receipt_id(receipt_rv)
+    if receipt_id is not None:
+        return [sc.bytes16(receipt_id)]
+    # Sealing without the receipt severs the attestation's only
+    # on-chain link to the payment that funded it — never do that
+    # silently.
+    logger.error(
+        "task %s: charge result did not decode to a 16-byte receipt id — "
+        "sealing without receipt link (result=%r, job %s, charge_tx %s, auth %s, payer %s)",
+        task_id,
+        receipt_rv,
+        job_hex,
+        charge_tx,
+        auth_id_hex,
+        payer,
+    )
+    await _emit(
+        task_id,
+        start,
+        "error",
+        "charge receipt id missing — sealing attestation without receipt link",
+    )
+    return []
+
+
 async def _settle_onchain(
     task_id: str,
     start: float,
@@ -1493,31 +1610,15 @@ async def _settle_onchain(
         # under "result" ("return_value" is _finalize_submit's key, on the
         # user-signed path), and bytes have already been converted with
         # .hex() — so the receipt id arrives as a 32-char hex string.
-        receipt_rv = charge.get("result")
-        receipt_id = _charge_receipt_id(receipt_rv)
-        receipts = []
-        if receipt_id is not None:
-            receipts.append(sc.bytes16(receipt_id))
-        else:
-            # Sealing without the receipt severs the attestation's only
-            # on-chain link to the payment that funded it — never do that
-            # silently.
-            logger.error(
-                "task %s: charge result did not decode to a 16-byte receipt id — "
-                "sealing without receipt link (result=%r, job %s, charge_tx %s, auth %s, payer %s)",
-                task_id,
-                receipt_rv,
-                job_id.hex(),
-                charge_tx,
-                auth_id_hex,
-                payer,
-            )
-            await _emit(
-                task_id,
-                start,
-                "error",
-                "charge receipt id missing — sealing attestation without receipt link",
-            )
+        receipts = await _charge_receipts(
+            task_id,
+            start,
+            charge.get("result"),
+            job_hex=job_id.hex(),
+            charge_tx=charge_tx,
+            auth_id_hex=auth_id_hex,
+            payer=payer,
+        )
         receipts_vec = _sv.to_vec(receipts)
 
         seal = await sc.invoke_with_server_key_async(
