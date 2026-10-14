@@ -850,6 +850,26 @@ class FakeWorld:
         """A simulation that failed with `msg`."""
         return {"error": msg, "latestLedger": self.ledger}
 
+    def _view_attestation(self, args: list[Any]) -> dict[str, Any]:
+        """AttestationRegistry.get(job_id): the sealed attestation, or the contract's not-found trap."""
+        a = self.attestations.get(bytes(args[0]).hex())
+        if a is None:
+            return self._sim_fail("HostError: Error(Contract, #2)")
+        return self._sim_value(
+            scval.to_map(
+                {
+                    scval.to_symbol("agents"): scval.to_vec([scval.to_symbol(x) for x in a["agents"]]),
+                    scval.to_symbol("intent_hash"): scval.to_bytes(bytes.fromhex(a["intent_hash"])),
+                    scval.to_symbol("orchestrator"): scval.to_address(a["orchestrator"]),
+                    scval.to_symbol("receipts"): scval.to_vec(
+                        [scval.to_bytes(bytes.fromhex(r)) for r in a["receipts"]]
+                    ),
+                    scval.to_symbol("sealed_at"): scval.to_uint64(a["sealed_at"]),
+                    scval.to_symbol("total_spent"): scval.to_int128(a["total_spent"]),
+                }
+            )
+        )
+
     def simulate(self, tx_xdr: str) -> dict[str, Any]:
         env = TransactionEnvelope.from_xdr(tx_xdr, self.passphrase)
         op = env.transaction.operations[0]
@@ -873,23 +893,7 @@ class FakeWorld:
                 )
             return self._sim_value(scval.to_int128(self.balances[args[0].address]))
         if contract == ATTEST and fn == "get":
-            a = self.attestations.get(bytes(args[0]).hex())
-            if a is None:
-                return self._sim_fail("HostError: Error(Contract, #2)")
-            return self._sim_value(
-                scval.to_map(
-                    {
-                        scval.to_symbol("agents"): scval.to_vec([scval.to_symbol(x) for x in a["agents"]]),
-                        scval.to_symbol("intent_hash"): scval.to_bytes(bytes.fromhex(a["intent_hash"])),
-                        scval.to_symbol("orchestrator"): scval.to_address(a["orchestrator"]),
-                        scval.to_symbol("receipts"): scval.to_vec(
-                            [scval.to_bytes(bytes.fromhex(r)) for r in a["receipts"]]
-                        ),
-                        scval.to_symbol("sealed_at"): scval.to_uint64(a["sealed_at"]),
-                        scval.to_symbol("total_spent"): scval.to_int128(a["total_spent"]),
-                    }
-                )
-            )
+            return self._view_attestation(args)
         if contract == ESCROW and fn == "settler":
             if self.escrow_version < 2:
                 return self._sim_fail("HostError: Error(WasmVm, MissingValue)")
