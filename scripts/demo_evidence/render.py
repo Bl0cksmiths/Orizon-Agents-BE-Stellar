@@ -147,6 +147,23 @@ def _sources(loaded: Loaded) -> str:
     return ", ".join(named)
 
 
+def _sheet_row(i: int, e: Entry) -> str:
+    """Row `i` of the transactions table; a row that did not re-verify is marked ✗."""
+    reverified = e.verdict.status if e.row.well_formed else "MALFORMED"
+    mark = "" if e.verified else " ✗"
+    cells = (
+        i,
+        f"{e.row.stage} · {e.row.label}",
+        e.row.proves,
+        e.row.deliverable,
+        f"`{e.row.tx_hash}`",
+        f"[open]({e.explorer})" if e.row.well_formed else "—",
+        e.row.recorded_status or "—",
+        f"{reverified} ({e.verdict.source}){mark}",
+    )
+    return "| " + " | ".join(_cell(v) for v in cells) + " |"
+
+
 def render_sheet(entries: list[Entry], loaded: Loaded, generated_at: int, title: str) -> str:
     verified = [e for e in entries if e.verified]
     failed = [e for e in entries if not e.verified]
@@ -172,26 +189,7 @@ def render_sheet(entries: list[Entry], loaded: Loaded, generated_at: int, title:
         "| # | Stage | What it proves | Deliverable | Tx hash | Stellar Expert | Recorded | Re-verified |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    for i, e in enumerate(entries, start=1):
-        reverified = e.verdict.status if e.row.well_formed else "MALFORMED"
-        mark = "" if e.verified else " ✗"
-        out.append(
-            "| "
-            + " | ".join(
-                _cell(v)
-                for v in (
-                    i,
-                    f"{e.row.stage} · {e.row.label}",
-                    e.row.proves,
-                    e.row.deliverable,
-                    f"`{e.row.tx_hash}`",
-                    f"[open]({e.explorer})" if e.row.well_formed else "—",
-                    e.row.recorded_status or "—",
-                    f"{reverified} ({e.verdict.source}){mark}",
-                )
-            )
-            + " |"
-        )
+    out += [_sheet_row(i, e) for i, e in enumerate(entries, start=1)]
     if failed:
         out += [
             "",
