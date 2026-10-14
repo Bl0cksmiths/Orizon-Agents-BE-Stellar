@@ -501,6 +501,35 @@ class FakeWorld:
             return {"Admin": scval.to_address(self.registry_admin)}
         return None
 
+    def _registry_view(
+        self, fn: str, args: list[stellar_xdr.SCVal], ok: Callable[[Any], httpx.Response]
+    ) -> httpx.Response | None:
+        """The registry's `list_ids`, `admin` and `get(id)`; None for any other function."""
+        if fn == "list_ids":
+            return _sim_value(ok, scval.to_vec([_sym(a) for a in self.agents]))
+        if fn == "admin":
+            return _sim_value(ok, scval.to_address(self.registry_admin))
+        if fn != "get":
+            return None
+        agent_id = scval.from_symbol(args[0])
+        a = self.agents.get(agent_id)
+        if a is None:
+            return _sim_fail(ok, "HostError: Error(Contract, #2)")
+        return _sim_value(
+            ok,
+            _map(
+                {
+                    "id": _sym(agent_id),
+                    "owner": scval.to_address(a["owner"]),
+                    "name": scval.to_string(a["name"]),
+                    "skills": scval.to_vec([_sym("x")]),
+                    "price": scval.to_int128(100_000),
+                    "active": scval.to_bool(a["active"]),
+                    "registered_at": scval.to_uint64(a["registered_at"]),
+                }
+            ),
+        )
+
     def simulate(self, tx_xdr: str, ok: Any) -> httpx.Response:
         env = SdkEnvelope.from_xdr(tx_xdr, TESTNET_PASSPHRASE)
         op = env.transaction.operations[0]
@@ -514,29 +543,9 @@ class FakeWorld:
             return _json(503, {"error": "unavailable"})
 
         if contract == REGISTRY:
-            if fn == "list_ids":
-                return _sim_value(ok, scval.to_vec([_sym(a) for a in self.agents]))
-            if fn == "admin":
-                return _sim_value(ok, scval.to_address(self.registry_admin))
-            if fn == "get":
-                agent_id = scval.from_symbol(args[0])
-                a = self.agents.get(agent_id)
-                if a is None:
-                    return _sim_fail(ok, "HostError: Error(Contract, #2)")
-                return _sim_value(
-                    ok,
-                    _map(
-                        {
-                            "id": _sym(agent_id),
-                            "owner": scval.to_address(a["owner"]),
-                            "name": scval.to_string(a["name"]),
-                            "skills": scval.to_vec([_sym("x")]),
-                            "price": scval.to_int128(100_000),
-                            "active": scval.to_bool(a["active"]),
-                            "registered_at": scval.to_uint64(a["registered_at"]),
-                        }
-                    ),
-                )
+            answer = self._registry_view(fn, args, ok)
+            if answer is not None:
+                return answer
         if contract in self.escrows:
             e = self.escrows[contract]
             if fn == "version":
