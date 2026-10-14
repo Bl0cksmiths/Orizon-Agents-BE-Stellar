@@ -139,9 +139,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
-    # JWTs and bearer tokens.
+    # JWTs and bearer tokens. (?i) already folds A-Z over lowercase.
     re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{16,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Z0-9._~+/=\-]{16,}"),
     # key = value / key: value for credential-named keys.
     re.compile(
         r"(?i)\b(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|password|passwd)"
