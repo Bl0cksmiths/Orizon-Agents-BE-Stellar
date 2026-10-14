@@ -1995,6 +1995,30 @@ async def _settle_refused(
     return (None, None, None)
 
 
+def _sealed_agents(
+    plan: StoredPlan, delivered_steps: frozenset[int], payout_plan: _PayoutPlan, *, release: bool
+) -> list[str]:
+    """The agents a v2 seal names, in the order its receipts are.
+
+    The agents are the PAID ones, one per payout, so `agents[i]` and
+    `receipts[i]` name the same payment (D-086). Sealing every plan step
+    attested work to an agent that timed out, failed or was refused — and the
+    seal is permanent on-chain evidence a buyer or an indexer reads as "this
+    agent delivered and was paid for this job".
+
+    A run that delivered and paid NOBODY (no confirmed on-chain owner — the
+    seeded catalogue — a free step, a spent cap) is sealed too, as DELIVERY
+    ONLY: the agents of the delivered steps in plan order, NO receipt and a
+    total of zero. The contract stores exactly what it is given, so with the
+    receipts empty and `total_spent` 0 nothing in the attestation reads as a
+    payment, and `seal_kind` says so to clients. Under the release's own job
+    id, so it attests the job the custody was handed back for.
+    """
+    if release:
+        return [plan.plan.steps[i].agent_id for i in sorted(delivered_steps)]
+    return [payout.agent_id for payout in payout_plan.payouts]
+
+
 async def _hand_off_v2_seal(
     task_id: str,
     start: float,
@@ -2305,25 +2329,8 @@ async def _settle_v2(
             return (settle_tx, None, settled_job_id)
         # Seal, exactly as v1 does, with one receipt per payout rather than one
         # for the run: the attestation's link to every payment that funded it.
-        # The agents are the PAID ones, one per payout, so `agents[i]` and
-        # `receipts[i]` name the same payment (D-086). Sealing every plan step
-        # attested work to an agent that timed out, failed or was refused —
-        # and the seal is permanent on-chain evidence a buyer or an indexer
-        # reads as "this agent delivered and was paid for this job".
-        #
-        # A run that delivered and paid NOBODY (no confirmed on-chain owner —
-        # the seeded catalogue — a free step, a spent cap) is sealed too, as
-        # DELIVERY ONLY: the agents of the delivered steps in plan order, NO
-        # receipt and a total of zero. The contract stores exactly what it is
-        # given, so with the receipts empty and `total_spent` 0 nothing in the
-        # attestation reads as a payment, and `seal_kind` says so to clients.
-        # Under the release's own job id, so it attests the job the custody
-        # was handed back for.
         kind: SealKind = "delivery_only" if release else "paid"
-        if release:
-            sealed_agents = [plan.plan.steps[i].agent_id for i in sorted(delivered_steps)]
-        else:
-            sealed_agents = [payout.agent_id for payout in payout_plan.payouts]
+        sealed_agents = _sealed_agents(plan, delivered_steps, payout_plan, release=release)
         if receipts is None and payout_plan.payouts:
             logger.error(
                 "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
