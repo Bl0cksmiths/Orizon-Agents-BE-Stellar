@@ -510,12 +510,17 @@ def read_bound(snap: Snapshot, reads: Reads) -> None:
     snap.bound = _bound_flags(operators)
 
 
+def _operator_agents(operator: Any) -> list[Any]:
+    """One adoption report operator's `agents`, or none when either is not of the report's shape."""
+    agents = operator.get("agents") if isinstance(operator, dict) else None
+    return agents if isinstance(agents, list) else []
+
+
 def _bound_flags(operators: list[Any]) -> dict[str, bool | None]:
     """Agent id -> the report's `bound` flag (None when not a boolean); entries of the wrong shape are skipped."""
     bound: dict[str, bool | None] = {}
     for operator in operators:
-        agents = operator.get("agents") if isinstance(operator, dict) else None
-        for agent in agents if isinstance(agents, list) else []:
+        for agent in _operator_agents(operator):
             if isinstance(agent, dict) and isinstance(agent.get("agent_id"), str):
                 flag = agent.get("bound")
                 bound[agent["agent_id"]] = flag if isinstance(flag, bool) else None
