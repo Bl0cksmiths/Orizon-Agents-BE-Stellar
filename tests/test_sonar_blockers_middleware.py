@@ -48,6 +48,24 @@ def test_a_foreign_origin_preflight_gets_no_allow_origin(client):
     assert "access-control-allow-origin" not in r.headers
 
 
+def test_a_preflight_is_answered_before_the_request_context(client, caplog):
+    """The one guarantee CORS-outermost gives up, pinned so it is changed on
+    purpose: CORS answers a preflight itself, so it gets no X-Request-ID and no
+    access-log line. A browser never shows a preflight's headers to script, so
+    there is no client that could have quoted the id (app/main.py)."""
+    with caplog.at_level("INFO", logger="app.security"):
+        r = client.options("/api/agents", headers={"Origin": ALLOWED, "Access-Control-Request-Method": "GET"})
+        client.get("/api/agents", headers={"Origin": ALLOWED})
+
+    access = [
+        rec.getMessage() for rec in caplog.records if rec.name == "app.security" and "/api/agents" in rec.getMessage()
+    ]
+    assert r.status_code == 200
+    assert "x-request-id" not in r.headers
+    assert [line for line in access if line.startswith("GET ")], "the GET beside it is logged"
+    assert not [line for line in access if line.startswith("OPTIONS ")]
+
+
 # ── responses the router produced ─────────────────────────────────────────
 
 
