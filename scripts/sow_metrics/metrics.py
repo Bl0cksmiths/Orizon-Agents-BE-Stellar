@@ -362,24 +362,27 @@ def m01(snap: Snapshot, rules: Rules) -> Metric:
             counted.append(item)
         else:
             excluded.append({**item, "reason": party.exclusion, "role": party.phrase})
-    n, total = len(counted), len(snap.agents)
-    team_owners = len({e["owner"] for e in excluded})
-    reason = None
-    if n < 2:
-        if total == 0:
-            reason = "No agent is registered on the AgentRegistry contract yet."
-        elif n == 0:
-            reason = (
-                f"No outside operator has registered an agent yet; all {plural(total, 'registered agent')} belong to "
-                f"{plural(team_owners, 'wallet')} the team controls."
-            )
-        else:
-            reason = (
-                f"Only {plural(n, 'agent')} {'is' if n == 1 else 'are'} registered by outside operators; the other "
-                f"{total - n} belong to wallets the team controls. The target is 2."
-            )
+    n = len(counted)
+    reason = _m01_reason(n, len(snap.agents), len({e["owner"] for e in excluded}))
     return Metric(
         row, str(n), MET if n >= 2 else NOT_MET, method, links + _by_date(item_links), reason, counted, excluded
+    )
+
+
+def _m01_reason(n: int, total: int, team_owners: int) -> str | None:
+    """Why fewer than 2 registered agents are externally operated; None when the target is met."""
+    if n >= 2:
+        return None
+    if total == 0:
+        return "No agent is registered on the AgentRegistry contract yet."
+    if n == 0:
+        return (
+            f"No outside operator has registered an agent yet; all {plural(total, 'registered agent')} belong to "
+            f"{plural(team_owners, 'wallet')} the team controls."
+        )
+    return (
+        f"Only {plural(n, 'agent')} {'is' if n == 1 else 'are'} registered by outside operators; the other "
+        f"{total - n} belong to wallets the team controls. The target is 2."
     )
 
 
