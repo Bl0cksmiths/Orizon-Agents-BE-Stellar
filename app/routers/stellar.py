@@ -661,7 +661,7 @@ class RegisterAgentReq(BaseModel):
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
 
-@router.post("/build/register-agent", response_model=XdrResponse)
+@router.post("/build/register-agent")
 async def build_register_agent(req: RegisterAgentReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.register. Owner signs via Freighter."""
     from stellar_sdk.exceptions import AccountNotFoundException
