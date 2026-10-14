@@ -804,7 +804,13 @@ class UpdatePriceReq(BaseModel):
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
 
-@router.post("/build/update-price")
+@router.post(
+    "/build/update-price",
+    responses={
+        400: _OWNER_BUILD_FAILED,
+        404: {"model": ErrorEnvelope, "description": "`agent_not_found` — the registry holds no such agent."},
+    },
+)
 async def build_update_price(req: UpdatePriceReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.update_price. Owner signs via Freighter.
 
