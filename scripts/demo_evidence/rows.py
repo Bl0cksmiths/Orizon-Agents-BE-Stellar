@@ -130,6 +130,30 @@ def _dispute_status(event: str, detail: dict[str, Any]) -> str | None:
     return None if status is None else str(status)
 
 
+def _records(path: Path) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+    """Every JSON object line of `path` with its `<file>:<line>`, and how many
+    lines were not one (a torn write). Blank lines are neither."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InputError(f"{path}: cannot be read: {exc}") from exc
+    records: list[tuple[str, dict[str, Any]]] = []
+    unreadable = 0
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            unreadable += 1
+            continue
+        if not isinstance(raw, dict):
+            unreadable += 1
+            continue
+        records.append((f"{path}:{number}", raw))
+    return records, unreadable
+
+
 def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     """Every transaction row of every input, in input order then file order. Raises on another network.
 
@@ -143,22 +167,9 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     duplicates = 0
     disputes: dict[str, str | None] = {}
     for path in files:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise InputError(f"{path}: cannot be read: {exc}") from exc
-        for number, line in enumerate(lines, start=1):
-            if not line.strip():
-                continue
-            where = f"{path}:{number}"
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
-            if not isinstance(raw, dict):
-                skipped += 1
-                continue
+        records, unreadable = _records(path)
+        skipped += unreadable
+        for where, raw in records:
             network = str(raw.get("network") or "")
             tx_hash = raw.get("tx_hash")
             if network not in _NO_NETWORK and network != TESTNET:
