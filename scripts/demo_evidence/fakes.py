@@ -86,25 +86,27 @@ class FakeLedger:
             return ok({"status": tx.status, "ledger": tx.ledger, "latestLedger": 5000})
         return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601}})
 
+    def _horizon(self, request: httpx.Request) -> httpx.Response:
+        """A Horizon read: the root, `/transactions/{hash}`, else 404."""
+        path = request.url.path
+        self.calls.append(f"horizon {request.method} {path}")
+        if path == "/":
+            return _json(200, {"network_passphrase": self.horizon_passphrase})
+        if not path.startswith("/transactions/"):
+            return _json(404, {"status": 404})
+        if self.horizon_down:
+            return _json(503, {"status": 503})
+        tx = self.txs.get(path.split("/")[2])
+        if tx is None or not tx.horizon_visible:
+            return _json(404, {"status": 404})
+        return _json(200, {"successful": tx.status == "SUCCESS", "ledger": tx.ledger, "created_at": tx.created_at})
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url.startswith(RPC):
             return self._rpc(request)
         if url.startswith(HORIZON):
-            path = request.url.path
-            self.calls.append(f"horizon {request.method} {path}")
-            if path == "/":
-                return _json(200, {"network_passphrase": self.horizon_passphrase})
-            if path.startswith("/transactions/"):
-                if self.horizon_down:
-                    return _json(503, {"status": 503})
-                tx = self.txs.get(path.split("/")[2])
-                if tx is None or not tx.horizon_visible:
-                    return _json(404, {"status": 404})
-                return _json(
-                    200, {"successful": tx.status == "SUCCESS", "ledger": tx.ledger, "created_at": tx.created_at}
-                )
-            return _json(404, {"status": 404})
+            return self._horizon(request)
         raise AssertionError(f"unexpected request {request.method} {url}")
 
 
