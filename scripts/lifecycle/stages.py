@@ -225,17 +225,7 @@ class Runner:
         try:
             start = self.preflight()
             if self.cfg.dry_run:
-                self.print_plan(start)
-                if self.blockers:
-                    self.say("")
-                    self.say("A real run with these flags would stop:")
-                    for blocker in self.blockers:
-                        self.say(f"  - {blocker}")
-                    raise Stop(
-                        EXIT_REFUSED,
-                        f"dry run: {len(self.blockers)} blocker(s) a real run would hit: " + "; ".join(self.blockers),
-                    )
-                return EXIT_OK
+                return self.dry_run(start)
             last = stage_index(self.cfg.until)
             for name in STAGES[stage_index(start) : last + 1]:
                 self.say(f"== {name}")
@@ -261,6 +251,20 @@ class Runner:
             if self.state.run_id and not self.cfg.dry_run:
                 self.note("run", "run_crashed", f"{type(exc).__name__}: {self.console.redactor.scrub(str(exc))}")
             raise
+
+    def dry_run(self, start: str) -> int:
+        """Print the plan. A dry run that found blockers stops, naming each, as the real run would."""
+        self.print_plan(start)
+        if self.blockers:
+            self.say("")
+            self.say("A real run with these flags would stop:")
+            for blocker in self.blockers:
+                self.say(f"  - {blocker}")
+            raise Stop(
+                EXIT_REFUSED,
+                f"dry run: {len(self.blockers)} blocker(s) a real run would hit: " + "; ".join(self.blockers),
+            )
+        return EXIT_OK
 
     def stopped(self, exc: Stop) -> int:
         self.say(f"STOPPED (exit {exc.code}): {exc.message}")
