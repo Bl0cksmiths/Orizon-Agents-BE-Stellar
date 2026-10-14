@@ -10,7 +10,7 @@ from ..schemas import X402Request, X402Response
 router = APIRouter(tags=["payments"])
 
 
-@router.post("/payments/x402", response_model=X402Response)
+@router.post("/payments/x402")
 async def x402(
     req: X402Request,
     response: Response,
