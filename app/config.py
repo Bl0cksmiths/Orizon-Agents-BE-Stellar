@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # The network passphrases are public protocol identifiers, not credentials: read
 # from stellar_sdk so they are spelled once, by the SDK that signs with them.
 MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
+TESTNET_PASSPHRASE = Network.TESTNET_NETWORK_PASSPHRASE
 
 # Every spelling of STELLAR_NETWORK that names the public network: ours, and
 # `public`/`pubnet` as Horizon and Stellar Expert say it. Read through
@@ -412,7 +413,7 @@ class Settings(BaseSettings):
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
     stellar_rpc_url: str = "https://soroban-testnet.stellar.org"
-    stellar_network_passphrase: str = "Test SDF Network ; September 2015"
+    stellar_network_passphrase: str = TESTNET_PASSPHRASE
 
     # Deployed contract IDs — empty until the backend is wired on-chain.
     stellar_agent_registry: str = ""
