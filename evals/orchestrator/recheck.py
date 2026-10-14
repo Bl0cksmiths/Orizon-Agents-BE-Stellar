@@ -155,6 +155,33 @@ def _block(name: str, keep: dict[str, str]) -> str:
     return f"<!-- BEGIN narrative:{name} -->\n{keep.get(name, '_(to be written)_\n')}<!-- END narrative:{name} -->"
 
 
+def _spend(
+    guard_rows: list[dict[str, Any]],
+    workers: dict[str, dict[str, Any]],
+    code_length: list[dict[str, Any]],
+    final: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The re-check's spend: the guard at list price from its recorded tokens,
+    the workers as the API reported them, and each cut-off stream's estimate."""
+    guard_usd = sum(list_price(c) for r in guard_rows for c in r["meta"]["calls"])
+    worker_usd = sum(w.get("cost_usd", 0.0) for w in workers.values())
+    # A stream the budget guard cut off was billed but never reported back;
+    # its error carries the guard's running estimate at the cut-off.
+    cut_off = {
+        name: float(m.group(1)) for name, w in workers.items() if (m := _CUT_OFF.search(str(w.get("error") or "")))
+    }
+    return {
+        "guard_usd": guard_usd,
+        "workers_reported_usd": worker_usd,
+        "by_worker_reported_usd": {k: w.get("cost_usd", 0.0) for k, w in workers.items()},
+        "cut_off_estimated_usd": cut_off,
+        "measured_total_usd": guard_usd + worker_usd,
+        "total_with_estimates_usd": guard_usd + worker_usd + sum(cut_off.values()),
+        "code_length_usd": sum(r.get("cost_usd", 0.0) + r.get("unreported_estimated_usd", 0.0) for r in code_length),
+        "final_usd": sum(r.get("cost_usd", 0.0) + r.get("unreported_estimated_usd", 0.0) for r in final),
+    }
+
+
 def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     old_all = read_jsonl(campaign_runs / "s1-guard" / "results.jsonl")
     old = [r for r in old_all if r.get("rep", 0) == 0]
@@ -168,13 +195,6 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
         workers[rec["worker"]] = rec
     code_length = _code_length(runs / "r3-code-length", revalidate=False)
     final = _code_length(runs / "r4-final", revalidate=True)
-    guard_usd = sum(list_price(c) for r in new for c in r["meta"]["calls"])
-    worker_usd = sum(w.get("cost_usd", 0.0) for w in workers.values())
-    # A stream the budget guard cut off was billed but never reported back;
-    # its error carries the guard's running estimate at the cut-off.
-    cut_off = {
-        name: float(m.group(1)) for name, w in workers.items() if (m := _CUT_OFF.search(str(w.get("error") or "")))
-    }
     analysis = {
         "campaign_rep0": g_old,
         "campaign_pooled": g_pool,
@@ -192,18 +212,7 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
         "code_length": code_length,
         "final": final,
         "final_ceilings": _ceilings() if final else {},
-        "spend": {
-            "guard_usd": guard_usd,
-            "workers_reported_usd": worker_usd,
-            "by_worker_reported_usd": {k: w.get("cost_usd", 0.0) for k, w in workers.items()},
-            "cut_off_estimated_usd": cut_off,
-            "measured_total_usd": guard_usd + worker_usd,
-            "total_with_estimates_usd": guard_usd + worker_usd + sum(cut_off.values()),
-            "code_length_usd": sum(
-                r.get("cost_usd", 0.0) + r.get("unreported_estimated_usd", 0.0) for r in code_length
-            ),
-            "final_usd": sum(r.get("cost_usd", 0.0) + r.get("unreported_estimated_usd", 0.0) for r in final),
-        },
+        "spend": _spend(new, workers, code_length, final),
     }
 
     out.mkdir(parents=True, exist_ok=True)
