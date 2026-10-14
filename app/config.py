@@ -6,13 +6,16 @@ from typing import Any, Literal
 
 from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from stellar_sdk import Network
 
 from .pdax_environments import BASE_URLS as PDAX_BASE_URLS
 from .pdax_environments import moves_real_value as pdax_moves_real_value
 
 logger = logging.getLogger(__name__)
 
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+# The network passphrases are public protocol identifiers, not credentials: read
+# from stellar_sdk so they are spelled once, by the SDK that signs with them.
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 # Every spelling of STELLAR_NETWORK that names the public network: ours, and
 # `public`/`pubnet` as Horizon and Stellar Expert say it. Read through
