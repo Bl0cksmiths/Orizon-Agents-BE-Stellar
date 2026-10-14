@@ -24,7 +24,14 @@ from pydantic import BaseModel, Field, model_validator
 from .. import http_cache, money
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key, require_seal_key
+from ..security import (
+    CodedHTTPException,
+    ErrorEnvelope,
+    _operator_key_scheme,
+    check_operator_key,
+    require_api_key,
+    require_seal_key,
+)
 from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc, snapshots, task_persistence
 from ..services.dispatch_signing import dispatch_signer_address
 from ..services.snapshots import KeepWarm, SnapshotCell
@@ -232,7 +239,15 @@ STELLAR_ADDRESS_PATTERN = r"^G[A-Z2-7]{55}$"
 
 
 # ── reads ───────────────────────────────────────────────────────
-@router.get("/agent/{agent_id}")
+@router.get(
+    "/agent/{agent_id}",
+    responses={
+        404: {
+            "model": ErrorEnvelope,
+            "description": "`agent_read_failed` — no such agent, or the registry read failed.",
+        }
+    },
+)
 async def read_agent(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> AgentRead:
     """Read an Agent from AgentRegistry.get(id)."""
     try:
