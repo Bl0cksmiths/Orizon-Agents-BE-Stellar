@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from ... import pacing
 from ...config import settings
 from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
@@ -637,9 +638,6 @@ class CodeGen(ModelWorker):
         *,
         tier: Tier | None = None,
     ) -> dict[str, Any]:
-        import asyncio
-        import random
-
         # Lazy import — avoids a hard dependency cycle between code_gen ↔ code_validator
         from .code_validator import harden_artifact, validate_html
 
@@ -649,7 +647,7 @@ class CodeGen(ModelWorker):
         baked = self._baked(context)
         if baked:
             # Mimic generation time so the trace doesn't feel instant.
-            await asyncio.sleep(0.4 + random.random() * 0.6)
+            await pacing.pause(0.4, 0.6)
             # Baked artifacts are repo-owned and already clean, but they go
             # through the same hardening so every artifact the frontend
             # renders carries the same policy.
