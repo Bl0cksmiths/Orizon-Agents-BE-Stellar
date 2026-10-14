@@ -1568,7 +1568,7 @@ async def _record_in_flight(
         # the hash, and raising instead would answer a 500 that says strictly
         # less than the 504 does. So this logs what the record will not say,
         # and the caller is answered properly.
-        logger.error(
+        logger.exception(
             "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
             " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
             dispute_id,
@@ -1576,7 +1576,6 @@ async def _record_in_flight(
             claimed.job_id_hex,
             claimed.payer,
             outcome.amount_usdc,
-            exc_info=True,
         )
 
 
