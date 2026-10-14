@@ -156,6 +156,13 @@ _CLAUSE_BREAKS = (", ", "; ", ": ", " — ", " – ", " - ")
 _OPENERS, _CLOSERS = "([", ")]"
 
 
+def _longer(best: str | None, candidate: str, floor: float) -> str | None:
+    """`candidate` when it keeps at least `floor` characters and outruns `best`; else `best`."""
+    if len(candidate) >= floor and (best is None or len(candidate) > len(best)):
+        return candidate
+    return best
+
+
 def fit_at_boundary(text: str, limit: int) -> str | None:
     """`text` (spacing collapsed) if it fits in `limit`; else the longest prefix
     that ends a sentence or a clause and fits, or None when no boundary leaves
@@ -169,17 +176,13 @@ def fit_at_boundary(text: str, limit: int) -> str | None:
     depth = 0
     for i, ch in enumerate(text[: limit + 1]):
         if depth == 0 and i <= limit and any(text.startswith(sep, i) for sep in _CLAUSE_BREAKS):
-            clause = text[:i].rstrip(" ,;:—–-")
-            if len(clause) >= floor and (best is None or len(clause) > len(best)):
-                best = clause
+            best = _longer(best, text[:i].rstrip(" ,;:—–-"), floor)
         if ch in _OPENERS:
             depth += 1
         elif ch in _CLOSERS and depth:
             depth -= 1
         elif depth == 0 and ch in _SENTENCE_ENDS and i + 1 <= limit and (i + 1 == len(text) or text[i + 1] == " "):
-            sentence = text[: i + 1]
-            if len(sentence) >= floor and (best is None or len(sentence) > len(best)):
-                best = sentence
+            best = _longer(best, text[: i + 1], floor)
     return best
 
 
