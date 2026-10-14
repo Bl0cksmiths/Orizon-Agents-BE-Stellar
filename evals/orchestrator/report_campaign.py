@@ -101,6 +101,29 @@ def _worker_outcome(w: dict[str, Any]) -> str:
     )
 
 
+def _workers_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
+    """§9: each sampled worker once, with its model, cost and outcome."""
+    L: list[str] = []
+    add = L.append
+    add("## 9. Worker sample (stage 5)")
+    add("")
+    add("| worker | tier → model | input (case) | latency | cost | outcome |")
+    add("|---|---|---|---|---|---|")
+    for name, w in a["s5"].items():
+        if "worker" not in w:
+            continue
+        call = w["calls"][0] if w["calls"] else {}
+        model = call.get("model", "—")
+        outcome = _worker_outcome(w)
+        add(
+            f"| {name} | {model} | {w['case_id'] or 'sample contract'} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
+        )
+    add("")
+    add(_block("worker_notes", keep, ""))
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -470,22 +493,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
         )
     add("")
 
-    add("## 9. Worker sample (stage 5)")
-    add("")
-    add("| worker | tier → model | input (case) | latency | cost | outcome |")
-    add("|---|---|---|---|---|---|")
-    for name, w in a["s5"].items():
-        if "worker" not in w:
-            continue
-        call = w["calls"][0] if w["calls"] else {}
-        model = call.get("model", "—")
-        outcome = _worker_outcome(w)
-        add(
-            f"| {name} | {model} | {w['case_id'] or 'sample contract'} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
-        )
-    add("")
-    add(_block("worker_notes", keep, ""))
-    add("")
+    L += _workers_section(a, keep)
 
     add("## 10. Error analysis — every misclassified in-repo case")
     add("")
