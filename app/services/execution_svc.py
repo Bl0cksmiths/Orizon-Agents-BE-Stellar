@@ -1995,6 +1995,55 @@ async def _settle_refused(
     return (None, None, None)
 
 
+async def _read_authorized_max(
+    task_id: str, start: float, plan: StoredPlan, escrow: str, *, payer: str, auth_id_hex: str
+) -> int | None:
+    """The authorization's `max_amount`, read back from the escrow for a settle
+    `/execute` did not check, or None when the settle must not go out.
+
+    None has already been said: an authorization that cannot be read or is not
+    found is refused and its custody released; one that is not this payer's
+    for this plan is refused and left alone.
+    """
+    from ..stellar import client as sc
+
+    try:
+        auth = await asyncio.to_thread(sc.escrow_authorization, escrow, bytes.fromhex(auth_id_hex))
+    except Exception as e:
+        await _settle_refused(
+            task_id, start, auth_id_hex, payer, f"authorization unreadable: {e}", "the authorization is unreadable"
+        )
+        return None
+    if auth is None:
+        await _settle_refused(
+            task_id, start, auth_id_hex, payer, "authorization not found", "the authorization was not found"
+        )
+        return None
+    if auth.payer != payer or auth.agent_id != plan.id:
+        # `/execute` skipped its check (an escrow version it could not read
+        # at the time), so this is the first look at whose custody this is.
+        # Not this payer's, or not for this plan: never settle it, and never
+        # release it either — it is somebody else's money to reclaim.
+        logger.error(
+            "task %s: PaymentEscrow.settle NOT submitted — authorization %s is %s's for %s, not %s's for %s",
+            task_id,
+            auth_id_hex,
+            auth.payer,
+            auth.agent_id,
+            payer,
+            plan.id,
+        )
+        await _emit(
+            task_id,
+            start,
+            "error",
+            "settlement refused — the authorization is not this buyer's for this plan",
+            settlement="failed",
+        )
+        return None
+    return auth.max_amount
+
+
 def _sealed_agents(
     plan: StoredPlan, delivered_steps: frozenset[int], payout_plan: _PayoutPlan, *, release: bool
 ) -> list[str]:
@@ -2192,39 +2241,9 @@ async def _settle_v2(
 
     escrow = sc.contract_ids().payment_escrow
     if authorized_max is None and delivered_steps:
-        try:
-            auth = await asyncio.to_thread(sc.escrow_authorization, escrow, bytes.fromhex(auth_id_hex))
-        except Exception as e:
-            return await _settle_refused(
-                task_id, start, auth_id_hex, payer, f"authorization unreadable: {e}", "the authorization is unreadable"
-            )
-        if auth is None:
-            return await _settle_refused(
-                task_id, start, auth_id_hex, payer, "authorization not found", "the authorization was not found"
-            )
-        if auth.payer != payer or auth.agent_id != plan.id:
-            # `/execute` skipped its check (an escrow version it could not read
-            # at the time), so this is the first look at whose custody this is.
-            # Not this payer's, or not for this plan: never settle it, and never
-            # release it either — it is somebody else's money to reclaim.
-            logger.error(
-                "task %s: PaymentEscrow.settle NOT submitted — authorization %s is %s's for %s, not %s's for %s",
-                task_id,
-                auth_id_hex,
-                auth.payer,
-                auth.agent_id,
-                payer,
-                plan.id,
-            )
-            await _emit(
-                task_id,
-                start,
-                "error",
-                "settlement refused — the authorization is not this buyer's for this plan",
-                settlement="failed",
-            )
+        authorized_max = await _read_authorized_max(task_id, start, plan, escrow, payer=payer, auth_id_hex=auth_id_hex)
+        if authorized_max is None:
             return (None, None, None)
-        authorized_max = auth.max_amount
     try:
         owners = (
             await _settle_owners({plan.plan.steps[i].agent_id for i in delivered_steps})
