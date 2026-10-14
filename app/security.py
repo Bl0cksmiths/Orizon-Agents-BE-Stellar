@@ -767,6 +767,8 @@ _BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (b"x-frame-options", b"DENY"),
     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
 )
+# The ASGI message that carries a response's status and headers.
+_RESPONSE_START = "http.response.start"
 # This API renders nothing, so nothing in a response may load, run or frame:
 # a body a browser is tricked into rendering stays inert text.
 _API_CSP = b"default-src 'none'; frame-ancestors 'none'"
@@ -800,7 +802,7 @@ class SecurityHeadersMiddleware:
         extra = security_headers(scope.get("path", ""))
 
         async def send_with_headers(message: dict) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 message["headers"] = list(message.get("headers") or []) + extra
             await send(message)
 
@@ -869,7 +871,7 @@ class RequestContextMiddleware:
         started = time.monotonic()
 
         async def send_with_context(message: dict) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 message["headers"] = list(message.get("headers") or []) + [
                     (b"x-request-id", request_id.encode("latin-1")),
                 ]
@@ -953,7 +955,7 @@ class BodyLimitMiddleware:
         ).encode()
         await send(
             {
-                "type": "http.response.start",
+                "type": _RESPONSE_START,
                 "status": 413,
                 "headers": [
                     (b"content-type", b"application/json"),
@@ -999,7 +1001,7 @@ class BodyLimitMiddleware:
 
         async def send_tracking(message: dict) -> None:
             nonlocal response_started
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 response_started = True
             await send(message)
 
@@ -1090,7 +1092,7 @@ class RateLimitMiddleware:
             ).encode()
             await send(
                 {
-                    "type": "http.response.start",
+                    "type": _RESPONSE_START,
                     "status": 429,
                     "headers": [
                         (b"content-type", b"application/json"),
@@ -1110,7 +1112,7 @@ class RateLimitMiddleware:
         remaining = str(max(0, self.limit - len(dq))).encode()
 
         async def send_with_quota(message: dict) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 message["headers"] = list(message.get("headers") or []) + [
                     (b"x-ratelimit-limit", limit_header),
                     (b"x-ratelimit-remaining", remaining),
