@@ -430,6 +430,23 @@ def _agent_entries(
     return None
 
 
+def _agent_records_in(response: GetLedgerEntriesResponse, wanted: set[str]) -> dict[str, dict[str, Any]]:
+    """Every record in one getLedgerEntries answer that vouches for an id in `wanted`.
+
+    An entry that will not decode is logged and skipped; it costs only itself.
+    """
+    records: dict[str, dict[str, Any]] = {}
+    for entry in response.entries or []:
+        try:
+            decoded = _agent_record(entry.xdr, wanted)
+        except Exception as e:
+            logger.warning("[stellar.rpc] undecodable agent record entry: %s: %s", type(e).__name__, e)
+            continue
+        if decoded is not None:
+            records[decoded[0]] = decoded[1]
+    return records
+
+
 def read_agent_records(registry_id: str, agent_ids: list[str]) -> dict[str, dict[str, Any]]:
     """AgentRegistry records for `agent_ids`, read straight from its storage. Blocking.
 
@@ -463,14 +480,7 @@ def read_agent_records(registry_id: str, agent_ids: list[str]) -> dict[str, dict
         response = _agent_entries(server, label, keys)
         if response is None:
             continue  # these ids fall back to `get`
-        for entry in response.entries or []:
-            try:
-                decoded = _agent_record(entry.xdr, wanted)
-            except Exception as e:
-                logger.warning("[stellar.rpc] undecodable agent record entry: %s: %s", type(e).__name__, e)
-                continue
-            if decoded is not None:
-                records[decoded[0]] = decoded[1]
+        records.update(_agent_records_in(response, wanted))
     return records
 
 
