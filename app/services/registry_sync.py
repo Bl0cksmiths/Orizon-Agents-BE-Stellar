@@ -442,6 +442,29 @@ def _skip_seeded(agent_id: str) -> None:
         )
 
 
+async def _read_agent(contract_id: str, agent_id: str, batched: dict[str, dict[str, Any]]) -> Agent | None:
+    """One listed id as an Agent: from the batch, else its own `get`. None when refused or unreadable."""
+    try:
+        known = batched.get(agent_id)
+        raw = (
+            known
+            if known is not None
+            else await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+        )
+        # Answered: whatever the mapper makes of it, the chain has told
+        # us about this id, so it no longer holds the mirror partial.
+        _answered_ids.add(agent_id)
+        return _to_agent(raw)
+    except UnbelievablePrice as e:
+        # Must precede the catch-all: UnbelievablePrice is a ValueError,
+        # and a refusal is a policy decision, not a read failure.
+        _refuse_price(agent_id, e)
+        return None
+    except Exception as e:
+        logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+        return None
+
+
 async def sync_once() -> int:
     """Run one full sync pass; returns the number of agents upserted.
 
@@ -495,24 +518,8 @@ async def _pass() -> int:
         if agent_id.startswith("agt_"):
             _skip_seeded(agent_id)
             continue
-        try:
-            known = batched.get(agent_id)
-            raw = (
-                known
-                if known is not None
-                else await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
-            )
-            # Answered: whatever the mapper makes of it, the chain has told
-            # us about this id, so it no longer holds the mirror partial.
-            _answered_ids.add(agent_id)
-            agent = _to_agent(raw)
-        except UnbelievablePrice as e:
-            # Must precede the catch-all: UnbelievablePrice is a ValueError,
-            # and a refusal is a policy decision, not a read failure.
-            _refuse_price(agent_id, e)
-            continue
-        except Exception as e:
-            logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+        agent = await _read_agent(contract_id, agent_id, batched)
+        if agent is None:
             continue
         # Believable again after a refusal — re-arm the warning so an
         # operator flip-flopping across the cap stays visible in the log.
