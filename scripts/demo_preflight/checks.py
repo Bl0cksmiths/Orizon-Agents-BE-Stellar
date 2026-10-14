@@ -646,6 +646,32 @@ def _ignored_reason(rep: dict[str, Any], row: dict[str, Any]) -> str | None:
     return None
 
 
+def _judge_below_floor(
+    facts: Facts, registered: list[str], reputations: dict[str, Any], floor: int
+) -> tuple[list[str], list[str]]:
+    """(genuinely below the floor, set aside with why) among `registered`, in their order.
+
+    Each genuine agent is also recorded on `facts`, with the lower bound it was judged on.
+    """
+    rows = {str(a.get("id")): a for a in facts.agents or []}
+    genuine: list[str] = []
+    ignored: list[str] = []
+    for agent_id in registered:
+        rep = reputations.get(agent_id)
+        if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
+            continue
+        if rep["lower_bound_bps"] >= floor:
+            continue
+        why = _ignored_reason(rep, rows[agent_id])
+        if why is not None:
+            ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why})")
+            continue
+        genuine.append(agent_id)
+        facts.below_floor.append(agent_id)
+        facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
+    return genuine, ignored
+
+
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
     check = Check(
         "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
@@ -705,22 +731,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     reread = (
         f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
     )
-    rows = {str(a.get("id")): a for a in facts.agents}
-    genuine: list[str] = []
-    ignored: list[str] = []
-    for agent_id in registered:
-        rep = reputations.get(agent_id)
-        if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
-            continue
-        if rep["lower_bound_bps"] >= floor:
-            continue
-        why = _ignored_reason(rep, rows[agent_id])
-        if why is not None:
-            ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why})")
-            continue
-        genuine.append(agent_id)
-        facts.below_floor.append(agent_id)
-        facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
+    genuine, ignored = _judge_below_floor(facts, registered, reputations, floor)
     if genuine:
         detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
         return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
