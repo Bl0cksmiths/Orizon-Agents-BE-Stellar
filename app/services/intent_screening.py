@@ -205,6 +205,20 @@ def _recheck_stage(check: SpecCheck, resolution: Resolution, *, user_edited: boo
     return PlanStage(stage="recheck", msg=f"{why}; planning from your own words")
 
 
+async def _improved(improving: asyncio.Task[Spec | None]) -> Spec | None:
+    """The improver's spec, once it is written. The spend cap pauses planning."""
+    try:
+        return await improving
+    except SpendCapReached as err:
+        raise paused(err) from err
+
+
+def _improve_stage(spec: Spec | None) -> PlanStage:
+    if spec is not None:
+        return PlanStage(stage="improve", msg=f"Prompt improved by {display_name(improver_model())}")
+    return PlanStage(stage="improve", msg="Prompt improvement unavailable")
+
+
 async def _recheck(intent: str, spec: Spec | None) -> SpecCheck | None:
     """The spec's re-check against the intent, or None when there is no spec.
     The spend cap pauses planning."""
@@ -238,14 +252,8 @@ async def screen_free_form(intent: str, *, user_spec: Spec | None = None) -> Scr
         stages = [_guard_stage(decision)]
 
         if improving is not None:
-            try:
-                spec = await improving
-            except SpendCapReached as err:
-                raise paused(err) from err
-            if spec is not None:
-                stages.append(PlanStage(stage="improve", msg=f"Prompt improved by {display_name(improver_model())}"))
-            else:
-                stages.append(PlanStage(stage="improve", msg="Prompt improvement unavailable"))
+            spec = await _improved(improving)
+            stages.append(_improve_stage(spec))
         else:
             spec = user_spec
             stages.append(PlanStage(stage="improve", msg="Using your edited reading of the request"))
