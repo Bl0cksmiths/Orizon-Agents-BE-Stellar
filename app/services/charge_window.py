@@ -483,6 +483,15 @@ def _unavailable_for(owners: Mapping[str, str], reason: str, *, out_of_time: boo
     )
 
 
+def _charges_by_agent(index: _Index, owners: Mapping[str, str]) -> dict[str, list[_Charge]]:
+    """The index's charges to the agents in `owners`, filed by agent in the order they were read."""
+    by_agent: dict[str, list[_Charge]] = {}
+    for indexed in index.charges:
+        if indexed.agent_id in owners:
+            by_agent.setdefault(indexed.agent_id, []).append(indexed.charge)
+    return by_agent
+
+
 async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> WindowSettlements:
     """Settlement evidence for every agent in `owners` (agent id → owner), from
     one scan of the escrow's window. Never raises; never runs past `deadline`
@@ -529,10 +538,7 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
             reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
             return _unavailable_for(owners, reason, out_of_time=out_of_time)
 
-        by_agent: dict[str, list[_Charge]] = {}
-        for indexed in held.charges:
-            if indexed.agent_id in owners:
-                by_agent.setdefault(indexed.agent_id, []).append(indexed.charge)
+        by_agent = _charges_by_agent(held, owners)
         needed = {c.auth_id for charges in by_agent.values() for c in charges}
         if await _resolve_payers(escrow_id, needed, deadline):
             out_of_time = True
