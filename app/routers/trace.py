@@ -40,6 +40,13 @@ def _replay_events(task_id: str) -> Iterator[dict[str, str]]:
         yield {"event": "trace", "data": line.model_dump_json()}
 
 
+async def _replay_then_done(task_id: str) -> AsyncIterator[dict[str, str]]:
+    """A finished task's stream: its recorded trace, then `done`."""
+    for event in _replay_events(task_id):
+        yield event
+    yield {"event": "done", "data": "{}"}
+
+
 @router.get(
     "/trace/{task_id}/stream",
     summary="Stream a task's trace as SSE",
@@ -73,12 +80,7 @@ async def stream_trace(task_id: str) -> EventSourceResponse:
         # Finished (or never started) — replay history and end the stream.
         # No subscription: no producer exists, so a live queue would only
         # ping forever and leak.
-        async def replay() -> AsyncIterator[dict[str, str]]:
-            for event in _replay_events(task_id):
-                yield event
-            yield {"event": "done", "data": "{}"}
-
-        return EventSourceResponse(replay())
+        return EventSourceResponse(_replay_then_done(task_id))
 
     queue = bus.subscribe(task_id)
 
