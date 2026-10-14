@@ -301,7 +301,7 @@ def _reserved_id_message(agent_id: str) -> str | None:
     return None
 
 
-@router.get("/agent-id-available/{agent_id}", response_model=AgentIdAvailability)
+@router.get("/agent-id-available/{agent_id}")
 async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentIdAvailability:
     """Advisory pre-signature check for the registration form (id blur).
 
