@@ -389,6 +389,7 @@ def _register_action() -> str:
 _RETRY_ACTION = "Check again in a minute. If it stays unknown, the Stellar RPC is degraded — it is not your agent."
 _NOT_REGISTERED = "This agent id is not registered yet."
 _UNREADABLE = "Can't tell until the registration can be read."
+_REGISTER_FIRST = "Register the agent first."
 
 
 def registered_step(owner: _Read[str | None]) -> Step:
@@ -608,7 +609,7 @@ def routable_step(owner: _Read[str | None], rep: _Read[reputation_svc.RepInfo] |
     if not owner.ok:
         return Step("routable", "unknown", _UNREADABLE, _RETRY_ACTION)
     if owner.value is None or rep is None:
-        return Step("routable", "todo", _NOT_REGISTERED, "Register the agent first.")
+        return Step("routable", "todo", _NOT_REGISTERED, _REGISTER_FIRST)
     unreadable = _rep_unreadable("routable", rep)
     if unreadable is not None:
         return unreadable
@@ -640,7 +641,7 @@ def first_run_step(owner: _Read[str | None], rep: _Read[reputation_svc.RepInfo] 
     if not owner.ok:
         return Step("first_run", "unknown", _UNREADABLE, _RETRY_ACTION)
     if owner.value is None or rep is None:
-        return Step("first_run", "todo", _NOT_REGISTERED, "Register the agent first.")
+        return Step("first_run", "todo", _NOT_REGISTERED, _REGISTER_FIRST)
     if not settings.reputation_enabled or not settings.stellar_reputation_ledger:
         return Step(
             "first_run",
@@ -671,7 +672,7 @@ def first_settlement_step(owner: _Read[str | None], evidence: _Read[settlement_s
     if not owner.ok:
         return Step("first_settlement", "unknown", _UNREADABLE, _RETRY_ACTION)
     if owner.value is None or evidence is None:
-        return Step("first_settlement", "todo", _NOT_REGISTERED, "Register the agent first.")
+        return Step("first_settlement", "todo", _NOT_REGISTERED, _REGISTER_FIRST)
     if not evidence.ok or evidence.value is None:
         detail = (
             "The settlement scan is still running."
