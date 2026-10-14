@@ -484,7 +484,7 @@ async def reputation_params() -> ReputationParams:
     )
 
 
-@router.get("/reputation/{agent_id}", response_model=ReputationInfo)
+@router.get("/reputation/{agent_id}")
 async def read_reputation(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
 ) -> ReputationInfo:
