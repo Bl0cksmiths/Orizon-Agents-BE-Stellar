@@ -7,7 +7,7 @@ import asyncio
 import os
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -267,53 +267,80 @@ def _workers(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _validate(args: argparse.Namespace) -> int:
+    print(_composition(load()))
+    return EXIT_OK
+
+
+def _estimate(args: argparse.Namespace) -> int:
+    print(cost.estimate(_cases(args), stages=args.stages, reps=args.reps).describe())
+    return EXIT_OK
+
+
+def _report(args: argparse.Namespace) -> int:
+    summary, sweep_md = report.write(args.variant_dir)
+    print(summary if args.cmd == "report" else sweep_md)
+    return EXIT_OK
+
+
+def _compare(args: argparse.Namespace) -> int:
+    text = report.compare(args.before, args.after)
+    if args.out:
+        args.out.write_text(text, encoding="utf-8")
+    print(text)
+    return EXIT_OK
+
+
+def _campaign(args: argparse.Namespace) -> int:
+    from .campaign import build
+
+    analysis = build(args.runs, args.out)
+    print(f"report: {args.out / 'REPORT.md'}; campaign spend {cost.usd(analysis['grand_total_usd'])}")
+    return EXIT_OK
+
+
+def _recheck(args: argparse.Namespace) -> int:
+    from .recheck import build as build_recheck
+
+    build_recheck(args.campaign, args.runs, args.out)
+    print(f"report: {args.out / 'REPORT.md'}")
+    return EXIT_OK
+
+
+def _fetch_external(args: argparse.Namespace) -> int:
+    for key in args.keys:
+        r = external.fetch(key)
+        print(
+            f"{r.benchmark}@{r.revision[:12]} ({r.license}): kept {r.kept}, "
+            f"skipped {r.skipped_length} out of length bounds, {r.skipped_duplicate} duplicates"
+        )
+    return EXIT_OK
+
+
+_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "validate": _validate,
+    "estimate": _estimate,
+    "run": _run,
+    "report": _report,
+    "sweep": _report,
+    "compare": _compare,
+    "campaign": _campaign,
+    "recheck": _recheck,
+    "workers": _workers,
+    "fetch-external": _fetch_external,
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    command = _COMMANDS.get(args.cmd)
+    if command is None:
+        return EXIT_USAGE
     try:
-        if args.cmd == "validate":
-            print(_composition(load()))
-            return EXIT_OK
-        if args.cmd == "estimate":
-            print(cost.estimate(_cases(args), stages=args.stages, reps=args.reps).describe())
-            return EXIT_OK
-        if args.cmd == "run":
-            return _run(args)
-        if args.cmd in ("report", "sweep"):
-            summary, sweep_md = report.write(args.variant_dir)
-            print(summary if args.cmd == "report" else sweep_md)
-            return EXIT_OK
-        if args.cmd == "compare":
-            text = report.compare(args.before, args.after)
-            if args.out:
-                args.out.write_text(text, encoding="utf-8")
-            print(text)
-            return EXIT_OK
-        if args.cmd == "campaign":
-            from .campaign import build
-
-            analysis = build(args.runs, args.out)
-            print(f"report: {args.out / 'REPORT.md'}; campaign spend {cost.usd(analysis['grand_total_usd'])}")
-            return EXIT_OK
-        if args.cmd == "recheck":
-            from .recheck import build as build_recheck
-
-            build_recheck(args.campaign, args.runs, args.out)
-            print(f"report: {args.out / 'REPORT.md'}")
-            return EXIT_OK
-        if args.cmd == "workers":
-            return _workers(args)
-        if args.cmd == "fetch-external":
-            for key in args.keys:
-                r = external.fetch(key)
-                print(
-                    f"{r.benchmark}@{r.revision[:12]} ({r.license}): kept {r.kept}, "
-                    f"skipped {r.skipped_length} out of length bounds, {r.skipped_duplicate} duplicates"
-                )
-            return EXIT_OK
+        return command(args)
     except DatasetError as e:
         print(f"dataset error: {e}", file=sys.stderr)
         return EXIT_USAGE
     except RunRefused as e:
         print(f"refused: {e}", file=sys.stderr)
         return EXIT_REFUSED
-    return EXIT_USAGE
