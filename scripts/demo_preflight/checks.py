@@ -746,6 +746,17 @@ def _not_a_verdict(rep: dict[str, Any]) -> str | None:
     return None
 
 
+def _unjudged_reason(rep: Any) -> str | None:
+    """Why this reputation entry cannot count as clearing the floor, else None.
+
+    A degraded read is the prior served because the ledger could not be read,
+    and a stale one may predate a rating: neither is a verdict.
+    """
+    if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
+        return "no reputation entry"
+    return _not_a_verdict(rep)
+
+
 def check_routable_count(facts: Facts) -> Check:
     check = Check(
         "exclusion.routable_count",
@@ -762,13 +773,7 @@ def check_routable_count(facts: Facts) -> Check:
             continue
         agent_id = str(agent.get("id"))
         rep = facts.reputations.get(agent_id)
-        if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
-            unjudged.append(f"{agent_id} (no reputation entry)")
-            continue
-        # A degraded read is the prior served because the ledger could not be
-        # read, and a stale one may predate a rating: neither is a verdict, so
-        # neither is counted as clearing the floor.
-        why = _not_a_verdict(rep)
+        why = _unjudged_reason(rep)
         if why is not None:
             unjudged.append(f"{agent_id} ({why})")
             continue
