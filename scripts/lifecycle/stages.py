@@ -915,6 +915,30 @@ class Runner:
             return dict(settlement)
         return self.state.settlement
 
+    def settle_events(
+        self, chain: ChainReader, charge_seen: Observation, settlement: dict[str, Any], escrow: str, version: int
+    ) -> list[ChainEvent]:
+        """Record the settle (v2) or charge (v1) row, then read the escrow's events in that transaction."""
+        self.tx(
+            "verify",
+            "settle" if version >= 2 else "charge",
+            charge_seen,
+            contract=escrow,
+            amount=settlement.get("settled_usdc"),
+            summary=f"PaymentEscrow v{version} {'settle' if version >= 2 else 'charge'} "
+            f"for job {settlement.get('job_id_hex')}",
+            job_id_hex=settlement.get("job_id_hex"),
+        )
+        if not charge_seen.ledger:
+            return []
+        try:
+            return chain.events(escrow, charge_seen.ledger, tx_hash=charge_seen.tx_hash)
+        except RpcError as exc:
+            # A settle older than the RPC's event retention: the checks
+            # then fail on missing events, and say why.
+            self.note("verify", "events_unavailable", f"getEvents refused: {exc}", ledger=charge_seen.ledger)
+            return []
+
     def no_settlement(self, version: int) -> Stop:
         """Record that the task has no settlement, and the stop that follows: nothing to verify or dispute."""
         why = (
@@ -943,25 +967,7 @@ class Runner:
         ]
         charge_tx = settlement.get("charge_tx")
         charge_seen = chain.observe(str(charge_tx), self.budgets.tx_observe) if charge_tx else None
-        events: list[ChainEvent] = []
-        if charge_seen is not None:
-            self.tx(
-                "verify",
-                "settle" if version >= 2 else "charge",
-                charge_seen,
-                contract=escrow,
-                amount=settlement.get("settled_usdc"),
-                summary=f"PaymentEscrow v{version} {'settle' if version >= 2 else 'charge'} "
-                f"for job {settlement.get('job_id_hex')}",
-                job_id_hex=settlement.get("job_id_hex"),
-            )
-            if charge_seen.ledger:
-                try:
-                    events = chain.events(escrow, charge_seen.ledger, tx_hash=charge_seen.tx_hash)
-                except RpcError as exc:
-                    # A settle older than the RPC's event retention: the
-                    # checks below then fail on missing events, and say why.
-                    self.note("verify", "events_unavailable", f"getEvents refused: {exc}", ledger=charge_seen.ledger)
+        events = self.settle_events(chain, charge_seen, settlement, escrow, version) if charge_seen is not None else []
 
         receipts: list[str] | None = None
         if version >= 2:
