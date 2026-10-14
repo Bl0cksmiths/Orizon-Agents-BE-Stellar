@@ -182,6 +182,14 @@ def _spend(
     }
 
 
+def _copy_files(src: Path, dst: Path) -> None:
+    """Copy every file directly in `src` into `dst` (created if missing), in name order."""
+    dst.mkdir(exist_ok=True)
+    for p in sorted(src.iterdir()):
+        if p.is_file():
+            shutil.copyfile(p, dst / p.name)
+
+
 def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     old_all = read_jsonl(campaign_runs / "s1-guard" / "results.jsonl")
     old = [r for r in old_all if r.get("rep", 0) == 0]
@@ -220,19 +228,13 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     for name in ("results.jsonl", "errors.jsonl"):
         src = runs / "r1-guard" / name
         (out / "r1-guard" / name).write_text(src.read_text(encoding="utf-8") if src.exists() else "", encoding="utf-8")
-    (out / "r2-workers").mkdir(exist_ok=True)
-    for p in sorted(wdir.iterdir()):
-        if p.is_file():
-            shutil.copyfile(p, out / "r2-workers" / p.name)
+    _copy_files(wdir, out / "r2-workers")
     (out / "metrics.json").write_text(
         json.dumps(_jsonable(analysis), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     for sub in ("r3-code-length", "r4-final"):
         if (runs / sub).is_dir():
-            (out / sub).mkdir(exist_ok=True)
-            for p in sorted((runs / sub).iterdir()):
-                if p.is_file():
-                    shutil.copyfile(p, out / sub / p.name)
+            _copy_files(runs / sub, out / sub)
     (out / "costs.json").write_text(json.dumps(analysis["spend"], indent=2) + "\n", encoding="utf-8")
     report = out / "REPORT.md"
     keep = narratives(report.read_text(encoding="utf-8")) if report.exists() else {}
