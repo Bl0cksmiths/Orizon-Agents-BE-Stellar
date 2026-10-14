@@ -239,6 +239,18 @@ class Rules:
         return self.external(self.owner_of.get(rating.agent_id)) or self.external(rating.payer)
 
     # ── charges ─────────────────────────────────────────────────
+    def _payer_exclusion(self, payer: str | None, owner: str | None, settler: str | None) -> str | None:
+        """Why a charge's payer rules it out: unknown, or paying itself. None for a real buyer."""
+        if payer is None:
+            return "its authorization could not be read, so its payer is unknown"
+        if payer == owner:
+            return "self-payment (the payer owns the agent)"
+        if payer == settler:
+            return "self-payment (the payer is the escrow's settler)"
+        if payer in self.snap.platform:
+            return f"self-payment (the payer is the platform's {self.snap.platform[payer]})"
+        return None
+
     def _classify_charges(self) -> list[Charge]:
         out: list[Charge] = []
         for escrow in self.snap.escrows:
@@ -246,15 +258,8 @@ class Rules:
                 auth = escrow.auths.get(r.auth_id)
                 payer = auth.payer if auth else None
                 owner = self.owner_of.get(r.agent_id)
-                reasons: list[str] = []
-                if payer is None:
-                    reasons.append("its authorization could not be read, so its payer is unknown")
-                elif payer == owner:
-                    reasons.append("self-payment (the payer owns the agent)")
-                elif payer == escrow.settler:
-                    reasons.append("self-payment (the payer is the escrow's settler)")
-                elif payer in self.snap.platform:
-                    reasons.append(f"self-payment (the payer is the platform's {self.snap.platform[payer]})")
+                payer_reason = self._payer_exclusion(payer, owner, escrow.settler)
+                reasons = [payer_reason] if payer_reason else []
                 if iso(r.settled_at) < SPRINT_ISO:
                     reasons.append(f"settled before the sprint began on {SPRINT_DAY}")
                 tx = self.snap.charge_txs.get((r.escrow, r.id_hex))
