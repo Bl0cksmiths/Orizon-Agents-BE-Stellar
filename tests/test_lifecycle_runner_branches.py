@@ -28,6 +28,7 @@ from scripts.lifecycle.config import (
     Budgets,
 )
 from scripts.lifecycle.fakes import AGENT, API, REGISTRY, FakeWorld
+from scripts.lifecycle.stages import check_mark
 
 BUDGETS = Budgets(warmup=30, task=60, poll_interval=4, tx_observe=4, refund=30, refund_interval=5)
 
@@ -317,3 +318,8 @@ def test_a_settle_hash_the_ledger_never_saw_reads_no_events(world: FakeWorld, bu
     settle = next(r for r in resumed.rows() if r["event"] == "settle")
     assert settle["tx_hash"] == "ff" * 32 and settle["onchain_status"] == "NOT_FOUND"
     assert "events_unavailable" not in resumed.events()
+
+
+@pytest.mark.parametrize(("ok", "mark"), [(True, "PASS"), (False, "FAIL"), (None, "n/a ")])
+def test_a_settlement_check_prints_a_four_character_mark(ok: bool | None, mark: str) -> None:
+    assert check_mark(ok) == mark

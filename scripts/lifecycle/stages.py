@@ -133,6 +133,13 @@ def wanted_ratings(lines: list[dict[str, Any]], names: dict[str, str]) -> list[t
     return wanted
 
 
+def check_mark(ok: bool | None) -> str:
+    """A settlement check's four-character mark: PASS, FAIL, or `n/a ` when it does not apply."""
+    if ok is None:
+        return "n/a "
+    return "PASS" if ok else "FAIL"
+
+
 @dataclass
 class Runner:
     cfg: RunConfig
@@ -987,7 +994,7 @@ class Runner:
         """Print each check and record them all; stop unless every one passes."""
         ok = verify.passed(checks)
         for c in checks:
-            mark = "PASS" if c.ok else ("n/a " if c.ok is None else "FAIL")
+            mark = check_mark(c.ok)
             self.say(f"    [{mark}] {c.name}: {c.detail}")
         self.note(
             "verify",
