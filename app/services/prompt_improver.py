@@ -295,7 +295,7 @@ async def _fallback_recheck(original: str, spec_text: str, policy: GuardPolicy) 
     except LLMRefused:
         return SpecCheck(verdict="unsafe", reasons=["refused", "fallback"], source="fallback", model=model)
     except (LLMError, MalformedAnswer) as exc:
-        logger.error("spec re-check unavailable: jev and fallback both failed (%s)", type(exc).__name__)
+        logger.exception("spec re-check unavailable: jev and fallback both failed (%s)", type(exc).__name__)
         return _check_unavailable(model)
 
 
