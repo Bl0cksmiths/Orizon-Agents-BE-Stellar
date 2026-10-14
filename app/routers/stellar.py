@@ -464,7 +464,7 @@ def _snapshot_row(agent_id: str) -> ReputationInfo | None:
 # routes in declaration order, so this must come first or "params" would be
 # read as an agent id. That makes `params` unusable AS an agent id, so it is
 # reserved at registration (RESERVED_AGENT_IDS).
-@router.get("/reputation/params", response_model=ReputationParams)
+@router.get("/reputation/params")
 async def reputation_params() -> ReputationParams:
     """The reputation system's parameter set — pure config, no RPC call."""
     return ReputationParams(
