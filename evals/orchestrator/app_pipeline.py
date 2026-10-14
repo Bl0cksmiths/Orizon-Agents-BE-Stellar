@@ -230,6 +230,21 @@ def _default_planner() -> tuple[PlanFn, str, frozenset[str]]:
     return draft_plan, render_agents_block(agents, {}), frozenset(a.id for a in agents)
 
 
+async def _improve(intent: str, reasons: list[str]) -> prompt_improver.Spec | None:
+    """The improver's spec, or None with the failure noted in `reasons`.
+
+    The app writes the spec before the guard's tier is known, on its
+    provisional tier; the eval asks for the same spec. A spend cap stops the
+    run; any other model failure leaves the app planning from the original."""
+    try:
+        return await prompt_improver.improve(intent, PROVISIONAL_IMPROVER_TIER)
+    except AppSpendCapReached:
+        raise
+    except LLMError as e:
+        reasons.append(f"no_spec:{type(e).__name__}")
+        return None
+
+
 @dataclass
 class AppPipeline:
     name: str
@@ -298,15 +313,7 @@ class AppPipeline:
         plan: PlanObservation | None = None
 
         if stages == "all" and verdict == "allow" and tier is not None:
-            spec = None
-            try:
-                # The app writes the spec before the guard's tier is known, on
-                # its provisional tier; the eval asks for the same spec.
-                spec = await prompt_improver.improve(intent, PROVISIONAL_IMPROVER_TIER)
-            except AppSpendCapReached:
-                raise
-            except LLMError as e:  # the app plans from the original on any improver failure
-                reasons.append(f"no_spec:{type(e).__name__}")
+            spec = await _improve(intent, reasons)
             check = await prompt_improver.recheck(intent, spec) if spec is not None else None
             if check is not None:
                 scores.update({f"recheck_{k}": v for k, v in check.scores.items() if k != "same_request"})
