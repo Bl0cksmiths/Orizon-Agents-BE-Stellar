@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
-import random
 from typing import Any
 
+from ... import pacing
 from .base import Worker
 
 
@@ -20,7 +19,7 @@ class MockWorker(Worker):
         rationale: str,
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        await asyncio.sleep(0.2 + random.random() * 0.4)
+        await pacing.pause(0.2, 0.4)
         return {
             "summary": f"{self.name} simulated output for intent",
             "mock": True,
