@@ -474,6 +474,25 @@ def _cors_allows(origin: str) -> bool:
     return origin in strict_cors_origins(settings.cors_origin_list) or _CORS_ORIGIN_REGEX.fullmatch(origin) is not None
 
 
+# Added last → outermost of the middleware registered here. A browser hides a
+# cross-origin response without Access-Control-Allow-Origin from the page that
+# asked for it, so the console sees an opaque network failure instead of the
+# envelope it can explain. The header therefore has to reach every response a
+# layer makes on its own — the limiter's 429, the origin lock's 403, the body
+# cap's 413 — and outermost is the one position no layer added later can end
+# up outside of.
+#
+# What that costs, on purpose: CORS answers a preflight itself, before
+# RequestContext runs, so a preflight carries no X-Request-ID and leaves no
+# access-log line. Nothing a client could use is lost — a browser never shows
+# a preflight's headers to script, so nobody could quote that id — and a
+# preflight never reached the limiter or the origin lock either: it is a
+# constant answer computed from this config, and the console proxies
+# same-origin, so it sends none today. Every other response, the refusals
+# included, still passes through RequestContext on its way out.
+#
+# Starlette's ServerErrorMiddleware still wraps even this layer, so the 500
+# handler below stamps CORS by hand through _cors_allows.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=strict_cors_origins(settings.cors_origin_list),
