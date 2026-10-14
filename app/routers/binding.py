@@ -235,7 +235,6 @@ async def endpoint_check(url: Annotated[str, Query(min_length=1, max_length=2048
 
 @router.post(
     "/{agent_id}/unbind/challenge",
-    response_model=UnbindChallengeResponse,
     summary="Mint an unbind challenge to sign",
 )
 async def unbind_challenge(
