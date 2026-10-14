@@ -542,6 +542,11 @@ class _RunState:
     # after the settle) may rewrite it as `failed` with no hash.
     finalized: bool = False
 
+    def bill(self, *, onchain: bool) -> int:
+        """The run's bill in stroops: what a paid run's settle moved, or what a
+        simulated run's delivered steps are priced at."""
+        return self.charged if onchain else self.spent
+
 
 async def _run(
     plan: StoredPlan,
@@ -606,9 +611,7 @@ async def _run(
         if status != "complete":
             await _report_incomplete(task_id, start, status, run, total_steps)
 
-        _finalize_task(
-            task_id, status, run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-        )
+        _finalize_task(task_id, status, run.bill(onchain=onchain), run.last_artifact, run.charge_tx, run.proof_tx)
         run.finalized = True
 
         # Follow-up work, in this order because both sign with the one server
@@ -677,9 +680,7 @@ def _finalize_on_exit(task_id: str, run: _RunState, *, onchain: bool) -> None:
     receipt keeps what it says (see `_RunState.finalized`)."""
     if run.finalized:
         return
-    _finalize_task(
-        task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-    )
+    _finalize_task(task_id, "failed", run.bill(onchain=onchain), run.last_artifact, run.charge_tx, run.proof_tx)
 
 
 async def _report_incomplete(task_id: str, start: float, status: TaskStatus, run: _RunState, total_steps: int) -> None:
