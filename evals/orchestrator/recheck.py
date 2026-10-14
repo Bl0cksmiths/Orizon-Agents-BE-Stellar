@@ -73,6 +73,36 @@ def _saved_html(d: Path, stem: str) -> tuple[str | None, str]:
     return html_files[0].name, html_files[0].read_text(encoding="utf-8")
 
 
+def _code_run(rec: dict[str, Any], html_name: str | None, html: str, validator: list[str] | None) -> dict[str, Any]:
+    """One measured code-worker run: its record's first call, its saved HTML
+    and the validator result chosen for it."""
+    call = rec["calls"][0] if rec["calls"] else {}
+    summary = str((rec.get("output") or {}).get("summary") or "")
+    deferred = _DEFERRED_LIST.search(summary)
+    return {
+        "label": rec.get("label") or rec["worker"],
+        "worker": rec["worker"],
+        "served_model": call.get("response_model"),
+        "effort": call.get("effort"),
+        "first_token_s": (call["first_token_ms"] / 1000) if call.get("first_token_ms") is not None else None,
+        "wall_s": rec["latency_s"],
+        "output_tokens": call.get("output_tokens"),
+        "cost_usd": rec["cost_usd"],
+        "unreported_estimated_usd": rec.get("unreported_estimated_usd", 0.0),
+        "lines": len(html.splitlines()) if html else None,
+        "bytes": len(html.encode()) if html else None,
+        "validator": validator,
+        "hit_token_ceiling": call.get("stop_reason") == "max_tokens",
+        "hit_stream_budget": "did not finish within" in str(rec.get("error") or ""),
+        "summary": summary,
+        "deferred_listed": bool(_DEFERRED.search(summary)),
+        "deferred_quote": deferred.group(0).strip() if deferred else None,
+        "chars_per_line": round(len(html) / len(html.splitlines()), 1) if html else None,
+        "html": html_name,
+        "error": rec.get("error"),
+    }
+
+
 def _code_length(d: Path, *, revalidate: bool) -> list[dict[str, Any]]:
     """Per run of a complex code.gen re-measure: what the record and the saved
     HTML say. With `revalidate`, the validator as it stands now is run over the
@@ -94,35 +124,12 @@ def _code_length(d: Path, *, revalidate: bool) -> list[dict[str, Any]]:
         if "skipped" in rec:
             out.append({"label": rec.get("label"), "skipped": rec["skipped"]})
             continue
-        call = rec["calls"][0] if rec["calls"] else {}
         html_name, html = _saved_html(d, p.stem)
-        summary = str((rec.get("output") or {}).get("summary") or "")
-        out.append(
-            {
-                "label": rec.get("label") or rec["worker"],
-                "worker": rec["worker"],
-                "served_model": call.get("response_model"),
-                "effort": call.get("effort"),
-                "first_token_s": (call["first_token_ms"] / 1000) if call.get("first_token_ms") is not None else None,
-                "wall_s": rec["latency_s"],
-                "output_tokens": call.get("output_tokens"),
-                "cost_usd": rec["cost_usd"],
-                "unreported_estimated_usd": rec.get("unreported_estimated_usd", 0.0),
-                "lines": len(html.splitlines()) if html else None,
-                "bytes": len(html.encode()) if html else None,
-                "validator": (validate_html(html) if html else None)
-                if revalidate
-                else frozen.get(html_name or "", _recorded_violations(rec)),
-                "hit_token_ceiling": call.get("stop_reason") == "max_tokens",
-                "hit_stream_budget": "did not finish within" in str(rec.get("error") or ""),
-                "summary": summary,
-                "deferred_listed": bool(_DEFERRED.search(summary)),
-                "deferred_quote": m.group(0).strip() if (m := _DEFERRED_LIST.search(summary)) else None,
-                "chars_per_line": round(len(html) / len(html.splitlines()), 1) if html else None,
-                "html": html_name,
-                "error": rec.get("error"),
-            }
-        )
+        if revalidate:
+            validator = validate_html(html) if html else None
+        else:
+            validator = frozen.get(html_name or "", _recorded_violations(rec))
+        out.append(_code_run(rec, html_name, html, validator))
     return out
 
 
