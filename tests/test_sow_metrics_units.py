@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.sow_metrics import chain
-from scripts.sow_metrics.config import GUIDE_PAGE, normalize_base
+from scripts.sow_metrics.config import GUIDE_PAGE, PendingLink, normalize_base, parse_pending_link
 from scripts.sow_metrics.fakes import BUYER1, JOB1, SIGNER, met_world
 from scripts.sow_metrics.metrics import amount, demo_state
 from scripts.sow_metrics.register import RegisterError
@@ -129,3 +129,22 @@ def test_a_bad_register_is_refused_with_its_reason(tmp_path: Path, content: str 
         path.write_text(content)
     with pytest.raises(RegisterError, match=message):
         load_register(path)
+
+
+@pytest.mark.parametrize("number", ["1", "91", "1200"])
+def test_a_pending_link_takes_a_pull_request_number(number: str) -> None:
+    url = f"https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/{number}"
+    assert parse_pending_link(f"m09={url}") == (
+        "m09",
+        PendingLink(
+            url,
+            f"Pull request #{number} in Bl0cksmiths/Orizon-Agents-FE-Stellar that adds the "
+            f"{GUIDE_PAGE} page (not deployed yet)",
+        ),
+    )
+
+
+@pytest.mark.parametrize("number", ["0", "012", "", "9a", "\u0663", "1\u0663", "\uff11"])
+def test_a_pending_link_refuses_anything_but_an_ascii_pull_request_number(number: str) -> None:
+    with pytest.raises(ValueError, match="is not a GitHub pull request URL"):
+        parse_pending_link(f"m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/{number}")

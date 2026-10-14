@@ -128,7 +128,8 @@ RAW_NAME = "sow-metrics.raw.json"
 # deployed it answers 404, and a link to it proves nothing; `--pending-link`
 # names the pull request that adds it instead.
 PAGE_METRICS: dict[str, str] = {"m06": REGISTER_PAGE, "m09": GUIDE_PAGE, "m10": DEMO_PAGE}
-_PULL_URL = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$")
+# ASCII: `\d` is exactly [0-9], so a number in another script's digits is refused.
+_PULL_URL = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9]\d*)$", re.ASCII)
 
 
 @dataclass(frozen=True)
