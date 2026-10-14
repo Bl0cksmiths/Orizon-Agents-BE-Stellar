@@ -99,6 +99,7 @@ D039 = (
 _NO_ANSWER = "the backend never answered"
 _FIX_WARM = "Fix network.warm first."
 _FIX_READINESS = "Fix build.readiness first."
+_FIX_BELOW_FLOOR = "Fix exclusion.below_floor first."
 
 
 class Refused(Exception):
@@ -822,7 +823,7 @@ def check_routable_count(facts: Facts) -> Check:
         f"At least {MIN_ROUTABLE_AGENTS} routable agents clear the floor, so the subject is excluded, not kept",
     )
     if facts.agents is None or facts.reputations is None or facts.floor_bps is None:
-        return check.skipped("the agents or the reputation batch were not read", "Fix exclusion.below_floor first.")
+        return check.skipped("the agents or the reputation batch were not read", _FIX_BELOW_FLOOR)
     floor = facts.floor_bps
     clear: list[str] = []
     unjudged: list[str] = []
@@ -859,7 +860,7 @@ def check_card_figure(facts: Facts) -> Check:
         "The plan card prints the excluded agent's lower bound below the floor's figure",
     )
     if not facts.below_floor or facts.floor_bps is None:
-        return check.skipped("there is no genuinely below-floor agent to judge", "Fix exclusion.below_floor first.")
+        return check.skipped("there is no genuinely below-floor agent to judge", _FIX_BELOW_FLOOR)
     floor = facts.floor_bps
     floor_figure = card_stars(floor)
     ceiling = highest_visibly_below(floor)
@@ -895,7 +896,7 @@ def check_decompose(reads: Reads, facts: Facts, intent: str | None) -> Check:
             'Pass --with-decompose "<the intent the video uses>" to confirm the plan names the exclusion.',
         )
     if not facts.below_floor:
-        return check.skipped("there is no genuinely below-floor agent to look for", "Fix exclusion.below_floor first.")
+        return check.skipped("there is no genuinely below-floor agent to look for", _FIX_BELOW_FLOOR)
     try:
         answer = reads.decompose(intent)
     except Unreachable as exc:
