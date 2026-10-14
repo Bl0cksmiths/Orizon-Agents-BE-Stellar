@@ -121,3 +121,42 @@ def test_an_unknown_trace_stream_is_refused_without_echoing_the_id(client):
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "unknown_task"
     assert HOSTILE_TASK_ID not in r.text
+
+
+def test_a_quiet_live_stream_pings_then_streams_its_lines_and_ends(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.routers import trace
+
+    task_id = "tsk_stream_ping"
+    _make_task(task_id, "running")
+    state.append_trace(task_id, TraceLine(t="0.01", level="exec", msg="history"))
+    timeouts: list[float] = []
+
+    async def quiet_once(awaitable, timeout):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            awaitable.close()  # never awaited: the queue stays quiet past the keepalive
+            raise asyncio.TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr(trace, "asyncio", SimpleNamespace(wait_for=quiet_once, TimeoutError=asyncio.TimeoutError))
+
+    async def scenario() -> list[tuple[str, str]]:
+        response = await trace.stream_trace(task_id)
+        assert task_id in bus._subs  # subscribed when the response is built, before the first read
+        await bus.publish(task_id, TraceLine(t="0.02", level="out", msg="live"))
+        await bus.close(task_id)
+        return [(event["event"], event["data"]) async for event in response.body_iterator]
+
+    try:
+        events = asyncio.run(scenario())
+    finally:
+        state.tasks.pop(task_id, None)
+        state.traces.pop(task_id, None)
+
+    assert [name for name, _ in events] == ["trace", "ping", "trace", "done"]
+    assert '"history"' in events[0][1] and '"live"' in events[2][1]
+    assert (events[1][1], events[3][1]) == ("{}", "{}")
+    assert timeouts == [15.0, 15.0, 15.0]
+    assert task_id not in bus._subs
