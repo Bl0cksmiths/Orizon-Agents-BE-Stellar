@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from stellar_sdk import Address, InvokeHostFunction, Keypair, StrKey, scval
+from stellar_sdk import Address, InvokeHostFunction, Keypair, Network, StrKey, scval
 from stellar_sdk import TransactionEnvelope as SdkEnvelope
 from stellar_sdk import xdr as stellar_xdr
 
@@ -29,7 +29,7 @@ FRONTEND = "https://front.test"
 RPC = "https://rpc.test"
 AGENT_ENDPOINT = "https://agent.test"
 HORIZON = "https://horizon.test"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 
 def _contract(tag: str) -> str:
