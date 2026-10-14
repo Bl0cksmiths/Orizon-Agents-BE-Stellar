@@ -242,6 +242,20 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     return analysis
 
 
+def _final_row(r: dict[str, Any], ceil: dict[str, int]) -> str:
+    """One final-check table row; output tokens carry their share of the
+    worker's ceiling when it has one."""
+    viol = r["validator"]
+    cap = ceil.get(r["worker"])
+    share = f" / {cap:,} ({100 * r['output_tokens'] / cap:.0f}%)" if cap else ""
+    return (
+        f"| {r['label']} | {r['served_model'] or 'not recorded'} | {r['effort'] or '—'} | "
+        f"{r['first_token_s']:.2f} s | {r['wall_s']:.1f} s | {r['output_tokens']:,}{share} | {usd(r['cost_usd'])} | "
+        f"{r['lines']} | {r['bytes']:,} | {r['chars_per_line']} | {'; '.join(viol) if viol else 'pass (no violations)'} | "
+        f"{'yes' if r['hit_token_ceiling'] else 'no'} | {'yes' if r['hit_stream_budget'] else 'no'} |"
+    )
+
+
 def _spend_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
     """The spend table: measured, estimated, and each separately capped re-measure."""
     sp = a["spend"]
@@ -401,15 +415,7 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
             if "skipped" in r:
                 L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
                 continue
-            viol = r["validator"]
-            cap = ceil.get(r["worker"])
-            share = f" / {cap:,} ({100 * r['output_tokens'] / cap:.0f}%)" if cap else ""
-            L.append(
-                f"| {r['label']} | {r['served_model'] or 'not recorded'} | {r['effort'] or '—'} | "
-                f"{r['first_token_s']:.2f} s | {r['wall_s']:.1f} s | {r['output_tokens']:,}{share} | {usd(r['cost_usd'])} | "
-                f"{r['lines']} | {r['bytes']:,} | {r['chars_per_line']} | {'; '.join(viol) if viol else 'pass (no violations)'} | "
-                f"{'yes' if r['hit_token_ceiling'] else 'no'} | {'yes' if r['hit_stream_budget'] else 'no'} |"
-            )
+            L.append(_final_row(r, ceil))
         L += ["", "Summaries as returned, and the deferred list:", ""]
         for r in a["final"]:
             if "skipped" in r:
