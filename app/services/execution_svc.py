@@ -1995,6 +1995,30 @@ async def _settle_refused(
     return (None, None, None)
 
 
+async def _v2_payout_plan(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    delivered_steps: frozenset[int],
+    authorized_max: int | None,
+    *,
+    payer: str,
+    auth_id_hex: str,
+) -> _PayoutPlan | None:
+    """The v2 settle's payouts, paid only to confirmed owners, or None when they
+    cannot be built — refused, and the custody released, already."""
+    try:
+        owners = (
+            await _settle_owners({plan.plan.steps[i].agent_id for i in delivered_steps})
+            if delivered_steps
+            else _SettleOwners(payees={}, unpaid={})
+        )
+        return _payout_plan(plan, delivered_steps, owners.unpaid, authorized_max, owners.payees)
+    except _PayoutRefused as e:
+        await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
+        return None
+
+
 async def _report_payout_cuts(
     task_id: str, start: float, payout_plan: _PayoutPlan, authorized_max: int | None, *, payer: str, auth_id_hex: str
 ) -> None:
@@ -2272,15 +2296,11 @@ async def _settle_v2(
         authorized_max = await _read_authorized_max(task_id, start, plan, escrow, payer=payer, auth_id_hex=auth_id_hex)
         if authorized_max is None:
             return (None, None, None)
-    try:
-        owners = (
-            await _settle_owners({plan.plan.steps[i].agent_id for i in delivered_steps})
-            if delivered_steps
-            else _SettleOwners(payees={}, unpaid={})
-        )
-        payout_plan = _payout_plan(plan, delivered_steps, owners.unpaid, authorized_max, owners.payees)
-    except _PayoutRefused as e:
-        return await _settle_refused(task_id, start, auth_id_hex, payer, str(e), "the payouts could not be built")
+    payout_plan = await _v2_payout_plan(
+        task_id, start, plan, delivered_steps, authorized_max, payer=payer, auth_id_hex=auth_id_hex
+    )
+    if payout_plan is None:
+        return (None, None, None)
     total = payout_plan.total
     await _report_payout_cuts(task_id, start, payout_plan, authorized_max, payer=payer, auth_id_hex=auth_id_hex)
 
