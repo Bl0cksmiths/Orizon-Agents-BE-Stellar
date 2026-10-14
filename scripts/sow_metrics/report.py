@@ -134,13 +134,9 @@ def link_problems(link: Any) -> list[str]:
     problem = label_problem(link.get("label"))
     if problem:
         out.append(f"label {problem}")
-    if "tx_hash" in link:
-        if kind != "tx" or not re.fullmatch(r"[0-9a-f]{64}", str(link["tx_hash"])):
-            out.append("tx_hash must be 64 hex on a tx link")
-        elif not str(url).endswith("/" + str(link["tx_hash"])):
-            out.append("tx_hash does not match the url")
-    if kind == "tx" and "tx_hash" not in link:
-        out.append("a tx link carries its tx_hash")
+    problem = _tx_hash_problem(link, kind, url)
+    if problem:
+        out.append(problem)
     if "date" in link and not _DATE.fullmatch(str(link["date"])):
         out.append(f"date {link['date']!r} is not YYYY-MM-DD")
     return out
@@ -152,6 +148,18 @@ def _url_problem(kind: Any, url: Any) -> str | None:
         return f"url {url!r} is not https"
     if kind in EXPLORER_URL and not EXPLORER_URL[kind].fullmatch(url):
         return f"url {url!r} is not a testnet explorer {kind} link"
+    return None
+
+
+def _tx_hash_problem(link: dict[str, Any], kind: Any, url: Any) -> str | None:
+    """A tx link carries its 64-hex `tx_hash`, the one its URL ends with; no other kind carries one."""
+    if "tx_hash" not in link:
+        return "a tx link carries its tx_hash" if kind == "tx" else None
+    tx_hash = str(link["tx_hash"])
+    if kind != "tx" or not re.fullmatch(r"[0-9a-f]{64}", tx_hash):
+        return "tx_hash must be 64 hex on a tx link"
+    if not str(url).endswith("/" + tx_hash):
+        return "tx_hash does not match the url"
     return None
 
 
