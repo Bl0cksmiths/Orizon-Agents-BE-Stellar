@@ -204,12 +204,16 @@ class FakeWorld:
         return httpx.Response(599, text=f"no fake for {url}")
 
     # ── the API ─────────────────────────────────────────────────
+    def health(self) -> httpx.Response:
+        """GET /api/health: Render's sleeping page while the backend wakes, then the health body."""
+        if self.health_failures > 0:
+            self.health_failures -= 1
+            return httpx.Response(503, text="<html>waking</html>")
+        return _json(200, {"status": "ok", "version": "t", "uptime_seconds": 1.0})
+
     def api(self, method: str, path: str, body: Any, headers: httpx.Headers) -> httpx.Response:
         if path == "/api/health":
-            if self.health_failures > 0:
-                self.health_failures -= 1
-                return httpx.Response(503, text="<html>waking</html>")
-            return _json(200, {"status": "ok", "version": "t", "uptime_seconds": 1.0})
+            return self.health()
         if path == "/readiness":
             if not self.readiness_reachable:
                 return httpx.Response(404, text="<html>not found</html>")
