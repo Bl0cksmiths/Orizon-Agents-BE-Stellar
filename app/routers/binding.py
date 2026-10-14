@@ -329,7 +329,7 @@ async def bind(
 
     try:
         raw_signature = base64.b64decode(body.signature, validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:  # binascii.Error, which b64decode raises, is a ValueError
         raise HTTPException(422, "signature_malformed") from None
     if len(raw_signature) != _SIGNATURE_BYTES:
         raise HTTPException(422, "signature_malformed")
