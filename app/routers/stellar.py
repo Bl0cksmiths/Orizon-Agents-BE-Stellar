@@ -889,6 +889,12 @@ async def build_set_active(req: SetActiveReq) -> XdrResponse:
         raise HTTPException(400, "build_failed") from e
 
 
+# The 400 the escrow builds answer when the transaction cannot be built.
+_BUILD_FAILED: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`build_failed` — the transaction could not be built.",
+}
+
 # The authorize route's ceiling on one authorization: 10 000 whole units of the
 # asset, as the legacy float field has always been bounded.
 MAX_AUTHORIZE_STROOPS = 10_000 * money.STROOPS_PER_UNIT
@@ -969,7 +975,16 @@ async def _refuse_if_not_the_plans_total(req: AuthorizeReq) -> None:
         )
 
 
-@router.post("/build/authorize")
+@router.post(
+    "/build/authorize",
+    responses={
+        400: _BUILD_FAILED,
+        409: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_amount_mismatch` — not exactly the held plan's total.",
+        },
+    },
+)
 async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
     """Build unsigned XDR for PaymentEscrow.authorize (x402 pre-auth).
 
