@@ -2551,6 +2551,34 @@ async def _registry_holds(task_id: str, registry: str, job_id: bytes) -> bool | 
     return bool(held)
 
 
+async def _reconcile_round(
+    task_id: str, start: float, pending: _PendingSeal, registry: str
+) -> Literal["sealed", "failed", "open"]:
+    """One round of `_reconcile_seal`: "sealed" once the seal is found or a
+    re-submission confirms, "failed" when it is proven absent with no
+    submission left, "open" when the next round must look again."""
+    landed, all_absent = await _landed_submission(pending)
+    if landed is not None:
+        await _seal_confirmed(task_id, start, pending, landed.tx_hash)
+        return "sealed"
+    held = await _registry_holds(task_id, registry, pending.job_id)
+    if held is None:
+        return "open"
+    if held:
+        await _sealed(task_id, start, None, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind)
+        return "sealed"
+    if not all_absent:
+        return "open"
+    if len(pending.submissions) >= MAX_SEAL_SUBMISSIONS:
+        return "failed"
+    seal_tx, again = await _submit_seal(pending.args)
+    if again is None:
+        await _seal_confirmed(task_id, start, pending, seal_tx)
+        return "sealed"
+    pending.submissions.append(again)
+    return "open"
+
+
 async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> None:
     """Find out what became of a seal that did not confirm, within a bound.
 
@@ -2570,28 +2598,12 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
     try:
         for delay in SEAL_RECONCILE_DELAYS:
             await asyncio.sleep(delay)
-            landed, all_absent = await _landed_submission(pending)
-            if landed is not None:
-                await _seal_confirmed(task_id, start, pending, landed.tx_hash)
+            verdict = await _reconcile_round(task_id, start, pending, registry)
+            if verdict == "sealed":
                 return
-            held = await _registry_holds(task_id, registry, pending.job_id)
-            if held is None:
-                continue
-            if held:
-                await _sealed(
-                    task_id, start, None, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind
-                )
-                return
-            if not all_absent:
-                continue
-            if len(pending.submissions) >= MAX_SEAL_SUBMISSIONS:
+            if verdict == "failed":
                 outcome = "failed"
                 break
-            seal_tx, again = await _submit_seal(pending.args)
-            if again is None:
-                await _seal_confirmed(task_id, start, pending, seal_tx)
-                return
-            pending.submissions.append(again)
     except asyncio.CancelledError:
         logger.error(
             "task %s: seal reconciliation cancelled — the seal of job %s is still unconfirmed (submissions: %s)",
