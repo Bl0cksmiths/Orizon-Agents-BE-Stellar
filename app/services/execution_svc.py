@@ -2536,6 +2536,21 @@ async def _landed_submission(pending: _PendingSeal) -> tuple[_SealSubmission | N
     return None, all_absent
 
 
+async def _registry_holds(task_id: str, registry: str, job_id: bytes) -> bool | None:
+    """`AttestationRegistry.exists(job_id)`, or None when the registry could not be read."""
+    from ..stellar import client as sc
+
+    try:
+        held = await asyncio.wait_for(
+            asyncio.to_thread(sc.simulate_read, registry, "exists", [sc.bytes16(job_id)], load_source=False),
+            SEAL_LOOKUP_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.warning("task %s: attestation registry unreadable while reconciling its seal: %s", task_id, e)
+        return None
+    return bool(held)
+
+
 async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> None:
     """Find out what became of a seal that did not confirm, within a bound.
 
@@ -2559,15 +2574,8 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
             if landed is not None:
                 await _seal_confirmed(task_id, start, pending, landed.tx_hash)
                 return
-            try:
-                held = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        sc.simulate_read, registry, "exists", [sc.bytes16(pending.job_id)], load_source=False
-                    ),
-                    SEAL_LOOKUP_TIMEOUT_SECONDS,
-                )
-            except Exception as e:
-                logger.warning("task %s: attestation registry unreadable while reconciling its seal: %s", task_id, e)
+            held = await _registry_holds(task_id, registry, pending.job_id)
+            if held is None:
                 continue
             if held:
                 await _sealed(
