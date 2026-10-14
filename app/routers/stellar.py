@@ -851,7 +851,13 @@ class SetActiveReq(BaseModel):
     active: bool = Field(..., description="True relists the agent, False delists it")
 
 
-@router.post("/build/set-active")
+@router.post(
+    "/build/set-active",
+    responses={
+        400: _OWNER_BUILD_FAILED,
+        404: {"model": ErrorEnvelope, "description": "`agent_not_found` — the registry holds no such agent."},
+    },
+)
 async def build_set_active(req: SetActiveReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.set_active (delist / relist). Owner signs.
 
