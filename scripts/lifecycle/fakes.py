@@ -512,17 +512,10 @@ class FakeWorld:
             lower_bound_bps=self.rep["lower_bound_bps"] + (200 if rating > 50 else -700),
         )
 
-    def finish(self, task_id: str) -> None:
-        """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
-        task = self.tasks[task_id]
-        steps = (self.plan or {})["steps"]
-        auth_id, payer = task["_auth"], task["_payer"]
-        auth = self.authorizations[auth_id]
-        job = secrets.token_hex(16)
-        trace = self.traces[task_id]
-        delivered = [s for s in steps if s["agent_id"] not in self.undelivered]
-
-        # one rating per dispatched step, as `_submit_ratings` writes them
+    def _write_ratings(
+        self, steps: list[dict[str, Any]], delivered: list[dict[str, Any]], job: str, trace: list[dict[str, Any]]
+    ) -> None:
+        """One rating per dispatched step, as `_submit_ratings` writes them: on the ledger and in the trace."""
         for s in steps:
             rating = 90 if s in delivered else self.failed_rating
             on_ledger = rating if s in delivered or self.ledger_failed_rating is None else self.ledger_failed_rating
@@ -549,6 +542,18 @@ class FakeWorld:
             )
             if s["agent_id"] == AGENT:
                 self._rate_agent(rating)
+
+    def finish(self, task_id: str) -> None:
+        """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
+        task = self.tasks[task_id]
+        steps = (self.plan or {})["steps"]
+        auth_id, payer = task["_auth"], task["_payer"]
+        auth = self.authorizations[auth_id]
+        job = secrets.token_hex(16)
+        trace = self.traces[task_id]
+        delivered = [s for s in steps if s["agent_id"] not in self.undelivered]
+
+        self._write_ratings(steps, delivered, job, trace)
 
         paid_steps: list[tuple[int, dict[str, Any], int, str]] = []
         if self.escrow_version >= 2:
