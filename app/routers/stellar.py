@@ -510,7 +510,12 @@ async def reputation_params() -> ReputationParams:
     )
 
 
-@router.get("/reputation/{agent_id}")
+@router.get(
+    "/reputation/{agent_id}",
+    responses={
+        404: {"model": ErrorEnvelope, "description": "`unknown_agent` — the registry does not hold this agent id."}
+    },
+)
 async def read_reputation(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
 ) -> ReputationInfo:
