@@ -41,7 +41,7 @@ from stellar_sdk import (
 from stellar_sdk import xdr as stellar_xdr
 from stellar_sdk.client.requests_client import RequestsClient
 from stellar_sdk.exceptions import PrepareTransactionException
-from stellar_sdk.soroban_rpc import GetTransactionStatus, SendTransactionStatus
+from stellar_sdk.soroban_rpc import GetLedgerEntriesResponse, GetTransactionStatus, SendTransactionStatus
 from stellar_sdk.xdr import SCVal, SCValType
 
 from ..config import settings
@@ -407,6 +407,29 @@ def _agent_record(entry_xdr: str, wanted: set[str]) -> tuple[str, dict[str, Any]
     return key[1], record
 
 
+def _agent_entries(
+    server: SorobanServer, label: str, keys: list[stellar_xdr.LedgerKey]
+) -> GetLedgerEntriesResponse | None:
+    """One getLedgerEntries for `keys`, asked at most twice; None when both attempts failed.
+
+    Asked twice: the read profile does not retry, and a batch that is
+    dropped once would otherwise send 200 ids down the slow path.
+    """
+    for attempt in (1, 2):
+        try:
+            with _rpc_span("read", label, slow_ms=SLOW_READ_MS) as span:
+                span["keys"] = len(keys)
+                span["attempt"] = attempt
+                span["stage"] = "get_ledger_entries"
+                response = server.get_ledger_entries(keys)
+                span["entries"] = len(response.entries or [])
+                span["stage"] = "ok"
+            return response
+        except Exception:
+            continue  # logged by the span
+    return None
+
+
 def read_agent_records(registry_id: str, agent_ids: list[str]) -> dict[str, dict[str, Any]]:
     """AgentRegistry records for `agent_ids`, read straight from its storage. Blocking.
 
@@ -437,21 +460,7 @@ def read_agent_records(registry_id: str, agent_ids: list[str]) -> dict[str, dict
     for start in range(0, len(agent_ids), LEDGER_ENTRIES_PER_REQUEST):
         chunk = agent_ids[start : start + LEDGER_ENTRIES_PER_REQUEST]
         keys = [_agent_record_key(registry_id, i) for i in chunk]
-        response = None
-        # Asked twice: the read profile does not retry, and a batch that is
-        # dropped once would otherwise send 200 ids down the slow path.
-        for attempt in (1, 2):
-            try:
-                with _rpc_span("read", label, slow_ms=SLOW_READ_MS) as span:
-                    span["keys"] = len(chunk)
-                    span["attempt"] = attempt
-                    span["stage"] = "get_ledger_entries"
-                    response = server.get_ledger_entries(keys)
-                    span["entries"] = len(response.entries or [])
-                    span["stage"] = "ok"
-                break
-            except Exception:
-                continue  # logged by the span
+        response = _agent_entries(server, label, keys)
         if response is None:
             continue  # these ids fall back to `get`
         for entry in response.entries or []:
