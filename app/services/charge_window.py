@@ -542,6 +542,38 @@ def _charges_by_agent(index: _Index, owners: Mapping[str, str]) -> dict[str, lis
     return by_agent
 
 
+def _evidence_by_agent(
+    owners: Mapping[str, str],
+    by_agent: Mapping[str, list[_Charge]],
+    payers: dict[str, str],
+    index: _Index,
+    truncated: bool,
+    *,
+    settler: str | None,
+    platform: frozenset[str],
+    asset: str,
+) -> dict[str, SettlementEvidence]:
+    """Each agent's evidence from its charges in `index`, attributed by `settlement_svc`'s own rule."""
+    window_days = round(index.scanned_ledgers * index.seconds_per_ledger / 86_400.0, 3)
+    evidence: dict[str, SettlementEvidence] = {}
+    for agent_id, owner in owners.items():
+        entries, total, excluded = settlement_svc._build_entries(
+            by_agent.get(agent_id, []), payers, owner, settler, platform
+        )
+        evidence[agent_id] = SettlementEvidence(
+            agent_id=agent_id,
+            asset=asset,
+            window_days=window_days,
+            scanned_ledgers=index.scanned_ledgers,
+            entries=entries,
+            total_stroops=total,
+            self_payment_stroops=excluded,
+            truncated=truncated,
+            unavailable=None,
+        )
+    return evidence
+
+
 def _warn_truncated(index: _Index, out_of_time: bool) -> None:
     """Say how far a truncated window was read, and why it stopped short."""
     logger.warning(
@@ -587,23 +619,9 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
     platform = settlement_svc._platform_keys()
     asset = await settlement_svc._read_asset(settings.stellar_asset_sac)
     truncated = not scanned.reached_tip or held.lossy
-    window_days = round(held.scanned_ledgers * held.seconds_per_ledger / 86_400.0, 3)
-    evidence: dict[str, SettlementEvidence] = {}
-    for agent_id, owner in owners.items():
-        entries, total, excluded = settlement_svc._build_entries(
-            by_agent.get(agent_id, []), payers, owner, settler, platform
-        )
-        evidence[agent_id] = SettlementEvidence(
-            agent_id=agent_id,
-            asset=asset,
-            window_days=window_days,
-            scanned_ledgers=held.scanned_ledgers,
-            entries=entries,
-            total_stroops=total,
-            self_payment_stroops=excluded,
-            truncated=truncated,
-            unavailable=None,
-        )
+    evidence = _evidence_by_agent(
+        owners, by_agent, payers, held, truncated, settler=settler, platform=platform, asset=asset
+    )
     charges = sum(len(c) for c in by_agent.values())
     unattributed = sum(1 for cs in by_agent.values() for c in cs if c.auth_id not in payers)
     if truncated:
