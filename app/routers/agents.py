@@ -56,7 +56,7 @@ from pydantic import TypeAdapter
 
 from .. import http_cache
 from ..schemas import AGENT_ID_PATTERN, Agent
-from ..security import CodedHTTPException
+from ..security import CodedHTTPException, ErrorEnvelope
 from ..services import registry_sync
 from ..services.binding_registry import is_bound
 from ..services.snapshots import etag_for
@@ -190,7 +190,11 @@ async def list_agents(
     )
 
 
-@router.get("/agents/{agent_id}", summary="Get one agent by id")
+@router.get(
+    "/agents/{agent_id}",
+    summary="Get one agent by id",
+    responses={404: {"model": ErrorEnvelope, "description": "`not_found` — no agent with that id."}},
+)
 async def get_agent(agent_id: str) -> Agent:
     agent = state.agents.get(agent_id)
     if agent is None:
