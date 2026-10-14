@@ -968,7 +968,7 @@ async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
     return DisputeResponse.of(record, free_text=True)
 
 
-@router.get("/disputes/{dispute_id}", response_model=DisputeResponse, summary="Read one dispute")
+@router.get("/disputes/{dispute_id}", summary="Read one dispute")
 async def get_dispute(
     dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
     proof: Annotated[TaskReadProof, Depends(task_read_proof)],
