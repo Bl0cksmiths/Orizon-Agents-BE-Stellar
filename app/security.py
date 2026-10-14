@@ -225,13 +225,18 @@ class SecretRedactionLogFilter(logging.Filter):
     and masked here too, and when masking changed it, folded into the message
     with `exc_info` cleared: exactly how `JsonLogFormatter` already presents a
     traceback, so the line is unchanged apart from the mask.
+
+    It never drops a record: `filter` returns the record to log, which since
+    Python 3.12 is the record handlers go on to format. It is the very record
+    it was given, masked in place, so a logger or handler further along sees
+    the same masked object either way.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def filter(self, record: logging.LogRecord) -> logging.LogRecord:
         try:
             message = record.getMessage()
         except Exception:  # noqa: BLE001 — a malformed record is logging's to report, not ours to drop
-            return True
+            return record
         masked = redact_secrets(message)
         if record.exc_info:
             trace = _EXCEPTION_FORMATTER.formatException(record.exc_info)
@@ -243,7 +248,7 @@ class SecretRedactionLogFilter(logging.Filter):
         if masked != message:
             record.msg = masked
             record.args = None
-        return True
+        return record
 
 
 # Resolved key for a forwarded chain that is too short to contain a client

@@ -92,7 +92,7 @@ def test_the_filter_masks_a_secret_passed_as_a_log_argument(secrets_configured: 
     # how agno logs a provider error ("Error in Agent run: %s").
     record = _record("Error in Agent run: %s", f"401 invalid key {secrets_configured['openai_api_key']}")
 
-    assert security.SecretRedactionLogFilter().filter(record) is True
+    assert security.SecretRedactionLogFilter().filter(record) is record
     assert record.getMessage() == "Error in Agent run: 401 invalid key [redacted]"
     assert record.args is None
 
