@@ -100,6 +100,15 @@ class Refused(Exception):
     """The run must not be judged at all: the wrong network, or one that cannot be confirmed."""
 
 
+class _Finding(Exception):
+    """A FAIL found inside a check's helper; the check reports it as `check.failed(detail, fix)`."""
+
+    def __init__(self, detail: str, fix: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.fix = fix
+
+
 @dataclass
 class Check:
     id: str
@@ -686,6 +695,41 @@ def _no_genuine_detail(floor: int, ignored: list[str], registered: list[str], re
     )
 
 
+def _read_past_cold_start(reads: Reads, batch: Answer, registered: list[str]) -> tuple[Any, int]:
+    """The reputation batch's entries once past a cold start, and how many reads that took.
+
+    A cold start reads every agent degraded until the backend's first ledger
+    read answers. That is the backend waking, not a finding about any agent,
+    so the batch is read again before anything is concluded. Raises `_Finding`
+    when a re-read gets no answer, or when every read is degraded.
+    """
+    reputations = batch.obj().get("reputations") or {}
+    reads_made = 1
+    while all_degraded(reputations, registered) and reads_made < REPUTATION_READ_ATTEMPTS:
+        reads.sleep(REPUTATION_REREAD_SECONDS)
+        try:
+            batch = reads.reputation()
+        except Unreachable as exc:
+            raise _Finding(str(exc), "Rerun; the reputation route did not answer.") from exc
+        if not batch.ok:
+            raise _Finding(
+                f"reputation batch {_status_line(batch)} on re-read {reads_made + 1}",
+                "Rerun; the reputation route did not answer.",
+            )
+        reputations = batch.obj().get("reputations") or {}
+        reads_made += 1
+    if all_degraded(reputations, registered):
+        raise _Finding(
+            f"every registered agent ({len(registered)}) read degraded on each of {reads_made} reads "
+            f"{REPUTATION_REREAD_SECONDS:.0f} s apart: the backend could not read the ReputationLedger, so this "
+            "is no verdict on any agent, not a finding that none is below the floor",
+            "Check the Soroban RPC the backend reads (/api/stellar/network rpc_url) answers and that the "
+            "reputation_ledger id there is right, wait a minute for the backend's ledger read, and rerun. On "
+            "camera a degraded read shows '⚠ unverified' and no exclusion at all.",
+        )
+    return reputations, reads_made
+
+
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
     check = Check(
         "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
@@ -714,33 +758,10 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
     facts.floor_bps = floor
     registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
-    reputations = batch.obj().get("reputations") or {}
-    # A cold start reads every agent degraded until the backend's first
-    # ledger read answers. That is the backend waking, not a finding about
-    # any agent, so the batch is read again before anything is concluded.
-    reads_made = 1
-    while all_degraded(reputations, registered) and reads_made < REPUTATION_READ_ATTEMPTS:
-        reads.sleep(REPUTATION_REREAD_SECONDS)
-        try:
-            batch = reads.reputation()
-        except Unreachable as exc:
-            return check.failed(str(exc), "Rerun; the reputation route did not answer.")
-        if not batch.ok:
-            return check.failed(
-                f"reputation batch {_status_line(batch)} on re-read {reads_made + 1}",
-                "Rerun; the reputation route did not answer.",
-            )
-        reputations = batch.obj().get("reputations") or {}
-        reads_made += 1
-    if all_degraded(reputations, registered):
-        return check.failed(
-            f"every registered agent ({len(registered)}) read degraded on each of {reads_made} reads "
-            f"{REPUTATION_REREAD_SECONDS:.0f} s apart: the backend could not read the ReputationLedger, so this "
-            "is no verdict on any agent, not a finding that none is below the floor",
-            "Check the Soroban RPC the backend reads (/api/stellar/network rpc_url) answers and that the "
-            "reputation_ledger id there is right, wait a minute for the backend's ledger read, and rerun. On "
-            "camera a degraded read shows '⚠ unverified' and no exclusion at all.",
-        )
+    try:
+        reputations, reads_made = _read_past_cold_start(reads, batch, registered)
+    except _Finding as finding:
+        return check.failed(finding.detail, finding.fix)
     facts.reputations = reputations if isinstance(reputations, dict) else {}
     reread = (
         f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
