@@ -89,6 +89,7 @@ async def _live_events(task_id: str, queue: asyncio.Queue[TraceLine | None]) -> 
     "/trace/{task_id}/stream",
     summary="Stream a task's trace as SSE",
     dependencies=[Depends(require_task_read)],
+    responses=_TASK_READ_RESPONSES,
 )
 async def stream_trace(task_id: str) -> EventSourceResponse:
     """Server-Sent Events — replays the existing trace then streams live lines.
