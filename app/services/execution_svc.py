@@ -3022,7 +3022,7 @@ async def _landed_submission(pending: _PendingSeal) -> tuple[_SealSubmission | N
     Stops at the first that landed, so the ones after it are never looked up.
     """
     all_absent = True
-    for submission in list(pending.submissions):
+    for submission in pending.submissions:
         verdict = await _seal_verdict(submission)
         if verdict == "landed":
             return submission, False
