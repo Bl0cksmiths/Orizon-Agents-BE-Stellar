@@ -20,7 +20,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .campaign import TIER_MODEL, _jsonable, guard_block, list_price, misclassified, narratives, tier_misses, usd
+from .campaign import RESULTS_FILE, TIER_MODEL, _jsonable, guard_block, list_price, misclassified, narratives, tier_misses, usd
 from .dataset import TIERS
 from .metrics import TIER_COLUMNS, ok_rows
 from .runner import read_jsonl
@@ -191,9 +191,9 @@ def _copy_files(src: Path, dst: Path) -> None:
 
 
 def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
-    old_all = read_jsonl(campaign_runs / "s1-guard" / "results.jsonl")
+    old_all = read_jsonl(campaign_runs / "s1-guard" / RESULTS_FILE)
     old = [r for r in old_all if r.get("rep", 0) == 0]
-    new = read_jsonl(runs / "r1-guard" / "results.jsonl")
+    new = read_jsonl(runs / "r1-guard" / RESULTS_FILE)
     errors = read_jsonl(runs / "r1-guard" / "errors.jsonl")
     g_old, g_pool, g_new = guard_block(old), guard_block(old_all), guard_block(new)
     workers = {}
@@ -225,7 +225,7 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "r1-guard").mkdir(exist_ok=True)
-    for name in ("results.jsonl", "errors.jsonl"):
+    for name in (RESULTS_FILE, "errors.jsonl"):
         src = runs / "r1-guard" / name
         (out / "r1-guard" / name).write_text(src.read_text(encoding="utf-8") if src.exists() else "", encoding="utf-8")
     _copy_files(wdir, out / "r2-workers")
