@@ -86,10 +86,21 @@ def _refused(err: IntentRefused) -> JSONResponse:
             "model": ErrorEnvelope,
             "description": "`intent_blocked` (+ `reason`), `intent_needs_detail` (+ `question`), or invalid input.",
         },
+        429: {
+            "model": ErrorEnvelope,
+            "description": (
+                "Rate limited (+ Retry-After): the global limit, or `decompose_rate_limited` — this client's "
+                "planner budget is spent."
+            ),
+        },
+        502: {"model": ErrorEnvelope, "description": "`decompose_failed` — planning failed unexpectedly."},
         503: {
             "model": ErrorEnvelope,
-            "description": "`intent_unavailable` or `planning_paused` (+ Retry-After), `no_routable_agents`",
+            "description": (
+                "`intent_unavailable` or `planning_paused` (+ Retry-After), `no_routable_agents`, `planner_busy`"
+            ),
         },
+        504: {"model": ErrorEnvelope, "description": "`decompose_timeout` — the planner did not answer in time."},
     },
 )
 async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse | JSONResponse:
