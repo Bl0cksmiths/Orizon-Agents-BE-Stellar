@@ -226,6 +226,19 @@ def write_state(flow_dir: Path, cases: list[Case], splits: dict[str, str]) -> No
     (flow_dir / "_state.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
+def _claim_variant(vdir: Path, meta: dict[str, Any]) -> None:
+    """Record how this variant's rows are made (`run.json`), for the report.
+
+    A resumed run must be the same kind of run: mixing fake and live rows in
+    one variant would average a harness check into a model measurement."""
+    meta_path = vdir / "run.json"
+    if meta_path.exists():
+        before = json.loads(meta_path.read_text(encoding="utf-8"))
+        if before != meta:
+            raise RunRefused(f"{vdir} holds a {before} run; use another --variant for a {meta} run")
+    meta_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+
+
 async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> RunOutcome:
     if pipeline.live and cfg.max_usd is None:
         raise RunRefused("a live pipeline needs a spend cap (max_usd)")
@@ -233,16 +246,7 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
     (vdir / "traces").mkdir(parents=True, exist_ok=True)
     splits = assign_splits(cases)
     write_state(cfg.flow_dir, cases, splits)
-    # How these rows were made, for the report. A resumed run must be the same
-    # kind of run: mixing fake and live rows in one variant would average a
-    # harness check into a model measurement.
-    meta_path = vdir / "run.json"
-    meta = {"pipeline": pipeline.name, "live": pipeline.live, "stages": cfg.stages}
-    if meta_path.exists():
-        before = json.loads(meta_path.read_text(encoding="utf-8"))
-        if before != meta:
-            raise RunRefused(f"{vdir} holds a {before} run; use another --variant for a {meta} run")
-    meta_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+    _claim_variant(vdir, {"pipeline": pipeline.name, "live": pipeline.live, "stages": cfg.stages})
     bind = getattr(pipeline, "bind", None)
     if callable(bind):
         bind(cases)
