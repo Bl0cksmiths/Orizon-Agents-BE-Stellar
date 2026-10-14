@@ -659,6 +659,25 @@ def trace_dispute(rating: DisputeRating, charges: list[Charge]) -> Charge | None
     return matches[0] if matches else None
 
 
+def _claim_refund(snap: Snapshot, charge: Charge, used: set[tuple[str, str, int]]) -> Transfer | None:
+    """The first unclaimed transfer to the charge's payer after it settled (and the sprint began), no larger than it.
+
+    The transfer found is marked used, so no other dispute can claim it.
+    """
+    settled = iso(charge.receipt.settled_at)
+    for t in snap.transfers:
+        key = (t.tx_hash, t.destination, t.amount_stroops)
+        if (
+            key not in used
+            and t.destination == charge.payer
+            and t.created_at >= max(settled, SPRINT_ISO)
+            and 0 < t.amount_stroops <= charge.receipt.amount
+        ):
+            used.add(key)
+            return t
+    return None
+
+
 def pair_refunds(snap: Snapshot, rules: Rules) -> tuple[list[RefundPair], list[dict[str, Any]], list[Transfer]]:
     """(refunded disputes, disputes that did not count with why, transfers left over)."""
     used: set[tuple[str, str, int]] = set()
@@ -673,18 +692,7 @@ def pair_refunds(snap: Snapshot, rules: Rules) -> tuple[list[RefundPair], list[d
         elif not charge.counts:
             why = "the charge it disputes does not count (" + "; ".join(charge.reasons) + ")"
         else:
-            settled = iso(charge.receipt.settled_at)
-            for t in snap.transfers:
-                key = (t.tx_hash, t.destination, t.amount_stroops)
-                if (
-                    key not in used
-                    and t.destination == charge.payer
-                    and t.created_at >= max(settled, SPRINT_ISO)
-                    and 0 < t.amount_stroops <= charge.receipt.amount
-                ):
-                    refund = t
-                    used.add(key)
-                    break
+            refund = _claim_refund(snap, charge, used)
             if refund is None:
                 why = "no refund from the platform to the charge's payer followed it"
         if refund is not None and charge is not None:
