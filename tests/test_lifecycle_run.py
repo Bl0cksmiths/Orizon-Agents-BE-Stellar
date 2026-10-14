@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from stellar_sdk import Keypair
 
-from scripts.lifecycle.cli import main
+from scripts.lifecycle.cli import _env_name, main
 from scripts.lifecycle.config import (
     EXIT_OK,
     EXIT_PLAN_MISSING_AGENT,
@@ -352,6 +352,17 @@ def test_refuses_a_seed_pasted_where_a_variable_name_belongs(world: FakeWorld, b
     assert code == EXIT_REFUSED
     assert buyer.secret not in stream.getvalue()
     assert world.calls == []
+
+
+@pytest.mark.parametrize("name", ["BUYER_1_SECRET", "_PRIVATE", "a1", "x"])
+def test_an_ascii_variable_name_is_taken_as_given(name: str) -> None:
+    assert _env_name(name, "--buyer-secret-env") == name
+
+
+@pytest.mark.parametrize("name", ["", "1ABC", "BUYER-KEY", "BUYER KEY", "CAFÉ_KEY", "KEY\u0663", "KEY²"])
+def test_a_name_outside_ascii_letters_digits_and_underscore_is_refused(name: str) -> None:
+    with pytest.raises(ValueError, match="takes the NAME of an environment variable"):
+        _env_name(name, "--buyer-secret-env")
 
 
 # ── secrets ─────────────────────────────────────────────────────

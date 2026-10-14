@@ -18,7 +18,7 @@ from .redact import Console, Redactor
 from .retry import RetryPolicy
 from .stages import Runner
 
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_NAME = re.compile(r"^[A-Za-z_]\w*$", re.ASCII)  # ASCII: `\w` is exactly [A-Za-z0-9_]
 # A seed is ALSO a valid variable name (upper-case base32), so it is refused by
 # shape before the name rule is asked.
 _SEED_SHAPE = re.compile(r"^S[A-Z2-7]{55}$")
