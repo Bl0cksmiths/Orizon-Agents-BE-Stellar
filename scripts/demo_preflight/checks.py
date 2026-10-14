@@ -319,6 +319,24 @@ def check_agent_readiness_route(reads: Reads, facts: Facts) -> Check:
     )
 
 
+def _missing_readiness_fields(body: dict[str, Any]) -> list[str]:
+    """The 5.01 `/readiness` fields `body` lacks, in the order the failure names them."""
+    missing: list[str] = []
+    disputes = body.get("disputes")
+    if not isinstance(disputes, dict):
+        missing.append("disputes")
+    else:
+        if "store" not in disputes:
+            missing.append("disputes.store")
+        reconcile = disputes.get("reconcile")
+        if not isinstance(reconcile, dict) or "enabled" not in reconcile:
+            missing.append("disputes.reconcile")
+    escrow = body.get("escrow")
+    if not isinstance(escrow, dict) or "contract" not in escrow or "version" not in escrow:
+        missing.append("escrow {contract, version}")
+    return missing
+
+
 def read_backend_readiness(reads: Reads, facts: Facts) -> Check:
     check = Check("build.readiness", "build", "The backend reports ready, with the 5.01 fields (GET /readiness)")
     try:
@@ -335,19 +353,9 @@ def read_backend_readiness(reads: Reads, facts: Facts) -> Check:
             f"Pass --backend with the backend's own host; /readiness is root-level and {reads.api} proxies only /api.",
         )
     facts.readiness = body
-    missing: list[str] = []
+    missing = _missing_readiness_fields(body)
     disputes = body.get("disputes")
-    if not isinstance(disputes, dict):
-        missing.append("disputes")
-    else:
-        if "store" not in disputes:
-            missing.append("disputes.store")
-        reconcile = disputes.get("reconcile")
-        if not isinstance(reconcile, dict) or "enabled" not in reconcile:
-            missing.append("disputes.reconcile")
     escrow = body.get("escrow")
-    if not isinstance(escrow, dict) or "contract" not in escrow or "version" not in escrow:
-        missing.append("escrow {contract, version}")
     if missing:
         return check.failed(
             f"{answer.url} has no {', '.join(missing)}: the deployed backend predates story 5.01's readiness fields",
