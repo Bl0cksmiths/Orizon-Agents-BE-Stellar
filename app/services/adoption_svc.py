@@ -536,6 +536,25 @@ async def _owner_or_none(agent_id: str, timeout: float = PROBE_TIMEOUT_SECONDS) 
         return None
 
 
+async def _batch_owners(registry_id: str, agent_ids: list[str], deadline: float) -> dict[str, str]:
+    """The owners one read of the registry's storage names for `agent_ids`,
+    by `deadline`; a record with no usable owner is left out, and a read that
+    failed answers none."""
+    try:
+        records = await asyncio.wait_for(
+            asyncio.to_thread(sc.read_agent_records, registry_id, agent_ids), timeout=deadline - time.monotonic()
+        )
+    except Exception as e:
+        logger.warning("[adoption] registry records unreadable: %s", _describe(e))
+        records = {}
+    owners: dict[str, str] = {}
+    for agent_id, record in records.items():
+        owner = record.get("owner")
+        if isinstance(owner, str) and owner:
+            owners[agent_id] = owner
+    return owners
+
+
 async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, str], bool]:
     """The owners of `agent_ids` that could be read by `deadline`, and whether
     any id was left unread for the next build (out of time, or past
@@ -550,17 +569,7 @@ async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, s
     owners = {i: _owners_read[(registry_id, i)] for i in agent_ids if (registry_id, i) in _owners_read}
     rest = [i for i in agent_ids if i not in owners]
     if rest and time.monotonic() < deadline:
-        try:
-            records = await asyncio.wait_for(
-                asyncio.to_thread(sc.read_agent_records, registry_id, rest), timeout=deadline - time.monotonic()
-            )
-        except Exception as e:
-            logger.warning("[adoption] registry records unreadable: %s", _describe(e))
-            records = {}
-        for agent_id, record in records.items():
-            owner = record.get("owner")
-            if isinstance(owner, str) and owner:
-                owners[agent_id] = owner
+        owners.update(await _batch_owners(registry_id, rest, deadline))
         rest = [i for i in rest if i not in owners]
     probe = rest[:MAX_OWNER_PROBES_PER_BUILD]
     left = len(rest) > len(probe)
