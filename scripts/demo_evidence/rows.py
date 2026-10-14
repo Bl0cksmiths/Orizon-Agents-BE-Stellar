@@ -174,6 +174,31 @@ def _tx_row(raw: dict[str, Any], detail: dict[str, Any], where: str, tx_hash: st
     )
 
 
+def _screen(raw: dict[str, Any], where: str, disputes: dict[str, str | None]) -> tuple[str, dict[str, Any]] | None:
+    """Check one row's network, note the status of the dispute it names in
+    `disputes`, and return its normalised hash and its detail; None for a row
+    without a hash (context, not a transaction).
+
+    Raises `WrongNetwork` for a row naming another network, and for a hash row
+    that does not name testnet."""
+    network = str(raw.get("network") or "")
+    tx_hash = raw.get("tx_hash")
+    if network not in _NO_NETWORK and network != TESTNET:
+        raise WrongNetwork(f"{where}: a row from network {network!r}; the video's evidence is testnet only")
+    raw_detail = raw.get("detail")
+    detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+    if detail.get("dispute_id"):
+        disputes[str(detail["dispute_id"])] = _dispute_status(str(raw.get("event") or ""), detail)
+    if not tx_hash:
+        return None
+    if network != TESTNET:
+        raise WrongNetwork(
+            f"{where}: a transaction row whose network is {network or 'unset'!r}, not testnet; refusing to "
+            "publish a hash whose network the row does not name"
+        )
+    return str(tx_hash).strip().lower(), detail
+
+
 def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     """Every transaction row of every input, in input order then file order. Raises on another network.
 
@@ -190,22 +215,10 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
         records, unreadable = _records(path)
         skipped += unreadable
         for where, raw in records:
-            network = str(raw.get("network") or "")
-            tx_hash = raw.get("tx_hash")
-            if network not in _NO_NETWORK and network != TESTNET:
-                raise WrongNetwork(f"{where}: a row from network {network!r}; the video's evidence is testnet only")
-            raw_detail = raw.get("detail")
-            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
-            if detail.get("dispute_id"):
-                disputes[str(detail["dispute_id"])] = _dispute_status(str(raw.get("event") or ""), detail)
-            if not tx_hash:
+            screened = _screen(raw, where, disputes)
+            if screened is None:
                 continue
-            if network != TESTNET:
-                raise WrongNetwork(
-                    f"{where}: a transaction row whose network is {network or 'unset'!r}, not testnet; refusing to "
-                    "publish a hash whose network the row does not name"
-                )
-            tx_hash = str(tx_hash).strip().lower()
+            tx_hash, detail = screened
             if tx_hash in seen:
                 duplicates += 1
                 continue
