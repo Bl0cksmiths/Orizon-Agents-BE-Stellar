@@ -47,7 +47,6 @@ by the response itself, and gzipped by the app's middleware.
 """
 
 import base64
-import binascii
 import re
 from bisect import bisect_right
 from typing import Annotated
@@ -101,7 +100,7 @@ def encode_cursor(agent_id: str) -> str:
 def _decode_cursor(cursor: str) -> str:
     try:
         agent_id = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
-    except (binascii.Error, UnicodeDecodeError, ValueError):
+    except ValueError:  # binascii.Error and UnicodeDecodeError are both ValueErrors
         agent_id = ""
     if not _AGENT_ID.fullmatch(agent_id):
         raise CodedHTTPException(400, "invalid_cursor", "cursor is not one this endpoint issued")
