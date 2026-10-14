@@ -538,6 +538,20 @@ def _read_params(snap: Snapshot, reads: Reads) -> None:
         snap.failures["params"] = f"{params.url} answered HTTP {params.status}"
 
 
+def _read_openapi(snap: Snapshot, reads: Reads) -> None:
+    """The backend's published routes, as `METHOD /path`: an answer without `paths` is a failed read."""
+    spec = _read(snap, "openapi", reads.openapi)
+    if spec is None:
+        return
+    paths = spec.obj().get("paths")
+    if spec.ok and isinstance(paths, dict):
+        snap.openapi_routes = {
+            f"{method.upper()} {path}" for path, ops in paths.items() if isinstance(ops, dict) for method in ops
+        }
+    else:
+        snap.failures["openapi"] = f"{spec.url} answered HTTP {spec.status}"
+
+
 def read_deployment(snap: Snapshot, reads: Reads) -> None:
     snap.urls.update(
         params=reads.api_url("/stellar/reputation/params"),
@@ -545,15 +559,7 @@ def read_deployment(snap: Snapshot, reads: Reads) -> None:
         readiness=f"{reads.backend}/readiness",
     )
     _read_params(snap, reads)
-    spec = _read(snap, "openapi", reads.openapi)
-    if spec is not None:
-        paths = spec.obj().get("paths")
-        if spec.ok and isinstance(paths, dict):
-            snap.openapi_routes = {
-                f"{method.upper()} {path}" for path, ops in paths.items() if isinstance(ops, dict) for method in ops
-            }
-        else:
-            snap.failures["openapi"] = f"{spec.url} answered HTTP {spec.status}"
+    _read_openapi(snap, reads)
     for path in (REGISTER_PAGE, GUIDE_PAGE, DEMO_PAGE):
         snap.page_urls[path] = reads.page_url(path)
         page = _read(snap, f"page:{path}", partial(reads.page, path))
