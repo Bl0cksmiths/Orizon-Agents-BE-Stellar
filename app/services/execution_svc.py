@@ -2514,6 +2514,13 @@ async def _seal_verdict(submission: _SealSubmission) -> Literal["landed", "absen
     return "absent"
 
 
+async def _seal_confirmed(task_id: str, start: float, pending: _PendingSeal, seal_tx: str | None) -> None:
+    """A reconciled seal is on the ledger: trace it, then link its hash to the settlement."""
+    await _sealed(task_id, start, seal_tx, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind)
+    if seal_tx is not None and pending.record is not None:
+        await _record_proof(task_id, pending.record, seal_tx)
+
+
 async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> None:
     """Find out what became of a seal that did not confirm, within a bound.
 
@@ -2537,16 +2544,7 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
             for submission in list(pending.submissions):
                 verdict = await _seal_verdict(submission)
                 if verdict == "landed":
-                    await _sealed(
-                        task_id,
-                        start,
-                        submission.tx_hash,
-                        agents=pending.agents,
-                        total_usdc=pending.total_usdc,
-                        kind=pending.kind,
-                    )
-                    if submission.tx_hash is not None and pending.record is not None:
-                        await _record_proof(task_id, pending.record, submission.tx_hash)
+                    await _seal_confirmed(task_id, start, pending, submission.tx_hash)
                     return
                 all_absent = all_absent and verdict == "absent"
             try:
@@ -2571,11 +2569,7 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
                 break
             seal_tx, again = await _submit_seal(pending.args)
             if again is None:
-                await _sealed(
-                    task_id, start, seal_tx, agents=pending.agents, total_usdc=pending.total_usdc, kind=pending.kind
-                )
-                if seal_tx is not None and pending.record is not None:
-                    await _record_proof(task_id, pending.record, seal_tx)
+                await _seal_confirmed(task_id, start, pending, seal_tx)
                 return
             pending.submissions.append(again)
     except asyncio.CancelledError:
