@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from stellar_sdk import Network
 
 from .config import TESTNET_PASSPHRASE
 
 RPC = "https://rpc.test"
 HORIZON = "https://horizon.test"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 
 def tx_hash(tag: str) -> str:
