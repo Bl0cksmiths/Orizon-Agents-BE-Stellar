@@ -21,7 +21,7 @@ from app.services import dispute_store, dispute_svc
 from app.services.dispute_store import DisputeRecord
 from app.services.dispute_svc import DisputeError, clean_dispute_text
 
-INVISIBLE = ["​", "‌⁠", "﻿", "­", "‮", "ㅤ", "⠀", "ᅟᅠ", "͏"]
+INVISIBLE = ["\u200b", "\u200c\u2060", "\ufeff", "\u00ad", "\u202e", "\u3164", "\u2800", "\u115f\u1160", "\u034f"]
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +65,7 @@ def test_c0_and_c1_controls_become_spaces_and_tab_and_newline_survive() -> None:
 
 
 def test_bidi_controls_and_lone_surrogates_are_dropped() -> None:
-    assert clean_dispute_text("a‮b⁦c⁩d‏e؜f\ud800g") == "abcdefg"
+    assert clean_dispute_text("a\u202eb\u2066c\u2069d\u200fe\u061cf\ud800g") == "abcdefg"
 
 
 def test_ordinary_text_is_untouched() -> None:
@@ -102,7 +102,7 @@ def test_a_rejection_note_nobody_can_see_is_refused(note: str) -> None:
 def test_a_rejection_note_is_stored_cleaned_and_otherwise_as_written() -> None:
     dispute = _open_dispute()
 
-    rejected = asyncio.run(dispute_svc.reject(dispute.id, note="THE END RESULT \x9bmatched‮ the brief"))
+    rejected = asyncio.run(dispute_svc.reject(dispute.id, note="THE END RESULT \x9bmatched\u202e the brief"))
 
     assert rejected.note == "THE END RESULT  matched the brief"
 
