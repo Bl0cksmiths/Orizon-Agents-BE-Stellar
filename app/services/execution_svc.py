@@ -634,20 +634,14 @@ async def _run(
         # "running" forever, tell the stream, and keep the cancellation
         # propagating. shield: a second cancel must not kill the trace line.
         # A task already final keeps what it says (see `finalized`).
-        if not run.finalized:
-            _finalize_task(
-                task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-            )
+        _finalize_on_exit(task_id, run, onchain=onchain)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not run.settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
         raise
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
-        if not run.finalized:
-            _finalize_task(
-                task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
-            )
+        _finalize_on_exit(task_id, run, onchain=onchain)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not run.settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
@@ -661,6 +655,17 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+def _finalize_on_exit(task_id: str, run: _RunState, *, onchain: bool) -> None:
+    """Write a run that ended early (cancelled, or failed by a bug) as `failed`
+    with what it had — unless its task is already final, in which case the
+    receipt keeps what it says (see `_RunState.finalized`)."""
+    if run.finalized:
+        return
+    _finalize_task(
+        task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
+    )
 
 
 async def _report_incomplete(task_id: str, start: float, status: TaskStatus, run: _RunState, total_steps: int) -> None:
