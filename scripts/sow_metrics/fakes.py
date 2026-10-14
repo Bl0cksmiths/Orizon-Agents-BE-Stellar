@@ -118,6 +118,19 @@ def _sim_fail(ok: Callable[[Any], httpx.Response], message: str) -> httpx.Respon
     return ok({"error": message, "latestLedger": 1})
 
 
+def _receipt_map(fields: dict[str, Any]) -> stellar_xdr.SCVal:
+    """An escrow receipt as the contract's `receipt(id)` view returns it."""
+    return _map(
+        {
+            "auth_id": scval.to_bytes(fields["auth_id"]),
+            "agent_id": _sym(fields["agent_id"]),
+            "amount": scval.to_int128(fields["amount"]),
+            "job_id": scval.to_bytes(bytes.fromhex(fields["job_id"])),
+            "settled_at": scval.to_uint64(fields["settled_at"]),
+        }
+    )
+
+
 @dataclass
 class Escrow:
     version: int
@@ -558,18 +571,7 @@ class FakeWorld:
                 if (fn == "receipt" and kind != "receipt") or (fn == "authorization" and kind != "auth"):
                     return _sim_fail(ok, "HostError: Error(Contract, #2)")
                 if kind == "receipt":
-                    return _sim_value(
-                        ok,
-                        _map(
-                            {
-                                "auth_id": scval.to_bytes(fields["auth_id"]),
-                                "agent_id": _sym(fields["agent_id"]),
-                                "amount": scval.to_int128(fields["amount"]),
-                                "job_id": scval.to_bytes(bytes.fromhex(fields["job_id"])),
-                                "settled_at": scval.to_uint64(fields["settled_at"]),
-                            }
-                        ),
-                    )
+                    return _sim_value(ok, _receipt_map(fields))
                 return _sim_value(
                     ok,
                     _map(
