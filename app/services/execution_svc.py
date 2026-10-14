@@ -525,6 +525,22 @@ class _RunState:
     # has to prove it (ADR 0005 D3). Carried separately because `delivered`
     # holds the output, not its provenance.
     first_party_ids: set[str] = field(default_factory=set)
+    # In stroops (ADR 0015): a paid run's bill, what its settle actually
+    # moved, set the moment it confirms.
+    charged: int = 0
+    charge_tx: str | None = None
+    proof_tx: str | None = None
+    # Set the moment a settle (or a v2 release) is handed to the chain. A run
+    # that ends WITHOUT one — cancelled, killed by shutdown, or failed by a bug
+    # — releases the buyer's v2 custody on its way out instead of stranding it
+    # until expiry (S4). One that ends after it never does: that settle may
+    # still land, and a second one is a replay at best and a race at worst.
+    settle_attempted: bool = False
+    # Set the moment the task is written terminal. From then on the task is
+    # the buyer's receipt of what happened — a settle that moved money above
+    # all — and nothing later (a cancel during the seal or the ratings, a bug
+    # after the settle) may rewrite it as `failed` with no hash.
+    finalized: bool = False
 
 
 async def _run(
@@ -537,24 +553,7 @@ async def _run(
 ) -> None:
     _live_runs.add(task_id)
     start = time.monotonic()
-    # In stroops (ADR 0015). A paid run's bill is `charged`: what its settle
-    # actually moved, set the moment it confirms. A simulated run's is
-    # `run.spent`.
-    charged = 0
-    charge_tx: str | None = None
-    proof_tx: str | None = None
     onchain = bool(auth_id_hex and payer)
-    # Set the moment a settle (or a v2 release) is handed to the chain. A run
-    # that ends WITHOUT one — cancelled, killed by shutdown, or failed by a bug
-    # — releases the buyer's v2 custody on its way out instead of stranding it
-    # until expiry (S4). One that ends after it never does: that settle may
-    # still land, and a second one is a replay at best and a race at worst.
-    settle_attempted = False
-    # Set the moment the task is written terminal. From then on the task is
-    # the buyer's receipt of what happened — a settle that moved money above
-    # all — and nothing later (a cancel during the seal or the ratings, a bug
-    # after the settle) may rewrite it as `failed` with no hash.
-    finalized = False
 
     # Accumulate prior step outputs so later steps can build on them.
     # The kit (if any) is seeded into context up-front so EVERY worker
@@ -706,10 +705,9 @@ async def _run(
             # the seal's own poll: the receipt is final, with the hash of what
             # moved and how much, from that instant. The seal's hash is added
             # when it lands.
-            nonlocal finalized, charged
-            charged = moved
-            _finalize_task(task_id, status, charged, run.last_artifact, settle_tx, None)
-            finalized = True
+            run.charged = moved
+            _finalize_task(task_id, status, run.charged, run.last_artifact, settle_tx, None)
+            run.finalized = True
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
             if run.succeeded == 0 and await _escrow_version() >= 2:
@@ -718,8 +716,8 @@ async def _run(
                 # `settle` releases every stroop back to them now, instead of
                 # leaving it locked until they reclaim it after expiry. Nothing
                 # is recorded or sealed — there is no delivered work.
-                settle_attempted = True
-                charge_tx, _, _ = await _settle_v2(
+                run.settle_attempted = True
+                run.charge_tx, _, _ = await _settle_v2(
                     task_id,
                     start,
                     plan,
@@ -765,8 +763,8 @@ async def _run(
                 # spin-down) would otherwise take the buyer's only evidence of
                 # what they paid for with it. It touches no chain, and a store
                 # that is down cannot fail the run — see `_record_settlement`.
-                settle_attempted = True
-                charge_tx, proof_tx, job_id = await _settle_and_record(
+                run.settle_attempted = True
+                run.charge_tx, run.proof_tx, job_id = await _settle_and_record(
                     task_id,
                     start,
                     plan,
@@ -828,8 +826,10 @@ async def _run(
                 f"workflow incomplete — {run.succeeded}/{total_steps} agents produced output",
             )
 
-        _finalize_task(task_id, status, charged if onchain else run.spent, run.last_artifact, charge_tx, proof_tx)
-        finalized = True
+        _finalize_task(
+            task_id, status, run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
+        )
+        run.finalized = True
 
         # Follow-up work, in this order because both sign with the one server
         # account and parallel submits collide on its sequence number: first
@@ -854,18 +854,22 @@ async def _run(
         # "running" forever, tell the stream, and keep the cancellation
         # propagating. shield: a second cancel must not kill the trace line.
         # A task already final keeps what it says (see `finalized`).
-        if not finalized:
-            _finalize_task(task_id, "failed", charged if onchain else run.spent, run.last_artifact, charge_tx, proof_tx)
+        if not run.finalized:
+            _finalize_task(
+                task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
+            )
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
-        if auth_id_hex and payer and not settle_attempted:
+        if auth_id_hex and payer and not run.settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
         raise
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
-        if not finalized:
-            _finalize_task(task_id, "failed", charged if onchain else run.spent, run.last_artifact, charge_tx, proof_tx)
+        if not run.finalized:
+            _finalize_task(
+                task_id, "failed", run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
+            )
         await _emit(task_id, start, "error", f"workflow failed: {e}")
-        if auth_id_hex and payer and not settle_attempted:
+        if auth_id_hex and payer and not run.settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
     finally:
         # The SSE terminator must reach subscribers even mid-cancellation:
