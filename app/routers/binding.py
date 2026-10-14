@@ -331,7 +331,21 @@ async def bind_challenge(
     )
 
 
-@router.post("/{agent_id}/bind", summary="Bind an endpoint to an agent id")
+@router.post(
+    "/{agent_id}/bind",
+    summary="Bind an endpoint to an agent id",
+    responses={
+        **_OWNER_RESPONSES,
+        401: {
+            "model": ErrorEnvelope,
+            "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+        },
+        422: {
+            "model": ErrorEnvelope,
+            "description": "`endpoint_not_allowed`, `signature_malformed`, or invalid input.",
+        },
+    },
+)
 async def bind(
     body: BindReq,
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
