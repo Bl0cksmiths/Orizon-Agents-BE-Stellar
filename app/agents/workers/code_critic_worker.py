@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ... import pacing
 from .base import ModelWorker
 from .claude_step import ModelStepError
 from .code_critic import CRITIC_DEFAULT_TIER, CodeCritic
@@ -94,9 +95,6 @@ class CodeCriticWorker(ModelWorker):
         *,
         tier: Tier | None = None,
     ) -> dict[str, Any]:
-        import asyncio
-        import random
-
         ctx = context or {}
         draft = _draft(ctx)
         if draft and _is_project(draft[1]):
@@ -132,7 +130,7 @@ class CodeCriticWorker(ModelWorker):
         # kit's checklist items are pre-met by design.
         if prior.get("source") == "baked":
             checklist = (ctx.get("kit") or {}).get("critic_checklist", [])
-            await asyncio.sleep(0.4 + random.random() * 0.6)
+            await pacing.pause(0.4, 0.6)
             title = draft_artifact.get("title", "artifact")
             kit_id = (ctx.get("kit") or {}).get("kit_id", "kit")
             draft_artifact = harden_artifact(draft_artifact)
