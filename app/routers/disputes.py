@@ -1268,7 +1268,6 @@ async def uphold_dispute(
 
 @router.post(
     "/disputes/{dispute_id}/reject",
-    response_model=DisputeResponse,
     summary="Reject a dispute, with a reason the buyer is shown",
     dependencies=[Depends(require_adjudicator)],
     # No 502/504: nothing here signs, so there is no ledger for it to report
