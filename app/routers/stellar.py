@@ -690,6 +690,13 @@ async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -
 
 
 # ── writes (user signs via Freighter) ───────────────────────────
+# The 400 every owner-signed agent build answers.
+_OWNER_BUILD_FAILED: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`owner_account_unfunded` — the owner's account is not on-chain yet; or `build_failed`.",
+}
+
+
 class RegisterAgentReq(BaseModel):
     owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the agent owner")
     # Soroban Symbol charset — anything outside it would only fail on-chain,
@@ -700,7 +707,16 @@ class RegisterAgentReq(BaseModel):
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
 
-@router.post("/build/register-agent")
+@router.post(
+    "/build/register-agent",
+    responses={
+        400: _OWNER_BUILD_FAILED,
+        409: {
+            "model": ErrorEnvelope,
+            "description": "`id_reserved` — a seeded or route name; or `id_taken` — already registered.",
+        },
+    },
+)
 async def build_register_agent(req: RegisterAgentReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.register. Owner signs via Freighter."""
     from stellar_sdk.exceptions import AccountNotFoundException
