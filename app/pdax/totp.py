@@ -32,7 +32,7 @@ def totp_now(secret_base32: str, *, timestamp: int, period: int = 30, digits: in
     # builds TOTP on HOTP's HMAC-SHA-1 and §4 defines the code over it, and
     # PDAX's SOFTWARE_TOKEN_MFA challenge (an authenticator-app TOTP) verifies
     # exactly that variant — another hash yields codes PDAX rejects. HMAC's
-    # strength does not rest on SHA-1's collision resistance (RFC 4226 App. A),
+    # strength does not rest on SHA-1's collision resistance (RFC 4226 App. B.2),
     # so the known SHA-1 collisions do not weaken a TOTP code.
     digest = hmac.new(key, msg, hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
