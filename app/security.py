@@ -235,7 +235,8 @@ class SecretRedactionLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> logging.LogRecord:
         try:
             message = record.getMessage()
-        except Exception:  # noqa: BLE001 — a malformed record is logging's to report, not ours to drop
+        except Exception:  # noqa: BLE001
+            # A malformed record is logging's to report, not ours to drop.
             return record
         masked = redact_secrets(message)
         if record.exc_info:
