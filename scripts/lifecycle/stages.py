@@ -442,14 +442,7 @@ class Runner:
             self.ensure_run_id()
             return "poll"
         if prior is not None and (prior.plan or prior.authorize or prior.task_id):
-            pending = (prior.authorize or {}).get("status") in ("signed", "unknown")
-            raise Stop(
-                EXIT_RESUME_CONFLICT,
-                f"{self.store.path} already holds a run (task {prior.task_id}"
-                + (f", authorize {prior.authorize['tx_hash']} unconfirmed" if pending and prior.authorize else "")
-                + "). Resume it with --from-task / --from-dispute, or start a new run in a new --evidence-dir. "
-                "A fresh run here could authorize a second payment.",
-            )
+            raise self.held_run(prior)
         if not self.cfg.intent:
             raise Stop(EXIT_REFUSED, "--intent is required for a fresh run")
         self.ensure_run_id()
@@ -462,6 +455,17 @@ class Runner:
         if prior.buyer and self.buyer is not None and prior.buyer != self.buyer.public_key:
             raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is buyer {prior.buyer}'s run, not this key's")
         self.state = prior
+
+    def held_run(self, prior: RunState) -> Stop:
+        """The refusal of a fresh run in an evidence dir that already holds one."""
+        pending = (prior.authorize or {}).get("status") in ("signed", "unknown")
+        return Stop(
+            EXIT_RESUME_CONFLICT,
+            f"{self.store.path} already holds a run (task {prior.task_id}"
+            + (f", authorize {prior.authorize['tx_hash']} unconfirmed" if pending and prior.authorize else "")
+            + "). Resume it with --from-task / --from-dispute, or start a new run in a new --evidence-dir. "
+            "A fresh run here could authorize a second payment.",
+        )
 
     def ensure_run_id(self) -> None:
         if not self.state.run_id:
