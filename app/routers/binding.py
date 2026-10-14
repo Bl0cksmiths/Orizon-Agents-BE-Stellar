@@ -219,7 +219,7 @@ def _check_policy(agent_id: str, endpoint_url: str, stage: str) -> None:
 # it can never be captured as an agent id — `GET /api/agents/{agent_id}` in
 # app/routers/agents.py has no pattern constraint and would otherwise swallow
 # a two-segment spelling regardless of router registration order.
-@router.get("/bind/endpoint-check", response_model=EndpointCheckResponse, summary="Preflight an endpoint URL")
+@router.get("/bind/endpoint-check", summary="Preflight an endpoint URL")
 async def endpoint_check(url: Annotated[str, Query(min_length=1, max_length=2048)]) -> EndpointCheckResponse:
     """Advisory: would this URL be accepted? Pure — no DNS, no outbound request.
 
