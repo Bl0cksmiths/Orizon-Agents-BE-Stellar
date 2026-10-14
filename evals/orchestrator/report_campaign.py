@@ -158,6 +158,86 @@ def _errors_section(a: dict[str, Any], keep: dict[str, str], diag: dict[str, str
     return L
 
 
+def _sweep_section(a: dict[str, Any]) -> list[str]:
+    """§11: the threshold sweep, the watch line, the tier rules and the recommended policy."""
+    L: list[str] = []
+    add = L.append
+    add("## 11. Threshold sweep and tier rules")
+    add("")
+    add(
+        "Replayed over recorded scores (stage 1 rep 0 + stage 2), no new calls. One knob at a time, picked on the train "
+        "split (never more wrong refusals than today), judged on the held-out test split. Full curves in `sweep.md`."
+    )
+    add("")
+    add("| knob | today | picked on train | held-out today | held-out at pick |")
+    add("|---|---|---|---|---|")
+    heads = {
+        "injection_block": ("injection_recall", "false_block"),
+        "harmful_block": ("harmful_recall", "false_block"),
+        "severity_block": ("harmful_recall", "false_block"),
+        "real_request_min": ("needs_detail_recall", "false_needs_detail"),
+        "complexity_confidence_min": ("tier_accuracy", "under_tier"),
+    }
+    for k in a["sweep"]:
+        x, y = heads[k["knob"]]
+        st_, pk = k["start_test"], k["picked_test"]
+        picked = "—" if k["picked"] is None else f"{k['picked']:.2f}"
+        add(
+            f"| `{k['knob']}` | {k['start']:.2f} | {picked} | {x} {pct(getattr(st_, x))}; {y} {pct(getattr(st_, y))} | {x} {pct(getattr(pk, x))}; {y} {pct(getattr(pk, y))} |"
+        )
+    add("")
+    add("Watch line (stage 4 rows, which carry re-check scores):")
+    add("")
+    add("| injection_watch | injection recall | false block | cases in the band |")
+    add("|---|---|---|---|")
+    for w in a["watch_sweep"]:
+        add(f"| {w['injection_watch']:.2f} | {pct(w['injection_recall'])} | {pct(w['false_block'])} | {w['watched']} |")
+    add("")
+    add(
+        "Complexity round-up rules over the legit cases jev allowed (stage 1, 3 reps pooled), with where the request lands:"
+    )
+    add("")
+    add(
+        "| rule | tier accuracy | under-tier | over-tier | Haiku / Sonnet / Opus | held-out tier accuracy | planning $/request |"
+    )
+    add("|---|---|---|---|---|---|---|")
+    held = {r["rule"]: r for r in a["tier_rules_s1_test"]}
+    for r in a["tier_rules_s1"]:
+        m = r["routed"]
+        h = held[r["rule"]]["accuracy"]
+        add(
+            f"| {r['rule']} | {pct(r['accuracy'])} | {pct(r['under_tier'])} | {pct(r['over_tier'])} | {m['low']} / {m['moderate']} / {m['complex']} | {pct(h)} | {usd(r['planning_usd_per_request'])} |"
+        )
+    add("")
+    add(
+        "Tier → step model: "
+        + ", ".join(f"{t} → {TIER_MODEL[t]}" for t in TIERS)
+        + ". Planning cost differs little by tier; the tier's real cost is in execution (see the code.gen timings in §7)."
+    )
+    add("")
+    rec = a["recommended"]
+    add("### Recommended policy, judged on the held-out split")
+    add("")
+    add("| | today | recommended |")
+    add("|---|---|---|")
+    add(
+        "| thresholds | "
+        + ", ".join(f"{k} {v}" for k, v in rec["today"].items())
+        + " | "
+        + ", ".join(f"{k} {v}" for k, v in rec["policy"].items())
+        + " |"
+    )
+    for key in ("injection_recall", "harmful_recall", "false_block", "needs_detail_recall", "false_needs_detail"):
+        add(
+            f"| {key.replace('_', ' ')} (held-out) | {pct(rec['held_out_today'][key])} | {pct(rec['held_out_recommended'][key])} |"
+        )
+    add(
+        f"| tier accuracy with the recommended tier rule (held-out) | {pct(rec['tier_today_test'])} | {pct(rec['tier_rule_test'])} |"
+    )
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -531,79 +611,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
 
     L += _errors_section(a, keep, diag)
 
-    add("## 11. Threshold sweep and tier rules")
-    add("")
-    add(
-        "Replayed over recorded scores (stage 1 rep 0 + stage 2), no new calls. One knob at a time, picked on the train "
-        "split (never more wrong refusals than today), judged on the held-out test split. Full curves in `sweep.md`."
-    )
-    add("")
-    add("| knob | today | picked on train | held-out today | held-out at pick |")
-    add("|---|---|---|---|---|")
-    heads = {
-        "injection_block": ("injection_recall", "false_block"),
-        "harmful_block": ("harmful_recall", "false_block"),
-        "severity_block": ("harmful_recall", "false_block"),
-        "real_request_min": ("needs_detail_recall", "false_needs_detail"),
-        "complexity_confidence_min": ("tier_accuracy", "under_tier"),
-    }
-    for k in a["sweep"]:
-        x, y = heads[k["knob"]]
-        st_, pk = k["start_test"], k["picked_test"]
-        picked = "—" if k["picked"] is None else f"{k['picked']:.2f}"
-        add(
-            f"| `{k['knob']}` | {k['start']:.2f} | {picked} | {x} {pct(getattr(st_, x))}; {y} {pct(getattr(st_, y))} | {x} {pct(getattr(pk, x))}; {y} {pct(getattr(pk, y))} |"
-        )
-    add("")
-    add("Watch line (stage 4 rows, which carry re-check scores):")
-    add("")
-    add("| injection_watch | injection recall | false block | cases in the band |")
-    add("|---|---|---|---|")
-    for w in a["watch_sweep"]:
-        add(f"| {w['injection_watch']:.2f} | {pct(w['injection_recall'])} | {pct(w['false_block'])} | {w['watched']} |")
-    add("")
-    add(
-        "Complexity round-up rules over the legit cases jev allowed (stage 1, 3 reps pooled), with where the request lands:"
-    )
-    add("")
-    add(
-        "| rule | tier accuracy | under-tier | over-tier | Haiku / Sonnet / Opus | held-out tier accuracy | planning $/request |"
-    )
-    add("|---|---|---|---|---|---|---|")
-    held = {r["rule"]: r for r in a["tier_rules_s1_test"]}
-    for r in a["tier_rules_s1"]:
-        m = r["routed"]
-        h = held[r["rule"]]["accuracy"]
-        add(
-            f"| {r['rule']} | {pct(r['accuracy'])} | {pct(r['under_tier'])} | {pct(r['over_tier'])} | {m['low']} / {m['moderate']} / {m['complex']} | {pct(h)} | {usd(r['planning_usd_per_request'])} |"
-        )
-    add("")
-    add(
-        "Tier → step model: "
-        + ", ".join(f"{t} → {TIER_MODEL[t]}" for t in TIERS)
-        + ". Planning cost differs little by tier; the tier's real cost is in execution (see the code.gen timings in §7)."
-    )
-    add("")
-    rec = a["recommended"]
-    add("### Recommended policy, judged on the held-out split")
-    add("")
-    add("| | today | recommended |")
-    add("|---|---|---|")
-    add(
-        "| thresholds | "
-        + ", ".join(f"{k} {v}" for k, v in rec["today"].items())
-        + " | "
-        + ", ".join(f"{k} {v}" for k, v in rec["policy"].items())
-        + " |"
-    )
-    for key in ("injection_recall", "harmful_recall", "false_block", "needs_detail_recall", "false_needs_detail"):
-        add(
-            f"| {key.replace('_', ' ')} (held-out) | {pct(rec['held_out_today'][key])} | {pct(rec['held_out_recommended'][key])} |"
-        )
-    add(
-        f"| tier accuracy with the recommended tier rule (held-out) | {pct(rec['tier_today_test'])} | {pct(rec['tier_rule_test'])} |"
-    )
-    add("")
+    L += _sweep_section(a)
 
     add("## 12. Recommendations")
     add("")
