@@ -1138,16 +1138,15 @@ async def _step_raised(
         logger.warning("task %s step %d (%s): not run — %s: %s", task_id, step_index, worker.name, not_run, e)
         await _emit(task_id, start, "error", f"{worker.name}: {not_run} — not charged, not rated")
         return
-    # exc_info: a revoked key / exhausted quota surfaces as a
+    # With its traceback: a revoked key / exhausted quota surfaces as a
     # provider exception several frames down — the traceback is the
     # only way to tell those apart without a debugger.
-    logger.error(
+    logger.exception(
         "task %s step %s (%s): failed: %s",
         task_id,
         step.agent_id,
         worker.name,
         e,
-        exc_info=True,
     )
     # Trace lines are world-readable when TASK_AUTH_REQUIRED is
     # off — the raw exception text stays in the server log above.
