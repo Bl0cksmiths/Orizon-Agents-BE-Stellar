@@ -1580,6 +1580,60 @@ async def _record_in_flight(
         )
 
 
+async def _price_claim(store: DisputeStore, claimed: DisputeRecord) -> tuple[SettlementRecord, float]:
+    """The settlement a claimed dispute is paid against and the amount to pay, or the claim handed back.
+
+    Every way out of here without an answer — a refusal, a missing
+    settlement, any exception at all — releases the claim, because nothing
+    has been signed yet.
+    """
+    # From the claim to the transfer NOTHING HAS BEEN SIGNED, so whatever goes
+    # wrong in between — the store dropping out mid-read, a cancellation, a
+    # bug — hands the claim back. Left held, it parks the dispute in
+    # `crediting` with no hash: exactly what a transfer still on the network
+    # looks like, so every later uphold refuses and only a human can pay the
+    # buyer, for money that never moved. The guard ends where `credit_refund`
+    # begins; past that line a transfer MAY have been sent and nothing may
+    # ever be released on a guess.
+    try:
+        settlement = await store.get_settlement(claimed.job_id_hex)
+        amount_usdc = (
+            0.0
+            if settlement is None
+            else refund_svc.creditable_for(
+                settlement,
+                claimed,
+                settings.dispute_credited_fraction,
+                credited_elsewhere_usdc=_credited_elsewhere(
+                    claimed, await store.list_disputes_for_task(claimed.task_id)
+                ),
+            )
+        )
+    except refund_svc.RefundRefused as refused:
+        await _hand_back(claimed, refused.code)
+        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
+    except BaseException:
+        await _hand_back(claimed, "the uphold failed before anything was signed")
+        raise
+    if settlement is None:
+        # The amount is bounded by what the settlement says actually moved
+        # (D4), so without the settlement there is no number that is safe to
+        # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
+        # settlement to price it from can only be paid by a human, and the
+        # claim is handed back so that a human still can.
+        await _hand_back(claimed, "settlement_missing")
+        raise _refuse_credit(
+            claimed,
+            "settlement_missing",
+            409,
+            "the settlement this dispute was judged against is no longer on record,"
+            " so the credit cannot be bounded by what was actually charged",
+            amount_usdc=claimed.creditable_usdc,
+            level=logging.ERROR,
+        )
+    return settlement, amount_usdc
+
+
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
@@ -1757,50 +1811,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         logger.info("dispute %s is already claimed (%s) — nothing signed here", current.id, current.status)
         return current
 
-    # From the claim to the transfer NOTHING HAS BEEN SIGNED, so whatever goes
-    # wrong in between — the store dropping out mid-read, a cancellation, a
-    # bug — hands the claim back. Left held, it parks the dispute in
-    # `crediting` with no hash: exactly what a transfer still on the network
-    # looks like, so every later uphold refuses and only a human can pay the
-    # buyer, for money that never moved. The guard ends where `credit_refund`
-    # begins; past that line a transfer MAY have been sent and nothing may
-    # ever be released on a guess.
-    try:
-        settlement = await store.get_settlement(claimed.job_id_hex)
-        amount_usdc = (
-            0.0
-            if settlement is None
-            else refund_svc.creditable_for(
-                settlement,
-                claimed,
-                settings.dispute_credited_fraction,
-                credited_elsewhere_usdc=_credited_elsewhere(
-                    claimed, await store.list_disputes_for_task(claimed.task_id)
-                ),
-            )
-        )
-    except refund_svc.RefundRefused as refused:
-        await _hand_back(claimed, refused.code)
-        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
-    except BaseException:
-        await _hand_back(claimed, "the uphold failed before anything was signed")
-        raise
-    if settlement is None:
-        # The amount is bounded by what the settlement says actually moved
-        # (D4), so without the settlement there is no number that is safe to
-        # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
-        # settlement to price it from can only be paid by a human, and the
-        # claim is handed back so that a human still can.
-        await _hand_back(claimed, "settlement_missing")
-        raise _refuse_credit(
-            claimed,
-            "settlement_missing",
-            409,
-            "the settlement this dispute was judged against is no longer on record,"
-            " so the credit cannot be bounded by what was actually charged",
-            amount_usdc=claimed.creditable_usdc,
-            level=logging.ERROR,
-        )
+    settlement, amount_usdc = await _price_claim(store, claimed)
 
     try:
         outcome = await refund_svc.credit_refund(claimed, amount_usdc)
