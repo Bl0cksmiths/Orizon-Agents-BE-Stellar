@@ -37,7 +37,7 @@ import httpx
 from stellar_sdk import StrKey
 
 from .api import AdoptionClaim, AgentClaim, ExclusionClaim, OperatorClaim, WorkflowClaim
-from .chain import ChainReader, RpcError, SimulationError, TxRecord
+from .chain import ChainEvent, ChainReader, RpcError, SimulationError, TxRecord
 from .config import EXPLORER_ACCOUNT, EXPLORER_TX, TARGETS, usdc_to_stroops
 from .register import TeamRegister
 from .retry import RetryableStatus
@@ -118,6 +118,16 @@ def _passed(checks: list[Check]) -> bool:
 
 
 # ── workflows ───────────────────────────────────────────────────
+def _matching_charge(named: list[ChainEvent], want_amount: int, want_job: str) -> list[Any] | None:
+    """The data of the first `charged` event carrying the claimed amount and
+    job (`[_, auth_id, amount, job, ...]`), or None when none does."""
+    for e in named:
+        data = e.value if isinstance(e.value, list) else []
+        if len(data) > 3 and int(data[2]) == want_amount and str(data[3]).lower() == want_job:
+            return data
+    return None
+
+
 def _settle_proof(
     tx: TxRecord, escrow: str, agent_id: str, want_amount: int, want_job: str, subject: str
 ) -> tuple[Check, str | None, str]:
@@ -182,19 +192,18 @@ def _charged_proof(
                 None,
                 "",
             )
-        for e in named:
-            data = e.value if isinstance(e.value, list) else []
-            if len(data) > 3 and int(data[2]) == want_amount and str(data[3]).lower() == want_job:
-                return (
-                    Check(
-                        subject,
-                        "charged_names_agent",
-                        True,
-                        f"charged({agent_id}) for {want_amount} stroops, job {want_job} (RPC contract events)",
-                    ),
-                    str(data[1]),
-                    "charged event",
-                )
+        data = _matching_charge(named, want_amount, want_job)
+        if data is not None:
+            return (
+                Check(
+                    subject,
+                    "charged_names_agent",
+                    True,
+                    f"charged({agent_id}) for {want_amount} stroops, job {want_job} (RPC contract events)",
+                ),
+                str(data[1]),
+                "charged event",
+            )
         seen = [(int(d[2]), str(d[3])) for d in (e.value for e in named) if isinstance(d, list) and len(d) > 3]
         return (
             Check(
