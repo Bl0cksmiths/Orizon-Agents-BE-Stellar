@@ -8,7 +8,6 @@ Used to answer a PDAX SOFTWARE_TOKEN_MFA challenge automatically when
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import hmac
 import struct
@@ -21,7 +20,7 @@ def totp_now(secret_base32: str, *, timestamp: int, period: int = 30, digits: in
     explicitly so the value is deterministic and testable."""
     try:
         key = base64.b32decode(_pad(secret_base32.strip().replace(" ", "").upper()))
-    except (binascii.Error, ValueError) as e:
+    except ValueError as e:  # binascii.Error is a ValueError
         # A mistyped PDAX_OTP_SECRET must not surface as a 500 on the first
         # MFA login: it is a failed PDAX authentication like any other, and
         # the routers only translate PdaxError.
