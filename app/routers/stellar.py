@@ -199,7 +199,7 @@ def _sac_name(asset: money.AssetInfo) -> str:
     return f"{asset.code}:{asset.issuer}"
 
 
-@router.get("/network", response_model=NetworkInfo)
+@router.get("/network")
 async def network() -> NetworkInfo:
     ids = sc.contract_ids()
     return NetworkInfo(
