@@ -1693,7 +1693,7 @@ async def _settle_onchain(
         )
         raise
     except Exception as e:
-        logger.error(
+        logger.exception(
             "task %s: on-chain settlement failed: %s (job %s, auth %s, payer %s, %.6f USDC, charge_tx=%s, proof_tx=%s)",
             task_id,
             e,
@@ -1703,7 +1703,6 @@ async def _settle_onchain(
             total_usdc,
             charge_tx,
             proof_tx,
-            exc_info=True,
         )
         await _report_charge_failure(task_id, start, e, charged=settled_job_id is not None)
 
