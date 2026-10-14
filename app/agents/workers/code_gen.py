@@ -122,8 +122,9 @@ def coerce_artifact(content: Any) -> CodeArtifact:
         return CodeArtifact.model_validate(content)
     if isinstance(content, str):
         s = content.strip()
-        # Strip ```json ... ``` or ``` ... ``` fences if present
-        fence = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```$", s, re.DOTALL)
+        # Strip ```json ... ``` or ``` ... ``` fences if present. One greedy
+        # group, stripped below, so an unclosed fence fails in linear time.
+        fence = re.match(r"^```(?:json)?(.*)```$", s, re.DOTALL)
         if fence:
             s = fence.group(1).strip()
         # Try direct JSON parse
