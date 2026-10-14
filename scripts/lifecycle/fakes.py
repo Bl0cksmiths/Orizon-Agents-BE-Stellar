@@ -232,6 +232,56 @@ class FakeWorld:
             },
         )
 
+    def agents_list(self) -> httpx.Response:
+        """GET /api/agents: the external agent (and the second, when on), then the seeded one."""
+        return _json(
+            200,
+            [
+                {
+                    "id": AGENT,
+                    "name": AGENT_NAME,
+                    "skills": ["code"],
+                    "price": self.agent_price,
+                    "rep": 4.0,
+                    "status": "online",
+                    "runs": 0,
+                    "owner": self.owner,
+                    "source": "onchain",
+                    "bound": self.agent_bound,
+                },
+                *(
+                    [
+                        {
+                            "id": AGENT_2,
+                            "name": AGENT_2_NAME,
+                            "skills": ["review"],
+                            "price": self.agent_price,
+                            "rep": 4.0,
+                            "status": "online",
+                            "runs": 0,
+                            "owner": self.owner_2,
+                            "source": "onchain",
+                            "bound": True,
+                        }
+                    ]
+                    if self.second_agent
+                    else []
+                ),
+                {
+                    "id": SEEDED,
+                    "name": SEEDED_NAME,
+                    "skills": ["copy"],
+                    "price": self.seeded_price,
+                    "rep": 4.0,
+                    "status": "online",
+                    "runs": 0,
+                    "owner": None,
+                    "source": "seeded",
+                    "bound": None,
+                },
+            ],
+        )
+
     def api(self, method: str, path: str, body: Any, headers: httpx.Headers) -> httpx.Response:
         if path == "/api/health":
             return self.health()
@@ -245,53 +295,7 @@ class FakeWorld:
         if path == "/api/stellar/network":
             return self.stellar_network()
         if path == "/api/agents":
-            return _json(
-                200,
-                [
-                    {
-                        "id": AGENT,
-                        "name": AGENT_NAME,
-                        "skills": ["code"],
-                        "price": self.agent_price,
-                        "rep": 4.0,
-                        "status": "online",
-                        "runs": 0,
-                        "owner": self.owner,
-                        "source": "onchain",
-                        "bound": self.agent_bound,
-                    },
-                    *(
-                        [
-                            {
-                                "id": AGENT_2,
-                                "name": AGENT_2_NAME,
-                                "skills": ["review"],
-                                "price": self.agent_price,
-                                "rep": 4.0,
-                                "status": "online",
-                                "runs": 0,
-                                "owner": self.owner_2,
-                                "source": "onchain",
-                                "bound": True,
-                            }
-                        ]
-                        if self.second_agent
-                        else []
-                    ),
-                    {
-                        "id": SEEDED,
-                        "name": SEEDED_NAME,
-                        "skills": ["copy"],
-                        "price": self.seeded_price,
-                        "rep": 4.0,
-                        "status": "online",
-                        "runs": 0,
-                        "owner": None,
-                        "source": "seeded",
-                        "bound": None,
-                    },
-                ],
-            )
+            return self.agents_list()
         if path == f"/api/stellar/agent/{AGENT}":
             return _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}})
         if path == f"/api/stellar/agent/{AGENT_2}" and self.second_agent:
