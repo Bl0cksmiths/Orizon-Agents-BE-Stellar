@@ -425,13 +425,7 @@ class Runner:
         """Where this invocation starts, and whether the evidence dir allows it."""
         prior = self.store.load()
         if prior is not None:
-            if prior.agent and prior.agent != self.cfg.agent:
-                raise Stop(
-                    EXIT_RESUME_CONFLICT, f"{self.store.path} is agent {prior.agent}'s run, not {self.cfg.agent}'s"
-                )
-            if prior.buyer and self.buyer is not None and prior.buyer != self.buyer.public_key:
-                raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is buyer {prior.buyer}'s run, not this key's")
-            self.state = prior
+            self.adopt_prior_state(prior)
         if self.cfg.from_dispute:
             if self.state.dispute is None or self.state.dispute.get("id") != self.cfg.from_dispute:
                 self.state.dispute = {"id": self.cfg.from_dispute}
@@ -460,6 +454,14 @@ class Runner:
             raise Stop(EXIT_REFUSED, "--intent is required for a fresh run")
         self.ensure_run_id()
         return "decompose"
+
+    def adopt_prior_state(self, prior: RunState) -> None:
+        """Carry on from the evidence dir's saved state, unless it is another agent's or buyer's run."""
+        if prior.agent and prior.agent != self.cfg.agent:
+            raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is agent {prior.agent}'s run, not {self.cfg.agent}'s")
+        if prior.buyer and self.buyer is not None and prior.buyer != self.buyer.public_key:
+            raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is buyer {prior.buyer}'s run, not this key's")
+        self.state = prior
 
     def ensure_run_id(self) -> None:
         if not self.state.run_id:
