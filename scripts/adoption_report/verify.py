@@ -118,6 +118,48 @@ def _passed(checks: list[Check]) -> bool:
 
 
 # ── workflows ───────────────────────────────────────────────────
+def _settle_proof(
+    tx: TxRecord, escrow: str, agent_id: str, want_amount: int, want_job: str, subject: str
+) -> tuple[Check, str | None, str]:
+    """The proof past the RPC's event window: a SUCCESSFUL escrow `settle`
+    whose own payouts name the agent for the amount, on the claimed job."""
+    for call in tx.invocations:
+        if call.contract_id != escrow or call.function != "settle" or len(call.args) < 4:
+            continue
+        job = str(call.args[2]).lower()
+        payouts = call.args[3] if isinstance(call.args[3], list) else []
+        for p in payouts:
+            if (
+                isinstance(p, dict)
+                and p.get("agent_id") == agent_id
+                and int(p.get("amount") or 0) == want_amount
+                and job == want_job
+            ):
+                return (
+                    Check(
+                        subject,
+                        "charged_names_agent",
+                        True,
+                        f"tx is past the RPC's event window; the SUCCESSFUL settle's payouts name {agent_id} "
+                        f"for {want_amount} stroops, job {job} (Horizon envelope)",
+                    ),
+                    str(call.args[1]),
+                    "settle payout (events past RPC retention)",
+                )
+    functions = sorted({f"{_short(c.contract_id)}.{c.function}" for c in tx.invocations})
+    return (
+        Check(
+            subject,
+            "charged_names_agent",
+            False,
+            f"tx {tx.tx_hash} is past the RPC's event window and its invocation {functions} has no settle payout "
+            f"naming {agent_id} for {want_amount} stroops, job {want_job}; the payment to {agent_id} cannot be shown",
+        ),
+        None,
+        "",
+    )
+
+
 def _charged_proof(
     tx: TxRecord, escrow: str, agent_id: str, claim: WorkflowClaim, subject: str
 ) -> tuple[Check, str | None, str]:
@@ -167,41 +209,7 @@ def _charged_proof(
         )
 
     # Horizon answered: no events. The settle invocation's own arguments.
-    for call in tx.invocations:
-        if call.contract_id != escrow or call.function != "settle" or len(call.args) < 4:
-            continue
-        job = str(call.args[2]).lower()
-        payouts = call.args[3] if isinstance(call.args[3], list) else []
-        for p in payouts:
-            if (
-                isinstance(p, dict)
-                and p.get("agent_id") == agent_id
-                and int(p.get("amount") or 0) == want_amount
-                and job == want_job
-            ):
-                return (
-                    Check(
-                        subject,
-                        "charged_names_agent",
-                        True,
-                        f"tx is past the RPC's event window; the SUCCESSFUL settle's payouts name {agent_id} "
-                        f"for {want_amount} stroops, job {job} (Horizon envelope)",
-                    ),
-                    str(call.args[1]),
-                    "settle payout (events past RPC retention)",
-                )
-    functions = sorted({f"{_short(c.contract_id)}.{c.function}" for c in tx.invocations})
-    return (
-        Check(
-            subject,
-            "charged_names_agent",
-            False,
-            f"tx {tx.tx_hash} is past the RPC's event window and its invocation {functions} has no settle payout "
-            f"naming {agent_id} for {want_amount} stroops, job {want_job}; the payment to {agent_id} cannot be shown",
-        ),
-        None,
-        "",
-    )
+    return _settle_proof(tx, escrow, agent_id, want_amount, want_job, subject)
 
 
 def verify_workflow(
