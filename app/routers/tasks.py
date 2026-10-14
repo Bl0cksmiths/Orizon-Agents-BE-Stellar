@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -23,7 +25,7 @@ class ArtifactResponse(BaseModel):
 
 
 @router.get("/tasks", response_model=list[TaskSummary], summary="List recent tasks")
-async def list_tasks(limit: int = Query(20, ge=1, le=200)) -> list[Task]:
+async def list_tasks(limit: Annotated[int, Query(ge=1, le=200)] = 20) -> list[Task]:
     # response_model narrows every row to TaskSummary, dropping the artifact:
     # this route is polled every 5 seconds and no client reads the field from
     # it. GET /tasks/{id}/artifact serves the payload on demand.
