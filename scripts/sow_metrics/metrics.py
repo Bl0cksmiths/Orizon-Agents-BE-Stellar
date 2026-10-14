@@ -484,6 +484,14 @@ def _missing_links_warning(snap: Snapshot, charges: list[Charge]) -> None:
         snap.warnings.append(note)
 
 
+def _one_agent_bound(bound: int, unknown: int) -> str:
+    """Whether the only outside agent is bound, or that it could not be checked."""
+    if unknown:
+        return "The one agent owned by an outside operator could not be checked for a binding"
+    state = "is bound" if bound else "is not bound"
+    return f"The one agent owned by an outside operator {state} to an endpoint"
+
+
 def bound_sentence(snap: Snapshot, agents: list[AgentRecord]) -> str:
     """How many of these outside agents are bound to an endpoint, in the adoption report's own words.
 
@@ -502,8 +510,7 @@ def bound_sentence(snap: Snapshot, agents: list[AgentRecord]) -> str:
     bound = sum(1 for f in flags if f is True)
     unknown = sum(1 for f in flags if f is None)
     if total == 1:
-        state = "could not be checked for a binding" if unknown else ("is bound" if bound else "is not bound")
-        text = f"The one agent owned by an outside operator {state}" + ("" if unknown else " to an endpoint")
+        text = _one_agent_bound(bound, unknown)
     elif bound == 0 and not unknown:
         text = f"None of the {total} agents owned by outside operators is bound to an endpoint"
     else:
