@@ -74,8 +74,13 @@ from .signing import (
 #   f"reputation submit failed for {step.agent_name}: {reason} · tx {tx[:10]}…"
 # The trace carries only the first ten hex characters of the hash; the full
 # hash is recovered from the ReputationLedger's `rated` event (`rating_hashes`).
+# The unlanded name runs to the first ": " (one character at least), spelled
+# so it cannot also claim what the reason's `.*` matches: a lazy `.+?` there
+# backtracks quadratically on a line with many colons.
 RATED_LINE = re.compile(r"^reputation → (?P<name>.+) rated (?P<rating>\d+)/100 · tx (?P<prefix>[0-9a-f]{10})…$")
-UNLANDED_LINE = re.compile(r"^reputation submit failed for (?P<name>.+?): .* · tx (?P<prefix>[0-9a-f]{10})…$")
+UNLANDED_LINE = re.compile(
+    r"^reputation submit failed for (?P<name>.(?:[^:\n]|:(?! ))*): .* · tx (?P<prefix>[0-9a-f]{10})…$"
+)
 
 TERMINAL_TASK = ("complete", "failed")
 RESUME_SCAN_LEDGERS = 17_280

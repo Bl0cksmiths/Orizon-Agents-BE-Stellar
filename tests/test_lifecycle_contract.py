@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import inspect
+import time
 from typing import Any
 
 import pytest
@@ -144,3 +145,40 @@ def test_the_rating_trace_lines_are_the_ones_execution_writes() -> None:
     unlanded = f"reputation submit failed for Code Smith: did not land · tx {tx[:10]}…"
     u = UNLANDED_LINE.match(unlanded)
     assert u and u.group("name") == "Code Smith" and u.group("prefix") == tx[:10]
+
+
+@pytest.mark.parametrize(
+    ("line", "name", "prefix"),
+    [
+        ("reputation submit failed for Code Smith: did not land · tx 1234567890…", "Code Smith", "1234567890"),
+        ("reputation submit failed for agent:v2: timeout · tx abcdef0123…", "agent:v2", "abcdef0123"),
+        ("reputation submit failed for Bot: rpc said: no · tx 9 · tx abcdef0123…", "Bot", "abcdef0123"),
+        ("reputation submit failed for Ünï Bot:  · tx 0000000000…", "Ünï Bot", "0000000000"),
+        ("reputation submit failed for :  : r · tx abcdef0123…", ":  ", "abcdef0123"),
+        ("reputation submit failed for Bot: x · tx abcdef0123…\n", "Bot", "abcdef0123"),
+    ],
+)
+def test_an_unlanded_line_names_the_agent_before_the_first_colon(line: str, name: str, prefix: str) -> None:
+    u = UNLANDED_LINE.match(line)
+    assert u and (u.group("name"), u.group("prefix")) == (name, prefix)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "reputation submit failed for : x · tx abcdef0123…",
+        "reputation submit failed for Bot · tx abcdef0123…",
+        "reputation submit failed for Bot: x · tx abcdef012…",
+        "reputation submit failed for Bot: x · tx ABCDEF0123…",
+        "reputation submit failed for B\not: x · tx abcdef0123…",
+    ],
+)
+def test_a_line_that_is_not_an_unlanded_rating_does_not_match(line: str) -> None:
+    assert UNLANDED_LINE.match(line) is None
+
+
+def test_the_unlanded_line_stays_linear_on_a_line_full_of_colons() -> None:
+    # The lazy `.+?` name took ~4 s on this line; the pattern now answers in well under a millisecond.
+    started = time.perf_counter()
+    assert UNLANDED_LINE.match("reputation submit failed for " + "a: " * 50_000 + "x") is None
+    assert time.perf_counter() - started < 0.5
