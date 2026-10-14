@@ -49,6 +49,7 @@ from ..schemas import (
     SettledDay,
     SkillShare,
 )
+from ..security import ErrorEnvelope
 from ..services import adoption_svc, binding_registry, registry_sync, reputation_svc, snapshots
 from ..services.dispute_store import SECONDS_PER_DAY, get_dispute_store
 from ..services.snapshots import KeepWarm, Snapshot, SnapshotCell
@@ -432,7 +433,10 @@ async def fetch_overview() -> OverviewMetrics:
     "/metrics/overview",
     response_model=OverviewMetrics,
     summary="Dashboard overview metrics",
-    responses={304: {"description": "Not modified: the `If-None-Match` ETag is current."}},
+    responses={
+        304: {"description": "Not modified: the `If-None-Match` ETag is current."},
+        503: {"model": ErrorEnvelope, "description": "`overview_unavailable` — no overview could be built yet."},
+    },
 )
 async def overview(request: Request) -> Response:
     """Measured network numbers for the dashboard.
