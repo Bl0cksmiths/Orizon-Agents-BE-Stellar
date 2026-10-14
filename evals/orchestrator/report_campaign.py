@@ -124,6 +124,40 @@ def _workers_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
     return L
 
 
+def _errors_section(a: dict[str, Any], keep: dict[str, str], diag: dict[str, str]) -> list[str]:
+    """§10: every misclassified in-repo case with its diagnosis, then the stage 4 tier misses."""
+    L: list[str] = []
+    add = L.append
+    add("## 10. Error analysis — every misclassified in-repo case")
+    add("")
+    add("| case | stage (reps wrong) | expected → got | reasons | key scores | intent | diagnosis |")
+    add("|---|---|---|---|---|---|---|")
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for m in a["misclassified"]:
+        grouped.setdefault((m["id"], m["stage"]), []).append(m)
+    for (cid, stage), ms in sorted(grouped.items()):
+        m = ms[0]
+        scores = ", ".join(
+            f"{k} {v}" for k, v in m["scores"].items() if k in ("injection", "harmful", "severity", "real_request")
+        )
+        intent = m["intent"].replace("|", "\\|").replace("\n", " ")
+        add(
+            f"| {cid} | {stage} ({len(ms)}) | {m['expected']} → {m['got']} | {', '.join(m['reasons']) or '—'} | {scores} | {intent[:110]} | {diag.get(cid, '')} |"
+        )
+    add("")
+    add("Tier misses in stage 4 (expected → routed; raw jev choice and its confidence):")
+    add("")
+    add("| case | expected | raw choice | confidence | routed | cause |")
+    add("|---|---|---|---|---|---|")
+    for t in a["tier_misses_s4"]:
+        cause = "round-up of a correct raw choice" if t["raw"] == t["expected"] else "raw choice"
+        add(f"| {t['id']} | {t['expected']} | {t['raw']} | {t['confidence']} | {t['routed']} | {cause} |")
+    add("")
+    add(_block("diagnoses", keep, "- id: diagnosis"))
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -495,33 +529,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
 
     L += _workers_section(a, keep)
 
-    add("## 10. Error analysis — every misclassified in-repo case")
-    add("")
-    add("| case | stage (reps wrong) | expected → got | reasons | key scores | intent | diagnosis |")
-    add("|---|---|---|---|---|---|---|")
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for m in a["misclassified"]:
-        grouped.setdefault((m["id"], m["stage"]), []).append(m)
-    for (cid, stage), ms in sorted(grouped.items()):
-        m = ms[0]
-        scores = ", ".join(
-            f"{k} {v}" for k, v in m["scores"].items() if k in ("injection", "harmful", "severity", "real_request")
-        )
-        intent = m["intent"].replace("|", "\\|").replace("\n", " ")
-        add(
-            f"| {cid} | {stage} ({len(ms)}) | {m['expected']} → {m['got']} | {', '.join(m['reasons']) or '—'} | {scores} | {intent[:110]} | {diag.get(cid, '')} |"
-        )
-    add("")
-    add("Tier misses in stage 4 (expected → routed; raw jev choice and its confidence):")
-    add("")
-    add("| case | expected | raw choice | confidence | routed | cause |")
-    add("|---|---|---|---|---|---|")
-    for t in a["tier_misses_s4"]:
-        cause = "round-up of a correct raw choice" if t["raw"] == t["expected"] else "raw choice"
-        add(f"| {t['id']} | {t['expected']} | {t['raw']} | {t['confidence']} | {t['routed']} | {cause} |")
-    add("")
-    add(_block("diagnoses", keep, "- id: diagnosis"))
-    add("")
+    L += _errors_section(a, keep, diag)
 
     add("## 11. Threshold sweep and tier rules")
     add("")
