@@ -86,14 +86,15 @@ class SowRow:
 
 
 # SOW v4 §6.3's row categories.
+ADOPTION_TARGETS = "Adoption targets"
 TRANSACTION_TARGETS = "Transaction targets"
 TECHNICAL_MILESTONES = "Technical milestones"
 
 # SOW v4 §6.3, character for character. The frozen block repeats these, and
 # the frontend's evidence index is pasted from the block.
 SOW_ROWS: tuple[SowRow, ...] = (
-    SowRow("m01", "Adoption targets", "Externally-operated agents registered on Testnet", "≥ 2", 2),
-    SowRow("m02", "Adoption targets", "Unique external operator wallet addresses", "≥ 2", 2),
+    SowRow("m01", ADOPTION_TARGETS, "Externally-operated agents registered on Testnet", "≥ 2", 2),
+    SowRow("m02", ADOPTION_TARGETS, "Unique external operator wallet addresses", "≥ 2", 2),
     SowRow("m03", TRANSACTION_TARGETS, "Workflows routed to external agents & settled on Testnet", "≥ 3", 3),
     SowRow("m04", TRANSACTION_TARGETS, "On-chain USDC settlements (charges) recorded", "≥ 3", 3),
     SowRow("m05", TRANSACTION_TARGETS, "Dispute → partial-refund settlements", "≥ 1", 1),
