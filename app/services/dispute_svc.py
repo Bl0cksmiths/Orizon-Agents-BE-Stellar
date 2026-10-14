@@ -1511,7 +1511,7 @@ async def _record_credit(
         # before it is re-raised, because re-raising is still right: the
         # claim stays held and the dispute stays `crediting`, which is
         # exactly what a credit that landed and could not be recorded is.
-        logger.error(
+        logger.exception(
             "dispute %s: %.7f USDC LANDED as tx %s and the credit could NOT be recorded — the dispute"
             " stays crediting with its claim held; record it by hand (job %s, payer %s)",
             dispute_id,
@@ -1519,7 +1519,6 @@ async def _record_credit(
             outcome.tx_hash,
             claimed.job_id_hex,
             claimed.payer,
-            exc_info=True,
         )
         raise
 
