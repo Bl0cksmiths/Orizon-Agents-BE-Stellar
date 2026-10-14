@@ -483,6 +483,44 @@ def _unavailable_for(owners: Mapping[str, str], reason: str, *, out_of_time: boo
     )
 
 
+@dataclass(frozen=True)
+class _Scanned:
+    """What one build's walk left: the index to answer from, and how far the walk got."""
+
+    index: _Index | None
+    out_of_time: bool = False
+    ledgers_in_window: int = 0
+    reached_tip: bool = False
+
+
+async def _scan(escrow_id: str, held: _Index | None, deadline: float) -> _Scanned:
+    """Advance `held` as far as the deadline allows, keeping the result in `_held`. Called under `_lock`.
+
+    A walk that cannot start (out of time) or cannot anchor (the node
+    unreadable) leaves `held` as it was, for the caller to serve as truncated.
+    """
+    if time.monotonic() >= deadline:
+        return _Scanned(held, out_of_time=True)
+    try:
+        advance = await asyncio.to_thread(_advance_sync, escrow_id, held, deadline)
+    except Exception as e:
+        logger.warning("[charges] the event window could not be read: %s: %s", type(e).__name__, e)
+        return _Scanned(held)
+    _held.index = index = advance.index
+    if index is not None:
+        # A payer is kept only while its charge is in the window,
+        # so what a long-lived process holds is bounded by it.
+        live = {c.charge.auth_id for c in index.charges}
+        for auth_id in [a for a in _held.payers if a not in live]:
+            del _held.payers[auth_id]
+    return _Scanned(
+        index,
+        out_of_time=advance.out_of_time,
+        ledgers_in_window=advance.ledgers_in_window,
+        reached_tip=index is not None and index.next_ledger > index.latest,
+    )
+
+
 def _charges_by_agent(index: _Index, owners: Mapping[str, str]) -> dict[str, list[_Charge]]:
     """The index's charges to the agents in `owners`, filed by agent in the order they were read."""
     by_agent: dict[str, list[_Charge]] = {}
@@ -513,27 +551,8 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
         held = _held.index if _held.index is not None and _held.index.escrow_id == escrow_id else None
         if held is None:
             _held.payers.clear()
-        out_of_time = False
-        in_window = 0
-        reached_tip = False
-        if time.monotonic() >= deadline:
-            out_of_time = True
-        else:
-            try:
-                advance = await asyncio.to_thread(_advance_sync, escrow_id, held, deadline)
-            except Exception as e:
-                logger.warning("[charges] the event window could not be read: %s: %s", type(e).__name__, e)
-            else:
-                _held.index = held = advance.index
-                if held is not None:
-                    # A payer is kept only while its charge is in the window,
-                    # so what a long-lived process holds is bounded by it.
-                    live = {c.charge.auth_id for c in held.charges}
-                    for auth_id in [a for a in _held.payers if a not in live]:
-                        del _held.payers[auth_id]
-                out_of_time = advance.out_of_time
-                in_window = advance.ledgers_in_window
-                reached_tip = held is not None and held.next_ledger > held.latest
+        scanned = await _scan(escrow_id, held, deadline)
+        held, out_of_time = scanned.index, scanned.out_of_time
         if held is None:
             reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
             return _unavailable_for(owners, reason, out_of_time=out_of_time)
@@ -548,7 +567,7 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
     settler = await settlement_svc._read_settler(escrow_id) if needed else None
     platform = settlement_svc._platform_keys()
     asset = await settlement_svc._read_asset(settings.stellar_asset_sac)
-    truncated = not reached_tip or held.lossy
+    truncated = not scanned.reached_tip or held.lossy
     window_days = round(held.scanned_ledgers * held.seconds_per_ledger / 86_400.0, 3)
     evidence: dict[str, SettlementEvidence] = {}
     for agent_id, owner in owners.items():
@@ -578,7 +597,7 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
     return WindowSettlements(
         by_agent=evidence,
         ledgers_scanned=held.scanned_ledgers,
-        ledgers_in_window=in_window,
+        ledgers_in_window=scanned.ledgers_in_window,
         out_of_time=out_of_time,
         charges=charges,
         unattributed=unattributed,
