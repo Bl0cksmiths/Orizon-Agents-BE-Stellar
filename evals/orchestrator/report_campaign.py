@@ -391,6 +391,41 @@ def _pipeline_section(a: dict[str, Any]) -> list[str]:
     return L
 
 
+def _external_section(a: dict[str, Any]) -> list[str]:
+    """§4: the guard on the pinned public benchmarks, per source and per label."""
+    ext = a["s2"]["external"]
+    L: list[str] = []
+    add = L.append
+    add("## 4. External benchmarks (stage 2)")
+    add("")
+    add(
+        "Fetched at run time, pinned, never committed (rows here carry ids, labels and scores only). deepset/"
+        "prompt-injections (Apache-2.0, revision 4f61ecb0, train + test, 18 rows over the 500-character API bound "
+        "skipped): label 1 → should block, 0 → should not. JailbreakBench/JBB-Behaviors (MIT, revision 886acc35): "
+        "harmful behaviours → should block, benign contrast behaviours → should not. `needs_detail` counts as "
+        "not blocking."
+    )
+    add("")
+    add("| source | n | block precision | block recall | specificity | F1 |")
+    add("|---|---|---|---|---|---|")
+    for src, v in ext.items():
+        p = v["prf"]
+        n = p["tp"] + p["fp"] + p["fn"] + p["tn"]
+        add(f"| {src} | {n} | {pct(p['precision'])} | {pct(p['recall'])} | {pct(p['specificity'])} | {_f1(p['f1'])} |")
+    add("")
+    add("| source / label | n | blocked | needs detail | allowed |")
+    add("|---|---|---|---|---|")
+    for src, v in ext.items():
+        if src == "all":
+            continue
+        for cat, c in v["categories"].items():
+            add(
+                f"| {src.split('@')[0]} / {cat} | {c['n']} | {pct(c['blocked'])} | {pct(c['needs_detail'])} | {pct(c['allowed'])} |"
+            )
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -587,33 +622,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("- Accuracy per repetition: " + ", ".join(pct(r) for r in st["per_rep_accuracy"]) + ".")
     add("")
 
-    add("## 4. External benchmarks (stage 2)")
-    add("")
-    add(
-        "Fetched at run time, pinned, never committed (rows here carry ids, labels and scores only). deepset/"
-        "prompt-injections (Apache-2.0, revision 4f61ecb0, train + test, 18 rows over the 500-character API bound "
-        "skipped): label 1 → should block, 0 → should not. JailbreakBench/JBB-Behaviors (MIT, revision 886acc35): "
-        "harmful behaviours → should block, benign contrast behaviours → should not. `needs_detail` counts as "
-        "not blocking."
-    )
-    add("")
-    add("| source | n | block precision | block recall | specificity | F1 |")
-    add("|---|---|---|---|---|---|")
-    for src, v in ext.items():
-        p = v["prf"]
-        n = p["tp"] + p["fp"] + p["fn"] + p["tn"]
-        add(f"| {src} | {n} | {pct(p['precision'])} | {pct(p['recall'])} | {pct(p['specificity'])} | {_f1(p['f1'])} |")
-    add("")
-    add("| source / label | n | blocked | needs detail | allowed |")
-    add("|---|---|---|---|---|")
-    for src, v in ext.items():
-        if src == "all":
-            continue
-        for cat, c in v["categories"].items():
-            add(
-                f"| {src.split('@')[0]} / {cat} | {c['n']} | {pct(c['blocked'])} | {pct(c['needs_detail'])} | {pct(c['allowed'])} |"
-            )
-    add("")
+    L += _external_section(a)
 
     ag = s3["agreement_with_jev"]
     add("## 5. Backup guard: Claude Haiku 4.5 vs jev (stage 3)")
