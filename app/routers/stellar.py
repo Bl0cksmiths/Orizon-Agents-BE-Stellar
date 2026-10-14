@@ -259,7 +259,7 @@ class SyncResponse(BaseModel):
     synced: int
 
 
-@router.post("/agents/sync", response_model=SyncResponse)
+@router.post("/agents/sync")
 async def trigger_registry_sync() -> SyncResponse:
     """Run one registry-sync pass now — the FE's post-registration fast path.
 
