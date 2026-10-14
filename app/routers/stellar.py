@@ -274,7 +274,15 @@ class SyncResponse(BaseModel):
     synced: int
 
 
-@router.post("/agents/sync")
+@router.post(
+    "/agents/sync",
+    responses={
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`registry_sync_failed` — the sync pass failed; keep polling /api/agents.",
+        }
+    },
+)
 async def trigger_registry_sync() -> SyncResponse:
     """Run one registry-sync pass now — the FE's post-registration fast path.
 
