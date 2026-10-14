@@ -242,6 +242,15 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     return analysis
 
 
+def _worker_row(name: str, w: dict[str, Any]) -> str:
+    """One worker re-run: the model that served it (none when its stream was
+    cut off before the reply), and its error or the start of its summary."""
+    call = w["calls"][0] if w["calls"] else {}
+    model = call.get("response_model") or call.get("model") or "not recorded (stream cut off)"
+    outcome = w["error"] or str((w["output"] or {}).get("summary", ""))[:200]
+    return f"| {name} | {w.get('tier') or 'default'} | {model} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
+
+
 def _code_length_row(r: dict[str, Any]) -> str:
     """One row of the complex code.gen re-measure table."""
     viol = r["validator"]
@@ -429,12 +438,7 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
         "|---|---|---|---|---|---|",
     ]
     for name, w in a["workers"].items():
-        call = w["calls"][0] if w["calls"] else {}
-        model = call.get("response_model") or call.get("model") or "not recorded (stream cut off)"
-        outcome = w["error"] or str((w["output"] or {}).get("summary", ""))[:200]
-        L.append(
-            f"| {name} | {w.get('tier') or 'default'} | {model} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
-        )
+        L.append(_worker_row(name, w))
     L += ["", _block("worker_notes", keep), ""]
     if a.get("code_length"):
         L += _code_length_section(a, keep)
