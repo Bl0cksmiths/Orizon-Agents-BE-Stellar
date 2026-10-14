@@ -1,0 +1,2 @@
+exit code 3
+REFUSED: --escrow must be a contract id (C...), got 'not-a-contract'

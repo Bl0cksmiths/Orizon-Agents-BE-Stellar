@@ -1,0 +1,18 @@
+exit code 4
+sow metrics · api https://orizon.test · backend https://backend.test · frontend https://front.test · testnet only, read-only
+[MET    ] m01 Externally-operated agents registered on Testnet — target ≥ 2, achieved 3
+[MET    ] m02 Unique external operator wallet addresses — target ≥ 2, achieved 2
+[MET    ] m03 Workflows routed to external agents & settled on Testnet — target ≥ 3, achieved 3
+[MET    ] m04 On-chain USDC settlements (charges) recorded — target ≥ 3, achieved 4
+[MET    ] m05 Dispute → partial-refund settlements — target ≥ 1, achieved 1
+[UNREAD ] m06 Permissionless AgentRegistry.register flow live on the dApp — target Yes, achieved Not measured
+[UNREAD ] m07 Reputation-gated routing (reads avg_bps, applies a floor) live — target Yes, achieved Not measured
+[UNREAD ] m08 Automated dispute window + partial-credit refund live — target Yes, achieved Not measured
+[MET    ] m09 Public "List your agent on Orizon" integration guide published — target Yes, achieved Yes
+[MET    ] m10 3–5 min demo video published — target Yes, achieved Yes
+[UNREAD ] m11 All source code released under MIT License — target Yes, achieved Not measured
+read failed: github: Unreachable: GET https://github-api.test/repos/Bl0cksmiths/Orizon-Agents-FE-Stellar kept answering HTTP 503 after retries; Unreachable: GET https://github-api.test/repos/Bl0cksmiths/Orizon-Agents-BE-Stellar kept answering HTTP 503 after retries; Unreachable: GET https://github-api.test/repos/Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar kept answering HTTP 503 after retries; Unreachable: GET https://github-api.test/repos/Bl0cksmiths/Orizon-Agents-Example-Agent-Stellar kept answering HTTP 503 after retries
+read failed: openapi: https://backend.test/openapi.json answered HTTP 404
+read failed: params: https://orizon.test/api/stellar/reputation/params answered HTTP 200
+wrote <tmp>/metrics/sow-metrics.block.json, <tmp>/metrics/sow-metrics.md, <tmp>/metrics/sow-metrics.raw.json
+exit 4: 7 of 11 met, 4 not measured

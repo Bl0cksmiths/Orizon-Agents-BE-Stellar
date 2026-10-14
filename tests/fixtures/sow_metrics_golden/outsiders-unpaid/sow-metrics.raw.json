@@ -1,0 +1,399 @@
+{
+  "contracts": {
+    "agent_registry": "CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN",
+    "attestation_registry": "CC6MPEYHMS43PKFZXPIBMG2WR2DJIZWQYTX252AANJLPH2HG3AVWTTYL",
+    "payment_escrow": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+    "reputation_ledger": "CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA"
+  },
+  "exit_code": 0,
+  "failures": {},
+  "generated_at": 1790000000,
+  "generated_utc": "2026-09-21T14:13:20Z",
+  "metrics": [
+    {
+      "achieved": "3",
+      "counted": [
+        {
+          "active": true,
+          "agent_id": "alpha",
+          "label": "Registration of alpha by an outside operator's wallet — 2026-09-19 (counted: outside operator)",
+          "owner": "GBXZSLYTTOFUALWIVA3H5GMGLZWRM63NBI5X2IGM3UYOAG3SH6KZPTLF",
+          "register_tx": "fab2f5a389ed60fd654935fcd8fa098ce3815ba66f48c9e6b74335eb0c758eba",
+          "registered": "2026-09-19"
+        },
+        {
+          "active": true,
+          "agent_id": "beta",
+          "label": "Registration of beta by an outside operator's wallet — 2026-09-20 (counted: outside operator)",
+          "owner": "GBL32VQIVY7O4766EQQMQ77IETKMCOU6IHHT2E2OQVJ75WJ6IJ3GDV6R",
+          "register_tx": "8ed5b22e01e6e2d7bd996f0b92e42d5e5872fdea3d9cebb4c34025e22c9206db",
+          "registered": "2026-09-20"
+        },
+        {
+          "active": true,
+          "agent_id": "gamma",
+          "label": "Registration of gamma by an outside operator's wallet — 2026-09-20 (counted: outside operator)",
+          "owner": "GBL32VQIVY7O4766EQQMQ77IETKMCOU6IHHT2E2OQVJ75WJ6IJ3GDV6R",
+          "register_tx": "eb6142a63cec25237fb684ae1519830811eed751e6e01378c84d3485ff72c6dc",
+          "registered": "2026-09-20"
+        }
+      ],
+      "excluded": [
+        {
+          "active": true,
+          "agent_id": "qa_agent",
+          "label": "Registration of qa_agent by the team's QA throwaway operator key — 2026-09-17 (excluded: team wallet)",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reason": "team wallet",
+          "register_tx": "045ef594d81d2f2134d61151ed71260d8f79e657c7cb6ed1d893688532017409",
+          "registered": "2026-09-17",
+          "role": "the team's QA throwaway operator key"
+        },
+        {
+          "active": true,
+          "agent_id": "qa_two",
+          "label": "Registration of qa_two by the team's QA throwaway operator key — 2026-09-18 (excluded: team wallet)",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reason": "team wallet",
+          "register_tx": "eea1ad3fbf2142ede510d0220518d902a5ba9b502851530d7fc1454f5147206c",
+          "registered": "2026-09-18",
+          "role": "the team's QA throwaway operator key"
+        }
+      ],
+      "id": "m01",
+      "measured": true,
+      "metric": "Externally-operated agents registered on Testnet",
+      "status": "met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "2",
+      "counted": [
+        {
+          "agents": [
+            "beta",
+            "gamma"
+          ],
+          "label": "An outside operator's wallet — owns beta and gamma (counted: outside operator)",
+          "owner": "GBL32VQIVY7O4766EQQMQ77IETKMCOU6IHHT2E2OQVJ75WJ6IJ3GDV6R"
+        },
+        {
+          "agents": [
+            "alpha"
+          ],
+          "label": "An outside operator's wallet — owns alpha (counted: outside operator)",
+          "owner": "GBXZSLYTTOFUALWIVA3H5GMGLZWRM63NBI5X2IGM3UYOAG3SH6KZPTLF"
+        }
+      ],
+      "excluded": [
+        {
+          "agents": [
+            "qa_agent",
+            "qa_two"
+          ],
+          "label": "The team's QA throwaway operator key — owns qa_agent and qa_two (excluded: team wallet)",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reason": "team wallet"
+        }
+      ],
+      "id": "m02",
+      "measured": true,
+      "metric": "Unique external operator wallet addresses",
+      "status": "met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "0",
+      "counted": [],
+      "excluded": [
+        {
+          "agent_id": "qa_agent",
+          "amount_stroops": 400000,
+          "auth_id": "00000000000000000000000000000000",
+          "escrow": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+          "job_id": "e313540a79c5f0dbd5ba9e34fadf9878",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "payer": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reasons": [
+            "self-payment (the payer owns the agent)",
+            "the agent is owned by the team's QA throwaway operator key"
+          ],
+          "receipt_id": "00000000000000000000000000000001",
+          "settled": "2026-09-20T10:00:00Z",
+          "tx_hash": "9b66130d2c7c05ee662b24fdca0a32bfda1a0cb1102fb3e53168eb61b378fc6d"
+        },
+        {
+          "agent_id": "qa_two",
+          "amount_stroops": 400000,
+          "auth_id": "00000000000000000000000000000002",
+          "escrow": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+          "job_id": "5cfaa78e28d5d1a4295130c137c71055",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "payer": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reasons": [
+            "self-payment (the payer owns the agent)",
+            "the agent is owned by the team's QA throwaway operator key"
+          ],
+          "receipt_id": "00000000000000000000000000000003",
+          "settled": "2026-09-21T10:00:00Z",
+          "tx_hash": "05320dd888b1da6f0de8cbf6e50cf39572ef9678ffca974b5372c3dcbe5b6716"
+        }
+      ],
+      "id": "m03",
+      "measured": true,
+      "metric": "Workflows routed to external agents & settled on Testnet",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "0",
+      "counted": [],
+      "excluded": [
+        {
+          "agent_id": "qa_agent",
+          "amount_stroops": 400000,
+          "auth_id": "00000000000000000000000000000000",
+          "escrow": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+          "job_id": "e313540a79c5f0dbd5ba9e34fadf9878",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "payer": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reasons": [
+            "self-payment (the payer owns the agent)"
+          ],
+          "receipt_id": "00000000000000000000000000000001",
+          "settled": "2026-09-20T10:00:00Z",
+          "tx_hash": "9b66130d2c7c05ee662b24fdca0a32bfda1a0cb1102fb3e53168eb61b378fc6d"
+        },
+        {
+          "agent_id": "qa_two",
+          "amount_stroops": 400000,
+          "auth_id": "00000000000000000000000000000002",
+          "escrow": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+          "job_id": "5cfaa78e28d5d1a4295130c137c71055",
+          "owner": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "payer": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "reasons": [
+            "self-payment (the payer owns the agent)"
+          ],
+          "receipt_id": "00000000000000000000000000000003",
+          "settled": "2026-09-21T10:00:00Z",
+          "tx_hash": "05320dd888b1da6f0de8cbf6e50cf39572ef9678ffca974b5372c3dcbe5b6716"
+        }
+      ],
+      "id": "m04",
+      "measured": true,
+      "metric": "On-chain USDC settlements (charges) recorded",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "0",
+      "counted": [],
+      "excluded": [
+        {
+          "amount_stroops": 540000,
+          "date": "2026-09-01",
+          "destination": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+          "kind": "transfer",
+          "reason": "no dispute behind it; paid to a team wallet; before the sprint",
+          "source": "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO",
+          "tx_hash": "d2e1ae97b92f28113c71d63ea2250041330628ed1c2abec23e99c8e44e4b6664"
+        }
+      ],
+      "id": "m05",
+      "measured": true,
+      "metric": "Dispute → partial-refund settlements",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "No",
+      "counted": [
+        {
+          "page": "/app/register",
+          "registrations_not_signed_by_admin": 5,
+          "route": "POST /api/stellar/build/register-agent",
+          "route_live": false,
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m06",
+      "measured": true,
+      "metric": "Permissionless AgentRegistry.register flow live on the dApp",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "No",
+      "counted": [
+        {
+          "enabled": true,
+          "floor_bps": 0,
+          "prior_bps": null
+        }
+      ],
+      "excluded": [],
+      "id": "m07",
+      "measured": true,
+      "metric": "Reputation-gated routing (reads avg_bps, applies a floor) live",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "Partly: the dispute routes are deployed, but refunds are switched off, and no dispute has been refunded on-chain yet (see the dispute refund row).",
+      "counted": [
+        {
+          "escrow_v2_live": true,
+          "escrow_v2_settled": true,
+          "missing_routes": [],
+          "refunded_disputes": "0",
+          "refunds_on": false
+        }
+      ],
+      "excluded": [],
+      "id": "m08",
+      "measured": true,
+      "metric": "Automated dispute window + partial-credit refund live",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "No",
+      "counted": [
+        {
+          "page": "/guide/list-your-agent",
+          "status": 500
+        }
+      ],
+      "excluded": [],
+      "id": "m09",
+      "measured": true,
+      "metric": "Public \"List your agent on Orizon\" integration guide published",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "No",
+      "counted": [
+        {
+          "page": "/demo",
+          "seconds": null,
+          "state": "published",
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m10",
+      "measured": true,
+      "metric": "3–5 min demo video published",
+      "status": "not_met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "Yes",
+      "counted": [
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-FE-Stellar",
+          "role": "frontend",
+          "spdx_id": "MIT",
+          "status": 200
+        },
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-BE-Stellar",
+          "role": "backend",
+          "spdx_id": "MIT",
+          "status": 200
+        },
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar",
+          "role": "smart contracts",
+          "spdx_id": "MIT",
+          "status": 200
+        },
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-Example-Agent-Stellar",
+          "role": "example agent",
+          "spdx_id": "MIT",
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m11",
+      "measured": true,
+      "metric": "All source code released under MIT License",
+      "status": "met",
+      "unmeasured_because": {}
+    }
+  ],
+  "network": "testnet",
+  "platform_keys": {
+    "GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N": "ratings signer",
+    "GDIMDIW7AW7CCHLN25B6PXMPPBKIGCUK7VIF6CZFJY5JRKWJ4HQHD7CA": "dispatch signer",
+    "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO": "network admin key"
+  },
+  "sources": {
+    "adoption": "https://orizon.test/api/ecosystem/adoption",
+    "api": "https://orizon.test",
+    "backend": "https://backend.test",
+    "frontend": "https://front.test",
+    "github": "https://github-api.test",
+    "horizon": "https://horizon.test",
+    "openapi": "https://backend.test/openapi.json",
+    "params": "https://orizon.test/api/stellar/reputation/params",
+    "readiness": "https://backend.test/readiness",
+    "rpc": "https://rpc.test"
+  },
+  "summary": {
+    "bound_per_adoption_report": {
+      "alpha": false,
+      "beta": false,
+      "gamma": false,
+      "qa_agent": false,
+      "qa_two": false
+    },
+    "dispute_ratings": 0,
+    "escrows": [
+      {
+        "authorizations": 2,
+        "contract": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+        "ids_issued": 4,
+        "live": true,
+        "receipts": 2,
+        "unreadable_ids": [],
+        "version": 2
+      },
+      {
+        "authorizations": 0,
+        "contract": "CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI",
+        "ids_issued": 0,
+        "live": false,
+        "receipts": 0,
+        "unreadable_ids": [],
+        "version": 1
+      }
+    ],
+    "ledger_lifetime_disputes": 0,
+    "platform_transfers": [
+      {
+        "amount_stroops": 540000,
+        "created_at": "2026-09-01T12:00:00Z",
+        "destination": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+        "muxed_id": null,
+        "source": "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO",
+        "tx_hash": "d2e1ae97b92f28113c71d63ea2250041330628ed1c2abec23e99c8e44e4b6664"
+      }
+    ],
+    "ratings_by_kind": {
+      "auto": 1
+    },
+    "registered_agents": 5
+  },
+  "team_register": {
+    "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ": "QA throwaway operator key",
+    "GC4JNBUTT35KQNPTLHKRTIZNYFMJ4EPFLRNILDGSMY3VCZGOZB6SYPMC": "QA throwaway buyer key",
+    "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO": "contract admin and v1 escrow settler"
+  },
+  "warnings": [],
+  "withheld_external": false
+}

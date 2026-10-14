@@ -1,0 +1,3 @@
+exit code 3
+sow metrics · api https://orizon.test · backend https://backend.test · frontend https://front.test · testnet only, read-only
+REFUSED: this is not testnet: the API says 'Public Global Stellar Network ; September 2015'
