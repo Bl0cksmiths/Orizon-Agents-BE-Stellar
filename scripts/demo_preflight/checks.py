@@ -621,6 +621,31 @@ def all_degraded(reputations: dict[str, Any], agent_ids: list[str]) -> bool:
     return bool(entries) and all(e.get("degraded") is True for e in entries)
 
 
+def _not_a_verdict(rep: dict[str, Any]) -> str | None:
+    """`degraded` or `stale` when this reputation read is no verdict on its agent, else None."""
+    if rep.get("degraded") is True:
+        return "degraded"
+    if rep.get("stale") is True:
+        return "stale"
+    return None
+
+
+def _ignored_reason(rep: dict[str, Any], row: dict[str, Any]) -> str | None:
+    """Why a below-floor read is set aside rather than counted as excluded, else None.
+
+    The planner only judges agents it could route to. An unbound one renders
+    as "no endpoint" and a delisted one not at all: neither is the "excluded"
+    row the exclusion scene films.
+    """
+    why = _not_a_verdict(rep)
+    if why is not None:
+        return why
+    if not routable(row):
+        why = "delisted" if row.get("status") == "offline" else "not bound"
+        return f"{why}: not routable, so never excluded"
+    return None
+
+
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
     check = Check(
         "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
@@ -689,16 +714,9 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             continue
         if rep["lower_bound_bps"] >= floor:
             continue
-        if rep.get("degraded") is True or rep.get("stale") is True:
-            why = "degraded" if rep.get("degraded") is True else "stale"
+        why = _ignored_reason(rep, rows[agent_id])
+        if why is not None:
             ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why})")
-            continue
-        # The planner only judges agents it could route to. An unbound one
-        # renders as "no endpoint" and a delisted one not at all: neither is
-        # the "excluded" row the exclusion scene films.
-        if not routable(rows[agent_id]):
-            why = "delisted" if rows[agent_id].get("status") == "offline" else "not bound"
-            ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why}: not routable, so never excluded)")
             continue
         genuine.append(agent_id)
         facts.below_floor.append(agent_id)
@@ -735,15 +753,6 @@ def routable(agent: dict[str, Any]) -> bool:
     if agent.get("source") == "seeded":
         return True
     return agent.get("source") == "onchain" and agent.get("bound") is True
-
-
-def _not_a_verdict(rep: dict[str, Any]) -> str | None:
-    """`degraded` or `stale` when this reputation read is no verdict on its agent, else None."""
-    if rep.get("degraded") is True:
-        return "degraded"
-    if rep.get("stale") is True:
-        return "stale"
-    return None
 
 
 def _unjudged_reason(rep: Any) -> str | None:
