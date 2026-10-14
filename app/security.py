@@ -717,6 +717,12 @@ async def require_adjudicator(
 
 # An exact origin: https with a host (and optional port), or plain http to the
 # loopback only, for local development. No path, no wildcard, no `null`.
+#
+# The `http://` below is deliberate and safe: it matches only localhost and
+# 127.0.0.1, an origin that is a page on the visitor's OWN machine, whose
+# traffic never crosses a network that could read or rewrite it. Every other
+# plain-http origin is dropped, and the Vercel origin regex in app/main.py is
+# https-only, so no public origin is ever admitted over plain http.
 _SECURE_ORIGIN = re.compile(r"https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?")
 _LOOPBACK_ORIGIN = re.compile(r"http://(localhost|127\.0\.0\.1)(:\d{1,5})?")
 
