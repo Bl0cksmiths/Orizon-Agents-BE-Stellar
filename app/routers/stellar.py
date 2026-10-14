@@ -749,7 +749,7 @@ class UpdatePriceReq(BaseModel):
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
 
-@router.post("/build/update-price", response_model=XdrResponse)
+@router.post("/build/update-price")
 async def build_update_price(req: UpdatePriceReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.update_price. Owner signs via Freighter.
 
