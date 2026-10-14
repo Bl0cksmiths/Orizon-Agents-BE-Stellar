@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Header, Request
 from fastapi.encoders import jsonable_encoder
@@ -898,11 +898,13 @@ class ReadinessResponse(BaseModel):
 )
 async def readiness(
     response: Response,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-        description="Optional. The operator's API_KEY adds the AI spend figures to `orchestrator`.",
-    ),
+    x_api_key: Annotated[
+        str | None,
+        Header(
+            alias="X-API-Key",
+            description="Optional. The operator's API_KEY adds the AI spend figures to `orchestrator`.",
+        ),
+    ] = None,
 ) -> ReadinessResponse:
     """503 only when a dependency the API cannot serve without is missing:
     the LLM key or the Stellar contract/RPC config. The signing key is
