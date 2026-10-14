@@ -267,6 +267,20 @@ def test_the_label_rule_accepts_words_that_quote_an_id(label: str) -> None:
     assert label_problem(label) is None
 
 
+# Punctuation is stripped from both ends of a token, never from its middle, so a
+# quoted id is still recognised as an id however it is wrapped.
+@pytest.mark.parametrize("token", ["(GABC…WXYZ", "GABC…WXYZ),", "(GABC…WXYZ),", "__GABC…WXYZ__", "«abcd…ef01»"])
+def test_the_label_rule_sees_an_id_through_the_punctuation_at_its_ends(token: str) -> None:
+    assert label_problem(f"Paid {token}") == "must be at least two words of plain language, not just an id"
+
+
+@pytest.mark.parametrize(
+    "label", ["«Settlement» —paid—", "(Settlement), paid!", "Settlement ... paid", "_Settlement_ paid"]
+)
+def test_the_label_rule_counts_words_wrapped_in_punctuation(label: str) -> None:
+    assert label_problem(label) is None
+
+
 @pytest.mark.parametrize(
     ("created_at", "date"),
     [
