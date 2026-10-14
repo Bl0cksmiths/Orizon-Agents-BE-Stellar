@@ -2521,6 +2521,21 @@ async def _seal_confirmed(task_id: str, start: float, pending: _PendingSeal, sea
         await _record_proof(task_id, pending.record, seal_tx)
 
 
+async def _landed_submission(pending: _PendingSeal) -> tuple[_SealSubmission | None, bool]:
+    """Look each submission up in turn: (the first that landed, False), or
+    (None, whether every one of them is proven absent).
+
+    Stops at the first that landed, so the ones after it are never looked up.
+    """
+    all_absent = True
+    for submission in list(pending.submissions):
+        verdict = await _seal_verdict(submission)
+        if verdict == "landed":
+            return submission, False
+        all_absent = all_absent and verdict == "absent"
+    return None, all_absent
+
+
 async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> None:
     """Find out what became of a seal that did not confirm, within a bound.
 
@@ -2540,13 +2555,10 @@ async def _reconcile_seal(task_id: str, start: float, pending: _PendingSeal) -> 
     try:
         for delay in SEAL_RECONCILE_DELAYS:
             await asyncio.sleep(delay)
-            all_absent = True
-            for submission in list(pending.submissions):
-                verdict = await _seal_verdict(submission)
-                if verdict == "landed":
-                    await _seal_confirmed(task_id, start, pending, submission.tx_hash)
-                    return
-                all_absent = all_absent and verdict == "absent"
+            landed, all_absent = await _landed_submission(pending)
+            if landed is not None:
+                await _seal_confirmed(task_id, start, pending, landed.tx_hash)
+                return
             try:
                 held = await asyncio.wait_for(
                     asyncio.to_thread(
