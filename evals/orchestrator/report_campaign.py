@@ -305,6 +305,40 @@ def _cost_section(a: dict[str, Any]) -> list[str]:
     return L
 
 
+def _latency_section(a: dict[str, Any]) -> list[str]:
+    """§7: p50 / p95 / max per model call and per request end to end."""
+    s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
+    L: list[str] = []
+    add = L.append
+    add("## 7. Latency")
+    add("")
+    add("p50 / p95 / max, per model call and per request end to end.")
+    add("")
+    add("| stage | latency |")
+    add("|---|---|")
+    add(f"| jev guard (stage 1) | {fmt_s(s1['latency'].get('guard', {}))} |")
+    add(f"| jev guard (stage 2, external) | {fmt_s(s2['latency'].get('guard', {}))} |")
+    add(f"| Haiku fallback guard (stage 3) | {fmt_s(s3['latency'].get('guard_fallback', {}))} |")
+    for k, label in (
+        ("guard", "jev guard (stage 4)"),
+        ("improve", "Sonnet 5.5 improver"),
+        ("recheck", "jev re-check (2 calls, parallel)"),
+        ("plan", "Opus 5.5 planner"),
+    ):
+        add(f"| {label} | {fmt_s(s4['latency'].get(k, {}))} |")
+    add(f"| end to end, refused requests (guard only) | {fmt_s(s4['latency'].get('end_to_end_refused', {}))} |")
+    add(f"| end to end, planned requests | {fmt_s(s4['latency'].get('end_to_end_planned', {}))} |")
+    for name, w in a["s5"].items():
+        if "worker" in w:
+            add(f"| worker {name} | {w['latency_s']:.2f} s (n=1) |")
+    add("")
+    add(
+        "Reference measurements supplied by the owner's earlier smoke tests (same day, not re-run here): jev ≈0.3 s per check; code.gen on Sonnet 5.5 (moderate) 35.4 s, 282 lines, 0 validator violations, $0.07; code.gen on Opus 5.5 (complex, effort high) 268.5 s, 747 lines, 0 violations, $0.68."
+    )
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -589,32 +623,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     L += _confusion(s4["guard"]["tier_confusion"])
     add("")
 
-    add("## 7. Latency")
-    add("")
-    add("p50 / p95 / max, per model call and per request end to end.")
-    add("")
-    add("| stage | latency |")
-    add("|---|---|")
-    add(f"| jev guard (stage 1) | {fmt_s(s1['latency'].get('guard', {}))} |")
-    add(f"| jev guard (stage 2, external) | {fmt_s(s2['latency'].get('guard', {}))} |")
-    add(f"| Haiku fallback guard (stage 3) | {fmt_s(s3['latency'].get('guard_fallback', {}))} |")
-    for k, label in (
-        ("guard", "jev guard (stage 4)"),
-        ("improve", "Sonnet 5.5 improver"),
-        ("recheck", "jev re-check (2 calls, parallel)"),
-        ("plan", "Opus 5.5 planner"),
-    ):
-        add(f"| {label} | {fmt_s(s4['latency'].get(k, {}))} |")
-    add(f"| end to end, refused requests (guard only) | {fmt_s(s4['latency'].get('end_to_end_refused', {}))} |")
-    add(f"| end to end, planned requests | {fmt_s(s4['latency'].get('end_to_end_planned', {}))} |")
-    for name, w in a["s5"].items():
-        if "worker" in w:
-            add(f"| worker {name} | {w['latency_s']:.2f} s (n=1) |")
-    add("")
-    add(
-        "Reference measurements supplied by the owner's earlier smoke tests (same day, not re-run here): jev ≈0.3 s per check; code.gen on Sonnet 5.5 (moderate) 35.4 s, 282 lines, 0 validator violations, $0.07; code.gen on Opus 5.5 (complex, effort high) 268.5 s, 747 lines, 0 violations, $0.68."
-    )
-    add("")
+    L += _latency_section(a)
 
     L += _cost_section(a)
 
