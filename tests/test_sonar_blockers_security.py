@@ -54,3 +54,15 @@ def test_an_empty_override_lifts_every_per_path_cap() -> None:
     c = TestClient(BodyLimitMiddleware(_byte_counting_app(), path_limits={}))
 
     assert c.post(PDAX_WEBHOOK, content=b"x" * (PDAX_WEBHOOK_CAP + 1)).status_code == 200
+
+
+def test_each_middleware_gets_its_own_copy_of_the_default_path_limits() -> None:
+    # The class table is shared by every instance; the instance's table must
+    # not be, or tuning one middleware would retune all of them.
+    middleware = BodyLimitMiddleware(_byte_counting_app())
+
+    assert middleware.path_limits == BodyLimitMiddleware.DEFAULT_PATH_LIMITS
+    assert middleware.path_limits is not BodyLimitMiddleware.DEFAULT_PATH_LIMITS
+    middleware.path_limits[PDAX_WEBHOOK] = 1
+
+    assert BodyLimitMiddleware.DEFAULT_PATH_LIMITS[PDAX_WEBHOOK] == PDAX_WEBHOOK_CAP
