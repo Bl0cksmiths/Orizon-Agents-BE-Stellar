@@ -172,6 +172,47 @@ def not_submitted_reason(exc: BaseException) -> str:
     return head if len(head) <= _REASON_LIMIT else head[: _REASON_LIMIT - 1] + "…"
 
 
+def _refused_by_ledger(
+    dispute: DisputeRecord, e: sc.ContractError, facts: str, derived_hex: str, weight: int
+) -> RatingOutcome:
+    """The outcome of a submit the ledger refused at simulation: REPLAY for `Replay`, FAILED otherwise."""
+    if e.code == _LEDGER_REPLAY:
+        # WARNING, not ERROR: on a retry this is the expected answer from an
+        # attempt that already landed. Only the caller, holding the
+        # dispute's history, can tell that apart from a collision.
+        logger.warning(
+            "dispute %s: rating refused as a Replay — the ledger already holds a rating under this "
+            "agent and derived id (%s)",
+            dispute.id,
+            facts,
+        )
+        return RatingOutcome("REPLAY", None, derived_hex, DISPUTE_RATING, weight)
+    reason = rating_writer.failure_reason(e)
+    if e.code == _LEDGER_UNAUTHORIZED:
+        # Spelled out because this exact misconfiguration once left a
+        # deployment's ledger at zero ratings with nobody able to say why:
+        # a signer that is not the Scorer is refused on every rating it signs.
+        logger.error(
+            "dispute %s: rating refused with %s — this deployment's signer is NOT the Scorer of "
+            "ReputationLedger %s, so no rating it submits can land. A misconfiguration, not a verdict on "
+            "the dispute: the ledger admin must call set_scorer with the signer's address (the boot line "
+            "and ratings on /readiness name both). Nothing was written (%s)",
+            dispute.id,
+            reason,
+            settings.stellar_reputation_ledger,
+            facts,
+        )
+    else:
+        logger.error(
+            "dispute %s: rating refused by the ledger with %s, nothing was written (%s)",
+            dispute.id,
+            reason,
+            facts,
+            exc_info=True,
+        )
+    return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
+
+
 async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
     """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
 
@@ -273,41 +314,7 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         logger.error("dispute %s: rating submit cancelled mid-flight and MAY HAVE LANDED (%s)", dispute.id, facts)
         raise
     except sc.ContractError as e:
-        if e.code == _LEDGER_REPLAY:
-            # WARNING, not ERROR: on a retry this is the expected answer from an
-            # attempt that already landed. Only the caller, holding the
-            # dispute's history, can tell that apart from a collision.
-            logger.warning(
-                "dispute %s: rating refused as a Replay — the ledger already holds a rating under this "
-                "agent and derived id (%s)",
-                dispute.id,
-                facts,
-            )
-            return RatingOutcome("REPLAY", None, derived_hex, DISPUTE_RATING, weight)
-        reason = rating_writer.failure_reason(e)
-        if e.code == _LEDGER_UNAUTHORIZED:
-            # Spelled out because this exact misconfiguration once left a
-            # deployment's ledger at zero ratings with nobody able to say why:
-            # a signer that is not the Scorer is refused on every rating it signs.
-            logger.error(
-                "dispute %s: rating refused with %s — this deployment's signer is NOT the Scorer of "
-                "ReputationLedger %s, so no rating it submits can land. A misconfiguration, not a verdict on "
-                "the dispute: the ledger admin must call set_scorer with the signer's address (the boot line "
-                "and ratings on /readiness name both). Nothing was written (%s)",
-                dispute.id,
-                reason,
-                settings.stellar_reputation_ledger,
-                facts,
-            )
-        else:
-            logger.error(
-                "dispute %s: rating refused by the ledger with %s, nothing was written (%s)",
-                dispute.id,
-                reason,
-                facts,
-                exc_info=True,
-            )
-        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
+        return _refused_by_ledger(dispute, e, facts, derived_hex, weight)
     except sc.NotSubmittedError as e:
         reason = not_submitted_reason(e)
         logger.error(
