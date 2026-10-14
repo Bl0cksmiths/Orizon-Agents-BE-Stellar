@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .collect import Snapshot
-from .config import BLOCK_NAME, EXPLORER, MARKDOWN_NAME, RAW_NAME, SOW_ROWS
+from .config import BLOCK_NAME, EXPLORER, MARKDOWN_NAME, RAW_NAME, SOW_ROWS, SowRow
 from .metrics import LINK_KINDS, MET, NOT_MET, Metric
 
 BLOCK_KEYS = ("id", "category", "metric", "target", "achieved", "status", "reason", "method", "links")
@@ -79,9 +79,7 @@ def block_problems(block: Any) -> list[str]:
         expected = BLOCK_KEYS if entry.get("status") == NOT_MET else tuple(k for k in BLOCK_KEYS if k != "reason")
         if keys != expected:
             problems.append(f"{where}: keys {keys} are not {expected}")
-        for key, want in (("id", row.id), ("category", row.category), ("metric", row.metric), ("target", row.target)):
-            if entry.get(key) != want:
-                problems.append(f"{where}: {key} {entry.get(key)!r} is not the SOW's {want!r}")
+        problems.extend(_wording_problems(where, row, entry))
         if entry.get("status") not in (MET, NOT_MET):
             problems.append(f"{where}: status {entry.get('status')!r}")
         for key in ("achieved", "method"):
@@ -91,6 +89,14 @@ def block_problems(block: Any) -> list[str]:
             problems.append(f"{where}: a miss needs a reason")
         problems.extend(_links_problems(where, entry.get("links")))
     return problems
+
+
+def _wording_problems(where: str, row: SowRow, entry: dict[str, Any]) -> list[str]:
+    """The entry's id, category, metric and target, each the SOW's own words."""
+    wanted = (("id", row.id), ("category", row.category), ("metric", row.metric), ("target", row.target))
+    return [
+        f"{where}: {key} {entry.get(key)!r} is not the SOW's {want!r}" for key, want in wanted if entry.get(key) != want
+    ]
 
 
 def _links_problems(where: str, links: Any) -> list[str]:
