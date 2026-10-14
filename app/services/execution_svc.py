@@ -1209,6 +1209,28 @@ async def _report_charge_unconfirmed(
     )
 
 
+async def _report_charge_failure(task_id: str, start: float, e: Exception, *, charged: bool) -> None:
+    """Trace a v1 settlement that raised, by whether its charge had confirmed."""
+    from ..stellar import client as sc
+
+    if charged:
+        # The charge confirmed and something after it failed — the seal,
+        # or the settlement write. The money moved; the line is as it was.
+        await _emit(task_id, start, "error", "on-chain settlement failed")
+    elif isinstance(e, sc.InFlightError):
+        # Sent, then lost: the charge may still land, exactly as an
+        # unconfirmed charge whose poll timed out (`_report_charge_unconfirmed`).
+        await _emit(
+            task_id,
+            start,
+            "error",
+            "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
+            settlement="unconfirmed",
+        )
+    else:
+        await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+
+
 def _charge_receipt_id(receipt_rv: object) -> bytes | None:
     """The 16-byte receipt id a v1 `charge` returned, or None when it did not decode to one."""
     receipt_id: bytes | None = None
@@ -1481,22 +1503,7 @@ async def _settle_onchain(
             proof_tx,
             exc_info=True,
         )
-        if settled_job_id is not None:
-            # The charge confirmed and something after it failed — the seal,
-            # or the settlement write. The money moved; the line is as it was.
-            await _emit(task_id, start, "error", "on-chain settlement failed")
-        elif isinstance(e, sc.InFlightError):
-            # Sent, then lost: the charge may still land, exactly as the
-            # unconfirmed branch above says of a poll that timed out.
-            await _emit(
-                task_id,
-                start,
-                "error",
-                "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
-                settlement="unconfirmed",
-            )
-        else:
-            await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+        await _report_charge_failure(task_id, start, e, charged=settled_job_id is not None)
 
     return (charge_tx, proof_tx, settled_job_id)
 
