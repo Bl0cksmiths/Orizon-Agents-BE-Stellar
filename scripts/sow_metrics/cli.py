@@ -200,6 +200,24 @@ def _unused_pending_links(snap: Snapshot, pending_links: dict[str, PendingLink])
     return notes
 
 
+def _say_findings(say: Callable[[str], None], metrics: list[Metric], snap: Snapshot, cfg: RunConfig) -> None:
+    """Each metric's line, then every failed read, warning and note."""
+    for m in metrics:
+        say(f"[{_status_word(m)}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
+    for source, failure in sorted(snap.failures.items()):
+        say(f"read failed: {source}: {failure}")
+    for warning in snap.warnings:
+        say(f"warning: {warning}")
+    if cfg.withhold_external:
+        say(
+            "note: outside operators' agent ids, wallets and hashes are held back from the block and the Markdown "
+            "until their consent is recorded (--publish-external links them); the raw JSON keeps them, so do not "
+            "publish it"
+        )
+    for note in _unused_pending_links(snap, cfg.pending_links):
+        say(note)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -248,20 +266,7 @@ def main(
         raise ValueError("the metrics block breaks its frozen shape: " + "; ".join(problems))
 
     run = _run_facts(cfg, now() if now else time.time())
-    for m in metrics:
-        say(f"[{_status_word(m)}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
-    for source, failure in sorted(snap.failures.items()):
-        say(f"read failed: {source}: {failure}")
-    for warning in snap.warnings:
-        say(f"warning: {warning}")
-    if cfg.withhold_external:
-        say(
-            "note: outside operators' agent ids, wallets and hashes are held back from the block and the Markdown "
-            "until their consent is recorded (--publish-external links them); the raw JSON keeps them, so do not "
-            "publish it"
-        )
-    for note in _unused_pending_links(snap, cfg.pending_links):
-        say(note)
+    _say_findings(say, metrics, snap, cfg)
     if cfg.out_dir is not None:
         paths = write(cfg.out_dir, block, render_markdown(metrics, run, code), render_raw(metrics, snap, run, code))
         say("wrote " + ", ".join(str(p) for p in paths))
