@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from .. import money
@@ -472,6 +472,61 @@ async def execute_plan(
     return task_id
 
 
+@dataclass
+class _RunState:
+    """What a run has accumulated, step by step, at whatever point it ends.
+
+    One object rather than locals so the run's helpers update it at exactly
+    the moments the loop did, and its exit handlers read what it held then.
+    """
+
+    # Worker-facing outputs, keyed by worker name (a worker asks for
+    # context["code.gen"]); seeded with the kit and the intent.
+    context: dict[str, Any]
+    # In stroops (ADR 0015): what the delivered steps' plan prices add up to —
+    # the whole bill of a simulated run.
+    spent: int = 0
+    succeeded: int = 0  # steps that returned output; drives the terminal status
+    last_artifact: dict | None = None
+    # What each step actually delivered, by PLAN-STEP INDEX.
+    # Separate from `context` because the two are keyed for different readers:
+    # `context` is worker-facing and keyed by worker name, while the settler
+    # grades a plan STEP.
+    # By index for the same reason its two siblings below are, and it was the
+    # one of the three that did not get it: keyed by agent_id, one agent hired
+    # for two steps overwrote its own first output with its second, and BOTH
+    # steps were then rated on whichever one happened to land last. Indexing
+    # also retires the agent_name fallback `_submit_ratings` carried, which
+    # existed only because worker name and agent_id coincide for a local worker
+    # and do NOT for a bound external one ("external.<agent_id>").
+    delivered: dict[int, Any] = field(default_factory=dict)
+    # Plan-step INDEXES that produced output — the same steps that incremented
+    # `succeeded` and `spent`. Kept by index rather than by agent_id because a
+    # plan may use the same agent twice: keyed by agent, a step that failed
+    # would be settled as delivered on the strength of a LATER step that
+    # succeeded, and story 4.02 would then accept a dispute over work nobody
+    # was ever paid for.
+    delivered_steps: set[int] = field(default_factory=set)
+    # What each delivered step produced, as its settlement keeps it (story
+    # 4.05) — by plan-step index for the same reason as `delivered_steps`: one
+    # agent on two steps produced two different things, and keyed by agent the
+    # second would overwrite the first on the step the buyer disputes.
+    output_summaries: dict[int, str | None] = field(default_factory=dict)
+    # Plan-step INDEXES that never reached a worker at all — refused at
+    # execute, unresolved, or not attempted. Distinct from "delivered nothing":
+    # these are not rated. By index, like the three maps above and for the
+    # last of the same reason: resolution fails OPEN and is negative-cached, so
+    # one blip can leave an agent unresolved at step 0 and resolvable at step 3
+    # — and keyed by agent that dropped the rating for step 3, which DID
+    # deliver and WAS charged for.
+    undispatched: set[int] = field(default_factory=set)
+    # Agent ids that ran on one of OUR workers. The rating scale trusts a
+    # first-party response to have delivered something real; an untrusted one
+    # has to prove it (ADR 0005 D3). Carried separately because `delivered`
+    # holds the output, not its provenance.
+    first_party_ids: set[str] = field(default_factory=set)
+
+
 async def _run(
     plan: StoredPlan,
     task_id: str,
@@ -482,13 +537,10 @@ async def _run(
 ) -> None:
     _live_runs.add(task_id)
     start = time.monotonic()
-    # In stroops (ADR 0015). `spent` is what the delivered steps' plan prices
-    # add up to — the whole bill of a simulated run. A paid run's bill is
-    # `charged`: what its settle actually moved, set the moment it confirms.
-    spent = 0
+    # In stroops (ADR 0015). A paid run's bill is `charged`: what its settle
+    # actually moved, set the moment it confirms. A simulated run's is
+    # `run.spent`.
     charged = 0
-    succeeded = 0  # steps that returned output; drives the terminal status
-    last_artifact: dict | None = None
     charge_tx: str | None = None
     proof_tx: str | None = None
     onchain = bool(auth_id_hex and payer)
@@ -508,46 +560,12 @@ async def _run(
     # The kit (if any) is seeded into context up-front so EVERY worker
     # in the pipeline can short-circuit deterministically.
     kit = detect_kit(plan.intent)
-    context: dict[str, Any] = {
-        "kit": kit.model_dump() if kit is not None else None,
-        "intent": plan.intent,
-    }
-    # What each step actually delivered, by PLAN-STEP INDEX.
-    # Separate from `context` because the two are keyed for different readers:
-    # `context` is worker-facing and keyed by worker name (a worker asks for
-    # context["code.gen"]), while the settler grades a plan STEP.
-    # By index for the same reason its two siblings below are, and it was the
-    # one of the three that did not get it: keyed by agent_id, one agent hired
-    # for two steps overwrote its own first output with its second, and BOTH
-    # steps were then rated on whichever one happened to land last. Indexing
-    # also retires the agent_name fallback `_submit_ratings` carried, which
-    # existed only because worker name and agent_id coincide for a local worker
-    # and do NOT for a bound external one ("external.<agent_id>").
-    delivered: dict[int, Any] = {}
-    # Plan-step INDEXES that produced output — the same steps that incremented
-    # `succeeded` and `spent`. Kept by index rather than by agent_id because a
-    # plan may use the same agent twice: keyed by agent, a step that failed
-    # would be settled as delivered on the strength of a LATER step that
-    # succeeded, and story 4.02 would then accept a dispute over work nobody
-    # was ever paid for.
-    delivered_steps: set[int] = set()
-    # What each delivered step produced, as its settlement keeps it (story
-    # 4.05) — by plan-step index for the same reason as `delivered_steps`: one
-    # agent on two steps produced two different things, and keyed by agent the
-    # second would overwrite the first on the step the buyer disputes.
-    output_summaries: dict[int, str | None] = {}
-    # Plan-step INDEXES that never reached a worker at all — see the resolve
-    # branch below. Distinct from "delivered nothing": these are not rated.
-    # By index, like the three maps above and for the last of the same reason:
-    # resolution fails OPEN and is negative-cached, so one blip can leave an
-    # agent unresolved at step 0 and resolvable at step 3 — and keyed by agent
-    # that dropped the rating for step 3, which DID deliver and WAS charged for.
-    undispatched: set[int] = set()
-    # Agent ids that ran on one of OUR workers. The rating scale trusts a
-    # first-party response to have delivered something real; an untrusted one
-    # has to prove it (ADR 0005 D3). Carried separately because `delivered`
-    # holds the output, not its provenance.
-    first_party_ids: set[str] = set()
+    run = _RunState(
+        context={
+            "kit": kit.model_dump() if kit is not None else None,
+            "intent": plan.intent,
+        }
+    )
 
     try:
         await _emit_run_opening(task_id, start, plan, kit, auth_id_hex=auth_id_hex, payer=payer)
@@ -566,7 +584,7 @@ async def _run(
                 # never asked, and a withdrawal is its operator's decision,
                 # not a delivery it failed (ADR 0005 D5). By index, like every
                 # other per-step set here.
-                undispatched.add(step_index)
+                run.undispatched.add(step_index)
                 logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
                 await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
                 continue
@@ -597,7 +615,7 @@ async def _run(
                 # THIS step, not this agent: the same agent may be resolvable
                 # at another step of the plan, and that step's delivery is its
                 # own evidence.
-                undispatched.add(step_index)
+                run.undispatched.add(step_index)
                 logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
                 await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
                 continue
@@ -608,25 +626,25 @@ async def _run(
                 "exec",
                 f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
             )
-            upstream_line = _upstream_line(worker, context, first_party=get_worker(step.agent_id) is worker)
+            upstream_line = _upstream_line(worker, run.context, first_party=get_worker(step.agent_id) is worker)
             if upstream_line:
                 await _emit(task_id, start, "exec", upstream_line)
 
             try:
-                output = await _dispatch_step(task_id, start, plan, step, worker, context)
+                output = await _dispatch_step(task_id, start, plan, step, worker, run.context)
             except asyncio.TimeoutError:
                 await _step_timed_out(task_id, start, step, worker)
                 continue
             except Exception as e:
-                await _step_raised(task_id, start, step_index, step, worker, e, undispatched)
+                await _step_raised(task_id, start, step_index, step, worker, e, run.undispatched)
                 continue
 
             if await _rejected_output(task_id, start, step, worker, output):
                 continue
 
-            succeeded += 1
-            spent += _price_stroops(step)
-            delivered_steps.add(step_index)
+            run.succeeded += 1
+            run.spent += _price_stroops(step)
+            run.delivered_steps.add(step_index)
             # Clears the streak and emits one recovery INFO, so an endpoint that
             # comes back is as visible in Render as one that broke.
             failure_tracker.record_success(step.agent_id)
@@ -642,7 +660,7 @@ async def _run(
             # Kept from the SAME value the line above traced, not re-derived at
             # settlement, so the dispute form and the trace cannot disagree
             # about what this step produced. Cannot raise — see the helper.
-            output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
+            run.output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
 
             # Surface critic notes / violations if the worker reports them.
             await _emit_output_notes(task_id, start, worker.name, output)
@@ -651,7 +669,7 @@ async def _run(
             # overwrite this (e.g. code.critic refines code.gen's draft).
             art = output.get("artifact") if isinstance(output, dict) else None
             if art:
-                last_artifact = art
+                run.last_artifact = art
                 await _emit_artifact(task_id, start, art)
 
             # Persist this step's output under the agent name so later workers
@@ -659,20 +677,20 @@ async def _run(
             if isinstance(output, dict):
                 first_party = get_worker(step.agent_id) is worker
                 if first_party:
-                    first_party_ids.add(step.agent_id)
+                    run.first_party_ids.add(step.agent_id)
                 # Untrusted prose is fenced on the way IN — this assignment is
                 # the single boundary every later step reads through, so a
                 # worker added tomorrow gets the defence without knowing it
                 # needs one (2.02 AC-5 / Product Rule 5).
-                context[worker.name] = output if first_party else _fenced_for_context(output)
+                run.context[worker.name] = output if first_party else _fenced_for_context(output)
                 # The settler reads a rating-facing view of the same output —
                 # an untrusted worker does not get to grade itself. Under THIS
                 # step's index: the agent may serve another step of this plan,
                 # and that step's output is its own evidence, not this one's.
-                delivered[step_index] = _rating_view(output, first_party=first_party)
+                run.delivered[step_index] = _rating_view(output, first_party=first_party)
 
         total_steps = len(plan.plan.steps)
-        status = _terminal_status(total_steps, succeeded, last_artifact)
+        status = _terminal_status(total_steps, run.succeeded, run.last_artifact)
         # The job id this run's ratings are written under, once the settlement
         # is over. Ratings are FOLLOW-UP work: one on-chain submit per step, in
         # sequence, each polling up to ~30s, and the receipt used to read
@@ -690,11 +708,11 @@ async def _run(
             # when it lands.
             nonlocal finalized, charged
             charged = moved
-            _finalize_task(task_id, status, charged, last_artifact, settle_tx, None)
+            _finalize_task(task_id, status, charged, run.last_artifact, settle_tx, None)
             finalized = True
 
         if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
-            if succeeded == 0 and await _escrow_version() >= 2:
+            if run.succeeded == 0 and await _escrow_version() >= 2:
                 # v2 holds the buyer's funds in custody from `authorize`, so
                 # "bill nothing" is not the same as "do nothing": an empty
                 # `settle` releases every stroop back to them now, instead of
@@ -711,7 +729,7 @@ async def _run(
                     authorized_max=authorized_max,
                 )
                 rate_under = unsettled_job_id(task_id)
-            elif succeeded == 0:
+            elif run.succeeded == 0:
                 # Same rule as the simulated branch below — a workflow that
                 # produced nothing has nothing to attest to, and nothing to
                 # bill: charging here would consume the payer's escrow
@@ -754,9 +772,9 @@ async def _run(
                     plan,
                     payer=payer,
                     auth_id_hex=auth_id_hex,
-                    total_usdc=money.stroops_to_float(spent),
-                    delivered_steps=frozenset(delivered_steps),
-                    output_summaries=output_summaries,
+                    total_usdc=money.stroops_to_float(run.spent),
+                    delivered_steps=frozenset(run.delivered_steps),
+                    output_summaries=run.output_summaries,
                     authorized_max=authorized_max,
                     on_money_moved=_money_moved,
                     on_seal_pending=pending_seals.append,
@@ -791,7 +809,7 @@ async def _run(
                 task_id,
                 start,
                 "proof",
-                f"workflow sealed — {succeeded} agents · {_amount(spent)} · {time.monotonic() - start:.2f}s",
+                f"workflow sealed — {run.succeeded} agents · {_amount(run.spent)} · {time.monotonic() - start:.2f}s",
             )
 
         if status != "complete":
@@ -799,18 +817,18 @@ async def _run(
                 "task %s finalized as %s: %d/%d steps produced output, artifact=%s",
                 task_id,
                 status,
-                succeeded,
+                run.succeeded,
                 total_steps,
-                last_artifact is not None,
+                run.last_artifact is not None,
             )
             await _emit(
                 task_id,
                 start,
                 "error",
-                f"workflow incomplete — {succeeded}/{total_steps} agents produced output",
+                f"workflow incomplete — {run.succeeded}/{total_steps} agents produced output",
             )
 
-        _finalize_task(task_id, status, charged if onchain else spent, last_artifact, charge_tx, proof_tx)
+        _finalize_task(task_id, status, charged if onchain else run.spent, run.last_artifact, charge_tx, proof_tx)
         finalized = True
 
         # Follow-up work, in this order because both sign with the one server
@@ -824,11 +842,11 @@ async def _run(
                 task_id,
                 start,
                 plan,
-                delivered,
+                run.delivered,
                 payer=payer,
                 job_id=rate_under,
-                undispatched=frozenset(undispatched),
-                first_party_ids=frozenset(first_party_ids),
+                undispatched=frozenset(run.undispatched),
+                first_party_ids=frozenset(run.first_party_ids),
             )
 
     except asyncio.CancelledError:
@@ -837,7 +855,7 @@ async def _run(
         # propagating. shield: a second cancel must not kill the trace line.
         # A task already final keeps what it says (see `finalized`).
         if not finalized:
-            _finalize_task(task_id, "failed", charged if onchain else spent, last_artifact, charge_tx, proof_tx)
+            _finalize_task(task_id, "failed", charged if onchain else run.spent, run.last_artifact, charge_tx, proof_tx)
         await asyncio.shield(_emit(task_id, start, "error", "workflow cancelled"))
         if auth_id_hex and payer and not settle_attempted:
             await asyncio.shield(_release_on_exit(task_id, start, auth_id_hex, "run_cancelled"))
@@ -845,7 +863,7 @@ async def _run(
     except Exception as e:
         logger.exception("workflow %s failed", task_id)
         if not finalized:
-            _finalize_task(task_id, "failed", charged if onchain else spent, last_artifact, charge_tx, proof_tx)
+            _finalize_task(task_id, "failed", charged if onchain else run.spent, run.last_artifact, charge_tx, proof_tx)
         await _emit(task_id, start, "error", f"workflow failed: {e}")
         if auth_id_hex and payer and not settle_attempted:
             await _release_on_exit(task_id, start, auth_id_hex, "run_failed")
