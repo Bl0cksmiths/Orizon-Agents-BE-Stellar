@@ -503,6 +503,15 @@ class FakeWorld:
             return _err(404, "unknown_task")
         return _json(200, self.traces[task_id])
 
+    def _rate_agent(self, rating: int) -> None:
+        """AGENT's reputation after one more on-chain rating: up for a pass, down for a fail."""
+        self.rep.update(
+            count=self.rep["count"] + 1,
+            source="onchain",
+            smoothed_bps=self.rep["smoothed_bps"] + (400 if rating > 50 else -900),
+            lower_bound_bps=self.rep["lower_bound_bps"] + (200 if rating > 50 else -700),
+        )
+
     def finish(self, task_id: str) -> None:
         """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
         task = self.tasks[task_id]
@@ -539,12 +548,7 @@ class FakeWorld:
                 }
             )
             if s["agent_id"] == AGENT:
-                self.rep.update(
-                    count=self.rep["count"] + 1,
-                    source="onchain",
-                    smoothed_bps=self.rep["smoothed_bps"] + (400 if rating > 50 else -900),
-                    lower_bound_bps=self.rep["lower_bound_bps"] + (200 if rating > 50 else -700),
-                )
+                self._rate_agent(rating)
 
         paid_steps: list[tuple[int, dict[str, Any], int, str]] = []
         if self.escrow_version >= 2:
