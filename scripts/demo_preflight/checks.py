@@ -315,7 +315,12 @@ def check_agent_readiness_route(reads: Reads, facts: Facts) -> Check:
         return check.skipped(_NO_ANSWER, _FIX_WARM)
     external = external_agents(facts.adoption)
     listed = [a.get("id") for a in facts.agents or [] if a.get("source") == "onchain"]
-    probe = external[0][0] if external else (str(listed[0]) if listed else "demo_preflight_probe")
+    if external:
+        probe = external[0][0]
+    elif listed:
+        probe = str(listed[0])
+    else:
+        probe = "demo_preflight_probe"
     try:
         answer = reads.agent_readiness(probe)
     except Unreachable as exc:
