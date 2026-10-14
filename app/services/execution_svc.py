@@ -3383,7 +3383,7 @@ async def _record_proof(task_id: str, record: SettlementRecord, proof_tx: str) -
     try:
         await get_dispute_store().record_settlement(replace(record, proof_tx=proof_tx))
     except Exception as e:
-        logger.error(
+        logger.exception(
             "task %s: the seal's proof tx was NOT added to the settlement: %s — the dispute window is open,"
             " the record lacks its attestation link (job %s, charge_tx %s, proof_tx %s)",
             task_id,
@@ -3391,7 +3391,6 @@ async def _record_proof(task_id: str, record: SettlementRecord, proof_tx: str) -
             record.job_id_hex,
             record.charge_tx,
             proof_tx,
-            exc_info=True,
         )
 
 
