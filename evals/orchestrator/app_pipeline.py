@@ -82,6 +82,23 @@ def _stage(purpose: str) -> str:
     return _STAGE.get(purpose, purpose)
 
 
+def _timing_first_token(request: claude.ClaudeRequest, started: float, first: list[float]) -> claude.ClaudeRequest:
+    """The streamed request with an `on_text` that notes the first delta's
+    latency (in ms since `started`) into `first`, then hands every delta on to
+    the caller's own callback, awaiting it when it is async."""
+    original = request.on_text
+
+    async def on_text(delta: str) -> None:
+        if not first:
+            first.append((time.perf_counter() - started) * 1000)
+        if original is not None:
+            maybe = original(delta)
+            if inspect.isawaitable(maybe):
+                await maybe
+
+    return dataclasses.replace(request, on_text=on_text)
+
+
 class RecordingClaude:
     """Passes every request through and books it to the case that made it."""
 
@@ -93,17 +110,7 @@ class RecordingClaude:
         started = time.perf_counter()
         first: list[float] = []
         if request.stream:
-            original = request.on_text
-
-            async def on_text(delta: str) -> None:
-                if not first:
-                    first.append((time.perf_counter() - started) * 1000)
-                if original is not None:
-                    maybe = original(delta)
-                    if inspect.isawaitable(maybe):
-                        await maybe
-
-            request = dataclasses.replace(request, on_text=on_text)
+            request = _timing_first_token(request, started, first)
         completion = await self.inner.complete(request)
         if log is not None:
             usage = completion.usage
