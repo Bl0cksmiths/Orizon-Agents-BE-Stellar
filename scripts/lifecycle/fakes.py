@@ -898,28 +898,43 @@ class FakeWorld:
         contract = Address.from_xdr_sc_address(invoke.contract_address).address
         fn = invoke.function_name.sc_symbol.decode()
         args: list[Any] = [scval.to_native(a) for a in invoke.args]
-        if contract == ESCROW and fn == "version":
-            return (
-                self._sim_value(scval.to_uint32(2))
-                if self.escrow_version >= 2
-                else self._sim_fail("HostError: Error(WasmVm, MissingValue)")
+        view = self.views().get((contract, fn))
+        if view is None:
+            return self._sim_fail(f"no fake for {contract}.{fn}")
+        return view(args)
+
+    def views(self) -> dict[tuple[str, str], Callable[[list[Any]], dict[str, Any]]]:
+        """(contract, function) -> the simulation of that contract view, given its decoded args."""
+        return {
+            (ESCROW, "version"): self._view_version,
+            (SAC, "balance"): self._view_balance,
+            (ATTEST, "get"): self._view_attestation,
+            (ESCROW, "settler"): self._view_settler,
+            (ESCROW, "authorization"): self._view_authorization,
+        }
+
+    def _view_version(self, args: list[Any]) -> dict[str, Any]:
+        """PaymentEscrow.version(): 2 on v2; v1 has no such function."""
+        return (
+            self._sim_value(scval.to_uint32(2))
+            if self.escrow_version >= 2
+            else self._sim_fail("HostError: Error(WasmVm, MissingValue)")
+        )
+
+    def _view_balance(self, args: list[Any]) -> dict[str, Any]:
+        """The SAC's balance(address)."""
+        if args[0].address not in self.balances:
+            # testnet's native SAC traps on a missing account (seen live)
+            return self._sim_fail(
+                "HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing"
             )
-        if contract == SAC and fn == "balance":
-            if args[0].address not in self.balances:
-                # testnet's native SAC traps on a missing account (seen live)
-                return self._sim_fail(
-                    "HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing"
-                )
-            return self._sim_value(scval.to_int128(self.balances[args[0].address]))
-        if contract == ATTEST and fn == "get":
-            return self._view_attestation(args)
-        if contract == ESCROW and fn == "settler":
-            if self.escrow_version < 2:
-                return self._sim_fail("HostError: Error(WasmVm, MissingValue)")
-            return self._sim_value(scval.to_address(self.settler))
-        if contract == ESCROW and fn == "authorization":
-            return self._view_authorization(args)
-        return self._sim_fail(f"no fake for {contract}.{fn}")
+        return self._sim_value(scval.to_int128(self.balances[args[0].address]))
+
+    def _view_settler(self, args: list[Any]) -> dict[str, Any]:
+        """PaymentEscrow.settler(): v2 only."""
+        if self.escrow_version < 2:
+            return self._sim_fail("HostError: Error(WasmVm, MissingValue)")
+        return self._sim_value(scval.to_address(self.settler))
 
     # ── Horizon ─────────────────────────────────────────────────
     def horizon(self, path: str) -> httpx.Response:
