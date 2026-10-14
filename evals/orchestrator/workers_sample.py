@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import cost
 from .app_pipeline import RecordingClaude, _CaseLog, _current
+from .contract import StageCall
 
 if TYPE_CHECKING:
     from app.agents.workers.base import Worker
@@ -290,6 +291,50 @@ async def _run_job(
     return out, error, unreported
 
 
+def _job_record(
+    job: Job,
+    worker_name: str,
+    label: str,
+    elapsed: float,
+    calls: list[StageCall],
+    error: str | None,
+    unreported: float,
+    out: dict[str, Any],
+) -> dict[str, Any]:
+    """The saved record of one job: what ran, every call it made, and a digest of its output."""
+    return {
+        "agent_id": job.agent_id,
+        "worker": worker_name,
+        "label": label,
+        "unreported_estimated_usd": unreported,
+        "case_id": job.case_id,
+        "tier": job.tier,
+        "intent": job.intent,
+        "latency_s": round(elapsed, 2),
+        "cost_usd": sum(c.cost_usd for c in calls),
+        "calls": [
+            {
+                "model": c.model,
+                "response_model": c.response_model,
+                "served_by": c.served_by,
+                "input_tokens": c.input_tokens,
+                "output_tokens": c.output_tokens,
+                "cache_read_input_tokens": c.cache_read_input_tokens,
+                "cache_creation_input_tokens": c.cache_creation_input_tokens,
+                "cost_usd": c.cost_usd,
+                "app_cost_usd": c.app_cost_usd,
+                "latency_ms": round(c.latency_ms),
+                "first_token_ms": round(c.first_token_ms) if c.first_token_ms is not None else None,
+                "effort": c.effort,
+                "stop_reason": c.stop_reason,
+            }
+            for c in calls
+        ],
+        "error": error,
+        "output": _digest(job.agent_id, out),
+    }
+
+
 async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: float | None = None) -> dict[str, Any]:
     """Run `jobs` in order. With `budget_usd`, a job starts only when its last
     measured cost fits what is left, and a streamed reply is cut off before it
@@ -331,37 +376,7 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
             context["code.gen"] = out  # the critic polishes this draft
             drafts[label] = out
         _save_artifact(out_dir, label, out)
-        record = {
-            "agent_id": job.agent_id,
-            "worker": worker.name,
-            "label": label,
-            "unreported_estimated_usd": unreported,
-            "case_id": job.case_id,
-            "tier": job.tier,
-            "intent": job.intent,
-            "latency_s": round(elapsed, 2),
-            "cost_usd": sum(c.cost_usd for c in log.calls),
-            "calls": [
-                {
-                    "model": c.model,
-                    "response_model": c.response_model,
-                    "served_by": c.served_by,
-                    "input_tokens": c.input_tokens,
-                    "output_tokens": c.output_tokens,
-                    "cache_read_input_tokens": c.cache_read_input_tokens,
-                    "cache_creation_input_tokens": c.cache_creation_input_tokens,
-                    "cost_usd": c.cost_usd,
-                    "app_cost_usd": c.app_cost_usd,
-                    "latency_ms": round(c.latency_ms),
-                    "first_token_ms": round(c.first_token_ms) if c.first_token_ms is not None else None,
-                    "effort": c.effort,
-                    "stop_reason": c.stop_reason,
-                }
-                for c in log.calls
-            ],
-            "error": error,
-            "output": _digest(job.agent_id, out),
-        }
+        record = _job_record(job, worker.name, label, elapsed, log.calls, error, unreported, out)
         results[label] = record
         (out_dir / f"{label.replace('.', '_').replace('#', '_')}.json").write_text(
             json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
