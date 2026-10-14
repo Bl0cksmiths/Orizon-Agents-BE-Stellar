@@ -90,6 +90,36 @@ def _polish_notes(draft_html: str, revised_html: str, fixed: int, kit_requiremen
     return notes
 
 
+async def _baked_review(
+    ctx: dict[str, Any], draft_artifact: dict[str, Any], draft_html: str, validator_violations: list[str]
+) -> dict[str, Any]:
+    """The critic's answer for a baked draft: validated and hardened, no model
+    asked. The kit's checklist items are pre-met by design."""
+    checklist = (ctx.get("kit") or {}).get("critic_checklist", [])
+    await pacing.pause(0.4, 0.6)
+    title = draft_artifact.get("title", "artifact")
+    kit_id = (ctx.get("kit") or {}).get("kit_id", "kit")
+    draft_artifact = harden_artifact(draft_artifact)
+    return {
+        "summary": (
+            f"{title} · verified · {len(validator_violations)} structural "
+            f"issue(s) · {len(checklist)} kit requirements ✓"
+        ),
+        "artifact": draft_artifact,
+        "critic_violations": validator_violations,
+        "critic_notes": [
+            f"validated baked artifact ({len(draft_html):,} bytes)",
+            f"{len(checklist)} {kit_id} kit requirements pre-met by design",
+        ],
+        "counts": {
+            "violations": len(validator_violations),
+            "kit_requirements": len(checklist),
+            "notes": 2,
+        },
+        "source": "baked",
+    }
+
+
 class CodeCriticWorker(ModelWorker):
     id = "agt_12r0"
     name = "code.critic"
@@ -152,29 +182,7 @@ class CodeCriticWorker(ModelWorker):
         # validates and emits a polished-looking summary — no LLM call. The
         # kit's checklist items are pre-met by design.
         if prior.get("source") == "baked":
-            checklist = (ctx.get("kit") or {}).get("critic_checklist", [])
-            await pacing.pause(0.4, 0.6)
-            title = draft_artifact.get("title", "artifact")
-            kit_id = (ctx.get("kit") or {}).get("kit_id", "kit")
-            draft_artifact = harden_artifact(draft_artifact)
-            return {
-                "summary": (
-                    f"{title} · verified · {len(validator_violations)} structural "
-                    f"issue(s) · {len(checklist)} kit requirements ✓"
-                ),
-                "artifact": draft_artifact,
-                "critic_violations": validator_violations,
-                "critic_notes": [
-                    f"validated baked artifact ({len(draft_html):,} bytes)",
-                    f"{len(checklist)} {kit_id} kit requirements pre-met by design",
-                ],
-                "counts": {
-                    "violations": len(validator_violations),
-                    "kit_requirements": len(checklist),
-                    "notes": 2,
-                },
-                "source": "baked",
-            }
+            return await _baked_review(ctx, draft_artifact, draft_html, validator_violations)
 
         # ── 2. Kit-specific must-haves (treated as REQUIRED items) ──────────
         kit = ctx.get("kit") or {}
