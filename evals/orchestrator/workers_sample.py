@@ -245,6 +245,18 @@ def _digest(agent_id: str, out: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
+def _save_artifact(out_dir: Path, label: str, out: dict[str, Any]) -> None:
+    """Write each file of the output's artifact, if it has one, beside the
+    record as `<label stem>__<file name>`."""
+    artifact = out.get("artifact") if isinstance(out.get("artifact"), dict) else None
+    if not artifact:
+        return
+    stem = label.replace(".", "_").replace("#", "_")
+    for f in artifact.get("files", []):
+        path = out_dir / f"{stem}__{Path(str(f.get('path', 'index.html'))).name}"
+        path.write_text(str(f.get("content", "")), encoding="utf-8")
+
+
 async def _run_job(
     worker: Worker, job: Job, context: dict[str, Any], budgeted: BudgetedClaude | None, log: _CaseLog
 ) -> tuple[dict[str, Any], str | None, float]:
@@ -318,12 +330,7 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
         if job.agent_id == "agt_11c0" and out:
             context["code.gen"] = out  # the critic polishes this draft
             drafts[label] = out
-        artifact = out.get("artifact") if isinstance(out.get("artifact"), dict) else None
-        if artifact:
-            stem = label.replace(".", "_").replace("#", "_")
-            for f in artifact.get("files", []):
-                path = out_dir / f"{stem}__{Path(str(f.get('path', 'index.html'))).name}"
-                path.write_text(str(f.get("content", "")), encoding="utf-8")
+        _save_artifact(out_dir, label, out)
         record = {
             "agent_id": job.agent_id,
             "worker": worker.name,
