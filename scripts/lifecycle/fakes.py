@@ -25,6 +25,7 @@ import base64
 import hashlib
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -300,8 +301,6 @@ class FakeWorld:
             return _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}})
         if path == f"/api/stellar/agent/{AGENT_2}" and self.second_agent:
             return _json(200, {"agent": {"owner": self.owner_2, "name": AGENT_2_NAME}})
-        if path.startswith("/api/stellar/agent/"):
-            return _err(404, "agent_read_failed")
         if path == "/api/stellar/reputation":
             return _json(200, {"reputations": {AGENT: dict(self.rep)}, "floor_bps": 5500, "prior_bps": 7000})
         if path == "/api/orchestrator/decompose" and method == "POST":
@@ -312,12 +311,6 @@ class FakeWorld:
             return self.submit(body)
         if path == "/api/orchestrator/execute":
             return self.execute(body)
-        if path.startswith("/api/tasks/") and path.endswith("/disputes"):
-            return self.task_disputes(path.split("/")[3], headers)
-        if path.startswith("/api/tasks/"):
-            return self.task(path.split("/")[3], headers)
-        if path.startswith("/api/trace/"):
-            return self.trace(path.split("/")[3], headers)
         if path == "/api/disputes/challenge":
             return self.dispute_challenge(body)
         if path == "/api/disputes/read-challenge":
@@ -326,10 +319,21 @@ class FakeWorld:
             return self.read_grant(body) if self.d067 else _err(404, "not_found")
         if path == "/api/disputes" and method == "POST":
             return self.open_dispute(body)
-        if path.startswith("/api/disputes/") and path.endswith("/uphold"):
-            return self.uphold(path.split("/")[3], headers)
-        if path.startswith("/api/disputes/"):
-            return self.get_dispute(path.split("/")[3])
+        return self.api_by_id(path, headers)
+
+    def api_by_id(self, path: str, headers: httpx.Headers) -> httpx.Response:
+        """The API's routes with an id in the path, matched in order; any other path is not found."""
+        routes: tuple[tuple[str, str, Callable[[str], httpx.Response]], ...] = (
+            ("/api/stellar/agent/", "", lambda _agent_id: _err(404, "agent_read_failed")),
+            ("/api/tasks/", "/disputes", lambda task_id: self.task_disputes(task_id, headers)),
+            ("/api/tasks/", "", lambda task_id: self.task(task_id, headers)),
+            ("/api/trace/", "", lambda task_id: self.trace(task_id, headers)),
+            ("/api/disputes/", "/uphold", lambda dispute_id: self.uphold(dispute_id, headers)),
+            ("/api/disputes/", "", self.get_dispute),
+        )
+        for prefix, suffix, route in routes:
+            if path.startswith(prefix) and path.endswith(suffix):
+                return route(path.split("/")[3])
         return _err(404, "not_found")
 
     def decompose(self, body: Any) -> httpx.Response:
