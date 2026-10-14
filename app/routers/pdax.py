@@ -12,7 +12,7 @@ snake_case codes, upstream detail logged server-side only — see _fail).
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
@@ -77,7 +77,7 @@ from ..pdax.models.withdrawals import (
     FiatWithdrawRequest,
     FiatWithdrawResult,
 )
-from ..security import require_api_key
+from ..security import ErrorEnvelope, require_api_key
 
 router = APIRouter(prefix="/pdax", tags=["pdax"])
 
@@ -89,6 +89,12 @@ secured = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 logger = logging.getLogger(__name__)
+
+# The `responses=` entry for `_fail`'s collapsed upstream failure.
+_UPSTREAM_UNAVAILABLE: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`upstream_unavailable` — PDAX failed, or refused this backend's own credentials.",
+}
 
 
 def _fail(e: PdaxError) -> HTTPException:
@@ -370,7 +376,14 @@ async def webhook_register(req: WebhookRegisterRequest) -> WebhookRegistration:
         raise _fail(e) from e
 
 
-@router.post("/webhooks/receive")
+@router.post(
+    "/webhooks/receive",
+    responses={
+        400: {"model": ErrorEnvelope, "description": "The payload is not a JSON object, or not an event PDAX defines."},
+        401: {"model": ErrorEnvelope, "description": "The `x-pdax-signature` HMAC does not verify."},
+        502: _UPSTREAM_UNAVAILABLE,
+    },
+)
 async def webhook_receive(request: Request) -> dict:
     """Inbound endpoint PDAX POSTs crypto/fiat events to. Validates the
     optional HMAC signature, then parses the event into a typed model."""
