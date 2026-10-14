@@ -561,6 +561,32 @@ def bounds(dispute: DisputeRecord, settlement: SettlementRecord, step: Settlemen
     ]
 
 
+def _say_bounds(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep) -> None:
+    """Print D4's three bounds with the one that binds marked, then D5's cap."""
+    say()
+    say("  D4 — the credit is the SMALLEST of three bounds:")
+    bounded = bounds(dispute, settlement, step)
+    smallest = min(value for value, _ in bounded)
+    # ONE marker, however many bounds sit at the smallest figure — which is
+    # the ordinary case, since a full-fraction credit on a workflow whose
+    # only settled step is the disputed one makes all three the same
+    # number. Three "<- BINDS" beside a promise of "which one binds" reads
+    # as the arithmetic disagreeing with itself. The others are counted
+    # instead, because an agreement is a fact worth seeing and a silent
+    # one looks like a bound that was skipped.
+    agreeing = sum(1 for value, _ in bounded if value == smallest) - 1
+    marked = False
+    for value, why in bounded:
+        mark = ""
+        if not marked and value == smallest:
+            marked = True
+            mark = "   <- BINDS"
+            if agreeing:
+                mark += f" ({agreeing} other bound{'s' if agreeing > 1 else ''} at the same figure)"
+        say(f"    {value:.7f} USDC  {why}{mark}")
+    say(f"  D5 — cap on ONE credit: MAX_REFUND_USDC = {settings.max_refund_usdc:.7f} USDC")
+
+
 def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep | None) -> tuple[float | None, int]:
     """Print what would be paid and why, and return it alongside an exit code.
 
@@ -576,28 +602,7 @@ def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementS
     through `refuse`.
     """
     if step is not None:
-        say()
-        say("  D4 — the credit is the SMALLEST of three bounds:")
-        bounded = bounds(dispute, settlement, step)
-        smallest = min(value for value, _ in bounded)
-        # ONE marker, however many bounds sit at the smallest figure — which is
-        # the ordinary case, since a full-fraction credit on a workflow whose
-        # only settled step is the disputed one makes all three the same
-        # number. Three "<- BINDS" beside a promise of "which one binds" reads
-        # as the arithmetic disagreeing with itself. The others are counted
-        # instead, because an agreement is a fact worth seeing and a silent
-        # one looks like a bound that was skipped.
-        agreeing = sum(1 for value, _ in bounded if value == smallest) - 1
-        marked = False
-        for value, why in bounded:
-            mark = ""
-            if not marked and value == smallest:
-                marked = True
-                mark = "   <- BINDS"
-                if agreeing:
-                    mark += f" ({agreeing} other bound{'s' if agreeing > 1 else ''} at the same figure)"
-            say(f"    {value:.7f} USDC  {why}{mark}")
-        say(f"  D5 — cap on ONE credit: MAX_REFUND_USDC = {settings.max_refund_usdc:.7f} USDC")
+        _say_bounds(dispute, settlement, step)
 
     try:
         amount = refund_svc.creditable_for(settlement, dispute, settings.dispute_credited_fraction)
