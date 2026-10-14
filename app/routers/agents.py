@@ -54,7 +54,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import TypeAdapter
-from pydantic_core import to_json
 
 from .. import http_cache
 from ..schemas import AGENT_ID_PATTERN, Agent
@@ -164,11 +163,18 @@ async def list_agents(
     next_cursor = None
     if limit is not None or cursor is not None:
         agents, next_cursor = _page(agents, limit, cursor)
+    # One serializer for both shapes: the list[Agent] schema, so every value is
+    # encoded by its declared type and anything the schema cannot encode fails
+    # loudly instead of being guessed at by a fallback. `__all__` applies the
+    # field selection to each agent.
     if selected is None:
         body = _agent_list.dump_json([_with_bound(a) for a in agents])
     else:
         stamp = "bound" in selected
-        body = to_json([(_with_bound(a) if stamp else a).model_dump(include=selected, mode="json") for a in agents])
+        body = _agent_list.dump_json(
+            [_with_bound(a) if stamp else a for a in agents],
+            include={"__all__": selected},
+        )
     headers = {
         REGISTRY_SYNCED_HEADER: "true" if synced else "false",
         REGISTRY_COUNT_HEADER: str(len(agents)),
