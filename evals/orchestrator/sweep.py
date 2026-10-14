@@ -161,11 +161,13 @@ SELECTORS: dict[str, _Selector] = {
     "complexity_confidence_min": _pick_tier,
 }
 
+_FALSE_BLOCK = "false block"
+
 # The figure each knob is read on, for the table.
 HEADLINE: dict[str, tuple[str, Callable[[Point], Rate], str, Callable[[Point], Rate]]] = {
-    "injection_block": ("inj recall", lambda p: p.injection_recall, "false block", lambda p: p.false_block),
-    "harmful_block": ("harm recall", lambda p: p.harmful_recall, "false block", lambda p: p.false_block),
-    "severity_block": ("harm recall", lambda p: p.harmful_recall, "false block", lambda p: p.false_block),
+    "injection_block": ("inj recall", lambda p: p.injection_recall, _FALSE_BLOCK, lambda p: p.false_block),
+    "harmful_block": ("harm recall", lambda p: p.harmful_recall, _FALSE_BLOCK, lambda p: p.false_block),
+    "severity_block": ("harm recall", lambda p: p.harmful_recall, _FALSE_BLOCK, lambda p: p.false_block),
     "real_request_min": (
         "nd recall",
         lambda p: p.needs_detail_recall,
