@@ -679,51 +679,7 @@ async def _run(
                 await _step_raised(task_id, start, step_index, step, worker, e, undispatched)
                 continue
 
-            if not isinstance(output, dict):
-                # A worker must hand back a dict; anything else is that STEP's
-                # failure — swallowed like a raised exception, not billed, and
-                # never allowed to reach _summarize and sink the whole run.
-                logger.error(
-                    "task %s step %s (%s): returned %s instead of dict — step treated as failed",
-                    task_id,
-                    step.agent_id,
-                    worker.name,
-                    type(output).__name__,
-                )
-                # Counted like any other step failure. The external contract
-                # makes this unreachable for a bound operator — parse_operator_output
-                # returns a dict or raises — so what lands here is a local
-                # worker returning the wrong thing, which is exactly the kind
-                # of persistent breakage the streak exists to name.
-                failure_tracker.record_failure(step.agent_id, NOT_A_DICT_FAILURE)
-                await _emit(task_id, start, "error", f"{worker.name} returned an unusable result")
-                continue
-
-            unusable = _unusable_field(output)
-            if unusable is not None:
-                # Same rule as the non-dict case above, one level in: a field
-                # the post-step handling cannot consume is that STEP's failure
-                # — unbilled, skipped, the run carries on — rather than an
-                # exception escaping to the run-level handler and taking the
-                # settlement (and every honest agent's payment) down with it.
-                # The field PATH is the diagnostic here — "artifact.files"
-                # names the offending value where the top-level type would
-                # only say "dict" — and it is a shape, not content, so the
-                # operator's own text stays out of the log.
-                logger.error(
-                    "task %s step %s (%s): output field %r has an unusable shape — step treated as failed",
-                    task_id,
-                    step.agent_id,
-                    worker.name,
-                    unusable,
-                )
-                # One token for every unusable field, not one per path: the
-                # field name is the diagnostic and it is already in the log
-                # above, while the tracker coalesces on CLASS CHANGE — so
-                # spelling the path into the class would let a worker mangling
-                # a different field each time flip the guard back into a flood.
-                failure_tracker.record_failure(step.agent_id, UNUSABLE_OUTPUT_FAILURE)
-                await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
+            if await _rejected_output(task_id, start, step, worker, output):
                 continue
 
             succeeded += 1
@@ -961,6 +917,58 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _rejected_output(task_id: str, start: float, step: PlanStep, worker: Worker, output: Any) -> bool:
+    """Whether a step's output is unusable — not a dict, or a field of the
+    wrong shape — and so that STEP's failure: logged, counted and traced here."""
+    if not isinstance(output, dict):
+        # A worker must hand back a dict; anything else is that STEP's
+        # failure — swallowed like a raised exception, not billed, and
+        # never allowed to reach _summarize and sink the whole run.
+        logger.error(
+            "task %s step %s (%s): returned %s instead of dict — step treated as failed",
+            task_id,
+            step.agent_id,
+            worker.name,
+            type(output).__name__,
+        )
+        # Counted like any other step failure. The external contract
+        # makes this unreachable for a bound operator — parse_operator_output
+        # returns a dict or raises — so what lands here is a local
+        # worker returning the wrong thing, which is exactly the kind
+        # of persistent breakage the streak exists to name.
+        failure_tracker.record_failure(step.agent_id, NOT_A_DICT_FAILURE)
+        await _emit(task_id, start, "error", f"{worker.name} returned an unusable result")
+        return True
+
+    unusable = _unusable_field(output)
+    if unusable is None:
+        return False
+    # Same rule as the non-dict case above, one level in: a field
+    # the post-step handling cannot consume is that STEP's failure
+    # — unbilled, skipped, the run carries on — rather than an
+    # exception escaping to the run-level handler and taking the
+    # settlement (and every honest agent's payment) down with it.
+    # The field PATH is the diagnostic here — "artifact.files"
+    # names the offending value where the top-level type would
+    # only say "dict" — and it is a shape, not content, so the
+    # operator's own text stays out of the log.
+    logger.error(
+        "task %s step %s (%s): output field %r has an unusable shape — step treated as failed",
+        task_id,
+        step.agent_id,
+        worker.name,
+        unusable,
+    )
+    # One token for every unusable field, not one per path: the
+    # field name is the diagnostic and it is already in the log
+    # above, while the tracker coalesces on CLASS CHANGE — so
+    # spelling the path into the class would let a worker mangling
+    # a different field each time flip the guard back into a flood.
+    failure_tracker.record_failure(step.agent_id, UNUSABLE_OUTPUT_FAILURE)
+    await _emit(task_id, start, "error", f"{worker.name} returned an unusable {unusable}")
+    return True
 
 
 async def _step_raised(
