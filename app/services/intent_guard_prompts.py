@@ -136,10 +136,11 @@ INTENT_BATTERY: dict[str, Question] = {
 # The improved spec's own safety questions. They are asked of the spec text
 # ALONE (no original alongside it), so a borderline original cannot leak its
 # score into the spec's — the watch band depends on the spec reading clean.
+_SPEC_SUBJECT = "task spec"
 SPEC_SAFETY_BATTERY: dict[str, Question] = {
-    "injection": _injection("task spec"),
-    "harmful": _harmful("task spec"),
-    "severity": _severity("task spec"),
+    "injection": _injection(_SPEC_SUBJECT),
+    "harmful": _harmful(_SPEC_SUBJECT),
+    "severity": _severity(_SPEC_SUBJECT),
 }
 
 SAME_REQUEST_BATTERY: dict[str, Question] = {
