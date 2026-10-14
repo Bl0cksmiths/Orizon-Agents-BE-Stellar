@@ -190,7 +190,7 @@ async def list_agents(
     )
 
 
-@router.get("/agents/{agent_id}", response_model=Agent, summary="Get one agent by id")
+@router.get("/agents/{agent_id}", summary="Get one agent by id")
 async def get_agent(agent_id: str) -> Agent:
     agent = state.agents.get(agent_id)
     if agent is None:
