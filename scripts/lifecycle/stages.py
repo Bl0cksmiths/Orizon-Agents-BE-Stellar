@@ -282,27 +282,7 @@ class Runner:
     # ── preflight (every invocation, dry runs included) ─────────
     def preflight(self) -> str:
         self.warm()
-        self.network = self.api.network()
-        passphrase = self.network.get("network_passphrase")
-        if passphrase != TESTNET_PASSPHRASE:
-            raise Stop(
-                EXIT_REFUSED,
-                f"refusing to run: the API is on {self.network.get('network')!r} ({passphrase!r}); "
-                "this harness signs on testnet only",
-            )
-        rpc_url = self.cfg.rpc_url or str(self.network.get("rpc_url") or "")
-        self.chain = ChainReader(
-            client=self.http,
-            rpc_url=rpc_url,
-            horizon_url=self.cfg.horizon_url,
-            passphrase=TESTNET_PASSPHRASE,
-            retry=self.retry,
-            sleep=self.sleep,
-            clock=self.clock,
-        )
-        rpc_passphrase = self.chain.network_passphrase()
-        if rpc_passphrase != TESTNET_PASSPHRASE:
-            raise Stop(EXIT_REFUSED, f"refusing to run: the RPC at {rpc_url} is on {rpc_passphrase!r}, not testnet")
+        chain, rpc_url = self.confirm_testnet()
 
         self.buyer = load_keypair(self.cfg.buyer_secret_env, self.console.redactor, self.environ)
         needs_uphold = stage_index(self.cfg.until) >= stage_index("uphold")
@@ -317,7 +297,7 @@ class Runner:
                 self.say("NOTE: the real run through 'uphold' needs --adjudicator-key-env; this dry run does not")
 
         start = self.resume_point()
-        version, how = self.chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
+        version, how = chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
         run_escrow = (self.state.authorize or {}).get("escrow")
         if run_escrow and run_escrow != self.contracts["payment_escrow"]:
             # A resume across the escrow switch: this run's money went through
@@ -325,7 +305,7 @@ class Runner:
             self.say(
                 f"NOTE: this run authorized against {run_escrow}; the API now names {self.contracts['payment_escrow']}"
             )
-            version, how = self.chain.escrow_version(run_escrow, self.need_buyer().public_key)
+            version, how = chain.escrow_version(run_escrow, self.need_buyer().public_key)
         self.state.escrow_version = version
         self.state.network = str(self.network.get("network") or "testnet")
         self.state.agent = self.cfg.agent
@@ -376,6 +356,34 @@ class Runner:
             )
         self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
         return start
+
+    def confirm_testnet(self) -> tuple[ChainReader, str]:
+        """Read the API's network and open the RPC reader; refuse unless both say testnet.
+
+        Returns the reader and the RPC url it reads.
+        """
+        self.network = self.api.network()
+        passphrase = self.network.get("network_passphrase")
+        if passphrase != TESTNET_PASSPHRASE:
+            raise Stop(
+                EXIT_REFUSED,
+                f"refusing to run: the API is on {self.network.get('network')!r} ({passphrase!r}); "
+                "this harness signs on testnet only",
+            )
+        rpc_url = self.cfg.rpc_url or str(self.network.get("rpc_url") or "")
+        self.chain = ChainReader(
+            client=self.http,
+            rpc_url=rpc_url,
+            horizon_url=self.cfg.horizon_url,
+            passphrase=TESTNET_PASSPHRASE,
+            retry=self.retry,
+            sleep=self.sleep,
+            clock=self.clock,
+        )
+        rpc_passphrase = self.chain.network_passphrase()
+        if rpc_passphrase != TESTNET_PASSPHRASE:
+            raise Stop(EXIT_REFUSED, f"refusing to run: the RPC at {rpc_url} is on {rpc_passphrase!r}, not testnet")
+        return self.chain, rpc_url
 
     def warm(self) -> None:
         """Wake the backend the way components/backend-warmup.tsx does — GET
