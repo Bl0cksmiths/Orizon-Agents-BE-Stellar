@@ -637,6 +637,7 @@ async def wait_first_pass(timeout_seconds: float) -> bool:
         return True
     if not timeout_seconds > 0:
         # REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS=0: the operator chose not to wait.
+        # Not `<= 0`, which a NaN bound would slip past into `wait_for`.
         return False
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
