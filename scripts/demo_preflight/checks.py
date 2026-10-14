@@ -97,6 +97,7 @@ D039 = (
 
 # What a check skipped behind an earlier one says, and the check to fix first.
 _NO_ANSWER = "the backend never answered"
+_FIX_WARM = "Fix network.warm first."
 
 
 class Refused(Exception):
@@ -258,7 +259,7 @@ def check_warm(reads: Reads, facts: Facts, budget: float = WARMUP_BUDGET_SECONDS
 def check_api_network(reads: Reads, facts: Facts) -> Check:
     check = Check("network.api", "network", "The API is on testnet (GET /api/stellar/network)")
     if not facts.warm:
-        return check.skipped(_NO_ANSWER, "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     try:
         answer = reads.network()
     except Unreachable as exc:
@@ -281,7 +282,7 @@ def check_api_network(reads: Reads, facts: Facts) -> Check:
 def check_adoption_route(reads: Reads, facts: Facts) -> Check:
     check = Check("build.adoption", "build", "The 5.02 adoption route answers (GET /api/ecosystem/adoption)")
     if not facts.warm:
-        return check.skipped(_NO_ANSWER, "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     try:
         answer = reads.adoption()
     except Unreachable as exc:
@@ -309,7 +310,7 @@ def check_agent_readiness_route(reads: Reads, facts: Facts) -> Check:
         "build.agent_readiness", "build", "The 5.02 operator readiness route answers (GET /api/agents/{id}/readiness)"
     )
     if not facts.warm:
-        return check.skipped(_NO_ANSWER, "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     external = external_agents(facts.adoption)
     listed = [a.get("id") for a in facts.agents or [] if a.get("source") == "onchain"]
     probe = external[0][0] if external else (str(listed[0]) if listed else "demo_preflight_probe")
@@ -756,7 +757,7 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
     )
     if not facts.warm:
-        return check.skipped(_NO_ANSWER, "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     if facts.agents is None:
         return check.skipped("GET /api/agents was not read", "Rerun once the backend answers.")
     try:
