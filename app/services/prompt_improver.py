@@ -356,6 +356,19 @@ def _without_spec(*, watch: bool, strict: bool) -> Resolution:
     return Resolution(action="use_original", reasons=["no_spec"])
 
 
+def _not_clean(verdict: CheckVerdict, *, watch: bool, user_edited: bool) -> Resolution:
+    """A spec that re-checked drifted or watch: blocked for a watch-band request,
+    asked again (drifted) or blocked when the buyer edited it, and otherwise
+    discarded for the original."""
+    if watch:
+        return _blocked(["injection", "watch", verdict])
+    if user_edited:
+        if verdict == "drifted":
+            return Resolution(action="needs_detail", reasons=["drifted"], message=guard_prompts.EDIT_CHANGED_REQUEST)
+        return _blocked(["injection", "watch"])
+    return Resolution(action="use_original", reasons=[verdict])
+
+
 def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bool = False) -> Resolution:
     """Combine the intent decision and the spec re-check.
 
@@ -382,11 +395,4 @@ def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bo
         return Resolution(action="use_spec")
     if check.verdict == "unavailable":
         return _unavailable() if strict else Resolution(action="use_original", reasons=["recheck_unavailable"])
-    # drifted or watch
-    if decision.watch:
-        return _blocked(["injection", "watch", check.verdict])
-    if user_edited:
-        if check.verdict == "drifted":
-            return Resolution(action="needs_detail", reasons=["drifted"], message=guard_prompts.EDIT_CHANGED_REQUEST)
-        return _blocked(["injection", "watch"])
-    return Resolution(action="use_original", reasons=[check.verdict])
+    return _not_clean(check.verdict, watch=decision.watch, user_edited=user_edited)
