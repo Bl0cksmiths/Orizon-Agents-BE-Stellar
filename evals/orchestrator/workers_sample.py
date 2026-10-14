@@ -23,10 +23,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import cost
 from .app_pipeline import RecordingClaude, _CaseLog, _current
+
+if TYPE_CHECKING:
+    from app.agents.workers.base import Worker
 
 # A contract small enough for the 500-character intent bound, with one
 # classic reentrancy bug (state written after the external call).
@@ -242,6 +245,39 @@ def _digest(agent_id: str, out: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
+async def _run_job(
+    worker: Worker, job: Job, context: dict[str, Any], budgeted: BudgetedClaude | None, log: _CaseLog
+) -> tuple[dict[str, Any], str | None, float]:
+    """Run one job's worker with its calls booked to `log`.
+
+    Returns the worker's output (empty when it failed), its error, and what
+    was billed but never reported back: the estimate at a budget cut-off, or
+    the running estimate of a stream aborted from outside (the worker's own
+    wall-clock budget)."""
+    token = _current.set(log)
+    error = None
+    unreported = 0.0
+    if budgeted is not None:
+        budgeted.in_flight_usd = 0.0
+    out: dict[str, Any] = {}
+    try:
+        if job.tier is not None:
+            out = await worker.run(job.intent, job.rationale, dict(context), tier=job.tier)  # type: ignore[call-arg]
+        else:
+            out = await worker.run(job.intent, job.rationale, dict(context))
+    except BudgetExceeded as e:
+        error = f"BudgetExceeded: {e}"
+        unreported = e.estimate_usd
+    except Exception as e:  # a worker failure is a result to report, not a crash
+        error = f"{type(e).__name__}: {e}"
+        if budgeted is not None and budgeted.in_flight_usd:
+            unreported = budgeted.in_flight_usd
+            error += f" (stream aborted; estimated ${unreported:.4f} unreported)"
+    finally:
+        _current.reset(token)
+    return out, error, unreported
+
+
 async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: float | None = None) -> dict[str, Any]:
     """Run `jobs` in order. With `budget_usd`, a job starts only when its last
     measured cost fits what is left, and a streamed reply is cut off before it
@@ -274,32 +310,9 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
         if job.critic_of is not None:
             context["code.gen"] = drafts.get(job.critic_of, {})
         log = _CaseLog()
-        token = _current.set(log)
         started = time.perf_counter()
-        error = None
-        unreported = 0.0
-        if budgeted is not None:
-            budgeted.in_flight_usd = 0.0
-        out: dict[str, Any] = {}
-        try:
-            if job.tier is not None:
-                out = await worker.run(job.intent, job.rationale, dict(context), tier=job.tier)  # type: ignore[call-arg]
-            else:
-                out = await worker.run(job.intent, job.rationale, dict(context))
-        except BudgetExceeded as e:
-            error = f"BudgetExceeded: {e}"
-            spent += e.estimate_usd
-            unreported = e.estimate_usd
-        except Exception as e:  # a worker failure is a result to report, not a crash
-            error = f"{type(e).__name__}: {e}"
-            if budgeted is not None and budgeted.in_flight_usd:
-                # A stream aborted from outside (the worker's own wall-clock
-                # budget): billed, never reported. Book the running estimate.
-                unreported = budgeted.in_flight_usd
-                spent += unreported
-                error += f" (stream aborted; estimated ${unreported:.4f} unreported)"
-        finally:
-            _current.reset(token)
+        out, error, unreported = await _run_job(worker, job, context, budgeted, log)
+        spent += unreported
         elapsed = time.perf_counter() - started
         spent += sum(c.cost_usd for c in log.calls)
         if job.agent_id == "agt_11c0" and out:
