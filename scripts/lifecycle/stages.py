@@ -939,6 +939,39 @@ class Runner:
             self.note("verify", "events_unavailable", f"getEvents refused: {exc}", ledger=charge_seen.ledger)
             return []
 
+    def v2_checks(
+        self,
+        chain: ChainReader,
+        settlement: dict[str, Any],
+        escrow: str,
+        charge_seen: Observation | None,
+        events: list[ChainEvent],
+    ) -> tuple[list[verify.Check], list[str]]:
+        """v2's settle, checked against the ledger.
+
+        Its payouts, the settled event, the authorization view and the balances.
+        Returns the checks and the receipts the settle's `charged` events carry.
+        """
+        buyer = self.need_buyer().public_key
+        checks = [verify.check_tx("v2_settle_tx", charge_seen)]
+        if self.state.owners is None:
+            self.state.owners = self.owners_for([str(s.get("agent_id")) for s in settlement.get("steps") or []])
+            self.save()
+        charged, paid = verify.check_charged_events(events, settlement, self.state.owners)
+        max_stroops = (self.state.authorize or {}).get("max_stroops")
+        checks += [*charged, verify.check_settled_event(events, settlement, paid, max_stroops)]
+        auth_id = (self.state.authorize or {}).get("auth_id_hex") or verify.settled_auth_id(events)
+        if auth_id:
+            checks.append(
+                verify.check_authorization_view(chain.escrow_authorization(escrow, auth_id, buyer), paid, buyer)
+            )
+        checks += self.balance_checks(events, paid, escrow)
+        receipts = verify.charged_receipts(events)
+        for e in events:
+            if e.topics[:1] == ["charged"]:
+                self.say(f"    charged {e.topics[1:2]} {e.value}")
+        return checks, receipts
+
     def no_settlement(self, version: int) -> Stop:
         """Record that the task has no settlement, and the stop that follows: nothing to verify or dispute."""
         why = (
@@ -971,23 +1004,8 @@ class Runner:
 
         receipts: list[str] | None = None
         if version >= 2:
-            checks.append(verify.check_tx("v2_settle_tx", charge_seen))
-            if self.state.owners is None:
-                self.state.owners = self.owners_for([str(s.get("agent_id")) for s in settlement.get("steps") or []])
-                self.save()
-            charged, paid = verify.check_charged_events(events, settlement, self.state.owners)
-            max_stroops = (self.state.authorize or {}).get("max_stroops")
-            checks += [*charged, verify.check_settled_event(events, settlement, paid, max_stroops)]
-            auth_id = (self.state.authorize or {}).get("auth_id_hex") or verify.settled_auth_id(events)
-            if auth_id:
-                checks.append(
-                    verify.check_authorization_view(chain.escrow_authorization(escrow, auth_id, buyer), paid, buyer)
-                )
-            checks += self.balance_checks(events, paid, escrow)
-            receipts = verify.charged_receipts(events)
-            for e in events:
-                if e.topics[:1] == ["charged"]:
-                    self.say(f"    charged {e.topics[1:2]} {e.value}")
+            v2_checks, receipts = self.v2_checks(chain, settlement, escrow, charge_seen, events)
+            checks += v2_checks
         else:
             checks += verify.check_v1_charge(charge_seen, events)
 
