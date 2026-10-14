@@ -672,6 +672,20 @@ def _judge_below_floor(
     return genuine, ignored
 
 
+def _no_genuine_detail(floor: int, ignored: list[str], registered: list[str], reputations: dict[str, Any]) -> str:
+    """The floor check's finding when no agent is genuinely below `floor`, naming what was set aside."""
+    degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
+    return (
+        f"no registered, bound and listed agent has an on-chain lower bound below {floor} bps"
+        + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else "")
+        + (
+            f"; {len(degraded)} of {len(registered)} registered agents read degraded (the ledger could not be read)"
+            if degraded
+            else ""
+        )
+    )
+
+
 def check_below_floor(reads: Reads, facts: Facts) -> Check:
     check = Check(
         "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
@@ -735,16 +749,8 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
     if genuine:
         detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
         return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
-    degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
     return check.failed(
-        f"no registered, bound and listed agent has an on-chain lower bound below {floor} bps"
-        + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else "")
-        + (
-            f"; {len(degraded)} of {len(registered)} registered agents read degraded (the ledger could not be read)"
-            if degraded
-            else ""
-        )
-        + reread,
+        _no_genuine_detail(floor, ignored, registered, reputations) + reread,
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
         "A degraded or stale read is the prior or an old read, never a verdict. The agent must also be bound "
