@@ -1277,7 +1277,7 @@ async def uphold_dispute(
 )
 async def reject_dispute(
     body: RejectDisputeReq,
-    dispute_id: str = Path(..., min_length=1, max_length=64),
+    dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
 ) -> DisputeResponse:
     """Find for the platform: close the dispute without crediting anything.
 
