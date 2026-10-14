@@ -870,6 +870,25 @@ class FakeWorld:
             )
         )
 
+    def _view_authorization(self, args: list[Any]) -> dict[str, Any]:
+        """PaymentEscrow.authorization(auth_id): the v2 record, or the contract's not-found trap."""
+        a = self.authorizations.get(bytes(args[0]).hex())
+        if a is None:
+            return self._sim_fail("HostError: Error(Contract, #2)")
+        return self._sim_value(
+            scval.to_map(
+                {
+                    scval.to_symbol("agent_id"): scval.to_symbol(a["agent_id"]),
+                    scval.to_symbol("expires_at"): scval.to_uint64(a["expires_at"]),
+                    scval.to_symbol("max_amount"): scval.to_int128(a["max_amount"]),
+                    scval.to_symbol("payer"): scval.to_address(a["payer"]),
+                    scval.to_symbol("revoked"): scval.to_bool(a["revoked"]),
+                    scval.to_symbol("settled"): scval.to_bool(a["settled"]),
+                    scval.to_symbol("spent"): scval.to_int128(a["spent"]),
+                }
+            )
+        )
+
     def simulate(self, tx_xdr: str) -> dict[str, Any]:
         env = TransactionEnvelope.from_xdr(tx_xdr, self.passphrase)
         op = env.transaction.operations[0]
@@ -899,22 +918,7 @@ class FakeWorld:
                 return self._sim_fail("HostError: Error(WasmVm, MissingValue)")
             return self._sim_value(scval.to_address(self.settler))
         if contract == ESCROW and fn == "authorization":
-            a = self.authorizations.get(bytes(args[0]).hex())
-            if a is None:
-                return self._sim_fail("HostError: Error(Contract, #2)")
-            return self._sim_value(
-                scval.to_map(
-                    {
-                        scval.to_symbol("agent_id"): scval.to_symbol(a["agent_id"]),
-                        scval.to_symbol("expires_at"): scval.to_uint64(a["expires_at"]),
-                        scval.to_symbol("max_amount"): scval.to_int128(a["max_amount"]),
-                        scval.to_symbol("payer"): scval.to_address(a["payer"]),
-                        scval.to_symbol("revoked"): scval.to_bool(a["revoked"]),
-                        scval.to_symbol("settled"): scval.to_bool(a["settled"]),
-                        scval.to_symbol("spent"): scval.to_int128(a["spent"]),
-                    }
-                )
-            )
+            return self._view_authorization(args)
         return self._sim_fail(f"no fake for {contract}.{fn}")
 
     # ── Horizon ─────────────────────────────────────────────────
