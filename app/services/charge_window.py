@@ -493,6 +493,18 @@ class _Scanned:
     reached_tip: bool = False
 
 
+def _held_index(escrow_id: str) -> _Index | None:
+    """The index this process holds for `escrow_id`, or None, forgetting every payer when it holds none.
+
+    Payers are kept for `_held.index.escrow_id` only, so an index for another
+    escrow (or none) leaves nothing they could be matched against.
+    """
+    held = _held.index if _held.index is not None and _held.index.escrow_id == escrow_id else None
+    if held is None:
+        _held.payers.clear()
+    return held
+
+
 async def _scan(escrow_id: str, held: _Index | None, deadline: float) -> _Scanned:
     """Advance `held` as far as the deadline allows, keeping the result in `_held`. Called under `_lock`.
 
@@ -558,10 +570,7 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
 
     async with _lock:
         await _restore(escrow_id)
-        held = _held.index if _held.index is not None and _held.index.escrow_id == escrow_id else None
-        if held is None:
-            _held.payers.clear()
-        scanned = await _scan(escrow_id, held, deadline)
+        scanned = await _scan(escrow_id, _held_index(escrow_id), deadline)
         held, out_of_time = scanned.index, scanned.out_of_time
         if held is None:
             reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
