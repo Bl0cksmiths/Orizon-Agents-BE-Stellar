@@ -11,7 +11,7 @@ rather than a constant `True`; it must still never drop a record.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import sys
 from typing import Any
 
 import pytest
@@ -91,22 +91,24 @@ class _CollectingHandler(logging.Handler):
 
 
 @pytest.fixture
-def redacting_logger(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[logging.Logger, _CollectingHandler]]:
+def redacting_handler(monkeypatch: pytest.MonkeyPatch) -> _CollectingHandler:
+    """A handler wired the way `app/main.py` wires the root handler. Tests
+    drive it with `Handler.handle` — filter, then emit — rather than through
+    a logger, so no other handler (pytest's capture among them) sees the
+    record and nothing global is left changed."""
     monkeypatch.setattr(settings, "pdax_password", SECRET)
     handler = _CollectingHandler()
     handler.addFilter(SecretRedactionLogFilter())
-    logger = logging.getLogger("tests.sonar_blockers.redaction")
-    logger.propagate = False
-    logger.addHandler(handler)
-    try:
-        yield logger, handler
-    finally:
-        logger.removeHandler(handler)
+    return handler
+
+
+def _record(msg: str, *args: object, exc_info: Any = None) -> logging.LogRecord:
+    return logging.LogRecord("pdax", logging.ERROR, __file__, 1, msg, args, exc_info)
 
 
 def test_the_filter_returns_the_record_it_masked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "pdax_password", SECRET)
-    record = logging.LogRecord("pdax", logging.ERROR, __file__, 1, "login failed with %s", (SECRET,), None)
+    record = _record("login failed with %s", SECRET)
 
     returned = SecretRedactionLogFilter().filter(record)
 
@@ -116,29 +118,27 @@ def test_the_filter_returns_the_record_it_masked(monkeypatch: pytest.MonkeyPatch
 
 
 def test_a_secret_in_the_message_is_masked_and_the_record_still_emitted(
-    redacting_logger: tuple[logging.Logger, _CollectingHandler],
+    redacting_handler: _CollectingHandler,
 ) -> None:
-    logger, handler = redacting_logger
+    redacting_handler.handle(_record("login failed with %s", SECRET))
 
-    logger.error("login failed with %s", SECRET)
-
-    [emitted] = handler.records
+    [emitted] = redacting_handler.records
     assert emitted.getMessage() == f"login failed with {REDACTED}"
-    assert SECRET not in handler.format(emitted)
+    assert SECRET not in redacting_handler.format(emitted)
 
 
 def test_a_secret_in_a_traceback_is_masked_and_the_record_still_emitted(
-    redacting_logger: tuple[logging.Logger, _CollectingHandler],
+    redacting_handler: _CollectingHandler,
 ) -> None:
-    logger, handler = redacting_logger
-
     try:
         raise ConnectionError(f"pdax rejected {SECRET}")
     except ConnectionError:
-        logger.exception("pdax login failed")
+        record = _record("pdax login failed", exc_info=sys.exc_info())
 
-    [emitted] = handler.records
-    rendered = handler.format(emitted)
+    redacting_handler.handle(record)
+
+    [emitted] = redacting_handler.records
+    rendered = redacting_handler.format(emitted)
     assert SECRET not in rendered
     assert f"pdax rejected {REDACTED}" in rendered
     assert rendered.startswith("pdax login failed\nTraceback")
@@ -146,26 +146,24 @@ def test_a_secret_in_a_traceback_is_masked_and_the_record_still_emitted(
     assert emitted.exc_info is None
 
 
-def test_a_malformed_record_is_still_emitted_unchanged(
-    redacting_logger: tuple[logging.Logger, _CollectingHandler],
-) -> None:
+def test_a_malformed_record_is_still_emitted_unchanged(redacting_handler: _CollectingHandler) -> None:
     # `getMessage()` raises on these args. Reporting that is logging's job
     # (Handler.handleError, at format time); the filter must not drop it.
-    logger, handler = redacting_logger
-    args = ("many",)
     msg = "plan has %d steps"
+    record = _record(msg, "many")
 
-    logger.error(msg, *args)
+    redacting_handler.handle(record)
 
-    [emitted] = handler.records
+    [emitted] = redacting_handler.records
+    assert emitted is record
     assert emitted.msg is msg
-    assert emitted.args == args
+    assert emitted.args == ("many",)
     with pytest.raises(TypeError):
         emitted.getMessage()
 
 
 def test_the_filter_returns_a_malformed_record_as_given() -> None:
-    record = logging.LogRecord("pdax", logging.ERROR, __file__, 1, "plan has %d steps", ("many",), None)
+    record = _record("plan has %d steps", "many")
 
     assert SecretRedactionLogFilter().filter(record) is record
     assert record.args == ("many",)
