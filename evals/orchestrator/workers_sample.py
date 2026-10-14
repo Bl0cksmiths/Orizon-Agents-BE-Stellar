@@ -230,7 +230,7 @@ def ceiling_usd(jobs: tuple[Job, ...] = JOBS) -> float:
     return sum(cost.call_cost(j.model, 6_000 + j.max_tokens, j.max_tokens) for j in jobs)
 
 
-def _digest(agent_id: str, out: dict[str, Any]) -> dict[str, Any]:
+def _digest(out: dict[str, Any]) -> dict[str, Any]:
     """The parts of a worker's output a reader needs, without the bulk."""
     digest: dict[str, Any] = {"summary": out.get("summary"), "counts": out.get("counts")}
     artifact = out.get("artifact")
@@ -331,7 +331,7 @@ def _job_record(
             for c in calls
         ],
         "error": error,
-        "output": _digest(job.agent_id, out),
+        "output": _digest(out),
     }
 
 
