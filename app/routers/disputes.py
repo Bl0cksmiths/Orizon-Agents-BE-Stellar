@@ -831,7 +831,6 @@ _READ_GRANT_RESPONSES: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/disputes/read-challenge",
-    response_model=DisputeReadChallengeResponse,
     summary="Mint a challenge the payer signs to read their disputes' free text",
     responses=_READ_CHALLENGE_RESPONSES,
 )
