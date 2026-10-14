@@ -471,22 +471,27 @@ class Runner:
         if not self.state.run_id:
             self.state.run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{self.cfg.agent}"
 
+    def plan_buyer_balance(self, chain: ChainReader, buyer: str, stages: tuple[str, ...]) -> None:
+        """Say the buyer's balance; a buyer that does not exist blocks a run that would decompose."""
+        sac = self.network.get("asset_sac")
+        if not sac:
+            return
+        balance = chain.sac_balance(str(sac), buyer, buyer)
+        if balance is not None:
+            self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
+            return
+        self.say(f"buyer {buyer} does not exist on testnet: fund it (friendbot) before a real run")
+        if "decompose" in stages:
+            self.blockers.append(
+                f"the buyer {buyer} does not exist on testnet: a real run refuses it after decompose, "
+                f"before anything is signed (exit {EXIT_REFUSED}); fund it (friendbot) first"
+            )
+
     def print_plan(self, start: str) -> None:
         buyer = self.need_buyer().public_key
         chain = self.need_chain()
         stages = STAGES[stage_index(start) : stage_index(self.cfg.until) + 1]
-        sac = self.network.get("asset_sac")
-        if sac:
-            balance = chain.sac_balance(str(sac), buyer, buyer)
-            if balance is None:
-                self.say(f"buyer {buyer} does not exist on testnet: fund it (friendbot) before a real run")
-                if "decompose" in stages:
-                    self.blockers.append(
-                        f"the buyer {buyer} does not exist on testnet: a real run refuses it after decompose, "
-                        f"before anything is signed (exit {EXIT_REFUSED}); fund it (friendbot) first"
-                    )
-            else:
-                self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
+        self.plan_buyer_balance(chain, buyer, stages)
         version = self.state.escrow_version or 1
         if version < 2 and "verify" in stages:
             escrow = (self.state.authorize or {}).get("escrow") or self.contracts.get("payment_escrow")
