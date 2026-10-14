@@ -368,7 +368,9 @@ def _record_cut_stream(request: ClaudeRequest, error: BaseException) -> None:
             progress.output_tokens,
         )
     except Exception as e:  # recording must never replace the error being raised
-        logger.error("claude stream cut purpose=%s: usage not recorded: %s: %s", request.purpose, type(e).__name__, e)
+        logger.exception(
+            "claude stream cut purpose=%s: usage not recorded: %s: %s", request.purpose, type(e).__name__, e
+        )
 
 
 def _result(value: V, request: ClaudeRequest, completion: Completion, cost: float, latency_ms: int) -> LLMResult[V]:
