@@ -47,6 +47,31 @@ async def _replay_then_done(task_id: str) -> AsyncIterator[dict[str, str]]:
     yield {"event": "done", "data": "{}"}
 
 
+async def _live_events(task_id: str, queue: asyncio.Queue[TraceLine | None]) -> AsyncIterator[dict[str, str]]:
+    """A running task's stream: its recorded trace, then each live line from
+    `queue` (a ping every 15 s of quiet) until the bus closes it with `done`.
+    The queue is unsubscribed however the stream ends."""
+    try:
+        # Replay anything already recorded so late subscribers see full history.
+        for event in _replay_events(task_id):
+            yield event
+
+        while True:
+            try:
+                line = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                # keepalive
+                yield {"event": "ping", "data": "{}"}
+                continue
+
+            if line is None:
+                yield {"event": "done", "data": "{}"}
+                break
+            yield {"event": "trace", "data": line.model_dump_json()}
+    finally:
+        bus.unsubscribe(task_id, queue)
+
+
 @router.get(
     "/trace/{task_id}/stream",
     summary="Stream a task's trace as SSE",
@@ -82,27 +107,6 @@ async def stream_trace(task_id: str) -> EventSourceResponse:
         # ping forever and leak.
         return EventSourceResponse(_replay_then_done(task_id))
 
-    queue = bus.subscribe(task_id)
-
-    async def generator() -> AsyncIterator[dict[str, str]]:
-        try:
-            # Replay anything already recorded so late subscribers see full history.
-            for event in _replay_events(task_id):
-                yield event
-
-            while True:
-                try:
-                    line = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    # keepalive
-                    yield {"event": "ping", "data": "{}"}
-                    continue
-
-                if line is None:
-                    yield {"event": "done", "data": "{}"}
-                    break
-                yield {"event": "trace", "data": line.model_dump_json()}
-        finally:
-            bus.unsubscribe(task_id, queue)
-
-    return EventSourceResponse(generator())
+    # Subscribed here, before the response streams, so no line published
+    # between this answer and the first read is missed.
+    return EventSourceResponse(_live_events(task_id, bus.subscribe(task_id)))
