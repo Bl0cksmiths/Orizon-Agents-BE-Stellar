@@ -2150,6 +2150,62 @@ async def _warn_if_receipts_unlinked(
     await _emit(task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links")
 
 
+async def _report_v2_settle_unconfirmed(
+    task_id: str,
+    start: float,
+    settle_status: str,
+    tx: str | None,
+    *,
+    release: bool,
+    total: int,
+    job_hex: str,
+    auth_id_hex: str,
+    payer: str,
+) -> None:
+    """Say how a v2 settle that did not CONFIRM ended: rejected by the ledger
+    (definitive, so a paid settle's custody is released) or unknown (it may
+    still land, so nothing is recorded and it is never retried)."""
+    if settle_status == "FAILED":
+        logger.error(
+            "task %s: PaymentEscrow.settle did not settle — status=%s hash=%s (auth %s, payer %s, %d stroops, job %s)",
+            task_id,
+            settle_status,
+            tx,
+            auth_id_hex,
+            payer,
+            total,
+            job_hex,
+        )
+        await _emit(task_id, start, "error", f"settle status={settle_status} hash={tx}", settlement="failed")
+        if not release:
+            # The ledger rejected it: definitive, nothing moved, so the
+            # custody would sit until the payer reclaims it (S4).
+            await release_authorization(auth_id_hex, reason="settle_rejected")
+        return
+    # `_settle_onchain`'s unconfirmed branch, for the same reasons: it
+    # may still land, nothing is recorded, and it is never retried.
+    logger.error(
+        "task %s: PaymentEscrow.settle is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+        "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=%s hash=%s "
+        "(auth %s, payer %s, %d stroops, job %s)",
+        task_id,
+        settle_status or "missing",
+        tx,
+        auth_id_hex,
+        payer,
+        total,
+        job_hex,
+    )
+    await _emit(
+        task_id,
+        start,
+        "error",
+        f"settle unconfirmed status={settle_status or 'missing'} hash={tx} — it may still "
+        "settle, and this run cannot be disputed",
+        settlement="unconfirmed",
+    )
+
+
 async def _hand_off_v2_seal(
     task_id: str,
     start: float,
@@ -2359,46 +2415,17 @@ async def _settle_v2(
                 )
             if on_settled is not None and delivered_steps:
                 await on_settled(tx, job_id, payout_plan, receipts)
-        elif settle_status == "FAILED":
-            logger.error(
-                "task %s: PaymentEscrow.settle did not settle — status=%s hash=%s "
-                "(auth %s, payer %s, %d stroops, job %s)",
-                task_id,
-                settle_status,
-                tx,
-                auth_id_hex,
-                payer,
-                total,
-                job_hex,
-            )
-            await _emit(task_id, start, "error", f"settle status={settle_status} hash={tx}", settlement="failed")
-            if not release:
-                # The ledger rejected it: definitive, nothing moved, so the
-                # custody would sit until the payer reclaims it (S4).
-                await release_authorization(auth_id_hex, reason="settle_rejected")
-            return (None, None, None)
         else:
-            # `_settle_onchain`'s unconfirmed branch, for the same reasons: it
-            # may still land, nothing is recorded, and it is never retried.
-            logger.error(
-                "task %s: PaymentEscrow.settle is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
-                "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=%s hash=%s "
-                "(auth %s, payer %s, %d stroops, job %s)",
-                task_id,
-                settle_status or "missing",
-                tx,
-                auth_id_hex,
-                payer,
-                total,
-                job_hex,
-            )
-            await _emit(
+            await _report_v2_settle_unconfirmed(
                 task_id,
                 start,
-                "error",
-                f"settle unconfirmed status={settle_status or 'missing'} hash={tx} — it may still "
-                "settle, and this run cannot be disputed",
-                settlement="unconfirmed",
+                settle_status,
+                tx,
+                release=release,
+                total=total,
+                job_hex=job_hex,
+                auth_id_hex=auth_id_hex,
+                payer=payer,
             )
             return (None, None, None)
 
