@@ -577,26 +577,7 @@ async def _run(
                 f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
             )
 
-        # The routing floor, re-applied at execute (see `_execute_refusal`): one
-        # bounded batch read for every agent the plan names, taken now rather
-        # than trusted from the stamps on the plan. One read for the run, not
-        # one per step — `fetch_reps` caps it at the configured batch deadline,
-        # so the worst case delays the first step by that bound once, and the
-        # buyer's /execute has already been answered. Listing, which costs
-        # nothing to read, is still checked per step at the moment of dispatch.
-        agent_ids = sorted({s.agent_id for s in plan.plan.steps})
-        fresh = await reputation_svc.fetch_reps(agent_ids) if agent_ids else {}
-        unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded or i.superseded]
-        if unread:
-            # Said out loud, because it is the one case where a step runs on
-            # evidence older than this run: the buyer should know which.
-            await _emit(
-                task_id,
-                start,
-                "exec",
-                f"reputation re-check unavailable for [{', '.join(unread)}] — "
-                "those steps run on the scores this plan was authorised with",
-            )
+        fresh = await _recheck_reputation(task_id, start, plan)
 
         for step_index, step in enumerate(plan.plan.steps):
             refusal = _execute_refusal(step, fresh.get(step.agent_id))
@@ -903,6 +884,33 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _recheck_reputation(task_id: str, start: float, plan: StoredPlan) -> dict[str, reputation_svc.RepInfo]:
+    """The routing floor, re-applied at execute (see `_execute_refusal`): one
+    bounded batch read for every agent the plan names, taken now rather than
+    trusted from the stamps on the plan.
+
+    One read for the run, not one per step — `fetch_reps` caps it at the
+    configured batch deadline, so the worst case delays the first step by that
+    bound once, and the buyer's /execute has already been answered. Listing,
+    which costs nothing to read, is still checked per step at the moment of
+    dispatch.
+    """
+    agent_ids = sorted({s.agent_id for s in plan.plan.steps})
+    fresh = await reputation_svc.fetch_reps(agent_ids) if agent_ids else {}
+    unread = [a for a in agent_ids if (i := fresh.get(a)) is None or i.degraded or i.superseded]
+    if unread:
+        # Said out loud, because it is the one case where a step runs on
+        # evidence older than this run: the buyer should know which.
+        await _emit(
+            task_id,
+            start,
+            "exec",
+            f"reputation re-check unavailable for [{', '.join(unread)}] — "
+            "those steps run on the scores this plan was authorised with",
+        )
+    return fresh
 
 
 async def _step_timed_out(task_id: str, start: float, step: PlanStep, worker: Worker) -> None:
