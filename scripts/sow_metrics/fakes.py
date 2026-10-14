@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +106,16 @@ def _sym(value: str) -> stellar_xdr.SCVal:
 
 def _map(fields: dict[str, stellar_xdr.SCVal]) -> stellar_xdr.SCVal:
     return scval.to_map({_sym(k): v for k, v in sorted(fields.items())})
+
+
+def _sim_value(ok: Callable[[Any], httpx.Response], value: stellar_xdr.SCVal) -> httpx.Response:
+    """A simulation that returned `value`."""
+    return ok({"results": [{"xdr": value.to_xdr(), "auth": []}], "latestLedger": 1})
+
+
+def _sim_fail(ok: Callable[[Any], httpx.Response], message: str) -> httpx.Response:
+    """A simulation the host failed, with its error `message`."""
+    return ok({"error": message, "latestLedger": 1})
 
 
 @dataclass
@@ -502,23 +513,18 @@ class FakeWorld:
         if (contract, fn) in self.simulate_down_for:
             return _json(503, {"error": "unavailable"})
 
-        def value(v: stellar_xdr.SCVal) -> httpx.Response:
-            return ok({"results": [{"xdr": v.to_xdr(), "auth": []}], "latestLedger": 1})
-
-        def fail(msg: str) -> httpx.Response:
-            return ok({"error": msg, "latestLedger": 1})
-
         if contract == REGISTRY:
             if fn == "list_ids":
-                return value(scval.to_vec([_sym(a) for a in self.agents]))
+                return _sim_value(ok, scval.to_vec([_sym(a) for a in self.agents]))
             if fn == "admin":
-                return value(scval.to_address(self.registry_admin))
+                return _sim_value(ok, scval.to_address(self.registry_admin))
             if fn == "get":
                 agent_id = scval.from_symbol(args[0])
                 a = self.agents.get(agent_id)
                 if a is None:
-                    return fail("HostError: Error(Contract, #2)")
-                return value(
+                    return _sim_fail(ok, "HostError: Error(Contract, #2)")
+                return _sim_value(
+                    ok,
                     _map(
                         {
                             "id": _sym(agent_id),
@@ -529,21 +535,22 @@ class FakeWorld:
                             "active": scval.to_bool(a["active"]),
                             "registered_at": scval.to_uint64(a["registered_at"]),
                         }
-                    )
+                    ),
                 )
         if contract in self.escrows:
             e = self.escrows[contract]
             if fn == "version":
                 if e.version < 2:
-                    return fail("HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
-                return value(scval.to_uint32(e.version))
+                    return _sim_fail(ok, "HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
+                return _sim_value(ok, scval.to_uint32(e.version))
             if fn in ("receipt", "authorization"):
                 index = int.from_bytes(scval.from_bytes(args[0]), "big")
                 kind, fields = e.ids[index] if index < len(e.ids) else ("gone", {})
                 if (fn == "receipt" and kind != "receipt") or (fn == "authorization" and kind != "auth"):
-                    return fail("HostError: Error(Contract, #2)")
+                    return _sim_fail(ok, "HostError: Error(Contract, #2)")
                 if kind == "receipt":
-                    return value(
+                    return _sim_value(
+                        ok,
                         _map(
                             {
                                 "auth_id": scval.to_bytes(fields["auth_id"]),
@@ -552,9 +559,10 @@ class FakeWorld:
                                 "job_id": scval.to_bytes(bytes.fromhex(fields["job_id"])),
                                 "settled_at": scval.to_uint64(fields["settled_at"]),
                             }
-                        )
+                        ),
                     )
-                return value(
+                return _sim_value(
+                    ok,
                     _map(
                         {
                             "payer": scval.to_address(fields["payer"]),
@@ -565,11 +573,12 @@ class FakeWorld:
                             "revoked": scval.to_bool(False),
                             **({"settled": scval.to_bool(fields["spent"] > 0)} if e.version >= 2 else {}),
                         }
-                    )
+                    ),
                 )
         if contract == LEDGER and fn == "rep_state":
             agent_id = scval.from_symbol(args[0])
-            return value(
+            return _sim_value(
+                ok,
                 _map(
                     {
                         "count": scval.to_uint32(3),
@@ -578,9 +587,9 @@ class FakeWorld:
                         "sum_w": scval.to_int128(1),
                         "weight": scval.to_int128(1),
                     }
-                )
+                ),
             )
-        return fail(f"HostError: no fake for {contract}.{fn}")
+        return _sim_fail(ok, f"HostError: no fake for {contract}.{fn}")
 
     # ── Horizon ─────────────────────────────────────────────────
     def horizon(self, request: httpx.Request) -> httpx.Response:
