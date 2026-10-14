@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -232,6 +233,15 @@ def judge_spec(
 
 def _check_unavailable(model: str | None = None) -> SpecCheck:
     return SpecCheck(verdict="unavailable", reasons=["guard_unavailable"], model=model)
+
+
+def _error_to_raise(errors: Sequence[BaseException]) -> BaseException:
+    """The one exception a failed pair of concurrent jev calls surfaces.
+
+    The spend cap outranks any outage, so the caller pauses rather than falls
+    back; otherwise the first error in call order. ``errors`` is never empty.
+    """
+    return next((error for error in errors if isinstance(error, SpendCapReached)), errors[0])
 
 
 async def _jev_recheck(original: str, spec_text: str, policy: GuardPolicy) -> SpecCheck:
