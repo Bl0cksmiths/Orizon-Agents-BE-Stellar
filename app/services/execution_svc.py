@@ -2162,6 +2162,33 @@ def _sealed_agents(
     return [payout.agent_id for payout in payout_plan.payouts]
 
 
+def _v2_seal_args(
+    plan: StoredPlan,
+    settler: str,
+    job_id: bytes,
+    payer: str,
+    sealed_agents: list[str],
+    receipts: list[bytes] | None,
+    total: int,
+) -> list[Any]:
+    """`AttestationRegistry.seal`'s arguments for a v2 job: the agents it names
+    beside their receipts (none when they did not decode) and the total paid."""
+    from stellar_sdk import scval as _sv
+
+    from ..stellar import client as sc
+
+    intent_hash = hashlib.sha256(plan.intent.encode("utf-8")).digest()
+    return [
+        sc.addr(settler),
+        sc.bytes16(job_id),
+        sc.addr(payer),
+        sc.bytes32(intent_hash),
+        _sv.to_vec([sc.sym(agent_id) for agent_id in sealed_agents]),
+        _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
+        sc.i128(total),
+    ]
+
+
 async def _warn_if_receipts_unlinked(
     task_id: str,
     start: float,
@@ -2410,8 +2437,6 @@ async def _settle_v2(
     it is NEVER retried — a second settle of one authorization is refused as a
     replay at best, and at worst would race the first.
     """
-    from stellar_sdk import scval as _sv
-
     from ..stellar import client as sc
 
     settle_tx: str | None = None
@@ -2508,16 +2533,7 @@ async def _settle_v2(
             auth_id_hex=auth_id_hex,
             payer=payer,
         )
-        intent_hash = hashlib.sha256(plan.intent.encode("utf-8")).digest()
-        seal_args = [
-            sc.addr(settler),
-            sc.bytes16(job_id),
-            sc.addr(payer),
-            sc.bytes32(intent_hash),
-            _sv.to_vec([sc.sym(agent_id) for agent_id in sealed_agents]),
-            _sv.to_vec([sc.bytes16(r) for r in receipts or []]),
-            sc.i128(total),
-        ]
+        seal_args = _v2_seal_args(plan, settler, job_id, payer, sealed_agents, receipts, total)
         _note_seal(task_id, "pending", kind=kind)
         seal_tx, submission = await _submit_seal(seal_args)
         if submission is None:
