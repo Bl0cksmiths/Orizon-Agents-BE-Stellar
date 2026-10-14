@@ -251,12 +251,12 @@ async def _jev_recheck(original: str, spec_text: str, policy: GuardPolicy) -> Sp
         state=guard_prompts.spec_state(original, spec_text),
         questions=guard_prompts.SAME_REQUEST_BATTERY,
     )
-    # Both calls run to completion (no orphaned request), then the spend cap
-    # outranks any outage so the caller can pause rather than fall back.
+    # Both calls run to completion (no orphaned request), then exactly one
+    # error surfaces, chosen by _error_to_raise.
     safety, same = await asyncio.gather(safety_call, same_call, return_exceptions=True)
     if isinstance(safety, BaseException) or isinstance(same, BaseException):
-        errors = [o for o in (safety, same) if isinstance(o, BaseException)]
-        raise next((e for e in errors if isinstance(e, SpendCapReached)), errors[0])
+        errors: list[BaseException] = [o for o in (safety, same) if isinstance(o, BaseException)]
+        raise _error_to_raise(errors)
     return judge_spec(
         same_request=unit(answer(same.answers, "same_request", "noul"), "same_request"),
         injection=unit(answer(safety.answers, "injection", "noul"), "injection"),
