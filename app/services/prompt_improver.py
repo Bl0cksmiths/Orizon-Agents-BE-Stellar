@@ -349,6 +349,13 @@ def _unavailable() -> Resolution:
     )
 
 
+def _without_spec(*, watch: bool, strict: bool) -> Resolution:
+    """No spec to plan from: the original, unless the request must plan from a clean spec."""
+    if strict:
+        return _blocked(["watch", "no_spec"]) if watch else _unavailable()
+    return Resolution(action="use_original", reasons=["no_spec"])
+
+
 def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bool = False) -> Resolution:
     """Combine the intent decision and the spec re-check.
 
@@ -368,9 +375,7 @@ def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bo
 
     strict = decision.watch or user_edited
     if check is None:
-        if strict:
-            return _blocked(["watch", "no_spec"]) if decision.watch else _unavailable()
-        return Resolution(action="use_original", reasons=["no_spec"])
+        return _without_spec(watch=decision.watch, strict=strict)
     if check.verdict == "unsafe":
         return _blocked([r for r in check.reasons if r != "fallback"] or ["harmful"])
     if check.verdict == "clean":
