@@ -284,42 +284,54 @@ class FakeWorld:
         )
 
     def api(self, method: str, path: str, body: Any, headers: httpx.Headers) -> httpx.Response:
-        if path == "/api/health":
-            return self.health()
-        if path == "/readiness":
-            if not self.readiness_reachable:
-                return httpx.Response(404, text="<html>not found</html>")
-            return _json(
-                200,
-                {"status": "ready", "ratings": {"writer": "scorer", "signer": self.settler, "scorer": self.settler}},
-            )
-        if path == "/api/stellar/network":
-            return self.stellar_network()
-        if path == "/api/agents":
-            return self.agents_list()
-        if path == f"/api/stellar/agent/{AGENT}":
-            return _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}})
-        if path == f"/api/stellar/agent/{AGENT_2}" and self.second_agent:
-            return _json(200, {"agent": {"owner": self.owner_2, "name": AGENT_2_NAME}})
-        if path == "/api/stellar/reputation":
-            return _json(200, {"reputations": {AGENT: dict(self.rep)}, "floor_bps": 5500, "prior_bps": 7000})
-        if path == "/api/orchestrator/decompose" and method == "POST":
-            return self.decompose(body)
-        if path == "/api/stellar/build/authorize":
-            return self.build_authorize(body)
-        if path == "/api/stellar/submit":
-            return self.submit(body)
-        if path == "/api/orchestrator/execute":
-            return self.execute(body)
-        if path == "/api/disputes/challenge":
-            return self.dispute_challenge(body)
-        if path == "/api/disputes/read-challenge":
-            return self.read_challenge(body) if self.d067 else _err(404, "not_found")
-        if path == "/api/disputes/read-grant":
-            return self.read_grant(body) if self.d067 else _err(404, "not_found")
-        if path == "/api/disputes" and method == "POST":
-            return self.open_dispute(body)
+        route = self.api_fixed(body).get(path)
+        if route is not None:
+            return route()
+        posted = self.api_posts(body).get(path)
+        if posted is not None and method == "POST":
+            return posted()
         return self.api_by_id(path, headers)
+
+    def api_fixed(self, body: Any) -> dict[str, Callable[[], httpx.Response]]:
+        """The API's fixed paths that answer any method, as the world is now."""
+        not_found = _err(404, "not_found")
+        routes: dict[str, Callable[[], httpx.Response]] = {
+            "/api/health": self.health,
+            "/readiness": self.readiness_report,
+            "/api/stellar/network": self.stellar_network,
+            "/api/agents": self.agents_list,
+            f"/api/stellar/agent/{AGENT}": lambda: _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}}),
+            "/api/stellar/reputation": lambda: _json(
+                200, {"reputations": {AGENT: dict(self.rep)}, "floor_bps": 5500, "prior_bps": 7000}
+            ),
+            "/api/stellar/build/authorize": lambda: self.build_authorize(body),
+            "/api/stellar/submit": lambda: self.submit(body),
+            "/api/orchestrator/execute": lambda: self.execute(body),
+            "/api/disputes/challenge": lambda: self.dispute_challenge(body),
+            "/api/disputes/read-challenge": lambda: self.read_challenge(body) if self.d067 else not_found,
+            "/api/disputes/read-grant": lambda: self.read_grant(body) if self.d067 else not_found,
+        }
+        if self.second_agent:
+            routes[f"/api/stellar/agent/{AGENT_2}"] = lambda: _json(
+                200, {"agent": {"owner": self.owner_2, "name": AGENT_2_NAME}}
+            )
+        return routes
+
+    def api_posts(self, body: Any) -> dict[str, Callable[[], httpx.Response]]:
+        """The API's fixed paths that answer only a POST."""
+        return {
+            "/api/orchestrator/decompose": lambda: self.decompose(body),
+            "/api/disputes": lambda: self.open_dispute(body),
+        }
+
+    def readiness_report(self) -> httpx.Response:
+        """GET /readiness: root-level, so the frontend's proxy (which forwards /api/* only) answers 404."""
+        if not self.readiness_reachable:
+            return httpx.Response(404, text="<html>not found</html>")
+        return _json(
+            200,
+            {"status": "ready", "ratings": {"writer": "scorer", "signer": self.settler, "scorer": self.settler}},
+        )
 
     def api_by_id(self, path: str, headers: httpx.Headers) -> httpx.Response:
         """The API's routes with an id in the path, matched in order; any other path is not found."""
