@@ -381,7 +381,7 @@ async def bind(
     )
 
 
-@router.delete("/{agent_id}/bind", response_model=UnbindResponse, summary="Revoke an agent's endpoint binding")
+@router.delete("/{agent_id}/bind", summary="Revoke an agent's endpoint binding")
 async def unbind(
     body: UnbindReq,
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
