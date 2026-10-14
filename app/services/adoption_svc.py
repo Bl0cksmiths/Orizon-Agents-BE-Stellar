@@ -741,6 +741,27 @@ def _split_unmirrored(
     return ours, unknown
 
 
+def _partition_owners(
+    owners: dict[str, str], rule: OwnerRule, mirrored: dict[str, Agent]
+) -> tuple[dict[str, ExcludedOwner], dict[str, list[Agent]]]:
+    """Every accounted agent by owner, in id order: ours, as `excluded` rows
+    naming why, and outside operators' mirrored agents, by owner."""
+    excluded: dict[str, ExcludedOwner] = {}
+    external: dict[str, list[Agent]] = {}
+    for agent_id, owner in sorted(owners.items()):
+        verdict = rule.classify(owner)
+        if verdict is not None:
+            reason, role = verdict
+            row = excluded.setdefault(
+                owner,
+                ExcludedOwner(owner=owner, owner_explorer=_account_link(owner), reason=reason, role=role, agent_ids=[]),
+            )
+            row.agent_ids.append(agent_id)
+        else:
+            external.setdefault(owner, []).append(mirrored[agent_id])
+    return excluded, external
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -753,7 +774,6 @@ async def build_report() -> AdoptionReport:
     started = time.monotonic()
     deadline = started + REPORT_WORK_BUDGET_SECONDS
     rule = await owner_rule()
-    classify = rule.classify
     team_roles = rule.team_roles
     degraded = bool(rule.unreadable)
 
@@ -768,19 +788,7 @@ async def build_report() -> AdoptionReport:
     owners.update(ours)
     unreadable.update(unknown)
 
-    excluded: dict[str, ExcludedOwner] = {}
-    external: dict[str, list[Agent]] = {}
-    for agent_id, owner in sorted(owners.items()):
-        verdict = classify(owner)
-        if verdict is not None:
-            reason, role = verdict
-            row = excluded.setdefault(
-                owner,
-                ExcludedOwner(owner=owner, owner_explorer=_account_link(owner), reason=reason, role=role, agent_ids=[]),
-            )
-            row.agent_ids.append(agent_id)
-        else:
-            external.setdefault(owner, []).append(mirrored[agent_id])
+    excluded, external = _partition_owners(owners, rule, mirrored)
 
     externals = [a for owner in sorted(external) for a in external[owner]]
     bound_ids, window = await asyncio.gather(_bound_ids(), _window({a.id: owners[a.id] for a in externals}, deadline))
