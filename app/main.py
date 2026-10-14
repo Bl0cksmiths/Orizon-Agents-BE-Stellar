@@ -459,9 +459,11 @@ app.add_middleware(SecurityHeadersMiddleware)
 # `Vary: Accept-Encoding` set here rather than replacing it.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-# Outermost of all: every response — including 429s from the limiter and
-# CORS rejections — carries an X-Request-ID, and the logged duration covers
-# the full middleware stack.
+# Right inside CORS: every response the app makes — including the limiter's
+# 429s, the origin lock's 403s and the body cap's 413s — carries an
+# X-Request-ID, and the logged duration covers every layer but CORS's own
+# header stamping. A preflight is the exception: CORS answers it before this
+# layer runs (see below).
 app.add_middleware(RequestContextMiddleware)
 
 # This project's Vercel production/preview origins only — a broad
