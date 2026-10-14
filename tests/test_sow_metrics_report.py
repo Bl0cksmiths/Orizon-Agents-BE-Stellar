@@ -233,8 +233,8 @@ def test_the_generator_refuses_to_write_a_block_that_breaks_the_shape(
 ) -> None:
     real = metrics_module.m09
 
-    def leaky(snap: Any, rules: Any, pending: Any = None) -> Any:
-        m = real(snap, rules, pending)
+    def leaky(snap: Any, pending: Any = None) -> Any:
+        m = real(snap, pending)
         m.links[0] = metrics_module.Link(f"guide by {ADMIN}", m.links[0].url, "page")
         return m
 

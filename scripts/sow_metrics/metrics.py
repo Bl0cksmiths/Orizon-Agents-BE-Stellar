@@ -1029,7 +1029,7 @@ def m08(snap: Snapshot, refunds: Metric) -> Metric:
     return Metric(row, achieved, MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m09(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
+def m09(snap: Snapshot, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[8]
     method = f"Opened the {GUIDE_PAGE} page on the live dApp with no login; published means it answers there."
     page = Link('"List your agent on Orizon" guide', snap.page_urls[GUIDE_PAGE], "page")
@@ -1178,7 +1178,7 @@ def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None)
         m06(snap, rules, pending.get("m06")),
         m07(snap),
         m08(snap, refunds),
-        m09(snap, rules, pending.get("m09")),
+        m09(snap, pending.get("m09")),
         m10(snap, rules, pending.get("m10")),
         m11(snap, rules),
     ]
