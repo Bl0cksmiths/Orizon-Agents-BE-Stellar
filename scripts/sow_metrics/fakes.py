@@ -155,6 +155,19 @@ class Escrow:
     ids: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
 
+def _escrow_record(
+    e: Escrow, fn: str, args: list[stellar_xdr.SCVal], ok: Callable[[Any], httpx.Response]
+) -> httpx.Response:
+    """`receipt(id)` or `authorization(id)`: the id's record when it is of that kind, else the contract's error."""
+    index = int.from_bytes(scval.from_bytes(args[0]), "big")
+    kind, fields = e.ids[index] if index < len(e.ids) else ("gone", {})
+    if (fn == "receipt" and kind != "receipt") or (fn == "authorization" and kind != "auth"):
+        return _sim_fail(ok, "HostError: Error(Contract, #2)")
+    if kind == "receipt":
+        return _sim_value(ok, _receipt_map(fields))
+    return _sim_value(ok, _authorization_map(fields, e.version))
+
+
 def demo_html(state: str | None, seconds: int | None = None) -> str:
     marker = f' data-demo="{state}"' if state else ""
     duration = ""
@@ -581,13 +594,7 @@ class FakeWorld:
                     return _sim_fail(ok, "HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
                 return _sim_value(ok, scval.to_uint32(e.version))
             if fn in ("receipt", "authorization"):
-                index = int.from_bytes(scval.from_bytes(args[0]), "big")
-                kind, fields = e.ids[index] if index < len(e.ids) else ("gone", {})
-                if (fn == "receipt" and kind != "receipt") or (fn == "authorization" and kind != "auth"):
-                    return _sim_fail(ok, "HostError: Error(Contract, #2)")
-                if kind == "receipt":
-                    return _sim_value(ok, _receipt_map(fields))
-                return _sim_value(ok, _authorization_map(fields, e.version))
+                return _escrow_record(e, fn, args, ok)
         if contract == LEDGER and fn == "rep_state":
             agent_id = scval.from_symbol(args[0])
             return _sim_value(
