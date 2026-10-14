@@ -163,3 +163,52 @@ def test_a_charge_that_raised_otherwise_is_failed(monkeypatch: pytest.MonkeyPatc
     assert _settle() == (None, None, None)
 
     assert _lines() == [("error", "on-chain settlement failed", "failed")]
+
+
+@pytest.mark.parametrize(
+    ("answer", "line", "trace", "settlement"),
+    [
+        (
+            {"hash": CHARGE_TX, "status": "FAILED"},
+            "task {task}: PaymentEscrow.charge did not settle — status=FAILED hash={tx} "
+            "(auth {auth}, payer {payer}, 0.050000 USDC, job {job})",
+            "charge status=FAILED hash={tx}",
+            "failed",
+        ),
+        (
+            {"hash": CHARGE_TX, "status": "timeout"},
+            "task {task}: PaymentEscrow.charge is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+            "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=timeout hash={tx} "
+            "(auth {auth}, payer {payer}, 0.050000 USDC, job {job})",
+            "charge unconfirmed status=timeout hash={tx} — it may still settle, and this run cannot be disputed",
+            "unconfirmed",
+        ),
+        (
+            {"hash": None, "status": None},
+            "task {task}: PaymentEscrow.charge is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+            "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=missing hash=None "
+            "(auth {auth}, payer {payer}, 0.050000 USDC, job {job})",
+            "charge unconfirmed status=missing hash=None — it may still settle, and this run cannot be disputed",
+            "unconfirmed",
+        ),
+    ],
+    ids=["rejected", "timed-out", "no-status"],
+)
+def test_a_charge_that_did_not_confirm_is_logged_and_traced_with_its_job(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    answer: dict[str, Any],
+    line: str,
+    trace: str,
+    settlement: str,
+) -> None:
+    chain = _install(monkeypatch, _V1Chain(charge=answer))
+    monkeypatch.setattr(execution_svc.secrets, "token_bytes", lambda n: b"\x22" * n)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        assert _settle() == (None, None, None)
+
+    fields = {"task": TASK, "tx": CHARGE_TX, "auth": AUTH_ID_HEX, "payer": PAYER, "job": (b"\x22" * 16).hex()}
+    assert [r.getMessage() for r in caplog.records] == [line.format(**fields)]
+    assert _lines() == [("error", trace.format(**fields), settlement)]
+    assert [name for name, _ in chain.calls] == ["charge"]
