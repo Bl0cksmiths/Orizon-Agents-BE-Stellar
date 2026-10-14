@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,10 @@ FLOOR = 5500
 
 def _json(status: int, body: Any) -> httpx.Response:
     return httpx.Response(status, json=body)
+
+
+def _not_found() -> httpx.Response:
+    return _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
 
 
 def ready_steps(**overrides: str) -> list[dict[str, Any]]:
@@ -229,26 +234,27 @@ class FakeWorld:
         return _json(200, {"reputations": reputations, "floor_bps": FLOOR, "prior_bps": 7000})
 
     def api(self, method: str, path: str) -> httpx.Response:
-        not_found = _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
         if method == "POST":
             if path == "/api/orchestrator/decompose":
                 return _json(self.decompose_status, self.decompose_body)
-            return not_found
-        if path == "/api/health":
-            return self.health()
-        if path == "/api/stellar/network":
-            return _json(200, {**self.network, "network_passphrase": self.api_passphrase})
-        if path == "/api/ecosystem/adoption":
-            return not_found if self.adoption is None else _json(200, self.adoption)
-        if path == "/api/agents":
-            return _json(200, self.agents)
+            return _not_found()
+        route = self.api_reads().get(path)
+        if route is not None:
+            return route()
         if path.startswith("/api/agents/") and path.endswith("/readiness"):
-            return self.agent_readiness_answer(path.split("/")[3]) if self.readiness_route else not_found
-        if path == "/api/stellar/reputation":
-            return self.reputation_batch()
-        if path == "/api/stellar/reputation/params":
-            return _json(200, self.params)
-        return not_found
+            return self.agent_readiness_answer(path.split("/")[3]) if self.readiness_route else _not_found()
+        return _not_found()
+
+    def api_reads(self) -> dict[str, Callable[[], httpx.Response]]:
+        """The API's fixed-path GET routes, each answering from the world as it is now."""
+        return {
+            "/api/health": self.health,
+            "/api/stellar/network": lambda: _json(200, {**self.network, "network_passphrase": self.api_passphrase}),
+            "/api/ecosystem/adoption": lambda: _not_found() if self.adoption is None else _json(200, self.adoption),
+            "/api/agents": lambda: _json(200, self.agents),
+            "/api/stellar/reputation": self.reputation_batch,
+            "/api/stellar/reputation/params": lambda: _json(200, self.params),
+        }
 
     def rpc(self, payload: dict[str, Any]) -> httpx.Response:
         method, params = payload.get("method"), payload.get("params") or {}
