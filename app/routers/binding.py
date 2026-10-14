@@ -297,7 +297,7 @@ async def bind_challenge(
     )
 
 
-@router.post("/{agent_id}/bind", response_model=BindingResponse, summary="Bind an endpoint to an agent id")
+@router.post("/{agent_id}/bind", summary="Bind an endpoint to an agent id")
 async def bind(
     body: BindReq,
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
