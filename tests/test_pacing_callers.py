@@ -7,6 +7,7 @@ Each caller used to inline `low + random.random() * span`; these pin the
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +16,8 @@ from app import pacing
 from app.agents.registry import WORKERS
 from app.agents.workers.mock import MockWorker
 from app.demo_kits.registry import ALL_KITS
+from app.pdax import resilience
+from app.pdax.errors import PdaxError
 from app.services import orchestrator_svc
 
 
@@ -75,3 +78,46 @@ def test_code_gen_and_critic_baked_paths_pause_as_before(pauses: list[tuple[floa
 def test_the_kit_thinking_time_is_one_point_four_to_two_point_four(pauses: list[tuple[float, float]]) -> None:
     asyncio.run(orchestrator_svc._kit_thinking())
     assert pauses == [(1.4, 1.0)]
+
+
+def _always_503(_attempt: int) -> Any:
+    raise PdaxError("boom", http_status=503)
+
+
+def test_pdax_retry_backoff_keeps_its_half_to_one_and_a_half_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[tuple[float, float]] = []
+    slept: list[float] = []
+
+    def fixed(low: float = 0.5, span: float = 1.0, source: object = None) -> float:
+        asked.append((low, span))
+        return 1.0
+
+    async def fake_sleep(d: float) -> None:
+        slept.append(d)
+
+    async def fn(attempt: int) -> str:
+        return _always_503(attempt)
+
+    monkeypatch.setattr(pacing, "jitter", fixed)
+    monkeypatch.setattr(resilience, "asyncio", SimpleNamespace(sleep=fake_sleep, Lock=asyncio.Lock))
+    with pytest.raises(PdaxError):
+        asyncio.run(resilience.with_retries(fn, attempts=4, base_delay=0.3, max_delay=1.0))
+    assert asked == [(0.5, 1.0)] * 3
+    assert slept == [pytest.approx(0.3), pytest.approx(0.6), pytest.approx(1.0)]  # capped at max_delay
+
+
+def test_pdax_retry_delays_stay_inside_the_jittered_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        slept.append(d)
+
+    async def fn(attempt: int) -> str:
+        return _always_503(attempt)
+
+    monkeypatch.setattr(resilience, "asyncio", SimpleNamespace(sleep=fake_sleep, Lock=asyncio.Lock))
+    for _ in range(200):
+        with pytest.raises(PdaxError):
+            asyncio.run(resilience.with_retries(fn, attempts=2, base_delay=0.3))
+    assert len(slept) == 200
+    assert all(0.15 <= d < 0.45 for d in slept)
