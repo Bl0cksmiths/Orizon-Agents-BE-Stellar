@@ -638,7 +638,15 @@ async def invalidate_reputation(
     )
 
 
-@router.get("/attestation/{job_id_hex}")
+@router.get(
+    "/attestation/{job_id_hex}",
+    responses={
+        400: {
+            "model": ErrorEnvelope,
+            "description": "`attestation_read_failed` — nothing is sealed for this job id, or the read failed.",
+        }
+    },
+)
 async def read_attestation(job_id_hex: str = Path(..., pattern=ID16_HEX_PATTERN)) -> AttestationRead:
     """Read an on-chain Attestation by hex-encoded 16-byte job_id."""
     try:
