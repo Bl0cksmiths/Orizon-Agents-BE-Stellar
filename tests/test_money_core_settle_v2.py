@@ -249,3 +249,44 @@ def test_a_release_that_confirms_is_traced_as_released(monkeypatch: pytest.Monke
     assert _lines() == [
         ("cost", f"x402 settle → nothing paid, custody released to the buyer · tx {SETTLE_TX[:10]}…", "released")
     ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "line", "settlement", "calls"),
+    [
+        (
+            {"hash": SETTLE_TX, "status": "FAILED"},
+            "task {task}: PaymentEscrow.settle did not settle — status=FAILED hash={tx} "
+            "(auth {auth}, payer {payer}, 100000 stroops, job {job})",
+            "failed",
+            2,
+        ),
+        (
+            {"hash": SETTLE_TX, "status": ""},
+            "task {task}: PaymentEscrow.settle is UNCONFIRMED and MAY STILL SETTLE — no settlement was "
+            "recorded, so if it does the buyer is charged with NO WAY TO DISPUTE it: status=missing hash={tx} "
+            "(auth {auth}, payer {payer}, 100000 stroops, job {job})",
+            "unconfirmed",
+            1,
+        ),
+    ],
+    ids=["rejected", "unconfirmed"],
+)
+def test_a_settle_that_did_not_confirm_is_logged_with_its_job(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    answer: dict[str, Any],
+    line: str,
+    settlement: str,
+    calls: int,
+) -> None:
+    chain = _install(monkeypatch, _Chain(auth=_auth(), settle=answer))
+    monkeypatch.setattr(execution_svc.secrets, "token_bytes", lambda n: b"\x11" * n)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
+        assert _settle((0.01,), frozenset({0})) == (None, None, None)
+
+    job = (b"\x11" * 16).hex()
+    assert _errors(caplog)[0] == line.format(task=TASK, tx=SETTLE_TX, auth=AUTH_ID_HEX, payer=PAYER, job=job)
+    assert len(chain.named("settle")) == calls
+    assert state.tasks[TASK].settlement == settlement
