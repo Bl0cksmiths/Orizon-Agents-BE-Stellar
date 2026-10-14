@@ -123,3 +123,10 @@ def test_every_report_fires_together_in_declaration_order(caplog):
         _settings(**merged)
 
     assert [r.getMessage() for r in _config_records(caplog)] == [line for _o, line in _REPORTED.values()]
+
+
+def test_no_startup_report_is_a_model_validator():
+    # A validator that can only hand `self` back refuses nothing; the reports
+    # run from `model_post_init` instead, and none may drift back.
+    validators = Settings.__pydantic_decorators__.model_validators
+    assert [name for name in validators if name.startswith("_report_")] == []
