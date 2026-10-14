@@ -204,6 +204,13 @@ class FakeWorld:
             return _json(status, self.readiness)
         return _json(404, {"detail": "Not Found"})
 
+    def health(self) -> httpx.Response:
+        """GET /api/health: 503 while the backend is down or still waking, then 200."""
+        self._health_seen += 1
+        if self.health_down or self._health_seen <= self.health_failures:
+            return _json(503, {"error": "waking"})
+        return _json(200, {"status": "ok"})
+
     def api(self, method: str, path: str) -> httpx.Response:
         not_found = _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
         if method == "POST":
@@ -211,10 +218,7 @@ class FakeWorld:
                 return _json(self.decompose_status, self.decompose_body)
             return not_found
         if path == "/api/health":
-            self._health_seen += 1
-            if self.health_down or self._health_seen <= self.health_failures:
-                return _json(503, {"error": "waking"})
-            return _json(200, {"status": "ok"})
+            return self.health()
         if path == "/api/stellar/network":
             return _json(200, {**self.network, "network_passphrase": self.api_passphrase})
         if path == "/api/ecosystem/adoption":
