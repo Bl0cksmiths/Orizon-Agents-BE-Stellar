@@ -799,10 +799,12 @@ class RequestContextMiddleware:
     correlated with server logs. Probe paths (EXEMPT_PATHS) still get the
     header but are not logged, to keep the log free of health-check noise.
 
-    Being the outermost layer, this is also where the forwarded-chain sample
-    is taken (see ForwardedChainSampler): the sample line and the access line
-    for the same request carry the same request id, so the raw chain and the
-    key it resolved to can be read side by side.
+    Being the outermost layer but for CORS (app/main.py), this is also where
+    the forwarded-chain sample is taken (see ForwardedChainSampler): the
+    sample line and the access line for the same request carry the same
+    request id, so the raw chain and the key it resolved to can be read side
+    by side. A CORS preflight is answered before it reaches this layer, so it
+    gets no request id, no access line and no sample.
     """
 
     def __init__(self, app: Any) -> None:
