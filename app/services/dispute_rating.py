@@ -315,7 +315,7 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
     try:
         derived = dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index)
     except ValueError:
-        logger.error(
+        logger.exception(
             "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s, credited %s, "
             "refund %s)",
             dispute.id,
@@ -325,7 +325,6 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
             dispute.payer,
             credited,
             dispute.refund_tx,
-            exc_info=True,
         )
         raise
     derived_hex = derived.hex()
@@ -351,22 +350,20 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         return _refused_by_ledger(dispute, e, facts, derived_hex, weight)
     except sc.NotSubmittedError as e:
         reason = not_submitted_reason(e)
-        logger.error(
+        logger.exception(
             "dispute %s: rating refused before it was submitted — nothing was sent and nothing is in "
             "flight, and a retry is refused the same way until the cause is fixed: %s (%s)",
             dispute.id,
             reason,
             facts,
-            exc_info=True,
         )
         return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
     except Exception as e:
-        logger.error(
+        logger.exception(
             "dispute %s: rating submit raised and MAY HAVE LANDED: %s (%s)",
             dispute.id,
             e,
             facts,
-            exc_info=True,
         )
         return RatingOutcome("TIMEOUT", None, derived_hex, DISPUTE_RATING, weight)
 
