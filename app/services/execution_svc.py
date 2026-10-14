@@ -1782,6 +1782,15 @@ class _PayoutPlan:
         return sum(p.amount for p in self.payouts)
 
 
+def _under_cap(amount: int, remaining: int | None) -> tuple[int, int | None]:
+    """`amount` cut to what is left of the authorized cap, and what is left
+    after paying it. No cap (None) cuts nothing."""
+    if remaining is None:
+        return amount, None
+    held = min(amount, remaining)
+    return held, remaining - held
+
+
 def _merged_payouts(paid: list[tuple[int, str, int]], payees: Mapping[str, str], steps: list[_StepPayout]) -> list[Any]:
     """One payout per agent, in first-seen order, for a run past the settle's
     payout limit; each paid step is appended to `steps` under its agent's entry.
@@ -1858,11 +1867,10 @@ def _payout_plan(
         step = plan.plan.steps[index]
         amount = _price_stroops(step)
         reason = UNPAID_FREE if amount <= 0 else unpaid_agents.get(step.agent_id)
-        if reason is None and remaining is not None:
-            if amount > remaining:
-                clamped += amount - remaining
-                amount = remaining
-            remaining -= amount
+        if reason is None:
+            held, remaining = _under_cap(amount, remaining)
+            clamped += amount - held
+            amount = held
             if amount <= 0:
                 reason = UNPAID_OVER_CAP
         if reason is not None:
