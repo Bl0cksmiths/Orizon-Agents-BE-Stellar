@@ -226,7 +226,7 @@ def _sweep_section(a: dict[str, Any]) -> list[str]:
     add("### Recommended policy, judged on the held-out split")
     add("")
     add("| | today | recommended |")
-    add("|---|---|---|")
+    add(_table_rule(3))
     add(
         "| thresholds | "
         + ", ".join(f"{k} {v}" for k, v in rec["today"].items())
@@ -289,7 +289,7 @@ def _cost_section(a: dict[str, Any]) -> list[str]:
     add(f"| this dataset's mix (51% planned) | {usd(pr['mean_per_request_mix'])} |")
     add("")
     add("| requests / day | planning spend, dataset mix | planning spend, every request planned |")
-    add("|---|---|---|")
+    add(_table_rule(3))
     for v in (50, 200, 1000):
         add(f"| {v} | {usd(pr['daily_projection_mix'][v])} | {usd(pr['daily_projection_all_planned'][v])} |")
     add("")
