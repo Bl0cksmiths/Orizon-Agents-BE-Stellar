@@ -360,14 +360,7 @@ class FakeWorld:
             return self.frontend(path)
         if url.startswith(GITHUB):
             self.calls.append(f"github {path}")
-            name = path.removeprefix("/repos/")
-            if self.github_status is not None:
-                return _json(self.github_status, {"message": "API rate limit exceeded"})
-            status, spdx = self.repos.get(name, (404, None))
-            if status != 200:
-                return _json(status, {"message": "Not Found"})
-            license_ = None if spdx is None else {"spdx_id": spdx, "key": spdx.lower()}
-            return _json(200, {"full_name": name, "private": False, "license": license_})
+            return self.github(path)
         if url.startswith(RPC):
             payload = json.loads(request.content)
             self.calls.append(f"rpc {payload.get('method')}")
@@ -399,6 +392,17 @@ class FakeWorld:
         if status in (301, 302, 307, 308):
             return httpx.Response(status, headers={"location": f"{FRONTEND}/login"})
         return httpx.Response(status, text=body, headers={"content-type": "text/html"})
+
+    def github(self, path: str) -> httpx.Response:
+        """GitHub's repository read, from `repos`; `github_status` overrides every answer."""
+        name = path.removeprefix("/repos/")
+        if self.github_status is not None:
+            return _json(self.github_status, {"message": "API rate limit exceeded"})
+        status, spdx = self.repos.get(name, (404, None))
+        if status != 200:
+            return _json(status, {"message": "Not Found"})
+        license_ = None if spdx is None else {"spdx_id": spdx, "key": spdx.lower()}
+        return _json(200, {"full_name": name, "private": False, "license": license_})
 
     def api(self, path: str) -> httpx.Response:
         if path in self.api_down:
