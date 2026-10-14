@@ -572,76 +572,7 @@ async def _run(
         fresh = await _recheck_reputation(task_id, start, plan)
 
         for step_index, step in enumerate(plan.plan.steps):
-            refusal = _execute_refusal(step, fresh.get(step.agent_id))
-            if refusal is not None:
-                # Story 2.03's rule for a step that fails, applied to a step
-                # that is refused: it is skipped, nothing is added to `spent`
-                # (so neither the simulated total nor the on-chain charge
-                # includes it), the settlement records it as not delivered,
-                # and the run carries on with the steps that remain. It is
-                # also NOT rated and NOT counted as a failure — the agent was
-                # never asked, and a withdrawal is its operator's decision,
-                # not a delivery it failed (ADR 0005 D5). By index, like every
-                # other per-step set here.
-                run.undispatched.add(step_index)
-                logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
-                await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
-                continue
-
-            # Resolution deliberately stays OUTSIDE the per-step try/except
-            # below. It is a lookup, not the step's work: resolve_worker fails
-            # OPEN — an unreadable binding store logs and returns None — so the
-            # only thing left that could raise here is a bug in resolution
-            # itself, which would repeat on every step anyway. Letting that
-            # reach the run-level handler (status "failed", stream closed) is
-            # therefore the honest outcome, and is what the suite pins.
-            worker = await resolve_worker(step.agent_id)
-            if worker is None:
-                # No local worker and no resolvable binding. A bound agent
-                # that could not be resolved degrades identically to one nobody
-                # ever registered — the step is skipped, unbilled, and the run
-                # continues. Trace lines only reach the SSE viewer and are
-                # dropped with the task; every step failure also goes to the
-                # server log so an outage is diagnosable after the fact.
-                # Never dispatched, so never rated. resolve_worker fails OPEN,
-                # which means this branch is also where OUR outage lands — an
-                # unreadable binding store returns None exactly like a missing
-                # binding, and the read failure is negative-cached, so one blip
-                # can hit several steps. Rating here would write a permanent
-                # on-chain 20/100 against an operator who was never asked to
-                # deliver. "Did not deliver" and "was never asked" are
-                # different facts and only the first is theirs (ADR 0005 D5).
-                # THIS step, not this agent: the same agent may be resolvable
-                # at another step of the plan, and that step's delivery is its
-                # own evidence.
-                run.undispatched.add(step_index)
-                logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
-                await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
-                continue
-
-            await _emit(
-                task_id,
-                start,
-                "exec",
-                f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
-            )
-            upstream_line = _upstream_line(worker, run.context, first_party=get_worker(step.agent_id) is worker)
-            if upstream_line:
-                await _emit(task_id, start, "exec", upstream_line)
-
-            try:
-                output = await _dispatch_step(task_id, start, plan, step, worker, run.context)
-            except asyncio.TimeoutError:
-                await _step_timed_out(task_id, start, step, worker)
-                continue
-            except Exception as e:
-                await _step_raised(task_id, start, step_index, step, worker, e, run.undispatched)
-                continue
-
-            if await _rejected_output(task_id, start, step, worker, output):
-                continue
-
-            await _record_delivery(task_id, start, step_index, step, worker, output, run, onchain=onchain)
+            await _run_step(task_id, start, plan, step_index, step, fresh.get(step.agent_id), run, onchain=onchain)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, run.succeeded, run.last_artifact)
@@ -836,6 +767,92 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _run_step(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    step_index: int,
+    step: PlanStep,
+    info: reputation_svc.RepInfo | None,
+    run: _RunState,
+    *,
+    onchain: bool,
+) -> None:
+    """One step of the run: refused, unresolved, failed or delivered, each
+    accounted for on `run`. A step's own failure never escapes; a bug in
+    resolving its worker does, to the run-level handler."""
+    refusal = _execute_refusal(step, info)
+    if refusal is not None:
+        # Story 2.03's rule for a step that fails, applied to a step
+        # that is refused: it is skipped, nothing is added to `spent`
+        # (so neither the simulated total nor the on-chain charge
+        # includes it), the settlement records it as not delivered,
+        # and the run carries on with the steps that remain. It is
+        # also NOT rated and NOT counted as a failure — the agent was
+        # never asked, and a withdrawal is its operator's decision,
+        # not a delivery it failed (ADR 0005 D5). By index, like every
+        # other per-step set here.
+        run.undispatched.add(step_index)
+        logger.warning("task %s step %d: refused at execute — %s", task_id, step_index, refusal)
+        await _emit(task_id, start, "error", f"step refused: {refusal} — not dispatched, not charged")
+        return
+
+    # Resolution deliberately stays OUTSIDE the per-step try/except
+    # below. It is a lookup, not the step's work: resolve_worker fails
+    # OPEN — an unreadable binding store logs and returns None — so the
+    # only thing left that could raise here is a bug in resolution
+    # itself, which would repeat on every step anyway. Letting that
+    # reach the run-level handler (status "failed", stream closed) is
+    # therefore the honest outcome, and is what the suite pins.
+    worker = await resolve_worker(step.agent_id)
+    if worker is None:
+        # No local worker and no resolvable binding. A bound agent
+        # that could not be resolved degrades identically to one nobody
+        # ever registered — the step is skipped, unbilled, and the run
+        # continues. Trace lines only reach the SSE viewer and are
+        # dropped with the task; every step failure also goes to the
+        # server log so an outage is diagnosable after the fact.
+        # Never dispatched, so never rated. resolve_worker fails OPEN,
+        # which means this branch is also where OUR outage lands — an
+        # unreadable binding store returns None exactly like a missing
+        # binding, and the read failure is negative-cached, so one blip
+        # can hit several steps. Rating here would write a permanent
+        # on-chain 20/100 against an operator who was never asked to
+        # deliver. "Did not deliver" and "was never asked" are
+        # different facts and only the first is theirs (ADR 0005 D5).
+        # THIS step, not this agent: the same agent may be resolvable
+        # at another step of the plan, and that step's delivery is its
+        # own evidence.
+        run.undispatched.add(step_index)
+        logger.error("task %s step %s: unknown agent — step skipped", task_id, step.agent_id)
+        await _emit(task_id, start, "error", f"unknown agent: {step.agent_id}")
+        return
+
+    await _emit(
+        task_id,
+        start,
+        "exec",
+        f"match agent: {worker.name} ({step.agent_id}) — {step.rationale}",
+    )
+    upstream_line = _upstream_line(worker, run.context, first_party=get_worker(step.agent_id) is worker)
+    if upstream_line:
+        await _emit(task_id, start, "exec", upstream_line)
+
+    try:
+        output = await _dispatch_step(task_id, start, plan, step, worker, run.context)
+    except asyncio.TimeoutError:
+        await _step_timed_out(task_id, start, step, worker)
+        return
+    except Exception as e:
+        await _step_raised(task_id, start, step_index, step, worker, e, run.undispatched)
+        return
+
+    if await _rejected_output(task_id, start, step, worker, output):
+        return
+
+    await _record_delivery(task_id, start, step_index, step, worker, output, run, onchain=onchain)
 
 
 async def _record_delivery(
