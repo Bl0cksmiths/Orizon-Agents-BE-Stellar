@@ -641,52 +641,7 @@ async def _run(
             if await _rejected_output(task_id, start, step, worker, output):
                 continue
 
-            run.succeeded += 1
-            run.spent += _price_stroops(step)
-            run.delivered_steps.add(step_index)
-            # Clears the streak and emits one recovery INFO, so an endpoint that
-            # comes back is as visible in Render as one that broke.
-            failure_tracker.record_success(step.agent_id)
-            if not onchain:
-                await _emit(
-                    task_id,
-                    start,
-                    "cost",
-                    f"x402 payment → {step.agent_id} :: {_amount(_price_stroops(step))} (simulated)",
-                )
-            summary = _summarize(output)
-            await _emit(task_id, start, "out", f"{worker.name}: {summary}")
-            # Kept from the SAME value the line above traced, not re-derived at
-            # settlement, so the dispute form and the trace cannot disagree
-            # about what this step produced. Cannot raise — see the helper.
-            run.output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
-
-            # Surface critic notes / violations if the worker reports them.
-            await _emit_output_notes(task_id, start, worker.name, output)
-
-            # Capture artifact if the worker returned one. Later steps may
-            # overwrite this (e.g. code.critic refines code.gen's draft).
-            art = output.get("artifact") if isinstance(output, dict) else None
-            if art:
-                run.last_artifact = art
-                await _emit_artifact(task_id, start, art)
-
-            # Persist this step's output under the agent name so later workers
-            # can read it. e.g. context["code.gen"] = {...}.
-            if isinstance(output, dict):
-                first_party = get_worker(step.agent_id) is worker
-                if first_party:
-                    run.first_party_ids.add(step.agent_id)
-                # Untrusted prose is fenced on the way IN — this assignment is
-                # the single boundary every later step reads through, so a
-                # worker added tomorrow gets the defence without knowing it
-                # needs one (2.02 AC-5 / Product Rule 5).
-                run.context[worker.name] = output if first_party else _fenced_for_context(output)
-                # The settler reads a rating-facing view of the same output —
-                # an untrusted worker does not get to grade itself. Under THIS
-                # step's index: the agent may serve another step of this plan,
-                # and that step's output is its own evidence, not this one's.
-                run.delivered[step_index] = _rating_view(output, first_party=first_party)
+            await _record_delivery(task_id, start, step_index, step, worker, output, run, onchain=onchain)
 
         total_steps = len(plan.plan.steps)
         status = _terminal_status(total_steps, run.succeeded, run.last_artifact)
@@ -881,6 +836,67 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _record_delivery(
+    task_id: str,
+    start: float,
+    step_index: int,
+    step: PlanStep,
+    worker: Worker,
+    output: dict,
+    run: _RunState,
+    *,
+    onchain: bool,
+) -> None:
+    """Count a step that delivered usable output, trace what it produced, and
+    hand that output on: to later steps through `context`, to the settlement
+    and the ratings by its plan-step index."""
+    run.succeeded += 1
+    run.spent += _price_stroops(step)
+    run.delivered_steps.add(step_index)
+    # Clears the streak and emits one recovery INFO, so an endpoint that
+    # comes back is as visible in Render as one that broke.
+    failure_tracker.record_success(step.agent_id)
+    if not onchain:
+        await _emit(
+            task_id,
+            start,
+            "cost",
+            f"x402 payment → {step.agent_id} :: {_amount(_price_stroops(step))} (simulated)",
+        )
+    summary = _summarize(output)
+    await _emit(task_id, start, "out", f"{worker.name}: {summary}")
+    # Kept from the SAME value the line above traced, not re-derived at
+    # settlement, so the dispute form and the trace cannot disagree
+    # about what this step produced. Cannot raise — see the helper.
+    run.output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
+
+    # Surface critic notes / violations if the worker reports them.
+    await _emit_output_notes(task_id, start, worker.name, output)
+
+    # Capture artifact if the worker returned one. Later steps may
+    # overwrite this (e.g. code.critic refines code.gen's draft).
+    art = output.get("artifact")
+    if art:
+        run.last_artifact = art
+        await _emit_artifact(task_id, start, art)
+
+    # Persist this step's output under the agent name so later workers
+    # can read it. e.g. context["code.gen"] = {...}.
+    first_party = get_worker(step.agent_id) is worker
+    if first_party:
+        run.first_party_ids.add(step.agent_id)
+    # Untrusted prose is fenced on the way IN — this assignment is
+    # the single boundary every later step reads through, so a
+    # worker added tomorrow gets the defence without knowing it
+    # needs one (2.02 AC-5 / Product Rule 5).
+    run.context[worker.name] = output if first_party else _fenced_for_context(output)
+    # The settler reads a rating-facing view of the same output —
+    # an untrusted worker does not get to grade itself. Under THIS
+    # step's index: the agent may serve another step of this plan,
+    # and that step's output is its own evidence, not this one's.
+    run.delivered[step_index] = _rating_view(output, first_party=first_party)
 
 
 async def _emit_run_opening(
