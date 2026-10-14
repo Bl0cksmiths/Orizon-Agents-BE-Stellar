@@ -222,10 +222,10 @@ async def network() -> NetworkInfo:
 # AGENT_ID_PATTERN now lives in app/schemas.py — the binding router bounds an
 # agent id with the same rule, and an SSRF-adjacent charset must have one owner.
 
-# Job/auth ids are 16-byte BytesN rendered hex — exactly 32 hex chars. Same
-# reasoning as AGENT_ID_PATTERN: bound the path param at the router edge so a
-# malformed id is a 422 with no RPC round-trip and no stack trace.
-JOB_ID_HEX_PATTERN = r"^[0-9a-fA-F]{32}$"
+# Job, auth and receipt ids are 16-byte BytesN rendered hex — exactly 32 hex
+# chars. Same reasoning as AGENT_ID_PATTERN: bound the id at the router edge so
+# a malformed one is a 422 with no RPC round-trip and no stack trace.
+ID16_HEX_PATTERN = r"^[0-9a-fA-F]{32}$"
 
 
 # ── reads ───────────────────────────────────────────────────────
@@ -606,7 +606,7 @@ async def invalidate_reputation(
 
 
 @router.get("/attestation/{job_id_hex}", response_model=AttestationRead)
-async def read_attestation(job_id_hex: str = Path(..., pattern=JOB_ID_HEX_PATTERN)) -> AttestationRead:
+async def read_attestation(job_id_hex: str = Path(..., pattern=ID16_HEX_PATTERN)) -> AttestationRead:
     """Read an on-chain Attestation by hex-encoded 16-byte job_id."""
     try:
         # The path pattern already guarantees 32 hex chars, so this decode
@@ -1013,9 +1013,9 @@ async def submit_signed(req: SubmitReq) -> dict:
 
 # ── writes (backend signs with STELLAR_SIGNING_KEY) ──────────────
 class ChargeReq(BaseModel):
-    auth_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
+    auth_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
     amount_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
-    job_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
+    job_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
 
 
 async def _refuse_charge_on_v2() -> None:
@@ -1085,11 +1085,11 @@ async def server_charge(req: ChargeReq) -> dict:
 
 
 class SealReq(BaseModel):
-    job_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
+    job_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
     orchestrator: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")  # G-address of the workflow owner
     intent_hash_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{64}$")
     agents: list[Annotated[str, Field(min_length=1, max_length=32)]] = Field(..., max_length=32)
-    receipts_hex: list[Annotated[str, Field(pattern=r"^[0-9a-fA-F]{32}$")]] = Field(..., max_length=32)
+    receipts_hex: list[Annotated[str, Field(pattern=ID16_HEX_PATTERN)]] = Field(..., max_length=32)
     total_spent_usdc: float = Field(..., ge=0, le=100_000, allow_inf_nan=False)
 
 
