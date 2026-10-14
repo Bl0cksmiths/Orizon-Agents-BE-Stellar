@@ -808,26 +808,7 @@ async def _run(
             output_summaries[step_index] = _stored_summary(task_id, step_index, summary)
 
             # Surface critic notes / violations if the worker reports them.
-            if isinstance(output, dict):
-                violations = output.get("critic_violations") or []
-                if violations:
-                    joined = " · ".join(violations)[:180]
-                    await _emit(task_id, start, "exec", f"{worker.name}: violations → {joined}")
-                notes = output.get("critic_notes") or []
-                if notes:
-                    joined = " · ".join(notes)[:180]
-                    await _emit(task_id, start, "exec", f"{worker.name}: {joined}")
-                # Some workers (deploy.v0) attach a synthetic preview URL —
-                # surface it so the demo viewer sees the "ship" moment. An
-                # unusable or non-http(s) one is dropped, not traced.
-                preview_url = _trace_url(output.get("preview_url"))
-                if preview_url:
-                    await _emit(
-                        task_id,
-                        start,
-                        "out",
-                        f"{worker.name}: preview → {preview_url}",
-                    )
+            await _emit_output_notes(task_id, start, worker.name, output)
 
             # Capture artifact if the worker returned one. Later steps may
             # overwrite this (e.g. code.critic refines code.gen's draft).
@@ -1052,6 +1033,30 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _emit_output_notes(task_id: str, start: float, worker_name: str, output: dict) -> None:
+    """Trace what a delivered step reported beside its result: the critic's
+    violations and notes, and a preview URL."""
+    violations = output.get("critic_violations") or []
+    if violations:
+        joined = " · ".join(violations)[:180]
+        await _emit(task_id, start, "exec", f"{worker_name}: violations → {joined}")
+    notes = output.get("critic_notes") or []
+    if notes:
+        joined = " · ".join(notes)[:180]
+        await _emit(task_id, start, "exec", f"{worker_name}: {joined}")
+    # Some workers (deploy.v0) attach a synthetic preview URL —
+    # surface it so the demo viewer sees the "ship" moment. An
+    # unusable or non-http(s) one is dropped, not traced.
+    preview_url = _trace_url(output.get("preview_url"))
+    if preview_url:
+        await _emit(
+            task_id,
+            start,
+            "out",
+            f"{worker_name}: preview → {preview_url}",
+        )
 
 
 async def _release_on_exit(task_id: str, start: float, auth_id_hex: str, reason: str) -> None:
