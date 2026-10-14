@@ -577,7 +577,6 @@ class InvalidatedReputation(BaseModel):
 
 @router.post(
     "/reputation/{agent_id}/invalidate",
-    response_model=InvalidatedReputation,
     summary="Drop one agent's cached reputation (operator only)",
     dependencies=[Depends(require_operator_key), Depends(invalidation_budget)],
 )
