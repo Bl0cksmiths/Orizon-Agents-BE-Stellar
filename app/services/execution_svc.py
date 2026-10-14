@@ -2019,6 +2019,36 @@ def _sealed_agents(
     return [payout.agent_id for payout in payout_plan.payouts]
 
 
+async def _warn_if_receipts_unlinked(
+    task_id: str,
+    start: float,
+    payout_plan: _PayoutPlan,
+    receipts: list[bytes] | None,
+    settle: dict[str, Any],
+    *,
+    job_hex: str,
+    settle_tx: str | None,
+    auth_id_hex: str,
+    payer: str,
+) -> None:
+    """Say so when a v2 settle paid someone but its receipts did not decode, so
+    its seal goes out without them."""
+    if receipts is not None or not payout_plan.payouts:
+        return
+    logger.error(
+        "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
+        "(result=%r, job %s, settle_tx %s, auth %s, payer %s)",
+        task_id,
+        len(payout_plan.payouts),
+        settle.get("result"),
+        job_hex,
+        settle_tx,
+        auth_id_hex,
+        payer,
+    )
+    await _emit(task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links")
+
+
 async def _hand_off_v2_seal(
     task_id: str,
     start: float,
@@ -2331,21 +2361,17 @@ async def _settle_v2(
         # for the run: the attestation's link to every payment that funded it.
         kind: SealKind = "delivery_only" if release else "paid"
         sealed_agents = _sealed_agents(plan, delivered_steps, payout_plan, release=release)
-        if receipts is None and payout_plan.payouts:
-            logger.error(
-                "task %s: settle result did not decode to %d receipt ids — sealing without receipt links "
-                "(result=%r, job %s, settle_tx %s, auth %s, payer %s)",
-                task_id,
-                len(payout_plan.payouts),
-                settle.get("result"),
-                job_hex,
-                settle_tx,
-                auth_id_hex,
-                payer,
-            )
-            await _emit(
-                task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links"
-            )
+        await _warn_if_receipts_unlinked(
+            task_id,
+            start,
+            payout_plan,
+            receipts,
+            settle,
+            job_hex=job_hex,
+            settle_tx=settle_tx,
+            auth_id_hex=auth_id_hex,
+            payer=payer,
+        )
         intent_hash = hashlib.sha256(plan.intent.encode("utf-8")).digest()
         seal_args = [
             sc.addr(settler),
