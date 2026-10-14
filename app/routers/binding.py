@@ -25,7 +25,7 @@ from __future__ import annotations
 import base64
 import logging
 import secrets
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query
@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
+from ..security import ErrorEnvelope
 from ..services import external_binding, operator_readiness
 from ..services.binding_registry import note_bound, note_unbound
 from ..services.binding_store import get_binding_store
@@ -46,6 +47,15 @@ router = APIRouter(prefix="/agents", tags=["binding"])
 # An ed25519 signature is exactly 64 bytes; base64 of that is 88 characters.
 # Bounded at the edge so a megabyte of "signature" is rejected before decode.
 _SIGNATURE_BYTES = 64
+
+# What `_require_owner` answers, on every route that resolves the agent's owner.
+_OWNER_RESPONSES: dict[int | str, dict[str, Any]] = {
+    404: {"model": ErrorEnvelope, "description": "`agent_not_found` — the registry names no owner for this agent id."},
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`registry_unavailable` — the owner could not be read on-chain. Retry.",
+    },
+}
 
 
 class BindChallengeReq(BaseModel):
@@ -236,6 +246,16 @@ async def endpoint_check(url: Annotated[str, Query(min_length=1, max_length=2048
 @router.post(
     "/{agent_id}/unbind/challenge",
     summary="Mint an unbind challenge to sign",
+    responses={
+        **_OWNER_RESPONSES,
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`registry_unavailable` — the owner could not be read on-chain; or `challenge_capacity_unbind` — "
+                "every unbind challenge slot is live. Retry."
+            ),
+        },
+    },
 )
 async def unbind_challenge(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
