@@ -516,6 +516,24 @@ def check_external_count(facts: Facts) -> Check:
     return check.passed(", ".join(f"{a} ({_short(o)})" for a, o in external))
 
 
+def _unready_reason(reads: Reads, agent_id: str) -> str | None:
+    """Why `agent_id` is not ready and reachable, read from its readiness route; None when it is."""
+    try:
+        answer = reads.agent_readiness(agent_id)
+    except Unreachable as exc:
+        return f"readiness unreadable ({exc})"
+    body = answer.obj()
+    if not answer.ok:
+        return f"readiness answered {_status_line(answer)}"
+    step = first_unready_step(body)
+    if body.get("ready") is True and step is None:
+        return None
+    if step is None:
+        return f"ready is {body.get('ready')!r}"
+    action = f" — {step.get('action')}" if step.get("action") else ""
+    return f"`{step.get('key')}` is {step.get('status')} ({step.get('detail')}){action}"
+
+
 def check_external_ready(reads: Reads, facts: Facts) -> Check:
     check = Check("operator.ready", "operator", "Every external agent is ready and reachable")
     external = external_agents(facts.adoption)
@@ -533,24 +551,11 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
     unready: list[str] = []
     ready: list[str] = []
     for agent_id, _owner in judged:
-        try:
-            answer = reads.agent_readiness(agent_id)
-        except Unreachable as exc:
-            unready.append(f"{agent_id}: readiness unreadable ({exc})")
-            continue
-        body = answer.obj()
-        if not answer.ok:
-            unready.append(f"{agent_id}: readiness answered {_status_line(answer)}")
-            continue
-        step = first_unready_step(body)
-        if body.get("ready") is True and step is None:
+        why = _unready_reason(reads, agent_id)
+        if why is None:
             ready.append(agent_id)
-            continue
-        if step is None:
-            unready.append(f"{agent_id}: ready is {body.get('ready')!r}")
-            continue
-        action = f" — {step.get('action')}" if step.get("action") else ""
-        unready.append(f"{agent_id}: `{step.get('key')}` is {step.get('status')} ({step.get('detail')}){action}")
+        else:
+            unready.append(f"{agent_id}: {why}")
     if unready:
         return check.failed(
             "not ready: " + "; ".join(unready),
