@@ -1782,6 +1782,30 @@ class _PayoutPlan:
         return sum(p.amount for p in self.payouts)
 
 
+def _merged_payouts(paid: list[tuple[int, str, int]], payees: Mapping[str, str], steps: list[_StepPayout]) -> list[Any]:
+    """One payout per agent, in first-seen order, for a run past the settle's
+    payout limit; each paid step is appended to `steps` under its agent's entry.
+
+    Raises `_PayoutRefused` when even merged there are more agents than one
+    settle accepts.
+    """
+    from ..stellar import client as sc
+
+    slot: dict[str, int] = {}
+    totals: list[int] = []
+    for index, agent_id, amount in paid:
+        if agent_id not in slot:
+            slot[agent_id] = len(totals)
+            totals.append(0)
+        totals[slot[agent_id]] += amount
+        steps.append(_StepPayout(index, agent_id, amount, slot[agent_id], payee=payees.get(agent_id)))
+    if len(totals) > sc.MAX_SETTLE_PAYOUTS:
+        raise _PayoutRefused(
+            f"{len(totals)} distinct agents delivered, more than the {sc.MAX_SETTLE_PAYOUTS} payouts one settle accepts"
+        )
+    return [sc.Payout(agent_id, totals[i]) for agent_id, i in slot.items()]
+
+
 def _payout_plan(
     plan: StoredPlan,
     delivered_steps: frozenset[int],
@@ -1853,20 +1877,7 @@ def _payout_plan(
             steps.append(_StepPayout(index, agent_id, amount, len(payouts), payee=payees.get(agent_id)))
             payouts.append(sc.Payout(agent_id, amount))
     else:
-        slot: dict[str, int] = {}
-        totals: list[int] = []
-        for index, agent_id, amount in paid:
-            if agent_id not in slot:
-                slot[agent_id] = len(totals)
-                totals.append(0)
-            totals[slot[agent_id]] += amount
-            steps.append(_StepPayout(index, agent_id, amount, slot[agent_id], payee=payees.get(agent_id)))
-        if len(totals) > sc.MAX_SETTLE_PAYOUTS:
-            raise _PayoutRefused(
-                f"{len(totals)} distinct agents delivered, "
-                f"more than the {sc.MAX_SETTLE_PAYOUTS} payouts one settle accepts"
-            )
-        payouts = [sc.Payout(agent_id, totals[i]) for agent_id, i in slot.items()]
+        payouts = _merged_payouts(paid, payees, steps)
     return _PayoutPlan(tuple(payouts), tuple(sorted(steps, key=lambda s: s.step_index)), clamped, cap)
 
 
