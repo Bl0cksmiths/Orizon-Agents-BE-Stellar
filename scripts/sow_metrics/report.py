@@ -82,11 +82,7 @@ def block_problems(block: Any) -> list[str]:
         problems.extend(_wording_problems(where, row, entry))
         if entry.get("status") not in (MET, NOT_MET):
             problems.append(f"{where}: status {entry.get('status')!r}")
-        for key in ("achieved", "method"):
-            if not isinstance(entry.get(key), str) or not entry[key].strip():
-                problems.append(f"{where}: {key} is empty")
-        if entry.get("status") == NOT_MET and (not isinstance(entry.get("reason"), str) or not entry["reason"].strip()):
-            problems.append(f"{where}: a miss needs a reason")
+        problems.extend(_text_problems(where, entry))
         problems.extend(_links_problems(where, entry.get("links")))
     return problems
 
@@ -97,6 +93,18 @@ def _wording_problems(where: str, row: SowRow, entry: dict[str, Any]) -> list[st
     return [
         f"{where}: {key} {entry.get(key)!r} is not the SOW's {want!r}" for key, want in wanted if entry.get(key) != want
     ]
+
+
+def _blank(value: Any) -> bool:
+    return not isinstance(value, str) or not value.strip()
+
+
+def _text_problems(where: str, entry: dict[str, Any]) -> list[str]:
+    """The entry's achieved and method, and a miss's reason: each words, never blank."""
+    problems = [f"{where}: {key} is empty" for key in ("achieved", "method") if _blank(entry.get(key))]
+    if entry.get("status") == NOT_MET and _blank(entry.get("reason")):
+        problems.append(f"{where}: a miss needs a reason")
+    return problems
 
 
 def _links_problems(where: str, links: Any) -> list[str]:
