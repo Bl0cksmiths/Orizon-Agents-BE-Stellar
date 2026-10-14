@@ -957,7 +957,7 @@ class ReclaimReq(BaseModel):
     auth_id_hex: str = Field(..., pattern=r"^[0-9a-f]{32}$")
 
 
-@router.post("/build/reclaim", response_model=XdrResponse)
+@router.post("/build/reclaim")
 async def build_reclaim(req: ReclaimReq) -> XdrResponse:
     """Build unsigned XDR for PaymentEscrow v2 `reclaim(payer, auth_id)`. The payer signs.
 
