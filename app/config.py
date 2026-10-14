@@ -1148,20 +1148,30 @@ class Settings(BaseSettings):
 
     # ── Startup reports (log, never raise) ────────────────────────
     # The validators above refuse to boot because the misconfiguration they
-    # catch would EXPOSE money routes or sign on the wrong network. The ones
-    # below catch a different class: values that are merely wrong, and whose
-    # only victim is the deployment itself. This service is live on mainnet
-    # with autoDeploy on, so a validator that wrongly rejects a real config
-    # takes the product down on merge — a cost that is never worth paying to
-    # improve an error message. They log loudly at startup instead, naming the
-    # variable and what breaks, so the operator does not have to trace a 500
-    # three layers down at request time.
+    # catch would EXPOSE money routes or sign on the wrong network. The
+    # reports below catch a different class: values that are merely wrong, and
+    # whose only victim is the deployment itself. This service is live on
+    # mainnet with autoDeploy on, so a validator that wrongly rejects a real
+    # config takes the product down on merge — a cost that is never worth
+    # paying to improve an error message. They log loudly at startup instead,
+    # naming the variable and what breaks, so the operator does not have to
+    # trace a 500 three layers down at request time.
+    #
+    # They are deliberately NOT validators. A validator's job is to accept or
+    # refuse; one that can only ever hand `self` back unchanged is a log line
+    # wearing a validator's contract, and it implies a refusal it can never
+    # make. They run from `model_post_init` instead, pydantic's hook for side
+    # effects after field validation, which returns nothing.
 
     def model_post_init(self, context: Any, /) -> None:
         """Run the startup reports once the fields are validated.
 
         Pydantic calls this hook once per construction, so each report logs
-        exactly once per Settings().
+        exactly once per Settings(), in the order below. It runs after every
+        field validator and BEFORE the model validators above, so a boot that
+        one of them goes on to refuse still logs its reports first: the
+        operator reading that deploy log sees every problem in one pass. No
+        report echoes a credential, so that is safe to print beside a refusal.
         """
         super().model_post_init(context)
         self._report_unknown_pdax_environment()
