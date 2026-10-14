@@ -68,6 +68,20 @@ def target_lines(totals: dict[str, int]) -> list[str]:
     ]
 
 
+def _workflow_rows(result: Verification) -> list[str]:
+    """One row per claimed workflow, every agent of every operator in order,
+    or a single "none claimed" row."""
+    rows = [
+        f"| `{_cell(agent.claim.agent_id)}` | `{_cell(wf.claim.job_id_hex)}` | {_tx(wf.claim.tx_hash)} "
+        f"| {wf.tx.ledger if wf.tx is not None else '—'} | {usdc_to_stroops(wf.claim.amount_usdc)} "
+        f"| {_acct(wf.claim.payer)} | {_cell(wf.proof or '—')} | {'yes' if wf.counted else 'no'} |"
+        for op in result.operators
+        for agent in op.agents
+        for wf in agent.workflows
+    ]
+    return rows or ["| — | — | none claimed | — | — | — | — | — |"]
+
+
 def render_markdown(claim: AdoptionClaim, result: Verification, team: TeamRegister, run: RunFacts) -> str:
     lines = [
         "# Adoption evidence — SOW §6.3 (testnet)",
@@ -121,19 +135,7 @@ def render_markdown(claim: AdoptionClaim, result: Verification, team: TeamRegist
         "| Agent | Job | Transaction | Ledger | Amount (stroops) | Payer | Proof | Counted |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    any_wf = False
-    for op in result.operators:
-        for agent in op.agents:
-            for wf in agent.workflows:
-                any_wf = True
-                ledger = wf.tx.ledger if wf.tx is not None else "—"
-                lines.append(
-                    f"| `{_cell(agent.claim.agent_id)}` | `{_cell(wf.claim.job_id_hex)}` | {_tx(wf.claim.tx_hash)} "
-                    f"| {ledger} | {usdc_to_stroops(wf.claim.amount_usdc)} | {_acct(wf.claim.payer)} "
-                    f"| {_cell(wf.proof or '—')} | {'yes' if wf.counted else 'no'} |"
-                )
-    if not any_wf:
-        lines.append("| — | — | none claimed | — | — | — | — | — |")
+    lines += _workflow_rows(result)
 
     lines += [
         "",
