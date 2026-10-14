@@ -615,19 +615,7 @@ async def _run(
         # account and parallel submits collide on its sequence number: first
         # the seal reconciliation (the attestation of money that moved), then
         # the ratings.
-        for pending in pending_seals:
-            await _reconcile_seal(task_id, start, pending)
-        if rate_under is not None and payer:
-            await _submit_ratings(
-                task_id,
-                start,
-                plan,
-                run.delivered,
-                payer=payer,
-                job_id=rate_under,
-                undispatched=frozenset(run.undispatched),
-                first_party_ids=frozenset(run.first_party_ids),
-            )
+        await _follow_up(task_id, start, plan, run, pending_seals, rate_under, payer)
 
     except asyncio.CancelledError:
         # Shutdown or external cancel: leave the task terminal instead of
@@ -655,6 +643,32 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _follow_up(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    run: _RunState,
+    pending_seals: list[_PendingSeal],
+    rate_under: bytes | None,
+    payer: str | None,
+) -> None:
+    """The run's work after its task is final: reconcile each seal that did
+    not confirm, then submit the ratings (a paid run only)."""
+    for pending in pending_seals:
+        await _reconcile_seal(task_id, start, pending)
+    if rate_under is not None and payer:
+        await _submit_ratings(
+            task_id,
+            start,
+            plan,
+            run.delivered,
+            payer=payer,
+            job_id=rate_under,
+            undispatched=frozenset(run.undispatched),
+            first_party_ids=frozenset(run.first_party_ids),
+        )
 
 
 def _finalize_on_exit(task_id: str, run: _RunState, *, onchain: bool) -> None:
