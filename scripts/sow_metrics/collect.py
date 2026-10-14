@@ -527,18 +527,24 @@ def _bound_flags(operators: list[Any]) -> dict[str, bool | None]:
     return bound
 
 
+def _read_params(snap: Snapshot, reads: Reads) -> None:
+    """The live reputation settings: an answer that is not a JSON object is a failed read."""
+    params = _read(snap, "params", reads.reputation_params)
+    if params is None:
+        return
+    if params.ok and isinstance(params.body, dict):
+        snap.params = params.body
+    else:
+        snap.failures["params"] = f"{params.url} answered HTTP {params.status}"
+
+
 def read_deployment(snap: Snapshot, reads: Reads) -> None:
     snap.urls.update(
         params=reads.api_url("/stellar/reputation/params"),
         openapi=f"{reads.backend}/openapi.json",
         readiness=f"{reads.backend}/readiness",
     )
-    params = _read(snap, "params", reads.reputation_params)
-    if params is not None:
-        if params.ok and isinstance(params.body, dict):
-            snap.params = params.body
-        else:
-            snap.failures["params"] = f"{params.url} answered HTTP {params.status}"
+    _read_params(snap, reads)
     spec = _read(snap, "openapi", reads.openapi)
     if spec is not None:
         paths = spec.obj().get("paths")
