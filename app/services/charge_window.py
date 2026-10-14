@@ -232,6 +232,15 @@ class _Advance:
     ledgers_in_window: int
 
 
+def _resume_or_start(escrow_id: str, held: _Index | None, window_start: int, seconds_per_ledger: float) -> _Index:
+    """`held` trimmed to the window when it is this escrow's and reaches it; otherwise an empty index at its start."""
+    if held is not None and held.escrow_id == escrow_id and held.next_ledger >= window_start:
+        first = max(held.first_ledger, window_start)
+        charges = [c for c in held.charges if c.charge.ledger >= first]
+        return replace(held, first_ledger=first, charges=tuple(charges))
+    return _Index(escrow_id, window_start, window_start, (), seconds_per_ledger)
+
+
 def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Advance:
     """Bring `held` up to the node's tip, as far as the deadline allows. Blocking.
 
@@ -247,13 +256,11 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
     seconds_per_ledger = settlement_svc._seconds_per_ledger(probe)
     in_window = latest - window_start + 1
 
-    if held is not None and held.escrow_id == escrow_id and held.next_ledger >= window_start:
-        first = max(held.first_ledger, window_start)
-        charges = [c for c in held.charges if c.charge.ledger >= first]
-        index = replace(held, first_ledger=first, charges=tuple(charges))
-    else:
-        index = _Index(escrow_id, window_start, window_start, (), seconds_per_ledger)
-    index = replace(index, seconds_per_ledger=seconds_per_ledger, latest=latest)
+    index = replace(
+        _resume_or_start(escrow_id, held, window_start, seconds_per_ledger),
+        seconds_per_ledger=seconds_per_ledger,
+        latest=latest,
+    )
 
     seen = {c.event_id for c in index.charges}
     found = list(index.charges)
