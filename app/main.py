@@ -452,8 +452,11 @@ app.add_middleware(OriginLockMiddleware)
 # headers too, not just responses that reached the router.
 app.add_middleware(SecurityHeadersMiddleware)
 
-# Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
-# stack compressed while the rate limiter still sees the raw request.
+# Outside every layer that makes or rewrites a body, so artifact/trace
+# payloads (30–76 kB) leave the stack compressed while the rate limiter still
+# sees the raw request. The two layers outside it only add headers, so neither
+# touches the compressed bytes, and CORS appends its `Vary: Origin` to the
+# `Vary: Accept-Encoding` set here rather than replacing it.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Outermost of all: every response — including 429s from the limiter and
