@@ -23,7 +23,7 @@ from .config import (
     usdc_to_stroops,
 )
 from .register import TeamRegister
-from .verify import Check, Verification, as_dict, met, summary_line
+from .verify import Check, Verification, VerifiedOperator, as_dict, met, summary_line
 
 MARKDOWN_NAME = "adoption-report.md"
 JSON_NAME = "adoption-report.json"
@@ -65,6 +65,17 @@ def target_lines(totals: dict[str, int]) -> list[str]:
     flags = met(totals)
     return [
         f"- **{TARGET_LABELS[m]}: {totals[m]} of {TARGETS[m]} — {'MET' if flags[m] else 'NOT MET'}**" for m in TARGETS
+    ]
+
+
+def _operator_rows(i: int, op: VerifiedOperator) -> list[str]:
+    """Operator `OP-<i>`'s rows: one per agent, or a dash row when it claimed none."""
+    if not op.agents:
+        return [f"| OP-{i} | {_acct(op.claim.owner)} | — | — | — | — | no |"]
+    return [
+        f"| OP-{i} | {_acct(op.claim.owner)} | `{_cell(agent.claim.agent_id)}` | {_cell(agent.claim.name)} "
+        f"| {agent.claim.active} | {agent.claim.bound} | {'yes' if agent.counted else 'no'} |"
+        for agent in op.agents
     ]
 
 
@@ -120,13 +131,7 @@ def render_markdown(claim: AdoptionClaim, result: Verification, team: TeamRegist
         "|---|---|---|---|---|---|---|",
     ]
     for i, op in enumerate(result.operators, 1):
-        if not op.agents:
-            lines.append(f"| OP-{i} | {_acct(op.claim.owner)} | — | — | — | — | no |")
-        for agent in op.agents:
-            lines.append(
-                f"| OP-{i} | {_acct(op.claim.owner)} | `{_cell(agent.claim.agent_id)}` | {_cell(agent.claim.name)} "
-                f"| {agent.claim.active} | {agent.claim.bound} | {'yes' if agent.counted else 'no'} |"
-            )
+        lines += _operator_rows(i, op)
 
     lines += [
         "",
