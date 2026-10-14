@@ -101,24 +101,31 @@ def load_team_register(path: Path = REGISTER_PATH) -> tuple[TeamWallet, ...]:
     first_seen: dict[str, int] = {}
     wallets: list[TeamWallet] = []
     for index, entry in enumerate(raw["wallets"]):
-        label = f"{name} entry {index}"
-        if not isinstance(entry, dict):
-            raise TeamRegisterError(f"{label}: expected an object, got {type(entry).__name__}")
-        if set(entry) != _ENTRY_FIELDS:
-            raise TeamRegisterError(f"{label}: expected exactly address, role and evidence, got {sorted(entry)}")
-        address = entry["address"]
-        if not isinstance(address, str) or not StrKey.is_valid_ed25519_public_key(address):
-            raise TeamRegisterError(f"{label}: {address!r} is not a valid Stellar account id (G-strkey)")
-        label = f"{label} ({address})"
-        for key in ("role", "evidence"):
-            value = entry[key]
-            if not isinstance(value, str) or not value.strip():
-                raise TeamRegisterError(f"{label}: `{key}` must be a non-empty string")
-        if address in first_seen:
-            raise TeamRegisterError(f"{label}: duplicates entry {first_seen[address]}")
-        first_seen[address] = index
-        wallets.append(TeamWallet(address=address, role=entry["role"].strip(), evidence=entry["evidence"].strip()))
+        wallet = _register_entry(entry, f"{name} entry {index}")
+        if wallet.address in first_seen:
+            raise TeamRegisterError(
+                f"{name} entry {index} ({wallet.address}): duplicates entry {first_seen[wallet.address]}"
+            )
+        first_seen[wallet.address] = index
+        wallets.append(wallet)
     return tuple(wallets)
+
+
+def _register_entry(entry: object, label: str) -> TeamWallet:
+    """One register entry, validated; `label` names it in the error raised."""
+    if not isinstance(entry, dict):
+        raise TeamRegisterError(f"{label}: expected an object, got {type(entry).__name__}")
+    if set(entry) != _ENTRY_FIELDS:
+        raise TeamRegisterError(f"{label}: expected exactly address, role and evidence, got {sorted(entry)}")
+    address = entry["address"]
+    if not isinstance(address, str) or not StrKey.is_valid_ed25519_public_key(address):
+        raise TeamRegisterError(f"{label}: {address!r} is not a valid Stellar account id (G-strkey)")
+    label = f"{label} ({address})"
+    for key in ("role", "evidence"):
+        value = entry[key]
+        if not isinstance(value, str) or not value.strip():
+            raise TeamRegisterError(f"{label}: `{key}` must be a non-empty string")
+    return TeamWallet(address=address, role=entry["role"].strip(), evidence=entry["evidence"].strip())
 
 
 # Loaded at import: the router imports this module and `app.main` imports the
