@@ -218,6 +218,13 @@ def _say_findings(say: Callable[[str], None], metrics: list[Metric], snap: Snaps
         say(note)
 
 
+def _summary(metrics: list[Metric]) -> str:
+    """How many were met, and how many could not be measured when any could not."""
+    met = sum(1 for m in metrics if m.status == MET)
+    unread = sum(1 for m in metrics if not m.measured)
+    return f"{met} of {len(metrics)} met" + (f", {unread} not measured" if unread else "")
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -272,8 +279,5 @@ def main(
         say("wrote " + ", ".join(str(p) for p in paths))
     if args.print_block:
         out.write(dump_block(block))
-    met = sum(1 for m in metrics if m.status == MET)
-    unread = sum(1 for m in metrics if not m.measured)
-    summary = f"{met} of {len(metrics)} met" + (f", {unread} not measured" if unread else "")
-    say(f"exit {code}: {summary}")
+    say(f"exit {code}: {_summary(metrics)}")
     return code
