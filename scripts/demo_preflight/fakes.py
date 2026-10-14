@@ -211,6 +211,13 @@ class FakeWorld:
             return _json(503, {"error": "waking"})
         return _json(200, {"status": "ok"})
 
+    def agent_readiness_answer(self, agent_id: str) -> httpx.Response:
+        """GET /api/agents/{id}/readiness: the agent's report, or an unregistered one's."""
+        body = self.agent_readiness.get(agent_id)
+        if body is None:
+            body = {"agent_id": agent_id, "checked_at": 1, "ready": False, "steps": ready_steps(registered="todo")}
+        return _json(200, body)
+
     def api(self, method: str, path: str) -> httpx.Response:
         not_found = _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
         if method == "POST":
@@ -226,13 +233,7 @@ class FakeWorld:
         if path == "/api/agents":
             return _json(200, self.agents)
         if path.startswith("/api/agents/") and path.endswith("/readiness"):
-            if not self.readiness_route:
-                return not_found
-            agent_id = path.split("/")[3]
-            body = self.agent_readiness.get(agent_id)
-            if body is None:
-                body = {"agent_id": agent_id, "checked_at": 1, "ready": False, "steps": ready_steps(registered="todo")}
-            return _json(200, body)
+            return self.agent_readiness_answer(path.split("/")[3]) if self.readiness_route else not_found
         if path == "/api/stellar/reputation":
             reputations = self.reputations
             if self.degraded_batches > 0:
