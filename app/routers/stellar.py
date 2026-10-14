@@ -1222,7 +1222,20 @@ class SealReq(BaseModel):
     total_spent_usdc: float = Field(..., ge=0, le=100_000, allow_inf_nan=False)
 
 
-@router.post("/server/seal", dependencies=[Depends(require_seal_key)])
+@router.post(
+    "/server/seal",
+    dependencies=[Depends(require_seal_key)],
+    responses={
+        400: {"model": ErrorEnvelope, "description": "`seal_failed` — the seal did not go through."},
+        401: _INVALID_API_KEY,
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`operator_key_not_configured` — API_KEY is empty; or the backend signing key is not configured."
+            ),
+        },
+    },
+)
 async def server_seal(req: SealReq) -> dict:
     """Backend-signed AttestationRegistry.seal (backend is the `sealer` role)."""
     if not settings.stellar_signing_key:
