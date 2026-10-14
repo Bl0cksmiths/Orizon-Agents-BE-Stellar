@@ -775,6 +775,15 @@ def _coverage(gap: _Unmirrored, accounted: int, window: charge_window.WindowSett
     )
 
 
+def _window_days(results: dict[str, _AgentResult]) -> float:
+    """The span the settlement scan covered, in days.
+
+    One scan answers every agent, so this is its span — or 0 when it never
+    ran; kept as the smallest so the claim holds for every agent regardless."""
+    windows = [r.window_days for r in results.values() if r.window_days is not None]
+    return min(windows) if windows else 0.0
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -810,10 +819,7 @@ async def build_report() -> AdoptionReport:
     for result in results.values():
         if not result.complete:
             unreadable.add(result.agent.agent_id)
-    # One scan answers every agent, so this is its span — or 0 when it never
-    # ran; kept as the smallest so the claim holds for every agent regardless.
-    windows = [r.window_days for r in results.values() if r.window_days is not None]
-    window_days = min(windows) if windows else 0.0
+    window_days = _window_days(results)
     complete = not owners_left and not (window is not None and window.out_of_time)
     if unreadable or not complete:
         degraded = True
