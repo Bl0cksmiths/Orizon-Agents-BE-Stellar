@@ -595,7 +595,10 @@ async def ramp_status(ramp_id: str) -> RampRecord:
     return record
 
 
-@secured.post("/ramp/{ramp_id}/reconcile")
+@secured.post(
+    "/ramp/{ramp_id}/reconcile",
+    responses={401: _INVALID_API_KEY, 404: _RAMP_NOT_FOUND, 502: _UPSTREAM_UNAVAILABLE},
+)
 async def ramp_reconcile(ramp_id: str = Path(..., max_length=64)) -> RampRecord:
     """Check PDAX for settlement and advance the ramp — used by the UI to track
     progress without relying on PDAX's redirect page."""
