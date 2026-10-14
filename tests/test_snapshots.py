@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,8 +88,12 @@ def test_a_snapshot_carries_its_body_gzip_and_a_weak_etag() -> None:
 
 
 def test_the_etag_changes_with_the_body_and_only_with_it() -> None:
-    assert snapshots.etag_for(b"a") == snapshots.etag_for(b"a")
-    assert snapshots.etag_for(b"a") != snapshots.etag_for(b"b")
+    first = snapshots.etag_for(b"a")
+    again = snapshots.etag_for(bytes(bytearray(b"a")))  # an equal body that is a different object
+
+    assert first == again
+    assert re.fullmatch(r'W/"[0-9a-f]{24}"', first)
+    assert first != snapshots.etag_for(b"b")
 
 
 # ── serving ─────────────────────────────────────────────────────────────────
