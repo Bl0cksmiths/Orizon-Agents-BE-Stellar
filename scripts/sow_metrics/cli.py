@@ -167,6 +167,21 @@ def confirm_testnet(reads: Reads, chain: ChainReader) -> dict[str, object]:
     return network
 
 
+def _run_facts(cfg: RunConfig, stamp: float) -> RunFacts:
+    """Where and when this run measured, for the Markdown and the raw JSON."""
+    return RunFacts(
+        api=cfg.api,
+        backend=cfg.backend,
+        frontend=cfg.frontend,
+        rpc_url=cfg.rpc_url,
+        horizon_url=cfg.horizon_url,
+        github_api=cfg.github_api,
+        generated_at=int(stamp),
+        generated_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
+        withheld_external=cfg.withhold_external,
+    )
+
+
 def _status_word(m: Metric) -> str:
     """The metric's console status, padded to one width."""
     if m.status == MET:
@@ -232,18 +247,7 @@ def main(
     if problems:  # a generator bug, never a finding: refuse to write a block the index cannot take
         raise ValueError("the metrics block breaks its frozen shape: " + "; ".join(problems))
 
-    stamp = now() if now else time.time()
-    run = RunFacts(
-        api=cfg.api,
-        backend=cfg.backend,
-        frontend=cfg.frontend,
-        rpc_url=cfg.rpc_url,
-        horizon_url=cfg.horizon_url,
-        github_api=cfg.github_api,
-        generated_at=int(stamp),
-        generated_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
-        withheld_external=cfg.withhold_external,
-    )
+    run = _run_facts(cfg, now() if now else time.time())
     for m in metrics:
         say(f"[{_status_word(m)}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
     for source, failure in sorted(snap.failures.items()):
