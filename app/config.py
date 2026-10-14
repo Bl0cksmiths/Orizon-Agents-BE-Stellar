@@ -64,6 +64,9 @@ REPUTATION_READ_BUDGET_TOLERANCE = 1e-9
 # an import would have been for.
 _MIN_API_KEY_CHARS = 8
 
+# Joins the faults a boot validator names into one sentence.
+_FAULT_JOINER = "; and "
+
 
 def _seconds(value: float) -> str:
     """A duration as a boot error prints it: precise enough to copy back in.
@@ -721,7 +724,7 @@ class Settings(BaseSettings):
             )
         if exposures:
             raise ValueError(
-                "API_KEY is required because " + "; and ".join(exposures) + ". Without it every "
+                "API_KEY is required because " + _FAULT_JOINER.join(exposures) + ". Without it every "
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
@@ -823,7 +826,7 @@ class Settings(BaseSettings):
             # The key is a credential: name the variable and the faults, never
             # echo the value or its length beyond the bound it failed.
             raise ValueError(
-                "API_KEY cannot be used as configured because " + "; and ".join(faults) + ". Set API_KEY "
+                "API_KEY cannot be used as configured because " + _FAULT_JOINER.join(faults) + ". Set API_KEY "
                 "(in the Render dashboard for the deployed service) to at least "
                 f"{_MIN_API_KEY_CHARS} printable ascii characters with no surrounding whitespace — "
                 "otherwise the adjudication routes answer 401 to the operator's own key, "
@@ -907,7 +910,7 @@ class Settings(BaseSettings):
             )
         if faults:
             raise ValueError(
-                "A money bound cannot be used as configured: " + "; and ".join(faults) + ". Set each named "
+                "A money bound cannot be used as configured: " + _FAULT_JOINER.join(faults) + ". Set each named "
                 "variable (in the Render dashboard for the deployed service) to a plain decimal number within "
                 "the rule stated, or unset it to take the default."
             )
@@ -963,7 +966,7 @@ class Settings(BaseSettings):
             faults.append("REPUTATION_STALE_GRACE_SECONDS is not a finite number of seconds, zero or above")
         if faults:
             raise ValueError(
-                "A reputation setting cannot be used as configured: " + "; and ".join(faults) + ". Set each "
+                "A reputation setting cannot be used as configured: " + _FAULT_JOINER.join(faults) + ". Set each "
                 "named variable (in the Render dashboard for the deployed service) to a plain number within the "
                 "rule stated, or unset it to take the default."
             )
@@ -1143,7 +1146,7 @@ class Settings(BaseSettings):
                 )
         if faults:
             raise ValueError(
-                "The reputation batch cannot be sized as configured: " + "; and ".join(faults) + ". Raise "
+                "The reputation batch cannot be sized as configured: " + _FAULT_JOINER.join(faults) + ". Raise "
                 "REPUTATION_BATCH_TIMEOUT_SECONDS (within the planning budget) or REPUTATION_READ_CONCURRENCY, "
                 "or unset the named variables to take the defaults."
             )
