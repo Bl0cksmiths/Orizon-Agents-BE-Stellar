@@ -471,13 +471,15 @@ def per_request_costs(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 # ── tier rules and the recommended policy ───────────────────────────────────
 
+CURRENT_TIER_RULE = "round up below 0.50 (current)"
+
 
 def _rule(name: str) -> Callable[[str, float], str]:
     def below(line: float) -> Callable[[str, float], str]:
         return lambda tier, conf: tier_up(tier) if conf < line else tier
 
     rules: dict[str, Callable[[str, float], str]] = {
-        "round up below 0.50 (current)": below(0.50),
+        CURRENT_TIER_RULE: below(0.50),
         "round up below 0.35": below(0.35),
         "round up below 0.25": below(0.25),
         "never round up": lambda tier, conf: tier,
@@ -487,7 +489,7 @@ def _rule(name: str) -> Callable[[str, float], str]:
 
 
 TIER_RULES = (
-    "round up below 0.50 (current)",
+    CURRENT_TIER_RULE,
     "round up below 0.35",
     "round up below 0.25",
     "never round up",
@@ -570,7 +572,6 @@ def watch_sweep(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # with the best accuracy and fewest over-tiered requests. Everything else stays.
 RECOMMENDED = STARTING.with_(injection_block=0.40)
 RECOMMENDED_TIER_RULE = "only low->moderate below 0.50"
-CURRENT_TIER_RULE = "round up below 0.50 (current)"
 
 
 def recommended(sweep_rows: list[dict[str, Any]], tier_test_rows: list[dict[str, Any]]) -> dict[str, Any]:
