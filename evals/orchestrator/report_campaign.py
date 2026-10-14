@@ -238,6 +238,73 @@ def _sweep_section(a: dict[str, Any]) -> list[str]:
     return L
 
 
+def _cost_section(a: dict[str, Any]) -> list[str]:
+    """§8: spend per stage and model, per request, per day under the cap, and prompt caching."""
+    costs = a["costs"]
+    s4 = a["s4"]
+    pr = s4["per_request"]
+    L: list[str] = []
+    add = L.append
+    add("## 8. Cost")
+    add("")
+    add("| stage | calls | list price | booked by the app's ledger |")
+    add("|---|---|---|---|")
+    for s in ("smoke", "s1-guard", "s2-external", "s3-haiku", "s4-full"):
+        c = costs[s]
+        add(f"| {s} | {c['calls']} | {usd(c['list_price_usd'])} | {usd(c['app_booked_usd'])} |")
+    w5 = costs["s5-workers"]
+    add(f"| s5-workers | 7 + 2 | {usd(w5['list_price_usd'] + w5['diagnostic_reruns_usd'])} | — |")
+    add(f"| **total** | | **{usd(a['grand_total_usd'])}** | |")
+    add("")
+    add("By model in stage 4:")
+    add("")
+    add("| model | calls | input | output | cache read | cache write | list price |")
+    add("|---|---|---|---|---|---|---|")
+    for m, v in costs["s4-full"]["by_model"].items():
+        add(
+            f"| {m} | {int(v['calls'])} | {int(v['input_tokens'])} | {int(v['output_tokens'])} | {int(v['cache_read_input_tokens'])} | {int(v['cache_creation_input_tokens'])} | {usd(v['usd'])} |"
+        )
+    add("")
+    add("Per request (planning only: guard + improve + re-check + plan; executing a plan's steps is extra):")
+    add("")
+    add("| | cost |")
+    add("|---|---|")
+    add(f"| refused request (guard only) | {usd(pr['mean_refused_request'])} |")
+    add(
+        f"| planned request, mean | {usd(pr['mean_planned_request'])} (p50 {usd(pr['planned_spread']['p50'])}, p95 {usd(pr['planned_spread']['p95'])}, max {usd(pr['planned_spread']['max'])}) |"
+    )
+    for t in TIERS:
+        bt = pr["by_tier"][t]
+        if bt["requests"]:
+            add(
+                f"| planned at tier {t} (n={bt['requests']}) | {usd(bt['mean_request_usd'])} (planner call {usd(bt['mean_plan_call_usd'])}; planner output tokens p50 {bt['plan_output_tokens'].get('p50', 'n/a')}, max {bt['plan_output_tokens'].get('max', 'n/a')}) |"
+            )
+    add(f"| this dataset's mix (51% planned) | {usd(pr['mean_per_request_mix'])} |")
+    add("")
+    add("| requests / day | planning spend, dataset mix | planning spend, every request planned |")
+    add("|---|---|---|")
+    for v in (50, 200, 1000):
+        add(f"| {v} | {usd(pr['daily_projection_mix'][v])} | {usd(pr['daily_projection_all_planned'][v])} |")
+    add("")
+    add(
+        f"The ${DAILY_CAP_USD:.0f}/day cap covers about {_count(pr['requests_per_cap_planned'])} planned requests "
+        f"(≈{_count(pr['requests_per_cap_mix'])} at this dataset's mix) if nothing is executed. Executions draw on the "
+        "same cap: one Sonnet code.gen + code.critic pair cost "
+        f"{usd(sum(a['s5'].get(w, {}).get('cost_usd', 0.0) for w in ('code.gen', 'code.critic')))} in stage 5."
+    )
+    add("")
+    add("### Prompt caching")
+    add("")
+    add("| stage | calls | calls reading the cache | calls writing it | share of prompt tokens served from cache |")
+    add("|---|---|---|---|---|")
+    for k, v in s4["caching"].items():
+        add(
+            f"| {k} | {v['calls']} | {pct(v['calls_with_cache_read'])} | {v['calls_with_cache_write']} | {100 * v['cached_share_of_prompt_tokens']:.1f}% |"
+        )
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -549,63 +616,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     )
     add("")
 
-    add("## 8. Cost")
-    add("")
-    add("| stage | calls | list price | booked by the app's ledger |")
-    add("|---|---|---|---|")
-    for s in ("smoke", "s1-guard", "s2-external", "s3-haiku", "s4-full"):
-        c = costs[s]
-        add(f"| {s} | {c['calls']} | {usd(c['list_price_usd'])} | {usd(c['app_booked_usd'])} |")
-    w5 = costs["s5-workers"]
-    add(f"| s5-workers | 7 + 2 | {usd(w5['list_price_usd'] + w5['diagnostic_reruns_usd'])} | — |")
-    add(f"| **total** | | **{usd(a['grand_total_usd'])}** | |")
-    add("")
-    add("By model in stage 4:")
-    add("")
-    add("| model | calls | input | output | cache read | cache write | list price |")
-    add("|---|---|---|---|---|---|---|")
-    for m, v in costs["s4-full"]["by_model"].items():
-        add(
-            f"| {m} | {int(v['calls'])} | {int(v['input_tokens'])} | {int(v['output_tokens'])} | {int(v['cache_read_input_tokens'])} | {int(v['cache_creation_input_tokens'])} | {usd(v['usd'])} |"
-        )
-    add("")
-    add("Per request (planning only: guard + improve + re-check + plan; executing a plan's steps is extra):")
-    add("")
-    add("| | cost |")
-    add("|---|---|")
-    add(f"| refused request (guard only) | {usd(pr['mean_refused_request'])} |")
-    add(
-        f"| planned request, mean | {usd(pr['mean_planned_request'])} (p50 {usd(pr['planned_spread']['p50'])}, p95 {usd(pr['planned_spread']['p95'])}, max {usd(pr['planned_spread']['max'])}) |"
-    )
-    for t in TIERS:
-        bt = pr["by_tier"][t]
-        if bt["requests"]:
-            add(
-                f"| planned at tier {t} (n={bt['requests']}) | {usd(bt['mean_request_usd'])} (planner call {usd(bt['mean_plan_call_usd'])}; planner output tokens p50 {bt['plan_output_tokens'].get('p50', 'n/a')}, max {bt['plan_output_tokens'].get('max', 'n/a')}) |"
-            )
-    add(f"| this dataset's mix (51% planned) | {usd(pr['mean_per_request_mix'])} |")
-    add("")
-    add("| requests / day | planning spend, dataset mix | planning spend, every request planned |")
-    add("|---|---|---|")
-    for v in (50, 200, 1000):
-        add(f"| {v} | {usd(pr['daily_projection_mix'][v])} | {usd(pr['daily_projection_all_planned'][v])} |")
-    add("")
-    add(
-        f"The ${DAILY_CAP_USD:.0f}/day cap covers about {_count(pr['requests_per_cap_planned'])} planned requests "
-        f"(≈{_count(pr['requests_per_cap_mix'])} at this dataset's mix) if nothing is executed. Executions draw on the "
-        "same cap: one Sonnet code.gen + code.critic pair cost "
-        f"{usd(sum(a['s5'].get(w, {}).get('cost_usd', 0.0) for w in ('code.gen', 'code.critic')))} in stage 5."
-    )
-    add("")
-    add("### Prompt caching")
-    add("")
-    add("| stage | calls | calls reading the cache | calls writing it | share of prompt tokens served from cache |")
-    add("|---|---|---|---|---|")
-    for k, v in s4["caching"].items():
-        add(
-            f"| {k} | {v['calls']} | {pct(v['calls_with_cache_read'])} | {v['calls_with_cache_write']} | {100 * v['cached_share_of_prompt_tokens']:.1f}% |"
-        )
-    add("")
+    L += _cost_section(a)
 
     L += _workers_section(a, keep)
 
