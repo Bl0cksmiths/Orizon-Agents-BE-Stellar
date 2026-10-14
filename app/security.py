@@ -438,6 +438,14 @@ def client_identity(scope: dict) -> str | None:
     if not raw:
         peer = scope.get("client")
         return peer[0] if peer else None
+    return _forwarded_caller(chain)
+
+
+def _forwarded_caller(chain: list[str]) -> str | None:
+    """The caller a forwarded chain names, read from the RIGHT: past the
+    entries that are not publicly routable, then past at most one Cloudflare
+    edge. None when no entry is left, or the one left cannot be a visitor
+    (see `client_identity`)."""
     index = len(chain) - 1
     while index >= 0:
         ip = _ip(chain[index])
