@@ -339,6 +339,58 @@ def _latency_section(a: dict[str, Any]) -> list[str]:
     return L
 
 
+def _pipeline_section(a: dict[str, Any]) -> list[str]:
+    """§6: the improver, the spec re-check and the raw plans of stage 4."""
+    s4 = a["s4"]
+    pipe = s4["pipeline"]
+    L: list[str] = []
+    add = L.append
+    add("## 6. Full pipeline (stage 4)")
+    add("")
+    rv = pipe["recheck_verdicts"]
+    add(
+        f"- Requests improved by Sonnet 5.5: {pipe['improved']}; improver failures (planned from the original): {pct(pipe['improver_failed'])}."
+    )
+    add(
+        "- Spec re-check verdicts (recomputed with `prompt_improver.judge_spec`): "
+        + ", ".join(f"{k} {v}" for k, v in rv.items())
+        + f"; drift rate {pct(pipe['drift_rate'])}; planned from the spec {pct(pipe['planned_from_spec'])}."
+    )
+    add(f"- Blocked by the re-check after an allow: {', '.join(pipe['blocked_after_recheck']) or 'none'}.")
+    add(
+        f"- Requests planned: {pipe['planned']}, of which not legitimate by label: {', '.join(pipe['planned_non_legit']) or 'none'}."
+    )
+    add("")
+    add("Plan validity on the RAW planner output (before `orchestrator_svc` clamps it):")
+    add("")
+    add("| check | value |")
+    add("|---|---|")
+    for key in ("plan_valid", "plan_schema", "plan_allowlisted", "plan_tiers"):
+        add(f"| {key.replace('_', ' ')} | {pct(pipe[key])} |")
+    add(f"| refused by the planner | {len(pipe['plan_refused'])} |")
+    add(f"| truncated (max_tokens) | {len(pipe['plan_truncated'])} |")
+    add(f"| steps whose tier is above the plan's tier | {pipe['steps_above_plan_tier']} |")
+    add("")
+    add(
+        "Invalid plans: "
+        + (
+            "; ".join(f"{x['id']} ({', '.join(x['failed'])})" for x in pipe["invalid"])
+            or "none — every raw plan passed every check"
+        )
+        + "."
+    )
+    add("")
+    add("- Steps per plan: " + ", ".join(f"{k} step(s) × {v}" for k, v in pipe["step_counts"].items()) + ".")
+    add("- Step tiers: " + ", ".join(f"{k} {v}" for k, v in sorted(pipe["step_tiers"].items())) + ".")
+    add("- Agents chosen: " + ", ".join(f"{k} × {v}" for k, v in pipe["agents"].items()) + ".")
+    add("")
+    add("### Tier confusion (jev, stage 4)")
+    add("")
+    L += _confusion(s4["guard"]["tier_confusion"])
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -579,49 +631,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
         add(f"| {x['id']} | {x['expected']} | {x['jev']} | {x['haiku']} |")
     add("")
 
-    add("## 6. Full pipeline (stage 4)")
-    add("")
-    rv = pipe["recheck_verdicts"]
-    add(
-        f"- Requests improved by Sonnet 5.5: {pipe['improved']}; improver failures (planned from the original): {pct(pipe['improver_failed'])}."
-    )
-    add(
-        "- Spec re-check verdicts (recomputed with `prompt_improver.judge_spec`): "
-        + ", ".join(f"{k} {v}" for k, v in rv.items())
-        + f"; drift rate {pct(pipe['drift_rate'])}; planned from the spec {pct(pipe['planned_from_spec'])}."
-    )
-    add(f"- Blocked by the re-check after an allow: {', '.join(pipe['blocked_after_recheck']) or 'none'}.")
-    add(
-        f"- Requests planned: {pipe['planned']}, of which not legitimate by label: {', '.join(pipe['planned_non_legit']) or 'none'}."
-    )
-    add("")
-    add("Plan validity on the RAW planner output (before `orchestrator_svc` clamps it):")
-    add("")
-    add("| check | value |")
-    add("|---|---|")
-    for key in ("plan_valid", "plan_schema", "plan_allowlisted", "plan_tiers"):
-        add(f"| {key.replace('_', ' ')} | {pct(pipe[key])} |")
-    add(f"| refused by the planner | {len(pipe['plan_refused'])} |")
-    add(f"| truncated (max_tokens) | {len(pipe['plan_truncated'])} |")
-    add(f"| steps whose tier is above the plan's tier | {pipe['steps_above_plan_tier']} |")
-    add("")
-    add(
-        "Invalid plans: "
-        + (
-            "; ".join(f"{x['id']} ({', '.join(x['failed'])})" for x in pipe["invalid"])
-            or "none — every raw plan passed every check"
-        )
-        + "."
-    )
-    add("")
-    add("- Steps per plan: " + ", ".join(f"{k} step(s) × {v}" for k, v in pipe["step_counts"].items()) + ".")
-    add("- Step tiers: " + ", ".join(f"{k} {v}" for k, v in sorted(pipe["step_tiers"].items())) + ".")
-    add("- Agents chosen: " + ", ".join(f"{k} × {v}" for k, v in pipe["agents"].items()) + ".")
-    add("")
-    add("### Tier confusion (jev, stage 4)")
-    add("")
-    L += _confusion(s4["guard"]["tier_confusion"])
-    add("")
+    L += _pipeline_section(a)
 
     L += _latency_section(a)
 
