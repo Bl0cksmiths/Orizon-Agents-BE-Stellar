@@ -87,6 +87,7 @@ class SowRow:
 
 # SOW v4 §6.3's row categories.
 TRANSACTION_TARGETS = "Transaction targets"
+TECHNICAL_MILESTONES = "Technical milestones"
 
 # SOW v4 §6.3, character for character. The frozen block repeats these, and
 # the frontend's evidence index is pasted from the block.
@@ -96,20 +97,18 @@ SOW_ROWS: tuple[SowRow, ...] = (
     SowRow("m03", TRANSACTION_TARGETS, "Workflows routed to external agents & settled on Testnet", "≥ 3", 3),
     SowRow("m04", TRANSACTION_TARGETS, "On-chain USDC settlements (charges) recorded", "≥ 3", 3),
     SowRow("m05", TRANSACTION_TARGETS, "Dispute → partial-refund settlements", "≥ 1", 1),
-    SowRow("m06", "Technical milestones", "Permissionless AgentRegistry.register flow live on the dApp", "Yes", None),
-    SowRow(
-        "m07", "Technical milestones", "Reputation-gated routing (reads avg_bps, applies a floor) live", "Yes", None
-    ),
-    SowRow("m08", "Technical milestones", "Automated dispute window + partial-credit refund live", "Yes", None),
+    SowRow("m06", TECHNICAL_MILESTONES, "Permissionless AgentRegistry.register flow live on the dApp", "Yes", None),
+    SowRow("m07", TECHNICAL_MILESTONES, "Reputation-gated routing (reads avg_bps, applies a floor) live", "Yes", None),
+    SowRow("m08", TECHNICAL_MILESTONES, "Automated dispute window + partial-credit refund live", "Yes", None),
     SowRow(
         "m09",
-        "Technical milestones",
+        TECHNICAL_MILESTONES,
         'Public "List your agent on Orizon" integration guide published',
         "Yes",
         None,
     ),
-    SowRow("m10", "Technical milestones", "3–5 min demo video published", "Yes", None),
-    SowRow("m11", "Technical milestones", "All source code released under MIT License", "Yes", None),
+    SowRow("m10", TECHNICAL_MILESTONES, "3–5 min demo video published", "Yes", None),
+    SowRow("m11", TECHNICAL_MILESTONES, "All source code released under MIT License", "Yes", None),
 )
 
 # Exit codes, so a wrapper can tell a refusal from a read failure without
