@@ -695,6 +695,24 @@ def _no_genuine_detail(floor: int, ignored: list[str], registered: list[str], re
     )
 
 
+def _reputation_floor(params: Answer, batch: Answer) -> int:
+    """The floor reputation-gated routing applies; raises `_Finding` when no floor applies."""
+    if not params.ok or not batch.ok:
+        raise _Finding(
+            f"reputation params {_status_line(params)}, batch {_status_line(batch)}",
+            "Deploy a backend build that serves /api/stellar/reputation and /params.",
+        )
+    if params.obj().get("enabled") is not True:
+        raise _Finding(
+            "reputation-gated routing is off: the floor excludes no one",
+            "Set REPUTATION_ENABLED=true on the Render dashboard.",
+        )
+    floor = params.obj().get("floor_bps")
+    if not isinstance(floor, int):
+        raise _Finding("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
+    return floor
+
+
 def _read_past_cold_start(reads: Reads, batch: Answer, registered: list[str]) -> tuple[Any, int]:
     """The reputation batch's entries once past a cold start, and how many reads that took.
 
@@ -743,22 +761,10 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
         batch = reads.reputation()
     except Unreachable as exc:
         return check.failed(str(exc), "Rerun; the reputation routes did not answer.")
-    if not params.ok or not batch.ok:
-        return check.failed(
-            f"reputation params {_status_line(params)}, batch {_status_line(batch)}",
-            "Deploy a backend build that serves /api/stellar/reputation and /params.",
-        )
-    if params.obj().get("enabled") is not True:
-        return check.failed(
-            "reputation-gated routing is off: the floor excludes no one",
-            "Set REPUTATION_ENABLED=true on the Render dashboard.",
-        )
-    floor = params.obj().get("floor_bps")
-    if not isinstance(floor, int):
-        return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
-    facts.floor_bps = floor
     registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
     try:
+        floor = _reputation_floor(params, batch)
+        facts.floor_bps = floor
         reputations, reads_made = _read_past_cold_start(reads, batch, registered)
     except _Finding as finding:
         return check.failed(finding.detail, finding.fix)
