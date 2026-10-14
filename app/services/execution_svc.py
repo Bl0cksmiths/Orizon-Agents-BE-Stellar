@@ -600,16 +600,8 @@ async def _run(
             )
         elif status == "complete":
             # Only a run that actually delivered gets a (simulated) seal — a
-            # workflow that produced nothing has nothing to attest to — and it
-            # counts the agents that delivered, never the plan's (D-086).
-            sim_hash = "0x" + secrets.token_hex(16)
-            await _emit(task_id, start, "proof", f"ERC-8004 attestation: {sim_hash} (simulated)")
-            await _emit(
-                task_id,
-                start,
-                "proof",
-                f"workflow sealed — {run.succeeded} agents · {_amount(run.spent)} · {time.monotonic() - start:.2f}s",
-            )
+            # workflow that produced nothing has nothing to attest to.
+            await _emit_simulated_seal(task_id, start, run)
 
         if status != "complete":
             logger.error(
@@ -682,6 +674,19 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _emit_simulated_seal(task_id: str, start: float, run: _RunState) -> None:
+    """A simulated run's seal: a made-up attestation hash and the run's
+    total, counting the agents that delivered, never the plan's (D-086)."""
+    sim_hash = "0x" + secrets.token_hex(16)
+    await _emit(task_id, start, "proof", f"ERC-8004 attestation: {sim_hash} (simulated)")
+    await _emit(
+        task_id,
+        start,
+        "proof",
+        f"workflow sealed — {run.succeeded} agents · {_amount(run.spent)} · {time.monotonic() - start:.2f}s",
+    )
 
 
 async def _settle_paid_run(
