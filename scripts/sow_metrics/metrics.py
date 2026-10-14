@@ -946,6 +946,13 @@ def _and_list(parts: list[str]) -> str:
     return ", ".join(parts[:-1]) + ", and " + parts[-1]
 
 
+def _refund_switch(readiness: dict[str, Any] | None) -> tuple[bool, bool]:
+    """(refunds are switched on, the readiness report carries the refund switch at all)."""
+    disputes = (readiness or {}).get("disputes")
+    reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
+    return isinstance(reconcile, dict) and reconcile.get("enabled") is True, isinstance(disputes, dict)
+
+
 def _m08_shortfalls(
     *, v2_live: bool, v2_settled: bool, refunds_on: bool, switch_reported: bool, refunded: bool
 ) -> list[str]:
@@ -992,9 +999,7 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     # settles one (v1's charge cannot move a payer's funds, D-039).
     v2_live = any(e.live and e.version >= 2 for e in snap.escrows)
     v2_settled = any(e.receipts for e in snap.escrows if e.version >= 2)
-    disputes = (snap.readiness or {}).get("disputes")
-    reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
-    refunds_on = isinstance(reconcile, dict) and reconcile.get("enabled") is True
+    refunds_on, switch_reported = _refund_switch(snap.readiness)
     refunded = refunds.status == MET
     met = not missing and v2_live and v2_settled and refunds_on and refunded
     achieved, reason = "Yes", None
@@ -1006,7 +1011,7 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
             v2_live=v2_live,
             v2_settled=v2_settled,
             refunds_on=refunds_on,
-            switch_reported=isinstance(disputes, dict),
+            switch_reported=switch_reported,
             refunded=refunded,
         )
         achieved = "Partly: the dispute routes are deployed, but " + _and_list(parts) + "."
