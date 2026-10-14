@@ -1165,6 +1165,7 @@ class Settings(BaseSettings):
         """
         super().model_post_init(context)
         self._report_unknown_pdax_environment()
+        self._report_malformed_pdax_otp_secret()
 
     def _report_unknown_pdax_environment(self) -> None:
         """Name a mistyped PDAX_ENVIRONMENT at startup, not at first use.
@@ -1192,8 +1193,7 @@ class Settings(BaseSettings):
                 ", ".join(PDAX_ENVIRONMENTS),
             )
 
-    @model_validator(mode="after")
-    def _report_malformed_pdax_otp_secret(self) -> "Settings":
+    def _report_malformed_pdax_otp_secret(self) -> None:
         """Name a mistyped PDAX_OTP_SECRET at startup, not at the MFA challenge.
 
         totp_now() (app/pdax/totp.py) base32-decodes the seed the first time
@@ -1209,7 +1209,7 @@ class Settings(BaseSettings):
         """
         secret = self.pdax_otp_secret.strip().replace(" ", "").upper()
         if not secret:
-            return self
+            return
         remainder = len(secret) % 8
         padded = secret + ("=" * (8 - remainder)) if remainder else secret
         try:
@@ -1223,7 +1223,6 @@ class Settings(BaseSettings):
                 "authenticate. Re-copy the TOTP seed from the PDAX console, or unset "
                 "PDAX_OTP_SECRET if the account has no MFA."
             )
-        return self
 
     @model_validator(mode="after")
     def _report_malformed_stellar_signing_key(self) -> "Settings":
