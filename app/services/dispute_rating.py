@@ -27,7 +27,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from ..config import settings
 from ..stellar import client as sc
@@ -213,6 +213,40 @@ def _refused_by_ledger(
     return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
 
 
+def _classify_answer(
+    dispute: DisputeRecord, raw: dict[str, Any], facts: str, derived_hex: str, weight: int
+) -> RatingOutcome:
+    """The outcome of a submit the client answered: SUCCESS only with a hash, else FAILED or TIMEOUT."""
+    raw_hash = raw.get("hash")
+    tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
+    status = str(raw.get("status") or "")
+
+    if status == "SUCCESS" and tx_hash:
+        logger.info("dispute %s: rating written — tx %s (%s)", dispute.id, tx_hash, facts)
+        return RatingOutcome("SUCCESS", tx_hash, derived_hex, DISPUTE_RATING, weight)
+
+    if status == "FAILED":
+        logger.error(
+            "dispute %s: rating transaction failed on the ledger, nothing was written — hash=%s (%s)",
+            dispute.id,
+            tx_hash,
+            facts,
+        )
+        return RatingOutcome(
+            "FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight, "the ledger failed the transaction"
+        )
+
+    logger.error(
+        "dispute %s: rating unconfirmed and MAY STILL LAND — a retry cannot double it, the replay guard "
+        "refuses a second: status=%s hash=%s (%s)",
+        dispute.id,
+        status or "missing",
+        tx_hash,
+        facts,
+    )
+    return RatingOutcome("TIMEOUT", tx_hash, derived_hex, DISPUTE_RATING, weight)
+
+
 async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
     """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
 
@@ -336,31 +370,4 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         )
         return RatingOutcome("TIMEOUT", None, derived_hex, DISPUTE_RATING, weight)
 
-    raw_hash = raw.get("hash")
-    tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
-    status = str(raw.get("status") or "")
-
-    if status == "SUCCESS" and tx_hash:
-        logger.info("dispute %s: rating written — tx %s (%s)", dispute.id, tx_hash, facts)
-        return RatingOutcome("SUCCESS", tx_hash, derived_hex, DISPUTE_RATING, weight)
-
-    if status == "FAILED":
-        logger.error(
-            "dispute %s: rating transaction failed on the ledger, nothing was written — hash=%s (%s)",
-            dispute.id,
-            tx_hash,
-            facts,
-        )
-        return RatingOutcome(
-            "FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight, "the ledger failed the transaction"
-        )
-
-    logger.error(
-        "dispute %s: rating unconfirmed and MAY STILL LAND — a retry cannot double it, the replay guard "
-        "refuses a second: status=%s hash=%s (%s)",
-        dispute.id,
-        status or "missing",
-        tx_hash,
-        facts,
-    )
-    return RatingOutcome("TIMEOUT", tx_hash, derived_hex, DISPUTE_RATING, weight)
+    return _classify_answer(dispute, raw, facts, derived_hex, weight)
