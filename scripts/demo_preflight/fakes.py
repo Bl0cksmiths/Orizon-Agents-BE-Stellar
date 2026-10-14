@@ -218,6 +218,16 @@ class FakeWorld:
             body = {"agent_id": agent_id, "checked_at": 1, "ready": False, "steps": ready_steps(registered="todo")}
         return _json(200, body)
 
+    def reputation_batch(self) -> httpx.Response:
+        """GET /api/stellar/reputation: every entry reads degraded (the prior) while a cold start lasts."""
+        reputations = self.reputations
+        if self.degraded_batches > 0:
+            self.degraded_batches -= 1
+            reputations = {
+                a: {**r, "lower_bound_bps": 5677, "source": "prior", "degraded": True} for a, r in reputations.items()
+            }
+        return _json(200, {"reputations": reputations, "floor_bps": FLOOR, "prior_bps": 7000})
+
     def api(self, method: str, path: str) -> httpx.Response:
         not_found = _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
         if method == "POST":
@@ -235,14 +245,7 @@ class FakeWorld:
         if path.startswith("/api/agents/") and path.endswith("/readiness"):
             return self.agent_readiness_answer(path.split("/")[3]) if self.readiness_route else not_found
         if path == "/api/stellar/reputation":
-            reputations = self.reputations
-            if self.degraded_batches > 0:
-                self.degraded_batches -= 1
-                reputations = {
-                    a: {**r, "lower_bound_bps": 5677, "source": "prior", "degraded": True}
-                    for a, r in reputations.items()
-                }
-            return _json(200, {"reputations": reputations, "floor_bps": FLOOR, "prior_bps": 7000})
+            return self.reputation_batch()
         if path == "/api/stellar/reputation/params":
             return _json(200, self.params)
         return not_found
