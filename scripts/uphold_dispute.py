@@ -727,6 +727,54 @@ def check_config() -> int:
     )
 
 
+def _report_upheld(dispute: DisputeRecord, fallback: int) -> int:
+    """`report` for a dispute the store still reads `upheld`: no credit was paid.
+
+    Never EXIT_OK: an `upheld` dispute is a buyer who has not been paid."""
+    say()
+    if fallback == EXIT_ADJUDICATION_RACE:
+        # The ONE case where "no claim is held" must not be said. The
+        # caller that won the compare-and-set is between the decision and
+        # the claim, so the claim may be taken and a transfer signed while
+        # this block is on the screen — and the generic `upheld` sentence
+        # below ends "then re-run", which is how this run races the other
+        # one a second time.
+        say(f"  ANOTHER ADJUDICATION OF {dispute.id} IS RUNNING — this one refused rather than race it.")
+        say("  Nothing was signed HERE. Whether anything has been signed THERE is not knowable")
+        say("  from this process: the dispute reads `upheld`, which is the state the other caller")
+        say("  claims from, so it may be signing a transfer as you read this.")
+        say()
+        say("  Read the dispute back before deciding anything — this signs nothing:")
+        say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id} --dry-run")
+        say()
+        say("  and go by what it says:")
+        say("    * `credited`  — they paid it. A live re-run writes the RATING only, never a transfer.")
+        say("    * `crediting` — their transfer is on the network. Do NOT re-run; reconcile it (10).")
+        say("    * `upheld`    — they failed or gave up and nothing moved, so a re-run pays it.")
+        say()
+        return fallback
+    # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
+    # outcome reached two ways: `uphold` refusing with `refund_failed`, and
+    # a call that returned while leaving the claim released. Both mean the
+    # ledger rejected the transfer, so both get the sentence that matters —
+    # nothing moved, and this is the one case where re-running is right.
+    if fallback in (EXIT_OK, EXIT_TRANSFER_FAILED):
+        say(f"  the transfer FAILED — dispute {dispute.id} is back at `upheld` and nothing moved.")
+        say("  The claim was released, so running this again once the cause is fixed (settler")
+        say("  balance, asset SAC, RPC) pays the credit. The log lines above name it.")
+        say()
+        return EXIT_TRANSFER_FAILED
+    say(f"  dispute {dispute.id} stands at `upheld`: the decision was recorded, the credit was")
+    say("  not paid, and no claim is held. Fix what the refusal above names, then re-run.")
+    say()
+    # NEVER 0 from here, whatever `fallback` says: a dispute left `upheld`
+    # is a buyer who has not been paid, and 0 is the code a wrapper reads
+    # as "credit and rating both landed". The branch above is meant to
+    # catch a clean return; if it ever stops doing so, this one must not
+    # turn that into a success.
+    return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+
+
 def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None, fallback: int) -> int:
     """What the STORE says happened to the money, and the exit code that follows.
 
@@ -804,48 +852,7 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         return EXIT_OK
 
     if dispute.status == "upheld":
-        say()
-        if fallback == EXIT_ADJUDICATION_RACE:
-            # The ONE case where "no claim is held" must not be said. The
-            # caller that won the compare-and-set is between the decision and
-            # the claim, so the claim may be taken and a transfer signed while
-            # this block is on the screen — and the generic `upheld` sentence
-            # below ends "then re-run", which is how this run races the other
-            # one a second time.
-            say(f"  ANOTHER ADJUDICATION OF {dispute.id} IS RUNNING — this one refused rather than race it.")
-            say("  Nothing was signed HERE. Whether anything has been signed THERE is not knowable")
-            say("  from this process: the dispute reads `upheld`, which is the state the other caller")
-            say("  claims from, so it may be signing a transfer as you read this.")
-            say()
-            say("  Read the dispute back before deciding anything — this signs nothing:")
-            say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id} --dry-run")
-            say()
-            say("  and go by what it says:")
-            say("    * `credited`  — they paid it. A live re-run writes the RATING only, never a transfer.")
-            say("    * `crediting` — their transfer is on the network. Do NOT re-run; reconcile it (10).")
-            say("    * `upheld`    — they failed or gave up and nothing moved, so a re-run pays it.")
-            say()
-            return fallback
-        # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
-        # outcome reached two ways: `uphold` refusing with `refund_failed`, and
-        # a call that returned while leaving the claim released. Both mean the
-        # ledger rejected the transfer, so both get the sentence that matters —
-        # nothing moved, and this is the one case where re-running is right.
-        if fallback in (EXIT_OK, EXIT_TRANSFER_FAILED):
-            say(f"  the transfer FAILED — dispute {dispute.id} is back at `upheld` and nothing moved.")
-            say("  The claim was released, so running this again once the cause is fixed (settler")
-            say("  balance, asset SAC, RPC) pays the credit. The log lines above name it.")
-            say()
-            return EXIT_TRANSFER_FAILED
-        say(f"  dispute {dispute.id} stands at `upheld`: the decision was recorded, the credit was")
-        say("  not paid, and no claim is held. Fix what the refusal above names, then re-run.")
-        say()
-        # NEVER 0 from here, whatever `fallback` says: a dispute left `upheld`
-        # is a buyer who has not been paid, and 0 is the code a wrapper reads
-        # as "credit and rating both landed". The branch above is meant to
-        # catch a clean return; if it ever stops doing so, this one must not
-        # turn that into a success.
-        return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+        return _report_upheld(dispute, fallback)
 
     say()
     if fallback != EXIT_OK and dispute.status == "open":
