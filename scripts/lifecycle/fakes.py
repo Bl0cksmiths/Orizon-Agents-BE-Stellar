@@ -603,6 +603,27 @@ class FakeWorld:
         )
         return charge_tx, spent / 10_000_000, paid_steps
 
+    def _charge_v1(self, delivered: list[dict[str, Any]], auth_id: str, job: str) -> tuple[str, float, bool]:
+        """v1's batch charge of every delivered step: (its hash, the USDC charged, whether it succeeded)."""
+        charge_tx = self._tx(status="SUCCESS" if self.charge_succeeds else "FAILED")
+        settled_usdc = sum(s["est_price_usdc"] for s in delivered)
+        settled = self.charge_succeeds
+        if settled:
+            self._event(
+                ESCROW,
+                charge_tx,
+                [scval.to_symbol("charged"), scval.to_symbol("orizon_batch")],
+                scval.to_vec(
+                    [
+                        scval.to_bytes(secrets.token_bytes(16)),
+                        scval.to_bytes(bytes.fromhex(auth_id)),
+                        scval.to_int128(usdc_to_stroops(settled_usdc)),
+                        scval.to_bytes(bytes.fromhex(job)),
+                    ]
+                ),
+            )
+        return charge_tx, settled_usdc, settled
+
     def finish(self, task_id: str) -> None:
         """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
         task = self.tasks[task_id]
@@ -620,23 +641,7 @@ class FakeWorld:
             charge_tx, settled_usdc, paid_steps = self._settle_v2(steps, delivered, auth_id, auth, payer, job)
             settled = True
         else:
-            charge_tx = self._tx(status="SUCCESS" if self.charge_succeeds else "FAILED")
-            settled_usdc = sum(s["est_price_usdc"] for s in delivered)
-            settled = self.charge_succeeds
-            if settled:
-                self._event(
-                    ESCROW,
-                    charge_tx,
-                    [scval.to_symbol("charged"), scval.to_symbol("orizon_batch")],
-                    scval.to_vec(
-                        [
-                            scval.to_bytes(secrets.token_bytes(16)),
-                            scval.to_bytes(bytes.fromhex(auth_id)),
-                            scval.to_int128(usdc_to_stroops(settled_usdc)),
-                            scval.to_bytes(bytes.fromhex(job)),
-                        ]
-                    ),
-                )
+            charge_tx, settled_usdc, settled = self._charge_v1(delivered, auth_id, job)
 
         proof_tx = None
         if settled:
