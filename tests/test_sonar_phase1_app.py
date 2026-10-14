@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ipaddress
+from pathlib import Path
 
+import pytest
 from stellar_sdk import Network
 
 from app import config, security
@@ -58,3 +60,47 @@ def test_an_address_just_outside_a_cloudflare_range_is_not_an_edge() -> None:
         after = net.broadcast_address + 1
         if not any(after in other for other in security._CLOUDFLARE_NETWORKS):
             assert not security._is_cloudflare(after), net
+
+
+# ── CORS: plain http only ever for the loopback ─────────────────────────────
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def _render_cors_origins() -> list[str]:
+    lines = (REPO / "render.yaml").read_text().splitlines()
+    at = next(i for i, line in enumerate(lines) if line.strip() == "- key: CORS_ORIGINS")
+    value = lines[at + 1].strip()
+    assert value.startswith("value: ")
+    return [o.strip() for o in value.removeprefix("value: ").split(",") if o.strip()]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://localhost.evil.example",
+        "http://127.0.0.1.nip.io",
+        "http://localhost:3000@evil.example",
+        "http://evil.example#localhost",
+        "http://0.0.0.0:3000",
+        "http://192.168.1.10:3000",
+        "http://LOCALHOST.evil.example",
+    ],
+)
+def test_a_loopback_lookalike_over_plain_http_is_dropped(origin: str) -> None:
+    assert security.strict_cors_origins([origin]) == []
+
+
+def test_the_deployed_origin_list_admits_plain_http_for_the_loopback_only() -> None:
+    kept = security.strict_cors_origins(_render_cors_origins())
+    assert kept, "render.yaml lists no CORS origin the filter keeps"
+    for origin in kept:
+        assert origin.startswith("https://") or security._LOOPBACK_ORIGIN.fullmatch(origin), origin
+
+
+def test_the_vercel_origin_regex_is_https_only() -> None:
+    import app.main as main
+
+    assert main._CORS_ORIGIN_REGEX.fullmatch("https://orizon-agents-fe-stellar.vercel.app")
+    assert main._CORS_ORIGIN_REGEX.fullmatch("http://orizon-agents-fe-stellar.vercel.app") is None
+    assert main._CORS_ORIGIN_REGEX.fullmatch("http://orizon-agents-fe-stellar-git-x.vercel.app") is None
