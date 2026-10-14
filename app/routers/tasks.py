@@ -72,7 +72,6 @@ async def get_task(task_id: str) -> Task:
 
 @router.get(
     "/tasks/{task_id}/artifact",
-    response_model=ArtifactResponse,
     summary="Get a task's produced artifact",
     dependencies=[Depends(require_task_read)],
 )
