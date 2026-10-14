@@ -683,7 +683,7 @@ async def root() -> dict[str, str]:
     return {"service": "orizon-agents", "status": "online"}
 
 
-@app.get("/health", tags=["meta"], summary="Liveness probe", response_model=HealthResponse)
+@app.get("/health", tags=["meta"], summary="Liveness probe")
 async def health() -> HealthResponse:
     """Liveness probe — process is up and serving. The body comes from the
     shared `health_payload()`, so this route and the proxy-reachable
