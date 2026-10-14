@@ -14,7 +14,7 @@ from stellar_sdk import StrKey
 
 from .api import Reads
 from .chain import ChainReader
-from .collect import FAILURES, collect
+from .collect import FAILURES, Snapshot, collect
 from .config import (
     DEFAULT_API,
     DEFAULT_BACKEND,
@@ -174,6 +174,17 @@ def _status_word(m: Metric) -> str:
     return "NOT MET" if m.measured else "UNREAD "
 
 
+def _unused_pending_links(snap: Snapshot, pending_links: dict[str, PendingLink]) -> list[str]:
+    """A note for each pending link whose page did not answer 404, so it stood in for nothing."""
+    notes = []
+    for metric_id in sorted(pending_links):
+        page = snap.pages.get(PAGE_METRICS[metric_id])
+        if page is None or page.status != 404:
+            status = "could not be read" if page is None else f"answered HTTP {page.status}"
+            notes.append(f"note: --pending-link {metric_id} was not used: {PAGE_METRICS[metric_id]} {status}, not 404")
+    return notes
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -245,11 +256,8 @@ def main(
             "until their consent is recorded (--publish-external links them); the raw JSON keeps them, so do not "
             "publish it"
         )
-    for metric_id in sorted(cfg.pending_links):
-        page = snap.pages.get(PAGE_METRICS[metric_id])
-        if page is None or page.status != 404:
-            status = "could not be read" if page is None else f"answered HTTP {page.status}"
-            say(f"note: --pending-link {metric_id} was not used: {PAGE_METRICS[metric_id]} {status}, not 404")
+    for note in _unused_pending_links(snap, cfg.pending_links):
+        say(note)
     if cfg.out_dir is not None:
         paths = write(cfg.out_dir, block, render_markdown(metrics, run, code), render_raw(metrics, snap, run, code))
         say("wrote " + ", ".join(str(p) for p in paths))
