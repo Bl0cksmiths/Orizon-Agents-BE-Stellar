@@ -303,6 +303,32 @@ class Runner:
         self.say(f"api {self.api.base} · rpc {rpc_url}")
         if readiness is not None:
             self.say(f"readiness: {readiness.get('status')} · ratings {readiness.get('ratings')}")
+        records = self.agent_records(agents, start)
+
+        if not self.cfg.dry_run:
+            self.save()
+            self.note(
+                "preflight",
+                "preflight",
+                f"testnet confirmed by API and RPC; escrow v{version}; starting at '{start}'",
+                escrow_version=version,
+                escrow_version_source=how,
+                escrow=self.contracts.get("payment_escrow"),
+                readiness=readiness,
+                agent_record=records[self.cfg.agent],
+                start_stage=start,
+                until=self.cfg.until,
+                **({"agents": list(self.cfg.all_agents), "agent_records": records} if self.cfg.multi_agent else {}),
+            )
+        self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
+        return start
+
+    def agent_records(self, agents: dict[Any, dict[str, Any]], start: str) -> dict[str, dict[str, Any]]:
+        """Each --agent's GET /api/agents row.
+
+        A fresh run refuses an agent that is not external and bound; a dry run
+        records it as a blocker instead.
+        """
         records: dict[str, dict[str, Any]] = {}
         for agent_id in self.cfg.all_agents:
             agent = agents.get(agent_id)
@@ -322,24 +348,7 @@ class Runner:
                 if not self.cfg.dry_run:
                     raise Stop(EXIT_REFUSED, message)
                 self.blockers.append(f"{message}: a real run refuses it before decompose (exit {EXIT_REFUSED})")
-
-        if not self.cfg.dry_run:
-            self.save()
-            self.note(
-                "preflight",
-                "preflight",
-                f"testnet confirmed by API and RPC; escrow v{version}; starting at '{start}'",
-                escrow_version=version,
-                escrow_version_source=how,
-                escrow=self.contracts.get("payment_escrow"),
-                readiness=readiness,
-                agent_record=records[self.cfg.agent],
-                start_stage=start,
-                until=self.cfg.until,
-                **({"agents": list(self.cfg.all_agents), "agent_records": records} if self.cfg.multi_agent else {}),
-            )
-        self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
-        return start
+        return records
 
     def read_escrow_version(self, chain: ChainReader) -> tuple[int, str]:
         """(version, how it was decided) of the escrow this run's money goes through."""
