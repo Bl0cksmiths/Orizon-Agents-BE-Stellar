@@ -58,6 +58,10 @@ SEEDED_NAME = "Writer"
 FEE = 100
 
 
+# (step index, plan step, amount paid in stroops, receipt id hex) for each step a v2 settle paid.
+_PaidStep = tuple[int, dict[str, Any], int, str]
+
+
 def _b64(val: stellar_xdr.SCVal) -> str:
     return str(val.to_xdr())
 
@@ -543,6 +547,62 @@ class FakeWorld:
             if s["agent_id"] == AGENT:
                 self._rate_agent(rating)
 
+    def _settle_v2(
+        self,
+        steps: list[dict[str, Any]],
+        delivered: list[dict[str, Any]],
+        auth_id: str,
+        auth: dict[str, Any],
+        payer: str,
+        job: str,
+    ) -> tuple[str, float, list[_PaidStep]]:
+        """v2's settle: one `charged` payout per paid step, the remainder back to the payer, one `settled`.
+
+        Returns (the settle's hash, what it spent in USDC, the steps it paid).
+        """
+        paid_steps: list[_PaidStep] = []
+        charge_tx = self._tx(fee=FEE)
+        spent = 0
+        owners = self.owners()
+        for index, s in enumerate(steps):
+            if (s not in delivered and not self.pays_undelivered) or s["agent_id"] not in owners:
+                continue  # a seeded agent has no on-chain owner, so no payout
+            amount = usdc_to_stroops(s["est_price_usdc"])
+            receipt = secrets.token_hex(16)
+            self._event(
+                ESCROW,
+                charge_tx,
+                [scval.to_symbol("charged"), scval.to_symbol(s["agent_id"])],
+                scval.to_vec(
+                    [
+                        scval.to_bytes(bytes.fromhex(receipt)),
+                        scval.to_bytes(bytes.fromhex(auth_id)),
+                        scval.to_int128(amount),
+                        scval.to_bytes(bytes.fromhex(job)),
+                    ]
+                ),
+            )
+            self.balances[owners[s["agent_id"]]] += amount - (1 if self.tamper_payout else 0)
+            spent += amount
+            paid_steps.append((index, s, amount, receipt))
+        returned = auth["max_amount"] - spent - self.withheld
+        self.balances[payer] += returned
+        auth.update(spent=spent, settled=True)
+        self._event(
+            ESCROW,
+            charge_tx,
+            [scval.to_symbol("settled")],
+            scval.to_vec(
+                [
+                    scval.to_bytes(bytes.fromhex(auth_id)),
+                    scval.to_bytes(bytes.fromhex(job)),
+                    scval.to_int128(spent),
+                    scval.to_int128(returned),
+                ]
+            ),
+        )
+        return charge_tx, spent / 10_000_000, paid_steps
+
     def finish(self, task_id: str) -> None:
         """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
         task = self.tasks[task_id]
@@ -555,49 +615,9 @@ class FakeWorld:
 
         self._write_ratings(steps, delivered, job, trace)
 
-        paid_steps: list[tuple[int, dict[str, Any], int, str]] = []
+        paid_steps: list[_PaidStep] = []
         if self.escrow_version >= 2:
-            charge_tx = self._tx(fee=FEE)
-            spent = 0
-            owners = self.owners()
-            for index, s in enumerate(steps):
-                if (s not in delivered and not self.pays_undelivered) or s["agent_id"] not in owners:
-                    continue  # a seeded agent has no on-chain owner, so no payout
-                amount = usdc_to_stroops(s["est_price_usdc"])
-                receipt = secrets.token_hex(16)
-                self._event(
-                    ESCROW,
-                    charge_tx,
-                    [scval.to_symbol("charged"), scval.to_symbol(s["agent_id"])],
-                    scval.to_vec(
-                        [
-                            scval.to_bytes(bytes.fromhex(receipt)),
-                            scval.to_bytes(bytes.fromhex(auth_id)),
-                            scval.to_int128(amount),
-                            scval.to_bytes(bytes.fromhex(job)),
-                        ]
-                    ),
-                )
-                self.balances[owners[s["agent_id"]]] += amount - (1 if self.tamper_payout else 0)
-                spent += amount
-                paid_steps.append((index, s, amount, receipt))
-            returned = auth["max_amount"] - spent - self.withheld
-            self.balances[payer] += returned
-            auth.update(spent=spent, settled=True)
-            self._event(
-                ESCROW,
-                charge_tx,
-                [scval.to_symbol("settled")],
-                scval.to_vec(
-                    [
-                        scval.to_bytes(bytes.fromhex(auth_id)),
-                        scval.to_bytes(bytes.fromhex(job)),
-                        scval.to_int128(spent),
-                        scval.to_int128(returned),
-                    ]
-                ),
-            )
-            settled_usdc = spent / 10_000_000
+            charge_tx, settled_usdc, paid_steps = self._settle_v2(steps, delivered, auth_id, auth, payer, job)
             settled = True
         else:
             charge_tx = self._tx(status="SUCCESS" if self.charge_succeeds else "FAILED")
