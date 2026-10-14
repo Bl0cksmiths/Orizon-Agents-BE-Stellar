@@ -242,6 +242,18 @@ def build(campaign_runs: Path, runs: Path, out: Path) -> dict[str, Any]:
     return analysis
 
 
+def _code_length_row(r: dict[str, Any]) -> str:
+    """One row of the complex code.gen re-measure table."""
+    viol = r["validator"]
+    return (
+        f"| {r['label']} | {r['served_model'] or 'not recorded'} | {r['effort'] or '—'} | "
+        f"{r['first_token_s']:.2f} s | {r['wall_s']:.1f} s | {r['output_tokens']:,} | {usd(r['cost_usd'])} | "
+        f"{r['lines']} | {r['bytes']:,} | {'; '.join(viol) if viol else 'none'} | "
+        f"{'yes' if r['hit_token_ceiling'] else 'no'} | {'yes' if r['hit_stream_budget'] else 'no'} | "
+        f"{'yes' if r['deferred_listed'] else 'no'} |"
+    )
+
+
 def _final_row(r: dict[str, Any], ceil: dict[str, int]) -> str:
     """One final-check table row; output tokens carry their share of the
     worker's ceiling when it has one."""
@@ -414,14 +426,7 @@ def render(a: dict[str, Any], keep: dict[str, str]) -> str:
             if "skipped" in r:
                 L.append(f"| {r['label']} | not run — {r['skipped']} | | | | | | | | | | | |")
                 continue
-            viol = r["validator"]
-            L.append(
-                f"| {r['label']} | {r['served_model'] or 'not recorded'} | {r['effort'] or '—'} | "
-                f"{r['first_token_s']:.2f} s | {r['wall_s']:.1f} s | {r['output_tokens']:,} | {usd(r['cost_usd'])} | "
-                f"{r['lines']} | {r['bytes']:,} | {'; '.join(viol) if viol else 'none'} | "
-                f"{'yes' if r['hit_token_ceiling'] else 'no'} | {'yes' if r['hit_stream_budget'] else 'no'} | "
-                f"{'yes' if r['deferred_listed'] else 'no'} |"
-            )
+            L.append(_code_length_row(r))
         L += ["", "Summaries as returned:", ""]
         for r in a["code_length"]:
             if "skipped" not in r:
