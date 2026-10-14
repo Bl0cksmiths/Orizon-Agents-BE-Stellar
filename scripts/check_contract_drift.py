@@ -71,6 +71,9 @@ CANONICAL_FILES: Mapping[str, str] = {
     "mainnet": "addresses.mainnet.json",
 }
 
+# This repo's env-style sources, each reported under its file name.
+ENV_EXAMPLE = ".env.example"
+
 # Printed in place of an id a source does not carry. An omission is drift too:
 # it produces the same unconfigured read, only reached by absence.
 MISSING = "<missing>"
@@ -219,7 +222,7 @@ def _attribute(source: str, blocks: Sequence[Mapping[str, str]]) -> NetworkMap:
     return out
 
 
-def parse_env_example(text: str, source: str = ".env.example") -> NetworkMap:
+def parse_env_example(text: str, source: str = ENV_EXAMPLE) -> NetworkMap:
     """Read both network blocks out of an env file, live one and commented one."""
     live: dict[str, str] = {}
     commented: dict[str, str] = {}
@@ -365,7 +368,7 @@ def load_sources(repo_root: Path, contracts_dir: Path) -> dict[str, NetworkMap]:
     """The three places a contract id is written down, canonical first."""
     return {
         "canonical": load_canonical(contracts_dir),
-        ".env.example": parse_env_example(_read(repo_root / ".env.example")),
+        ENV_EXAMPLE: parse_env_example(_read(repo_root / ENV_EXAMPLE)),
         "render.yaml": parse_render_yaml(_read(repo_root / "render.yaml")),
     }
 
