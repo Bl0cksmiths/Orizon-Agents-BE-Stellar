@@ -73,6 +73,23 @@ def _draft_html(artifact: dict[str, Any]) -> str:
     return draft_html
 
 
+def _polish_notes(draft_html: str, revised_html: str, fixed: int, kit_requirements: int) -> list[str]:
+    """The notes for a kept revision: its size change and what it fixed, then
+    the kit requirements it applied, if the kit set any."""
+    draft_lines = draft_html.count("\n") + 1
+    revised_lines = revised_html.count("\n") + 1
+    delta = revised_lines - draft_lines
+    notes = [
+        f"polished: {draft_lines}L → {revised_lines}L "
+        f"({'+' if delta >= 0 else ''}{delta}) · "
+        f"{fixed} structural issue"
+        f"{'s' if fixed != 1 else ''} fixed"
+    ]
+    if kit_requirements:
+        notes.append(f"applied {kit_requirements} kit requirement{'s' if kit_requirements != 1 else ''}")
+    return notes
+
+
 class CodeCriticWorker(ModelWorker):
     id = "agt_12r0"
     name = "code.critic"
@@ -187,19 +204,7 @@ class CodeCriticWorker(ModelWorker):
                     f"issues vs. {len(validator_violations)} in draft"
                 )
             else:
-                draft_lines = draft_html.count("\n") + 1
-                revised_lines = revised_html.count("\n") + 1
-                delta = revised_lines - draft_lines
-                critic_notes.append(
-                    f"polished: {draft_lines}L → {revised_lines}L "
-                    f"({'+' if delta >= 0 else ''}{delta}) · "
-                    f"{len(validator_violations)} structural issue"
-                    f"{'s' if len(validator_violations) != 1 else ''} fixed"
-                )
-                if kit_required:
-                    critic_notes.append(
-                        f"applied {len(kit_required)} kit requirement{'s' if len(kit_required) != 1 else ''}"
-                    )
+                critic_notes += _polish_notes(draft_html, revised_html, len(validator_violations), len(kit_required))
                 # The draft's "Deferred: …" list survives the rewrite: the
                 # critic writes its own summary, and the buyer must still be
                 # told what was left out (merged with any list it adds).
