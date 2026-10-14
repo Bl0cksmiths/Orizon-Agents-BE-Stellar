@@ -28,6 +28,12 @@ def totp_now(secret_base32: str, *, timestamp: int, period: int = 30, digits: in
         raise PdaxError("PDAX_OTP_SECRET is not valid base32", code="InvalidMfaCode") from e
     counter = int(timestamp // period)
     msg = struct.pack(">Q", counter)
+    # HMAC-SHA1 is the TOTP algorithm, not a weak-hash choice: RFC 6238 §1.2
+    # builds TOTP on HOTP's HMAC-SHA-1 and §4 defines the code over it, and
+    # PDAX's SOFTWARE_TOKEN_MFA challenge (an authenticator-app TOTP) verifies
+    # exactly that variant — another hash yields codes PDAX rejects. HMAC's
+    # strength does not rest on SHA-1's collision resistance (RFC 4226 App. A),
+    # so the known SHA-1 collisions do not weaken a TOTP code.
     digest = hmac.new(key, msg, hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
     code_int = (struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF) % (10**digits)
