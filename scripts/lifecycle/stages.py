@@ -972,6 +972,41 @@ class Runner:
                 self.say(f"    charged {e.topics[1:2]} {e.value}")
         return checks, receipts
 
+    def seal_checks(
+        self, chain: ChainReader, settlement: dict[str, Any], receipts: list[str] | None
+    ) -> tuple[list[verify.Check], dict[str, Any] | None]:
+        """The seal, checked against the ledger: its transaction and the attestation it wrote.
+
+        A multi-agent run also checks the seal names which steps delivered.
+        Returns the checks and the attestation read.
+        """
+        buyer = self.need_buyer().public_key
+        proof_tx = settlement.get("proof_tx")
+        proof_seen = chain.observe(str(proof_tx), self.budgets.tx_observe) if proof_tx else None
+        checks = [verify.check_tx("seal_tx", proof_seen)]
+        if proof_seen is not None:
+            self.tx(
+                "verify",
+                "seal",
+                proof_seen,
+                contract=self.contracts["attestation_registry"],
+                summary=f"AttestationRegistry.seal for job {settlement.get('job_id_hex')}",
+                job_id_hex=settlement.get("job_id_hex"),
+            )
+        attestation = chain.attestation(
+            self.contracts["attestation_registry"], str(settlement.get("job_id_hex")), buyer
+        )
+        checks += verify.check_seal(attestation, settlement, self.cfg.agent, receipts)
+        if self.cfg.multi_agent:
+            # Partial delivery (AC5): the seal and the ratings say which steps
+            # delivered as plainly as the settle's payouts do.
+            checks += [
+                verify.check_seal_names_every_agent(attestation, self.cfg.all_agents),
+                verify.check_seal_receipts_are_delivered_steps(attestation, settlement),
+                *verify.check_failed_steps_rated(settlement, self.ratings),
+            ]
+        return checks, attestation
+
     def no_settlement(self, version: int) -> Stop:
         """Record that the task has no settlement, and the stop that follows: nothing to verify or dispute."""
         why = (
@@ -1009,30 +1044,8 @@ class Runner:
         else:
             checks += verify.check_v1_charge(charge_seen, events)
 
-        proof_tx = settlement.get("proof_tx")
-        proof_seen = chain.observe(str(proof_tx), self.budgets.tx_observe) if proof_tx else None
-        checks.append(verify.check_tx("seal_tx", proof_seen))
-        if proof_seen is not None:
-            self.tx(
-                "verify",
-                "seal",
-                proof_seen,
-                contract=self.contracts["attestation_registry"],
-                summary=f"AttestationRegistry.seal for job {settlement.get('job_id_hex')}",
-                job_id_hex=settlement.get("job_id_hex"),
-            )
-        attestation = chain.attestation(
-            self.contracts["attestation_registry"], str(settlement.get("job_id_hex")), buyer
-        )
-        checks += verify.check_seal(attestation, settlement, self.cfg.agent, receipts)
-        if self.cfg.multi_agent:
-            # Partial delivery (AC5): the seal and the ratings say which steps
-            # delivered as plainly as the settle's payouts do.
-            checks += [
-                verify.check_seal_names_every_agent(attestation, self.cfg.all_agents),
-                verify.check_seal_receipts_are_delivered_steps(attestation, settlement),
-                *verify.check_failed_steps_rated(settlement, self.ratings),
-            ]
+        seal_checks, attestation = self.seal_checks(chain, settlement, receipts)
+        checks += seal_checks
 
         ok = verify.passed(checks)
         for c in checks:
