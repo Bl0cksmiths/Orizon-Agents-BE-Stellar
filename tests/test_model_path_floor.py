@@ -171,9 +171,16 @@ def test_an_unscored_agent_is_scored_at_the_prior_never_its_own_claim(seeded: ob
 def test_registry_prompt_block_is_stable_across_runs(seeded: object) -> None:
     # Nothing in the block may depend on set iteration, dict ordering or a
     # clock: the same snapshot must render the same bytes every time.
+    # The second render reads the same snapshot built in the opposite order.
     reps = _pinned_reps()
+    reordered = dict(reversed(list(_pinned_reps().items())))
 
-    assert orchestrator_svc._registry_prompt_fragment(reps) == orchestrator_svc._registry_prompt_fragment(reps)
+    first = orchestrator_svc._registry_prompt_fragment(reps)
+    second = orchestrator_svc._registry_prompt_fragment(reordered)
+
+    assert first == second
+    assert first.startswith("AVAILABLE_AGENTS:\n")
+    assert first.count("\n- id=") == PINNED_ENTRIES.count("\n- id=")
 
 
 # ── the model path ──────────────────────────────────────────────
