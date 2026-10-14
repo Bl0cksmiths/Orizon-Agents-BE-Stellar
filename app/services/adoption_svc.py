@@ -784,6 +784,17 @@ def _window_days(results: dict[str, _AgentResult]) -> float:
     return min(windows) if windows else 0.0
 
 
+def _totals(operators: list[AdoptionOperator], *, external_agents: int) -> AdoptionCounts:
+    """§6.3's three numbers, from the operators and their agents' settled workflows."""
+    # One workflow that paid two external agents is ONE workflow.
+    jobs = {w.job_id_hex for op in operators for a in op.agents for w in a.settled_workflows}
+    return AdoptionCounts(
+        external_agents=external_agents,
+        unique_operator_wallets=len(operators),
+        settled_external_workflows=len(jobs),
+    )
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -832,13 +843,7 @@ async def build_report() -> AdoptionReport:
         )
         for owner in sorted(external)
     ]
-    # One workflow that paid two external agents is ONE workflow.
-    jobs = {w.job_id_hex for op in operators for a in op.agents for w in a.settled_workflows}
-    totals = AdoptionCounts(
-        external_agents=len(externals),
-        unique_operator_wallets=len(external),
-        settled_external_workflows=len(jobs),
-    )
+    totals = _totals(operators, external_agents=len(externals))
     coverage = _coverage(gap, len(owners), window)
     report = AdoptionReport(
         network=_network(),
