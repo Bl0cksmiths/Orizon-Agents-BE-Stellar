@@ -369,6 +369,22 @@ def _match_charges(snap: Snapshot, op: Operation) -> None:
         snap.charge_txs.setdefault((r.escrow, r.id_hex), TxRef(op.tx_hash, op.date))
 
 
+def _record_transfers(snap: Snapshot, op: Operation) -> None:
+    """Every asset movement of one asset-contract transfer that a platform key paid out: refund candidates."""
+    for change in op.balance_changes:
+        if change.kind == "transfer" and change.source in snap.platform and change.destination:
+            snap.transfers.append(
+                Transfer(
+                    source=change.source,
+                    destination=change.destination,
+                    amount_stroops=change.amount_stroops,
+                    tx_hash=op.tx_hash,
+                    created_at=op.created_at,
+                    muxed_id=change.destination_muxed_id,
+                )
+            )
+
+
 def history(snap: Snapshot, chain: ChainReader, account: str) -> list[Operation]:
     if account not in snap.histories:
         snap.histories[account] = chain.operations(account)
@@ -414,18 +430,7 @@ def read_histories(snap: Snapshot, chain: ChainReader) -> None:
                     )
                 )
             if op.contract_id == sac and op.function == "transfer":
-                for change in op.balance_changes:
-                    if change.kind == "transfer" and change.source in snap.platform and change.destination:
-                        snap.transfers.append(
-                            Transfer(
-                                source=change.source,
-                                destination=change.destination,
-                                amount_stroops=change.amount_stroops,
-                                tx_hash=op.tx_hash,
-                                created_at=op.created_at,
-                                muxed_id=change.destination_muxed_id,
-                            )
-                        )
+                _record_transfers(snap, op)
     snap.dispute_ratings.sort(key=lambda d: (d.created_at, d.tx_hash))
     snap.transfers.sort(key=lambda t: (t.created_at, t.tx_hash))
 
