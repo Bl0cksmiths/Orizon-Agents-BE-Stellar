@@ -67,8 +67,10 @@ class _CaseLog:
 
 _current: contextvars.ContextVar[_CaseLog | None] = contextvars.ContextVar("eval_case_log", default=None)
 
+_GUARD_PURPOSE = "guard.intent"
+
 _STAGE = {
-    "guard.intent": "guard",
+    _GUARD_PURPOSE: "guard",
     "guard.intent.fallback": "guard_fallback",
     "improve.spec": "improve",
     "guard.spec": "recheck",
@@ -165,7 +167,7 @@ class RecordingJev:
             answers = {k: _answer_json(v) for k, v in reply.answers.items()}
             log.transcript.append({"role": "tool_call", "name": request.purpose, "content": request.state})
             log.transcript.append({"role": "tool_result", "name": request.purpose, "content": json.dumps(answers)})
-            if request.purpose == "guard.intent":
+            if request.purpose == _GUARD_PURPOSE:
                 choice = reply.answers.get("complexity")
                 log.raw_tier = getattr(choice, "choice", None)
         return reply
@@ -452,7 +454,7 @@ def scripted_fakes(cases: list[Case], *, noise: float, seed: int) -> tuple[Any, 
         }
 
     fake_claude.respond_with(fallback_assessment, purpose="guard.intent.fallback")
-    fake_jev.respond_with(guard_answers, purpose="guard.intent")
+    fake_jev.respond_with(guard_answers, purpose=_GUARD_PURPOSE)
     fake_jev.respond_with(spec_answers, purpose="guard.spec")
     fake_jev.respond_with(spec_answers, purpose="guard.spec.same")
     fake_claude.respond_with(improve, purpose="improve.spec")
