@@ -109,6 +109,25 @@ def fmt_amount(value: float | int | None) -> str | None:
     return None if value is None else f"{float(value):.7f}"
 
 
+def wanted_ratings(lines: list[dict[str, Any]], names: dict[str, str]) -> list[tuple[str, str, str | None, bool]]:
+    """(hash prefix, agent id, rating, landed) for each rating line in the trace, in trace order.
+
+    A landed rating carries its score; an unlanded one (`reputation submit
+    failed`) has none. `names` maps the agent names the trace prints to ids.
+    """
+    wanted: list[tuple[str, str, str | None, bool]] = []
+    for line in lines:
+        msg = str(line.get("msg") or "")
+        m = RATED_LINE.match(msg)
+        if m:
+            wanted.append((m.group("prefix"), names.get(m.group("name"), m.group("name")), m.group("rating"), True))
+            continue
+        u = UNLANDED_LINE.match(msg)
+        if u:
+            wanted.append((u.group("prefix"), names.get(u.group("name"), u.group("name")), None, False))
+    return wanted
+
+
 @dataclass
 class Runner:
     cfg: RunConfig
@@ -832,16 +851,7 @@ class Runner:
         recovered from the ReputationLedger's `rated` events (topic: the
         agent's id), matched by that prefix, from the ledger the run started at.
         """
-        wanted: list[tuple[str, str, str | None, bool]] = []  # (prefix, agent_id, rating, landed)
-        for line in lines:
-            msg = str(line.get("msg") or "")
-            m = RATED_LINE.match(msg)
-            if m:
-                wanted.append((m.group("prefix"), names.get(m.group("name"), m.group("name")), m.group("rating"), True))
-                continue
-            u = UNLANDED_LINE.match(msg)
-            if u:
-                wanted.append((u.group("prefix"), names.get(u.group("name"), u.group("name")), None, False))
+        wanted = wanted_ratings(lines, names)
         self.ratings = []
         if not wanted:
             return
