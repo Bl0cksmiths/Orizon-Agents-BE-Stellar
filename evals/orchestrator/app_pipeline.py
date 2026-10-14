@@ -230,6 +230,14 @@ def _default_planner() -> tuple[PlanFn, str, frozenset[str]]:
     return draft_plan, render_agents_block(agents, {}), frozenset(a.id for a in agents)
 
 
+def _merge_recheck_scores(scores: dict[str, float], check: prompt_improver.SpecCheck) -> None:
+    """Add the re-check's scores beside the guard's: each prefixed `recheck_`,
+    except `same_request`, which only the re-check produces."""
+    scores.update({f"recheck_{k}": v for k, v in check.scores.items() if k != "same_request"})
+    if "same_request" in check.scores:
+        scores["same_request"] = check.scores["same_request"]
+
+
 async def _improve(intent: str, reasons: list[str]) -> prompt_improver.Spec | None:
     """The improver's spec, or None with the failure noted in `reasons`.
 
@@ -316,9 +324,7 @@ class AppPipeline:
             spec = await _improve(intent, reasons)
             check = await prompt_improver.recheck(intent, spec) if spec is not None else None
             if check is not None:
-                scores.update({f"recheck_{k}": v for k, v in check.scores.items() if k != "same_request"})
-                if "same_request" in check.scores:
-                    scores["same_request"] = check.scores["same_request"]
+                _merge_recheck_scores(scores, check)
             resolution = prompt_improver.resolve(decision, check)
             if resolution.action == "unavailable":
                 raise PipelineUnavailable("guard_unavailable", "the spec re-check could not run", log.calls)
