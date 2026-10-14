@@ -211,6 +211,27 @@ class FakeWorld:
             return httpx.Response(503, text="<html>waking</html>")
         return _json(200, {"status": "ok", "version": "t", "uptime_seconds": 1.0})
 
+    def stellar_network(self) -> httpx.Response:
+        """GET /api/stellar/network: the network, its RPC and every contract id the API names."""
+        return _json(
+            200,
+            {
+                "network": "testnet" if self.passphrase == TESTNET_PASSPHRASE else "mainnet",
+                "rpc_url": RPC,
+                "network_passphrase": self.passphrase,
+                "admin": self.settler,
+                "dispatch_signer": None,
+                "asset": "native",
+                "asset_sac": SAC,
+                "contracts": {
+                    "agent_registry": REGISTRY,
+                    "reputation_ledger": LEDGER,
+                    "payment_escrow": ESCROW,
+                    "attestation_registry": ATTEST,
+                },
+            },
+        )
+
     def api(self, method: str, path: str, body: Any, headers: httpx.Headers) -> httpx.Response:
         if path == "/api/health":
             return self.health()
@@ -222,24 +243,7 @@ class FakeWorld:
                 {"status": "ready", "ratings": {"writer": "scorer", "signer": self.settler, "scorer": self.settler}},
             )
         if path == "/api/stellar/network":
-            return _json(
-                200,
-                {
-                    "network": "testnet" if self.passphrase == TESTNET_PASSPHRASE else "mainnet",
-                    "rpc_url": RPC,
-                    "network_passphrase": self.passphrase,
-                    "admin": self.settler,
-                    "dispatch_signer": None,
-                    "asset": "native",
-                    "asset_sac": SAC,
-                    "contracts": {
-                        "agent_registry": REGISTRY,
-                        "reputation_ledger": LEDGER,
-                        "payment_escrow": ESCROW,
-                        "attestation_registry": ATTEST,
-                    },
-                },
-            )
+            return self.stellar_network()
         if path == "/api/agents":
             return _json(
                 200,
