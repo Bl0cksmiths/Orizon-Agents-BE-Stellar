@@ -946,6 +946,28 @@ def _and_list(parts: list[str]) -> str:
     return ", ".join(parts[:-1]) + ", and " + parts[-1]
 
 
+def _m08_shortfalls(
+    *, v2_live: bool, v2_settled: bool, refunds_on: bool, switch_reported: bool, refunded: bool
+) -> list[str]:
+    """What keeps a deployed dispute flow from being fully live, as clauses, in the order the row states them."""
+    parts = []
+    if not v2_live:
+        parts.append("no dispute window can open until a payment settles, which needs escrow v2")
+    elif not v2_settled:
+        parts.append("no dispute window has opened yet, because no payment has settled on escrow v2")
+    if not refunds_on:
+        parts.append(
+            "refunds are switched off"
+            if switch_reported
+            else "refunds are not reported as switched on (the readiness report predates the refund switch)"
+        )
+    # With no window able to open, no refund is implied; it is said only
+    # when a window could have opened and none was refunded.
+    if not refunded and v2_live and v2_settled:
+        parts.append("no dispute has been refunded on-chain yet (see the dispute refund row)")
+    return parts
+
+
 def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     row = SOW_ROWS[7]
     method = (
@@ -980,21 +1002,13 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
         achieved = "No"
         reason = "The live backend does not publish every dispute route."
     elif not met:
-        parts = []
-        if not v2_live:
-            parts.append("no dispute window can open until a payment settles, which needs escrow v2")
-        elif not v2_settled:
-            parts.append("no dispute window has opened yet, because no payment has settled on escrow v2")
-        if not refunds_on:
-            parts.append(
-                "refunds are switched off"
-                if isinstance(disputes, dict)
-                else "refunds are not reported as switched on (the readiness report predates the refund switch)"
-            )
-        # With no window able to open, no refund is implied; it is said only
-        # when a window could have opened and none was refunded.
-        if not refunded and v2_live and v2_settled:
-            parts.append("no dispute has been refunded on-chain yet (see the dispute refund row)")
+        parts = _m08_shortfalls(
+            v2_live=v2_live,
+            v2_settled=v2_settled,
+            refunds_on=refunds_on,
+            switch_reported=isinstance(disputes, dict),
+            refunded=refunded,
+        )
         achieved = "Partly: the dispute routes are deployed, but " + _and_list(parts) + "."
         reason = _sentence(_and_list(parts)) + "."
     counted = [
