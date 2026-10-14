@@ -17,7 +17,7 @@ from ..agents.workers.base import ModelWorker, Worker
 from ..agents.workers.context import delivered_roles
 from ..agents.workers.prompt_safety import fence_untrusted, sanitize_untrusted
 from ..config import settings
-from ..demo_kits import detect_kit
+from ..demo_kits import DemoKit, detect_kit
 from ..schemas import (
     PlanStep,
     SealKind,
@@ -550,32 +550,7 @@ async def _run(
     first_party_ids: set[str] = set()
 
     try:
-        await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
-        # How the plan was reached (checked, improved, re-checked, planned), in
-        # the order the stages ran. Server-written lines; a plan from the legacy
-        # planner has none.
-        for stage in plan.stages:
-            await _emit(task_id, start, "exec", stage.msg)
-        if kit is not None:
-            await _emit(
-                task_id,
-                start,
-                "exec",
-                f"kit detected: {kit.kit_id} → {kit.brand.name} ({len(kit.features)} features locked)",
-            )
-        await _emit(
-            task_id,
-            start,
-            "exec",
-            f"orchestrator: decompose → [{', '.join(s.agent_id for s in plan.plan.steps)}]",
-        )
-        if auth_id_hex and payer:  # equivalent to `onchain`, spelled out to narrow the optionals
-            await _emit(
-                task_id,
-                start,
-                "exec",
-                f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
-            )
+        await _emit_run_opening(task_id, start, plan, kit, auth_id_hex=auth_id_hex, payer=payer)
 
         fresh = await _recheck_reputation(task_id, start, plan)
 
@@ -884,6 +859,39 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _emit_run_opening(
+    task_id: str, start: float, plan: StoredPlan, kit: DemoKit | None, *, auth_id_hex: str | None, payer: str | None
+) -> None:
+    """The run's first trace lines: the intent, how the plan was reached, the
+    kit, the decomposition and, for a paid run, who authorized it."""
+    await _emit(task_id, start, "input", f"intent received → '{plan.intent}'")
+    # How the plan was reached (checked, improved, re-checked, planned), in
+    # the order the stages ran. Server-written lines; a plan from the legacy
+    # planner has none.
+    for stage in plan.stages:
+        await _emit(task_id, start, "exec", stage.msg)
+    if kit is not None:
+        await _emit(
+            task_id,
+            start,
+            "exec",
+            f"kit detected: {kit.kit_id} → {kit.brand.name} ({len(kit.features)} features locked)",
+        )
+    await _emit(
+        task_id,
+        start,
+        "exec",
+        f"orchestrator: decompose → [{', '.join(s.agent_id for s in plan.plan.steps)}]",
+    )
+    if auth_id_hex and payer:
+        await _emit(
+            task_id,
+            start,
+            "exec",
+            f"x402 authorized on-chain by {payer[:4]}…{payer[-4:]} (auth {auth_id_hex[:8]}…)",
+        )
 
 
 async def _recheck_reputation(task_id: str, start: float, plan: StoredPlan) -> dict[str, reputation_svc.RepInfo]:
