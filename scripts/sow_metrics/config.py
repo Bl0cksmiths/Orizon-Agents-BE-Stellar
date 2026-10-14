@@ -85,14 +85,17 @@ class SowRow:
     threshold: int | None  # the count to reach; None for a Yes/No milestone
 
 
+# SOW v4 §6.3's row categories.
+TRANSACTION_TARGETS = "Transaction targets"
+
 # SOW v4 §6.3, character for character. The frozen block repeats these, and
 # the frontend's evidence index is pasted from the block.
 SOW_ROWS: tuple[SowRow, ...] = (
     SowRow("m01", "Adoption targets", "Externally-operated agents registered on Testnet", "≥ 2", 2),
     SowRow("m02", "Adoption targets", "Unique external operator wallet addresses", "≥ 2", 2),
-    SowRow("m03", "Transaction targets", "Workflows routed to external agents & settled on Testnet", "≥ 3", 3),
-    SowRow("m04", "Transaction targets", "On-chain USDC settlements (charges) recorded", "≥ 3", 3),
-    SowRow("m05", "Transaction targets", "Dispute → partial-refund settlements", "≥ 1", 1),
+    SowRow("m03", TRANSACTION_TARGETS, "Workflows routed to external agents & settled on Testnet", "≥ 3", 3),
+    SowRow("m04", TRANSACTION_TARGETS, "On-chain USDC settlements (charges) recorded", "≥ 3", 3),
+    SowRow("m05", TRANSACTION_TARGETS, "Dispute → partial-refund settlements", "≥ 1", 1),
     SowRow("m06", "Technical milestones", "Permissionless AgentRegistry.register flow live on the dApp", "Yes", None),
     SowRow(
         "m07", "Technical milestones", "Reputation-gated routing (reads avg_bps, applies a floor) live", "Yes", None
