@@ -2150,6 +2150,40 @@ async def _warn_if_receipts_unlinked(
     await _emit(task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links")
 
 
+async def _announce_v2_settle(
+    task_id: str,
+    start: float,
+    tx: str,
+    job_id: bytes,
+    payout_plan: _PayoutPlan,
+    receipts: list[bytes] | None,
+    *,
+    release: bool,
+    on_settled: Callable[[str, bytes, _PayoutPlan, list[bytes] | None], Awaitable[None]] | None,
+) -> None:
+    """Trace a v2 settle that CONFIRMED — a release, or who it paid — then hand
+    it to `on_settled`, before the seal."""
+    if release:
+        await _emit(
+            task_id,
+            start,
+            "cost",
+            f"x402 settle → nothing paid, custody released to the buyer · tx {tx[:10]}…",
+            settlement="released",
+        )
+    else:
+        await _emit(
+            task_id,
+            start,
+            "cost",
+            f"x402 settle → {_amount(payout_plan.total)} paid: {_paid_to(payout_plan)}, the rest released · "
+            f"tx {tx[:10]}…",
+            settlement="settled",
+        )
+    if on_settled is not None:
+        await on_settled(tx, job_id, payout_plan, receipts)
+
+
 async def _report_v2_settle_unconfirmed(
     task_id: str,
     start: float,
@@ -2397,24 +2431,16 @@ async def _settle_v2(
             receipts = sc.receipt_ids(settle.get("result"))
             if receipts is not None and len(receipts) != len(payout_plan.payouts):
                 receipts = None
-            if release:
-                await _emit(
-                    task_id,
-                    start,
-                    "cost",
-                    f"x402 settle → nothing paid, custody released to the buyer · tx {tx[:10]}…",
-                    settlement="released",
-                )
-            else:
-                await _emit(
-                    task_id,
-                    start,
-                    "cost",
-                    f"x402 settle → {_amount(total)} paid: {_paid_to(payout_plan)}, the rest released · tx {tx[:10]}…",
-                    settlement="settled",
-                )
-            if on_settled is not None and delivered_steps:
-                await on_settled(tx, job_id, payout_plan, receipts)
+            await _announce_v2_settle(
+                task_id,
+                start,
+                tx,
+                job_id,
+                payout_plan,
+                receipts,
+                release=release,
+                on_settled=on_settled if delivered_steps else None,
+            )
         else:
             await _report_v2_settle_unconfirmed(
                 task_id,
