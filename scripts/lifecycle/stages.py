@@ -285,16 +285,8 @@ class Runner:
         chain, rpc_url = self.confirm_testnet()
 
         self.buyer = load_keypair(self.cfg.buyer_secret_env, self.console.redactor, self.environ)
-        needs_uphold = stage_index(self.cfg.until) >= stage_index("uphold")
-        if needs_uphold:
-            if self.cfg.adjudicator_key_env:
-                self.adjudicator_key = load_api_key(self.cfg.adjudicator_key_env, self.console.redactor, self.environ)
-            elif not self.cfg.dry_run:
-                raise Stop(EXIT_REFUSED, "--adjudicator-key-env is required to run through 'uphold'")
-            else:
-                # A dry run signs and adjudicates nothing, so it does not ask
-                # for the operator key; the real run still will.
-                self.say("NOTE: the real run through 'uphold' needs --adjudicator-key-env; this dry run does not")
+        if stage_index(self.cfg.until) >= stage_index("uphold"):
+            self.load_adjudicator_key()
 
         start = self.resume_point()
         version, how = chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
@@ -356,6 +348,17 @@ class Runner:
             )
         self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
         return start
+
+    def load_adjudicator_key(self) -> None:
+        """The operator key a run through 'uphold' adjudicates with."""
+        if self.cfg.adjudicator_key_env:
+            self.adjudicator_key = load_api_key(self.cfg.adjudicator_key_env, self.console.redactor, self.environ)
+        elif not self.cfg.dry_run:
+            raise Stop(EXIT_REFUSED, "--adjudicator-key-env is required to run through 'uphold'")
+        else:
+            # A dry run signs and adjudicates nothing, so it does not ask
+            # for the operator key; the real run still will.
+            self.say("NOTE: the real run through 'uphold' needs --adjudicator-key-env; this dry run does not")
 
     def confirm_testnet(self) -> tuple[ChainReader, str]:
         """Read the API's network and open the RPC reader; refuse unless both say testnet.
