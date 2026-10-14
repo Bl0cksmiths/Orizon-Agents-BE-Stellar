@@ -232,7 +232,7 @@ STELLAR_ADDRESS_PATTERN = r"^G[A-Z2-7]{55}$"
 
 
 # ── reads ───────────────────────────────────────────────────────
-@router.get("/agent/{agent_id}", response_model=AgentRead)
+@router.get("/agent/{agent_id}")
 async def read_agent(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> AgentRead:
     """Read an Agent from AgentRegistry.get(id)."""
     try:
