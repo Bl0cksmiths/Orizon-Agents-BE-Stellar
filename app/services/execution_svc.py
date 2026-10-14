@@ -659,21 +659,7 @@ async def _run(
             try:
                 output = await _dispatch_step(task_id, start, plan, step, worker, context)
             except asyncio.TimeoutError:
-                logger.error(
-                    "task %s step %s (%s): timed out after %.0fs",
-                    task_id,
-                    step.agent_id,
-                    worker.name,
-                    STEP_TIMEOUT_SECONDS,
-                )
-                # A step that never answered failed as surely as one that
-                # raised, and the counter's question — is this agent broken, or
-                # was that one bad run — does not care which. Today the
-                # external worker's own deadline fires first, so this handler
-                # is reached by a LOCAL worker hanging, which was the one
-                # failure the streak could not see.
-                failure_tracker.record_failure(step.agent_id, STEP_TIMEOUT_FAILURE)
-                await _emit(task_id, start, "error", f"{worker.name} timed out")
+                await _step_timed_out(task_id, start, step, worker)
                 continue
             except Exception as e:
                 await _step_raised(task_id, start, step_index, step, worker, e, undispatched)
@@ -917,6 +903,25 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _step_timed_out(task_id: str, start: float, step: PlanStep, worker: Worker) -> None:
+    """Account for a step that did not answer within `STEP_TIMEOUT_SECONDS`."""
+    logger.error(
+        "task %s step %s (%s): timed out after %.0fs",
+        task_id,
+        step.agent_id,
+        worker.name,
+        STEP_TIMEOUT_SECONDS,
+    )
+    # A step that never answered failed as surely as one that
+    # raised, and the counter's question — is this agent broken, or
+    # was that one bad run — does not care which. Today the
+    # external worker's own deadline fires first, so this handler
+    # is reached by a LOCAL worker hanging, which was the one
+    # failure the streak could not see.
+    failure_tracker.record_failure(step.agent_id, STEP_TIMEOUT_FAILURE)
+    await _emit(task_id, start, "error", f"{worker.name} timed out")
 
 
 async def _rejected_output(task_id: str, start: float, step: PlanStep, worker: Worker, output: Any) -> bool:
