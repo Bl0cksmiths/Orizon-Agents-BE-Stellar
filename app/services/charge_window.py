@@ -530,6 +530,16 @@ def _charges_by_agent(index: _Index, owners: Mapping[str, str]) -> dict[str, lis
     return by_agent
 
 
+def _warn_truncated(index: _Index, out_of_time: bool) -> None:
+    """Say how far a truncated window was read, and why it stopped short."""
+    logger.warning(
+        "[charges] window read to ledger %d of %d (%s) — settlements are a floor",
+        index.next_ledger - 1,
+        index.latest,
+        "out of time" if out_of_time else "lossy ledger" if index.lossy else "a read failed",
+    )
+
+
 async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> WindowSettlements:
     """Settlement evidence for every agent in `owners` (agent id → owner), from
     one scan of the escrow's window. Never raises; never runs past `deadline`
@@ -588,12 +598,7 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
     charges = sum(len(c) for c in by_agent.values())
     unattributed = sum(1 for cs in by_agent.values() for c in cs if c.auth_id not in payers)
     if truncated:
-        logger.warning(
-            "[charges] window read to ledger %d of %d (%s) — settlements are a floor",
-            held.next_ledger - 1,
-            held.latest,
-            "out of time" if out_of_time else "lossy ledger" if held.lossy else "a read failed",
-        )
+        _warn_truncated(held, out_of_time)
     return WindowSettlements(
         by_agent=evidence,
         ledgers_scanned=held.scanned_ledgers,
