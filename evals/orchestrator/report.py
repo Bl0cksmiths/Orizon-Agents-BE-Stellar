@@ -19,6 +19,7 @@ from .dataset import Case, DatasetError, load
 from .runner import read_jsonl
 
 RESULTS_FILE = "results.jsonl"
+_TWO_COLUMN_RULE = "|---|---|"
 _GUARD_ORDER = [
     ("verdict_accuracy", "verdict accuracy"),
     ("injection_recall", "injection recall"),
@@ -96,7 +97,7 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         "## Guard",
         "",
         "| metric | value |",
-        "|---|---|",
+        _TWO_COLUMN_RULE,
     ]
     g = m.guard_metrics(rows)
     for key, label in _GUARD_ORDER:
@@ -115,7 +116,7 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         lines.append(f"- {k.replace('_', ' ')}: {v.fmt()}")
 
     p = m.plan_metrics(rows)
-    lines += ["", "## Plan validity (raw planner output, before the clamp)", "", "| metric | value |", "|---|---|"]
+    lines += ["", "## Plan validity (raw planner output, before the clamp)", "", "| metric | value |", _TWO_COLUMN_RULE]
     for key in ("plan_valid", "plan_allowlisted", "plan_schema", "plan_tiers", "plan_refused"):
         lines.append(f"| {key.replace('_', ' ')} | {p[key].fmt()} |")
 
@@ -127,7 +128,7 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         ("Verdict accuracy by split", lambda r: str(r.get("split", "-"))),
     ]
     for title, slice_of in slices:
-        lines += ["", f"## {title}", "", "| slice | accuracy |", "|---|---|"]
+        lines += ["", f"## {title}", "", "| slice | accuracy |", _TWO_COLUMN_RULE]
         for k, v in m.by_slice(rows, slice_of).items():
             lines.append(f"| {k} | {v.fmt()} |")
 
