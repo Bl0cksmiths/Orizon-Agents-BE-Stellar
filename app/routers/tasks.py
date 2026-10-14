@@ -74,6 +74,7 @@ async def get_task(task_id: str) -> Task:
     "/tasks/{task_id}/artifact",
     summary="Get a task's produced artifact",
     dependencies=[Depends(require_task_read)],
+    responses=_TASK_READ_RESPONSES,
 )
 async def get_artifact(task_id: str) -> ArtifactResponse:
     """Returns the code artifact produced by the workflow, if any."""
