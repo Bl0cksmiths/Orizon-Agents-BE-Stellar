@@ -47,6 +47,7 @@ from .sweep import render as render_sweep
 from .sweep import sweep as run_sweep
 
 STAGES = ("s1-guard", "s2-external", "s3-haiku", "s4-full")
+RESULTS_FILE = "results.jsonl"
 SNAPSHOT = re.compile(r"-\d{8}$")
 JEV_USD_PER_MTOK = 0.042
 TIER_MODEL = {"low": "claude-haiku-4-5", "moderate": "claude-sonnet-5-5", "complex": "claude-opus-5-5"}
@@ -673,7 +674,7 @@ class Campaign:
     out: Path
 
     def rows(self, stage: str) -> list[dict[str, Any]]:
-        return read_jsonl(self.runs / stage / "results.jsonl")
+        return read_jsonl(self.runs / stage / RESULTS_FILE)
 
     def errors(self, stage: str) -> list[dict[str, Any]]:
         return read_jsonl(self.runs / stage / "errors.jsonl")
@@ -693,7 +694,7 @@ class Campaign:
             "diagnostic_reruns_usd": sum(w["cost_usd"] for w in workers.values() if w.get("diagnostic")),
             "by_worker": {k: w["cost_usd"] for k, w in workers.items()},
         }
-        smoke = read_jsonl(self.runs / "smoke" / "results.jsonl")
+        smoke = read_jsonl(self.runs / "smoke" / RESULTS_FILE)
         costs["smoke"] = cost_block(smoke, [])
         grand = (
             sum(c["list_price_usd"] for c in costs.values() if "list_price_usd" in c)
@@ -777,7 +778,7 @@ class Campaign:
             rows = self.rows(stage)
             if stage == "s2-external":
                 rows = [_redact_external(r) for r in rows]
-            (dest / "results.jsonl").write_text(
+            (dest / RESULTS_FILE).write_text(
                 "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
             )
             errs = self.errors(stage)
