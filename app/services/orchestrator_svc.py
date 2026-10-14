@@ -6,7 +6,7 @@ import logging
 import re
 import secrets
 from collections import deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Protocol
@@ -950,6 +950,50 @@ class _DroppedKitRole(NamedTuple):
     info: reputation_svc.RepInfo | None
 
 
+def _kit_backstop(
+    dropped: list[_DroppedKitRole],
+    placed: int,
+    reps: dict[str, reputation_svc.RepInfo],
+    role_tier: Callable[[str], Tier | None],
+) -> tuple[list[tuple[int, PlanStep]], list[PlanFloorNotice]]:
+    """The starvation backstop over the sub-floor kit roles: the steps it
+    re-admits, at their pipeline positions, and a notice for every dropped role.
+
+    Reuses _MIN_ROUTABLE_AGENTS rather than invent a second rule. If the floor
+    left too few steps (`placed`), dropped kit agents are re-admitted to cover
+    the deficit and the degradation recorded; the remainder are recorded as
+    exclusions. A re-admitted step goes back to its own pipeline position,
+    never onto the end: appended, design tokens would run AFTER the code.gen
+    step that needs them, and it would build without them.
+
+    The builder goes first whatever its score, then `_backstop_rank` — the
+    free-form path's rule. Score alone once turned a battered tetris kit into
+    research + brand + tokens with no code.gen: three paid steps preparing
+    inputs for a build nobody was asked to do, and no artifact at the end.
+    """
+    by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
+    deficit = max(0, _MIN_ROUTABLE_AGENTS - placed)
+    readmit_ids = {d.agent.id for d in by_priority[:deficit]}
+    if readmit_ids:
+        logger.warning(
+            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s), builder first",
+            placed,
+            len(readmit_ids),
+        )
+    readmitted: list[tuple[int, PlanStep]] = []
+    notices: list[PlanFloorNotice] = []
+    for position, agent, rationale, info in dropped:
+        if agent.id in readmit_ids:
+            step = _kit_step(
+                agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True, tier=role_tier(agent.id)
+            )
+            readmitted.append((position, step))
+            notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
+        else:
+            notices.append(below_floor_exclusion(agent, info))
+    return readmitted, notices
+
+
 async def _build_kit_plan(
     intent: str,
     kit: DemoKit,
@@ -1061,36 +1105,9 @@ async def _build_kit_plan(
         else:
             dropped.append(_DroppedKitRole(position, agent, rationale, info))
 
-    # Starvation backstop — reuse _MIN_ROUTABLE_AGENTS rather than invent a
-    # second rule. If the floor left too few steps, re-admit dropped kit agents
-    # to cover the deficit and record the degradation; the remainder are
-    # recorded as exclusions. A re-admitted step goes back to its own pipeline
-    # position, never onto the end: appended, design tokens would run AFTER the
-    # code.gen step that needs them, and it would build without them.
-    #
-    # The builder goes first whatever its score, then `_backstop_rank` — the
-    # free-form path's rule. Score alone once turned a battered tetris kit into
-    # research + brand + tokens with no code.gen: three paid steps preparing
-    # inputs for a build nobody was asked to do, and no artifact at the end.
-    by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
-    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(placed))
-    readmit_ids = {d.agent.id for d in by_priority[:deficit]}
-    if readmit_ids:
-        logger.warning(
-            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s), builder first",
-            len(placed),
-            len(readmit_ids),
-        )
-    for position, agent, rationale, info in dropped:
-        if agent.id in readmit_ids:
-            step = _kit_step(
-                agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True, tier=role_tier(agent.id)
-            )
-            placed.append((position, step))
-            taken.add(agent.id)
-            notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
-        else:
-            notices.append(below_floor_exclusion(agent, info))
+    readmitted, backstop_notices = _kit_backstop(dropped, len(placed), reps, role_tier)
+    placed += readmitted
+    notices += backstop_notices
     # Last, as on the free-form path, so both lists group the same way: what
     # the floor did first, then registry entries nothing could dispatch. This
     # path used to report none, so a demo intent showed a marketplace with
