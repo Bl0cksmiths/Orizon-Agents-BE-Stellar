@@ -790,7 +790,7 @@ class SetActiveReq(BaseModel):
     active: bool = Field(..., description="True relists the agent, False delists it")
 
 
-@router.post("/build/set-active", response_model=XdrResponse)
+@router.post("/build/set-active")
 async def build_set_active(req: SetActiveReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.set_active (delist / relist). Owner signs.
 
