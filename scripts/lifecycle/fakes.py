@@ -624,6 +624,31 @@ class FakeWorld:
             )
         return charge_tx, settled_usdc, settled
 
+    def _view_steps(
+        self, steps: list[dict[str, Any]], delivered: list[dict[str, Any]], paid_steps: list[_PaidStep]
+    ) -> list[dict[str, Any]]:
+        """The settlement record's steps, in plan order."""
+        return [self._view_step(index, s, delivered, paid_steps) for index, s in enumerate(steps)]
+
+    def _view_step(
+        self, index: int, s: dict[str, Any], delivered: list[dict[str, Any]], paid_steps: list[_PaidStep]
+    ) -> dict[str, Any]:
+        """One settlement step; v2 adds what the step was paid and its receipt."""
+        paid = next(((a, r) for i, _, a, r in paid_steps if i == index), None)
+        step = {
+            "step_index": index,
+            "agent_id": s["agent_id"],
+            "agent_name": s["agent_name"],
+            "price_usdc": s["est_price_usdc"],
+            "delivered": s in delivered,
+            "creditable_usdc": s["est_price_usdc"] if s in delivered else 0.0,
+            "output_summary": "ok" if s in delivered else None,
+        }
+        if self.v2_receipt_fields and self.escrow_version >= 2:
+            step["paid_usdc"] = paid[0] / 10_000_000 if paid else None
+            step["receipt_id_hex"] = paid[1] if paid else None
+        return step
+
     def finish(self, task_id: str) -> None:
         """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
         task = self.tasks[task_id]
@@ -655,22 +680,7 @@ class FakeWorld:
                 "total_spent": usdc_to_stroops(settled_usdc),
                 "sealed_at": 1_900_000_100,
             }
-            view_steps = []
-            for index, s in enumerate(steps):
-                paid = next(((a, r) for i, _, a, r in paid_steps if i == index), None)
-                step = {
-                    "step_index": index,
-                    "agent_id": s["agent_id"],
-                    "agent_name": s["agent_name"],
-                    "price_usdc": s["est_price_usdc"],
-                    "delivered": s in delivered,
-                    "creditable_usdc": s["est_price_usdc"] if s in delivered else 0.0,
-                    "output_summary": "ok" if s in delivered else None,
-                }
-                if self.v2_receipt_fields and self.escrow_version >= 2:
-                    step["paid_usdc"] = paid[0] / 10_000_000 if paid else None
-                    step["receipt_id_hex"] = paid[1] if paid else None
-                view_steps.append(step)
+            view_steps = self._view_steps(steps, delivered, paid_steps)
             self.settlements[task_id] = {
                 "job_id_hex": job,
                 "payer": payer,
