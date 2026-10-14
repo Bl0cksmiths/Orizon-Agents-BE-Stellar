@@ -633,7 +633,7 @@ async def read_attestation(job_id_hex: str = Path(..., pattern=ID16_HEX_PATTERN)
         raise HTTPException(400, "attestation_read_failed") from e
 
 
-@router.get("/settlement/{agent_id}", response_model=SettlementEvidence)
+@router.get("/settlement/{agent_id}")
 async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> SettlementEvidence:
     """On-chain settlement evidence for one agent: every `charged` event Soroban
     RPC still holds for it, with the platform's own payments separated out.
