@@ -2150,6 +2150,17 @@ async def _warn_if_receipts_unlinked(
     await _emit(task_id, start, "error", "settle receipt ids missing — sealing attestation without receipt links")
 
 
+def _settle_receipts(result: Any, payouts: int) -> list[bytes] | None:
+    """The receipt ids a v2 settle returned, one per payout, or None when they
+    did not decode or do not line up with the payouts."""
+    from ..stellar import client as sc
+
+    receipts = sc.receipt_ids(result)
+    if receipts is not None and len(receipts) != payouts:
+        return None
+    return receipts
+
+
 async def _announce_v2_settle(
     task_id: str,
     start: float,
@@ -2428,9 +2439,7 @@ async def _settle_v2(
         if settle_status == "SUCCESS" and tx:
             settle_tx = tx
             settled_job_id = job_id
-            receipts = sc.receipt_ids(settle.get("result"))
-            if receipts is not None and len(receipts) != len(payout_plan.payouts):
-                receipts = None
+            receipts = _settle_receipts(settle.get("result"), len(payout_plan.payouts))
             await _announce_v2_settle(
                 task_id,
                 start,
