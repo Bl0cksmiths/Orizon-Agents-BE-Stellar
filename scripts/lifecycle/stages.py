@@ -878,21 +878,25 @@ class Runner:
                     scanned_from_ledger=start,
                 )
                 continue
-            seen = chain.observe(match.tx_hash, self.budgets.tx_observe)
-            value = match.value if isinstance(match.value, list) else []
-            if self.ratings is not None:
-                self.ratings.append((agent_id, int(value[0]) if value else None, seen.status))
-            self.tx(
-                "poll",
-                "rating",
-                seen,
-                contract=self.contracts["reputation_ledger"],
-                agent=agent_id,
-                summary=f"ReputationLedger.submit for {agent_id}: {rating or (value[0] if value else '?')}/100",
-                rating=value[0] if value else rating,
-                weight=value[1] if len(value) > 1 else None,
-                kind=value[3] if len(value) > 3 else None,
-            )
+            self.record_rating(chain, match, agent_id, rating)
+
+    def record_rating(self, chain: ChainReader, match: ChainEvent, agent_id: str, rating: str | None) -> None:
+        """The evidence row for one rating found on the ledger, with the ledger's status for its hash."""
+        seen = chain.observe(match.tx_hash, self.budgets.tx_observe)
+        value = match.value if isinstance(match.value, list) else []
+        if self.ratings is not None:
+            self.ratings.append((agent_id, int(value[0]) if value else None, seen.status))
+        self.tx(
+            "poll",
+            "rating",
+            seen,
+            contract=self.contracts["reputation_ledger"],
+            agent=agent_id,
+            summary=f"ReputationLedger.submit for {agent_id}: {rating or (value[0] if value else '?')}/100",
+            rating=value[0] if value else rating,
+            weight=value[1] if len(value) > 1 else None,
+            kind=value[3] if len(value) > 3 else None,
+        )
 
     # ── 5. verify ───────────────────────────────────────────────
     def read_settlement(self) -> dict[str, Any] | None:
