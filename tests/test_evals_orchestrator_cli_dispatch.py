@@ -39,9 +39,13 @@ def test_estimate_prints_the_described_estimate(monkeypatch, capsys):
     assert seen == {"cases": ["c1"], "stages": "all", "reps": 3}
 
 
-def test_run_hands_over_to_the_runner(monkeypatch):
-    monkeypatch.setattr(cli, "_run", lambda args: 17 if args.cmd == "run" else 0)
-    assert cli.main(["run"]) == 17
+def test_run_reaches_the_runner(monkeypatch, capsys):
+    def cases(args: Any) -> list[Any]:
+        raise DatasetError(f"{args.cmd} selected nothing")
+
+    monkeypatch.setattr(cli, "_cases", cases)
+    assert cli.main(["run"]) == cli.EXIT_USAGE
+    assert capsys.readouterr().err == "dataset error: run selected nothing\n"
 
 
 @pytest.mark.parametrize(("cmd", "printed"), [("report", "summary.md"), ("sweep", "sweep.md")])
@@ -96,9 +100,9 @@ def test_recheck_builds_and_prints_the_report_path(monkeypatch, capsys, tmp_path
     assert capsys.readouterr().out == f"report: {out / 'REPORT.md'}\n"
 
 
-def test_workers_hands_over_to_the_worker_sample(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli, "_workers", lambda args: 23)
-    assert cli.main(["workers", "--out", str(tmp_path)]) == 23
+def test_workers_reaches_the_worker_sample(capsys, tmp_path):
+    assert cli.main(["workers", "--out", str(tmp_path)]) == cli.EXIT_REFUSED
+    assert capsys.readouterr().err == "refused: the worker sample needs --live and --max-usd N\n"
 
 
 def test_fetch_external_prints_one_line_per_benchmark(monkeypatch, capsys):
@@ -126,10 +130,10 @@ def test_a_dataset_error_is_a_usage_error(monkeypatch, capsys):
 
 
 def test_a_refused_run_is_a_refusal(monkeypatch, capsys):
-    def run(args: Any) -> int:
+    def cases(args: Any) -> list[Any]:
         raise RunRefused("over the cap")
 
-    monkeypatch.setattr(cli, "_run", run)
+    monkeypatch.setattr(cli, "_cases", cases)
     assert cli.main(["run"]) == cli.EXIT_REFUSED
     assert capsys.readouterr().err == "refused: over the cap\n"
 
