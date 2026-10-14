@@ -894,7 +894,6 @@ class ReadinessResponse(BaseModel):
     "/readiness",
     tags=["meta"],
     summary="Readiness probe with per-dependency status",
-    response_model=ReadinessResponse,
     responses={503: {"model": ReadinessResponse, "description": "A required dependency is not configured."}},
 )
 async def readiness(
