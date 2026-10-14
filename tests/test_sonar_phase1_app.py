@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import ipaddress
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
+from pydantic_core import PydanticSerializationError, to_json
 from stellar_sdk import Network
 
 from app import config, security
 from app.config import MAINNET_PASSPHRASE, TESTNET_PASSPHRASE, Settings
+from app.routers import agents as agents_router
+from app.schemas import Agent
+from app.services import binding_registry
+from app.state import state
 
 # ── network passphrases come from the SDK ──────────────────────────────────
 
@@ -104,3 +112,54 @@ def test_the_vercel_origin_regex_is_https_only() -> None:
     assert main._CORS_ORIGIN_REGEX.fullmatch("https://orizon-agents-fe-stellar.vercel.app")
     assert main._CORS_ORIGIN_REGEX.fullmatch("http://orizon-agents-fe-stellar.vercel.app") is None
     assert main._CORS_ORIGIN_REGEX.fullmatch("http://orizon-agents-fe-stellar-git-x.vercel.app") is None
+
+
+# ── GET /api/agents?fields=: one schema-driven serializer ───────────────────
+
+
+def _listed(agent_id: str) -> Agent:
+    return Agent(
+        id=agent_id,
+        name=f'{agent_id} "quoted" é </script>',
+        skills=["code"],
+        price=0.1234567890123,
+        rep=4.0,
+        status="online",
+        runs=0,
+        owner="GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
+        source="onchain",
+    )
+
+
+@pytest.fixture
+def listed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Agent]]:
+    saved = dict(state.agents)
+    monkeypatch.setattr(binding_registry, "_bound_ids", {"ag_001"})
+    monkeypatch.setattr(binding_registry, "_loaded", True)
+    state.agents.clear()
+    agents = [_listed(f"ag_{i:03d}") for i in range(3)]
+    for agent in agents:
+        state.add_agent(agent)
+    yield agents
+    state.agents.clear()
+    state.agents.update(saved)
+
+
+@pytest.mark.parametrize("fields", [*agents_router.AGENT_FIELDS, ",".join(agents_router.AGENT_FIELDS)])
+def test_a_field_selected_body_is_byte_for_byte_the_previous_encoding(
+    client: TestClient, listed: list[Agent], fields: str
+) -> None:
+    """The bytes are the ETag's input, so the switch must not change them."""
+    selected = {f.strip() for f in fields.split(",")} | {"id"}
+    stamp = "bound" in selected
+    rows = [agents_router._with_bound(a) if stamp else a for a in listed]
+    before = to_json([a.model_dump(include=selected, mode="json") for a in rows])
+    assert client.get("/api/agents", params={"fields": fields}).content == before
+
+
+def test_a_value_the_agent_schema_cannot_encode_fails_loudly(client: TestClient, listed: list[Agent]) -> None:
+    """No fallback guesses at an unknown value: the payload is refused, never shipped half-encoded."""
+    state.add_agent(listed[0].model_copy(update={"id": "ag_999", "owner": object()}))
+    with pytest.raises(PydanticSerializationError), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        client.get("/api/agents", params={"fields": "owner"})
