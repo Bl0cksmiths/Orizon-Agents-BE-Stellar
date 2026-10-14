@@ -130,4 +130,8 @@ def test_the_block_is_byte_stable_between_calls() -> None:
 
     agents = [_priced(0.0125)]
 
-    assert render_agents_block(agents, {}) == render_agents_block(agents, {})
+    first = render_agents_block(agents, {})
+    second = render_agents_block(agents, {})
+
+    assert first == second
+    assert '- id=agt_01h8 name="copywrite.v3" price=0.0125 ' in first
