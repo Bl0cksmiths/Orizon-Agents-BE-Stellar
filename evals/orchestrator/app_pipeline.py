@@ -68,10 +68,11 @@ class _CaseLog:
 _current: contextvars.ContextVar[_CaseLog | None] = contextvars.ContextVar("eval_case_log", default=None)
 
 _GUARD_PURPOSE = "guard.intent"
+_GUARD_FALLBACK_PURPOSE = "guard.intent.fallback"
 
 _STAGE = {
     _GUARD_PURPOSE: "guard",
-    "guard.intent.fallback": "guard_fallback",
+    _GUARD_FALLBACK_PURPOSE: "guard_fallback",
     "improve.spec": "improve",
     "guard.spec": "recheck",
     "guard.spec.same": "recheck",
@@ -136,7 +137,7 @@ class RecordingClaude:
             )
             log.transcript.append({"role": "tool_call", "name": request.purpose, "content": request.user})
             log.transcript.append({"role": "tool_result", "name": request.purpose, "content": completion.text})
-            if request.purpose == "guard.intent.fallback":
+            if request.purpose == _GUARD_FALLBACK_PURPOSE:
                 try:
                     log.raw_tier = json.loads(completion.text).get("complexity")
                 except (ValueError, AttributeError):
@@ -453,7 +454,7 @@ def scripted_fakes(cases: list[Case], *, noise: float, seed: int) -> tuple[Any, 
             "complexity_confidence": s.get("complexity_confidence", 0.9),
         }
 
-    fake_claude.respond_with(fallback_assessment, purpose="guard.intent.fallback")
+    fake_claude.respond_with(fallback_assessment, purpose=_GUARD_FALLBACK_PURPOSE)
     fake_jev.respond_with(guard_answers, purpose=_GUARD_PURPOSE)
     fake_jev.respond_with(spec_answers, purpose="guard.spec")
     fake_jev.respond_with(spec_answers, purpose="guard.spec.same")
