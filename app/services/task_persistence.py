@@ -275,7 +275,7 @@ class TaskJournal:
                 await store.write(single)
             except TaskStoreRejected as exc:
                 row = (single.plans or single.tasks or single.traces)[0]
-                logger.error("task store: dropped a row the database refuses (%r): %s", row, exc)
+                logger.exception("task store: dropped a row the database refuses (%r): %s", row, exc)
 
     def _restore(self, failed: _Pending) -> None:
         """Put a failed batch back, without overwriting anything newer."""
