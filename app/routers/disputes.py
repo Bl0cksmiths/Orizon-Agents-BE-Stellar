@@ -1207,7 +1207,6 @@ _UPHOLD_RESPONSES: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/disputes/{dispute_id}/uphold",
-    response_model=DisputeResponse,
     summary="Uphold a dispute and credit the buyer",
     dependencies=[Depends(require_adjudicator)],
     responses=_UPHOLD_RESPONSES,
