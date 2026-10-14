@@ -397,7 +397,7 @@ def healthy_world() -> FakeWorld:
     world.fund(OP1, 5)
     world.fund(TEAM_BUYER, 20)
     world.fund(TEAM, 20)
-    world.pages = {p: 200 for p in FRONTEND_PAGES}
+    world.pages = dict.fromkeys(FRONTEND_PAGES, 200)
     world.decompose_body = {
         "plan_id": "plan_1",
         "intent": "x",
