@@ -115,7 +115,7 @@ def _workers_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
     add("## 9. Worker sample (stage 5)")
     add("")
     add("| worker | tier → model | input (case) | latency | cost | outcome |")
-    add("|---|---|---|---|---|---|")
+    add(_table_rule(6))
     for name, w in a["s5"].items():
         if "worker" not in w:
             continue
@@ -155,7 +155,7 @@ def _errors_section(a: dict[str, Any], keep: dict[str, str], diag: dict[str, str
     add("Tier misses in stage 4 (expected → routed; raw jev choice and its confidence):")
     add("")
     add("| case | expected | raw choice | confidence | routed | cause |")
-    add("|---|---|---|---|---|---|")
+    add(_table_rule(6))
     for t in a["tier_misses_s4"]:
         cause = "round-up of a correct raw choice" if t["raw"] == t["expected"] else "raw choice"
         add(f"| {t['id']} | {t['expected']} | {t['raw']} | {t['confidence']} | {t['routed']} | {cause} |")
@@ -414,7 +414,7 @@ def _external_section(a: dict[str, Any]) -> list[str]:
     )
     add("")
     add("| source | n | block precision | block recall | specificity | F1 |")
-    add("|---|---|---|---|---|---|")
+    add(_table_rule(6))
     for src, v in ext.items():
         p = v["prf"]
         n = p["tp"] + p["fp"] + p["fn"] + p["tn"]
@@ -519,7 +519,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("### Stages")
     add("")
     add("| stage | what ran | cases × reps | models | cap | spent (list price) |")
-    add("|---|---|---|---|---|---|")
+    add(_table_rule(6))
     stage_rows = [
         (
             "1 guard",
