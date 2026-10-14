@@ -402,6 +402,15 @@ def _record_transfers(snap: Snapshot, op: Operation) -> None:
             )
 
 
+def _read_operation(snap: Snapshot, op: Operation, ledger: str | None, sac: str | None) -> None:
+    """One contract call a platform key made: a charge it settled, a rating it wrote, or a transfer it paid."""
+    _match_charges(snap, op)
+    if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7:
+        _record_rating(snap, op)
+    if op.contract_id == sac and op.function == "transfer":
+        _record_transfers(snap, op)
+
+
 def history(snap: Snapshot, chain: ChainReader, account: str) -> list[Operation]:
     if account not in snap.histories:
         snap.histories[account] = chain.operations(account)
@@ -430,11 +439,7 @@ def read_histories(snap: Snapshot, chain: ChainReader) -> None:
             seen.add(op.id)
             if op.contract_id is None:
                 continue
-            _match_charges(snap, op)
-            if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7:
-                _record_rating(snap, op)
-            if op.contract_id == sac and op.function == "transfer":
-                _record_transfers(snap, op)
+            _read_operation(snap, op, ledger, sac)
     snap.dispute_ratings.sort(key=lambda d: (d.created_at, d.tx_hash))
     snap.transfers.sort(key=lambda t: (t.created_at, t.tx_hash))
 
