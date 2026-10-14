@@ -1044,7 +1044,6 @@ async def _require_listing_read(
 
 @router.get(
     "/tasks/{task_id}/disputes",
-    response_model=TaskDisputesResponse,
     summary="A task's dispute window and the disputes raised on it",
     dependencies=[Depends(_require_listing_read)],
 )
