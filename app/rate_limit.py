@@ -294,6 +294,21 @@ async def _refuse(send: Any, wait_seconds: float) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _refused_for_client(policy: RoutePolicy, backend: RateLimitBackend, scope: dict[str, Any], send: Any) -> bool:
+    """Spend the client's budget; True once it refused the request (the 429 is sent).
+
+    A caller `client_identity` cannot attribute has no client budget to spend."""
+    client = client_identity(scope)
+    if client is None:
+        return False
+    wait = await backend.take(f"{policy.name}:client:{client}", policy.per_client, _WINDOW_SECONDS)
+    if wait is None:
+        return False
+    logger.warning("route rate limit: policy=%s scope=client", policy.name)
+    await _refuse(send, wait)
+    return True
+
+
 class RouteRateLimitMiddleware:
     """Spend the matching `POLICIES` budgets: ceiling, client, then wallet (pure ASGI).
 
@@ -318,13 +333,8 @@ class RouteRateLimitMiddleware:
             logger.warning("route rate limit: policy=%s scope=ceiling", policy.name)
             await _refuse(send, wait)
             return
-        client = client_identity(scope)
-        if client is not None:
-            wait = await backend.take(f"{policy.name}:client:{client}", policy.per_client, _WINDOW_SECONDS)
-            if wait is not None:
-                logger.warning("route rate limit: policy=%s scope=client", policy.name)
-                await _refuse(send, wait)
-                return
+        if await _refused_for_client(policy, backend, scope, send):
+            return
         if policy.per_wallet > 0 and policy.wallet_fields:
             body, receive = await _sniff(scope, receive)
             wallet = _wallet(body, policy.wallet_fields) if body is not None else None
