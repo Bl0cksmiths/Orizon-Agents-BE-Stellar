@@ -465,7 +465,7 @@ async def unbind(
     return UnbindResponse(agent_id=agent_id, owner=owner, was_bound=True, unbound_at=record.unbound_at)
 
 
-@router.get("/{agent_id}/binding", response_model=BindingResponse, summary="Read an agent's binding")
+@router.get("/{agent_id}/binding", summary="Read an agent's binding")
 async def read_binding(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
