@@ -17,6 +17,7 @@ from .metrics import TIER_COLUMNS
 
 NARRATIVES = ("summary", "recommendations", "limitations", "diagnoses", "stage_notes", "worker_notes")
 _TO_BE_WRITTEN = "_(to be written)_"
+_JEV_MODEL = "jev-1.13.0"  # the jev build the campaign's guard stages ran on
 
 
 def _block(name: str, keep: dict[str, str], placeholder: str) -> str:
@@ -519,7 +520,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
             "1 guard",
             "jev intent battery via `intent_guard.check_intent`",
             f"{d['cases']} × 3",
-            "jev-1.13.0",
+            _JEV_MODEL,
             0.10,
             costs["s1-guard"]["list_price_usd"],
         ),
@@ -527,7 +528,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
             "2 external",
             "the same guard on public benchmarks",
             f"{sum(s2['external']['all']['prf'][k] for k in ('tp', 'fp', 'fn', 'tn'))} × 1",
-            "jev-1.13.0",
+            _JEV_MODEL,
             0.50,
             costs["s2-external"]["list_price_usd"],
         ),
@@ -555,7 +556,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
             3.0,
             costs["s5-workers"]["list_price_usd"] + costs["s5-workers"]["diagnostic_reruns_usd"],
         ),
-        ("smoke", "two guard checks before stage 1", "2 × 1", "jev-1.13.0", None, costs["smoke"]["list_price_usd"]),
+        ("smoke", "two guard checks before stage 1", "2 × 1", _JEV_MODEL, None, costs["smoke"]["list_price_usd"]),
     ]
     for name, what, n, models, cap, spent in stage_rows:
         add(f"| {name} | {what} | {n} | {models} | {usd(cap) if cap is not None else '—'} | {usd(spent)} |")
