@@ -1995,6 +1995,48 @@ async def _settle_refused(
     return (None, None, None)
 
 
+async def _v2_payouts_to_settle(
+    task_id: str,
+    start: float,
+    plan: StoredPlan,
+    escrow: str,
+    delivered_steps: frozenset[int],
+    authorized_max: int | None,
+    *,
+    payer: str,
+    auth_id_hex: str,
+) -> _PayoutPlan | None:
+    """Everything a v2 settle checks before anything is signed: the payouts,
+    held under the authorization's `max_amount` (read back from the chain
+    unless `/execute` already read it) and under `MAX_CHARGE_USDC`. None when
+    the settle must not go out, which has then already been said."""
+    from ..stellar import client as sc
+
+    if authorized_max is None and delivered_steps:
+        authorized_max = await _read_authorized_max(task_id, start, plan, escrow, payer=payer, auth_id_hex=auth_id_hex)
+        if authorized_max is None:
+            return None
+    payout_plan = await _v2_payout_plan(
+        task_id, start, plan, delivered_steps, authorized_max, payer=payer, auth_id_hex=auth_id_hex
+    )
+    if payout_plan is None:
+        return None
+    total = payout_plan.total
+    await _report_payout_cuts(task_id, start, payout_plan, authorized_max, payer=payer, auth_id_hex=auth_id_hex)
+
+    if total > sc.usdc_to_i128(settings.max_charge_usdc):
+        await _settle_refused(
+            task_id,
+            start,
+            auth_id_hex,
+            payer,
+            f"payouts total {total} stroops exceed MAX_CHARGE_USDC={settings.max_charge_usdc}",
+            "the payouts exceed the charge cap",
+        )
+        return None
+    return payout_plan
+
+
 async def _v2_payout_plan(
     task_id: str,
     start: float,
@@ -2393,27 +2435,12 @@ async def _settle_v2(
         return (None, None, None)
 
     escrow = sc.contract_ids().payment_escrow
-    if authorized_max is None and delivered_steps:
-        authorized_max = await _read_authorized_max(task_id, start, plan, escrow, payer=payer, auth_id_hex=auth_id_hex)
-        if authorized_max is None:
-            return (None, None, None)
-    payout_plan = await _v2_payout_plan(
-        task_id, start, plan, delivered_steps, authorized_max, payer=payer, auth_id_hex=auth_id_hex
+    payout_plan = await _v2_payouts_to_settle(
+        task_id, start, plan, escrow, delivered_steps, authorized_max, payer=payer, auth_id_hex=auth_id_hex
     )
     if payout_plan is None:
         return (None, None, None)
     total = payout_plan.total
-    await _report_payout_cuts(task_id, start, payout_plan, authorized_max, payer=payer, auth_id_hex=auth_id_hex)
-
-    if total > sc.usdc_to_i128(settings.max_charge_usdc):
-        return await _settle_refused(
-            task_id,
-            start,
-            auth_id_hex,
-            payer,
-            f"payouts total {total} stroops exceed MAX_CHARGE_USDC={settings.max_charge_usdc}",
-            "the payouts exceed the charge cap",
-        )
 
     release = not payout_plan.payouts
     total_usdc = total / reputation_svc.STROOPS_PER_USDC
