@@ -43,6 +43,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from .api import Answer
 from .collect import AgentRecord, DisputeRating, EscrowScan, ReceiptRecord, Registration, Snapshot, Transfer
 from .config import (
     DEMO_MAX_SECONDS,
@@ -1095,6 +1096,18 @@ def m10(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Met
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
 
 
+def _licence_verdict(answer: Answer) -> tuple[Any, str, str | None]:
+    """(the licence GitHub detects, what the proof link says, why it misses — None when it is MIT)."""
+    spdx = ((answer.obj().get("license") or {}) if answer.ok else {}).get("spdx_id")
+    if answer.status == 404:
+        return spdx, "not found on GitHub", "not found"
+    if spdx == "MIT":
+        return spdx, "MIT licence detected", None
+    if spdx in (None, "NOASSERTION"):
+        return spdx, "GitHub detects no licence", "no licence detected"
+    return spdx, f"licence detected: {spdx}, not MIT", f"licence {spdx}"
+
+
 def m11(snap: Snapshot, rules: Rules) -> Metric:
     row = SOW_ROWS[10]
     method = (
@@ -1108,15 +1121,7 @@ def m11(snap: Snapshot, rules: Rules) -> Metric:
     links, counted, excluded, missing = [], [], [], []
     for name, role in REPOSITORIES:
         answer = snap.repos[name]
-        spdx = ((answer.obj().get("license") or {}) if answer.ok else {}).get("spdx_id")
-        if answer.status == 404:
-            text, why = "not found on GitHub", "not found"
-        elif spdx == "MIT":
-            text, why = "MIT licence detected", None
-        elif spdx in (None, "NOASSERTION"):
-            text, why = "GitHub detects no licence", "no licence detected"
-        else:
-            text, why = f"licence detected: {spdx}, not MIT", f"licence {spdx}"
+        spdx, text, why = _licence_verdict(answer)
         links.append(Link(f"{_sentence(role)} repository — {text}", f"https://github.com/{name}", "repo"))
         item = {"repository": name, "role": role, "status": answer.status, "spdx_id": spdx}
         if why is None:
