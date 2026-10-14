@@ -196,7 +196,7 @@ def _sweep_section(a: dict[str, Any]) -> list[str]:
     add("Watch line (stage 4 rows, which carry re-check scores):")
     add("")
     add("| injection_watch | injection recall | false block | cases in the band |")
-    add("|---|---|---|---|")
+    add(_table_rule(4))
     for w in a["watch_sweep"]:
         add(f"| {w['injection_watch']:.2f} | {pct(w['injection_recall'])} | {pct(w['false_block'])} | {w['watched']} |")
     add("")
@@ -255,7 +255,7 @@ def _cost_section(a: dict[str, Any]) -> list[str]:
     add("## 8. Cost")
     add("")
     add("| stage | calls | list price | booked by the app's ledger |")
-    add("|---|---|---|---|")
+    add(_table_rule(4))
     for s in ("smoke", "s1-guard", "s2-external", "s3-haiku", "s4-full"):
         c = costs[s]
         add(f"| {s} | {c['calls']} | {usd(c['list_price_usd'])} | {usd(c['app_booked_usd'])} |")
@@ -642,7 +642,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     )
     add("")
     add("| case | expected | jev | Haiku |")
-    add("|---|---|---|---|")
+    add(_table_rule(4))
     for x in ag["disagreements"]:
         add(f"| {x['id']} | {x['expected']} | {x['jev']} | {x['haiku']} |")
     add("")
