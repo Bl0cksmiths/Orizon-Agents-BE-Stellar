@@ -307,7 +307,8 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
                 latency = time.perf_counter() - started
                 row = build_row(case, rep, splits[case.id], run, pipeline.name, latency)
                 trace = vdir / "traces" / f"{case.id}_rep{rep}.json"
-                trace.write_text(json.dumps(run.transcript, ensure_ascii=False, indent=1), encoding="utf-8")
+                body = json.dumps(run.transcript, ensure_ascii=False, indent=1)
+                await asyncio.to_thread(trace.write_text, body, encoding="utf-8")
                 await append(results_path, row)
                 outcome.scored += 1
             finally:
