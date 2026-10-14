@@ -896,8 +896,9 @@ class BodyLimitMiddleware:
     """
 
     DEFAULT_LIMIT = 1_048_576  # 1 MiB — comfortably above any legitimate payload
-    # Routes that buffer the entire body up front get a tighter budget.
-    PATH_LIMITS: dict[str, int] = {"/api/pdax/webhooks/receive": 65_536}
+    # Routes that buffer the entire body up front get a tighter budget. The
+    # default for `path_limits`; an explicit `path_limits` replaces it whole.
+    DEFAULT_PATH_LIMITS: dict[str, int] = {"/api/pdax/webhooks/receive": 65_536}
 
     def __init__(
         self,
@@ -907,7 +908,7 @@ class BodyLimitMiddleware:
     ) -> None:
         self.app = app
         self.limit = self.DEFAULT_LIMIT if limit is None else limit
-        self.path_limits = dict(self.PATH_LIMITS) if path_limits is None else path_limits
+        self.path_limits = dict(self.DEFAULT_PATH_LIMITS) if path_limits is None else path_limits
 
     @staticmethod
     async def _send_413(send: Any) -> None:
