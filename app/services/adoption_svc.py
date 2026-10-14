@@ -534,10 +534,14 @@ def forget_owners() -> None:
     _owners_read.clear()
 
 
-async def _owner_or_none(agent_id: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> str | None:
-    """The live `owner_of`, or None when it could not be established."""
+async def _owner_or_none(agent_id: str) -> str | None:
+    """The live `owner_of`, or None when it could not be established.
+
+    Unbounded here: the caller holds the deadline and answers its expiry, as
+    `_probe_owners` does, with the same warning and the same None.
+    """
     try:
-        return await asyncio.wait_for(external_binding.resolve_owner(agent_id), timeout=timeout)
+        return await external_binding.resolve_owner(agent_id)
     except (external_binding.OwnerLookupError, TimeoutError) as e:
         logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
         return None
@@ -573,7 +577,12 @@ async def _probe_owners(agent_ids: list[str], deadline: float) -> tuple[dict[str
         if remaining <= 0:
             late = True
             return None
-        return await _owner_or_none(agent_id, min(remaining, PROBE_TIMEOUT_SECONDS))
+        try:
+            async with asyncio.timeout(min(remaining, PROBE_TIMEOUT_SECONDS)):
+                return await _owner_or_none(agent_id)
+        except TimeoutError as e:
+            logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
+            return None
 
     found = zip(agent_ids, await _bounded(agent_ids, _probe), strict=True)
     return {agent_id: owner for agent_id, owner in found if owner is not None}, late

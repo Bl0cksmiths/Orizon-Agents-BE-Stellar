@@ -34,7 +34,7 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _probes(monkeypatch: pytest.MonkeyPatch, owners: dict[str, str | None]) -> list[str]:
     probed: list[str] = []
 
-    async def owner_or_none(agent_id: str, timeout: float = 0.0) -> str | None:
+    async def owner_or_none(agent_id: str) -> str | None:
         probed.append(agent_id)
         return owners.get(agent_id)
 
