@@ -131,6 +131,21 @@ def _receipt_map(fields: dict[str, Any]) -> stellar_xdr.SCVal:
     )
 
 
+def _authorization_map(fields: dict[str, Any], version: int) -> stellar_xdr.SCVal:
+    """An escrow authorization as the contract's `authorization(id)` view returns it: v2 adds `settled`."""
+    return _map(
+        {
+            "payer": scval.to_address(fields["payer"]),
+            "agent_id": _sym(fields["agent_id"]),
+            "max_amount": scval.to_int128(fields["max_amount"]),
+            "spent": scval.to_int128(fields["spent"]),
+            "expires_at": scval.to_uint64(1),
+            "revoked": scval.to_bool(False),
+            **({"settled": scval.to_bool(fields["spent"] > 0)} if version >= 2 else {}),
+        }
+    )
+
+
 @dataclass
 class Escrow:
     version: int
@@ -572,20 +587,7 @@ class FakeWorld:
                     return _sim_fail(ok, "HostError: Error(Contract, #2)")
                 if kind == "receipt":
                     return _sim_value(ok, _receipt_map(fields))
-                return _sim_value(
-                    ok,
-                    _map(
-                        {
-                            "payer": scval.to_address(fields["payer"]),
-                            "agent_id": _sym(fields["agent_id"]),
-                            "max_amount": scval.to_int128(fields["max_amount"]),
-                            "spent": scval.to_int128(fields["spent"]),
-                            "expires_at": scval.to_uint64(1),
-                            "revoked": scval.to_bool(False),
-                            **({"settled": scval.to_bool(fields["spent"] > 0)} if e.version >= 2 else {}),
-                        }
-                    ),
-                )
+                return _sim_value(ok, _authorization_map(fields, e.version))
         if contract == LEDGER and fn == "rep_state":
             agent_id = scval.from_symbol(args[0])
             return _sim_value(
