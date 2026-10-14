@@ -452,6 +452,15 @@ app.add_middleware(OriginLockMiddleware)
 # headers too, not just responses that reached the router.
 app.add_middleware(SecurityHeadersMiddleware)
 
+# Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
+# stack compressed while the rate limiter still sees the raw request.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Outermost of all: every response — including 429s from the limiter and
+# CORS rejections — carries an X-Request-ID, and the logged duration covers
+# the full middleware stack.
+app.add_middleware(RequestContextMiddleware)
+
 # This project's Vercel production/preview origins only — a broad
 # `.*\.vercel\.app` would let ANY hosted Vercel page drive the
 # unauthenticated LLM routes from visitors' browsers.
@@ -500,15 +509,6 @@ app.add_middleware(
         "Retry-After",
     ],
 )
-
-# Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
-# stack compressed while the rate limiter still sees the raw request.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
-
-# Outermost of all: every response — including 429s from the limiter and
-# CORS rejections — carries an X-Request-ID, and the logged duration covers
-# the full middleware stack.
-app.add_middleware(RequestContextMiddleware)
 
 # Details that are already machine-readable tokens ("invalid_api_key",
 # "build_failed") are promoted to the envelope's error code as-is.
