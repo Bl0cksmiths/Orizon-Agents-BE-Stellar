@@ -1883,7 +1883,7 @@ async def release_authorization(auth_id_hex: str, *, reason: str) -> str | None:
             raise ValueError("an authorization id is 16 bytes")
         outcome, tx, detail = await _submit_release(auth_id_hex, secrets.token_bytes(16))
     except Exception as e:
-        logger.error("release of authorization %s (%s) NOT submitted: %s", auth_id_hex, reason, e, exc_info=True)
+        logger.exception("release of authorization %s (%s) NOT submitted: %s", auth_id_hex, reason, e)
         return None
     if outcome == "released":
         logger.info("released authorization %s to its payer (%s): tx %s", auth_id_hex, reason, tx)
