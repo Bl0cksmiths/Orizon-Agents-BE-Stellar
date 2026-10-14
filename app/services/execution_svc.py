@@ -1995,6 +1995,43 @@ async def _settle_refused(
     return (None, None, None)
 
 
+async def _report_v2_settle_failure(
+    task_id: str, start: float, e: Exception, *, settled: bool, release: bool, auth_id_hex: str
+) -> None:
+    """Trace a v2 settle that raised, by what the exception says moved, and
+    hand back custody that a refused, never-sent settle left behind."""
+    from ..stellar import client as sc
+
+    if settled:
+        await _emit(task_id, start, "error", "on-chain settlement failed")
+    elif isinstance(e, sc.InFlightError):
+        await _emit(
+            task_id,
+            start,
+            "error",
+            "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
+            settlement="unconfirmed",
+        )
+    elif isinstance(e, sc.ContractError) and e.code in _NOT_SETTLED_BY_US:
+        # Reclaimed by the payer first, already settled, or gone: nothing
+        # this settle did moved money, and there is nothing to release.
+        await _emit(
+            task_id,
+            start,
+            "error",
+            f"not settled by us — the authorization was {_NOT_SETTLED_BY_US[e.code].replace('_', ' ')}",
+            settlement="failed",
+        )
+    else:
+        await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
+        if isinstance(e, sc.NotSubmittedError) and not release:
+            # Refused before it was sent — by the simulation, the signer or
+            # the RPC — so nothing is in flight, and the custody would sit
+            # until the payer reclaims it. Hand it back instead (S4). Not
+            # for a release: that IS the call that was just refused.
+            await release_authorization(auth_id_hex, reason="settle_not_submitted")
+
+
 async def _settle_v2(
     task_id: str,
     start: float,
@@ -2337,34 +2374,9 @@ async def _settle_v2(
             proof_tx,
             exc_info=True,
         )
-        if settled_job_id is not None:
-            await _emit(task_id, start, "error", "on-chain settlement failed")
-        elif isinstance(e, sc.InFlightError):
-            await _emit(
-                task_id,
-                start,
-                "error",
-                "on-chain settlement unconfirmed — it may still settle, and this run cannot be disputed",
-                settlement="unconfirmed",
-            )
-        elif isinstance(e, sc.ContractError) and e.code in _NOT_SETTLED_BY_US:
-            # Reclaimed by the payer first, already settled, or gone: nothing
-            # this settle did moved money, and there is nothing to release.
-            await _emit(
-                task_id,
-                start,
-                "error",
-                f"not settled by us — the authorization was {_NOT_SETTLED_BY_US[e.code].replace('_', ' ')}",
-                settlement="failed",
-            )
-        else:
-            await _emit(task_id, start, "error", "on-chain settlement failed", settlement="failed")
-            if isinstance(e, sc.NotSubmittedError) and not release:
-                # Refused before it was sent — by the simulation, the signer or
-                # the RPC — so nothing is in flight, and the custody would sit
-                # until the payer reclaims it. Hand it back instead (S4). Not
-                # for a release: that IS the call that was just refused.
-                await release_authorization(auth_id_hex, reason="settle_not_submitted")
+        await _report_v2_settle_failure(
+            task_id, start, e, settled=settled_job_id is not None, release=release, auth_id_hex=auth_id_hex
+        )
 
     return (settle_tx, proof_tx, settled_job_id)
 
