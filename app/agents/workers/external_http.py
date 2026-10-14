@@ -501,98 +501,113 @@ class ExternalHttpWorker(Worker):
                         f"external dispatch {dispatch_id} to {self.id}: "
                         f"exceeded the {DISPATCH_DEADLINE_SECONDS:.0f}s dispatch deadline",
                     )
-                try:
-                    return await asyncio.wait_for(self._once(client, body, headers, dispatch_id), timeout=remaining)
-                except asyncio.TimeoutError as e:
-                    # A slow-but-alive operator: judged HERE, as a failed step,
-                    # rather than by execution_svc's outer ceiling. Never
-                    # retried — the request was on the wire and may have run.
-                    raise ExternalDispatchError(
-                        "response_timeout",
-                        f"external dispatch {dispatch_id} to {self.id}: "
-                        f"no response within {DISPATCH_DEADLINE_SECONDS:.0f}s",
-                    ) from e
-                except EndpointPolicyError as e:
-                    # The host resolved into a blocked range at CONNECT time —
-                    # `_PinnedAddressTransport` refused before a socket was
-                    # opened, so nothing of the envelope reached the address.
-                    # Classed with the URL refusal above rather than getting a
-                    # rule of its own: the operator's remedy is identical, and
-                    # `DISPATCH_RULES` is coarse on purpose (one class, one
-                    # remedy). Which check refused, and which address did it,
-                    # stay in the prose. Never retried — a rebind answers
-                    # whatever it likes on the second query.
-                    raise ExternalDispatchError(
-                        "endpoint_refused",
-                        f"external dispatch {dispatch_id} to {self.id}: "
-                        f"{_without_url(self.endpoint_url, str(e))} (rule: {e.rule})",
-                    ) from e
-                except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                    # The connection never established, so the operator never
-                    # received the step: a single retry cannot double-run work.
-                    if attempts >= 2:
-                        raise ExternalDispatchError(
-                            "no_connection",
-                            f"external dispatch {dispatch_id} to {self.id}: "
-                            f"no connection after retry ({type(e).__name__})",
-                        ) from e
-                    logger.warning(
-                        "external dispatch %s to %s: connection failed (%s) — retrying once",
-                        dispatch_id,
-                        self.id,
-                        type(e).__name__,
-                    )
-                except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
-                    # The other three httpx timeouts, none of which the clause
-                    # above catches (ConnectTimeout is a sibling, not a base).
-                    # None is retried, and only ConnectTimeout ever could be:
-                    # a read timeout means the request reached the operator and
-                    # may be running right now, and a write timeout means part
-                    # of it did — retrying either is exactly the double-run the
-                    # module's "no retry on a step that may have executed" rule
-                    # exists to prevent. PoolTimeout never left this process at
-                    # all, so a retry would be SAFE, but it would queue for the
-                    # same exhausted pool inside the same deadline; it is
-                    # grouped here because what an operator sees is a dispatch
-                    # that ran out of time.
-                    raise ExternalDispatchError(
-                        "response_timeout",
-                        f"external dispatch {dispatch_id} to {self.id}: no usable response ({type(e).__name__})",
-                    ) from e
-                except httpx.TooManyRedirects as e:
-                    # Unreachable while follow_redirects stays False — a 30x is
-                    # a non-2xx and fails as `error_status` in _once — but an
-                    # injected client can be built with redirects on, so it is
-                    # classed the same way: the operator answered, with a chain
-                    # of statuses we will not use.
-                    raise ExternalDispatchError(
-                        "error_status",
-                        f"external dispatch {dispatch_id} to {self.id}: too many redirects ({type(e).__name__})",
-                    ) from e
-                except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as e:
-                    # EVERYTHING else httpx can raise, so the docstring's "any
-                    # failure is raised as ExternalDispatchError" is true rather
-                    # than aspirational: RemoteProtocolError (the operator spoke
-                    # malformed HTTP or hung up mid-body), DecodingError (their
-                    # Content-Encoding does not match their bytes), ReadError /
-                    # WriteError / CloseError, ProxyError, UnsupportedProtocol,
-                    # LocalProtocolError. Before this clause each of those left
-                    # the module as a raw httpx error, which execution_svc
-                    # cannot classify and the failure tracker cannot count.
-                    #
-                    # Not retried: RemoteProtocolError and ReadError both follow
-                    # a request that was fully sent, so the step may have run.
-                    #
-                    # The httpx TYPE goes in the message, never its str(): an
-                    # httpx error's text can quote the request URL, which is the
-                    # one thing no message leaving this module may carry.
-                    raise ExternalDispatchError(
-                        "transport_error",
-                        f"external dispatch {dispatch_id} to {self.id}: transport failure ({type(e).__name__})",
-                    ) from e
+                result = await self._attempt(client, body, headers, dispatch_id, remaining, attempts)
+                if result is not None:
+                    return result
         finally:
             if owns_client:
                 await client.aclose()
+
+    async def _attempt(
+        self,
+        client: httpx.AsyncClient,
+        body: bytes,
+        headers: dict[str, str],
+        dispatch_id: str,
+        remaining: float,
+        attempts: int,
+    ) -> dict[str, Any] | None:
+        """One send of the dispatch within `remaining` seconds: the operator's
+        answer, or None when a first attempt could not connect and is retried.
+        Any other failure is raised as ExternalDispatchError."""
+        try:
+            return await asyncio.wait_for(self._once(client, body, headers, dispatch_id), timeout=remaining)
+        except asyncio.TimeoutError as e:
+            # A slow-but-alive operator: judged HERE, as a failed step,
+            # rather than by execution_svc's outer ceiling. Never
+            # retried — the request was on the wire and may have run.
+            raise ExternalDispatchError(
+                "response_timeout",
+                f"external dispatch {dispatch_id} to {self.id}: no response within {DISPATCH_DEADLINE_SECONDS:.0f}s",
+            ) from e
+        except EndpointPolicyError as e:
+            # The host resolved into a blocked range at CONNECT time —
+            # `_PinnedAddressTransport` refused before a socket was
+            # opened, so nothing of the envelope reached the address.
+            # Classed with the URL refusal above rather than getting a
+            # rule of its own: the operator's remedy is identical, and
+            # `DISPATCH_RULES` is coarse on purpose (one class, one
+            # remedy). Which check refused, and which address did it,
+            # stay in the prose. Never retried — a rebind answers
+            # whatever it likes on the second query.
+            raise ExternalDispatchError(
+                "endpoint_refused",
+                f"external dispatch {dispatch_id} to {self.id}: "
+                f"{_without_url(self.endpoint_url, str(e))} (rule: {e.rule})",
+            ) from e
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # The connection never established, so the operator never
+            # received the step: a single retry cannot double-run work.
+            if attempts >= 2:
+                raise ExternalDispatchError(
+                    "no_connection",
+                    f"external dispatch {dispatch_id} to {self.id}: no connection after retry ({type(e).__name__})",
+                ) from e
+            logger.warning(
+                "external dispatch %s to %s: connection failed (%s) — retrying once",
+                dispatch_id,
+                self.id,
+                type(e).__name__,
+            )
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+            # The other three httpx timeouts, none of which the clause
+            # above catches (ConnectTimeout is a sibling, not a base).
+            # None is retried, and only ConnectTimeout ever could be:
+            # a read timeout means the request reached the operator and
+            # may be running right now, and a write timeout means part
+            # of it did — retrying either is exactly the double-run the
+            # module's "no retry on a step that may have executed" rule
+            # exists to prevent. PoolTimeout never left this process at
+            # all, so a retry would be SAFE, but it would queue for the
+            # same exhausted pool inside the same deadline; it is
+            # grouped here because what an operator sees is a dispatch
+            # that ran out of time.
+            raise ExternalDispatchError(
+                "response_timeout",
+                f"external dispatch {dispatch_id} to {self.id}: no usable response ({type(e).__name__})",
+            ) from e
+        except httpx.TooManyRedirects as e:
+            # Unreachable while follow_redirects stays False — a 30x is
+            # a non-2xx and fails as `error_status` in _once — but an
+            # injected client can be built with redirects on, so it is
+            # classed the same way: the operator answered, with a chain
+            # of statuses we will not use.
+            raise ExternalDispatchError(
+                "error_status",
+                f"external dispatch {dispatch_id} to {self.id}: too many redirects ({type(e).__name__})",
+            ) from e
+        except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as e:
+            # EVERYTHING else httpx can raise, so the docstring's "any
+            # failure is raised as ExternalDispatchError" is true rather
+            # than aspirational: RemoteProtocolError (the operator spoke
+            # malformed HTTP or hung up mid-body), DecodingError (their
+            # Content-Encoding does not match their bytes), ReadError /
+            # WriteError / CloseError, ProxyError, UnsupportedProtocol,
+            # LocalProtocolError. Before this clause each of those left
+            # the module as a raw httpx error, which execution_svc
+            # cannot classify and the failure tracker cannot count.
+            #
+            # Not retried: RemoteProtocolError and ReadError both follow
+            # a request that was fully sent, so the step may have run.
+            #
+            # The httpx TYPE goes in the message, never its str(): an
+            # httpx error's text can quote the request URL, which is the
+            # one thing no message leaving this module may carry.
+            raise ExternalDispatchError(
+                "transport_error",
+                f"external dispatch {dispatch_id} to {self.id}: transport failure ({type(e).__name__})",
+            ) from e
+        return None
 
     async def _once(
         self, client: httpx.AsyncClient, body: bytes, headers: dict[str, str], dispatch_id: str
