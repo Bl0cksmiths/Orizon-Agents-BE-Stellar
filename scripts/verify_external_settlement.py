@@ -320,6 +320,21 @@ def check_settlement_tx(tx: dict[str, Any]) -> list[Check]:
     return [Check("tx_succeeded", successful, detail)]
 
 
+def _find_credit(client: httpx.Client, horizon: str, tx: str, owner: str) -> Credit | None:
+    """The credit to `owner` in transaction `tx`: from its operations' balance
+    changes first (a SAC transfer), else from its effects (a classic payment).
+    A Horizon read that does not answer 200 is treated as holding none."""
+    credit = None
+    ops = client.get(f"{horizon}/transactions/{tx}/operations", params={"limit": 200})
+    if ops.status_code == 200:
+        credit = find_credit_in_operations(_records(ops.json()), owner)
+    if credit is None:
+        effects = client.get(f"{horizon}/transactions/{tx}/effects", params={"limit": 200})
+        if effects.status_code == 200:
+            credit = find_credit_in_effects(_records(effects.json()), owner)
+    return credit
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Verify an external agent's settlement evidence (story 2.04).")
     p.add_argument("--agent", required=True, help="agent id")
@@ -372,14 +387,7 @@ def main() -> int:
         else:
             checks.append(Check("tx_on_horizon", True, "transaction found on Horizon"))
             checks.extend(check_settlement_tx(tx_resp.json()))
-
-            ops = client.get(f"{horizon}/transactions/{args.tx}/operations", params={"limit": 200})
-            if ops.status_code == 200:
-                credit = find_credit_in_operations(_records(ops.json()), args.owner)
-            if credit is None:
-                effects = client.get(f"{horizon}/transactions/{args.tx}/effects", params={"limit": 200})
-                if effects.status_code == 200:
-                    credit = find_credit_in_effects(_records(effects.json()), args.owner)
+            credit = _find_credit(client, horizon, args.tx, args.owner)
             checks.extend(check_owner_credited(credit, args.owner, args.amount))
 
     print(f"\nExternal settlement evidence — agent {args.agent} - tx {args.tx[:12]}...\n")
