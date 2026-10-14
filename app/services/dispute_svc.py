@@ -1524,6 +1524,62 @@ async def _record_credit(
         raise
 
 
+async def _record_in_flight(
+    store: DisputeStore, dispute_id: str, claimed: DisputeRecord, outcome: refund_svc.RefundOutcome
+) -> None:
+    """Record an UNCONFIRMED transfer's hash and amount on the dispute it was for.
+
+    The claim stays held and the dispute stays `crediting` whatever happens
+    here, so a write that fails costs only the record of the hash: it is
+    logged at ERROR in its place, never raised.
+    """
+    try:
+        # Conditional on `crediting`, as the credited write is. Losing it
+        # means somebody moved the dispute while the transfer was out; that
+        # record is theirs and is not overwritten, and this line is what says
+        # a transfer that may still land was sent against it.
+        if (
+            await store.append_status(
+                dispute_id,
+                "crediting",
+                refund_tx=outcome.tx_hash,
+                inflight_usdc=outcome.amount_usdc,
+                expected_status="crediting",
+            )
+            is None
+        ):
+            moved = await store.get_dispute(dispute_id)
+            logger.critical(
+                "dispute %s: refund tx %s is UNCONFIRMED and MAY STILL LAND, but the dispute is no longer in"
+                " crediting (now %s) — an operator intervened mid-flight; it was NOT overwritten, and a"
+                " second credit may follow — reconcile by hand (job %s, payer %s, %.7f USDC)",
+                dispute_id,
+                outcome.tx_hash,
+                moved.status if moved else "missing",
+                claimed.job_id_hex,
+                claimed.payer,
+                outcome.amount_usdc,
+            )
+    except Exception:
+        # Only the HASH was lost. `claim_refund` already moved this dispute to
+        # `crediting` and the claim is still held, so both of the things that
+        # stop a second transfer are in place whatever happened here. The
+        # refusal below is therefore still the right answer and still carries
+        # the hash, and raising instead would answer a 500 that says strictly
+        # less than the 504 does. So this logs what the record will not say,
+        # and the caller is answered properly.
+        logger.error(
+            "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
+            " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
+            dispute_id,
+            outcome.tx_hash,
+            claimed.job_id_hex,
+            claimed.payer,
+            outcome.amount_usdc,
+            exc_info=True,
+        )
+
+
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
     """Adjudicate a dispute in the BUYER's favour, pay the credit, and rate the agent.
 
@@ -1804,51 +1860,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # never as `credited_usdc`: the reconcile sweep that later finds it landed
     # checks the chain's figure against this one, and a receipt must not show
     # a payment that may never arrive.
-    try:
-        # Conditional on `crediting`, as the credited write above is. Losing it
-        # means somebody moved the dispute while the transfer was out; that
-        # record is theirs and is not overwritten, and this line is what says
-        # a transfer that may still land was sent against it.
-        if (
-            await store.append_status(
-                dispute_id,
-                "crediting",
-                refund_tx=outcome.tx_hash,
-                inflight_usdc=outcome.amount_usdc,
-                expected_status="crediting",
-            )
-            is None
-        ):
-            moved = await store.get_dispute(dispute_id)
-            logger.critical(
-                "dispute %s: refund tx %s is UNCONFIRMED and MAY STILL LAND, but the dispute is no longer in"
-                " crediting (now %s) — an operator intervened mid-flight; it was NOT overwritten, and a"
-                " second credit may follow — reconcile by hand (job %s, payer %s, %.7f USDC)",
-                dispute_id,
-                outcome.tx_hash,
-                moved.status if moved else "missing",
-                claimed.job_id_hex,
-                claimed.payer,
-                outcome.amount_usdc,
-            )
-    except Exception:
-        # Only the HASH was lost. `claim_refund` already moved this dispute to
-        # `crediting` and the claim is still held, so both of the things that
-        # stop a second transfer are in place whatever happened here. The
-        # refusal below is therefore still the right answer and still carries
-        # the hash, and raising instead would answer a 500 that says strictly
-        # less than the 504 does. So this logs what the record will not say,
-        # and the caller is answered properly.
-        logger.error(
-            "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
-            " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
-            dispute_id,
-            outcome.tx_hash,
-            claimed.job_id_hex,
-            claimed.payer,
-            outcome.amount_usdc,
-            exc_info=True,
-        )
+    await _record_in_flight(store, dispute_id, claimed, outcome)
     raise _refuse_credit(
         claimed,
         "refund_unconfirmed",
