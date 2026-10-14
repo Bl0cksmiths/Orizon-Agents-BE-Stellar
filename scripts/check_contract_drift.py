@@ -92,7 +92,10 @@ _RELEVANT: frozenset[str] = frozenset({*_ENV_KEYS, _NETWORK_KEY})
 _ASSIGNMENT = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 
 _YAML_KEY = re.compile(r"^\s*-\s*key:\s*(\S+)\s*$")
-_YAML_VALUE = re.compile(r"^\s*value:\s*(.*)$")
+# The value's surrounding whitespace is left in the group and stripped by the
+# caller: a `\s*` before `(.*)` would let both quantifiers claim the same
+# spaces and backtrack quadratically on a long run of them.
+_YAML_VALUE = re.compile(r"^\s*value:(.*)$")
 
 
 class DriftCheckError(Exception):

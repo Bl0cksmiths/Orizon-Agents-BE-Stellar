@@ -10,12 +10,14 @@ when none of them needs a filesystem staged first.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from scripts.check_contract_drift import (
+    _YAML_VALUE,
     CONTRACTS,
     MISSING,
     DriftCheckError,
@@ -226,6 +228,34 @@ def test_a_key_set_twice_to_different_values_is_refused() -> None:
 
 def test_render_yaml_reads_values_and_walks_past_secrets() -> None:
     assert parse_render_yaml(_render_yaml(MAINNET_IDS)) == {"mainnet": MAINNET_IDS}
+
+
+@pytest.mark.parametrize(
+    ("line", "value"),
+    [
+        ("        value: CABC", "CABC"),
+        ("value:CABC", "CABC"),
+        ("  value: \t CABC \t ", "CABC"),
+        ('        value: "Public Network ; 2015"', "Public Network ; 2015"),
+        ("        value: 'mainnet'  ", "mainnet"),
+        ("        value:", ""),
+    ],
+)
+def test_render_yaml_value_lines_read_with_their_padding_stripped(line: str, value: str) -> None:
+    text = f"      - key: STELLAR_NETWORK\n        value: mainnet\n      - key: STELLAR_AGENT_REGISTRY\n{line}\n"
+    assert parse_render_yaml(text) == {"mainnet": {"agent_registry": value}}
+
+
+@pytest.mark.parametrize("line", ["      - key: STELLAR_NETWORK", "        values: CABC", "        # value: CABC"])
+def test_render_yaml_value_pattern_skips_lines_that_are_not_values(line: str) -> None:
+    assert _YAML_VALUE.match(line) is None
+
+
+def test_render_yaml_value_pattern_stays_linear_on_a_long_run_of_spaces() -> None:
+    # The old `value:\s*(.*)$` backtracked quadratically here (~15 s at this size).
+    started = time.perf_counter()
+    assert _YAML_VALUE.match("value:" + " " * 100_000 + "\nx\ny") is None
+    assert time.perf_counter() - started < 0.5
 
 
 def test_canonical_json_is_read_by_its_declared_network() -> None:
