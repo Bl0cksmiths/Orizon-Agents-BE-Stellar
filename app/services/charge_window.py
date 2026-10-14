@@ -584,6 +584,12 @@ def _warn_truncated(index: _Index, out_of_time: bool) -> None:
     )
 
 
+def _unscanned(owners: Mapping[str, str], *, out_of_time: bool) -> WindowSettlements:
+    """Every agent unavailable: no index was read this build and none is held to answer from."""
+    reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
+    return _unavailable_for(owners, reason, out_of_time=out_of_time)
+
+
 async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> WindowSettlements:
     """Settlement evidence for every agent in `owners` (agent id → owner), from
     one scan of the escrow's window. Never raises; never runs past `deadline`
@@ -605,8 +611,7 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
         scanned = await _scan(escrow_id, _held_index(escrow_id), deadline)
         held, out_of_time = scanned.index, scanned.out_of_time
         if held is None:
-            reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
-            return _unavailable_for(owners, reason, out_of_time=out_of_time)
+            return _unscanned(owners, out_of_time=out_of_time)
 
         by_agent = _charges_by_agent(held, owners)
         needed = {c.auth_id for charges in by_agent.values() for c in charges}
