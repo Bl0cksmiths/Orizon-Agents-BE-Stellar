@@ -3789,7 +3789,7 @@ async def _submit_ratings(
         try:
             step_job_id = settlement_job_id(job_id, step_index)
         except ValueError:
-            logger.error(
+            logger.exception(
                 "task %s: no rating id for %s (%s) at step %d of job %s — that step is NOT rated "
                 "(rating %d, weight %d, payer %s)",
                 task_id,
@@ -3800,7 +3800,6 @@ async def _submit_ratings(
                 rating,
                 weight,
                 payer,
-                exc_info=True,
             )
             await _emit(
                 task_id,
