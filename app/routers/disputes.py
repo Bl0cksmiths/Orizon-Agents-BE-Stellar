@@ -1212,7 +1212,7 @@ _UPHOLD_RESPONSES: dict[int | str, dict[str, object]] = {
     responses=_UPHOLD_RESPONSES,
 )
 async def uphold_dispute(
-    dispute_id: str = Path(..., min_length=1, max_length=64),
+    dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
 ) -> DisputeResponse:
     """Find for the buyer: credit the step back out of the settler's balance.
 
