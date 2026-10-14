@@ -205,6 +205,17 @@ def _recheck_stage(check: SpecCheck, resolution: Resolution, *, user_edited: boo
     return PlanStage(stage="recheck", msg=f"{why}; planning from your own words")
 
 
+async def _recheck(intent: str, spec: Spec | None) -> SpecCheck | None:
+    """The spec's re-check against the intent, or None when there is no spec.
+    The spend cap pauses planning."""
+    if spec is None:
+        return None
+    try:
+        return await prompt_improver.recheck(intent, spec)
+    except SpendCapReached as err:
+        raise paused(err) from err
+
+
 async def screen_free_form(intent: str, *, user_spec: Spec | None = None) -> Screening:
     """Guard ∥ improver, then the re-check, then one decision. Raises a refusal or returns.
 
@@ -239,12 +250,7 @@ async def screen_free_form(intent: str, *, user_spec: Spec | None = None) -> Scr
             spec = user_spec
             stages.append(PlanStage(stage="improve", msg="Using your edited reading of the request"))
 
-        check: SpecCheck | None = None
-        if spec is not None:
-            try:
-                check = await prompt_improver.recheck(intent, spec)
-            except SpendCapReached as err:
-                raise paused(err) from err
+        check = await _recheck(intent, spec)
         resolution = prompt_improver.resolve(decision, check, user_edited=user_spec is not None)
         _refuse_unless_planned(resolution)
         if check is not None:
