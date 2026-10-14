@@ -1039,7 +1039,28 @@ class ReclaimReq(BaseModel):
     auth_id_hex: str = Field(..., pattern=r"^[0-9a-f]{32}$")
 
 
-@router.post("/build/reclaim")
+@router.post(
+    "/build/reclaim",
+    responses={
+        400: _BUILD_FAILED,
+        403: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_payer_mismatch` — another wallet made this authorization.",
+        },
+        404: {"model": ErrorEnvelope, "description": "`authorization_not_found` — no such authorization."},
+        409: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`reclaim_unsupported` (a v1 escrow), `authorization_settled`, `authorization_revoked`, or "
+                "`authorization_locked` (not yet expired)."
+            ),
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_unreadable` — it could not be read on-chain. Retry.",
+        },
+    },
+)
 async def build_reclaim(req: ReclaimReq) -> XdrResponse:
     """Build unsigned XDR for PaymentEscrow v2 `reclaim(payer, auth_id)`. The payer signs.
 
