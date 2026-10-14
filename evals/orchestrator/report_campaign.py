@@ -83,6 +83,24 @@ def _confusion(conf: dict[str, dict[str, int]]) -> list[str]:
     return out
 
 
+def _worker_outcome(w: dict[str, Any]) -> str:
+    """A sampled worker's outcome cell: its failure, its artifact with the
+    validator's count, or the start of its summary."""
+    out = w["output"]
+    if w["error"]:
+        return f"FAILED: {w['error']}"
+    if not out.get("artifact_title"):
+        return str(out.get("summary", ""))[:220]
+    counts = out.get("counts") or {}
+    lines = counts.get("lines")
+    viol = out.get("validator_violations", out.get("critic_violations"))
+    return (
+        f"“{out['artifact_title']}”"
+        + (f", {lines} lines" if lines else "")
+        + f", validator violations: {len(viol) if viol is not None else 'n/a'}; {out.get('summary', '')}"
+    )
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -461,20 +479,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
             continue
         call = w["calls"][0] if w["calls"] else {}
         model = call.get("model", "—")
-        out = w["output"]
-        if w["error"]:
-            outcome = f"FAILED: {w['error']}"
-        elif out.get("artifact_title"):
-            counts = out.get("counts") or {}
-            lines = counts.get("lines")
-            viol = out.get("validator_violations", out.get("critic_violations"))
-            outcome = (
-                f"“{out['artifact_title']}”"
-                + (f", {lines} lines" if lines else "")
-                + f", validator violations: {len(viol) if viol is not None else 'n/a'}; {out.get('summary', '')}"
-            )
-        else:
-            outcome = str(out.get("summary", ""))[:220]
+        outcome = _worker_outcome(w)
         add(
             f"| {name} | {model} | {w['case_id'] or 'sample contract'} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
         )
