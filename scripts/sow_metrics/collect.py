@@ -183,6 +183,12 @@ def _int(value: Any) -> int:
 
 
 # ── the platform's own keys ──────────────────────────────────────────────
+def _add_key(snap: Snapshot, address: Any, role: str) -> None:
+    """Record a platform key under its first-named role; anything that is not an account is ignored."""
+    if _is_account(address):
+        snap.platform.setdefault(address, role)
+
+
 def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     """The keys this deployment demonstrably holds or names, each with its role.
 
@@ -192,22 +198,17 @@ def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     contract holds in its instance storage. A failed read leaves an owner we
     cannot rule out, so it fails `platform_keys` and every count that needs it.
     """
-
-    def add(address: Any, role: str) -> None:
-        if _is_account(address):
-            snap.platform.setdefault(address, role)
-
-    add(snap.network.get("admin"), "network admin key")
-    add(snap.network.get("dispatch_signer"), "dispatch signer")
+    _add_key(snap, snap.network.get("admin"), "network admin key")
+    _add_key(snap, snap.network.get("dispatch_signer"), "dispatch signer")
     ratings = (snap.readiness or {}).get("ratings") or {}
-    add(ratings.get("signer"), "ratings signer")
-    add(ratings.get("scorer"), "ratings scorer")
+    _add_key(snap, ratings.get("signer"), "ratings signer")
+    _add_key(snap, ratings.get("scorer"), "ratings scorer")
 
     registry = snap.contract("agent_registry")
     if registry:
         try:
             admin = chain.simulate(registry, "admin")
-            add(admin, "registry admin")
+            _add_key(snap, admin, "registry admin")
             snap.registry_admin = admin if _is_account(admin) else None
         except FAILURES as exc:
             snap.fail("platform_keys", exc)
@@ -224,7 +225,7 @@ def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
             snap.fail("platform_keys", exc)
             continue
         for key, role in roles.items():
-            add(storage.get(key), role)
+            _add_key(snap, storage.get(key), role)
 
 
 # ── the registry ─────────────────────────────────────────────────────────
