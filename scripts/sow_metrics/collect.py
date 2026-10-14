@@ -189,6 +189,19 @@ def _add_key(snap: Snapshot, address: Any, role: str) -> None:
         snap.platform.setdefault(address, role)
 
 
+def _read_registry_admin(snap: Snapshot, chain: ChainReader) -> None:
+    """The registry's own `admin()`, when the live API names a registry."""
+    registry = snap.contract("agent_registry")
+    if not registry:
+        return
+    try:
+        admin = chain.simulate(registry, "admin")
+        _add_key(snap, admin, "registry admin")
+        snap.registry_admin = admin if _is_account(admin) else None
+    except FAILURES as exc:
+        snap.fail("platform_keys", exc)
+
+
 def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     """The keys this deployment demonstrably holds or names, each with its role.
 
@@ -204,14 +217,7 @@ def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     _add_key(snap, ratings.get("signer"), "ratings signer")
     _add_key(snap, ratings.get("scorer"), "ratings scorer")
 
-    registry = snap.contract("agent_registry")
-    if registry:
-        try:
-            admin = chain.simulate(registry, "admin")
-            _add_key(snap, admin, "registry admin")
-            snap.registry_admin = admin if _is_account(admin) else None
-        except FAILURES as exc:
-            snap.fail("platform_keys", exc)
+    _read_registry_admin(snap, chain)
     for name, roles in (
         ("reputation_ledger", {"Admin": "reputation ledger admin", "Scorer": "reputation ledger scorer"}),
         ("attestation_registry", {"Admin": "attestation registry admin", "Sealer": "attestation sealer"}),
