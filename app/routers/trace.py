@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from ..schemas import TraceLine
+from ..security import ErrorEnvelope
 from ..services import execution_svc
 from ..state import state
 from ..task_auth import require_task_read
@@ -14,11 +15,24 @@ from ..trace_bus import bus
 
 router = APIRouter(tags=["trace"])
 
+# What `require_task_read` and the routes behind it answer besides the body.
+_TASK_READ_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {
+        "model": ErrorEnvelope,
+        "description": "`unknown_task` — no such task, or the read token does not prove it. The two are one answer.",
+    },
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`task_store_unavailable` (+ Retry-After) — the task store could not be read.",
+    },
+}
+
 
 @router.get(
     "/trace/{task_id}",
     summary="Get a task's recorded trace",
     dependencies=[Depends(require_task_read)],
+    responses=_TASK_READ_RESPONSES,
 )
 async def get_trace(task_id: str) -> list[TraceLine]:
     if task_id not in state.traces and task_id not in state.tasks:
