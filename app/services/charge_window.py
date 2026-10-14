@@ -576,11 +576,17 @@ def _evidence_by_agent(
 
 def _warn_truncated(index: _Index, out_of_time: bool) -> None:
     """Say how far a truncated window was read, and why it stopped short."""
+    if out_of_time:
+        why = "out of time"
+    elif index.lossy:
+        why = "lossy ledger"
+    else:
+        why = "a read failed"
     logger.warning(
         "[charges] window read to ledger %d of %d (%s) — settlements are a floor",
         index.next_ledger - 1,
         index.latest,
-        "out of time" if out_of_time else "lossy ledger" if index.lossy else "a read failed",
+        why,
     )
 
 
