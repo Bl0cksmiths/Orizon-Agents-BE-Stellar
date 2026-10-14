@@ -555,6 +555,23 @@ async def _batch_owners(registry_id: str, agent_ids: list[str], deadline: float)
     return owners
 
 
+async def _probe_owners(agent_ids: list[str], deadline: float) -> tuple[dict[str, str], bool]:
+    """`owner_of` for each of `agent_ids`, by `deadline`: the owners it
+    established, and whether any probe was skipped because time ran out."""
+    late = False
+
+    async def _probe(agent_id: str) -> str | None:
+        nonlocal late
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            late = True
+            return None
+        return await _owner_or_none(agent_id, min(remaining, PROBE_TIMEOUT_SECONDS))
+
+    found = zip(agent_ids, await _bounded(agent_ids, _probe), strict=True)
+    return {agent_id: owner for agent_id, owner in found if owner is not None}, late
+
+
 async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, str], bool]:
     """The owners of `agent_ids` that could be read by `deadline`, and whether
     any id was left unread for the next build (out of time, or past
@@ -572,19 +589,9 @@ async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, s
         owners.update(await _batch_owners(registry_id, rest, deadline))
         rest = [i for i in rest if i not in owners]
     probe = rest[:MAX_OWNER_PROBES_PER_BUILD]
-    left = len(rest) > len(probe)
-
-    async def _probe(agent_id: str) -> str | None:
-        nonlocal left
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            left = True
-            return None
-        return await _owner_or_none(agent_id, min(remaining, PROBE_TIMEOUT_SECONDS))
-
-    for agent_id, owner in zip(probe, await _bounded(probe, _probe), strict=True):
-        if owner is not None:
-            owners[agent_id] = owner
+    probed, late = await _probe_owners(probe, deadline)
+    owners.update(probed)
+    left = len(rest) > len(probe) or late
     for agent_id, owner in owners.items():
         _owners_read[(registry_id, agent_id)] = owner
     return owners, left
