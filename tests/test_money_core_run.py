@@ -449,3 +449,19 @@ def test_a_signing_key_missing_skips_settle_without_a_release(
     assert chain.calls == []
     task = state.tasks[TASK]
     assert (task.status, task.settlement, task.charge_tx, task.spent_stroops) == ("complete", "failed", None, 0)
+
+
+def test_a_kit_intent_is_traced_and_seeded_into_every_steps_context(harness: dict[str, Any]) -> None:
+    plan = _plan((0.01,), ("agt_ok",)).model_copy(update={"intent": "build a snake game"})
+
+    _start(plan)
+
+    trace = _trace()
+    assert trace[:3] == [
+        ("input", "intent received → 'build a snake game'", None),
+        ("exec", "kit detected: snake → VIPER·GRID (8 features locked)", None),
+        ("exec", "orchestrator: decompose → [agt_ok]", None),
+    ]
+    context = harness["workers"]["agt_ok"].contexts[0]
+    assert context["intent"] == "build a snake game"
+    assert context["kit"]["kit_id"] == "snake"
