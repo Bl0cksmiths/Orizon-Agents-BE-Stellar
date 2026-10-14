@@ -1791,6 +1791,33 @@ def _under_cap(amount: int, remaining: int | None) -> tuple[int, int | None]:
     return held, remaining - held
 
 
+def _split_delivered(
+    plan: StoredPlan, delivered_steps: frozenset[int], unpaid_agents: Mapping[str, str], cap: int | None
+) -> tuple[list[tuple[int, str, int]], list[_StepPayout], int]:
+    """The delivered steps, in plan order, split into the paid — (index, agent,
+    amount) held under `cap` — and the unpaid with their reason, plus how many
+    stroops the cap cut."""
+    remaining = cap
+    clamped = 0
+    paid: list[tuple[int, str, int]] = []
+    unpaid: list[_StepPayout] = []
+    for index in sorted(delivered_steps):
+        step = plan.plan.steps[index]
+        amount = _price_stroops(step)
+        reason = UNPAID_FREE if amount <= 0 else unpaid_agents.get(step.agent_id)
+        if reason is None:
+            held, remaining = _under_cap(amount, remaining)
+            clamped += amount - held
+            amount = held
+            if amount <= 0:
+                reason = UNPAID_OVER_CAP
+        if reason is not None:
+            unpaid.append(_StepPayout(index, step.agent_id, 0, None, reason))
+        else:
+            paid.append((index, step.agent_id, amount))
+    return paid, unpaid, clamped
+
+
 def _merged_payouts(paid: list[tuple[int, str, int]], payees: Mapping[str, str], steps: list[_StepPayout]) -> list[Any]:
     """One payout per agent, in first-seen order, for a run past the settle's
     payout limit; each paid step is appended to `steps` under its agent's entry.
@@ -1859,24 +1886,7 @@ def _payout_plan(
 
     payees = payees or {}
 
-    remaining = cap
-    clamped = 0
-    paid: list[tuple[int, str, int]] = []
-    unpaid: list[_StepPayout] = []
-    for index in sorted(delivered_steps):
-        step = plan.plan.steps[index]
-        amount = _price_stroops(step)
-        reason = UNPAID_FREE if amount <= 0 else unpaid_agents.get(step.agent_id)
-        if reason is None:
-            held, remaining = _under_cap(amount, remaining)
-            clamped += amount - held
-            amount = held
-            if amount <= 0:
-                reason = UNPAID_OVER_CAP
-        if reason is not None:
-            unpaid.append(_StepPayout(index, step.agent_id, 0, None, reason))
-        else:
-            paid.append((index, step.agent_id, amount))
+    paid, unpaid, clamped = _split_delivered(plan, delivered_steps, unpaid_agents, cap)
 
     payouts: list[Any] = []
     steps: list[_StepPayout] = list(unpaid)
