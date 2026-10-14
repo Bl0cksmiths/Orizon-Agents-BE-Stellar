@@ -61,6 +61,18 @@ def _is_project(output: dict[str, Any]) -> bool:
     return isinstance(artifact, dict) and artifact.get("framework") == "next"
 
 
+def _draft_html(artifact: dict[str, Any]) -> str:
+    """The draft's HTML: its preview, or the entry file's content (else the
+    first file's) when the preview is empty."""
+    draft_html: str = artifact.get("preview_html") or ""
+    if not draft_html.strip():
+        files = artifact.get("files", [])
+        entry = artifact.get("entry")
+        entry_file = next((f for f in files if f.get("path") == entry), files[0] if files else None)
+        draft_html = (entry_file or {}).get("content", "")
+    return draft_html
+
+
 class CodeCriticWorker(ModelWorker):
     id = "agt_12r0"
     name = "code.critic"
@@ -113,13 +125,7 @@ class CodeCriticWorker(ModelWorker):
                 "counts": {"violations": 0, "notes": 1},
             }
 
-        draft_html = draft_artifact.get("preview_html") or ""
-        if not draft_html.strip():
-            # Try the entry file's content if preview_html is empty
-            files = draft_artifact.get("files", [])
-            entry = draft_artifact.get("entry")
-            entry_file = next((f for f in files if f.get("path") == entry), files[0] if files else None)
-            draft_html = (entry_file or {}).get("content", "")
+        draft_html = _draft_html(draft_artifact)
 
         # ── 1. Structural violations from the validator ─────────────────────
         validator_violations = validate_html(draft_html)
