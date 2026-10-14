@@ -972,6 +972,32 @@ class Runner:
                 self.say(f"    charged {e.topics[1:2]} {e.value}")
         return checks, receipts
 
+    def report_checks(
+        self,
+        checks: list[verify.Check],
+        version: int,
+        attestation: dict[str, Any] | None,
+        settlement: dict[str, Any],
+    ) -> None:
+        """Print each check and record them all; stop unless every one passes."""
+        ok = verify.passed(checks)
+        for c in checks:
+            mark = "PASS" if c.ok else ("n/a " if c.ok is None else "FAIL")
+            self.say(f"    [{mark}] {c.name}: {c.detail}")
+        self.note(
+            "verify",
+            "settlement_checks",
+            f"escrow v{version}: {'all checks pass' if ok else 'CHECKS FAILED'}",
+            escrow_version=version,
+            checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+            attestation=attestation,
+            steps=settlement.get("steps"),
+        )
+        if not ok:
+            raise Stop(
+                EXIT_VERIFY_FAILED, "the ledger does not show the settlement the API reports; see the checks above"
+            )
+
     def seal_checks(
         self, chain: ChainReader, settlement: dict[str, Any], receipts: list[str] | None
     ) -> tuple[list[verify.Check], dict[str, Any] | None]:
@@ -1047,23 +1073,7 @@ class Runner:
         seal_checks, attestation = self.seal_checks(chain, settlement, receipts)
         checks += seal_checks
 
-        ok = verify.passed(checks)
-        for c in checks:
-            mark = "PASS" if c.ok else ("n/a " if c.ok is None else "FAIL")
-            self.say(f"    [{mark}] {c.name}: {c.detail}")
-        self.note(
-            "verify",
-            "settlement_checks",
-            f"escrow v{version}: {'all checks pass' if ok else 'CHECKS FAILED'}",
-            escrow_version=version,
-            checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
-            attestation=attestation,
-            steps=settlement.get("steps"),
-        )
-        if not ok:
-            raise Stop(
-                EXIT_VERIFY_FAILED, "the ledger does not show the settlement the API reports; see the checks above"
-            )
+        self.report_checks(checks, version, attestation, settlement)
 
     def balance_checks(self, events: list[ChainEvent], paid: int, escrow: str) -> list[verify.Check]:
         chain, buyer = self.need_chain(), self.need_buyer().public_key
