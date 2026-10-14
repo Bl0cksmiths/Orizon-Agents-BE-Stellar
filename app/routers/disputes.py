@@ -754,6 +754,26 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
 @router.post(
     "/disputes/challenge",
     summary="Mint a dispute challenge to sign",
+    responses={
+        404: {"model": ErrorEnvelope, "description": "`unknown_job` — no settled workflow with that job id."},
+        409: {
+            "model": ErrorEnvelope,
+            "description": (
+                "The step cannot be disputed: `dispute_window_closed`, `step_not_settled` or `nothing_was_charged`."
+            ),
+        },
+        429: {
+            "model": ErrorEnvelope,
+            "description": (
+                "Rate limited (+ Retry-After): the global limit, or `dispute_challenge_rate_limited` — this "
+                "client's challenge budget is spent."
+            ),
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`challenge_capacity_dispute` — every dispute-challenge slot is live. Ask again shortly.",
+        },
+    },
 )
 async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> DisputeChallengeResponse:
     """Issue the nonce and the exact string the payer's wallet must sign.
