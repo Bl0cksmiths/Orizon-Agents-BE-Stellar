@@ -184,7 +184,42 @@ async def _response(task_id: str) -> ExecuteResponse:
     return ExecuteResponse(task_id=task_id, read_token=state.task_tokens.get(task_id))
 
 
-@router.post("/execute", response_model=ExecuteResponse, summary="Execute a stored plan")
+@router.post(
+    "/execute",
+    response_model=ExecuteResponse,
+    summary="Execute a stored plan",
+    responses={
+        403: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_payer_mismatch` — the authorization was made by a different wallet.",
+        },
+        404: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`not_found` — the plan is no longer held (+ `release_tx_hash` when custody was released); "
+                "or `authorization_not_found`."
+            ),
+        },
+        409: {
+            "model": ErrorEnvelope,
+            "description": (
+                "The authorization cannot pay for this run: `authorization_used`, `authorization_plan_mismatch`, "
+                "`authorization_spent`, `authorization_insufficient` or `authorization_expiring`."
+            ),
+        },
+        410: {
+            "model": ErrorEnvelope,
+            "description": "`plan_expired` (+ `release_tx_hash` when custody was released).",
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`plan_store_unavailable` (+ Retry-After), `capacity_exhausted` (+ `release_tx_hash` when "
+                "custody was released), or `authorization_unreadable`."
+            ),
+        },
+    },
+)
 async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONResponse:
     if (req.auth_id_hex is None) != (req.payer is None):
         # Half a pair used to run SIMULATED without a word, so a buyer who
