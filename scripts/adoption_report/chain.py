@@ -22,6 +22,7 @@ answers it with a fake RPC and a fake Horizon (`fakes.py`).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,6 +103,16 @@ def _event_from_xdr(event: stellar_xdr.ContractEvent) -> ChainEvent | None:
     )
 
 
+def _decoded(raw_events: Iterable[stellar_xdr.ContractEvent]) -> list[ChainEvent]:
+    """The contract events among `raw_events`, decoded, in order."""
+    out: list[ChainEvent] = []
+    for raw_event in raw_events:
+        ev = _event_from_xdr(raw_event)
+        if ev is not None:
+            out.append(ev)
+    return out
+
+
 def events_from_rpc(result: dict[str, Any]) -> list[ChainEvent]:
     """The contract events of a `getTransaction` result.
 
@@ -109,18 +120,12 @@ def events_from_rpc(result: dict[str, Any]) -> list[ChainEvent]:
     `events.contractEventsXdr`; older RPC only in `resultMetaXdr` (meta v3's
     `soroban_meta.events`, meta v4's per-operation `events`). Both are read.
     """
-    out: list[ChainEvent] = []
     grouped = (result.get("events") or {}).get("contractEventsXdr")
     if isinstance(grouped, list):
-        for per_op in grouped:
-            for raw in per_op or []:
-                ev = _event_from_xdr(stellar_xdr.ContractEvent.from_xdr(raw))
-                if ev is not None:
-                    out.append(ev)
-        return out
+        return _decoded(stellar_xdr.ContractEvent.from_xdr(raw) for per_op in grouped for raw in per_op or [])
     meta_b64 = result.get("resultMetaXdr")
     if not meta_b64:
-        return out
+        return []
     meta = stellar_xdr.TransactionMeta.from_xdr(meta_b64)
     raw_events: list[stellar_xdr.ContractEvent] = []
     if meta.v3 is not None and meta.v3.soroban_meta is not None:
@@ -128,11 +133,7 @@ def events_from_rpc(result: dict[str, Any]) -> list[ChainEvent]:
     if meta.v4 is not None:
         for op in meta.v4.operations:
             raw_events.extend(op.events)
-    for raw_event in raw_events:
-        ev = _event_from_xdr(raw_event)
-        if ev is not None:
-            out.append(ev)
-    return out
+    return _decoded(raw_events)
 
 
 def invocations_from_envelope(envelope_b64: str) -> list[Invocation]:
