@@ -207,6 +207,14 @@ def _done_keys(path: Path) -> set[tuple[str, int]]:
     return keys
 
 
+def _append_line(path: Path, row: dict[str, Any]) -> None:
+    """Append one JSON row and fsync it, so a crash loses nothing already recorded (blocking; run off the loop)."""
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def write_state(flow_dir: Path, cases: list[Case], splits: dict[str, str]) -> None:
     flow_dir.mkdir(parents=True, exist_ok=True)
     state = {
@@ -249,10 +257,7 @@ async def run_cases(cases: list[Case], pipeline: Pipeline, cfg: RunConfig) -> Ru
 
     async def append(path: Path, row: dict[str, Any]) -> None:
         async with write_lock:
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+            await asyncio.to_thread(_append_line, path, row)
 
     async def record_error(case: Case, rep: int, cls: str, detail: str, calls: list[StageCall]) -> None:
         outcome.errors += 1
