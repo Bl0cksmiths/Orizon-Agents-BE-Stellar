@@ -915,22 +915,26 @@ class Runner:
             return dict(settlement)
         return self.state.settlement
 
+    def no_settlement(self, version: int) -> Stop:
+        """Record that the task has no settlement, and the stop that follows: nothing to verify or dispute."""
+        why = (
+            " Escrow v1 cannot settle an external payer's funds (D-039), so this is expected until v2 is deployed."
+            if version == 1
+            else ""
+        )
+        self.note("verify", "no_settlement", "the task has no settlement record" + why)
+        return Stop(
+            EXIT_VERIFY_FAILED,
+            "no settlement was recorded for this task, so there is nothing to verify or dispute." + why,
+        )
+
     def stage_verify(self) -> None:
         chain, buyer = self.need_chain(), self.need_buyer().public_key
         settlement = self.read_settlement()
         escrow = (self.state.authorize or {}).get("escrow") or self.contracts["payment_escrow"]
         version = self.state.escrow_version or 1
         if not settlement:
-            why = (
-                " Escrow v1 cannot settle an external payer's funds (D-039), so this is expected until v2 is deployed."
-                if version == 1
-                else ""
-            )
-            self.note("verify", "no_settlement", "the task has no settlement record" + why)
-            raise Stop(
-                EXIT_VERIFY_FAILED,
-                "no settlement was recorded for this task, so there is nothing to verify or dispute." + why,
-            )
+            raise self.no_settlement(version)
 
         checks: list[verify.Check] = [
             verify.Check(
