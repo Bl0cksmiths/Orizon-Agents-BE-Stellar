@@ -113,6 +113,18 @@ def _decoded(raw_events: Iterable[stellar_xdr.ContractEvent]) -> list[ChainEvent
     return out
 
 
+def _meta_events(meta: stellar_xdr.TransactionMeta) -> list[stellar_xdr.ContractEvent]:
+    """The raw contract events in a transaction meta: v3's `soroban_meta.events`,
+    then v4's per-operation `events`."""
+    raw_events: list[stellar_xdr.ContractEvent] = []
+    if meta.v3 is not None and meta.v3.soroban_meta is not None:
+        raw_events.extend(meta.v3.soroban_meta.events)
+    if meta.v4 is not None:
+        for op in meta.v4.operations:
+            raw_events.extend(op.events)
+    return raw_events
+
+
 def events_from_rpc(result: dict[str, Any]) -> list[ChainEvent]:
     """The contract events of a `getTransaction` result.
 
@@ -126,14 +138,7 @@ def events_from_rpc(result: dict[str, Any]) -> list[ChainEvent]:
     meta_b64 = result.get("resultMetaXdr")
     if not meta_b64:
         return []
-    meta = stellar_xdr.TransactionMeta.from_xdr(meta_b64)
-    raw_events: list[stellar_xdr.ContractEvent] = []
-    if meta.v3 is not None and meta.v3.soroban_meta is not None:
-        raw_events.extend(meta.v3.soroban_meta.events)
-    if meta.v4 is not None:
-        for op in meta.v4.operations:
-            raw_events.extend(op.events)
-    return _decoded(raw_events)
+    return _decoded(_meta_events(stellar_xdr.TransactionMeta.from_xdr(meta_b64)))
 
 
 def invocations_from_envelope(envelope_b64: str) -> list[Invocation]:
