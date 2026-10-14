@@ -40,7 +40,6 @@ async def list_tasks(limit: Annotated[int, Query(ge=1, le=200)] = 20) -> list[Ta
 
 @router.get(
     "/tasks/{task_id}",
-    response_model=Task,
     summary="Get a task's status",
     dependencies=[Depends(require_task_read)],
 )
