@@ -3334,7 +3334,7 @@ async def _record_settlement(
             )
         await get_dispute_store().record_settlement(record)
     except Exception as e:
-        logger.error(
+        logger.exception(
             "task %s: settlement NOT recorded: %s — the buyer has no way to dispute this run "
             "(job %s, charge_tx %s, proof_tx %s, auth %s, payer %s, %.6f USDC)",
             task_id,
@@ -3345,7 +3345,6 @@ async def _record_settlement(
             auth_id_hex,
             payer,
             total_usdc,
-            exc_info=True,
         )
         # The buyer is told too: a window they cannot actually use must not
         # appear in their trace as if it were open.
