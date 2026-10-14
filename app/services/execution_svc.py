@@ -604,20 +604,7 @@ async def _run(
             await _emit_simulated_seal(task_id, start, run)
 
         if status != "complete":
-            logger.error(
-                "task %s finalized as %s: %d/%d steps produced output, artifact=%s",
-                task_id,
-                status,
-                run.succeeded,
-                total_steps,
-                run.last_artifact is not None,
-            )
-            await _emit(
-                task_id,
-                start,
-                "error",
-                f"workflow incomplete — {run.succeeded}/{total_steps} agents produced output",
-            )
+            await _report_incomplete(task_id, start, status, run, total_steps)
 
         _finalize_task(
             task_id, status, run.charged if onchain else run.spent, run.last_artifact, run.charge_tx, run.proof_tx
@@ -674,6 +661,24 @@ async def _run(
         # The run's terminal state, durably, before the run is gone — shielded
         # for the same reason: it is the write a receipt reads after a restart.
         await asyncio.shield(task_persistence.flush(task_persistence.RUN_END_FLUSH_SECONDS))
+
+
+async def _report_incomplete(task_id: str, start: float, status: TaskStatus, run: _RunState, total_steps: int) -> None:
+    """Say, in the log and the trace, that a run ended short of its plan."""
+    logger.error(
+        "task %s finalized as %s: %d/%d steps produced output, artifact=%s",
+        task_id,
+        status,
+        run.succeeded,
+        total_steps,
+        run.last_artifact is not None,
+    )
+    await _emit(
+        task_id,
+        start,
+        "error",
+        f"workflow incomplete — {run.succeeded}/{total_steps} agents produced output",
+    )
 
 
 async def _emit_simulated_seal(task_id: str, start: float, run: _RunState) -> None:
