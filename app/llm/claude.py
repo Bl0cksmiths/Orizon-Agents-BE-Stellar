@@ -589,7 +589,7 @@ def _retry_after(error: Any) -> float | None:
     return None
 
 
-def _unavailable(error: Exception, model: str) -> Exception:
+def _unavailable(error: Exception, model: str) -> LLMUnavailable | LLMRequestError:
     """The SDK's typed error as this layer's (classified by class and status, never by message)."""
     import anthropic
 
