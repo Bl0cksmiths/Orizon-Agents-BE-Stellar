@@ -35,7 +35,7 @@ _BARE_HEX = re.compile(r"^(?:0x)?[0-9a-f]{8,}$", re.IGNORECASE)
 _SHORT_HEX = re.compile(r"^[0-9a-f]{4,}\s*(?:…|\.{2,3})\s*[0-9a-f]{4,}$", re.IGNORECASE)
 _BARE_STRKEY = re.compile(r"^[GCM][A-Z2-7]{55}$")
 _SHORT_STRKEY = re.compile(r"^[GCM][A-Z2-7]{2,}\s*(?:…|\.{2,3})\s*[A-Z2-7]{3,}$")
-_EDGES = re.compile(r"^[\W_]+|[\W_]+$")  # anything but a letter or a digit, at either end of a token
+_EDGES = re.compile(r"(?:^[\W_]+)|(?:[\W_]+$)")  # anything but a letter or a digit, at either end of a token
 _WORD = re.compile(r"[^\W\d_]{2,}")  # two letters in a row
 
 # A full id inside a label, which is shortened the way the index writes them.
