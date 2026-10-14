@@ -91,6 +91,11 @@ def chain_event(raw: dict[str, Any]) -> ChainEvent:
     )
 
 
+def _next_cursor(result: dict[str, Any], batch: list[dict[str, Any]]) -> Any:
+    """Where the next getEvents page starts: the answer's cursor, else the last event's own."""
+    return result.get("cursor") or (batch[-1].get("pagingToken") or batch[-1].get("id") if batch else None)
+
+
 @dataclass
 class ChainReader:
     client: httpx.Client
@@ -198,7 +203,7 @@ class ChainReader:
                 if tx_hash is not None and raw.get("txHash") != tx_hash:
                     continue
                 out.append(chain_event(raw))
-            cursor = result.get("cursor") or (batch[-1].get("pagingToken") or batch[-1].get("id") if batch else None)
+            cursor = _next_cursor(result, batch)
             if len(batch) < _EVENT_PAGE or not cursor:
                 break
             params = {
