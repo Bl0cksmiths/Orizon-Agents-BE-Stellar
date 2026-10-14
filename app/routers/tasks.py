@@ -5,10 +5,23 @@ from pydantic import BaseModel
 
 from ..config import settings
 from ..schemas import Task, TaskSummary
+from ..security import ErrorEnvelope
 from ..state import state
 from ..task_auth import require_task_read
 
 router = APIRouter(tags=["tasks"])
+
+# What `require_task_read` and the routes behind it answer besides the body.
+_TASK_READ_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {
+        "model": ErrorEnvelope,
+        "description": "`unknown_task` — no such task, or the read token does not prove it. The two are one answer.",
+    },
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`task_store_unavailable` (+ Retry-After) — the task store could not be read.",
+    },
+}
 
 
 class ArtifactResponse(BaseModel):
@@ -42,6 +55,7 @@ async def list_tasks(limit: Annotated[int, Query(ge=1, le=200)] = 20) -> list[Ta
     "/tasks/{task_id}",
     summary="Get a task's status",
     dependencies=[Depends(require_task_read)],
+    responses=_TASK_READ_RESPONSES,
 )
 async def get_task(task_id: str) -> Task:
     task = state.tasks.get(task_id)
