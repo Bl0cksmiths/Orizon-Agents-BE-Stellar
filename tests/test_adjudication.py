@@ -1048,8 +1048,9 @@ def test_a_credit_that_computes_to_nothing_is_refused_and_hands_the_claim_back(m
     monkeypatch.setattr(settings, "dispute_credited_fraction", 0.0)
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "nothing_to_credit"
     assert refused.value.status_code == 409
