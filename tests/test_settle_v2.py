@@ -722,7 +722,7 @@ def _execute(plan: StoredPlan, payer: str = PAYER) -> str:
     return asyncio.run(execution_svc.execute_plan(plan, auth_id_hex=AUTH_ID_HEX, payer=payer))
 
 
-@pytest.fixture()
+@pytest.fixture
 def captured_runs(monkeypatch) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
 
