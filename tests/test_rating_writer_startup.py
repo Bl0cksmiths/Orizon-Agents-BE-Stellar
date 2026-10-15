@@ -197,8 +197,10 @@ def test_stop_cancels_a_check_still_waiting_on_the_chain(monkeypatch, caplog):
 
     with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
         report_task = asyncio.run(_boot_then_shut_down())
-    assert report_task is not None and report_task.cancelled()
-    assert rw._report_task is None and rw._read_task is None
+    assert report_task is not None
+    assert report_task.cancelled()
+    assert rw._report_task is None
+    assert rw._read_task is None
     assert _writer_records(caplog) == []
 
 
