@@ -170,7 +170,8 @@ def test_v1_has_nothing_to_reclaim(client: TestClient, monkeypatch: pytest.Monke
     escrow = install(monkeypatch, FakeEscrow(version=None, auth=RuntimeError("never read")))
     r = reclaim(client)
     assert (r.status_code, r.json()["error"]["code"]) == (409, "reclaim_unsupported")
-    assert builds.calls == [] and escrow.calls == [(ESCROW, "version")]
+    assert builds.calls == []
+    assert escrow.calls == [(ESCROW, "version")]
 
 
 @pytest.mark.parametrize("where", ["version", "authorization"])
