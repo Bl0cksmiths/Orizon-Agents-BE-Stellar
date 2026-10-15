@@ -405,7 +405,8 @@ def test_a_claim_and_a_release_carry_the_receipt_verbatim(store: DisputeStore) -
 
     upheld, claimed, released = asyncio.run(go())
 
-    assert claimed is not None and released is not None
+    assert claimed is not None
+    assert released is not None
     assert claimed == replace(upheld, status="crediting", updated_at=claimed.updated_at)
     assert released == replace(upheld, status="upheld", updated_at=released.updated_at)
 
