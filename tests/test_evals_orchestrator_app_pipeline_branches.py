@@ -64,11 +64,13 @@ def test_an_improver_failure_plans_from_the_original_and_says_why(monkeypatch):
     monkeypatch.setattr(prompt_improver, "improve", improve)
     pipeline = _pipeline(monkeypatch, check=None, resolution=Resolution(action="use_original", reasons=["no_spec"]))
     run = asyncio.run(pipeline.run("hello", stages="all"))
-    assert run.guard.verdict == "allow" and run.guard.tier == "low"
+    assert run.guard.verdict == "allow"
+    assert run.guard.tier == "low"
     assert run.guard.reasons == ("watch", "no_spec:LLMError")
     assert run.guard.scores == {"injection": 0.1}
     assert run.spec is None
-    assert run.plan is not None and run.plan.raw == {"planned_from": "hello"}
+    assert run.plan is not None
+    assert run.plan.raw == {"planned_from": "hello"}
 
 
 def test_a_spend_cap_in_the_improver_stops_the_run(monkeypatch):
