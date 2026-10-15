@@ -812,7 +812,8 @@ def test_a_complete_build_says_so_and_what_it_covered(world: _World) -> None:
 
     report = world.report()
 
-    assert report.complete is True and report.degraded is False
+    assert report.complete is True
+    assert report.degraded is False
     assert report.coverage is not None
     assert report.coverage.model_dump() == {
         "agents_listed": 2,
