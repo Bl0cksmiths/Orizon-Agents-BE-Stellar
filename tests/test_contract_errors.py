@@ -295,7 +295,8 @@ def test_a_send_that_raises_carries_the_hash_of_what_it_signed(monkeypatch):
     rpc = _rpc(monkeypatch, _SigningRpc(fail_at="send_raises"))
     with pytest.raises(sc.InFlightError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
-    assert rpc.signed_hash is not None and len(rpc.signed_hash) == 64
+    assert rpc.signed_hash is not None
+    assert len(rpc.signed_hash) == 64
     assert caught.value.tx_hash == rpc.signed_hash
 
 
