@@ -706,7 +706,8 @@ def test_a_pass_reports_what_it_did_by_action(store: DisputeStore, chain: Chain,
 
     report = run(store, go())
 
-    assert report.skipped is None and report.outcomes == {"credited": 1}
+    assert report.skipped is None
+    assert report.outcomes == {"credited": 1}
     assert refund_reconcile.status()["last_outcomes"] == {"credited": 1}
 
 
