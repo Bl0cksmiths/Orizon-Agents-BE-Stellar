@@ -916,8 +916,10 @@ def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
         during = client.get("/readiness").json()["disputes"]["reconcile"]
         task = refund_reconcile._task
 
-    assert during["enabled"] is True and during["running"] is True
-    assert task is not None and task.cancelled()
+    assert during["enabled"] is True
+    assert during["running"] is True
+    assert task is not None
+    assert task.cancelled()
     assert refund_reconcile._task is None
 
 
