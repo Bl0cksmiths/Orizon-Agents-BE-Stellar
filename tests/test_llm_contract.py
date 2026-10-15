@@ -329,8 +329,9 @@ def test_a_question_left_unanswered_fails_the_fake_loudly(fake_jev: FakeJev) -> 
 
 def test_jev_failures_are_jev_unavailable(fake_jev: FakeJev) -> None:
     fake_jev.fail()
+    asking = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS)
     with pytest.raises(JevUnavailable) as caught:
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+        asyncio.run(asking)
     assert caught.value.reason == "timeout"
 
 
