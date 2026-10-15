@@ -302,7 +302,8 @@ def test_a_claim_somebody_else_holds_returns_the_dispute_unsigned(
     with caplog.at_level(logging.INFO, logger=LOGGER):
         result = _uphold()
     assert result == seeded
-    assert store.calls == [LOAD, CLAIM, LOAD] and seams.calls == []
+    assert store.calls == [LOAD, CLAIM, LOAD]
+    assert seams.calls == []
     assert _lines(caplog, logging.INFO)[-1] == f"dispute {DISPUTE} is already claimed (upheld) — nothing signed here"
 
 
