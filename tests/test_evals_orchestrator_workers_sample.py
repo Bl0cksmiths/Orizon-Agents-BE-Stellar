@@ -124,7 +124,8 @@ def test_an_unbudgeted_sample_records_every_job_and_feeds_the_critic(monkeypatch
     assert gen_record == json.loads(json.dumps(results["code.gen#1"]))
     call = gen_record["calls"][0]
     # The clock is a counter, so the latencies are whole numbers of ticks.
-    assert gen_record.pop("latency_s") > 0 and call.pop("latency_ms") > 0
+    assert gen_record.pop("latency_s") > 0
+    assert call.pop("latency_ms") > 0
     assert gen_record == {
         "agent_id": "agt_11c0",
         "worker": "code.gen",
@@ -162,7 +163,8 @@ def test_an_unbudgeted_sample_records_every_job_and_feeds_the_critic(monkeypatch
     }
     assert call["cost_usd"] > 0
     critic_record = results["code.critic"]
-    assert critic_record["label"] == "code.critic" and len(critic_record["calls"]) == 2
+    assert critic_record["label"] == "code.critic"
+    assert len(critic_record["calls"]) == 2
     assert critic_record["output"] == {"summary": "polished", "counts": None, "critic_violations": ["v"]}
     assert files["code_critic.json"] == json.dumps(critic_record, indent=2, ensure_ascii=False) + "\n"
 
