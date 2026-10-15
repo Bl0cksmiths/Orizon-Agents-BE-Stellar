@@ -192,7 +192,9 @@ def test_a_fast_read_after_invalidation_serves_the_post_rating_value_fresh(chain
     served = asyncio.run(scenario())
 
     assert (served.count, served.disputed) == (5, 1)
-    assert served.stale is False and served.superseded is False and served.degraded is False
+    assert served.stale is False
+    assert served.superseded is False
+    assert served.degraded is False
     assert rep.passes_floor(served) is False  # judged, and failed, on its own post-dispute numbers
 
 
