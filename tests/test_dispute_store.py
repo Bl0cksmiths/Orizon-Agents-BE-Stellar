@@ -2010,4 +2010,5 @@ def test_choosing_the_in_memory_store_is_a_warning_that_records_are_not_kept(
     assert chosen.levelno == logging.WARNING
     message = chosen.getMessage()
     assert "dispute and settlement records are held in memory only" in message
-    assert "LOST on restart" in message and f"cap of {dispute_store._MAX_IN_MEMORY}" in message
+    assert "LOST on restart" in message
+    assert f"cap of {dispute_store._MAX_IN_MEMORY}" in message
