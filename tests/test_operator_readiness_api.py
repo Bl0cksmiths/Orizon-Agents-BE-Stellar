@@ -165,7 +165,7 @@ def world(monkeypatch):
     rcache.clear()
 
 
-@pytest.fixture()
+@pytest.fixture
 def api():
     # No lifespan: nothing in this route needs it, and the background loops it
     # starts (registry sync, reputation pre-warm) would read the scripted chain.
