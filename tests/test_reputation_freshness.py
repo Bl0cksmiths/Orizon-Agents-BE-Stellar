@@ -142,8 +142,10 @@ def test_a_slow_read_after_invalidation_serves_the_last_value_stale_never_the_pr
 
     assert served.source == "onchain"
     assert served.degraded is False
-    assert served.stale is True and served.superseded is True
-    assert served.stale_age_seconds is not None and 0.0 <= served.stale_age_seconds < 5.0
+    assert served.stale is True
+    assert served.superseded is True
+    assert served.stale_age_seconds is not None
+    assert 0.0 <= served.stale_age_seconds < 5.0
     assert (served.smoothed_bps, served.count, served.disputed) == (before.smoothed_bps, 4, 0)
     assert served.smoothed_bps != settings.reputation_prior_bps
     assert rep.passes_floor(served) is False
