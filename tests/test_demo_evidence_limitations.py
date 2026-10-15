@@ -87,7 +87,8 @@ def test_a_rating_only_dispute_claims_the_rating_and_no_refund(tmp_path: Path) -
     rows = [*settled_run(ledger), row("dispute_rating", ledger.add("dispute"), stage="refund", seq=5)]
     text = described(ledger, tmp_path, rows)
     assert text == paragraph(RATED_ONLY)
-    assert "upheld" not in text and "partial credit" not in text
+    assert "upheld" not in text
+    assert "partial credit" not in text
 
 
 def test_a_refund_that_failed_on_the_ledger_is_not_claimed(tmp_path: Path) -> None:
