@@ -164,7 +164,7 @@ def clean_state():
     registry_sync._disabled_logged = False
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry_configured(monkeypatch):
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
 
