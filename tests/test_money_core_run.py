@@ -220,7 +220,8 @@ def test_a_paid_run_settles_records_and_rates_exactly_the_delivered_steps(
     trace = _trace()
     assert trace[3] == ("exec", f"x402 authorized on-chain by {PAYER[:4]}…{PAYER[-4:]} (auth {AUTH_ID_HEX[:8]}…)", None)
     assert [line for line in trace if "(simulated)" in line[1]] == []
-    assert trace[-1][0] == "proof" and trace[-1][1].startswith("workflow sealed — 2 agents · ")
+    assert trace[-1][0] == "proof"
+    assert trace[-1][1].startswith("workflow sealed — 2 agents · ")
     record = store.recorded[0]
     assert [(s.step_index, s.delivered, s.output_summary) for s in record.steps] == [
         (0, True, "drafted it"),
@@ -234,10 +235,12 @@ def test_a_paid_run_settles_records_and_rates_exactly_the_delivered_steps(
         (8, True, "x y"),
     ]
     args, kwargs = harness["ratings"]
-    assert args[0] == TASK and args[2].id == "pln_v2"
+    assert args[0] == TASK
+    assert args[2].id == "pln_v2"
     delivered = args[3]
     assert sorted(delivered) == [0, 8]
-    assert delivered[0]["source"] == "baked" and "source" not in delivered[8]
+    assert delivered[0]["source"] == "baked"
+    assert "source" not in delivered[8]
     assert kwargs["payer"] == PAYER
     assert kwargs["job_id"] == bytes.fromhex(record.job_id_hex)
     assert kwargs["undispatched"] == frozenset({1, 2, 4})
