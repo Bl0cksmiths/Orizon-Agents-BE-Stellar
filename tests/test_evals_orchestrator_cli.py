@@ -201,10 +201,11 @@ def test_a_streamed_reply_is_cut_off_at_the_budget():
         stream=True,
     )
     guard = BudgetedClaude(Streaming(), remaining=lambda: 0.01)
-    with pytest.raises(BudgetExceeded) as caught:
-        import asyncio
+    import asyncio
 
-        asyncio.run(guard.complete(request))
+    completion = guard.complete(request)
+    with pytest.raises(BudgetExceeded) as caught:
+        asyncio.run(completion)
     assert 0.0099 < caught.value.estimate_usd < 0.0115
 
 
