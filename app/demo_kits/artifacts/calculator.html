@@ -484,6 +484,16 @@
     while (stack.length && popsBefore(stack[stack.length - 1], t)) out.push(stack.pop());
     stack.push(t);
   }
+  // Emit everything back to the matching "(", drop it, then emit the
+  // function that owned the group, if any.
+  function closeParen(stack, out) {
+    while (stack.length && stack[stack.length - 1].kind !== 'lparen') {
+      out.push(stack.pop());
+    }
+    if (!stack.length) throw new Error('unmatched right paren');
+    stack.pop();
+    if (stack.length && stack[stack.length - 1].kind === 'fn') out.push(stack.pop());
+  }
   function toRPN(tokens) {
     const out = [];
     const stack = [];
@@ -492,14 +502,7 @@
       else if (t.kind === 'fn') stack.push(t);
       else if (t.kind === 'op') pushOperator(t, stack, out);
       else if (t.kind === 'lparen') stack.push(t);
-      else if (t.kind === 'rparen') {
-        while (stack.length && stack[stack.length - 1].kind !== 'lparen') {
-          out.push(stack.pop());
-        }
-        if (!stack.length) throw new Error('unmatched right paren');
-        stack.pop();
-        if (stack.length && stack[stack.length - 1].kind === 'fn') out.push(stack.pop());
-      }
+      else if (t.kind === 'rparen') closeParen(stack, out);
     }
     while (stack.length) {
       const top = stack.pop();
