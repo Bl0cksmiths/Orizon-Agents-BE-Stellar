@@ -47,7 +47,8 @@ def test_a_timed_out_credit_records_the_amount_it_was_for_and_never_as_credited(
 
     current, queue = _stored(dispute.id)
     assert (current.status, current.refund_tx, queue) == ("crediting", signed, [dispute.id])
-    assert current.inflight_usdc is not None and current.inflight_usdc > 0
+    assert current.inflight_usdc is not None
+    assert current.inflight_usdc > 0
     assert current.inflight_usdc == _sent_usdc(calls)
     # The receipt's "what landed" is untouched: nothing is known to have.
     assert current.credited_usdc is None
