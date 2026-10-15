@@ -239,14 +239,16 @@ def test_a_failed_build_keeps_the_last_snapshot_and_records_why(caplog: pytest.L
         assert task is not None
         await task
         again = await cell.get(wait_seconds=None)
-        assert served is first and again is first
+        assert served is first
+        assert again is first
         return builder.calls, again.value.n  # type: ignore[union-attr]
 
     with caplog.at_level("WARNING"):
         calls, n = _run(go)  # type: ignore[misc]
     assert (calls, n) == (2, 1)
     status = cell.status()
-    assert status.ready and status.last_error == "RuntimeError: rpc down"
+    assert status.ready
+    assert status.last_error == "RuntimeError: rpc down"
     assert status.failing_since is not None
     assert "snapshot test build failed" in caplog.text
     assert "still serving" in caplog.text
