@@ -1612,8 +1612,10 @@ def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
         paid = asyncio.run(dispute_svc.uphold(dispute.id))
         again = asyncio.run(dispute_svc.uphold(dispute.id))
 
-    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
-    assert paid.rating_tx is None and again == paid
+    assert paid.status == "credited"
+    assert paid.refund_tx == "tx_credit"
+    assert paid.rating_tx is None
+    assert again == paid
     assert rater.calls == 0
     assert invalidated == []
     assert len(chain.calls) == 1
