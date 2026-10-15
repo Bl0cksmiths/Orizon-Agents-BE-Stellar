@@ -69,7 +69,8 @@ def test_horizon_answers() -> None:
     down = _horizon(ledger, f"/transactions/{ok}")
     assert (down.status_code, down.json()) == (503, {"status": 503})
     assert _horizon(ledger, "/").status_code == 200
-    assert ledger.calls[0] == "horizon GET /" and ledger.calls[-3] == "horizon GET /ledgers/1"
+    assert ledger.calls[0] == "horizon GET /"
+    assert ledger.calls[-3] == "horizon GET /ledgers/1"
 
 
 def test_any_other_host_is_an_assertion() -> None:
