@@ -279,7 +279,7 @@ def test_the_fallback_never_lands_on_the_dead_agent(world, monkeypatch: pytest.M
 # ── the planner keeps the memory warm ───────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def probes(monkeypatch: pytest.MonkeyPatch):
     """Replace the endpoint check under `refresh_stale` with a scripted one."""
     script: dict[str, readiness.ProbeResult | None] = {}
