@@ -142,7 +142,8 @@ def _seed(store: Store, status: str = "open", **fields: Any) -> DisputeRecord:
         elif fields:
             await store.append_status(opened.id, status, **fields)
         current = await store.get_dispute(opened.id)
-        assert current is not None and current.status == status
+        assert current is not None
+        assert current.status == status
         return current
 
     seeded = asyncio.run(go())
