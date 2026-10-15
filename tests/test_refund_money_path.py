@@ -335,8 +335,9 @@ def test_an_unconfirmed_credit_never_overwrites_a_dispute_moved_mid_flight(monke
     dispute = a_dispute()
 
     with caplog.at_level(logging.CRITICAL, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as unconfirmed:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert unconfirmed.value.code == "refund_unconfirmed"
     current, _ = _stored(dispute.id)
