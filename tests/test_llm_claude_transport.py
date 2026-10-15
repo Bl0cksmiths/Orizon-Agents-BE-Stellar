@@ -300,7 +300,8 @@ def test_a_streamed_reply_reaches_the_callback_and_the_final_message(api: Callab
             on_text=seen.append,
         )
     )
-    assert seen == ["<html>", "</html>"] and result.value == "<html></html>"
+    assert seen == ["<html>", "</html>"]
+    assert result.value == "<html></html>"
     assert result.usage.output_tokens == 900
     assert recorder.body()["stream"] is True
 
