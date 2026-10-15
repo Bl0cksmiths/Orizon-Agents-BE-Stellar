@@ -185,8 +185,9 @@ def test_the_fake_ledger_refuses_a_second_rating_for_one_pair_whatever_its_kind(
     ledger = _FakeLedger()
     assert asyncio.run(ledger.submit("agt_x", JOB_ID, 95, 1, PAYER, "auto"))["status"] == "SUCCESS"
 
+    replay = ledger.submit("agt_x", JOB_ID, 10, 1, PAYER, "dispute")
     with pytest.raises(sc.ContractError) as refused:
-        asyncio.run(ledger.submit("agt_x", JOB_ID, 10, 1, PAYER, "dispute"))
+        asyncio.run(replay)
 
     assert refused.value.code == LEDGER_REPLAY
     assert ledger.refused == [("agt_x", JOB_ID)]
