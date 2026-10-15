@@ -1529,8 +1529,9 @@ def test_an_upheld_dispute_whose_credit_did_not_land_is_never_rated(
     dispute = a_dispute()
     settler(monkeypatch, answer)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
     assert refused.value.code == code
 
     if answer is LOST:
