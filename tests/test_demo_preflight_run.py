@@ -721,7 +721,9 @@ def test_a_plan_that_does_not_exclude_the_agent_fails(tmp_path: Path) -> None:
     ]
     out = run(world, tmp_path, "--with-decompose", INTENT)
     check = out.check("exclusion.decompose")
-    assert check["status"] == FAIL and check["required"] is True and "lowrep" in check["detail"]
+    assert check["status"] == FAIL
+    assert check["required"] is True
+    assert "lowrep" in check["detail"]
     assert out.code == EXIT_NO_GO
 
 
