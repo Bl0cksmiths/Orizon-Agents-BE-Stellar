@@ -216,4 +216,6 @@ def test_a_streamed_call_records_its_effort_and_first_token_time():
     finally:
         _current.reset(token)
     call = log.calls[0]
-    assert call.effort == "low" and call.first_token_ms is not None and call.first_token_ms <= call.latency_ms
+    assert call.effort == "low"
+    assert call.first_token_ms is not None
+    assert call.first_token_ms <= call.latency_ms
