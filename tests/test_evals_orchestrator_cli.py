@@ -26,7 +26,8 @@ def test_live_without_a_cap_is_refused_before_anything_runs(tmp_path, capsys):
     code = cli.main(["run", "--live", "--flow-dir", str(tmp_path)])
     assert code == cli.EXIT_REFUSED
     out = capsys.readouterr()
-    assert "estimate:" in out.out and "--max-usd" in out.err
+    assert "estimate:" in out.out
+    assert "--max-usd" in out.err
     assert not (tmp_path / "baseline").exists()
 
 
