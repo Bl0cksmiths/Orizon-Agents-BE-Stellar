@@ -330,7 +330,8 @@ def test_a_transition_moves_the_status_and_stamps_the_resolution() -> None:
     after = time.time()
 
     assert updated.status == "upheld"
-    assert updated.resolved_at is not None and before <= updated.resolved_at <= after
+    assert updated.resolved_at is not None
+    assert before <= updated.resolved_at <= after
     assert stored == updated
     # Everything the buyer was told at opening time is still exactly what it was.
     assert updated.reason == "the summary was empty"
