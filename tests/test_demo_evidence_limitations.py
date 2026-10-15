@@ -208,4 +208,5 @@ def test_the_sheet_claims_no_uphold_for_a_dispute_rating_or_a_refund(tmp_path: P
     sheet = out.sheet()
     assert "| the platform's signing key paid the buyer a partial credit for the disputed step |" in sheet
     assert "| a kind=dispute rating against the disputed agent landed on the ReputationLedger |" in sheet
-    assert "upheld" not in sheet and "settler" not in sheet
+    assert "upheld" not in sheet
+    assert "settler" not in sheet
