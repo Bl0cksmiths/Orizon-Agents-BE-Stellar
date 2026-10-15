@@ -338,7 +338,8 @@ def test_repeated_invalidation_keeps_one_refresh_that_goes_round_once_more(chain
     assert same is True
     assert chain.count("agt_01h8") == 3  # the first read, the parked one, one more
     stored = rcache.last_stored(_key("agt_01h8"))
-    assert stored is not None and stored.superseded is False
+    assert stored is not None
+    assert stored.superseded is False
     assert stored.value == POST
 
 
