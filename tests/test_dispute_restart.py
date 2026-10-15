@@ -108,7 +108,7 @@ class Ledger:
         return {"status": "SUCCESS", "hash": RATING_TX}
 
 
-@pytest.fixture()
+@pytest.fixture
 def deployment(monkeypatch: pytest.MonkeyPatch, pg_dsn: str) -> dict[str, Any]:
     """Production's shape, faked at the edges: Postgres, escrow v2, refunds and ratings on.
 
