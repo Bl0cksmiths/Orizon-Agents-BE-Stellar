@@ -245,7 +245,7 @@ class _World:
         return asyncio.run(adoption_svc.build_report())
 
 
-@pytest.fixture()
+@pytest.fixture
 def world(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_World]:
     saved_agents = dict(state.agents)
     state.agents.clear()
