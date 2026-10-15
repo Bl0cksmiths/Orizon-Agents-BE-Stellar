@@ -155,8 +155,9 @@ def _row(**over):
     ],
 )
 def test_the_loader_refuses_rows_that_would_mislead(tmp_path, rows, message):
+    path = _write(tmp_path, rows)
     with pytest.raises(DatasetError, match=message):
-        load(_write(tmp_path, rows))
+        load(path)
 
 
 def test_the_committed_file_is_one_json_object_per_line():
