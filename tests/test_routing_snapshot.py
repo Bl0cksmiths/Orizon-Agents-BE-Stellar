@@ -118,7 +118,7 @@ def test_reputation_is_read_only_for_listed_dispatchable_agents(seeded: None, mo
     assert sorted(asked[0]) == sorted(a.id for a in state.list_agents() if a.source == "seeded" and a.id != "agt_03d9")
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(seeded: None, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """The real reputation read path over a fake Soroban simulation.
 
