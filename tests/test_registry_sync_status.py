@@ -170,8 +170,9 @@ def test_a_failed_list_ids_leaves_synced_false(registry_configured: None, monkey
 
     monkeypatch.setattr(registry_sync.sc, "simulate_read", down)
 
+    syncing = registry_sync.sync_once()
     with pytest.raises(RuntimeError):
-        asyncio.run(registry_sync.sync_once())
+        asyncio.run(syncing)
 
     assert registry_sync.status().synced is False
     assert registry_sync.status().syncing is False
