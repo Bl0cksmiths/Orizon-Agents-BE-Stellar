@@ -453,7 +453,8 @@ def test_a_v1_charge_to_an_outside_agent_counts(tmp_path: Path) -> None:
     assert out.metric("m04")["achieved"] == "5"
     assert out.metric("m03")["achieved"] == "4"
     links = [link for link in out.metric("m04")["links"] if link.get("tx_hash") == tx]
-    assert links and links[0]["label"] == "Charge of 0.03 XLM to beta on the v1 escrow — 2026-09-26 (counted)"
+    assert links
+    assert links[0]["label"] == "Charge of 0.03 XLM to beta on the v1 escrow — 2026-09-26 (counted)"
 
 
 def test_each_escrow_is_read_by_its_version(tmp_path: Path) -> None:
