@@ -418,7 +418,8 @@ def test_no_anchor_with_an_index_held_serves_it_as_truncated(chain: Any) -> None
     window = _fetch({"ext_a": OWNER_A})
 
     evidence = window.by_agent["ext_a"]
-    assert evidence.unavailable is None and evidence.truncated is True
+    assert evidence.unavailable is None
+    assert evidence.truncated is True
     assert len(_revenue(window, "ext_a")) == 1
     assert window.complete is False
 
