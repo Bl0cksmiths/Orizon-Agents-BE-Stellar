@@ -116,8 +116,9 @@ def test_a_message_for_another_step_is_refused() -> None:
 def test_the_read_message_the_server_builds_passes_the_harness_check() -> None:
     nonce = "ef" * 16
     check_read_message(eb.dispute_read_message("tsk_abc123", nonce), "tsk_abc123", nonce)
+    another_task = eb.dispute_read_message("tsk_other", nonce)
     with pytest.raises(SigningRefused):
-        check_read_message(eb.dispute_read_message("tsk_other", nonce), "tsk_abc123", nonce)
+        check_read_message(another_task, "tsk_abc123", nonce)
 
 
 def test_the_harness_signature_verifies_as_the_backend_verifies_it() -> None:
