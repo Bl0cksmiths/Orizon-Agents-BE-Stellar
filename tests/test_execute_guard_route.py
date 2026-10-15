@@ -145,9 +145,11 @@ def test_execute_plans_refusal_passes_through_unreleased_and_unclaimed(
     r = paid(client)
     assert r.status_code == status
     body = r.json()
-    assert body["detail"] == code and body["error"]["code"] == code
+    assert body["detail"] == code
+    assert body["error"]["code"] == code
     assert "release_tx_hash" not in body
-    assert releases.calls == [] and (ESCROW, "authorization") not in escrow.calls
+    assert releases.calls == []
+    assert (ESCROW, "authorization") not in escrow.calls
     assert guard.claimed_by(AUTH) is None
     # So the same authorization is not refused as "used" when the buyer retries.
     assert paid(client).json()["error"]["code"] == code
