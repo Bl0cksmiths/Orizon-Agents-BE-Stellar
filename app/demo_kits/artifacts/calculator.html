@@ -614,7 +614,7 @@
       resultEl.textContent = errorText(state.error);
       resultEl.classList.add('error');
     } else {
-      resultEl.textContent = formatNum(parseFloat(state.result));
+      resultEl.textContent = formatNum(Number.parseFloat(state.result));
       resultEl.classList.remove('error');
     }
     memBadge.classList.toggle('visible', state.memory !== 0);
