@@ -98,7 +98,8 @@ def test_no_signing_key_is_no_signer(monkeypatch):
     configure(monkeypatch, key=False)
     v = asyncio.run(rw.check())
     assert v.status == "no_signer"
-    assert v.gap is not None and v.gap.problem == "STELLAR_SIGNING_KEY is unset"
+    assert v.gap is not None
+    assert v.gap.problem == "STELLAR_SIGNING_KEY is unset"
     assert (v.signer, v.scorer) == (None, None)
 
 
