@@ -462,7 +462,8 @@ def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path
     world.adoption = world.adoption_payload({OP1: ["lowrep"]})
     out = run(world, tmp_path)
     check = out.check("operator.ready")
-    assert check["status"] == FAIL and "none can serve the recording" in check["detail"]
+    assert check["status"] == FAIL
+    assert "none can serve the recording" in check["detail"]
 
 
 def test_a_healthy_operator_endpoint_passes_and_its_secret_is_never_shown(tmp_path: Path) -> None:
