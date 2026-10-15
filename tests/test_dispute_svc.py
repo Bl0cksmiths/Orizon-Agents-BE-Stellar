@@ -138,7 +138,9 @@ def test_the_payer_opens_a_dispute_against_a_settled_step() -> None:
     # promises for it — not the workflow's 0.12 total.
     assert record.charged_usdc == 0.07
     assert record.creditable_usdc == 0.07
-    assert record.resolved_at is None and record.refund_tx is None and record.rating_tx is None
+    assert record.resolved_at is None
+    assert record.refund_tx is None
+    assert record.rating_tx is None
     assert record.opened_at <= time.time()
 
 
