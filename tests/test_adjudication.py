@@ -798,8 +798,9 @@ def test_a_timed_out_transfer_keeps_the_claim_and_the_next_uphold_refuses(monkey
     dispute = a_dispute()
     chain = settler(monkeypatch, LOST)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_unconfirmed"
     assert refused.value.status_code == 504
