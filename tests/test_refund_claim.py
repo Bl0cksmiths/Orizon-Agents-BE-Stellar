@@ -206,9 +206,11 @@ def test_a_release_restores_upheld_and_a_later_claim_succeeds(store: DisputeStor
 
     released, after_release, reclaimed, after_reclaim = run(store, go())
 
-    assert released is not None and released.status == "upheld"
+    assert released is not None
+    assert released.status == "upheld"
     assert after_release == []
-    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert reclaimed is not None
+    assert reclaimed.status == "crediting"
     assert after_reclaim == ["dsp_0001"]
 
 
