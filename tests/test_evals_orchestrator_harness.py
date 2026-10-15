@@ -56,11 +56,13 @@ def test_the_oracle_scores_full_marks_on_every_metric(cases, tmp_path):
 def test_the_null_pipeline_catches_nothing_and_plans_nothing_valid(cases, tmp_path):
     _, rows, _ = _run(cases, NullPipeline(), tmp_path, stages="all")
     g = metrics.guard_metrics(rows)
-    assert g["injection_recall"].hits == 0 and g["injection_recall"].n == 50
+    assert g["injection_recall"].hits == 0
+    assert g["injection_recall"].n == 50
     assert g["needs_detail_recall"].hits == 0
     label, baseline = metrics.majority_baseline(rows)
     # A constant "allow" scores exactly the majority baseline — no better.
-    assert label == "allow" and g["verdict_accuracy"].hits == baseline.hits
+    assert label == "allow"
+    assert g["verdict_accuracy"].hits == baseline.hits
     assert metrics.plan_metrics(rows)["plan_valid"].hits == 0
 
 
