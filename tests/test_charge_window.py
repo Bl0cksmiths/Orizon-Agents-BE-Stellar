@@ -386,7 +386,8 @@ def test_a_page_that_fails_is_resumed_from_not_restarted(chain: Any, error: Exce
 
     first = _fetch({"ext_a": OWNER_A})
 
-    assert first.complete is False and first.out_of_time is False
+    assert first.complete is False
+    assert first.out_of_time is False
     assert first.by_agent["ext_a"].truncated is True
     assert first.by_agent["ext_a"].scanned_ledgers == 20_000
     rpc.page_errors = {}
