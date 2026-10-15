@@ -447,9 +447,11 @@ def test_nothing_read_before_the_deadline_is_out_of_time_never_zero(chain: Any) 
 
     window = asyncio.run(charge_window.fetch_settlements({"ext_a": OWNER_A}, deadline=time.monotonic() - 1))
 
-    assert window.out_of_time is True and window.complete is False
+    assert window.out_of_time is True
+    assert window.complete is False
     assert window.by_agent["ext_a"].unavailable is not None
-    assert rpc.pages == [] and "authorization" not in views.reads
+    assert rpc.pages == []
+    assert "authorization" not in views.reads
 
 
 @pytest.mark.parametrize("unset", ["stellar_payment_escrow", "stellar_agent_registry"])
