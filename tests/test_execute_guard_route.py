@@ -78,7 +78,7 @@ def runs(monkeypatch: pytest.MonkeyPatch) -> RunRecorder:
     return recorder
 
 
-@pytest.fixture()
+@pytest.fixture
 def releases(monkeypatch: pytest.MonkeyPatch) -> ReleaseRecorder:
     recorder = ReleaseRecorder()
     monkeypatch.setattr(execution_svc, "release_authorization", recorder, raising=False)
