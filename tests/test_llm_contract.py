@@ -169,10 +169,12 @@ def test_a_constraint_the_api_does_not_enforce_is_validated_here(fake_claude: Fa
     fake_claude.reply({"code": "TOO-LONG"})
     with pytest.raises(LLMInvalidOutput) as caught:
         _structured(schema=Short)
-    assert caught.value.schema == "Short" and "code" in caught.value.detail
+    assert caught.value.schema == "Short"
+    assert "code" in caught.value.detail
     # The API-side schema carries the constraint as a description, not a keyword.
     sent = fake_claude.calls[0].json_schema
-    assert sent is not None and "maxLength" not in sent["properties"]["code"]
+    assert sent is not None
+    assert "maxLength" not in sent["properties"]["code"]
 
 
 def test_a_server_side_fallback_names_the_model_that_served(fake_claude: FakeClaude) -> None:
