@@ -174,7 +174,8 @@ def test_no_key_means_unavailable_and_nothing_is_sent(api: Callable[..., Recorde
     monkeypatch.setattr(settings, "typesafe_api_key", "")
     with pytest.raises(JevUnavailable) as caught:
         _ask()
-    assert caught.value.reason == "missing_key" and recorder.requests == []
+    assert caught.value.reason == "missing_key"
+    assert recorder.requests == []
 
 
 def test_a_key_the_sdk_refuses_is_unavailable_before_any_request(
