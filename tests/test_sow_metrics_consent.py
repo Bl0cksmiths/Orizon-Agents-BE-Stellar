@@ -92,8 +92,10 @@ def test_each_row_that_named_an_outsider_links_the_ecosystem_page_once(tmp_path:
             assert links == [{"label": WITHHELD_LABEL, "url": ECOSYSTEM, "kind": "page"}], entry["id"]
         else:
             assert links == [], entry["id"]
-    assert "held back" in WITHHELD_LABEL and "consent" in WITHHELD_LABEL
-    assert G_ADDRESS.search(WITHHELD_LABEL) is None and OUTSIDE_AGENTS.search(WITHHELD_LABEL) is None
+    assert "held back" in WITHHELD_LABEL
+    assert "consent" in WITHHELD_LABEL
+    assert G_ADDRESS.search(WITHHELD_LABEL) is None
+    assert OUTSIDE_AGENTS.search(WITHHELD_LABEL) is None
 
 
 def test_withholding_changes_the_links_and_nothing_else(tmp_path: Path) -> None:
