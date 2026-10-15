@@ -44,7 +44,7 @@ def clock(monkeypatch):
     return lambda t: now.__setitem__("t", t)
 
 
-@pytest.fixture()
+@pytest.fixture
 def runs(monkeypatch):
     """Replace the run loop; records which plans were started."""
     started: list[str] = []
