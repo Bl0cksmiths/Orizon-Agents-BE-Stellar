@@ -265,7 +265,8 @@ def test_the_block_is_byte_identical_across_runs(tmp_path: Path) -> None:
         now=lambda: 1_900_000_000.0,  # a different clock: the block carries no time
     )
     assert (tmp_path / "b" / BLOCK_NAME).read_bytes() == first
-    assert b"1790000000" not in first and b"1900000000" not in first
+    assert b"1790000000" not in first
+    assert b"1900000000" not in first
 
 
 def test_the_markdown_tables_every_metric(tmp_path: Path) -> None:
