@@ -76,7 +76,8 @@ def test_upstream_copy_is_translated_segment_by_segment_on_haiku(claude: FakeCla
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.translate.42", "claude-haiku-4-5", None)
-    assert call.schema_name == "TranslateDraft" and call.system == translate.INSTRUCTIONS
+    assert call.schema_name == "TranslateDraft"
+    assert call.system == translate.INSTRUCTIONS
     assert call.max_tokens == translate.MAX_TOKENS
     user = call.user
     assert user.index("END USER_INPUT") < user.index("BEGIN TEXT_TO_TRANSLATE") < user.index("[S1] (Hero headline)")
@@ -84,7 +85,8 @@ def test_upstream_copy_is_translated_segment_by_segment_on_haiku(claude: FakeCla
 
     assert [t["language"] for t in out["translations"]] == ["tl", "es"]
     tl = out["translations"][0]
-    assert tl["name"] == "Tagalog" and tl["lang"] == "tl"
+    assert tl["name"] == "Tagalog"
+    assert tl["lang"] == "tl"
     assert tl["text"] == "\n".join(TL.values())
     assert tl["segments"][1] == {
         "id": "S2",
