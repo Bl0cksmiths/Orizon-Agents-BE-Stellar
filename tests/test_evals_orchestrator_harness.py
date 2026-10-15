@@ -161,8 +161,9 @@ def test_the_spend_cap_stops_new_cases_before_it_is_passed(cases, tmp_path):
 
 
 def test_a_live_pipeline_without_a_cap_is_refused(cases, tmp_path):
+    pipeline = Scripted(failures={}, live=True)
     with pytest.raises(RunRefused, match="spend cap"):
-        _run(cases[:1], Scripted(failures={}, live=True), tmp_path)
+        _run(cases[:1], pipeline, tmp_path)
 
 
 def test_a_variant_cannot_mix_two_kinds_of_run(cases, tmp_path):
