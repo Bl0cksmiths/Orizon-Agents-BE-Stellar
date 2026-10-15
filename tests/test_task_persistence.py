@@ -246,7 +246,8 @@ def test_a_database_that_fails_is_retried_until_it_takes_the_write(
 
     with caplog.at_level(logging.WARNING, logger="app.services.task_persistence"):
         assert asyncio.run(run()) is True
-    assert _id(2) in store.tasks and store.tasks[_id(2)].read_token_sha256 == read_token_digest(TOKEN)
+    assert _id(2) in store.tasks
+    assert store.tasks[_id(2)].read_token_sha256 == read_token_digest(TOKEN)
     assert sum("failed (attempt" in r.getMessage() for r in caplog.records) == 3
 
 
