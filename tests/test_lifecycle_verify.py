@@ -194,7 +194,8 @@ def test_the_seal_carries_exactly_the_delivered_steps_receipts() -> None:
     stray = _with_receipts()
     stray["steps"][2]["receipt_id_hex"] = "0d" * 16
     check = check_seal_receipts_are_delivered_steps(att, stray)
-    assert check.ok is False and "undelivered step(s) [2] carry a receipt" in check.detail
+    assert check.ok is False
+    assert "undelivered step(s) [2] carry a receipt" in check.detail
     assert check_seal_receipts_are_delivered_steps(None, _with_receipts()).ok is False
     # an older backend records no per-step receipt: not measured
     assert check_seal_receipts_are_delivered_steps(att, _settlement()).ok is None
