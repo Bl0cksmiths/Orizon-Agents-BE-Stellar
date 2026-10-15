@@ -74,7 +74,8 @@ def test_a_decodable_receipt_id_is_sealed(monkeypatch: pytest.MonkeyPatch, resul
 
     charge_tx, proof_tx, job_id = _settle()
 
-    assert (charge_tx, proof_tx) == (CHARGE_TX, SEAL_TX) and job_id is not None
+    assert (charge_tx, proof_tx) == (CHARGE_TX, SEAL_TX)
+    assert job_id is not None
     assert _sealed_receipts(chain) == [RECEIPT]
     assert not any("receipt id missing" in msg for _, msg, _ in _lines())
 
