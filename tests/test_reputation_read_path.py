@@ -67,7 +67,7 @@ class Chain:
         return value
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch) -> Chain:
     fake = Chain()
     monkeypatch.setattr(settings, "reputation_enabled", True)
