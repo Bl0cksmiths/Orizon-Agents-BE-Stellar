@@ -79,11 +79,12 @@ def test_next_files_are_streamed_on_sonnet_and_returned_as_an_artifact(claude: F
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.code.next", "claude-sonnet-5-5", "low")
-    assert call.stream is True and call.json_schema is None
-    assert call.system == code_next.CLAUDE_INSTRUCTIONS and call.max_tokens == code_next.MAX_TOKENS
-    assert "BEGIN USER_INPUT" in call.user and call.user.rstrip().endswith(
-        "Return the Next.js files in the tagged shape."
-    )
+    assert call.stream is True
+    assert call.json_schema is None
+    assert call.system == code_next.CLAUDE_INSTRUCTIONS
+    assert call.max_tokens == code_next.MAX_TOKENS
+    assert "BEGIN USER_INPUT" in call.user
+    assert call.user.rstrip().endswith("Return the Next.js files in the tagged shape.")
 
     art = out["artifact"]
     assert set(out) == {"summary", "artifact", "counts", "validator_violations", "issues"}
@@ -95,11 +96,14 @@ def test_next_files_are_streamed_on_sonnet_and_returned_as_an_artifact(claude: F
         ("components/Pricing.module.css", "css"),
     ]
     assert art["files"][1]["content"] == COMPONENT + "\n"
-    assert art["entry"] == "app/page.tsx" and art["framework"] == "next"
+    assert art["entry"] == "app/page.tsx"
+    assert art["framework"] == "next"
     # The preview is a static, hardened overview of the source: no script runs.
     preview = art["preview_html"]
-    assert "Content-Security-Policy" in preview and "<script" not in preview
-    assert "useState(false)" in preview and "&lt;Pricing /&gt;" in preview
+    assert "Content-Security-Policy" in preview
+    assert "<script" not in preview
+    assert "useState(false)" in preview
+    assert "&lt;Pricing /&gt;" in preview
     assert out["validator_violations"] == []
     assert out["counts"]["files"] == 3
     # What a later step (deploy.v0, code.critic) receives through the handoff.
