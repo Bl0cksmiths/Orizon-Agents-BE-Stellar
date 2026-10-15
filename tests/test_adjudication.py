@@ -1534,8 +1534,9 @@ def test_an_upheld_dispute_whose_credit_did_not_land_is_never_rated(
     assert refused.value.code == code
 
     if answer is LOST:
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError):
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert rater.calls == 0
 
