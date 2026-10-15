@@ -62,7 +62,7 @@ class _Store(InMemoryDisputeStore):
         await super().record_settlement(record)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch) -> _Store:
     fresh = _Store()
     monkeypatch.setattr(dispute_store, "_store", fresh)
