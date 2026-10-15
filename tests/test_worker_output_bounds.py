@@ -76,7 +76,8 @@ def test_a_cut_never_lands_inside_a_bracketed_citation() -> None:
     )
     out = trim_text(text, 70)
     assert out.endswith("entry…")
-    assert "(" not in out and len(out) <= 70
+    assert "(" not in out
+    assert len(out) <= 70
 
 
 def test_a_sentence_end_inside_brackets_is_not_a_sentence_end() -> None:
