@@ -70,10 +70,12 @@ def test_an_ad_set_is_written_on_haiku_and_handed_on(claude: FakeClaude) -> None
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.ads.meta", "claude-haiku-4-5", None)
-    assert call.schema_name == "AdSetDraft" and call.system == ads_meta.INSTRUCTIONS
+    assert call.schema_name == "AdSetDraft"
+    assert call.system == ads_meta.INSTRUCTIONS
     assert call.max_tokens == ads_meta.MAX_TOKENS
     assert out["summary"] == "3 Meta ad variants — Fix your bike, together"
-    assert out["objective"] == "OUTCOME_TRAFFIC" and out["special_ad_category"] == "NONE"
+    assert out["objective"] == "OUTCOME_TRAFFIC"
+    assert out["special_ad_category"] == "NONE"
     assert out["ads"][0] == {
         "primary_text": "Bring your bike on Saturday. Our stands and tools are yours to use.",
         "headline": "Fix your bike, together",
@@ -81,12 +83,14 @@ def test_an_ad_set_is_written_on_haiku_and_handed_on(claude: FakeClaude) -> None
         "cta": "LEARN_MORE",
         "cta_label": "Learn more",
     }
-    assert out["audience"]["locations"] == ["Quezon City"] and (
+    assert out["audience"]["locations"] == ["Quezon City"]
+    assert (
         out["audience"]["age_min"],
         out["audience"]["age_max"],
     ) == (18, 45)
     assert out["counts"] == {"ads": 3, "interests": 2}
-    assert out["unverified_figures"] == [] and out["issues"] == []
+    assert out["unverified_figures"] == []
+    assert out["issues"] == []
 
 
 def test_the_steps_tier_picks_the_model(claude: FakeClaude) -> None:
