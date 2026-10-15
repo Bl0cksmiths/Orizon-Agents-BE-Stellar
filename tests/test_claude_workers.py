@@ -305,16 +305,19 @@ def test_code_gen_streams_a_tagged_app_and_returns_the_same_contract(claude: Fak
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.code.gen", SONNET, "low")
-    assert call.stream is True and call.json_schema is None
+    assert call.stream is True
+    assert call.json_schema is None
     assert call.system == code_gen.CLAUDE_INSTRUCTIONS
     assert call.max_tokens == code_gen.MAX_TOKENS
-    assert "BEGIN USER_INPUT" in call.user and call.user.rstrip().endswith("Return the CodeArtifact.")
+    assert "BEGIN USER_INPUT" in call.user
+    assert call.user.rstrip().endswith("Return the CodeArtifact.")
 
     art = out["artifact"]
     assert set(out) == {"summary", "artifact", "counts", "validator_violations"}
     assert out["summary"] == "Spoke — Book a repair stand in two taps."
     assert set(art) == {"title", "summary", "files", "entry", "preview_html"}
-    assert art["entry"] == "index.html" and [f["path"] for f in art["files"]] == ["index.html"]
+    assert art["entry"] == "index.html"
+    assert [f["path"] for f in art["files"]] == ["index.html"]
     # Hardened on the way out, exactly like the agno path's artifact.
     assert "Content-Security-Policy" in art["preview_html"]
     assert art["files"][0]["content"] == art["preview_html"]
