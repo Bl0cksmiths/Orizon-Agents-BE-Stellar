@@ -378,7 +378,8 @@ def test_a_refund_that_did_not_land_records_no_credited_amount(monkeypatch, answ
 
     assert refused.value.code == code
     stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stored is not None and stored.status != "credited"
+    assert stored is not None
+    assert stored.status != "credited"
     assert stored.credited_usdc is None
 
 
