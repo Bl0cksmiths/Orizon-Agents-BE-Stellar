@@ -136,6 +136,7 @@ def test_a_world_with_no_outsider_is_unchanged_by_withholding(tmp_path: Path) ->
 
 
 def test_the_two_flags_cannot_be_combined(tmp_path: Path) -> None:
+    world = met_world()
     with pytest.raises(SystemExit) as exc:
-        run(met_world(), tmp_path, "--publish-external", consent="--withhold-external")
+        run(world, tmp_path, "--publish-external", consent="--withhold-external")
     assert exc.value.code == 2
