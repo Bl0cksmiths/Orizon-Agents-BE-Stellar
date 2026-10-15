@@ -593,8 +593,10 @@ def test_a_failed_retry_leaves_an_unconfirmed_rating_as_it_was(ledger, settler, 
     failed = uphold(dispute.id)
 
     assert failed == unconfirmed
-    assert failed.rating_tx == "tx_rating_1" and failed.rating_confirmed is False
-    assert len(ledger.submits) == 2 and ledger.replays == 0
+    assert failed.rating_tx == "tx_rating_1"
+    assert failed.rating_confirmed is False
+    assert len(ledger.submits) == 2
+    assert ledger.replays == 0
     assert invalidated == []
 
 
