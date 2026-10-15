@@ -333,7 +333,8 @@ def test_an_rpc_outage_is_never_read_as_v1(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     check = out.check("escrow.version")
     assert check["status"] == FAIL
-    assert "could not be read" in check["detail"] and "D-039" not in check["detail"]
+    assert "could not be read" in check["detail"]
+    assert "D-039" not in check["detail"]
 
 
 def test_a_settler_that_is_not_the_signing_key_fails(tmp_path: Path) -> None:
