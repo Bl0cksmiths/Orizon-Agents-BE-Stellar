@@ -58,7 +58,7 @@ class Invokes:
         return {"status": "SUCCESS", "hash": "0" * 64}
 
 
-@pytest.fixture()
+@pytest.fixture
 def charge_ready(monkeypatch: pytest.MonkeyPatch) -> Invokes:
     """A deployment that could sign a charge: a key, an operator API key, and a recorded invoke."""
     invokes = Invokes()
