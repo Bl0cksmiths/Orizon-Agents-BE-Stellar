@@ -216,22 +216,23 @@ def test_a_plan_of_only_external_steps_falls_back_to_a_built_in_agent(
 
 
 def test_the_clamp_holds_the_policy_if_the_switch_turns_off_mid_plan(
-    registry: list[list[str]], claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev
+    registry: list[list[str]],
+    claude_on: None,
+    fake_claude: FakeClaude,
+    fake_jev: FakeJev,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Offered under the switch ON; the switch is OFF by the time the plan
     # comes back. The clamp asks again at the point of use.
-    settings.planner_route_external = True
+    monkeypatch.setattr(settings, "planner_route_external", True)
 
     def planner(request: Any) -> ModelPlan:
         assert f"id={EXTERNAL} " in request.system
-        settings.planner_route_external = False
+        monkeypatch.setattr(settings, "planner_route_external", False)
         return _plan(EXTERNAL, "agt_11c0")
 
     _screened(fake_claude, fake_jev, planner)
-    try:
-        resp = _decompose()
-    finally:
-        settings.planner_route_external = False
+    resp = _decompose()
 
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
 
