@@ -25,7 +25,7 @@ OTHER_PAYER = "GDJHP2I6NRCWYZTB3ZOXRE74V4M4EGXRYORGNPTGQ6BVNJNSSJO4PKXJ"
 AUTH = "ab" * 16
 
 
-@pytest.fixture()
+@pytest.fixture
 def client():
     rate_limit.set_backend(InMemoryTokenBucket())
     with TestClient(app) as c:
