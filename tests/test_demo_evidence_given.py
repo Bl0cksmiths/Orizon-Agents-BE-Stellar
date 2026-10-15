@@ -234,7 +234,8 @@ def test_given_hashes_on_a_mainnet_ledger_are_refused(tmp_path: Path, where: str
     ledger = FakeLedger()
     setattr(ledger, f"{where}_passphrase", MAINNET_PASSPHRASE)
     out = run(ledger, tmp_path, "--tx", f"settle={ledger.add('x')}")
-    assert out.code == EXIT_REFUSED and "testnet only" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "testnet only" in out.out
     assert not out.dir.exists()
     assert "rpc getTransaction" not in ledger.calls
 
