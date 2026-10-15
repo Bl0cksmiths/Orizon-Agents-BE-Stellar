@@ -33,7 +33,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from collections.abc import Iterator
 
 import pytest
 from stellar_sdk import Keypair
@@ -66,7 +65,7 @@ EXPECTED_MESSAGE = (
 
 
 @pytest.fixture(autouse=True)
-def isolated_signing_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def isolated_signing_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every test unconfigured, and leave nothing behind.
 
     The key is restored by monkeypatch (conftest's hermetic fixture predates
@@ -78,7 +77,6 @@ def isolated_signing_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(settings, "orizon_dispatch_signing_key", "")
     monkeypatch.setattr(ds, "_cached", ("", None))
     monkeypatch.setattr(ds, "_warned_reason", None)
-    yield
 
 
 def _configure(key: str) -> None:
