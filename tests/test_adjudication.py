@@ -572,7 +572,8 @@ def test_a_second_uphold_holding_a_stale_open_read_never_signs_a_second_transfer
     won, lost = asyncio.run(race())
 
     assert len(chain.calls) == 1, f"the settler signed {len(chain.calls)} transfers for one dispute"
-    assert won.status == "credited" and won.refund_tx == "tx_credit"
+    assert won.status == "credited"
+    assert won.refund_tx == "tx_credit"
     assert lost == won, "the loser was answered with something other than the credit that exists"
     final = store._disputes[dispute.id]
     assert (final.status, final.refund_tx, final.credited_usdc) == ("credited", "tx_credit", 0.05)
