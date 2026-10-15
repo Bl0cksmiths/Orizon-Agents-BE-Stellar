@@ -515,7 +515,8 @@ def test_no_operator_endpoint_is_skipped_and_keeps_the_verdict_incomplete(tmp_pa
 def test_an_operator_endpoint_that_is_not_a_url_is_refused_unechoed(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path, endpoint="agent.test/?token=bound-secret-7f3")
     assert out.code == EXIT_REFUSED
-    assert "bound-secret-7f3" not in out.out and "--operator-endpoint" in out.out
+    assert "bound-secret-7f3" not in out.out
+    assert "--operator-endpoint" in out.out
 
 
 # ── the exclusion moment ────────────────────────────────────────
