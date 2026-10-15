@@ -1559,9 +1559,11 @@ def test_the_moment_a_dispute_resolved_is_stamped_once_and_never_moved(pg: Postg
     upheld, credited, rows = run(pg, go())
     after = time.time()
 
-    assert upheld is not None and upheld.resolved_at is not None
+    assert upheld is not None
+    assert upheld.resolved_at is not None
     assert before <= upheld.resolved_at <= after
-    assert credited is not None and credited.resolved_at == upheld.resolved_at
+    assert credited is not None
+    assert credited.resolved_at == upheld.resolved_at
     assert rows[-1]["resolved_at"] == upheld.resolved_at
 
 
