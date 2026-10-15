@@ -104,8 +104,9 @@ def test_an_unreadable_chain_raises_instead_of_returning_none(
     fake_read, _ = _reads(failure)
     monkeypatch.setattr(sc, "simulate_read", fake_read)
 
+    resolving = resolve_owner("ext_agent")
     with pytest.raises(OwnerLookupError):
-        asyncio.run(resolve_owner("ext_agent"))
+        asyncio.run(resolving)
 
 
 def test_a_read_without_an_address_raises(monkeypatch: pytest.MonkeyPatch) -> None:
