@@ -274,8 +274,9 @@ def test_a_hand_rolled_unpayable_number_never_reaches_the_signer(monkeypatch, am
     """
     _no_signing(monkeypatch)
 
+    crediting = refund_svc.credit_refund(_dispute(), amount)
     with pytest.raises(RefundRefused) as exc:
-        asyncio.run(refund_svc.credit_refund(_dispute(), amount))
+        asyncio.run(crediting)
 
     assert exc.value.code == "refund_amount_invalid"
 
