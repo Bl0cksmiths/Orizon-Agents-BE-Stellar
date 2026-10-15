@@ -551,17 +551,18 @@
     return cells;
   }
 
+  function cellBlocked(board, x, y) {
+    if (x < 0 || x >= COLS || y >= ROWS) return true;
+    if (y < 0) return false;                  // above the board is allowed
+    return Boolean(board[y][x]);
+  }
+
   function collides(board, piece, dx = 0, dy = 0, rot = null) {
     const r = rot == null ? piece.rot : rot;
     const m = ROTATIONS[piece.kind][r];
     for (let i = 0; i < m.length; i++) {
       for (let j = 0; j < m[i].length; j++) {
-        if (!m[i][j]) continue;
-        const nx = piece.x + j + dx;
-        const ny = piece.y + i + dy;
-        if (nx < 0 || nx >= COLS || ny >= ROWS) return true;
-        if (ny < 0) continue;                 // above the board is allowed
-        if (board[ny][nx]) return true;
+        if (m[i][j] && cellBlocked(board, piece.x + j + dx, piece.y + i + dy)) return true;
       }
     }
     return false;
