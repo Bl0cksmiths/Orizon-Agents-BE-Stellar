@@ -213,7 +213,8 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
             for dispute_id, last in status.items():
                 held = store._disputes.get(dispute_id)
                 if last in UNFINISHED:
-                    assert held is not None and held.status == last, (dispute_id, last)
+                    assert held is not None, (dispute_id, last)
+                    assert held.status == last, (dispute_id, last)
                 else:
                     assert held is None or held.status == last, (dispute_id, last)
             claimed = {c.dispute_id for c in await store.list_refund_claims()}
