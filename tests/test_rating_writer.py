@@ -432,4 +432,5 @@ def test_each_cause_is_warned_on_its_own_clock(caplog):
 def test_the_trace_reasons_name_no_setting():
     """The operator line names the variable; the buyer's trace does not."""
     for gap in (rw._REPUTATION_OFF, rw._NO_LEDGER, rw._NO_KEY, rw._BAD_KEY):
-        assert "STELLAR_" not in gap.reason and "REPUTATION_" not in gap.reason
+        assert "STELLAR_" not in gap.reason
+        assert "REPUTATION_" not in gap.reason
