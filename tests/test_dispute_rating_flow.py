@@ -1052,4 +1052,5 @@ def test_a_send_that_raised_is_still_a_timeout(monkeypatch, settler, invalidated
     (outcome,) = seen
     assert outcome.status == "TIMEOUT"
     (logged,) = svc_errors(caplog)
-    assert "outcome=TIMEOUT" in logged and "credited_usdc=0.0500000" in logged
+    assert "outcome=TIMEOUT" in logged
+    assert "credited_usdc=0.0500000" in logged
