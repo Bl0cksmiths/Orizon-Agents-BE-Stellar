@@ -622,7 +622,8 @@ def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(
             return opened, await store.claim_refund(opened.id)
 
         opened, claimed = run(store, before())
-        assert claimed is not None and claimed.status == "crediting"
+        assert claimed is not None
+        assert claimed.status == "crediting"
         claimed_at = asyncio.run(claims(pg_dsn))[opened.id]
 
     assert dispute_store._store is None
@@ -637,7 +638,8 @@ def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(
             )
 
         restored, reclaimed, queue = run(store, after())
-        assert restored is not None and restored.status == "crediting"
+        assert restored is not None
+        assert restored.status == "crediting"
         # Still blocked: the mutex came back held, so this process refuses to
         # pay a buyer the last one may already have paid.
         assert reclaimed is None
