@@ -1135,7 +1135,9 @@ def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
     assert len(logged) == 1
     assert reason not in logged[0]
     assert "noted=yes" in logged[0]
-    assert dispute.id in logged[0] and JOB in logged[0] and dispute.payer in logged[0]
+    assert dispute.id in logged[0]
+    assert JOB in logged[0]
+    assert dispute.payer in logged[0]
     # ...and it is on the record, cleaned and otherwise verbatim, which is the
     # other half of the same decision.
     assert rejected.note == reason
@@ -1146,8 +1148,10 @@ def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
         asyncio.run(dispute_svc.reject(other.id, note=" \t\x1b\x07 "))
 
     (refusal,) = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "refused" in r.getMessage()]
-    assert "rejection_reason_required" in refusal and other.id in refusal
-    assert "\x1b" not in refusal and "\x07" not in refusal
+    assert "rejection_reason_required" in refusal
+    assert other.id in refusal
+    assert "\x1b" not in refusal
+    assert "\x07" not in refusal
 
 
 @pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
