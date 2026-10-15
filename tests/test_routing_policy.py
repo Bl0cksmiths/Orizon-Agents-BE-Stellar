@@ -319,7 +319,8 @@ def test_one_policy_notice_however_many_outside_agents_are_listed(
             state.agents.pop(f"ext_crowd{i:02d}", None)
 
     external = [n for n in shortlist.notices if n.reason_code == "external_not_routed"]
-    assert len(external) == 1 and external[0].agent_id == EXTERNAL_POLICY_ID
+    assert len(external) == 1
+    assert external[0].agent_id == EXTERNAL_POLICY_ID
     assert all(not n.agent_id.startswith("ext_") for n in shortlist.notices)
     # The per-agent detail is in the server log, not on the card.
     assert any("ext_crowd00" in r.getMessage() and EXTERNAL in r.getMessage() for r in caplog.records)
