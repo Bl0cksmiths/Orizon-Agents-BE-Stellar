@@ -21,7 +21,9 @@ def rpc() -> FakeRpc:
 
 def test_registry_views(rpc: FakeRpc) -> None:
     ids = rpc.ids
-    assert len(ids) == 23 and ids[0] == "ext_00000" and ids[-1] == "team_19"
+    assert len(ids) == 23
+    assert ids[0] == "ext_00000"
+    assert ids[-1] == "team_19"
     assert rpc._view(REGISTRY, "list_ids", []) == scval.to_vec([scval.to_symbol(i) for i in ids])
     assert rpc._view(REGISTRY, "get", ["ext_00001"]) == rpc._record("ext_00001")
     owner = rpc.records["ext_00002"]["owner"]
