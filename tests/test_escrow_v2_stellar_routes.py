@@ -83,7 +83,8 @@ def test_a_charge_against_v2_is_refused_with_a_pointer_to_settle(
     r = charge(client)
     assert r.status_code == 409
     body = r.json()
-    assert body["detail"] == "charge_unsupported_on_v2" and body["error"]["code"] == "charge_unsupported_on_v2"
+    assert body["detail"] == "charge_unsupported_on_v2"
+    assert body["error"]["code"] == "charge_unsupported_on_v2"
     assert "settle" in body["error"]["message"]
     assert charge_ready.calls == []
 
