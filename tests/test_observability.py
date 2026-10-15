@@ -136,7 +136,8 @@ def test_simulate_read_logs_one_timed_line_per_call(fake_rpc, caplog):
     assert len(debug) == 1, debug
     line = debug[0]
     assert "read agent_registry.get ok in" in line
-    assert "load_ms=" in line and "sim_ms=" in line
+    assert "load_ms=" in line
+    assert "sim_ms=" in line
 
 
 def test_successful_read_never_logs_at_info(fake_rpc, caplog):
