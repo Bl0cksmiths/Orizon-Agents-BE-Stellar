@@ -336,8 +336,9 @@ def test_jev_failures_are_jev_unavailable(fake_jev: FakeJev) -> None:
 
 
 def test_the_suite_default_jev_is_offline() -> None:
+    asking = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS)
     with pytest.raises(JevUnavailable) as caught:
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+        asyncio.run(asking)
     assert caught.value.reason == "missing_key"
 
 
