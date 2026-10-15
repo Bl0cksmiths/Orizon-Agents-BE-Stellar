@@ -242,7 +242,8 @@ def test_a_stream_aborted_from_outside_leaves_its_running_estimate():
     async def abort() -> None:
         await asyncio.wait_for(guard.complete(request), timeout=0.05)
 
+    aborted = abort()
     with pytest.raises(TimeoutError):
-        asyncio.run(abort())
+        asyncio.run(aborted)
     # ~1,000 text tokens x 1.7 for thinking at $10/MTok
     assert guard.in_flight_usd == pytest.approx(0.017, rel=0.05)
