@@ -225,7 +225,8 @@ def test_the_facts_rule_is_asked_for_and_unbacked_figures_are_surfaced(claude: F
 def test_an_ad_set_the_model_did_not_deliver_fails_the_step(claude: FakeClaude, script: Any, rule: str) -> None:
     script(claude)
     err = _failure()
-    assert err.rule == rule and "MODEL-PROSE" not in str(err)
+    assert err.rule == rule
+    assert "MODEL-PROSE" not in str(err)
 
 
 def test_off_claude_the_step_is_not_attempted(fake_claude: FakeClaude) -> None:
