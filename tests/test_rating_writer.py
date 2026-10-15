@@ -81,7 +81,8 @@ def test_reputation_switched_off_is_disabled(monkeypatch):
     configure(monkeypatch, enabled=False)
     v = asyncio.run(rw.check())
     assert v.status == "disabled"
-    assert v.gap is not None and "REPUTATION_ENABLED" in v.gap.problem
+    assert v.gap is not None
+    assert "REPUTATION_ENABLED" in v.gap.problem
     assert (v.signer, v.scorer) == (None, None)
 
 
