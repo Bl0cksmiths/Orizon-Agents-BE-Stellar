@@ -627,7 +627,8 @@ def test_an_answer_about_another_transaction_is_never_acted_on(store: DisputeSto
         store, lambda _: chain.answers.update(tx_on_record=an_answer("tx_on_record", "SUCCESS", envelope=envelope))
     )
 
-    assert decision.action == "not_this_refund" and "hashes to" in decision.detail
+    assert decision.action == "not_this_refund"
+    assert "hashes to" in decision.detail
     assert unchanged
 
 
