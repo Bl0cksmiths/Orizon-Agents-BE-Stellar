@@ -104,7 +104,8 @@ def test_withholding_changes_the_links_and_nothing_else(tmp_path: Path) -> None:
     for w, p in zip(withheld, published, strict=True):
         assert {k: v for k, v in w.items() if k != "links"} == {k: v for k, v in p.items() if k != "links"}
     team_links = [link for link in published[0]["links"] if "excluded" in link["label"]]
-    assert team_links and all(link in withheld[0]["links"] for link in team_links)
+    assert team_links
+    assert all(link in withheld[0]["links"] for link in team_links)
 
 
 def test_publish_external_links_every_outside_operator(tmp_path: Path) -> None:
