@@ -90,7 +90,8 @@ def test_every_missed_entry_carries_a_reason(tmp_path: Path) -> None:
     assert [m["status"] for m in block] == ["not_met"] * 11
     for entry in block:
         assert list(entry) == MISS_KEYS, entry["id"]
-        assert entry["reason"].strip() and entry["reason"].endswith("."), entry
+        assert entry["reason"].strip(), entry
+        assert entry["reason"].endswith("."), entry
 
 
 def test_one_met_entry_is_pinned_exactly(tmp_path: Path) -> None:
