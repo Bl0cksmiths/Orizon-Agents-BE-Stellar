@@ -46,8 +46,9 @@ def test_is_retryable_policy():
 def test_no_retry_on_400(monkeypatch):
     _no_sleep(monkeypatch)
     fn, calls = _fn([PdaxError("bad input", http_status=400)])
+    retrying = with_retries(fn, attempts=3)
     with pytest.raises(PdaxError):
-        asyncio.run(with_retries(fn, attempts=3))
+        asyncio.run(retrying)
     assert calls["n"] == 1  # a validation 4xx is never retried
 
 
