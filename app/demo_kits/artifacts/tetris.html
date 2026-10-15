@@ -1000,13 +1000,16 @@
   }
 
   // ── High scores (top 3, localStorage) ────────────────────────────────────
+  const byScoreDesc = (a, b) => b.score - a.score;
+  // The saved table, best first, so the top three survive a stored list
+  // that is out of order or longer than three.
   function loadScores() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return [];
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
-      return arr.filter(s => s && typeof s.score === 'number').slice(0, 3);
+      return arr.filter(s => s && typeof s.score === 'number').sort(byScoreDesc).slice(0, 3);
     } catch (e) {
       // Storage blocked (privacy mode) or corrupt JSON: play on with an empty table.
       return [];
@@ -1025,7 +1028,7 @@
       level: state.level,
       ts: Date.now(),
     });
-    scores.sort((a, b) => b.score - a.score);
+    scores.sort(byScoreDesc);
     saveScores(scores);
     return scores.slice(0, 3);
   }
