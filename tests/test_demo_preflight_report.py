@@ -65,8 +65,11 @@ def test_json_shape(tmp_path: Path) -> None:
     facts = Facts(cold_start_seconds=12.5, disclosures=["The operator G… is a team wallet: say so on camera."])
     code, line = verdict(checks)
     body = render_json(checks, facts, RUN, code, line)
-    assert body["verdict"] == "NO-GO" and body["exit_code"] == EXIT_NO_GO and body["network"] == "testnet"
-    assert body["generated_at"] == 1_790_000_000 and body["cold_start_seconds"] == 12.5
+    assert body["verdict"] == "NO-GO"
+    assert body["exit_code"] == EXIT_NO_GO
+    assert body["network"] == "testnet"
+    assert body["generated_at"] == 1_790_000_000
+    assert body["cold_start_seconds"] == 12.5
     assert [c["id"] for c in body["checks"]] == ["a.b", "c.d"]
     assert set(body["checks"][0]) == {"id", "group", "title", "required", "status", "detail", "fix"}
     md_path, json_path = write(tmp_path, render_markdown(checks, facts, RUN, code, line), body)
