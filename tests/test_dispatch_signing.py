@@ -114,8 +114,10 @@ def test_the_signed_payload_is_sep53_framed_not_the_raw_message() -> None:
     Keypair.from_public_key(SIGNER.public_key).verify(payload, signature)  # raises if it disagrees
 
     # And emphatically NOT a signature over the message bytes themselves.
+    signer = Keypair.from_public_key(SIGNER.public_key)
+    message = EXPECTED_MESSAGE.encode("utf-8")
     with pytest.raises(BadSignatureError):
-        Keypair.from_public_key(SIGNER.public_key).verify(EXPECTED_MESSAGE.encode("utf-8"), signature)
+        signer.verify(message, signature)
 
 
 def test_a_signature_verifies_for_the_published_signer_address() -> None:
