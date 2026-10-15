@@ -36,7 +36,7 @@ def _plan(plan_id: str, created_at: float = BUILT_AT) -> StoredPlan:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def clock(monkeypatch):
     """Pin the wall clock execute_plan reads; returns a setter."""
     now = {"t": BUILT_AT}
