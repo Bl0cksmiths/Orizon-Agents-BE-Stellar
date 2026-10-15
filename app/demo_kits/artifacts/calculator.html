@@ -746,7 +746,7 @@
 
   // ── Memory ───────────────────────────────────────────────────────────────
   function memSet() {
-    const v = parseFloat(state.result);
+    const v = Number.parseFloat(state.result);
     if (Number.isFinite(v)) { state.memory = v; saveState(); render(); toast('memory set'); }
   }
   function memAdd() {
