@@ -250,7 +250,8 @@ def test_a_deployment_that_cannot_sign_claims_nothing(
         err = _refused()
     assert (err.code, err.status_code) == ("refunds_not_configured", 503)
     assert err.message == "this deployment cannot sign a credit: there is no asset contract to pay a credit over"
-    assert store.calls == [LOAD] and seams.calls == []
+    assert store.calls == [LOAD]
+    assert seams.calls == []
     errors = _lines(caplog, logging.ERROR)
     assert errors[0] == (
         f"dispute {DISPUTE} cannot be credited — STELLAR_ASSET_SAC is unset; nothing was claimed and nothing was"
