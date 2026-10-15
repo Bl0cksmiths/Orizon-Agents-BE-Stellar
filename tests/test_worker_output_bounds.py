@@ -89,7 +89,8 @@ def test_a_sentence_end_inside_brackets_is_not_a_sentence_end() -> None:
 
 def test_a_single_unbreakable_word_is_still_bounded() -> None:
     out = trim_text("x" * 500, 50)
-    assert len(out) == 50 and out.endswith("…")
+    assert len(out) == 50
+    assert out.endswith("…")
 
 
 # ── every structured worker sends a schema without hard bounds ──────────────
