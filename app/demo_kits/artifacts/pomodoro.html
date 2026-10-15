@@ -638,7 +638,9 @@
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         ...state.settings, theme: state.theme, muted: state.muted, notifEnabled: state.notifEnabled,
       }));
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or full: the settings still apply now, they just won't survive a reload.
+    }
   }
   function loadHistory() {
     try {
@@ -655,7 +657,11 @@
     }
   }
   function saveHistory() {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); } catch (e) {}
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history));
+    } catch (e) {
+      // Storage blocked or full: the history stays in memory for this visit only.
+    }
   }
   function loadDaily() {
     try {
@@ -669,7 +675,11 @@
     }
   }
   function saveDaily() {
-    try { localStorage.setItem(DAILY_KEY, JSON.stringify(state.daily)); } catch (e) {}
+    try {
+      localStorage.setItem(DAILY_KEY, JSON.stringify(state.daily));
+    } catch (e) {
+      // Storage blocked or full: today's count stays in memory for this visit only.
+    }
   }
   function rolloverDailyIfNeeded() {
     const today = todayKey();
