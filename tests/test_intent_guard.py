@@ -242,7 +242,8 @@ def test_policy_is_overridable_for_threshold_sweeps(fake_jev):
 
 
 def test_watch_band_sits_between_the_two_injection_lines():
-    assert GuardPolicy().injection_watch == 0.35 and GuardPolicy().injection_block == 0.40
+    assert GuardPolicy().injection_watch == 0.35
+    assert GuardPolicy().injection_block == 0.40
     with pytest.raises(ValueError):
         GuardPolicy(injection_watch=0.5, injection_block=0.4)
 
