@@ -951,19 +951,22 @@
     li.appendChild(k); li.appendChild(dur); li.appendChild(t);
     return li;
   }
-  function renderHistory() {
-    if (!state.history.length) {
-      historyContent.innerHTML = '<div class="history-empty">no completed sessions yet</div>';
-      return;
-    }
-    // Group by day.
+  function groupHistoryByDay(entries) {
     const byDay = new Map();
-    for (const e of state.history) {
+    for (const e of entries) {
       const d = new Date(e.ts);
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
       if (!byDay.has(key)) byDay.set(key, []);
       byDay.get(key).push(e);
     }
+    return byDay;
+  }
+  function renderHistory() {
+    if (!state.history.length) {
+      historyContent.innerHTML = '<div class="history-empty">no completed sessions yet</div>';
+      return;
+    }
+    const byDay = groupHistoryByDay(state.history);
     const days = [...byDay.keys()].sort().reverse();
     historyContent.innerHTML = '';
     for (const day of days) {
