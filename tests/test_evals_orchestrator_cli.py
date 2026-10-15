@@ -68,7 +68,8 @@ def test_the_estimate_counts_planning_only_for_expected_allows():
     cases = load()
     guard_only = cost.estimate(cases, stages="guard")
     full = cost.estimate(cases, stages="all", reps=2)
-    assert guard_only.planned_cases == 0 and set(guard_only.by_stage_usd) == {"guard"}
+    assert guard_only.planned_cases == 0
+    assert set(guard_only.by_stage_usd) == {"guard"}
     assert full.planned_cases == sum(c.expected_verdict == "allow" for c in cases)
     assert full.ceiling_usd > full.expected_usd > guard_only.expected_usd * 2
     assert cost.estimate(cases, stages="all", reps=1).expected_usd * 2 == pytest.approx(full.expected_usd)
