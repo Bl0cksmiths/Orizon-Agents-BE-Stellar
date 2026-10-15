@@ -194,7 +194,8 @@ def test_a_walk_past_its_deadline_reads_no_page(clock: Clock, rpc: Rpc) -> None:
     advance = _advance(deadline=clock.now)
 
     assert advance.out_of_time is True
-    assert advance.index is not None and advance.index.next_ledger == OLDEST
+    assert advance.index is not None
+    assert advance.index.next_ledger == OLDEST
     assert rpc.pages == []
 
 
