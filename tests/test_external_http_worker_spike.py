@@ -217,8 +217,9 @@ def test_response_missing_summary_is_rejected() -> None:
 
     async def go() -> None:
         async with _client_for(app) as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())
 
