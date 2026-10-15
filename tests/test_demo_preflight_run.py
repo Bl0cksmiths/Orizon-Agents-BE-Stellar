@@ -288,7 +288,8 @@ def test_a_backend_host_that_is_another_deployment_fails(tmp_path: Path) -> None
     world.readiness["escrow"]["contract"] = "CSOMETHINGELSE"
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "not the same deployment" in check["detail"]
+    assert check["status"] == FAIL
+    assert "not the same deployment" in check["detail"]
     assert "--backend" in check["fix"]
 
 
