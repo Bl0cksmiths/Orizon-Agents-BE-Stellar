@@ -1541,8 +1541,10 @@ def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_conse
     assert f"dispute:   {DISPUTE_ID}" in out
     assert f"rating id: {rating_id_hex()}" in out
     assert f"https://stellar.expert/explorer/testnet/contract/{LEDGER}" in out
-    assert "must not" in out and "be reported as resolved" in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "must not" in out
+    assert "be reported as resolved" in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
     assert stored().rating_tx is None
 
 
