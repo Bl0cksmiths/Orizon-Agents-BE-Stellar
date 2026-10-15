@@ -1936,7 +1936,8 @@ def test_a_live_run_given_the_service_url_invalidates_its_cached_score_after_the
     # be refilled with the pre-dispute score by the next read.
     assert service.ratings_before_call == [1]
     assert f"{SERVICE} dropped its cached score for {AGENT}" in out
-    assert "NOT TOLD" not in out and "could not tell" not in out
+    assert "NOT TOLD" not in out
+    assert "could not tell" not in out
     # The key went over the wire, never to the terminal.
     assert configured["api_key"] not in out
 
