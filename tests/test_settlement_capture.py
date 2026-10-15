@@ -792,7 +792,8 @@ def test_a_first_write_that_failed_is_tried_again_after_the_seal(monkeypatch):
     _, _, job_id = _settle_and_record("tsk_capture_retry_record")
 
     [record] = flaky.recorded
-    assert job_id is not None and record.job_id_hex == job_id.hex()
+    assert job_id is not None
+    assert record.job_id_hex == job_id.hex()
     assert (record.charge_tx, record.proof_tx) == (CHARGE_TX, PROOF_TX)
 
 
