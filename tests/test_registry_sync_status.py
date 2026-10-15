@@ -61,7 +61,7 @@ def fresh_status(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     state.agents.update(agents_before)
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
 
