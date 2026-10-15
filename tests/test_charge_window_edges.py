@@ -358,7 +358,8 @@ def test_a_window_cut_short_by_the_deadline_is_logged_as_out_of_time(
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         window = _fetch({"ext_a": OWNER_A})
 
-    assert window.out_of_time is True and window.ledgers_scanned == 10
+    assert window.out_of_time is True
+    assert window.ledgers_scanned == 10
     assert _warnings(caplog)[-1] == (
         f"[charges] window read to ledger {OLDEST + 9} of {LATEST} (out of time) — settlements are a floor"
     )
