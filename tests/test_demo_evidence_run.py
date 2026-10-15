@@ -232,7 +232,8 @@ def test_a_contradiction_outranks_an_unreadable_read(tmp_path: Path) -> None:
     path = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("seal", bad), row("settle", unread)])
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_NOT_SUCCESS
-    assert "FAILED (rpc)" in out.sheet() and "UNREADABLE" in out.sheet()
+    assert "FAILED (rpc)" in out.sheet()
+    assert "UNREADABLE" in out.sheet()
 
 
 # ── the network ─────────────────────────────────────────────────
