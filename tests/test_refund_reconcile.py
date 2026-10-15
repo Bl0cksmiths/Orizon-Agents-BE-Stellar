@@ -660,7 +660,8 @@ def test_a_claim_with_no_hash_is_never_touched(store: DisputeStore, chain: Chain
 
     decision, unchanged = run(store, go())
 
-    assert decision.action == "no_hash" and unchanged
+    assert decision.action == "no_hash"
+    assert unchanged
     assert chain.asked == []
 
 
