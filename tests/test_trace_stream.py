@@ -156,7 +156,8 @@ def test_a_quiet_live_stream_pings_then_streams_its_lines_and_ends(monkeypatch):
         state.traces.pop(task_id, None)
 
     assert [name for name, _ in events] == ["trace", "ping", "trace", "done"]
-    assert '"history"' in events[0][1] and '"live"' in events[2][1]
+    assert '"history"' in events[0][1]
+    assert '"live"' in events[2][1]
     assert (events[1][1], events[3][1]) == ("{}", "{}")
     assert timeouts == [15.0, 15.0, 15.0]
     assert task_id not in bus._subs
