@@ -157,8 +157,9 @@ def test_a_signature_for_one_endpoint_does_not_verify_for_another() -> None:
     assert for_b[ds.SIGNATURE_HEADER] != for_a[ds.SIGNATURE_HEADER]
 
     # B cannot verify A's envelope...
+    message_at_b, signature_for_a = dispatch_message(OTHER_URL, BODY), _signature(for_a)
     with pytest.raises(BadSignatureError):
-        pinned.verify_message(dispatch_message(OTHER_URL, BODY), _signature(for_a))
+        pinned.verify_message(message_at_b, signature_for_a)
     # ...and B's own signature is equally useless to A.
     with pytest.raises(BadSignatureError):
         pinned.verify_message(dispatch_message(URL, BODY), _signature(for_b))
