@@ -90,17 +90,20 @@ def test_an_uploaded_image_is_read_on_haiku_and_handed_on_as_text(claude: FakeCl
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.vision.ocr", "claude-haiku-4-5", None)
-    assert call.schema_name == "OcrDraft" and call.system == vision_ocr.INSTRUCTIONS
+    assert call.schema_name == "OcrDraft"
+    assert call.system == vision_ocr.INSTRUCTIONS
     assert call.max_tokens == vision_ocr.MAX_TOKENS
     assert call.images == (ImageBlock("image/png", UPLOAD["data"]),)
     assert "Image 1: upload 1" in call.user
-    assert out["text"] == "OPEN\nMon–Fri 9:00–18:00" and out["language"] == "en"
+    assert out["text"] == "OPEN\nMon–Fri 9:00–18:00"
+    assert out["language"] == "en"
     assert out["images"][0]["tables"] == [{"title": "Hours", "rows": [["Day", "Hours"], ["Mon–Fri", "9:00–18:00"]]}]
     assert out["skipped"] == []
     assert out["counts"] == {"images": 1, "skipped": 0, "chars": len(out["text"]), "blocks": 2, "tables": 1}
     # What a later step receives through the handoff.
     handoff = upstream({"vision.ocr": out}, "translate.42")
-    assert handoff.sources == ["vision.ocr"] and "Mon–Fri 9:00–18:00" in handoff.text()
+    assert handoff.sources == ["vision.ocr"]
+    assert "Mon–Fri 9:00–18:00" in handoff.text()
 
 
 @pytest.mark.parametrize(
