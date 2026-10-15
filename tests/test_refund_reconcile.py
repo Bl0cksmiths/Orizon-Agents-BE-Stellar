@@ -429,7 +429,8 @@ def test_not_found_before_max_time_and_its_margin_never_releases(
     decision, current, held = run(store, go())
 
     assert decision.action == "pending"
-    assert current is not None and (current.status, current.refund_tx) == ("crediting", "tx_unconfirmed")
+    assert current is not None
+    assert (current.status, current.refund_tx) == ("crediting", "tx_unconfirmed")
     assert held == [current.id]
 
 
