@@ -998,9 +998,12 @@ def test_a_rating_refused_before_the_send_is_failed_and_nothing_is_in_flight(
 
     (outcome,) = seen
     assert (outcome.status, outcome.tx_hash) == ("FAILED", None)
-    assert outcome.reason is not None and cause in outcome.reason
-    assert after.status == "credited" and after.refund_tx == "tx_credit"
-    assert after.rating_tx is None and after.rating_confirmed is None
+    assert outcome.reason is not None
+    assert cause in outcome.reason
+    assert after.status == "credited"
+    assert after.refund_tx == "tx_credit"
+    assert after.rating_tx is None
+    assert after.rating_confirmed is None
     assert invalidated == []
     if fail_at in ("ERROR", "TRY_AGAIN_LATER"):
         assert rpc.sent == 1  # the RPC answered the send, and holds nothing
