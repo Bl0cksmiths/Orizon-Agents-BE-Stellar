@@ -77,12 +77,11 @@ def test_signs_the_authorize_it_asked_for() -> None:
 )
 def test_refuses_an_envelope_that_is_not_the_call(change: dict[str, object], complaint: str) -> None:
     kp = Keypair.random()
-    with pytest.raises(SigningRefused, match="refusing to sign|operation"):
-        try:
-            sign_authorize(_envelope(kp.public_key, **change), kp, TESTNET_PASSPHRASE, _expect(kp))  # type: ignore[arg-type]
-        except SigningRefused as exc:
-            assert complaint in str(exc)
-            raise
+    envelope = _envelope(kp.public_key, **change)  # type: ignore[arg-type]
+    expected = _expect(kp)
+    with pytest.raises(SigningRefused, match="refusing to sign|operation") as refused:
+        sign_authorize(envelope, kp, TESTNET_PASSPHRASE, expected)
+    assert complaint in str(refused.value)
 
 
 def test_refuses_an_envelope_from_another_source_account() -> None:
