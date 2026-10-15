@@ -124,7 +124,8 @@ def test_an_operators_summary_reaches_the_next_step_fenced(monkeypatch):
     fenced = reader.seen["external.ext_op"]["summary"]
     assert fenced == fence_untrusted(summary, label=LABEL)
     assert "SECURITY DIRECTIVE" in fenced
-    assert f"BEGIN {LABEL}" in fenced and f"END {LABEL}" in fenced
+    assert f"BEGIN {LABEL}" in fenced
+    assert f"END {LABEL}" in fenced
     # The payload survives as DATA — fencing isolates it, it does not censor it.
     assert summary in fenced
 
