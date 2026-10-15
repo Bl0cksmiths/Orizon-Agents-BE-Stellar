@@ -846,8 +846,9 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
     dispute = a_dispute()
     settler(monkeypatch, {"status": "PENDING", "hash": "tx_who_knows"})
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_unconfirmed"
     stuck = asyncio.run(dispute_svc.get_dispute(dispute.id))
