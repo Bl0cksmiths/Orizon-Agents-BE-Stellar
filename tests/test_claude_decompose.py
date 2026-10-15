@@ -713,7 +713,11 @@ def test_the_openai_provider_runs_the_legacy_planner_untouched(
     resp = _decompose(spec=None)
 
     assert len(prompts) == 1
-    assert fake_claude.calls == [] and fake_jev.calls == []
+    assert fake_claude.calls == []
+    assert fake_jev.calls == []
     # Nothing on the legacy path judged a tier, so none is served or stored.
-    assert resp.steps[0].tier is None and resp.tier is None
-    assert resp.guard is None and resp.models is None and resp.stages == []
+    assert resp.steps[0].tier is None
+    assert resp.tier is None
+    assert resp.guard is None
+    assert resp.models is None
+    assert resp.stages == []
