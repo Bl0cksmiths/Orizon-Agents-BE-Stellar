@@ -761,9 +761,11 @@ def test_the_seal_is_appended_to_the_settlement_recorded_at_charge_time(monkeypa
     charge_tx, proof_tx, job_id = _settle_and_record("tsk_capture_seal_after")
 
     assert invoked == ["charge", "seal"]
-    assert (charge_tx, proof_tx) == (CHARGE_TX, PROOF_TX) and job_id is not None
+    assert (charge_tx, proof_tx) == (CHARGE_TX, PROOF_TX)
+    assert job_id is not None
     first, second = store.recorded
-    assert first.proof_tx is None and second.proof_tx == PROOF_TX
+    assert first.proof_tx is None
+    assert second.proof_tx == PROOF_TX
     # The same record twice, the seal's hash the only difference: in
     # particular the window the buyer was told about does not move.
     assert dataclasses.replace(second, proof_tx=None) == first
