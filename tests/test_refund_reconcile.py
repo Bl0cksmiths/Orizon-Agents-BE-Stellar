@@ -233,7 +233,8 @@ def test_the_real_testnet_refund_decodes_to_the_amount_it_moved(
 
     current = run(store, go())
 
-    assert current is not None and current.credited_usdc == REAL_AMOUNT_STROOPS / 10_000_000 == 0.054
+    assert current is not None
+    assert current.credited_usdc == REAL_AMOUNT_STROOPS / 10_000_000 == 0.054
 
 
 def test_two_sweeps_racing_one_success_record_it_exactly_once(
