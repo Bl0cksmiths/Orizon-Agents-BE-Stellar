@@ -133,7 +133,8 @@ def test_a_completed_stream_is_recorded_once_and_not_estimated(
     with caplog.at_level(logging.WARNING, logger="app.llm.claude"):
         assert _stream().value == PARTIAL
     calls, usage, _cost = _rows(spend_ledger)[("claude-opus-5-5", "worker.code.gen")]
-    assert calls == 1 and usage.output_tokens == 200  # FakeClaude's DEFAULT_USAGE, the reported figure
+    assert calls == 1
+    assert usage.output_tokens == 200  # FakeClaude's DEFAULT_USAGE, the reported figure
     assert not [r for r in caplog.records if "estimated" in r.getMessage()]
 
 
