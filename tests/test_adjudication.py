@@ -1417,7 +1417,8 @@ def test_a_rejection_without_a_usable_reason_is_refused_before_anything_is_writt
     assert refused.value.existing is None
     # Nothing written: the record is the very one the buyer opened.
     assert store._disputes[dispute.id] is as_opened
-    assert as_opened.status == "open" and as_opened.note is None
+    assert as_opened.status == "open"
+    assert as_opened.note is None
 
 
 # ── the dispute rating: after the credit, never instead of it ───
