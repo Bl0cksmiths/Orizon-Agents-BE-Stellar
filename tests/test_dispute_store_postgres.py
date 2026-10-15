@@ -238,7 +238,8 @@ def test_a_claim_racing_a_claim_is_settled_by_the_primary_key(
         assert trail == ["open", "upheld", "crediting"]
         assert held["dsp_0001"] == 1.0  # still the other claimant's row
     else:
-        assert claimed is not None and claimed.status == "crediting"
+        assert claimed is not None
+        assert claimed.status == "crediting"
         assert trail == ["open", "upheld", "crediting"]
         assert held["dsp_0001"] != 1.0
 
