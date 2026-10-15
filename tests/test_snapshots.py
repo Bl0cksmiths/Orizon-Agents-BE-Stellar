@@ -173,8 +173,10 @@ def test_a_zero_bound_never_waits_but_starts_the_build() -> None:
         return snap, building, await cell.get(wait_seconds=0)
 
     snap, building, after = _run(go)  # type: ignore[misc]
-    assert snap is None and building is True
-    assert after is not None and after.value.n == 1  # type: ignore[attr-defined]
+    assert snap is None
+    assert building is True
+    assert after is not None
+    assert after.value.n == 1  # type: ignore[attr-defined]
 
 
 def test_a_caller_that_gives_up_does_not_cancel_the_build() -> None:
