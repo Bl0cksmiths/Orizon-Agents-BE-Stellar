@@ -279,7 +279,8 @@ def test_a_lost_race_to_another_adjudication_refuses(store: Store, seams: Seams)
     store.script = {"append_status": [None], "get_dispute": [REAL, upheld]}
     err = _refused()
     assert (err.code, err.status_code) == ("adjudication_in_progress", 409)
-    assert store.calls == [LOAD, CAS_UPHELD, LOAD] and seams.calls == []
+    assert store.calls == [LOAD, CAS_UPHELD, LOAD]
+    assert seams.calls == []
 
 
 @pytest.mark.parametrize(("raced_to", "code"), [("crediting", "refund_in_flight"), ("rejected", "dispute_rejected")])
