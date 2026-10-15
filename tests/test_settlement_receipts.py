@@ -283,7 +283,8 @@ def test_run_with_no_successful_step_skips_charge_and_seal_but_still_rates(monke
     assert rating_calls == [execution_svc.unsettled_job_id(task_id)]
     task = state.tasks[task_id]
     assert task.status == "failed"
-    assert task.charge_tx is None and task.proof_tx is None
+    assert task.charge_tx is None
+    assert task.proof_tx is None
     assert any("skipping on-chain charge/seal" in ln.msg for ln in state.traces[task_id])
 
 
