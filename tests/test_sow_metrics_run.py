@@ -1072,4 +1072,5 @@ def test_a_bad_pending_link_is_refused(tmp_path: Path, value: str) -> None:
 
 def test_a_pending_link_given_twice_is_refused(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path, "--pending-link", f"m09={PR91}", "--pending-link", f"m09={PR92}")
-    assert out.code == EXIT_REFUSED and "given twice" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "given twice" in out.out
