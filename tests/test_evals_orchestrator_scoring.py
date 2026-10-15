@@ -157,7 +157,8 @@ def test_the_sweep_picks_on_train_and_judges_on_held_out(noisy_rows):
     assert inj.curve[0][1].injection_recall.n == sum(r["meta"]["expected"]["is_injection"] for r in train)
     # …and the pick is judged on the held-out rows only.
     assert inj.picked_test.injection_recall.n == sum(r["meta"]["expected"]["is_injection"] for r in test)
-    assert inj.picked is not None and 0.30 <= inj.picked <= 0.95
+    assert inj.picked is not None
+    assert 0.30 <= inj.picked <= 0.95
 
 
 def test_lowering_the_injection_line_never_lowers_recall(noisy_rows):
