@@ -393,8 +393,9 @@ def test_a_credit_still_in_flight_is_reserved_at_its_promise(monkeypatch) -> Non
     calls = _chain(monkeypatch, {"status": "timeout", "hash": "tx_inflight"})
     first, second = _two_disputes_of_one_job(settled_usdc=0.10)
 
+    upholding = dispute_svc.uphold(second.id)
     with pytest.raises(DisputeError):
-        asyncio.run(dispute_svc.uphold(second.id))  # 0.07 out, may still land
+        asyncio.run(upholding)  # 0.07 out, may still land
     assert asyncio.run(dispute_svc.uphold(first.id)).credited_usdc == pytest.approx(0.03, abs=1e-12)
     assert [args[2][1] for _, _, args in calls] == [700_000, 300_000]
 
