@@ -63,7 +63,9 @@ def _other_token(token: str) -> str:
 def test_the_other_token_is_never_the_token() -> None:
     for token in ("abcx", "abcA", "abcB", "x", "A"):
         other = _other_token(token)
-        assert other != token and len(other) == len(token) and other[:-1] == token[:-1]
+        assert other != token
+        assert len(other) == len(token)
+        assert other[:-1] == token[:-1]
 
 
 def _comparable(receipt: dict[str, Any]) -> dict[str, Any]:
