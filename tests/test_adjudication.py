@@ -699,7 +699,8 @@ def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch,
     lost, won = asyncio.run(race())
 
     assert mid_flight == [("crediting", "refund_in_flight")]
-    assert lost.code == "refund_in_flight" and lost.status_code == 409
+    assert lost.code == "refund_in_flight"
+    assert lost.status_code == 409
     assert won.code == "refund_failed"
     assert len(chain.calls) == 1
     # FAILED means nothing moved, so the claim went back and the buyer can
