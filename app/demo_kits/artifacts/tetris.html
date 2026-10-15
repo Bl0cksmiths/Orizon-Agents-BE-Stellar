@@ -1092,25 +1092,32 @@
     if (k === 'p' || k === 'P') { togglePause(); e.preventDefault(); return; }
     if (k === 'r' || k === 'R') { restart(); e.preventDefault(); return; }
     if (state.paused || state.over) return;
+    if (handlePlayKey(k)) e.preventDefault();
+  }
+  // Runs the in-play action bound to a key; returns false for unbound keys.
+  function handlePlayKey(k) {
     if (k === 'ArrowLeft') {
       keysDown.add('left');
       dasState.dir = -1; dasState.dasStarted = performance.now(); dasState.lastShift = dasState.dasStarted;
-      move(-1); e.preventDefault();
+      move(-1);
     } else if (k === 'ArrowRight') {
       keysDown.add('right');
       dasState.dir = 1; dasState.dasStarted = performance.now(); dasState.lastShift = dasState.dasStarted;
-      move(1); e.preventDefault();
+      move(1);
     } else if (k === 'ArrowDown') {
-      keysDown.add('down'); softDrop(); e.preventDefault();
+      keysDown.add('down'); softDrop();
     } else if (k === ' ' || k === 'Spacebar') {
-      hardDrop(); e.preventDefault();
+      hardDrop();
     } else if (k === 'ArrowUp' || k === 'x' || k === 'X') {
-      tryRotate(+1); e.preventDefault();
+      tryRotate(+1);
     } else if (k === 'z' || k === 'Z') {
-      tryRotate(-1); e.preventDefault();
+      tryRotate(-1);
     } else if (k === 'c' || k === 'C' || k === 'Shift') {
-      holdSwap(); e.preventDefault();
+      holdSwap();
+    } else {
+      return false;
     }
+    return true;
   }
   function onKeyUp(e) {
     const k = e.key;
