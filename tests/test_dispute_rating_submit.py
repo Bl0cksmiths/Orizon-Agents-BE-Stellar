@@ -169,7 +169,8 @@ def test_two_steps_by_one_agent_rate_under_two_ids(monkeypatch) -> None:
 
     assert calls[0]["agent_id"] == calls[1]["agent_id"]
     assert calls[0]["job_id"] != calls[1]["job_id"]
-    assert calls[0]["weight"] == 500_000 and calls[1]["weight"] == WEIGHT
+    assert calls[0]["weight"] == 500_000
+    assert calls[1]["weight"] == WEIGHT
 
 
 def test_the_rating_is_below_what_the_settler_gives_a_non_delivery() -> None:
