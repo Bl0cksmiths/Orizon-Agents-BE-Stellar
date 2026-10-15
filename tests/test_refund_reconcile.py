@@ -890,10 +890,13 @@ def test_readiness_reports_the_sweep_and_its_last_pass_by_count_only(
         response = client.get("/readiness")
 
     reconcile = response.json()["disputes"]["reconcile"]
-    assert reconcile["enabled"] is True and reconcile["running"] is False
-    assert reconcile["last_outcomes"] == {"credited": 1} and reconcile["last_skipped"] is None
+    assert reconcile["enabled"] is True
+    assert reconcile["running"] is False
+    assert reconcile["last_outcomes"] == {"credited": 1}
+    assert reconcile["last_skipped"] is None
     assert isinstance(reconcile["last_run_at"], float)
-    assert dispute_id not in response.text and tx_hash not in response.text
+    assert dispute_id not in response.text
+    assert tx_hash not in response.text
 
 
 def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
