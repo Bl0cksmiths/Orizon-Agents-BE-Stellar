@@ -891,6 +891,7 @@ def test_the_sdk_never_hands_us_an_event_without_a_transaction_hash() -> None:
     future SDK relaxes this field to optional, the service starts receiving
     events it cannot decode at all and this is where that shows up."""
     assert EventInfo.model_fields["transaction_hash"].is_required()
+    value = scval.to_vec([]).to_xdr()
     with pytest.raises(pydantic.ValidationError):
         EventInfo(
             type="contract",
@@ -899,7 +900,7 @@ def test_the_sdk_never_hands_us_an_event_without_a_transaction_hash() -> None:
             contractId=ESCROW_ID,
             id="1000010-0",
             topic=[],
-            value=scval.to_vec([]).to_xdr(),
+            value=value,
             inSuccessfulContractCall=True,
             operationIndex=0,
             transactionIndex=0,
