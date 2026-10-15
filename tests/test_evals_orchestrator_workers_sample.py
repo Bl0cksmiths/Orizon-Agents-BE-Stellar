@@ -214,4 +214,5 @@ def test_a_worker_failure_without_a_budget_is_a_plain_error(monkeypatch, tmp_pat
     results = asyncio.run(run_sample(tmp_path, (_job("agt_01h8"),)))
     rec = results["copywrite"]
     assert rec["error"] == "ValueError: bad"
-    assert rec["unreported_estimated_usd"] == 0.0 and len(rec["calls"]) == 1
+    assert rec["unreported_estimated_usd"] == 0.0
+    assert len(rec["calls"]) == 1
