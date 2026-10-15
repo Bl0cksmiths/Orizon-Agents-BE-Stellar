@@ -82,7 +82,8 @@ def test_a_snapshot_carries_its_body_gzip_and_a_weak_etag() -> None:
     assert isinstance(snap, snapshots.Snapshot)
     assert snap.body == b'{"n": 1}'
     assert gzip.decompress(snap.gzip_body) == snap.body
-    assert snap.etag.startswith('W/"') and snap.etag.endswith('"')
+    assert snap.etag.startswith('W/"')
+    assert snap.etag.endswith('"')
     assert snap.etag == snapshots.etag_for(snap.body)
     assert snap.source == "live"
 
