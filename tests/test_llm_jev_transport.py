@@ -201,4 +201,5 @@ def test_one_client_per_loop_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
         return first, again, rotated
 
     first, again, rotated = asyncio.run(clients())
-    assert first is again and rotated is not first
+    assert first is again
+    assert rotated is not first
