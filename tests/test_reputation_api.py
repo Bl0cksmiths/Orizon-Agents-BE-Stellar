@@ -447,7 +447,8 @@ def test_submit_ratings_is_best_effort(monkeypatch):
     job_id = b"\x01" * 16
     assert [c[1] for c in calls] == [job_id, execution_svc.settlement_job_id(job_id, 1)]
     assert all(c[5] == "auto" for c in calls)
-    assert calls[0][2] == 95 and calls[1][2] == 20
+    assert calls[0][2] == 95
+    assert calls[1][2] == 20
 
     lines = state.traces[task_id]
     proofs = [ln for ln in lines if ln.level == "proof"]
