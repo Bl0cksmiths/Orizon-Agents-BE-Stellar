@@ -162,8 +162,9 @@ def test_forged_markers_in_the_draft_are_neutralised():
 
 
 def test_an_empty_required_field_is_invalid_output():
+    empty = draft(goal="  \x00 ")
     with pytest.raises(ImproverOutputInvalid):
-        normalize_spec(draft(goal="  \x00 "), INTENT)
+        normalize_spec(empty, INTENT)
 
 
 # --- Spec as an API input (the user-edited panel) -----------------------------------------
