@@ -67,7 +67,8 @@ def test_a_stated_paid_amount_is_what_the_events_are_held_to() -> None:
 
 def test_one_charged_event_per_paid_step_passes() -> None:
     checks, paid = check_charged_events([_charged("ext", 500_000)], _settlement(), OWNERS)
-    assert paid == 500_000 and passed(checks)
+    assert paid == 500_000
+    assert passed(checks)
 
 
 def test_a_missing_charged_event_fails() -> None:
