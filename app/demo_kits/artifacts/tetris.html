@@ -719,17 +719,21 @@
     return 'mini';
   }
 
+  function writePieceToBoard(piece) {
+    for (const [x, y] of pieceCells(piece)) {
+      if (y >= 0 && y < ROWS && x >= 0 && x < COLS) {
+        state.board[y][x] = PIECES[piece.kind].color;
+      }
+    }
+  }
+
   function lockPiece() {
     if (!state.active) return;
     // 1. T-spin detection happens BEFORE we write to the board.
     const tspin = tspinKind();
 
     // 2. Write the piece to the board.
-    for (const [x, y] of pieceCells(state.active)) {
-      if (y >= 0 && y < ROWS && x >= 0 && x < COLS) {
-        state.board[y][x] = PIECES[state.active.kind].color;
-      }
-    }
+    writePieceToBoard(state.active);
 
     // 3. Clear completed lines.
     let cleared = 0;
