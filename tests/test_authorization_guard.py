@@ -151,7 +151,9 @@ def test_v1_is_never_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     """v1 has no `version()`: nothing is read past that, and nothing is refused, whatever the input."""
     escrow = install(monkeypatch, FakeEscrow(version=None, auth=RuntimeError("never read")))
     verified = asyncio.run(owned(payer=OTHER, plan_id="pln_ffffffff"))
-    assert not verified.enforced and verified.escrow_version == 1 and verified.authorization is None
+    assert not verified.enforced
+    assert verified.escrow_version == 1
+    assert verified.authorization is None
     assert escrow.calls == [(ESCROW, "version")]
 
 
