@@ -527,7 +527,8 @@ def test_the_dispute_is_signed_sep53_by_the_payer_over_the_servers_message(
     body = world.call_log("/api/disputes")[0]["json"]
     message = f"orizon-dispute:v1:{challenge_call['job_id_hex']}:{challenge_call['step_index']}:{body['nonce']}"
     Keypair.from_public_key(buyer.public_key).verify_message(message, base64.b64decode(body["signature_b64"]))
-    assert body["payer"] == buyer.public_key and body["step_index"] == 0
+    assert body["payer"] == buyer.public_key
+    assert body["step_index"] == 0
 
 
 # ── the settlement checks ───────────────────────────────────────
