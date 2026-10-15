@@ -187,10 +187,15 @@ def test_a_resume_of_another_task_drops_the_first_tasks_context(
     resumed = run(world, buyer, tmp_path / "a", "--from-task", second, "--until", "poll", intent=False)
     assert resumed.code == EXIT_OK, resumed.out
     state = resumed.state()
-    assert state["task_id"] == second and first != second
+    assert state["task_id"] == second
+    assert first != second
     assert state["read_token"] is None
-    assert state["plan"] is None and state["authorize"] is None and state["settlement"] is None
-    assert state["dispute"] is None and state["balances_before"] is None and state["owners"] is None
+    assert state["plan"] is None
+    assert state["authorize"] is None
+    assert state["settlement"] is None
+    assert state["dispute"] is None
+    assert state["balances_before"] is None
+    assert state["owners"] is None
 
 
 def test_from_dispute_in_a_fresh_directory_resumes_at_the_uphold(
