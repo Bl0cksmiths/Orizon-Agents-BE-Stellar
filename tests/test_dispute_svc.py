@@ -532,8 +532,9 @@ def test_a_free_step_cannot_be_disputed() -> None:
         steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.0, delivered=True),),
     )
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "nothing_was_charged"
     assert "free" in refused.value.message
