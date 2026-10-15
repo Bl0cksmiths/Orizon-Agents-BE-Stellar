@@ -199,7 +199,8 @@ def test_a_malformed_rows_file_is_refused(tmp_path: Path, body: Any, says: str) 
     out = run(ledger, tmp_path, "--rows", str(rows_file(tmp_path, text)))
     assert out.code == EXIT_REFUSED, out.out
     assert says in out.out
-    assert not out.dir.exists() and ledger.calls == []
+    assert not out.dir.exists()
+    assert ledger.calls == []
 
 
 def test_an_unreadable_rows_file_is_refused(tmp_path: Path) -> None:
