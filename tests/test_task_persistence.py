@@ -181,7 +181,7 @@ class _Slow:
         return {"summary": "done"}
 
 
-@pytest.fixture()
+@pytest.fixture
 def slow_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
 
