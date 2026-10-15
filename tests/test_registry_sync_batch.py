@@ -102,7 +102,8 @@ def test_a_pass_reads_every_record_in_one_batch_and_simulates_no_get(registry: A
 
     assert asyncio.run(registry_sync.sync_once()) == 450
 
-    assert len(fake.batches) == 1 and len(fake.batches[0]) == 450
+    assert len(fake.batches) == 1
+    assert len(fake.batches[0]) == 450
     assert fake.gets == []
     assert len(_onchain()) == 450
     assert registry_sync.status().synced is True
