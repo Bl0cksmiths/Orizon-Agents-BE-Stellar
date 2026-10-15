@@ -102,7 +102,10 @@ def test_all_stages_run_improve_recheck_and_plan_for_allowed_cases(cases, tmp_pa
     assert errors == []
     for r in rows:
         stages = [c["stage"] for c in r["meta"]["calls"]]
-        assert stages[0] == "guard" and "improve" in stages and stages.count("recheck") == 2 and stages[-1] == "plan"
+        assert stages[0] == "guard"
+        assert "improve" in stages
+        assert stages.count("recheck") == 2
+        assert stages[-1] == "plan"
         assert r["grade"]["plan_valid"] == 1
         assert r["meta"]["spec"]["goal"]
         assert "same_request" in r["meta"]["observed"]["scores"]
