@@ -316,7 +316,8 @@ def test_an_invalidated_read_is_served_superseded_never_the_prior(chain):
     assert served.degraded is False
     assert served.source == "onchain"
     assert served.stale is True
-    assert served.stale_age_seconds is not None and 0.0 <= served.stale_age_seconds < 5.0
+    assert served.stale_age_seconds is not None
+    assert 0.0 <= served.stale_age_seconds < 5.0
     assert served.superseded is True
     assert served.model_dump(exclude={"stale", "stale_age_seconds"}) == before.model_dump(
         exclude={"stale", "stale_age_seconds"}
