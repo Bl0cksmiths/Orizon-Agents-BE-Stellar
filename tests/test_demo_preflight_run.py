@@ -453,7 +453,8 @@ def test_the_exclusion_subject_is_not_held_to_routable(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("operator.ready")
     assert check["status"] == PASS
-    assert "below the floor by design" in check["detail"] and "lowrep" in check["detail"]
+    assert "below the floor by design" in check["detail"]
+    assert "lowrep" in check["detail"]
 
 
 def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path: Path) -> None:
