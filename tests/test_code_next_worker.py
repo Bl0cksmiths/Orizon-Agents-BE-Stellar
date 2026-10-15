@@ -335,7 +335,8 @@ def test_files_and_sizes_are_bounded(claude: FakeClaude, monkeypatch: pytest.Mon
 def test_files_the_model_did_not_deliver_fail_the_step(claude: FakeClaude, script: Any, rule: str) -> None:
     script(claude)
     err = _failure()
-    assert err.rule == rule and "MODEL-PROSE" not in str(err)
+    assert err.rule == rule
+    assert "MODEL-PROSE" not in str(err)
 
 
 def test_a_slow_stream_fails_inside_the_step_budget(claude: FakeClaude, monkeypatch: pytest.MonkeyPatch) -> None:
