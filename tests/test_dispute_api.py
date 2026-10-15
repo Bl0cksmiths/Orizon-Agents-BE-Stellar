@@ -125,7 +125,7 @@ def fresh_challenge_limiter(monkeypatch):
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def challenge_stub(monkeypatch):
     """Point the challenge mint at a known nonce; record every call."""
     calls: list[tuple[str, int]] = []
