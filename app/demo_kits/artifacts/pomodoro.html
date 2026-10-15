@@ -765,7 +765,13 @@
     if (!state.notifEnabled) return;
     if (!('Notification' in window)) return;
     if (Notification.permission !== 'granted') return;
-    try { new Notification(title, { body, silent: state.muted }); } catch (e) {}
+    try {
+      new Notification(title, { body, silent: state.muted });
+    } catch (e) {
+      // Some browsers (Chrome on Android) only allow notifications from a service worker and
+      // throw here. The notification is a courtesy: the chime and the on-page phase change
+      // still mark the transition, so the timer carries on without it.
+    }
   }
 
   // ── Render ───────────────────────────────────────────────────────────────
