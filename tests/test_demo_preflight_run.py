@@ -766,7 +766,8 @@ def test_an_operator_without_a_bound_agent_fails(tmp_path: Path) -> None:
     world = healthy_world()
     world.agents = [agent_row("alpha", OP1, bound=False)] + [a for a in world.agents if a["id"] != "alpha"]
     check = run(world, tmp_path).check("wallets.operator")
-    assert check["status"] == FAIL and "/app/bind" in check["fix"]
+    assert check["status"] == FAIL
+    assert "/app/bind" in check["fix"]
 
 
 def test_an_unfunded_operator_fails(tmp_path: Path) -> None:
