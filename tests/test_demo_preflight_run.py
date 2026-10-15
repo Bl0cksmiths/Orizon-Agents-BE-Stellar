@@ -469,13 +469,15 @@ def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path
 def test_a_healthy_operator_endpoint_passes_and_its_secret_is_never_shown(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("operator.endpoint")
-    assert check["status"] == PASS and check["required"] is True
+    assert check["status"] == PASS
+    assert check["required"] is True
     assert check["detail"] == (
         'https://agent.test/ answered {"ok": true} with no fault_injection field and no X-Fault-Injection header'
     )
     assert "agent GET /?" in out.world.calls  # the origin's root, not the bound path and its query
     for text in (out.out, (out.dir / "demo-preflight.json").read_text(), (out.dir / "demo-preflight.md").read_text()):
-        assert "bound-secret-7f3" not in text and "/dispatch" not in text
+        assert "bound-secret-7f3" not in text
+        assert "/dispatch" not in text
 
 
 @pytest.mark.parametrize("how", ["field", "header", "both"])
