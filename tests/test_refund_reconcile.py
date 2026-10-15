@@ -793,7 +793,8 @@ def test_a_pass_on_a_deployment_that_cannot_pay_reads_nothing(
 
     report = run(store, go())
 
-    assert report.skipped is not None and report.outcomes == {}
+    assert report.skipped is not None
+    assert report.outcomes == {}
     assert chain.asked == []
 
 
