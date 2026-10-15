@@ -98,8 +98,10 @@ def test_an_envelope_built_for_another_network_does_not_verify_here() -> None:
     signed = sign_authorize(xdr, kp, TESTNET_PASSPHRASE, _expect(kp))
     # signed under the TESTNET passphrase, so a mainnet node would reject it
     main_env = TransactionEnvelope.from_xdr(signed.signed_xdr, "Public Global Stellar Network ; September 2015")
+    digest = main_env.hash()
+    signature = main_env.signatures[0].signature
     with pytest.raises(BadSignatureError):
-        kp.verify(main_env.hash(), main_env.signatures[0].signature)
+        kp.verify(digest, signature)
 
 
 def test_sep53_message_signature() -> None:
