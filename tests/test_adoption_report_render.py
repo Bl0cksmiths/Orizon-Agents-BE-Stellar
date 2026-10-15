@@ -109,12 +109,15 @@ def test_json_carries_the_recount_the_links_and_every_check(tmp_path: Path) -> N
     assert doc["targets"] == doc["totals"] == doc["api_totals"]
     assert doc["met_lines"] == {k: "MET" for k in doc["targets"]}
     assert doc["contracts"]["payment_escrow"] == {"id": ESCROW, "explorer": f"{EXPLORER}/contract/{ESCROW}"}
-    assert doc["team_register"]["accounts"] == 2 and len(doc["team_register"]["sha256"]) == 64
+    assert doc["team_register"]["accounts"] == 2
+    assert len(doc["team_register"]["sha256"]) == 64
     first = doc["operators"][0]
     assert first["owner_explorer"] == f"{EXPLORER}/account/{OP1}"
     wf = first["agents"][0]["settled_workflows"][0]
     assert wf["explorer"] == f"{EXPLORER}/tx/{wf['tx_hash']}"
-    assert wf["read_from"] == "rpc" and wf["counted"] is True and wf["amount_stroops"] == 100_000
+    assert wf["read_from"] == "rpc"
+    assert wf["counted"] is True
+    assert wf["amount_stroops"] == 100_000
     assert wf["ledger"] == world.txs[wf["tx_hash"]].ledger
     assert doc["excluded"][0]["owner"] == PLATFORM
     names = {(c["subject"], c["check"]) for c in doc["checks"]}
