@@ -32,7 +32,7 @@ def _worker(handler, endpoint: str = "https://operator.example/run") -> eh.Exter
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def short_deadline(monkeypatch: pytest.MonkeyPatch) -> float:
     """A 1 s budget so the suite stays fast; the mechanism is identical."""
     monkeypatch.setattr(eh, "DISPATCH_DEADLINE_SECONDS", 1.0)
