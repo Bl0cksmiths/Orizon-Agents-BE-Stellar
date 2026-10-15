@@ -43,11 +43,14 @@ print(int(code), settings.stellar_agent_registry)
 def test_a_patched_setting_comes_back_as_the_environment_set_it(tmp_path: Path) -> None:
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_patching.py").write_text(_PATCHING_TEST)
+    # The inner session collects no Postgres tests on purpose, so CI's
+    # "every real-Postgres test must run" gate would fail it; leave it out.
+    outer_env = {k: v for k, v in os.environ.items() if not k.startswith("ORIZON_TEST_PG_")}
     out = subprocess.run(
         [sys.executable, "-c", _RUN],
         cwd=tmp_path,
         env={
-            **os.environ,
+            **outer_env,
             "PYTHONPATH": os.pathsep.join([str(_ROOT), str(_TESTS)]),
             "OPENAI_API_KEY": "sk-test",
             "STELLAR_AGENT_REGISTRY": "CREG",
