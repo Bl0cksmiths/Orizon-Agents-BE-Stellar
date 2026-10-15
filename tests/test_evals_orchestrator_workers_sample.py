@@ -192,7 +192,9 @@ def test_a_budget_cut_off_is_booked_as_unreported_spend(monkeypatch, tmp_path, c
     results = asyncio.run(run_sample(tmp_path, jobs, budget_usd=1.0))
     rec = results["code.gen"]
     assert rec["error"] == "BudgetExceeded: stopped at an estimated $0.2500"
-    assert rec["unreported_estimated_usd"] == 0.25 and rec["calls"] == [] and rec["cost_usd"] == 0
+    assert rec["unreported_estimated_usd"] == 0.25
+    assert rec["calls"] == []
+    assert rec["cost_usd"] == 0
     assert rec["output"] == {"summary": None, "counts": None}
     # 1.0 - 0.25 left, and 0.61 x 1.25 headroom does not fit
     assert results["copywrite"]["skipped"] == "budget left 0.7500 USD"
