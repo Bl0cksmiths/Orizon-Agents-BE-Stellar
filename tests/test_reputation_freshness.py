@@ -214,7 +214,8 @@ def test_a_cold_agent_with_no_known_value_is_still_the_degraded_prior(chain):
 
     assert served.source == "prior"
     assert served.degraded is True
-    assert served.stale is False and served.superseded is False
+    assert served.stale is False
+    assert served.superseded is False
 
 
 def test_the_warning_says_a_superseded_agent_is_refused_not_judged(chain, caplog):
