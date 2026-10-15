@@ -315,8 +315,9 @@ def test_mapper_leaves_a_legitimate_name_alone():
     ],
 )
 def test_mapper_refuses_a_price_we_could_never_settle(stroops):
+    raw = _raw(EVIL, price=stroops)
     with pytest.raises(registry_sync.UnbelievablePrice):
-        registry_sync._to_agent(_raw(EVIL, price=stroops))
+        registry_sync._to_agent(raw)
 
 
 def test_mapper_accepts_a_price_at_the_ceiling():
