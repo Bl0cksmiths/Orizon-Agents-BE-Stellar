@@ -267,7 +267,8 @@ def test_the_order_disputes_are_opened_in_does_not_decide_what_is_kept(monkeypat
     assert asyncio.run(store.get_settlement(_job(0))) is None
     assert asyncio.run(store.get_dispute("dsp_0")) is None
     newest = asyncio.run(store.get_settlement_by_task("task_0"))
-    assert newest is not None and newest.job_id_hex == _job(1)
+    assert newest is not None
+    assert newest.job_id_hex == _job(1)
 
 
 # ── what is still owed is never shed ──────────────────────────────────────
