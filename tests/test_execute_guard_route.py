@@ -510,7 +510,7 @@ class ChainSpy:
         return {"status": "FAILED", "hash": "1" * 64}
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch: pytest.MonkeyPatch) -> ChainSpy:
     """A deployment that COULD rate: a signing key and a ledger are configured."""
     spy = ChainSpy()
