@@ -685,6 +685,15 @@
     state.canHold = false;
   }
 
+  // A corner counts as blocked when it is off the board (any side) or filled.
+  function countBlockedCorners(points) {
+    let n = 0;
+    for (const [cx, cy] of points) {
+      if (cx < 0 || cx >= COLS || cy >= ROWS || cy < 0 || state.board[cy][cx]) n++;
+    }
+    return n;
+  }
+
   // Detect T-spin / T-spin-mini using the 3-corner test.
   function tspinKind() {
     const p = state.active;
@@ -695,8 +704,6 @@
       [p.x, p.y + 2],
       [p.x + 2, p.y + 2],
     ];
-    let blocked = 0;
-    let blockedFront = 0;
     // Front corners depend on rotation. Rot 0 = pointing up → fronts are top-left + top-right.
     const frontPairs = {
       0: [[p.x, p.y], [p.x + 2, p.y]],
@@ -705,14 +712,8 @@
       3: [[p.x, p.y], [p.x, p.y + 2]],
     };
     const fronts = frontPairs[p.rot];
-    for (const [cx, cy] of corners) {
-      if (cx < 0 || cx >= COLS || cy >= ROWS || cy < 0) { blocked++; continue; }
-      if (state.board[cy][cx]) blocked++;
-    }
-    for (const [cx, cy] of fronts) {
-      if (cx < 0 || cx >= COLS || cy >= ROWS || cy < 0) { blockedFront++; continue; }
-      if (state.board[cy][cx]) blockedFront++;
-    }
+    const blocked = countBlockedCorners(corners);
+    const blockedFront = countBlockedCorners(fronts);
     if (blocked < 3) return 'none';
     if (blockedFront === 2) return 'full';
     return 'mini';
