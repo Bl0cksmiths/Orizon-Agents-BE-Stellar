@@ -121,7 +121,8 @@ def test_every_refusal_is_named_before_anything_is_built(
     install(monkeypatch, FakeEscrow(auth=auth))
     r = reclaim(client, payer=payer)
     assert r.status_code == status
-    assert r.json()["detail"] == code and r.json()["error"]["code"] == code
+    assert r.json()["detail"] == code
+    assert r.json()["error"]["code"] == code
     assert builds.calls == []
 
 
