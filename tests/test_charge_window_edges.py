@@ -165,7 +165,8 @@ def test_a_dense_ledger_that_ends_its_page_reads_nothing_more_of_it(
 
     advance = _advance()
 
-    assert advance.index is not None and advance.index.lossy_ledger == dense
+    assert advance.index is not None
+    assert advance.index.lossy_ledger == dense
     assert not any(start == dense + 1 and end == OLDEST + 10_000 for start, end in rpc.pages)
     assert (OLDEST + 10_000, OLDEST + 20_000) in rpc.pages
 
