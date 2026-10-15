@@ -42,7 +42,8 @@ def test_every_append_is_on_disk_and_rendered_before_it_returns(tmp_path: Path) 
     assert rows[1]["explorer"] == f"https://stellar.expert/explorer/testnet/tx/{HASH}"
     md = log.markdown.read_text()
     assert f"[{HASH[:8]}…{HASH[-6:]}](https://stellar.expert/explorer/testnet/tx/{HASH})" in md
-    assert "| SUCCESS | CESCROW |" in md and "0.0500000 XLM (native)" in md
+    assert "| SUCCESS | CESCROW |" in md
+    assert "0.0500000 XLM (native)" in md
 
 
 def test_the_log_is_append_only_across_instances(tmp_path: Path) -> None:
