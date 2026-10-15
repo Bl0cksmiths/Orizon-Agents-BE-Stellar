@@ -45,8 +45,9 @@ def _worker(handler: Handler, endpoint: str = ENDPOINT) -> eh.ExternalHttpWorker
 
 def _failure(handler: Handler, endpoint: str = ENDPOINT) -> eh.ExternalDispatchError:
     """Drive one real dispatch and hand back the error it failed with."""
+    dispatch = _worker(handler, endpoint).run("build it", "because")
     with pytest.raises(eh.ExternalDispatchError) as caught:
-        asyncio.run(_worker(handler, endpoint).run("build it", "because"))
+        asyncio.run(dispatch)
     return caught.value
 
 
