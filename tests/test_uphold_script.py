@@ -1246,7 +1246,8 @@ def test_a_clean_live_run_prints_both_transactions_as_the_dispute_evidence(
     refund_url = f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}"
     rating_url = f"https://stellar.expert/explorer/testnet/tx/{RATING_TX}"
     assert code == uphold_dispute.EXIT_OK
-    assert paying == [DISPUTE_ID] and ledger.calls == [DISPUTE_ID]
+    assert paying == [DISPUTE_ID]
+    assert ledger.calls == [DISPUTE_ID]
     assert f"CREDITED — {CREDITABLE_USDC:.7f} USDC paid to {PAYER}" in out
     assert "status:    credited" in out
     assert f"tx:        {REFUND_TX}" in out
