@@ -312,8 +312,9 @@ def test_payout_plan_merges_per_agent_past_sixteen_and_refuses_past_sixteen_agen
     assert len(per_step.payouts) == 16
 
     distinct = _plan(tuple(0.01 for _ in range(17)))
+    all_delivered = frozenset(range(17))
     with pytest.raises(execution_svc._PayoutRefused):
-        execution_svc._payout_plan(distinct, frozenset(range(17)), {})
+        execution_svc._payout_plan(distinct, all_delivered, {})
 
 
 # ── S1: only agents with a confirmed on-chain owner are named ───────────
