@@ -38,9 +38,11 @@ def owned(auth_id: str = AUTH, payer: str = PAYER, plan_id: str = "pln_0a1b2c3d"
 def test_a_matching_v2_authorization_is_owned(monkeypatch: pytest.MonkeyPatch) -> None:
     escrow = install(monkeypatch, FakeEscrow())
     verified = asyncio.run(owned(AUTH.upper()))
-    assert verified.enforced and verified.escrow_version == 2
+    assert verified.enforced
+    assert verified.escrow_version == 2
     assert verified.auth_id_hex == AUTH
-    assert verified.authorization is not None and verified.authorization.label == "pln_0a1b2c3d"
+    assert verified.authorization is not None
+    assert verified.authorization.label == "pln_0a1b2c3d"
     assert escrow.calls == [(ESCROW, "version"), (ESCROW, "authorization")]
 
 
