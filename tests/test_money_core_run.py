@@ -83,7 +83,7 @@ def _workers() -> dict[str, _Worker]:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     workers = _workers()
     first_party = {a: w for a, w in workers.items() if a in {"agt_ok", "agt_paused", "agt_boom", "agt_hang"}}
