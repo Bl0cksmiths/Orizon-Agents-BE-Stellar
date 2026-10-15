@@ -243,7 +243,7 @@ def server_signing_key(hermetic_settings):
     sc._signer_keypair.cache_clear()
 
 
-@pytest.fixture()
+@pytest.fixture
 def failing_invoke(monkeypatch):
     """Make the backend-signed invoke blow up without touching the network."""
 
