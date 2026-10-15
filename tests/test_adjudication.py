@@ -1022,8 +1022,9 @@ def test_a_credit_above_the_cap_never_reaches_the_signer(monkeypatch) -> None:
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)  # the step settled for 0.05
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_above_cap"
     assert refused.value.status_code == 409
