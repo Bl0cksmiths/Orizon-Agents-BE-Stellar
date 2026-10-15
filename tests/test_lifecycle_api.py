@@ -118,7 +118,8 @@ def test_an_app_refusal_on_a_write_is_definite() -> None:
     api, _ = _api(handler)
     with pytest.raises(ApiError) as exc:
         api.execute("pln_1", "00" * 16, "GB")
-    assert exc.value.code == "capacity_exhausted" and len(seen) == 1
+    assert exc.value.code == "capacity_exhausted"
+    assert len(seen) == 1
     handler, _ = _sequence(_envelope(502, "refund_failed"))
     api, _ = _api(handler)
     with pytest.raises(ApiError):
