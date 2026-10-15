@@ -380,7 +380,8 @@ def test_below_floor_every_read_degraded_fails_with_the_count() -> None:
         "camera a degraded read shows '⚠ unverified' and no exclusion at all."
     )
     assert sleeps == [5.0, 5.0]
-    assert facts.reputations is None and facts.floor_bps == 5500
+    assert facts.reputations is None
+    assert facts.floor_bps == 5500
 
 
 # ── check_routable_count ────────────────────────────────────────
