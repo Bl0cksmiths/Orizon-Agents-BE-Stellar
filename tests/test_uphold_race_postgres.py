@@ -235,7 +235,8 @@ def test_two_upholds_of_an_open_dispute_sign_one_transfer(
             assert other.code in ("adjudication_in_progress", "refund_in_flight"), other.code
         else:
             assert isinstance(other, DisputeRecord), other
-    assert final is not None and final.status == "credited"
+    assert final is not None
+    assert final.status == "credited"
     assert held == {}
     # One verdict and one claim on the trail, whoever won.
     assert trail == ["open", "upheld", "crediting", "credited"]
