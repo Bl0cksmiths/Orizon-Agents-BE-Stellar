@@ -378,8 +378,9 @@ def test_no_challenge_is_minted_for_a_job_or_step_that_cannot_be_disputed() -> N
 
     with pytest.raises(DisputeError) as unknown:
         asyncio.run(dispute_svc.issue_dispute_challenge("ff" * 16, 0))
+    issuing = dispute_svc.issue_dispute_challenge(JOB, 7)
     with pytest.raises(DisputeError) as no_step:
-        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 7))
+        asyncio.run(issuing)
 
     assert (unknown.value.code, unknown.value.status_code) == ("unknown_job", 404)
     assert (no_step.value.code, no_step.value.status_code) == ("step_not_settled", 409)
