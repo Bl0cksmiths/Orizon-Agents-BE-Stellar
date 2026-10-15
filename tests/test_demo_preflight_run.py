@@ -308,7 +308,8 @@ def test_readiness_unreachable_on_the_backend_host_fails(tmp_path: Path) -> None
     world.readiness = None
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "--backend" in check["fix"]
+    assert check["status"] == FAIL
+    assert "--backend" in check["fix"]
     assert out.status("refunds.enabled") == SKIPPED
 
 
