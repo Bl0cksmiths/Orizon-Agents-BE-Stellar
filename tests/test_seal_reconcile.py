@@ -405,4 +405,5 @@ def test_a_delivery_only_seal_is_reconciled_like_a_paid_one(
     )
     receipt = client.get("/api/tasks/tsk_v2_seal_delivery/disputes").json()
     assert (receipt["seal"], receipt["seal_kind"], receipt["proof_tx"]) == ("sealed", "delivery_only", H2)
-    assert receipt["settlement_state"] == "settled" and receipt["settlement"]["settled_usdc"] == 0
+    assert receipt["settlement_state"] == "settled"
+    assert receipt["settlement"]["settled_usdc"] == 0
