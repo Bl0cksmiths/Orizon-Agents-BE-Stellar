@@ -419,7 +419,8 @@ def test_no_external_operator_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("operator.external")
-    assert check["status"] == FAIL and "onboarding-session-runbook" in check["fix"]
+    assert check["status"] == FAIL
+    assert "onboarding-session-runbook" in check["fix"]
     assert out.status("operator.ready") == SKIPPED
 
 
