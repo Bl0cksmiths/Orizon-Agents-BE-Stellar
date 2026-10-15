@@ -338,7 +338,8 @@ def test_a_rejected_request_is_a_request_error_not_an_outage(api: Callable[..., 
     api(_status(code, "invalid_request_error"))
     with pytest.raises(LLMRequestError) as caught:
         _plan()
-    assert caught.value.status == code and caught.value.error_type == "invalid_request_error"
+    assert caught.value.status == code
+    assert caught.value.error_type == "invalid_request_error"
 
 
 def test_a_dropped_connection_is_unavailable(api: Callable[..., Recorder]) -> None:
