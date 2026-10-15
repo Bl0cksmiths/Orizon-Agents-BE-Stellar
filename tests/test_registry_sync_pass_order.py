@@ -57,7 +57,8 @@ class Chain:
         if fn == "list_ids":
             self.calls.append(("list_ids",))
             return list(self.records)
-        assert fn == "get" and args is not None
+        assert fn == "get"
+        assert args is not None
         agent_id = scval.from_symbol(args[0])
         self.calls.append(("get", agent_id))
         if agent_id in self.failing:
