@@ -469,7 +469,8 @@ def test_the_real_settlement_scan_excludes_what_it_excludes(world: _World, monke
     assert _totals(report) == (1, 1, 1)
     (workflow,) = report.operators[0].agents[0].settled_workflows
     assert (workflow.job_id_hex, workflow.payer) == (_job_id(3).hex(), BUYER)
-    assert report.degraded is False and report.complete is True
+    assert report.degraded is False
+    assert report.complete is True
     # The window is the one the scan measured, not a constant: the fake node
     # holds 101 ledgers at 5 s each.
     assert report.window_days == round(101 * 5 / 86_400, 3) > 0
