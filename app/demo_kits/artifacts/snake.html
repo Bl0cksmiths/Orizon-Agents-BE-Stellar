@@ -768,7 +768,9 @@
       const p = JSON.parse(raw);
       if (typeof p.wrap === 'boolean') state.wrap = p.wrap;
       if (typeof p.speed === 'string' && p.speed in SPEEDS) state.speed = p.speed;
-    } catch (e) {}
+    } catch (e) {
+      // Storage is blocked or the saved prefs aren't usable: keep the default speed and wrap.
+    }
   }
   function savePrefs() {
     try {
