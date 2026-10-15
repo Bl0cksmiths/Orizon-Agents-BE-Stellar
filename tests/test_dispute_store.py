@@ -1619,8 +1619,9 @@ def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
 def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """`INSERT ... SELECT FROM latest` writes nothing when there is no history,
     so the store says so instead of inventing a dispute out of an id."""
+    transition = pg.append_status("dsp_never", "upheld")
     with pytest.raises(KeyError):
-        run(pg, pg.append_status("dsp_never", "upheld"))
+        run(pg, transition)
 
     assert asyncio.run(events(pg_dsn)) == []
 
