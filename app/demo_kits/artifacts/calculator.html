@@ -838,7 +838,10 @@
     const next = cur === 'light' ? 'dark' : 'light';
     if (next === 'light') document.documentElement.dataset.theme = 'light';
     else delete document.documentElement.dataset.theme;
-    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    try { localStorage.setItem(THEME_KEY, next); }
+    catch {
+      // Storage blocked or full: the theme still switches, it just isn't remembered.
+    }
   }
 
   // ── Toast + clipboard ────────────────────────────────────────────────────
