@@ -290,7 +290,8 @@ def test_a_dry_run_blocks_on_a_v1_escrow_that_the_run_would_verify(buyer: Keypai
     world = FakeWorld(buyer=buyer.public_key, escrow_version=1)
     result = run(world, buyer, tmp_path / "run", "--dry-run")
     assert result.code == EXIT_REFUSED, result.out
-    assert f"the escrow {ESCROW} is v1" in result.out and "D-039" in result.out
+    assert f"the escrow {ESCROW} is v1" in result.out
+    assert "D-039" in result.out
     assert "stops at 'verify' with exit 7" in result.out
     assert not (tmp_path / "run").exists()
 
