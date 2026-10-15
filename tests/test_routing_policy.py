@@ -252,7 +252,8 @@ def test_the_legacy_planner_holds_the_same_policy(registry: list[list[str]], mon
 
     resp = _decompose("write a haiku about databases")
 
-    assert f"id={EXTERNAL} " not in seen[0] and f"id={SIMULATED} " not in seen[0]
+    assert f"id={EXTERNAL} " not in seen[0]
+    assert f"id={SIMULATED} " not in seen[0]
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
     assert _codes(resp)[EXTERNAL_POLICY_ID] == "external_not_routed"
     assert _codes(resp)[SIMULATED] == "simulated_worker"
