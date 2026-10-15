@@ -509,7 +509,8 @@ def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice(
     assert released is None
     assert after_refusals == ["dsp_0001"]
     assert after_unfinishing == ["dsp_0001"]
-    assert resolved is not None and resolved.status == "credited"
+    assert resolved is not None
+    assert resolved.status == "credited"
     assert after_resolution == []
 
 
