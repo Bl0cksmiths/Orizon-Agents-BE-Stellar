@@ -343,8 +343,9 @@ def test_the_suite_default_jev_is_offline() -> None:
 
 
 def test_ask_refuses_empty_input_and_an_oversized_state(fake_jev: FakeJev) -> None:
+    no_questions = jev.ask(purpose="guard", state="hi", questions={})
     with pytest.raises(ValueError):
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions={}))
+        asyncio.run(no_questions)
     with pytest.raises(ValueError):
         asyncio.run(jev.ask(purpose="guard", state="  ", questions=_QUESTIONS))
     with pytest.raises(JevUnavailable) as caught:
