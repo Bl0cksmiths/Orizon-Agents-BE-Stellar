@@ -764,6 +764,16 @@
     return { gained: SCORE_LINES[cleared], toastMsg };
   }
 
+  function updateLevel() {
+    const newLevel = Math.max(1, Math.floor(state.lines / 10) + 1);
+    if (newLevel === state.level) return;
+    state.level = newLevel;
+    if (!reducedMotion) {
+      fieldEl.classList.add('level-up');
+      setTimeout(() => fieldEl.classList.remove('level-up'), 600);
+    }
+  }
+
   function lockPiece() {
     if (!state.active) return;
     // 1. T-spin detection happens BEFORE we write to the board.
@@ -800,14 +810,7 @@
     state.lines += cleared;
 
     // 5. Level up every 10 lines.
-    const newLevel = Math.max(1, Math.floor(state.lines / 10) + 1);
-    if (newLevel !== state.level) {
-      state.level = newLevel;
-      if (!reducedMotion) {
-        fieldEl.classList.add('level-up');
-        setTimeout(() => fieldEl.classList.remove('level-up'), 600);
-      }
-    }
+    updateLevel();
 
     if (toastMsg) showToast(toastMsg);
 
