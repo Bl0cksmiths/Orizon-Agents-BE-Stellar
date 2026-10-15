@@ -495,7 +495,8 @@ def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected(store: DisputeS
     refused, current = run(store, go())
 
     assert refused is None
-    assert current is not None and current.status == "rejected"
+    assert current is not None
+    assert current.status == "rejected"
     # The buyer's explanation is still the one they were given.
     assert current.note == NOTE
 
