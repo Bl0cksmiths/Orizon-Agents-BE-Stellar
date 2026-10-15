@@ -94,7 +94,8 @@ def test_invalidate_supersedes_the_stored_value():
     served, after = asyncio.run(run())
     assert served == "post-dispute"
     assert fresh_calls["n"] == 1
-    assert after is not None and (after.value, after.superseded) == ("post-dispute", False)
+    assert after is not None
+    assert (after.value, after.superseded) == ("post-dispute", False)
 
 
 def test_a_read_in_flight_at_invalidation_does_not_write_back():
