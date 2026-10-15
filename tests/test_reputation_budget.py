@@ -125,8 +125,9 @@ def test_exactly_at_the_margin_boots():
 
 
 def test_one_step_past_the_margin_does_not():
+    past_the_margin = _allowance() + 0.01
     with pytest.raises(ValidationError, match="REPUTATION_BATCH_TIMEOUT_SECONDS"):
-        _settings(reputation_batch_timeout_seconds=_allowance() + 0.01)
+        _settings(reputation_batch_timeout_seconds=past_the_margin)
 
 
 def test_the_error_names_both_values_and_both_ways_out():
