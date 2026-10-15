@@ -1110,7 +1110,8 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     assert refused.value.code == "dispute_rejected"
     assert refused.value.status_code == 409
     still_rejected = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert still_rejected is not None and still_rejected.status == "rejected"
+    assert still_rejected is not None
+    assert still_rejected.status == "rejected"
 
 
 def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
