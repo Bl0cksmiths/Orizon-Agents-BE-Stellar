@@ -56,8 +56,9 @@ def test_operator_chosen_keys_never_survive() -> None:
 
 
 def test_a_hostile_artifact_shape_fails_the_step_not_the_run() -> None:
+    handler = _responds({"summary": "done", "artifact": "boom"})
     with pytest.raises(eh.ExternalDispatchError, match="rule: artifact_not_an_object"):
-        _run(_responds({"summary": "done", "artifact": "boom"}))
+        _run(handler)
 
 
 def test_deeply_nested_json_fails_the_step_not_the_run() -> None:
