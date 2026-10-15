@@ -74,8 +74,9 @@ def test_a_slow_operator_is_not_retried(short_deadline: float) -> None:
         return httpx.Response(200, json={"summary": "too late"})
 
     async def go() -> None:
+        worker = _worker(slow)
         with pytest.raises(eh.ExternalDispatchError):
-            await _worker(slow).run("x", "y")
+            await worker.run("x", "y")
 
     asyncio.run(go())
     assert calls["n"] == 1
