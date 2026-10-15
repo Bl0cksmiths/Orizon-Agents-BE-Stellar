@@ -264,7 +264,8 @@ def test_a_dispute_that_is_not_crediting_cannot_be_released(store: DisputeStore,
     released, stored, queue = run(store, go())
 
     assert released is None
-    assert stored is not None and stored.status == status
+    assert stored is not None
+    assert stored.status == status
     assert queue == []
 
 
