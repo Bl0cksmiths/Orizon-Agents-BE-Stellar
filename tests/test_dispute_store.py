@@ -1669,8 +1669,9 @@ def test_a_refused_transition_is_told_apart_from_an_unknown_dispute(pg: Postgres
 
     assert run(pg, go()) is None
 
+    transition = pg.append_status("dsp_never", "credited", expected_status="open")
     with pytest.raises(KeyError):
-        run(pg, pg.append_status("dsp_never", "credited", expected_status="open"))
+        run(pg, transition)
 
 
 # ── two transitions at once ───────────────────────────────────────────────
