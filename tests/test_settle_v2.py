@@ -458,7 +458,8 @@ def test_zero_delivered_is_a_skip_under_v1(monkeypatch, store):
 
     _run(_plan((0.05,)), "tsk_v2_nothing_v1")
 
-    assert chain.calls == [] and chain.reads == []
+    assert chain.calls == []
+    assert chain.reads == []
     assert state.tasks["tsk_v2_nothing_v1"].settlement == "skipped"
 
 
