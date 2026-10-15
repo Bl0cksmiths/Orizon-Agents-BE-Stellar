@@ -127,7 +127,7 @@ def test_an_unconfigured_registry_fails_closed(monkeypatch: pytest.MonkeyPatch) 
     This is also the hermetic suite's own configuration, so the default posture
     of this function with no chain available is "deny".
     """
-    settings.stellar_agent_registry = ""
+    monkeypatch.setattr(settings, "stellar_agent_registry", "")
 
     def must_not_read(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("resolve_owner read the chain with no registry configured")
