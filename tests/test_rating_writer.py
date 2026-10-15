@@ -416,7 +416,8 @@ def test_the_warning_returns_after_the_interval_with_the_runs_it_held_back(monke
         rw.note_skipped("tsk_later", rw._NO_KEY)
     first, second = _warnings(caplog)
     assert "0 more run(s)" in first
-    assert "tsk_later" in second and "3 more run(s)" in second
+    assert "tsk_later" in second
+    assert "3 more run(s)" in second
 
 
 def test_each_cause_is_warned_on_its_own_clock(caplog):
