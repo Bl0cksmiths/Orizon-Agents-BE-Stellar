@@ -424,8 +424,9 @@ def test_closed_windows_cannot_crowd_out_a_buyer_inside_theirs() -> None:
     for i in range(eb.CHALLENGE_BUDGETS["dispute"]):
         job = f"{i:032x}"
         _seed(Keypair.random().public_key, job=job, task=f"tsk_old{i}", window_seconds=-86_400.0)
+        issuing = dispute_svc.issue_dispute_challenge(job, 0)
         with pytest.raises(DisputeError):
-            asyncio.run(dispute_svc.issue_dispute_challenge(job, 0))
+            asyncio.run(issuing)
     _seed(Keypair.random().public_key)
 
     nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
