@@ -264,7 +264,8 @@ def test_a_database_that_stays_down_never_blocks_the_caller(store: FakeStore) ->
         return flushed, time.monotonic() - began
 
     flushed, took = asyncio.run(run())
-    assert flushed is False and took < 1.0
+    assert flushed is False
+    assert took < 1.0
     assert state.tasks[_id(3)].status == "complete"
     assert store.tasks == {}
 
