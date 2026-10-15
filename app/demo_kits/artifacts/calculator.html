@@ -647,7 +647,7 @@
     if (state.error) state.expr = '';
     state.error = null;
     // Smart leading zero: replace leading "0" with first digit unless decimal.
-    if (state.expr === '0' && /[\d]/.test(tok)) state.expr = tok;
+    if (state.expr === '0' && /\d/.test(tok)) state.expr = tok;
     else state.expr += tok;
     tryLiveEval();
   }
