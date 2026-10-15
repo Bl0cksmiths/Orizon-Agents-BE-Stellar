@@ -937,7 +937,12 @@
   });
   wrapToggle.addEventListener('click', toggleWrap);
   wrapToggle.addEventListener('keydown', (e) => {
-    if (e.key === ' ' || e.key === 'Enter') { toggleWrap(); e.preventDefault(); }
+    if (e.key === ' ' || e.key === 'Enter') {
+      toggleWrap();
+      e.preventDefault();
+      // Space here operates the switch only; it must not also pause the game.
+      e.stopPropagation();
+    }
   });
   restartBtn.addEventListener('click', () => {
     const name = (initialsInput.value || '').trim();
