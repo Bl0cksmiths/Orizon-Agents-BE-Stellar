@@ -179,7 +179,8 @@ def test_a_low_confidence_tier_is_rounded_up_and_said(
     resp = _decompose()
 
     assert resp.tier == "moderate"
-    assert resp.guard is not None and "tier_rounded_up" in resp.guard.reasons
+    assert resp.guard is not None
+    assert "tier_rounded_up" in resp.guard.reasons
 
 
 # ── the clamp is the same clamp ────────────────────────────────
