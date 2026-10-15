@@ -235,7 +235,8 @@ def test_postgres_rows_increment_per_day_model_and_purpose(pg_dsn: str) -> None:
         return total, before, rows
 
     total, before, rows = asyncio.run(run())
-    assert total == pytest.approx(0.751) and before == 0.0
+    assert total == pytest.approx(0.751)
+    assert before == 0.0
     assert rows == [
         {
             "model": "claude-opus-5-5",
