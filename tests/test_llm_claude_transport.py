@@ -393,5 +393,7 @@ def test_one_client_per_loop_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
         return first, again, rotated
 
     first, again, rotated = asyncio.run(clients())
-    assert first is again and rotated is not first
-    assert isinstance(first, anthropic.AsyncAnthropic) and first.max_retries == settings.claude_max_retries
+    assert first is again
+    assert rotated is not first
+    assert isinstance(first, anthropic.AsyncAnthropic)
+    assert first.max_retries == settings.claude_max_retries
