@@ -263,8 +263,9 @@ def test_a_slow_translation_fails_inside_the_step_deadline(claude: FakeClaude, m
     monkeypatch.setattr(translate, "BUDGET_SECONDS", 0.05)
     claude.cut_stream("", purpose="worker.translate.42")  # never answers
     step = WORKER.run(INTENT, RATIONALE, context={"copywrite.v3": COPY})
+    bounded = asyncio.wait_for(step, timeout=2)
     with pytest.raises(ModelStepError) as info:  # a TimeoutError here means no budget of its own
-        asyncio.run(asyncio.wait_for(step, timeout=2))
+        asyncio.run(bounded)
     assert info.value.rule == "model_truncated"
 
 
