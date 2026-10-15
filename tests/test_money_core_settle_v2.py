@@ -308,4 +308,5 @@ def test_an_unreadable_owner_is_logged_with_its_traceback_and_left_unpaid(
     assert (owners.payees, owners.unpaid) == ({}, {"ext_op": execution_svc.UNPAID_OWNER_UNREADABLE})
     [record] = caplog.records
     assert record.getMessage() == "owner of ext_op unreadable before settle — its steps are not paid: rpc down"
-    assert record.exc_info is not None and record.exc_info[1] is not None
+    assert record.exc_info is not None
+    assert record.exc_info[1] is not None
