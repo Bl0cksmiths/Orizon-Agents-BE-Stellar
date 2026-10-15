@@ -299,7 +299,8 @@ def test_ask_returns_typed_answers_priced_and_recorded(fake_jev: FakeJev, spend_
     assert result.noul("injection") == 0.03
     assert (result.choice("complexity").choice, result.choice("complexity").confidence) == ("moderate", 0.4)
     assert result.score("harm").score == 0.2
-    assert result.cost_usd == pytest.approx(0.042) and result.model == "jev-1.13.0"
+    assert result.cost_usd == pytest.approx(0.042)
+    assert result.model == "jev-1.13.0"
     assert asyncio.run(spend_ledger.spent_today()) == pytest.approx(0.042)
     (call,) = fake_jev.calls
     assert call.questions["injection"] == {
