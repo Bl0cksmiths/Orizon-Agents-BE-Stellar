@@ -326,7 +326,8 @@ def test_below_floor_passes_naming_what_it_ignored_and_the_rereads() -> None:
     assert facts.below_floor == ["lowrep"]
     assert facts.lower_bounds == {"lowrep": 4100}
     assert facts.floor_bps == 5500
-    assert facts.reputations is not None and set(facts.reputations) == set(world.reputations)
+    assert facts.reputations is not None
+    assert set(facts.reputations) == set(world.reputations)
 
 
 def test_below_floor_fails_naming_what_it_ignored_and_the_degraded_count() -> None:
