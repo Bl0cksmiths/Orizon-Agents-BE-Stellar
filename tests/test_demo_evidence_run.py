@@ -115,7 +115,8 @@ def test_the_description_lists_every_verified_hash_with_its_link(tmp_path: Path)
     assert text.startswith("Orizon demo\n")
     assert "Chapters\n00:00 [CHAPTERS" in text
     for h in hashes.values():
-        assert h in text and f"https://stellar.expert/explorer/testnet/tx/{h}" in text
+        assert h in text
+        assert f"https://stellar.expert/explorer/testnet/tx/{h}" in text
     assert "Limitations. Everything in this video runs on the Stellar TESTNET" in text
 
 
