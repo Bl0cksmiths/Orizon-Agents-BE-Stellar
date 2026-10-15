@@ -245,7 +245,8 @@ def test_a_row_from_another_network_is_refused(tmp_path: Path) -> None:
     write_jsonl(path, rows)
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_REFUSED
-    assert "network 'mainnet'" in out.out and "lifecycle.jsonl:4" in out.out
+    assert "network 'mainnet'" in out.out
+    assert "lifecycle.jsonl:4" in out.out
     assert not out.dir.exists()
     assert ledger.calls == []
 
