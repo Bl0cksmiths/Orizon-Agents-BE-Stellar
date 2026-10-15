@@ -118,7 +118,8 @@ def test_a_request_id_outside_the_safe_shape_is_replaced_not_echoed(client, supp
     r = client.get("/", headers={"X-Request-ID": supplied.encode("utf-8")})
 
     rid = r.headers["x-request-id"]
-    assert rid != supplied and supplied[:64] != rid
+    assert rid != supplied
+    assert supplied[:64] != rid
     assert re.fullmatch(r"[0-9a-f]{16}", rid)
 
 
