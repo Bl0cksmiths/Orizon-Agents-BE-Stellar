@@ -358,7 +358,8 @@ def test_invalidate_rep_makes_the_next_batch_read_see_the_landed_rating(ledger):
         return before, cached, after
 
     before, cached, after = asyncio.run(run())
-    assert before.source == "onchain" and before.disputed == 0
+    assert before.source == "onchain"
+    assert before.disputed == 0
     # Without the invalidation the TTL cache serves the pre-dispute score —
     # the exact failure this story closes.
     assert cached == before
