@@ -223,8 +223,9 @@ def test_a_second_dispute_of_the_same_step_is_refused_with_the_first() -> None:
 
     first = asyncio.run(go())
 
+    second_try = store.open_dispute(a_dispute(id="dsp_0002", reason="a second try"))
     with pytest.raises(DuplicateDisputeError) as excinfo:
-        asyncio.run(store.open_dispute(a_dispute(id="dsp_0002", reason="a second try")))
+        asyncio.run(second_try)
 
     assert excinfo.value.existing == first
     assert excinfo.value.existing.reason == "the summary was empty"
