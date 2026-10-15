@@ -648,7 +648,8 @@ def test_a_kit_still_plans_while_the_spend_cap_pauses_ai(
     resp = _decompose(KIT_INTENT)
 
     assert len(resp.steps) == 6
-    assert resp.guard is None and resp.tier is None
+    assert resp.guard is None
+    assert resp.tier is None
     assert [s.tier for s in resp.steps] == [None] * 6
     assert resp.stages[0].msg == "Request check paused: today's AI budget is spent; curated demo served"
     assert fake_claude.calls_for("planner") == []
