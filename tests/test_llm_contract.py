@@ -272,12 +272,11 @@ def test_text_streams_deltas_in_order_and_returns_the_whole_reply(fake_claude: F
 
 
 def test_on_text_without_streaming_is_refused() -> None:
+    unstreamed = claude.text(
+        purpose="x", model="claude-opus-5-5", system="s", user="u", max_tokens=10, on_text=lambda d: None
+    )
     with pytest.raises(ValueError):
-        asyncio.run(
-            claude.text(
-                purpose="x", model="claude-opus-5-5", system="s", user="u", max_tokens=10, on_text=lambda d: None
-            )
-        )
+        asyncio.run(unstreamed)
 
 
 # ── jev ────────────────────────────────────────────────────────────────────
