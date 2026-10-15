@@ -528,29 +528,31 @@
       default: throw new Error('syntax');
     }
   }
+  function applyOperator(op, stack) {
+    if (op === 'u-') {
+      if (!stack.length) throw new Error('syntax');
+      stack.push(-stack.pop());
+      return;
+    }
+    if (stack.length < 2) throw new Error('syntax');
+    const b = stack.pop(), a = stack.pop();
+    switch (op) {
+      case '+': stack.push(a + b); break;
+      case '-': stack.push(a - b); break;
+      case '*': stack.push(a * b); break;
+      case '/':
+        if (b === 0) { const e = new Error('/0'); e.code = '/0'; throw e; }
+        stack.push(a / b); break;
+      case '%': stack.push(a % b); break;
+      case '^': stack.push(Math.pow(a, b)); break;
+    }
+  }
   function evalRPN(rpn) {
     const stack = [];
     for (const t of rpn) {
       if (t.kind === 'num') stack.push(t.value);
-      else if (t.kind === 'op') {
-        if (t.value === 'u-') {
-          if (!stack.length) throw new Error('syntax');
-          stack.push(-stack.pop());
-        } else {
-          if (stack.length < 2) throw new Error('syntax');
-          const b = stack.pop(), a = stack.pop();
-          switch (t.value) {
-            case '+': stack.push(a + b); break;
-            case '-': stack.push(a - b); break;
-            case '*': stack.push(a * b); break;
-            case '/':
-              if (b === 0) { const e = new Error('/0'); e.code = '/0'; throw e; }
-              stack.push(a / b); break;
-            case '%': stack.push(a % b); break;
-            case '^': stack.push(Math.pow(a, b)); break;
-          }
-        }
-      } else if (t.kind === 'fn') {
+      else if (t.kind === 'op') applyOperator(t.value, stack);
+      else if (t.kind === 'fn') {
         if (!stack.length) throw new Error('syntax');
         stack.push(applyFn(t.value, stack.pop()));
       }
