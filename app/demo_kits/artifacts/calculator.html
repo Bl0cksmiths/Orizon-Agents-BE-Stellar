@@ -798,7 +798,9 @@
         const arr = JSON.parse(raw);
         if (Array.isArray(arr)) state.history = arr.slice(0, 20);
       }
-    } catch (e) {}
+    } catch {
+      // Storage blocked or the saved value is corrupt: start with no history.
+    }
   }
 
   // ── Theme ────────────────────────────────────────────────────────────────
