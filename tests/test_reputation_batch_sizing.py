@@ -80,7 +80,7 @@ def test_the_refusal_never_quotes_a_value():
 # ── the threads are reserved and as many as the rule assumes ────
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(monkeypatch):
     monkeypatch.setattr(settings, "reputation_enabled", True)
     monkeypatch.setattr(settings, "stellar_reputation_ledger", "CFAKELEDGER")
