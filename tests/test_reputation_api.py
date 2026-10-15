@@ -167,7 +167,8 @@ def test_params_is_reserved_so_no_agent_is_shadowed_by_the_route(client):
     assert availability["reason"] == "id_reserved"
     # And the route itself still answers with the config.
     body = client.get("/api/stellar/reputation/params").json()
-    assert "prior_weight_usdc" in body and "agent_id" not in body
+    assert "prior_weight_usdc" in body
+    assert "agent_id" not in body
 
 
 def test_routing_constants_are_read_per_request(client, monkeypatch):
