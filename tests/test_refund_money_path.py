@@ -274,8 +274,9 @@ def test_a_release_that_fails_on_a_refusal_still_answers_the_refusal(monkeypatch
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
     _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_above_cap"
     assert calls == []
