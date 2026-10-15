@@ -86,8 +86,10 @@ def test_refuses_an_envelope_that_is_not_the_call(change: dict[str, object], com
 
 def test_refuses_an_envelope_from_another_source_account() -> None:
     kp = Keypair.random()
+    envelope = _envelope(Keypair.random().public_key, payer=kp.public_key)
+    expected = _expect(kp)
     with pytest.raises(SigningRefused, match="is not the buyer"):
-        sign_authorize(_envelope(Keypair.random().public_key, payer=kp.public_key), kp, TESTNET_PASSPHRASE, _expect(kp))
+        sign_authorize(envelope, kp, TESTNET_PASSPHRASE, expected)
 
 
 def test_an_envelope_built_for_another_network_does_not_verify_here() -> None:
