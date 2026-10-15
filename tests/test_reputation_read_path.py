@@ -390,7 +390,8 @@ def test_boot_does_not_wait_for_the_prewarm(chain):
     try:
         with TestClient(app) as client:
             assert client.get("/health").status_code == 200
-            assert rep._prewarm_task is not None and not rep._prewarm_task.done()
+            assert rep._prewarm_task is not None
+            assert not rep._prewarm_task.done()
             chain.release("agt_01h8")
             _join_prewarm(client)
     finally:
