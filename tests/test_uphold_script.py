@@ -791,10 +791,12 @@ def test_a_non_finite_credit_exits_the_same_way_through_either_door(
     assert uphold.calls == [DISPUTE_ID]
 
     assert from_preview == from_live == uphold_dispute.EXIT_UNEXPECTED
-    assert "refund_amount_invalid" in preview_out and "refund_amount_invalid" in live_out
+    assert "refund_amount_invalid" in preview_out
+    assert "refund_amount_invalid" in live_out
     # Neither door signed anything: the finiteness test is made before the
     # amount can reach the settler's key, on both of them.
-    assert "nothing was signed" in preview_out and "nothing was signed" in live_out
+    assert "nothing was signed" in preview_out
+    assert "nothing was signed" in live_out
 
 
 def test_every_refusal_code_is_non_zero_and_distinct() -> None:
