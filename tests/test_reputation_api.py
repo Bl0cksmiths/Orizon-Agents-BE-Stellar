@@ -202,7 +202,7 @@ def test_routing_constants_are_read_per_request(client, monkeypatch):
 # ── degradation on the wire ─────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def unreadable_ledger(monkeypatch):
     """Reputation configured against a ledger whose every read fails.
 
