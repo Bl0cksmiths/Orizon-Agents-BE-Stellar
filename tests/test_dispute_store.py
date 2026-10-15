@@ -1329,7 +1329,8 @@ def test_a_settlement_round_trips_through_the_json_column(pg: PostgresDisputeSto
     stored, kinds = run(pg, go())
 
     assert stored == a_settlement()
-    assert stored is not None and stored.steps == STEPS
+    assert stored is not None
+    assert stored.steps == STEPS
     # It really went through JSON: the column holds a JSON array, not text.
     assert kinds == [{"t": "array"}]
 
