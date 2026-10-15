@@ -94,7 +94,8 @@ def test_a_write_with_a_lost_answer_is_unknown_and_sent_once(call: Any, answer: 
     api, slept = _api(handler)
     with pytest.raises(UnknownOutcome):
         call(api)
-    assert len(seen) == 1 and slept == []
+    assert len(seen) == 1
+    assert slept == []
 
 
 def test_submit_failed_is_unknown_because_it_may_have_been_sent() -> None:
