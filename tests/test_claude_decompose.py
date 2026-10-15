@@ -49,7 +49,7 @@ def _plan(*steps: tuple[str, str]) -> ModelPlan:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def claude_on(fake_claude: FakeClaude, fake_jev: FakeJev, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The Claude provider, a fresh seeded registry, and no kit thinking pause."""
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
