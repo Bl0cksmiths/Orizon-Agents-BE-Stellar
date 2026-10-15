@@ -128,8 +128,11 @@ def test_the_sheet_is_an_ordered_table_with_status_and_deliverable(tmp_path: Pat
     lines = [line for line in sheet.splitlines() if line.startswith("| ") and "`" in line]
     assert len(lines) == 6
     assert lines[0].startswith("| 1 | authorize · Buyer authorization — alpha (0.0200000 XLM) |")
-    assert "| D4 |" in lines[0] and f"`{hashes['authorize']}`" in lines[0] and "| SUCCESS | SUCCESS (rpc) |" in lines[0]
-    assert "| D3 |" in lines[5] and "kind=dispute rating" in lines[5]
+    assert "| D4 |" in lines[0]
+    assert f"`{hashes['authorize']}`" in lines[0]
+    assert "| SUCCESS | SUCCESS (rpc) |" in lines[0]
+    assert "| D3 |" in lines[5]
+    assert "kind=dispute rating" in lines[5]
     assert "Failed verification" not in sheet
 
 
