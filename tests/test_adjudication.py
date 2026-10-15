@@ -1104,8 +1104,9 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     asyncio.run(dispute_svc.reject(dispute.id, note="the output matched the brief"))
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "dispute_rejected"
     assert refused.value.status_code == 409
