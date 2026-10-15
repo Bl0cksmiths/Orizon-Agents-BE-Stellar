@@ -33,7 +33,9 @@ def test_kit_decompose_returns_deterministic_plan(client: TestClient) -> None:
 
     # Deterministic: the same intent over the same registry and reputation is
     # the same plan — steps, prices, ETAs, notices and totals — under a new id.
-    assert a["plan_id"] and b["plan_id"] and a["plan_id"] != b["plan_id"]
+    assert a["plan_id"]
+    assert b["plan_id"]
+    assert a["plan_id"] != b["plan_id"]
     assert _plan_content(a) == _plan_content(b)
     assert [s["agent_id"] for s in a["steps"]] == [aid for aid, _ in orchestrator_svc._KIT_PIPELINE]
     assert a["total_usdc"] == pytest.approx(sum(s["est_price_usdc"] for s in a["steps"]), abs=1e-4)
