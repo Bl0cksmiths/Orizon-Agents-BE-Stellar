@@ -318,7 +318,8 @@ def test_submit_failure_log_identifies_tx_without_leaking_the_xdr(client, monkey
     assert "signed xdr submit failed" in line
     assert f"source={kp.public_key}" in line
     tx_hash = line.split("tx_hash=")[1].split()[0]
-    assert len(tx_hash) == 64 and tx_hash != "unparseable"
+    assert len(tx_hash) == 64
+    assert tx_hash != "unparseable"
     # The envelope carries the user's signature — it must stay out of the log.
     assert signed_xdr not in caplog.text
     assert kp.secret not in caplog.text
