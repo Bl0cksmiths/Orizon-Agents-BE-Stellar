@@ -325,13 +325,17 @@ def test_the_credited_amount_and_the_confirmation_are_carried_forward(store: Dis
 
     credited, in_flight, silent, confirmed, later, stored = asyncio.run(go())
 
-    assert credited.credited_usdc == 1.25 and credited.rating_confirmed is None
+    assert credited.credited_usdc == 1.25
+    assert credited.rating_confirmed is None
     # What moved, not the 1.5 promised at opening — and kept by the rating.
-    assert in_flight.credited_usdc == 1.25 and in_flight.creditable_usdc == 1.5
+    assert in_flight.credited_usdc == 1.25
+    assert in_flight.creditable_usdc == 1.5
     assert in_flight.rating_confirmed is False
-    assert silent.rating_confirmed is False and silent.rating_tx == "tx_rating"
+    assert silent.rating_confirmed is False
+    assert silent.rating_tx == "tx_rating"
     assert confirmed.rating_confirmed is True
-    assert later.rating_confirmed is True and later.credited_usdc == 1.25
+    assert later.rating_confirmed is True
+    assert later.credited_usdc == 1.25
     assert stored == later
 
 
