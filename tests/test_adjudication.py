@@ -1409,8 +1409,9 @@ def test_a_rejection_without_a_usable_reason_is_refused_before_anything_is_writt
 
     monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
 
+    rejecting = dispute_svc.reject(dispute.id, note=cast(str, note))
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.reject(dispute.id, note=cast(str, note)))
+        asyncio.run(rejecting)
 
     assert refused.value.code == "rejection_reason_required"
     assert refused.value.status_code == 422
