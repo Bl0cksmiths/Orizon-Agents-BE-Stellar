@@ -355,7 +355,7 @@ def test_the_first_page_failing_is_unavailable(monkeypatch: pytest.MonkeyPatch) 
 def test_an_unconfigured_escrow_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """No escrow id means no events to read, which is a configuration fact and
     not an earnings fact."""
-    settings.stellar_payment_escrow = ""
+    monkeypatch.setattr(settings, "stellar_payment_escrow", "")
     result = _run(monkeypatch, _FakeRpc(), _reader())
 
     assert result.unavailable == "escrow contract not configured"
