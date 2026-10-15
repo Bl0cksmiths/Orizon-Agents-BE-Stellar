@@ -589,7 +589,7 @@
     const abs = Math.abs(n);
     if (abs >= 1e15 || (abs < 1e-6 && abs > 0)) return n.toExponential(8);
     // 12 significant digits, trim trailing zeros.
-    let s = parseFloat(n.toPrecision(12)).toString();
+    let s = Number.parseFloat(n.toPrecision(12)).toString();
     if (s.includes('.') && !s.includes('e')) {
       s = s.replace(/0+$/, '').replace(/\.$/, '');
     }
