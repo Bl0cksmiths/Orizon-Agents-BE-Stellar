@@ -45,7 +45,7 @@ def _info(agent_id: str) -> RepInfo:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     saved = dict(state.agents)
     state.agents.clear()
