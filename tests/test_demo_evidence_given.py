@@ -294,7 +294,8 @@ def test_a_hash_given_as_two_kinds_is_refused(tmp_path: Path) -> None:
     harness = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("settle", h)])
     out = run(ledger, tmp_path, str(harness), "--tx", f"refund={h}")
     assert out.code == EXIT_REFUSED
-    assert "is given as 'refund'" in out.out and "filed it as 'settle'" in out.out
+    assert "is given as 'refund'" in out.out
+    assert "filed it as 'settle'" in out.out
     assert not out.dir.exists()
 
 
