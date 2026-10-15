@@ -1499,7 +1499,8 @@ def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone(pg: Postgre
 
     credited, rows = run(pg, go())
 
-    assert credited is not None and credited.status == "credited"
+    assert credited is not None
+    assert credited.status == "credited"
     assert credited.refund_tx == "tx_refund"
     assert len(rows) == 2
     # The opening row still says exactly what it always said.
