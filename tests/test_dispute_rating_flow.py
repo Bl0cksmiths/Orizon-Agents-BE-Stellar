@@ -788,7 +788,8 @@ def test_an_unconfirmed_rating_the_store_would_not_record_is_not_reported_as_con
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         paid = uphold(dispute.id)
 
-    assert paid.status == "credited" and paid.rating_tx is None
+    assert paid.status == "credited"
+    assert paid.rating_tx is None
     unrecorded = [m for m in svc_errors(caplog) if "could not be recorded" in m]
     assert len(unrecorded) == 1
     assert "was TIMEOUT but could not be recorded" in unrecorded[0]
