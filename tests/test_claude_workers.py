@@ -144,7 +144,8 @@ def test_a_structured_worker_hands_back_the_same_output_on_claude_as_on_agno(
     assert call.system == _instructions(module)
     # Claude is asked for the draft shape where the output carries hard bounds
     # (tests/test_worker_output_bounds.py); design tokens has none to lift.
-    assert call.schema_name == DRAFTS.get(agent_id, type(reply()).__name__) and call.json_schema
+    assert call.schema_name == DRAFTS.get(agent_id, type(reply()).__name__)
+    assert call.json_schema
     assert call.stream is False
     assert call.max_tokens == module.MAX_TOKENS
 
