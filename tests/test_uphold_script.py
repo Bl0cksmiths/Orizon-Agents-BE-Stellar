@@ -1500,7 +1500,8 @@ def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on
     assert "TIMED OUT — submitted and unconfirmed; it may still land." in out
     assert f"check it:  https://stellar.expert/explorer/testnet/tx/{in_flight}" in out
     assert "RE-RUNNING THIS SCRIPT IS SAFE HERE" in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
 
 
 def test_a_rating_success_with_no_hash_is_not_reported_as_landed(
