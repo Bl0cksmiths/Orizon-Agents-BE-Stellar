@@ -232,8 +232,10 @@ def test_recheck_asks_safety_of_the_spec_alone_and_sameness_of_both(fake_jev):
     # The borderline original must not contaminate the spec's own safety score.
     assert original not in safety.state
     assert SPEC.goal in safety.state
-    assert original in same.state and SPEC.goal in same.state
-    assert "ORIGINAL REQUEST" in same.state and "IMPROVED SPEC" in same.state
+    assert original in same.state
+    assert SPEC.goal in same.state
+    assert "ORIGINAL REQUEST" in same.state
+    assert "IMPROVED SPEC" in same.state
 
 
 def test_same_request_question_names_what_must_not_be_added():
