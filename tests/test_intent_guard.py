@@ -131,7 +131,8 @@ def test_blank_intent_needs_detail_without_spending_a_call(fake_jev, fake_claude
     decision = check("  \x00\n ")
     assert decision.verdict == "needs_detail"
     assert decision.message == prompts.NEEDS_DETAIL_QUESTION
-    assert fake_jev.calls == [] and fake_claude.calls == []
+    assert fake_jev.calls == []
+    assert fake_claude.calls == []
 
 
 # --- verdicts ------------------------------------------------------------------------
