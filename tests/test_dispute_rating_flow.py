@@ -572,7 +572,8 @@ def test_each_rating_answer_records_whether_the_rating_is_known_to_have_landed(
 
     rated = uphold(dispute.id)
 
-    assert rated.status == "credited" and rated.refund_tx == "tx_credit"
+    assert rated.status == "credited"
+    assert rated.refund_tx == "tx_credit"
     assert rated.rating_tx == rating_tx
     assert rated.rating_confirmed is rating_confirmed
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == rated
