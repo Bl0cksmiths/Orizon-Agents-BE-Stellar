@@ -443,5 +443,6 @@ def test_rpc_outage_is_unverified_not_forged(tmp_path: Path) -> None:
     assert out.code == EXIT_CHAIN_UNREADABLE
     assert "exit 8: UNVERIFIED" in out.out
     tx_fails = [f for f in out.fails() if "tx_success" in f]
-    assert len(tx_fails) == 3 and all("could not read tx" in f for f in tx_fails)
+    assert len(tx_fails) == 3
+    assert all("could not read tx" in f for f in tx_fails)
     assert sum(1 for c in world.calls if c == "rpc getTransaction") == 3 * 4  # bounded: 4 attempts per tx
