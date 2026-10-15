@@ -629,7 +629,8 @@ def test_the_register_page_must_answer_with_no_login(tmp_path: Path, status: int
     world = met_world()
     world.pages[REGISTER_PAGE] = (status, "")
     out = run(world, tmp_path)
-    assert out.status("m06") == "not_met" and out.metric("m06")["achieved"] == "No"
+    assert out.status("m06") == "not_met"
+    assert out.metric("m06")["achieved"] == "No"
     assert out.metric("m06")["reason"] == expected
 
 
