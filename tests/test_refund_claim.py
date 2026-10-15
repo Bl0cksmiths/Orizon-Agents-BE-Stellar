@@ -587,9 +587,11 @@ def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to(pg: Postgre
 
     claimed, refused, current, queue = run(pg, go())
 
-    assert claimed is not None and claimed.status == "crediting"
+    assert claimed is not None
+    assert claimed.status == "crediting"
     assert refused is None
-    assert current is not None and current.status == "crediting"
+    assert current is not None
+    assert current.status == "crediting"
     assert queue == ["dsp_0001"]
 
 
