@@ -115,8 +115,9 @@ def test_a_paid_step_can_never_be_disputed_again_while_its_settlement_is_held(
     assert original.id == "dsp_paid"
     assert original.status == "credited"
     assert original.refund_tx == "tx_refund"
+    again = store.open_dispute(_dispute("dsp_again", 0, 0))
     with pytest.raises(DuplicateDisputeError) as refused:
-        asyncio.run(store.open_dispute(_dispute("dsp_again", 0, 0)))
+        asyncio.run(again)
     assert refused.value.existing.id == "dsp_paid"
     assert asyncio.run(store.get_dispute("dsp_again")) is None
 
