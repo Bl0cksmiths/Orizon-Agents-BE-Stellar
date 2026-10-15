@@ -516,7 +516,8 @@ def test_a_later_transition_carries_the_refund_hash_and_the_credit_forward(
     for record in (rated, noted):
         assert record is not None
         assert (record.refund_tx, record.credited_usdc, record.rating_tx) == ("tx_paid", 1.25, "tx_rating")
-    assert noted is not None and noted.note == "reconciled"
+    assert noted is not None
+    assert noted.note == "reconciled"
     # On the rows themselves, not only on what the call returned.
     assert [row["refund_tx"] for row in rows] == [None, None, None, "tx_paid", "tx_paid", "tx_paid"]
 
