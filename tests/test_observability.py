@@ -229,7 +229,7 @@ SEAL_BODY = {
 }
 
 
-@pytest.fixture()
+@pytest.fixture
 def server_signing_key(hermetic_settings):
     """Give the backend a throwaway signing key for one test, clearing the
     lru_cached keypair on both sides so it never leaks into another test."""
