@@ -77,7 +77,8 @@ def test_the_build_writes_every_deliverable(runs, tmp_path):
     assert planned == analysis["s4"]["pipeline"]["planned"] > 0
     assert json.loads((tmp_path / "costs.json").read_text())["grand_total_usd"] == pytest.approx(0.03)
     report = (tmp_path / "REPORT.md").read_text()
-    assert "## 10. Error analysis" in report and "| tier accuracy" in report
+    assert "## 10. Error analysis" in report
+    assert "| tier accuracy" in report
 
 
 def test_benchmark_prompt_text_never_leaves_the_runs(runs, tmp_path):
