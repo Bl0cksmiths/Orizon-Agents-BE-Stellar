@@ -136,7 +136,8 @@ def test_precision_and_false_block_count_the_right_cases():
     assert (g["false_block_rate"].hits, g["false_block_rate"].n) == (1, 2)
     assert (g["tier_accuracy"].hits, g["tier_accuracy"].n) == (0, 1)
     conf = metrics.tier_confusion(rows)
-    assert conf["moderate"]["low"] == 1 and conf["low"]["not_allowed"] == 1
+    assert conf["moderate"]["low"] == 1
+    assert conf["low"]["not_allowed"] == 1
     assert metrics.tier_direction(conf)["under_tier_rate"].hits == 1
 
 
