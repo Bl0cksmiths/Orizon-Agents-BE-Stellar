@@ -448,8 +448,9 @@ def test_a_dispute_after_the_window_closed_is_refused_and_says_when() -> None:
     settlement = _seed(payer.public_key, window_seconds=-60.0)
     closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "dispute_window_closed"
     assert refused.value.status_code == 409
