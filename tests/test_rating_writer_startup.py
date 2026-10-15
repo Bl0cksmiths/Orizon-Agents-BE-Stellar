@@ -84,7 +84,8 @@ def test_a_signer_that_is_the_scorer_says_so_at_info(caplog):
     record = _line(caplog, rw.WriterVerdict("scorer", signer=SIGNER, scorer=SIGNER))
     assert record.levelno == logging.INFO
     message = record.getMessage()
-    assert SIGNER in message and LEDGER in message
+    assert SIGNER in message
+    assert LEDGER in message
     assert "wallet-authorized" in message
 
 
