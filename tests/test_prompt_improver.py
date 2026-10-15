@@ -147,7 +147,8 @@ def test_fields_are_clamped_deduplicated_and_emptied_items_dropped():
     )
     assert len(spec.goal) == MAX_GOAL_CHARS
     assert spec.goal.endswith("…")
-    assert spec.constraints[0] == "Same" and "same" not in spec.constraints
+    assert spec.constraints[0] == "Same"
+    assert "same" not in spec.constraints
     assert len(spec.constraints) == MAX_ITEMS
     assert len(spec.done_criteria[0]) == MAX_ITEM_CHARS
 
