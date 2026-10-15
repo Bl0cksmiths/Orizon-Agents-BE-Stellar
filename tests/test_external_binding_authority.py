@@ -38,7 +38,7 @@ CONTRACT_ERROR = RuntimeError("simulate failed: HostError: Error(Contract, #1)")
 
 
 @pytest.fixture(autouse=True)
-def configured_registry(hermetic_settings: Any) -> Any:
+def configured_registry(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Give resolve_owner a registry id, and an empty read cache per test.
 
     conftest forces `stellar_agent_registry` to "" so the hermetic suite can
@@ -47,7 +47,7 @@ def configured_registry(hermetic_settings: Any) -> Any:
     ordering (and its restore) is not left to chance.
     """
     rcache.clear()
-    settings.stellar_agent_registry = REGISTRY_ID
+    monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
     yield settings
     rcache.clear()
 
