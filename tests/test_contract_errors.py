@@ -339,12 +339,9 @@ def test_not_submitted_is_still_caught_by_an_except_runtime_error(monkeypatch):
     """The subclass is the compatibility promise: a caller written against
     RuntimeError, as the charge and seal paths were, still catches it."""
     _rpc(monkeypatch, _FakeRpc(fail_at="simulate"))
-    try:
+    with pytest.raises(RuntimeError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
-    except RuntimeError as caught:
-        assert isinstance(caught, sc.NotSubmittedError)
-    else:  # pragma: no cover - the simulation always refuses
-        pytest.fail("the refused simulation raised nothing")
+    assert isinstance(caught.value, sc.NotSubmittedError)
 
 
 def test_a_user_signed_envelope_that_will_not_decode_is_not_submitted(monkeypatch):
