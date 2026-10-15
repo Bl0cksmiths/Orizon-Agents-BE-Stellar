@@ -386,8 +386,10 @@ def test_an_in_memory_dispute_store_fails_and_gates(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO, out.out
     check = out.check("refunds.store")
-    assert check["status"] == FAIL and check["required"] is True
-    assert "'memory'" in check["detail"] and "DATABASE_URL" in check["fix"]
+    assert check["status"] == FAIL
+    assert check["required"] is True
+    assert "'memory'" in check["detail"]
+    assert "DATABASE_URL" in check["fix"]
 
 
 def test_a_settler_that_cannot_pay_a_refund_fails(tmp_path: Path) -> None:
