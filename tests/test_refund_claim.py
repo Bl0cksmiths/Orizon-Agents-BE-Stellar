@@ -238,8 +238,10 @@ def test_a_failed_attempts_hash_never_follows_the_dispute_into_the_next_one(stor
     timed_out, released, reclaimed = run(store, go())
 
     assert timed_out.refund_tx == "tx_never_settled"  # the in-flight hash was on record
-    assert released is not None and released.refund_tx is None
-    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert released is not None
+    assert released.refund_tx is None
+    assert reclaimed is not None
+    assert reclaimed.status == "crediting"
     assert reclaimed.refund_tx is None
 
 
