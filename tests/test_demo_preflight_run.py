@@ -794,9 +794,12 @@ def test_a_team_operator_with_the_flag_warns_and_must_be_disclosed(tmp_path: Pat
     out = run(world, tmp_path, "--allow-team-operator", operator=TEAM)
     assert out.code == EXIT_GO, out.out
     check = out.check("wallets.team")
-    assert check["status"] == WARN and "Disclose on camera" in check["fix"]
+    assert check["status"] == WARN
+    assert "Disclose on camera" in check["fix"]
     disclosures = out.report()["disclosures"]
-    assert len(disclosures) == 1 and TEAM in disclosures[0] and "on camera" in disclosures[0]
+    assert len(disclosures) == 1
+    assert TEAM in disclosures[0]
+    assert "on camera" in disclosures[0]
     assert f"DISCLOSE: The operator {TEAM}" in out.out
     assert "## Disclose on camera" in (out.dir / "demo-preflight.md").read_text()
 
