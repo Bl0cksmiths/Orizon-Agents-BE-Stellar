@@ -193,7 +193,8 @@ def test_the_asset_sentence_says_testnet_xlm_labelled_xlm(tmp_path: Path) -> Non
     ledger = FakeLedger()
     text = described(ledger, tmp_path, settled_run(ledger))
     assert ASSET in text
-    assert "labels USDC" not in text and "interface labels it XLM" in text
+    assert "labels USDC" not in text
+    assert "interface labels it XLM" in text
 
 
 # ── the sheet's "what it proves" ────────────────────────────────
