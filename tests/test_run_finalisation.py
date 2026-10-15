@@ -54,7 +54,7 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> Any:
         state.traces.pop(key, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     fresh = _Store()
     monkeypatch.setattr(dispute_store, "_store", fresh)
