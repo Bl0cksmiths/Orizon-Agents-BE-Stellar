@@ -710,7 +710,10 @@
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
       return arr.filter(e => e && typeof e.score === 'number').slice(0, 5);
-    } catch (e) { return []; }
+    } catch (e) {
+      // Storage is blocked or the saved board isn't valid JSON: show an empty board.
+      return [];
+    }
   }
   function saveLb(arr) {
     try { localStorage.setItem(LB_KEY, JSON.stringify(arr.slice(0, 5))); } catch (e) {}
