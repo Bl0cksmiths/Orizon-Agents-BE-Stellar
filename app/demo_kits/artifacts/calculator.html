@@ -472,27 +472,26 @@
   // ── Shunting-yard → RPN ──────────────────────────────────────────────────
   const PREC = { 'u-': 5, '^': 4, '*': 3, '/': 3, '%': 3, '+': 2, '-': 2 };
   const RIGHT_ASSOC = new Set(['^', 'u-']);
+  // A pending function, or an operator that binds at least as tightly as `t`,
+  // must be emitted before `t` goes on the stack.
+  function popsBefore(top, t) {
+    if (top.kind === 'fn') return true;
+    if (top.kind !== 'op') return false;
+    const tp = PREC[t.value], pp = PREC[top.value];
+    return pp > tp || (pp === tp && !RIGHT_ASSOC.has(t.value));
+  }
+  function pushOperator(t, stack, out) {
+    while (stack.length && popsBefore(stack[stack.length - 1], t)) out.push(stack.pop());
+    stack.push(t);
+  }
   function toRPN(tokens) {
     const out = [];
     const stack = [];
     for (const t of tokens) {
       if (t.kind === 'num') out.push(t);
       else if (t.kind === 'fn') stack.push(t);
-      else if (t.kind === 'op') {
-        while (stack.length) {
-          const top = stack[stack.length - 1];
-          if (top.kind === 'fn') { out.push(stack.pop()); continue; }
-          if (top.kind === 'op') {
-            const tp = PREC[t.value], pp = PREC[top.value];
-            if (pp > tp || (pp === tp && !RIGHT_ASSOC.has(t.value))) {
-              out.push(stack.pop());
-              continue;
-            }
-          }
-          break;
-        }
-        stack.push(t);
-      } else if (t.kind === 'lparen') stack.push(t);
+      else if (t.kind === 'op') pushOperator(t, stack, out);
+      else if (t.kind === 'lparen') stack.push(t);
       else if (t.kind === 'rparen') {
         while (stack.length && stack[stack.length - 1].kind !== 'lparen') {
           out.push(stack.pop());
