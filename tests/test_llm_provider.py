@@ -112,7 +112,8 @@ def test_the_operator_key_adds_the_spend_figures(client, monkeypatch: pytest.Mon
     _spend_past_the_cap(monkeypatch)
     monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
     orchestrator = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY}).json()["orchestrator"]
-    assert orchestrator["planning"] == "paused" and orchestrator["resets_at"] is not None
+    assert orchestrator["planning"] == "paused"
+    assert orchestrator["resets_at"] is not None
     assert orchestrator["spend"] == {
         "day": datetime.now(UTC).date().isoformat(),
         "spent_usd": 0.0125,
