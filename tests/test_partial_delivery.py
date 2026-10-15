@@ -97,7 +97,7 @@ def store(monkeypatch) -> _Store:
     return fresh
 
 
-@pytest.fixture()
+@pytest.fixture
 def ratings(monkeypatch) -> list[tuple[str, bytes, int, str]]:
     """Every rating the run submits, as (agent_id, job_id, rating, kind)."""
     monkeypatch.setattr(settings, "reputation_enabled", True)
