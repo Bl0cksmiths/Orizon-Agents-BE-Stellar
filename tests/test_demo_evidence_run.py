@@ -275,7 +275,8 @@ def test_a_mainnet_ledger_is_refused(tmp_path: Path, where: str) -> None:
     setattr(ledger, f"{where}_passphrase", MAINNET_PASSPHRASE)
     path, _ = full_run(ledger, tmp_path)
     out = run(ledger, tmp_path, path)
-    assert out.code == EXIT_REFUSED and "testnet only" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "testnet only" in out.out
     assert not out.dir.exists()
 
 
