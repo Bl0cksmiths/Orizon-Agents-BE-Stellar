@@ -524,8 +524,12 @@
   function beep(freq, duration = 80, type = 'square') {
     if (state.muted) return;
     if (!audioCtx) {
-      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-      catch (e) { return; }
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) {
+        // No Web Audio here (unsupported or blocked): sound is optional, so play silently.
+        return;
+      }
     }
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
