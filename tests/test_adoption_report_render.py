@@ -66,8 +66,10 @@ def test_markdown_links_every_account_transaction_and_contract_to_testnet_stella
     assert f"({EXPLORER}/contract/{REGISTRY})" in markdown
     assert "stellar.expert/explorer/public" not in markdown
     assert "Generated 2026-09-21T" in markdown  # from the injected clock
-    assert "| OP-1 |" in markdown and "| OP-2 |" in markdown
-    assert "| `alpha` |" in markdown and "| charged event | yes |" in markdown
+    assert "| OP-1 |" in markdown
+    assert "| OP-2 |" in markdown
+    assert "| `alpha` |" in markdown
+    assert "| charged event | yes |" in markdown
 
 
 def test_untrusted_names_cannot_break_the_table(tmp_path: Path) -> None:
