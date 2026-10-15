@@ -97,7 +97,8 @@ def test_nothing_imports_the_harness_or_app_at_runtime() -> None:
     for source in (ROOT / "scripts" / "demo_evidence").glob("*.py"):
         text = source.read_text()
         assert not re.search(r"^\s*(from app\b|import app\b)", text, re.MULTILINE), source
-        assert "scripts.lifecycle" not in text and "from ..lifecycle" not in text, source
+        assert "scripts.lifecycle" not in text, source
+        assert "from ..lifecycle" not in text, source
 
 
 def _harness_run(directory: Path, *extra: str) -> None:
