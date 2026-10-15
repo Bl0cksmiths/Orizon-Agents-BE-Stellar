@@ -302,7 +302,8 @@ def test_partial_run_still_settles_on_chain(monkeypatch):
     assert settle_calls == [(PAYER, AUTH_ID_HEX, pytest.approx(0.05))]
     assert rating_calls == [b"\x01" * 16]
     task = state.tasks[task_id]
-    assert task.charge_tx == "chargehash123" and task.proof_tx == "sealhash456"
+    assert task.charge_tx == "chargehash123"
+    assert task.proof_tx == "sealhash456"
     assert not any("skipping on-chain" in ln.msg for ln in state.traces[task_id])
 
 
