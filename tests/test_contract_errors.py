@@ -193,7 +193,8 @@ def test_a_host_simulation_failure_is_not_submitted(monkeypatch):
     # Raised as itself, not rewrapped by the stage guard around it: the head
     # is the host's error, once, which is what an operator reads.
     assert str(caught.value) == f"prepare failed: {HOST_SIMULATION_ERROR}"
-    assert rpc.prepared and not rpc.sent
+    assert rpc.prepared
+    assert not rpc.sent
 
 
 def test_a_contract_rejection_is_not_submitted_either(monkeypatch):
