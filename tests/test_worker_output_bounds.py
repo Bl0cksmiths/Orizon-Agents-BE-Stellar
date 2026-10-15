@@ -66,7 +66,8 @@ def test_an_over_long_text_keeps_its_whole_sentences() -> None:
 
 def test_with_no_sentence_to_keep_it_cuts_at_a_word_and_says_so() -> None:
     out = trim_text("one two three four five six seven eight nine ten", 20)
-    assert out == "one two three four…" and len(out) <= 20
+    assert out == "one two three four…"
+    assert len(out) <= 20
 
 
 def test_a_cut_never_lands_inside_a_bracketed_citation() -> None:
