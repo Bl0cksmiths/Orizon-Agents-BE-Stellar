@@ -531,7 +531,8 @@ def test_a_transition_that_matches_the_expectation_is_written(store: DisputeStor
 
     upheld = run(store, go())
 
-    assert upheld is not None and upheld.status == "upheld"
+    assert upheld is not None
+    assert upheld.status == "upheld"
 
 
 def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation(store: DisputeStore) -> None:
