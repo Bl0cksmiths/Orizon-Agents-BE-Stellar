@@ -783,12 +783,15 @@
     if (p === 'short') return 'short break';
     return 'long break';
   }
+  function cycleLabelText() {
+    if (state.phase === 'work') return `cycle ${state.cycle + 1} of 4`;
+    if (state.phase === 'long') return 'long break';
+    return `break · cycle ${state.cycle} of 4`;
+  }
   function render() {
     rolloverDailyIfNeeded();
     phaseNameEl.textContent = phaseTitle(state.phase);
-    cycleLabelEl.textContent = state.phase === 'work'
-      ? `cycle ${state.cycle + 1} of 4`
-      : (state.phase === 'long' ? 'long break' : `break · cycle ${state.cycle} of 4`);
+    cycleLabelEl.textContent = cycleLabelText();
     // Cycle dots
     const dots = cycleDots.querySelectorAll('.dot');
     dots.forEach((d, i) => {
