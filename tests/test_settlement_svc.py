@@ -245,12 +245,10 @@ def configured(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     # stand-in reader here puts it in place BEFORE the `client` fixture runs;
     # tests that need their own reader override it afterwards.
     monkeypatch.setattr(sc, "simulate_read", _reader())
-    saved = (settings.stellar_payment_escrow, settings.stellar_asset_sac)
-    settings.stellar_agent_registry = REGISTRY_ID
-    settings.stellar_payment_escrow = ESCROW_ID
-    settings.stellar_asset_sac = SAC_ID
+    monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
+    monkeypatch.setattr(settings, "stellar_payment_escrow", ESCROW_ID)
+    monkeypatch.setattr(settings, "stellar_asset_sac", SAC_ID)
     yield settings
-    settings.stellar_payment_escrow, settings.stellar_asset_sac = saved
     rcache.clear()
 
 
