@@ -185,7 +185,8 @@ def test_a_key_the_sdk_refuses_is_unavailable_before_any_request(
     monkeypatch.setattr(settings, "typesafe_api_key", "has whitespace inside")
     with pytest.raises(JevUnavailable) as caught:
         _ask()
-    assert caught.value.reason == "missing_key" and recorder.requests == []
+    assert caught.value.reason == "missing_key"
+    assert recorder.requests == []
 
 
 def test_one_client_per_loop_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
