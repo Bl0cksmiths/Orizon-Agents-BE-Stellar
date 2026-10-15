@@ -399,5 +399,7 @@ def test_resolve_full_table_with_reasons(watch, user_edited, check, action, reas
 
 @pytest.mark.parametrize("verdict", ["block", "needs_detail", "unavailable"])
 def test_resolve_refuses_a_decision_that_was_not_allowed(verdict):
+    decision = GuardDecision(verdict=verdict)
+    check = check_of("clean")
     with pytest.raises(ValueError):
-        resolve(GuardDecision(verdict=verdict), check_of("clean"))
+        resolve(decision, check)
