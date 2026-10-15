@@ -299,7 +299,7 @@ _AGENTS_SNAPSHOT = [
 ]
 
 
-@pytest.fixture()
+@pytest.fixture
 def two_agents(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """One seeded and one bound on-chain agent, after the lifespan has seeded."""
     monkeypatch.setattr(binding_registry, "_bound_ids", {"ext_a"})
