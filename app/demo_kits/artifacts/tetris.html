@@ -875,6 +875,21 @@
     ctx.stroke();
   }
 
+  function drawGhost() {
+    if (!state.active || state.over) return;
+    const gy = ghostY();
+    const m = ROTATIONS[state.active.kind][state.active.rot];
+    const color = PIECES[state.active.kind].color;
+    for (let i = 0; i < m.length; i++) {
+      for (let j = 0; j < m[i].length; j++) {
+        if (!m[i][j]) continue;
+        const x = state.active.x + j;
+        const y = gy + i;
+        if (y >= 0) drawCell(ctx, x, y, color, { ghost: true });
+      }
+    }
+  }
+
   function render() {
     ctx.clearRect(0, 0, board.width, board.height);
     drawGrid();
@@ -886,19 +901,7 @@
       }
     }
     // Ghost piece.
-    if (state.active && !state.over) {
-      const gy = ghostY();
-      const m = ROTATIONS[state.active.kind][state.active.rot];
-      const color = PIECES[state.active.kind].color;
-      for (let i = 0; i < m.length; i++) {
-        for (let j = 0; j < m[i].length; j++) {
-          if (!m[i][j]) continue;
-          const x = state.active.x + j;
-          const y = gy + i;
-          if (y >= 0) drawCell(ctx, x, y, color, { ghost: true });
-        }
-      }
-    }
+    drawGhost();
     // Active piece.
     if (state.active && !state.over) {
       const color = PIECES[state.active.kind].color;
