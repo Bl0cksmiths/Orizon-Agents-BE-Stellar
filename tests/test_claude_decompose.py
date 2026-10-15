@@ -607,7 +607,8 @@ def test_a_kit_passes_the_guard_and_keeps_its_fixed_plan(
     assert [s.tier for s in resp.steps] == ["low", "low", "low", "moderate", "moderate", "low"]
     assert fake_claude.calls == []  # no improver, no planner
     assert resp.understood_as is None
-    assert resp.models is not None and resp.models.planner is None
+    assert resp.models is not None
+    assert resp.models.planner is None
     assert [(s.stage, s.msg) for s in resp.stages] == [
         ("guard", "Request checked by jev (tier: moderate)"),
         ("plan", f"Curated demo plan: {detect_kit(KIT_INTENT).brand.name}"),  # type: ignore[union-attr]
