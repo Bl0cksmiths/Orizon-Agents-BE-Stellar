@@ -287,7 +287,8 @@ def test_boot_does_not_wait_for_the_chain(monkeypatch):
             # Served while the chain read is still hung: lifespan returned
             # without waiting on it. Asserted on the task, not on a wall-clock
             # budget a slow runner could blow.
-            assert rw._report_task is not None and not rw._report_task.done()
+            assert rw._report_task is not None
+            assert not rw._report_task.done()
             assert client.get("/readiness").json()["ratings"]["writer"] == "unchecked"
         finally:
             # Inside the client: its loop's executor would otherwise wait out
