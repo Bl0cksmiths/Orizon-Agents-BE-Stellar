@@ -376,7 +376,8 @@ def test_every_unusable_reason_is_one_code_that_names_the_bound(client, monkeypa
     assert str(dispute_svc.MAX_REASON_CHARS) in body["error"]["message"]
     # Nothing the buyer wrote comes back.
     if reason.strip():
-        assert reason not in r.text and "q" * 50 not in r.text
+        assert reason not in r.text
+        assert "q" * 50 not in r.text
 
 
 def test_the_published_schema_still_states_the_reason_bound(client):
