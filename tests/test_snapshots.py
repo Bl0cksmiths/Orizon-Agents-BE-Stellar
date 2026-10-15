@@ -368,7 +368,8 @@ def test_a_seed_is_served_until_a_live_build_replaces_it_and_never_after() -> No
 
     served, live, reseeded = _run(go)  # type: ignore[misc]
     assert served is old
-    assert live.source == "live" and live.value.n == 1  # type: ignore[attr-defined]
+    assert live.source == "live"
+    assert live.value.n == 1  # type: ignore[attr-defined]
     assert reseeded is False
 
 
