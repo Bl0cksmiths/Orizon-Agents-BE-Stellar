@@ -110,7 +110,8 @@ class _Rpc:
         self.filters.append(filters)
         if end_ledger is None:  # the retention probe
             return self._response([])
-        assert start_ledger is not None and cursor is None
+        assert start_ledger is not None
+        assert cursor is None
         self.pages.append((start_ledger, end_ledger))
         if self.on_page is not None:
             self.on_page(len(self.pages))
