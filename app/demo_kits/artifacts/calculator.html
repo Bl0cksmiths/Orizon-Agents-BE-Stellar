@@ -825,7 +825,10 @@
   // ── Theme ────────────────────────────────────────────────────────────────
   function loadTheme() {
     let t;
-    try { t = localStorage.getItem(THEME_KEY); } catch (e) {}
+    try { t = localStorage.getItem(THEME_KEY); }
+    catch {
+      // Storage blocked: no saved choice, so the system color scheme below decides.
+    }
     if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     if (t === 'light') document.documentElement.dataset.theme = 'light';
     else delete document.documentElement.dataset.theme;
