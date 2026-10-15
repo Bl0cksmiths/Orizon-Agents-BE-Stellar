@@ -110,7 +110,9 @@ def test_first_unready_step_reads_a_real_readiness() -> None:
     )
     body = {"ready": operator_readiness.is_ready(steps), "steps": [s.__dict__ for s in steps]}
     step = checks.first_unready_step(body)
-    assert body["ready"] is False and step is not None and step["key"] == "reachable"
+    assert body["ready"] is False
+    assert step is not None
+    assert step["key"] == "reachable"
 
 
 def test_the_exclusion_notice_kinds_exist() -> None:
