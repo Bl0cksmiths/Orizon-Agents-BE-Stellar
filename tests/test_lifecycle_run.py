@@ -161,9 +161,11 @@ def test_v1_authorizes_the_batch_label_the_console_sends(buyer: Keypair, tmp_pat
     result = run(world, buyer, tmp_path)
     assert result.code == EXIT_OK, result.out
     body = world.call_log("/api/stellar/build/authorize")[0]["json"]
-    assert body["agent_id"] == "orizon_batch" and body["ttl_seconds"] == 600
+    assert body["agent_id"] == "orizon_batch"
+    assert body["ttl_seconds"] == 600
     names = {c["name"] for c in result.row("settlement_checks")["detail"]["checks"]}
-    assert "v1_charge_tx" in names and "v1_charged_event" in names
+    assert "v1_charge_tx" in names
+    assert "v1_charged_event" in names
 
 
 def test_v1_charge_that_failed_on_the_ledger_stops_before_any_dispute(buyer: Keypair, tmp_path: Path) -> None:
