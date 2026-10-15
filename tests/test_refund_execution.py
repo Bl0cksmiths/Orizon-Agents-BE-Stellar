@@ -492,8 +492,9 @@ def test_an_unusable_ceiling_never_lets_a_hand_rolled_credit_be_signed(monkeypat
     calls = _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": "refund_tx"})
     monkeypatch.setattr(settings, "max_refund_usdc", cap)
 
+    crediting = refund_svc.credit_refund(_dispute(creditable_usdc=50.0), 50.0)
     with pytest.raises(RefundRefused) as exc:
-        asyncio.run(refund_svc.credit_refund(_dispute(creditable_usdc=50.0), 50.0))
+        asyncio.run(crediting)
 
     assert exc.value.code == "refund_amount_invalid"
     assert calls == [], "a credit was signed against a ceiling that bounds nothing"
