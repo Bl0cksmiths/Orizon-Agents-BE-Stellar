@@ -237,7 +237,9 @@ def test_a_backend_that_never_wakes_fails_and_skips_what_needs_it(tmp_path: Path
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     warm = out.check("network.warm")
-    assert warm["status"] == FAIL and "within 120 s" in warm["detail"] and "Render" in warm["fix"]
+    assert warm["status"] == FAIL
+    assert "within 120 s" in warm["detail"]
+    assert "Render" in warm["fix"]
     for dependent in ("network.api", "build.adoption", "exclusion.below_floor"):
         assert out.status(dependent) == SKIPPED
     # Reads that do not need the API still ran.
