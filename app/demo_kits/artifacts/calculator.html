@@ -681,13 +681,34 @@
     state.expr = state.expr.slice(0, -1);
     tryLiveEval();
   }
+  // The number at the end of `s` (digits with at most one "."), plus a "-"
+  // right before it when that "-" is followed by a digit, or null. It returns
+  // what /(-?\d+\.?\d*|\d*\.?\d+)$/ matched, in one backward scan instead
+  // of the regex's polynomial backtracking.
+  function trailingNumber(s) {
+    let start = s.length;
+    let seenDot = false;
+    while (start > 0) {
+      const c = s[start - 1];
+      if (c === '.') {
+        if (seenDot) break;
+        seenDot = true;
+      } else if (c < '0' || c > '9') {
+        break;
+      }
+      start--;
+    }
+    const body = s.slice(start);
+    if (!/\d/.test(body)) return null;
+    if (s[start - 1] === '-' && /^\d/.test(body)) return s.slice(start - 1);
+    return body;
+  }
   function neg() {
     // Find the last number in the expression and toggle its sign.
     if (state.error) return;
-    const m = state.expr.match(/(-?\d+\.?\d*|\d*\.?\d+)$/);
-    if (m && m[0] !== '') {
-      const start = state.expr.length - m[0].length;
-      const cur = m[0];
+    const cur = trailingNumber(state.expr);
+    if (cur) {
+      const start = state.expr.length - cur.length;
       const flipped = cur.startsWith('-') ? cur.slice(1) : '-' + cur;
       state.expr = state.expr.slice(0, start) + flipped;
       tryLiveEval();
