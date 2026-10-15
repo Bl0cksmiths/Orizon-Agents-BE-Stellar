@@ -663,7 +663,8 @@ def test_a_kit_is_still_checked_by_jev_past_the_spend_cap(
 
     resp = _decompose(KIT_INTENT)
 
-    assert resp.guard is not None and resp.guard.verdict == "allow"
+    assert resp.guard is not None
+    assert resp.guard.verdict == "allow"
 
 
 def test_a_free_form_request_pauses_when_the_cap_stops_the_guard(
