@@ -62,7 +62,7 @@ def routable_set():
     binding_registry._bound_ids.update(saved)
 
 
-@pytest.fixture()
+@pytest.fixture
 def no_dns(monkeypatch):
     """Stub the bind-time resolution: the suite is hermetic, and these tests
     need a real bind in place before they can revoke it."""
