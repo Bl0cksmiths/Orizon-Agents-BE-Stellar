@@ -106,7 +106,6 @@ def test_the_published_bound_is_the_enforced_one() -> None:
 
     schema = WebhookRegisterRequest.model_json_schema()
     assert all(p.get("maxLength", 0) <= REQUEST_STR_MAX_LENGTH for p in schema["properties"].values())
+    too_long = {name: "x" * (REQUEST_STR_MAX_LENGTH + 1) for name in schema.get("required", [])}
     with pytest.raises(ValidationError):
-        WebhookRegisterRequest.model_validate(
-            {name: "x" * (REQUEST_STR_MAX_LENGTH + 1) for name in schema.get("required", [])}
-        )
+        WebhookRegisterRequest.model_validate(too_long)
