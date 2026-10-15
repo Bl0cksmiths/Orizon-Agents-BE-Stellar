@@ -1591,8 +1591,11 @@ def test_an_adjudicators_note_is_appended_and_read_back_in_postgres(pg: Postgres
 
     rejected, stored, rows = run(pg, go())
 
-    assert rejected is not None and rejected.note == NOTE
-    assert stored is not None and stored.note == NOTE and stored.rating_tx == "tx_rating"
+    assert rejected is not None
+    assert rejected.note == NOTE
+    assert stored is not None
+    assert stored.note == NOTE
+    assert stored.rating_tx == "tx_rating"
     assert [row["note"] for row in rows] == [None, NOTE, NOTE]
 
 
