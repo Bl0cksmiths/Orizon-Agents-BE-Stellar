@@ -645,10 +645,8 @@
   }
 
   // ── Tick: advance snake one cell ─────────────────────────────────────────
-  function tick() {
-    if (state.paused || state.over || !state.started) return;
-    // Commit pending direction (debounced — prevents instant-reverse death).
-    state.dir = state.pendingDir;
+  // Next head cell in the current direction, or null when it hits a wall.
+  function nextHead() {
     const head = state.snake[0];
     let nx = head.x + state.dir.x;
     let ny = head.y + state.dir.y;
@@ -660,8 +658,18 @@
       if (ny < 0) ny = ROWS - 1;
       if (ny >= ROWS) ny = 0;
     } else if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) {
-      return gameOver();
+      return null;
     }
+    return { x: nx, y: ny };
+  }
+  function tick() {
+    if (state.paused || state.over || !state.started) return;
+    // Commit pending direction (debounced — prevents instant-reverse death).
+    state.dir = state.pendingDir;
+    const next = nextHead();
+    if (!next) return gameOver();
+    const nx = next.x;
+    const ny = next.y;
 
     // Eat? Note: tail collision is OK if we're not also growing this tick.
     const willEat = state.food && state.food.x === nx && state.food.y === ny;
