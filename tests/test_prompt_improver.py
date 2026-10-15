@@ -116,8 +116,9 @@ def test_improve_is_held_to_the_spend_cap(fake_claude, monkeypatch):
 
     monkeypatch.setattr(settings, "llm_daily_spend_cap_usd", 0.0)
     fake_claude.reply(draft(), purpose="improve.spec")
+    improving = improve(INTENT, "low")
     with pytest.raises(SpendCapReached):
-        asyncio.run(improve(INTENT, "low"))
+        asyncio.run(improving)
 
 
 # --- normalize_spec: the deterministic backstop ---------------------------------------
