@@ -179,7 +179,8 @@ def test_every_request_is_logged_and_a_crash_is_raised() -> None:
     world = _world(crash_on="/api/agents")
     with pytest.raises(RuntimeError, match="fake crash on /api/agents"):
         _send(world, "POST", API + "/api/agents", {"x": 1})
-    assert world.calls[-1]["method"] == "POST" and world.calls[-1]["json"] == {"x": 1}
+    assert world.calls[-1]["method"] == "POST"
+    assert world.calls[-1]["json"] == {"x": 1}
     assert world.posted_bodies == ['{"x":1}']
 
 
