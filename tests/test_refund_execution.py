@@ -166,8 +166,10 @@ def test_a_step_that_never_delivered_refuses(monkeypatch) -> None:
     """An undelivered step was never part of what the buyer paid for, so there
     is nothing to give back — whatever the dispute was opened promising."""
     _no_signing(monkeypatch)
+    settlement = _settlement()
+    dispute = _dispute(step_index=2, creditable_usdc=0.09)
     with pytest.raises(RefundRefused) as exc:
-        refund_svc.creditable_for(_settlement(), _dispute(step_index=2, creditable_usdc=0.09))
+        refund_svc.creditable_for(settlement, dispute)
     assert exc.value.code == "nothing_to_credit"
 
 
