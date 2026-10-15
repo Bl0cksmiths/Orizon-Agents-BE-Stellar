@@ -218,8 +218,9 @@ def test_a_hand_rolled_over_cap_amount_never_reaches_the_signer(monkeypatch) -> 
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
     _no_signing(monkeypatch)
 
+    crediting = refund_svc.credit_refund(_dispute(), 5.0)
     with pytest.raises(RefundRefused) as exc:
-        asyncio.run(refund_svc.credit_refund(_dispute(), 5.0))
+        asyncio.run(crediting)
     assert exc.value.code == "refund_above_cap"
 
 
