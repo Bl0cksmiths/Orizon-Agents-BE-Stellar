@@ -106,8 +106,9 @@ def test_system_prompt_forbids_adding_scope():
 )
 def test_improve_raises_model_errors_for_the_planner_to_map(fake_claude, script):
     script(fake_claude)
+    improving = improve(INTENT, "low")
     with pytest.raises(LLMError):
-        asyncio.run(improve(INTENT, "low"))
+        asyncio.run(improving)
 
 
 def test_improve_is_held_to_the_spend_cap(fake_claude, monkeypatch):
