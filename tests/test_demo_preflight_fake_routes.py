@@ -95,7 +95,8 @@ def test_api_degraded_batches_count_down() -> None:
     world = healthy_world()
     world.degraded_batches = 1
     status, body = _answer(_send(world, "GET", API + "/api/stellar/reputation"))
-    assert status == 200 and world.degraded_batches == 0
+    assert status == 200
+    assert world.degraded_batches == 0
     assert body["reputations"]["alpha"] == {
         **world.reputations["alpha"],
         "lower_bound_bps": 5677,
