@@ -83,13 +83,15 @@ def test_every_verified_hash_is_published_in_the_frozen_shape(tmp_path: Path) ->
     assert out.code == EXIT_OK, out.out
     body = out.json()
     assert set(body) == {"generated_at", "network", "items"}
-    assert body["generated_at"] == 1_790_000_000 and body["network"] == "testnet"
+    assert body["generated_at"] == 1_790_000_000
+    assert body["network"] == "testnet"
     assert [i["tx_hash"] for i in body["items"]] == [
         hashes[k] for k in ("authorize", "settle", "seal", "rating", "refund", "dispute")
     ]
     for item in body["items"]:
         assert set(item) == {"label", "deliverable", "kind", "tx_hash", "explorer", "verified"}
-        assert isinstance(item["label"], str) and item["label"]
+        assert isinstance(item["label"], str)
+        assert item["label"]
         assert item["deliverable"] in ("D1", "D2", "D3", "D4")
         assert item["kind"] in KINDS
         assert re.fullmatch(r"[0-9a-f]{64}", item["tx_hash"])
