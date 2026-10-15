@@ -502,7 +502,8 @@ def test_an_operator_endpoint_that_is_not_healthy_fails(tmp_path: Path, status: 
     world = healthy_world()
     world.agent_status, world.agent_health = status, body
     check = run(world, tmp_path).check("operator.endpoint")
-    assert check["status"] == FAIL and f"answered HTTP {status} without" in check["detail"]
+    assert check["status"] == FAIL
+    assert f"answered HTTP {status} without" in check["detail"]
 
 
 def test_no_operator_endpoint_is_skipped_and_keeps_the_verdict_incomplete(tmp_path: Path) -> None:
