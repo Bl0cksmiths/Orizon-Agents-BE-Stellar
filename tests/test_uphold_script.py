@@ -1600,7 +1600,8 @@ def test_a_rerun_after_a_rating_that_did_not_land_writes_the_rating_and_signs_no
     assert code == uphold_dispute.EXIT_OK
     assert paying == []
     assert ledger.calls == [DISPUTE_ID]
-    assert "CREDITED EARLIER" in out and "this one signed no transfer" in out
+    assert "CREDITED EARLIER" in out
+    assert "this one signed no transfer" in out
     assert f"refund: https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
     assert f"rating: https://stellar.expert/explorer/testnet/tx/{RATING_TX}" in out
     assert stored().rating_tx == RATING_TX
