@@ -194,8 +194,10 @@ def test_an_amount_over_the_cap_refuses_before_anything_is_signed(monkeypatch, c
     _no_signing(monkeypatch)
 
     with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        settlement = _settlement()
+        dispute = _dispute()
         with pytest.raises(RefundRefused) as exc:
-            refund_svc.creditable_for(_settlement(), _dispute())
+            refund_svc.creditable_for(settlement, dispute)
 
     assert exc.value.code == "refund_above_cap"
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
