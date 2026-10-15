@@ -373,7 +373,9 @@ def test_every_failure_line_carries_what_the_payer_was_credited(monkeypatch, cap
         _rate(credited)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
-    assert msgs and all("credited 0.0700000 USDC" in m and "refund tx_refund" in m for m in msgs), msgs
+    assert msgs, msgs
+    assert all("credited 0.0700000 USDC" in m for m in msgs), msgs
+    assert all("refund tx_refund" in m for m in msgs), msgs
 
 
 def test_a_not_submitted_reason_never_quotes_the_signing_key() -> None:
