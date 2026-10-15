@@ -358,8 +358,10 @@ def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeSto
     upheld, claimed, released = run(store, go())
 
     assert upheld.resolved_at == 1_700_009_999.0
-    assert claimed is not None and claimed.resolved_at == 1_700_009_999.0
-    assert released is not None and released.resolved_at == 1_700_009_999.0
+    assert claimed is not None
+    assert claimed.resolved_at == 1_700_009_999.0
+    assert released is not None
+    assert released.resolved_at == 1_700_009_999.0
 
 
 # ── the race the mutex exists for ─────────────────────────────────────────
