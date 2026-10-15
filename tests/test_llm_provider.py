@@ -192,7 +192,8 @@ def test_close_releases_the_clients_and_the_ledger(monkeypatch: pytest.MonkeyPat
     jev.set_transport(Closable("jev"))  # type: ignore[arg-type]
     ledger = spend.get_ledger()
     asyncio.run(provider.close())
-    assert closed == ["claude", "jev"] and spend.get_ledger() is not ledger
+    assert closed == ["claude", "jev"]
+    assert spend.get_ledger() is not ledger
 
 
 def test_the_app_shuts_the_model_layer_down(monkeypatch: pytest.MonkeyPatch) -> None:
