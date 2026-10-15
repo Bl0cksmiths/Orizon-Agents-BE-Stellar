@@ -583,6 +583,12 @@
   const toastEl = document.getElementById('toast');
 
   // ── Display helpers ──────────────────────────────────────────────────────
+  // Same result as s.replace(/0+$/, ''), without the regex's quadratic backtracking.
+  function trimTrailingZeros(s) {
+    let end = s.length;
+    while (end > 0 && s[end - 1] === '0') end--;
+    return s.slice(0, end);
+  }
   function formatNum(n) {
     if (n === 0) return '0';
     if (Number.isNaN(n)) return 'NaN';
@@ -591,7 +597,7 @@
     // 12 significant digits, trim trailing zeros.
     let s = Number.parseFloat(n.toPrecision(12)).toString();
     if (s.includes('.') && !s.includes('e')) {
-      s = s.replace(/0+$/, '').replace(/\.$/, '');
+      s = trimTrailingZeros(s).replace(/\.$/, '');
     }
     return s;
   }
