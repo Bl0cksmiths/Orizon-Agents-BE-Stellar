@@ -129,24 +129,20 @@ def forbid_uphold(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_store():
+def _fresh_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """A store per test.
 
     It is a process singleton, and `DATABASE_URL` in the environment of whoever
     runs the suite must not turn one of these into a live query — the hermetic
     fixture in conftest does not clear that one.
     """
-    saved = settings.database_url, settings.stellar_network, settings.stellar_network_passphrase
-    settings.database_url = ""
+    monkeypatch.setattr(settings, "database_url", "")
     # Pinned so the explorer URLs asserted below are the ones a testnet operator
     # sees, rather than whatever network a developer's .env happens to name —
     # the passphrase too, since that is what the links are keyed on (D-074).
-    settings.stellar_network = "testnet"
-    settings.stellar_network_passphrase = TESTNET_PASSPHRASE
-    dispute_store._store = None
-    yield
-    dispute_store._store = None
-    settings.database_url, settings.stellar_network, settings.stellar_network_passphrase = saved
+    monkeypatch.setattr(settings, "stellar_network", "testnet")
+    monkeypatch.setattr(settings, "stellar_network_passphrase", TESTNET_PASSPHRASE)
+    monkeypatch.setattr(dispute_store, "_store", None)
 
 
 @pytest.fixture(autouse=True)
