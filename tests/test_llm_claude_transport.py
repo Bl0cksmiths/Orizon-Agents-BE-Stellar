@@ -216,7 +216,8 @@ def test_a_server_side_fallback_is_served_by_and_priced_per_attempt(api: Callabl
         )
     )
     result = _plan()
-    assert result.value == Plan(steps=["x"]) and result.served_by == "claude-opus-5"
+    assert result.value == Plan(steps=["x"])
+    assert result.served_by == "claude-opus-5"
     # Declined attempt on Opus 5.5 ($4/MTok in) + serving attempt on Opus 5 ($5 in, $25 out).
     assert result.cost_usd == pytest.approx(0.004 + 0.005 + 0.0025)
     assert result.usage == Usage(input_tokens=2000, output_tokens=100)
