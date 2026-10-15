@@ -109,7 +109,7 @@
     color: var(--muted);
     margin-bottom: 4px;
   }
-  .stat b {
+  .stat output {
     font-size: 18px;
     font-weight: 500;
     color: var(--text);
@@ -416,16 +416,16 @@
 
       <div class="hud">
         <div class="stat">
-          <label>score</label>
-          <b id="score">0</b>
+          <label for="score">score</label>
+          <output id="score" aria-live="off">0</output>
         </div>
         <div class="stat">
-          <label>length</label>
-          <b id="length">3</b>
+          <label for="length">length</label>
+          <output id="length" aria-live="off">3</output>
         </div>
         <div class="stat full">
-          <label>session best</label>
-          <b id="best">0</b>
+          <label for="best">session best</label>
+          <output id="best" aria-live="off">0</output>
         </div>
       </div>
 
