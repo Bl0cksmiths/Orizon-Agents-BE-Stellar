@@ -422,8 +422,9 @@ def test_a_step_the_settlement_lacks_raises_instead_of_rating(monkeypatch, caplo
     _no_submit(monkeypatch)
 
     with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        unknown_step = _dispute(step_index=7)
         with pytest.raises(LookupError):
-            _rate(_dispute(step_index=7))
+            _rate(unknown_step)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
     assert any(DISPUTE_ID in m and JOB in m and "no step 7" in m and PAYER in m for m in msgs), (
