@@ -71,7 +71,7 @@ class Chain:
         return {i: self.records[i] for i in agent_ids if i not in self.batch_skips}
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch: pytest.MonkeyPatch) -> Any:
     agents_before = dict(state.agents)
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
