@@ -925,17 +925,17 @@
     return { minR, maxR, minC, maxC };
   }
 
-  function renderMini(ctx2d, kind, cellSize) {
-    ctx2d.clearRect(0, 0, ctx2d.canvas.width, ctx2d.canvas.height);
-    if (!kind) return;
+  // Draw a piece in its spawn rotation, trimmed to its cells so it centers
+  // nicely in the band of the canvas from `top` to `top + height`. The light
+  // top and dark bottom edges of each cell are `edge` pixels high.
+  function drawCenteredPiece(ctx2d, kind, cellSize, edge, top, height) {
     const m = ROTATIONS[kind][0];
     const color = PIECES[kind].color;
-    // Trim to actual cells so the piece centers nicely.
     const { minR, maxR, minC, maxC } = pieceBounds(m);
     const w = (maxC - minC + 1) * cellSize;
     const h = (maxR - minR + 1) * cellSize;
     const offX = Math.round((ctx2d.canvas.width - w) / 2);
-    const offY = Math.round((ctx2d.canvas.height - h) / 2);
+    const offY = Math.round(top + (height - h) / 2);
     for (let r = minR; r <= maxR; r++) {
       for (let c = minC; c <= maxC; c++) {
         if (!m[r][c]) continue;
@@ -944,11 +944,17 @@
         ctx2d.fillStyle = color;
         ctx2d.fillRect(px, py, cellSize, cellSize);
         ctx2d.fillStyle = 'rgba(255,255,255,0.18)';
-        ctx2d.fillRect(px, py, cellSize, 1.5);
+        ctx2d.fillRect(px, py, cellSize, edge);
         ctx2d.fillStyle = 'rgba(0,0,0,0.28)';
-        ctx2d.fillRect(px, py + cellSize - 1.5, cellSize, 1.5);
+        ctx2d.fillRect(px, py + cellSize - edge, cellSize, edge);
       }
     }
+  }
+
+  function renderMini(ctx2d, kind, cellSize) {
+    ctx2d.clearRect(0, 0, ctx2d.canvas.width, ctx2d.canvas.height);
+    if (!kind) return;
+    drawCenteredPiece(ctx2d, kind, cellSize, 1.5, 0, ctx2d.canvas.height);
   }
 
   function renderHold() {
@@ -959,28 +965,7 @@
     nextCtx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
     const slot = nextCanvas.height / 3;
     for (let i = 0; i < 3 && i < state.queue.length; i++) {
-      const kind = state.queue[i];
-      const m = ROTATIONS[kind][0];
-      const color = PIECES[kind].color;
-      const { minR, maxR, minC, maxC } = pieceBounds(m);
-      const cellSize = 14;
-      const w = (maxC - minC + 1) * cellSize;
-      const h = (maxR - minR + 1) * cellSize;
-      const offX = Math.round((nextCanvas.width - w) / 2);
-      const offY = Math.round(i * slot + (slot - h) / 2);
-      for (let r = minR; r <= maxR; r++) {
-        for (let c = minC; c <= maxC; c++) {
-          if (!m[r][c]) continue;
-          const px = offX + (c - minC) * cellSize;
-          const py = offY + (r - minR) * cellSize;
-          nextCtx.fillStyle = color;
-          nextCtx.fillRect(px, py, cellSize, cellSize);
-          nextCtx.fillStyle = 'rgba(255,255,255,0.18)';
-          nextCtx.fillRect(px, py, cellSize, 1);
-          nextCtx.fillStyle = 'rgba(0,0,0,0.28)';
-          nextCtx.fillRect(px, py + cellSize - 1, cellSize, 1);
-        }
-      }
+      drawCenteredPiece(nextCtx, state.queue[i], 14, 1, i * slot, slot);
     }
   }
 
