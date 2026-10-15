@@ -587,7 +587,8 @@ def test_a_summary_branch_summary_is_cleaned_before_it_is_kept(monkeypatch, stor
     assert len(traced) == 180
     stored = store.recorded[0].steps[0].output_summary
     assert stored is not None
-    assert "\x1b" not in stored and "\x00" not in stored
+    assert "\x1b" not in stored
+    assert "\x00" not in stored
     assert stored == traced.replace("\x1b", " ").replace("\x00", " ")
     assert not stored.endswith("[truncated]")
 
