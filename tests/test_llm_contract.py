@@ -224,7 +224,8 @@ def test_the_cap_pauses_calls_until_the_utc_day_turns(
     _structured(model="claude-opus-5-5")  # $0.008: crosses the cap, and still completes
     with pytest.raises(SpendCapReached) as caught:
         _structured()
-    assert caught.value.spent_usd == pytest.approx(0.008) and caught.value.cap_usd == 0.005
+    assert caught.value.spent_usd == pytest.approx(0.008)
+    assert caught.value.cap_usd == 0.005
     assert 1 <= caught.value.retry_after <= 86_400
     assert len(fake_claude.calls) == 1  # the paused call never left
 
