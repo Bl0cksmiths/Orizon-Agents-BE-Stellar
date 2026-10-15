@@ -472,7 +472,8 @@ def test_every_read_answers_with_the_newest_row_by_id(pg: PostgresDisputeStore, 
 
     assert trail == ["open", "upheld", "crediting", "upheld", "crediting"]
     assert newest == "crediting"
-    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert reclaimed is not None
+    assert reclaimed.status == "crediting"
     assert by_id == by_step == reclaimed
     assert listed == (reclaimed,)
 
