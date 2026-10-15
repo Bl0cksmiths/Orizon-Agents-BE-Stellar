@@ -377,7 +377,9 @@ def test_a_rating_that_was_never_submitted_is_still_told_from_one_in_flight(stor
         upheld = await store.append_status(opened.id, "upheld")
         in_flight = await store.append_status(opened.id, "credited", rating_confirmed=False)
         silent = await store.append_status(opened.id, "credited")
-        assert upheld is not None and in_flight is not None and silent is not None
+        assert upheld is not None
+        assert in_flight is not None
+        assert silent is not None
         return upheld, in_flight, silent
 
     upheld, in_flight, silent = asyncio.run(go())
