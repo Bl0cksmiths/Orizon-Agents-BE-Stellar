@@ -138,7 +138,8 @@ def test_a_kit_run_leaves_out_the_kits_duplicate_briefs(claude: FakeClaude) -> N
     run(context=context)
     user = claude.calls[0].user
     assert "UPSTREAM-HEADLINE" in user
-    assert "RESEARCH-BRIEF" not in user and "SEO-BRIEF" not in user
+    assert "RESEARCH-BRIEF" not in user
+    assert "SEO-BRIEF" not in user
     assert WORKER.upstream_sources(context) == ["copywrite.v3"]
     # Without a kit the briefs are this run's own work, and are handed on.
     assert WORKER.upstream_sources({k: v for k, v in context.items() if k != "kit"}) == [
