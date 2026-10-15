@@ -128,7 +128,8 @@ def test_a_young_claim_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     world = World(monkeypatch, crediting())
     age = MIN_CLAIM_AGE_SECONDS - 0.5
     assert world.decide(now=CLAIMED_AT + age) == Decision("dsp_0001", "young", age)
-    assert world.store.calls == [] and world.calls == []
+    assert world.store.calls == []
+    assert world.calls == []
 
 
 def test_a_claim_exactly_at_the_minimum_age_is_decided(monkeypatch: pytest.MonkeyPatch) -> None:
