@@ -211,7 +211,8 @@ def test_the_body_is_validated_before_any_read(
     escrow = install(monkeypatch, FakeEscrow(auth=expired()))
     r = client.post("/api/stellar/build/reclaim", json=body)
     assert r.status_code == 422
-    assert escrow.calls == [] and builds.calls == []
+    assert escrow.calls == []
+    assert builds.calls == []
 
 
 def test_it_spends_the_service_rate_limit_like_its_siblings(
