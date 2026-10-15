@@ -1006,7 +1006,8 @@ def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
         asyncio.run(dispute_svc.uphold(dispute.id))
 
     unaccounted = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unaccounted is not None and unaccounted.status == "crediting"
+    assert unaccounted is not None
+    assert unaccounted.status == "crediting"
 
 
 # ── refusals raised before the settler's key is touched ─────────
