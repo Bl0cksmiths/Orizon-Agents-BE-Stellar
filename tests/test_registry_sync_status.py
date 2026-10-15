@@ -235,8 +235,9 @@ def test_a_later_failing_pass_keeps_the_latch_and_its_count(
     full = registry_sync.status()
 
     monkeypatch.setattr(registry_sync.sc, "simulate_read", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    syncing = registry_sync.sync_once()
     with pytest.raises(RuntimeError):
-        asyncio.run(registry_sync.sync_once())
+        asyncio.run(syncing)
 
     assert registry_sync.status() == full
 
