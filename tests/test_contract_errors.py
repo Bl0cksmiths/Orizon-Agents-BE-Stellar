@@ -315,8 +315,9 @@ class _PollRaises(_FakeRpc):
 def test_a_poll_that_raises_after_the_send_carries_the_pending_hash(monkeypatch):
     """Sent and PENDING, then the poll itself raised: in flight, with its hash."""
     _rpc(monkeypatch, _PollRaises())
+    invocation = sc.invoke_with_server_key_async(LEDGER_ID, "submit", [])
     with pytest.raises(sc.InFlightError) as caught:
-        asyncio.run(sc.invoke_with_server_key_async(LEDGER_ID, "submit", []))
+        asyncio.run(invocation)
     assert caught.value.tx_hash == PENDING_HASH
     assert isinstance(caught.value.__cause__, ConnectionError)
     with pytest.raises(sc.InFlightError) as caught_sync:
