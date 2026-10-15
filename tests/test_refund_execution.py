@@ -467,8 +467,10 @@ def test_an_unusable_ceiling_refuses_the_credit_it_cannot_bound(monkeypatch, cap
     _no_signing(monkeypatch)
 
     with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        settlement = _settlement(settled_usdc=50.0, steps=FIFTY)
+        dispute = _dispute(creditable_usdc=50.0)
         with pytest.raises(RefundRefused) as exc:
-            refund_svc.creditable_for(_settlement(settled_usdc=50.0, steps=FIFTY), _dispute(creditable_usdc=50.0))
+            refund_svc.creditable_for(settlement, dispute)
 
     assert exc.value.code == "refund_amount_invalid"
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
