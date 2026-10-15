@@ -895,8 +895,9 @@ def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(
     monkeypatch.setattr(store, "append_status", _unreachable)
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(RuntimeError, match=raised):
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     # The claim is what stops a second payment, so it must outlive the failure.
     assert store._disputes[dispute.id].status == "crediting"
