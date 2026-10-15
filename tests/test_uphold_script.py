@@ -1473,9 +1473,12 @@ def test_a_rating_that_failed_after_the_credit_landed_says_the_buyer_is_paid_and
     # Never the 4.03 advice, never a claim that nothing was signed, never a PASS.
     assert "DO NOT RE-RUN" not in out
     assert "nothing was signed" not in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
     record = stored()
-    assert record.status == "credited" and record.refund_tx == REFUND_TX and record.rating_tx is None
+    assert record.status == "credited"
+    assert record.refund_tx == REFUND_TX
+    assert record.rating_tx is None
 
 
 def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on_record(
