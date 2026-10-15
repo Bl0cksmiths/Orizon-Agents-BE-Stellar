@@ -640,8 +640,9 @@ def test_an_in_flight_hash_the_store_would_not_record_still_refuses_with_the_has
     monkeypatch.setattr(store, "append_status", _refuses_the_hash)
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as refused:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert refused.value.code == "refund_unconfirmed"
     assert refused.value.status_code == 504
