@@ -679,7 +679,8 @@ def test_two_agents_under_one_owner_are_one_operator_wallet(world: _World) -> No
     report = world.report()
 
     assert _totals(report) == (2, 1, 0)
-    assert report.met.external_agents is True and report.met.unique_operator_wallets is False
+    assert report.met.external_agents is True
+    assert report.met.unique_operator_wallets is False
 
 
 # ── the cache ───────────────────────────────────────────────────────────────
