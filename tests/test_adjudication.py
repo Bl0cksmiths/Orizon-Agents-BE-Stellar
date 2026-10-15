@@ -1068,8 +1068,9 @@ def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> Non
     dispute_store.get_dispute_store()._settlements.clear()
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "settlement_missing"
     assert refused.value.status_code == 409
