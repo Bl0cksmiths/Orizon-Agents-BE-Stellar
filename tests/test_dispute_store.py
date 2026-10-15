@@ -179,8 +179,10 @@ def test_the_step_breakdown_is_addressable_by_step_index() -> None:
     settled = asyncio.run(go())
 
     assert settled is not None
-    assert settled.step(0) is not None and settled.step(0).price_usdc == 1.5  # type: ignore[union-attr]
-    assert settled.step(1) is not None and settled.step(1).delivered is False  # type: ignore[union-attr]
+    assert settled.step(0) is not None
+    assert settled.step(0).price_usdc == 1.5  # type: ignore[union-attr]
+    assert settled.step(1) is not None
+    assert settled.step(1).delivered is False  # type: ignore[union-attr]
     assert settled.step(7) is None
 
 
