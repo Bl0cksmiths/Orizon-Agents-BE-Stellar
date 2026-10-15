@@ -1549,7 +1549,8 @@ def test_a_repeat_uphold_lands_a_rating_that_failed_without_a_second_credit(monk
     chain = settler(monkeypatch, LANDED)
     rater.script = ["FAILED"]
     paid = asyncio.run(dispute_svc.uphold(dispute.id))
-    assert paid.status == "credited" and paid.rating_tx is None
+    assert paid.status == "credited"
+    assert paid.rating_tx is None
     assert invalidated == []
 
     trap_the_refund(monkeypatch)
