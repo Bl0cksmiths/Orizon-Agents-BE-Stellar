@@ -824,16 +824,19 @@ def test_a_confirmation_the_store_would_not_record_is_left_for_the_next_uphold(
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         answered = uphold(dispute.id)
 
-    assert answered == unconfirmed and answered.rating_confirmed is False
+    assert answered == unconfirmed
+    assert answered.rating_confirmed is False
     assert invalidated == [AGENT]  # the replay proved it landed, whatever the store says
     (logged,) = svc_errors(caplog)
-    assert "confirmation could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "confirmation could not be recorded" in logged
+    assert "tx=tx_rating_1" in logged
     assert "by hand" not in logged
 
     monkeypatch.setattr(store, "append_status", real_append)
     confirmed = uphold(dispute.id)
 
-    assert confirmed.rating_confirmed is True and confirmed.rating_tx == "tx_rating_1"
+    assert confirmed.rating_confirmed is True
+    assert confirmed.rating_tx == "tx_rating_1"
     assert len(settler.transfers) == 1
 
 
