@@ -99,7 +99,8 @@ def test_state_is_written_owner_only_and_round_trips(tmp_path: Path) -> None:
 def test_state_ignores_fields_a_newer_harness_wrote(tmp_path: Path) -> None:
     (tmp_path / "state.json").write_text(json.dumps({"run_id": "r1", "from_the_future": 1}))
     loaded = StateStore(tmp_path).load()
-    assert loaded is not None and loaded.run_id == "r1"
+    assert loaded is not None
+    assert loaded.run_id == "r1"
 
 
 # ── redaction ───────────────────────────────────────────────────
