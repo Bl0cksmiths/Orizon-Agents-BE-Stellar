@@ -253,7 +253,8 @@ def test_no_routable_agent_refuses_before_any_paid_call(
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
         _decompose()
 
-    assert fake_claude.calls == [] and fake_jev.calls == []
+    assert fake_claude.calls == []
+    assert fake_jev.calls == []
 
 
 # ── refusals ───────────────────────────────────────────────────
