@@ -346,7 +346,8 @@ def test_a_failure_before_anything_is_signed_hands_the_claim_back_and_raises_it(
     store.script = {"get_settlement": [ConnectionError("store down")]}
     with pytest.raises(ConnectionError, match="store down"):
         _uphold()
-    assert store.calls == [LOAD, CLAIM, SETTLEMENT, RELEASE] and seams.calls == []
+    assert store.calls == [LOAD, CLAIM, SETTLEMENT, RELEASE]
+    assert seams.calls == []
 
 
 def test_a_cancellation_before_anything_is_signed_hands_the_claim_back(store: Store, seams: Seams) -> None:
