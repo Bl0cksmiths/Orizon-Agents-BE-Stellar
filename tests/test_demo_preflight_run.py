@@ -736,7 +736,8 @@ def test_a_plan_that_substitutes_the_agent_passes(tmp_path: Path) -> None:
 def test_decompose_is_skipped_and_advisory_by_default(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("exclusion.decompose")
-    assert check["status"] == SKIPPED and check["required"] is False
+    assert check["status"] == SKIPPED
+    assert check["required"] is False
     assert out.code == EXIT_GO
 
 
