@@ -264,7 +264,8 @@ def test_a_build_without_the_readiness_route_fails(tmp_path: Path) -> None:
     world.readiness_route = False
     out = run(world, tmp_path)
     check = out.check("build.agent_readiness")
-    assert check["status"] == FAIL and "/api/agents/alpha/readiness answered 404" in check["detail"]
+    assert check["status"] == FAIL
+    assert "/api/agents/alpha/readiness answered 404" in check["detail"]
     assert out.code == EXIT_NO_GO
 
 
