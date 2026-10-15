@@ -1032,7 +1032,8 @@ def test_a_rating_lost_after_the_send_is_still_a_timeout_with_its_hash_in_flight
     (outcome,) = seen
     assert (outcome.status, outcome.tx_hash, outcome.reason) == ("TIMEOUT", IN_FLIGHT, None)
     assert rpc.sent == 1
-    assert after.rating_tx == IN_FLIGHT and after.rating_confirmed is False
+    assert after.rating_tx == IN_FLIGHT
+    assert after.rating_confirmed is False
     (logged,) = svc_errors(caplog)
     for fact in ("outcome=TIMEOUT", "may still land", "credited_usdc=0.0500000", dispute.id, JOB, AGENT, IN_FLIGHT):
         assert fact in logged, (fact, logged)
