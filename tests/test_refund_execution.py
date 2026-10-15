@@ -508,8 +508,10 @@ def test_a_settled_total_that_is_not_a_number_refuses_rather_than_being_skipped(
     promise left over is a good number, so the amount check cannot see it."""
     _no_signing(monkeypatch)
 
+    settlement = _settlement(settled_usdc=settled)
+    dispute = _dispute()
     with pytest.raises(RefundRefused) as exc:
-        refund_svc.creditable_for(_settlement(settled_usdc=settled), _dispute())
+        refund_svc.creditable_for(settlement, dispute)
 
     assert exc.value.code == "refund_amount_invalid"
 
