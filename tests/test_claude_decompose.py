@@ -461,7 +461,8 @@ def test_a_failed_improver_plans_from_the_original_words(
 
     assert "BEGIN USER_INPUT" in fake_claude.calls_for("planner")[0].user
     assert resp.understood_as is None
-    assert resp.models is not None and resp.models.improver is None
+    assert resp.models is not None
+    assert resp.models.improver is None
     assert [s.stage for s in resp.stages] == ["guard", "improve", "plan"]
     assert resp.stages[1].msg == "Prompt improvement unavailable"
     assert fake_jev.calls_for("guard.spec") == []
