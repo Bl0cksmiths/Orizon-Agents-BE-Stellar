@@ -822,7 +822,8 @@ def test_a_seed_given_as_the_buyer_is_refused_unechoed(tmp_path: Path) -> None:
     seed = "S" + "A" * 55
     out = run(healthy_world(), tmp_path, buyer=seed)
     assert out.code == EXIT_REFUSED
-    assert seed not in out.out and "SECRET seed" in out.out
+    assert seed not in out.out
+    assert "SECRET seed" in out.out
 
 
 def test_an_unreadable_team_register_is_refused(tmp_path: Path) -> None:
