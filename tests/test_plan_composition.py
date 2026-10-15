@@ -306,7 +306,8 @@ def test_composition_only_drops_or_reorders_never_adds(proposed: list[str]) -> N
     builders = [i for i, a in enumerate(ids) if a in (GEN, NEXT)]
     for i, a in enumerate(ids):
         if a in (CRITIC, DEPLOY):
-            assert builders and all(b < i for b in builders)
+            assert builders
+            assert all(b < i for b in builders)
         if a == CRITIC:
             assert GEN in ids  # the critic reviews code.gen's build only
         if a == DEPLOY:
