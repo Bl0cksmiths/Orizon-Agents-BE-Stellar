@@ -301,8 +301,9 @@ def test_plan_is_refused_when_every_offered_agent_leaves_during_planning(
         return _plan("agt_11c0")
 
     before = set(state.plans)
+    reps = _clearing_reps()
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
-        _decompose(monkeypatch, _clearing_reps(), _arun)
+        _decompose(monkeypatch, reps, _arun)
     # Nothing was minted for /execute to find.
     assert set(state.plans) == before
 
