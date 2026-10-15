@@ -67,7 +67,8 @@ def test_the_stable_half_is_byte_identical_across_requests(fake_claude: FakeClau
 
     first, second = fake_claude.calls_for("planner")
     assert first.system == second.system == f"{CLAUDE_INSTRUCTIONS}\n\n{BLOCK}"
-    assert "bakery" not in first.system and "oolong" not in second.system
+    assert "bakery" not in first.system
+    assert "oolong" not in second.system
     assert first.user != second.user
 
 
