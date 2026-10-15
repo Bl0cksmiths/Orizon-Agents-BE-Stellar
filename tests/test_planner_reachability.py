@@ -313,7 +313,8 @@ def test_refresh_probes_an_unknown_agent_and_remembers_the_verdict(probes) -> No
 
     assert sorted(probes.calls) == [ALIVE, DEAD]
     assert reachability.is_failing(DEAD)
-    assert not reachability.is_failing(ALIVE) and reachability.has_fresh_verdict(ALIVE)
+    assert not reachability.is_failing(ALIVE)
+    assert reachability.has_fresh_verdict(ALIVE)
 
 
 def test_refresh_skips_fresh_verdicts_and_never_doubles_a_probe(probes) -> None:
