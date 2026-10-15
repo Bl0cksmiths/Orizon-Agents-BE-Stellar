@@ -60,7 +60,8 @@ def test_a_well_formed_plan_passes_every_check():
 )
 def test_a_wrong_plan_fails_its_check(plan, failed):
     checks = plan_checks(plan)
-    assert checks[failed] == 0 and checks["plan_valid"] == 0
+    assert checks[failed] == 0
+    assert checks["plan_valid"] == 0
 
 
 def _case(verdict="allow", tier="low", category="legit_low"):
