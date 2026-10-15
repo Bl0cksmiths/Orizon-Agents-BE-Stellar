@@ -164,7 +164,8 @@ def test_the_rating_trace_lines_are_the_ones_execution_writes() -> None:
 )
 def test_an_unlanded_line_names_the_agent_before_the_first_colon(line: str, name: str, prefix: str) -> None:
     u = UNLANDED_LINE.match(line)
-    assert u and (u.group("name"), u.group("prefix")) == (name, prefix)
+    assert u
+    assert (u.group("name"), u.group("prefix")) == (name, prefix)
 
 
 @pytest.mark.parametrize(
