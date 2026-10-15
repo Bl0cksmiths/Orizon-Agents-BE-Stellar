@@ -303,7 +303,8 @@ def test_a_settlement_without_hashes_fails_verification_plainly(
     edit_state(tmp_path, settlement=None, owners=None, authorize=None)
     resumed = run(world, buyer, tmp_path, "--from-task", task_id, "--until", "verify", intent=False)
     assert resumed.code == EXIT_VERIFY_FAILED
-    assert "settle" not in resumed.events() and "seal" not in resumed.events()
+    assert "settle" not in resumed.events()
+    assert "seal" not in resumed.events()
     checks = {c["name"]: c for c in resumed.rows()[-2]["detail"]["checks"]}
     assert checks["v2_settle_tx"] == {
         "name": "v2_settle_tx",
