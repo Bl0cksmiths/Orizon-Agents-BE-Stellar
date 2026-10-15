@@ -80,7 +80,8 @@ def test_without_a_signing_key_nothing_is_sent(
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
         assert _settle((0.01,), frozenset({0})) == (None, None, None)
 
-    assert chain.calls == [] and chain.reads == []
+    assert chain.calls == []
+    assert chain.reads == []
     assert _lines() == [("error", "STELLAR_SIGNING_KEY not set — skipping on-chain settle/seal", "failed")]
     assert _errors(caplog) == [
         f"task {TASK}: STELLAR_SIGNING_KEY not set — skipping on-chain settle/seal "
