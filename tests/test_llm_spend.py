@@ -159,7 +159,8 @@ def test_a_failed_write_is_logged_and_the_spend_still_counts(
 
     asyncio.run(run())
     messages = " ".join(r.getMessage() for r in caplog.records)
-    assert "not persisted" in messages and "unreadable" in messages
+    assert "not persisted" in messages
+    assert "unreadable" in messages
 
 
 def test_record_refuses_a_bad_purpose_or_cost() -> None:
