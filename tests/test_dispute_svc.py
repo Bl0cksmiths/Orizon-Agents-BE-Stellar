@@ -282,8 +282,9 @@ def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
 
     with pytest.raises(DisputeError) as healthy:
         _open(impostor, claimed_payer=payer.public_key)
+    damaged_nonce = _raw_nonce("dead" * 8, 0)
     with pytest.raises(DisputeError) as damaged:
-        _open(impostor, job="dead" * 8, nonce=_raw_nonce("dead" * 8, 0), claimed_payer=payer.public_key)
+        _open(impostor, job="dead" * 8, nonce=damaged_nonce, claimed_payer=payer.public_key)
 
     assert (healthy.value.code, healthy.value.status_code) == ("not_the_payer", 403)
     assert (damaged.value.code, damaged.value.status_code) == ("not_the_payer", 403)
