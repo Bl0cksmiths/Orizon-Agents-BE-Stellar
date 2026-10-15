@@ -311,4 +311,5 @@ def test_a_harness_file_with_no_transactions_is_fine_beside_a_given_hash(tmp_pat
 def test_a_harness_file_with_no_transactions_alone_is_still_refused(tmp_path: Path) -> None:
     harness = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("preflight", None, network="unknown")])
     out = run(FakeLedger(), tmp_path, str(harness))
-    assert out.code == EXIT_REFUSED and "no transaction rows" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no transaction rows" in out.out
