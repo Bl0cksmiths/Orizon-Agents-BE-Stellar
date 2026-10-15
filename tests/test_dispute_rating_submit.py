@@ -436,8 +436,9 @@ def test_a_job_id_that_will_not_derive_raises_instead_of_rating(monkeypatch, cap
     _no_submit(monkeypatch)
 
     with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        underivable = _dispute(job_id_hex=job_id_hex)
         with pytest.raises(ValueError):
-            _rate(_dispute(job_id_hex=job_id_hex))
+            _rate(underivable)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
     assert any(DISPUTE_ID in m and job_id_hex in m and PAYER in m for m in msgs), (
