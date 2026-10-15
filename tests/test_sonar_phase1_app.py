@@ -160,6 +160,7 @@ def test_a_field_selected_body_is_byte_for_byte_the_previous_encoding(
 def test_a_value_the_agent_schema_cannot_encode_fails_loudly(client: TestClient, listed: list[Agent]) -> None:
     """No fallback guesses at an unknown value: the payload is refused, never shipped half-encoded."""
     state.add_agent(listed[0].model_copy(update={"id": "ag_999", "owner": object()}))
-    with pytest.raises(PydanticSerializationError), warnings.catch_warnings():
+    with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        client.get("/api/agents", params={"fields": "owner"})
+        with pytest.raises(PydanticSerializationError):
+            client.get("/api/agents", params={"fields": "owner"})
