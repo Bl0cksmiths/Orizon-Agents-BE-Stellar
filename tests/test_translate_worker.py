@@ -252,7 +252,8 @@ def test_a_translation_the_model_did_not_deliver_fails_the_step(
 ) -> None:
     script(claude)
     err = _failure(**({"context": {"copywrite.v3": COPY}} | kw))
-    assert err.rule == rule and "MODEL-PROSE" not in str(err)
+    assert err.rule == rule
+    assert "MODEL-PROSE" not in str(err)
 
 
 def test_a_slow_translation_fails_inside_the_step_deadline(claude: FakeClaude, monkeypatch: pytest.MonkeyPatch) -> None:
