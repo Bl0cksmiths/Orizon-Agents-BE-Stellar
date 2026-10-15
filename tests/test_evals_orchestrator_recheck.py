@@ -51,7 +51,8 @@ def test_the_recheck_compares_both_runs_and_books_the_cut_off_estimate(runs, tmp
     assert costs["cut_off_estimated_usd"] == {"code.gen": 0.1296}
     assert costs["total_with_estimates_usd"] == pytest.approx(costs["measured_total_usd"] + 0.1296)
     report = (tmp_path / "REPORT.md").read_text()
-    assert "≈ $0.1296" in report and "| re-check, legit requests |" in report
+    assert "≈ $0.1296" in report
+    assert "| re-check, legit requests |" in report
 
 
 def test_the_code_length_section_measures_the_saved_html(runs, tmp_path):
