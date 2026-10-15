@@ -185,7 +185,7 @@ class Chain:
         raise RuntimeError(f"no fake for {contract_id}.{method}")
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch):
     from types import SimpleNamespace
 
