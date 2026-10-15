@@ -257,7 +257,7 @@ def _sync_log(caplog: pytest.LogCaptureFixture, level: int) -> list[logging.LogR
     return [r for r in caplog.records if r.name == SYNC_LOGGER and r.levelno == level]
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
     """A configured registry contract backed by an in-memory record set.
 
