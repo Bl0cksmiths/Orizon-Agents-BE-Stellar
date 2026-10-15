@@ -192,7 +192,8 @@ def test_sol_audit_fits_long_rationales_extra_findings_and_an_out_of_range_score
     )
     out = run("agt_04m1")
     assert len(out["summary"]) <= 280
-    assert len(out["findings"]) == 6 and all(len(f["rationale"]) <= 240 for f in out["findings"])
+    assert len(out["findings"]) == 6
+    assert all(len(f["rationale"]) <= 240 for f in out["findings"])
     assert out["cvss_estimate"] == 10.0
 
 
