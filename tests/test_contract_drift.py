@@ -279,8 +279,9 @@ def test_public_and_mainnet_name_the_same_network() -> None:
 
 
 def test_an_unknown_network_name_is_refused() -> None:
+    canonical = _canonical_json("futurenet", MAINNET_IDS)
     with pytest.raises(DriftCheckError, match="unknown network"):
-        parse_canonical(_canonical_json("futurenet", MAINNET_IDS), "canonical")
+        parse_canonical(canonical, "canonical")
 
 
 # ── finding the files ────────────────────────────────────────────────────────
