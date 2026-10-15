@@ -782,7 +782,9 @@ def test_a_team_operator_without_the_flag_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path, operator=TEAM)
     assert out.code == EXIT_NO_GO
     check = out.check("wallets.team")
-    assert check["status"] == FAIL and TEAM in check["detail"] and "--allow-team-operator" in check["fix"]
+    assert check["status"] == FAIL
+    assert TEAM in check["detail"]
+    assert "--allow-team-operator" in check["fix"]
     assert out.report()["disclosures"] == []
 
 
