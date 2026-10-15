@@ -128,8 +128,10 @@ def test_the_harness_signature_verifies_as_the_backend_verifies_it() -> None:
     assert eb._signature_matches(kp.public_key, message, signature)
     # and it is SEP-53, the wallet's encoding — not a raw-bytes signature
     raw = base64.b64decode(signature)
+    verifier = Keypair.from_public_key(kp.public_key)
+    message_bytes = message.encode()
     with pytest.raises(ValueError):
-        Keypair.from_public_key(kp.public_key).verify(message.encode(), raw)
+        verifier.verify(message_bytes, raw)
 
 
 # ── the stroop conversion and the trace lines ───────────────────
