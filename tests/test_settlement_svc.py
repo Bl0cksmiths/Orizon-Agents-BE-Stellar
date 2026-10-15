@@ -724,7 +724,7 @@ def test_a_payer_budget_timeout_excludes_every_charge(monkeypatch: pytest.Monkey
 def test_an_unconfigured_sac_reports_an_unknown_asset(monkeypatch: pytest.MonkeyPatch) -> None:
     """No SAC id means nothing to ask what the amounts are denominated in.
     Saying so beats defaulting to a unit the deployment may not use."""
-    settings.stellar_asset_sac = ""
+    monkeypatch.setattr(settings, "stellar_asset_sac", "")
     result = _run(monkeypatch, _FakeRpc(), _reader())
 
     assert result.asset == "unknown"
