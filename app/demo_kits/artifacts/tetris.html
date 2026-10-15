@@ -1008,6 +1008,7 @@
       if (!Array.isArray(arr)) return [];
       return arr.filter(s => s && typeof s.score === 'number').slice(0, 3);
     } catch (e) {
+      // Storage blocked (privacy mode) or corrupt JSON: play on with an empty table.
       return [];
     }
   }
