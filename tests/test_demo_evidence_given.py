@@ -205,7 +205,8 @@ def test_a_malformed_rows_file_is_refused(tmp_path: Path, body: Any, says: str) 
 
 def test_an_unreadable_rows_file_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path, "--rows", str(tmp_path / "nowhere.json"))
-    assert out.code == EXIT_REFUSED and "cannot be read" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "cannot be read" in out.out
 
 
 @pytest.mark.parametrize(
