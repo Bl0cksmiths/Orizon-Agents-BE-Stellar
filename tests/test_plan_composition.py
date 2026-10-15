@@ -38,7 +38,7 @@ OCR, TRANSLATE, ADS, AUDIT = "agt_06q4", "agt_10b6", "agt_07w3", "agt_04m1"
 INTENT = "build a landing page for my bakery with opening hours"
 
 
-@pytest.fixture()
+@pytest.fixture
 def claude_on(fake_claude: FakeClaude, fake_jev: FakeJev, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
     saved = dict(state.agents)
