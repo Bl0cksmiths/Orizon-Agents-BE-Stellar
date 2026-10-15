@@ -39,7 +39,7 @@ from app.services.external_binding import OwnerLookupError
 ENDPOINT = "https://operator.example/run"
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch):
     """A fresh binding store per test, injected at the router's seam so the
     tests never depend on the resolver's internal singleton."""
