@@ -260,7 +260,8 @@ def test_boot_reports_the_verdict(monkeypatch, caplog):
         client.get("/health")
         record = _wait_for_line(client, caplog)
     assert record.levelno == logging.WARNING
-    assert SIGNER in record.getMessage() and OTHER in record.getMessage()
+    assert SIGNER in record.getMessage()
+    assert OTHER in record.getMessage()
 
 
 def test_the_hermetic_default_boots_disabled_without_a_chain_read(monkeypatch, caplog):
