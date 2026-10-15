@@ -445,8 +445,10 @@ def test_not_found_after_max_time_and_its_margin_releases(store: DisputeStore, c
 
     decision, current, claims = run(store, go())
 
-    assert decision.action == "expired_released" and decision.chain == "NOT_FOUND"
-    assert current is not None and (current.status, current.refund_tx) == ("upheld", None)
+    assert decision.action == "expired_released"
+    assert decision.chain == "NOT_FOUND"
+    assert current is not None
+    assert (current.status, current.refund_tx) == ("upheld", None)
     assert claims == ()
 
 
