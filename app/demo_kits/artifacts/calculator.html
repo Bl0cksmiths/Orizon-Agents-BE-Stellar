@@ -831,8 +831,9 @@
     try {
       await navigator.clipboard.writeText(text);
       toast('copied · ' + text);
-    } catch (e) {
-      // Fallback for older browsers / insecure contexts.
+    } catch {
+      // The Clipboard API is missing or denied (older browsers, insecure
+      // contexts), so the reason does not matter: fall back to execCommand.
       const ta = document.createElement('textarea');
       ta.value = text;
       document.body.appendChild(ta);
