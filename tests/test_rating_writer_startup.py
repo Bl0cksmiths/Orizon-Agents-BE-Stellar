@@ -144,7 +144,8 @@ def test_start_checks_and_reports_without_being_awaited(monkeypatch, caplog):
     async def _boot():
         rw.start()
         task = rw._report_task
-        assert task is not None and not task.done()  # start() returned first
+        assert task is not None
+        assert not task.done()  # start() returned first
         await task
 
     with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
