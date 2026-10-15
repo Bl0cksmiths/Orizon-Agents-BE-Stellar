@@ -345,7 +345,8 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     dispute = open_dispute()
     ledger.script = ["late"]
     unconfirmed = uphold(dispute.id)
-    assert unconfirmed.rating_tx == "tx_rating_1" and invalidated == []
+    assert unconfirmed.rating_tx == "tx_rating_1"
+    assert invalidated == []
     assert unconfirmed.rating_confirmed is False
 
     confirmed = uphold(dispute.id)
@@ -354,9 +355,11 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     # them: only the confirmation moved, and the moment it was recorded.
     assert confirmed.rating_confirmed is True
     assert confirmed == replace(unconfirmed, rating_confirmed=True, updated_at=confirmed.updated_at)
-    assert confirmed.updated_at is not None and unconfirmed.updated_at is not None
+    assert confirmed.updated_at is not None
+    assert unconfirmed.updated_at is not None
     assert confirmed.updated_at >= unconfirmed.updated_at
-    assert ledger.replays == 1 and len(ledger.submits) == 1
+    assert ledger.replays == 1
+    assert len(ledger.submits) == 1
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
 
