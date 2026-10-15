@@ -371,7 +371,8 @@ def test_no_image_exclusion_says_there_was_nothing_to_read():
     n = plan_notices.no_image_exclusion(_agent("agt_06q4", "vision.ocr"))
 
     assert (n.kind, n.reason_code) == ("excluded", "no_image_input")
-    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
     assert n.reason == (
         "the plan asked it to read an image, but the request has no image or https image link (nothing to read, so "
         "the step was left out)"
