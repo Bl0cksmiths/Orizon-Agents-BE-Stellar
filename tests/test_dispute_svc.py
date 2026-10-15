@@ -501,8 +501,9 @@ def test_a_step_that_produced_no_output_cannot_be_disputed() -> None:
         steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.05, delivered=False),),
     )
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "step_not_settled"
     assert refused.value.status_code == 409
