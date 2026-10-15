@@ -1074,7 +1074,8 @@ def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> Non
     assert refused.value.code == "settlement_missing"
     assert refused.value.status_code == 409
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid is not None
+    assert unpaid.status == "upheld"
 
 
 # ── rejection, and what a rejected dispute may never become ─────
