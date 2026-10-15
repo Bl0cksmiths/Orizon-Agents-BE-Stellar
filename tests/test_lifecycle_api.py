@@ -13,7 +13,7 @@ from stellar_sdk import scval
 from scripts.lifecycle.api import ApiError, OrizonApi, UnknownOutcome
 from scripts.lifecycle.chain import ChainReader, SimulationError
 from scripts.lifecycle.config import TESTNET_PASSPHRASE, normalize_api_base
-from scripts.lifecycle.retry import RetryPolicy
+from scripts.lifecycle.retry import RetryableStatus, RetryPolicy
 
 BASE = "https://api.fake"
 RPC = "https://rpc.fake"
@@ -261,7 +261,7 @@ def test_an_rpc_outage_is_never_read_as_v1() -> None:
         return httpx.Response(503, text="down")
 
     reader, _ = _chain(down)
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RetryableStatus, match="HTTP 503") as exc:
         reader.escrow_version(
             "CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI",
             "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
