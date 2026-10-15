@@ -344,7 +344,9 @@ def test_a_settler_that_is_not_the_signing_key_fails(tmp_path: Path) -> None:
     assert out.code == EXIT_NO_GO
     check = out.check("escrow.settler")
     assert check["status"] == FAIL
-    assert OTHER_SIGNER in check["detail"] and SIGNER in check["detail"] and "Unauthorized" in check["detail"]
+    assert OTHER_SIGNER in check["detail"]
+    assert SIGNER in check["detail"]
+    assert "Unauthorized" in check["detail"]
 
 
 def test_no_signing_key_fails_the_settler_check(tmp_path: Path) -> None:
