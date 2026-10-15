@@ -1516,7 +1516,8 @@ def test_a_rating_success_with_no_hash_is_not_reported_as_landed(
 
     assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
     assert "submitted and unconfirmed" in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
 
 
 def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_consequence_did_not_land(
