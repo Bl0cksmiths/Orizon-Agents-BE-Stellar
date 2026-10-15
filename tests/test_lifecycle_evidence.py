@@ -116,7 +116,9 @@ def test_secret_shapes_are_masked_even_unregistered() -> None:
     kp = Keypair.random()
     xdr_like = "AAAAAgAAAAB+" + "Q" * 200 + "=="
     out = Redactor().scrub(f"seed {kp.secret} envelope {xdr_like} sig {'Zm9v' * 20}+w==")
-    assert kp.secret not in out and xdr_like not in out and "Zm9v" not in out
+    assert kp.secret not in out
+    assert xdr_like not in out
+    assert "Zm9v" not in out
 
 
 def test_evidence_values_are_never_masked() -> None:
