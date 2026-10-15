@@ -513,6 +513,21 @@
   }
 
   // ── RPN evaluator ────────────────────────────────────────────────────────
+  function applyFn(name, a) {
+    switch (name) {
+      case 'sin': return Math.sin(a);
+      case 'cos': return Math.cos(a);
+      case 'tan': return Math.tan(a);
+      case 'asin': return Math.asin(a);
+      case 'acos': return Math.acos(a);
+      case 'atan': return Math.atan(a);
+      case 'log': return Math.log10(a);
+      case 'ln':  return Math.log(a);
+      case 'sqrt': return Math.sqrt(a);
+      case 'abs': return Math.abs(a);
+      default: throw new Error('syntax');
+    }
+  }
   function evalRPN(rpn) {
     const stack = [];
     for (const t of rpn) {
@@ -537,22 +552,7 @@
         }
       } else if (t.kind === 'fn') {
         if (!stack.length) throw new Error('syntax');
-        const a = stack.pop();
-        let r;
-        switch (t.value) {
-          case 'sin': r = Math.sin(a); break;
-          case 'cos': r = Math.cos(a); break;
-          case 'tan': r = Math.tan(a); break;
-          case 'asin': r = Math.asin(a); break;
-          case 'acos': r = Math.acos(a); break;
-          case 'atan': r = Math.atan(a); break;
-          case 'log': r = Math.log10(a); break;
-          case 'ln':  r = Math.log(a); break;
-          case 'sqrt': r = Math.sqrt(a); break;
-          case 'abs': r = Math.abs(a); break;
-          default: throw new Error('syntax');
-        }
-        stack.push(r);
+        stack.push(applyFn(t.value, stack.pop()));
       }
     }
     if (stack.length !== 1) throw new Error('syntax');
