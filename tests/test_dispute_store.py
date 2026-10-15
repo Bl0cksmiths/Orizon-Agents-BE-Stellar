@@ -702,7 +702,8 @@ def test_a_credit_naming_a_transfer_refuses_a_dispute_now_waiting_on_another(sto
 
     assert refused is None
     assert held == ["dsp_0001"]
-    assert landed is not None and (landed.status, landed.refund_tx, landed.credited_usdc) == ("credited", "tx_new", 1.5)
+    assert landed is not None
+    assert (landed.status, landed.refund_tx, landed.credited_usdc) == ("credited", "tx_new", 1.5)
     assert after == ()
 
 
