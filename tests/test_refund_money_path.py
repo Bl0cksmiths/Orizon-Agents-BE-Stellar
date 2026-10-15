@@ -95,8 +95,9 @@ def test_a_transfer_refused_before_the_send_hands_the_claim_back(monkeypatch, wh
     calls = _chain(monkeypatch, why)
     dispute = a_dispute()
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert (refused.value.code, refused.value.status_code) == ("refund_failed", 502)
     assert len(calls) == 1
