@@ -161,8 +161,9 @@ def test_an_image_claude_cannot_read_is_refused_before_anything_is_sent(
     api: Callable[..., Recorder], image: tuple[str, str]
 ) -> None:
     recorder = api()
+    images = [claude.ImageBlock(*image)]
     with pytest.raises(ValueError, match="image"):
-        _plan(images=[claude.ImageBlock(*image)])
+        _plan(images=images)
     assert recorder.requests == []
 
 
