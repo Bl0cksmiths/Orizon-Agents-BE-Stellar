@@ -240,8 +240,9 @@ def test_a_bug_while_pricing_the_credit_hands_the_claim_back(monkeypatch) -> Non
         raise TypeError("a bug in the arithmetic")
 
     monkeypatch.setattr(refund_svc, "creditable_for", _broken)
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(TypeError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert calls == []
     current, queue = _stored(dispute.id)
