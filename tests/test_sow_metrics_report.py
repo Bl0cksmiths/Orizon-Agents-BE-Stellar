@@ -243,8 +243,9 @@ def test_the_generator_refuses_to_write_a_block_that_breaks_the_shape(
         return m
 
     monkeypatch.setattr(metrics_module, "m09", leaky)
+    world = met_world()
     with pytest.raises(ValueError, match="contains a Stellar address"):
-        run(met_world(), tmp_path)
+        run(world, tmp_path)
     assert not (tmp_path / "metrics" / BLOCK_NAME).exists()
 
 
