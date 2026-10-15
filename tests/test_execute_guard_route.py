@@ -71,7 +71,7 @@ def guarded(monkeypatch: pytest.MonkeyPatch) -> None:
     state.plans.pop(PLAN_ID, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def runs(monkeypatch: pytest.MonkeyPatch) -> RunRecorder:
     recorder = RunRecorder()
     monkeypatch.setattr(orchestrator_router, "execute_plan", recorder)
