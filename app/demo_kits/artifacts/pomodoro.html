@@ -925,7 +925,7 @@
     longVal.textContent = `${state.settings.longMin} min`;
   }
   function onRangeChange(name, val) {
-    const v = parseInt(val, 10);
+    const v = Number.parseInt(val, 10);
     if (name === 'workMin') state.settings.workMin = clamp(v, 15, 90);
     else if (name === 'shortMin') state.settings.shortMin = clamp(v, 3, 15);
     else state.settings.longMin = clamp(v, 10, 45);
