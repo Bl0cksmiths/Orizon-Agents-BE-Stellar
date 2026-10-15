@@ -316,9 +316,10 @@ def test_a_dispute_without_a_challenge_is_refused() -> None:
     payer = Keypair.random()
     _seed(payer.public_key)
     never_issued = "0" * 32
+    signature = _sign(payer, dispute_message(JOB, 0, never_issued))
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=never_issued, signature=_sign(payer, dispute_message(JOB, 0, never_issued)))
+        _open(payer, nonce=never_issued, signature=signature)
 
     assert refused.value.code == "challenge_expired"
     assert refused.value.status_code == 400
