@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,11 +62,11 @@ def _cell(builds: _Builds, name: str = "doc") -> SnapshotCell[_Doc]:
 
 
 @pytest.fixture
-def store(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySnapshotStore]:
+def store(monkeypatch: pytest.MonkeyPatch) -> InMemorySnapshotStore:
     s = InMemorySnapshotStore()
     monkeypatch.setattr(snapshot_store, "_store", s)
     monkeypatch.setattr(snapshots, "_boot_hooks", [])
-    yield s
+    return s
 
 
 async def _drain_saves() -> None:
