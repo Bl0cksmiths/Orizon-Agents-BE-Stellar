@@ -494,7 +494,8 @@ def test_an_rpc_error_never_releases_and_never_credits(store: DisputeStore, chai
 
     decision, unchanged = _unchanged(store, lambda _: None)
 
-    assert decision.action == "rpc_error" and unchanged
+    assert decision.action == "rpc_error"
+    assert unchanged
 
 
 def test_a_hash_older_than_the_rpc_s_history_never_releases_and_never_credits(
