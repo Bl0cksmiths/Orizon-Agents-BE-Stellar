@@ -526,7 +526,8 @@ def test_an_unknown_rpc_status_never_releases(store: DisputeStore, chain: Chain)
 
     decision, unchanged = _unchanged(store, lambda _: None)
 
-    assert decision.action == "rpc_error" and unchanged
+    assert decision.action == "rpc_error"
+    assert unchanged
 
 
 @pytest.mark.parametrize(
