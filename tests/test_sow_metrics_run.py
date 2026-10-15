@@ -224,12 +224,14 @@ def test_every_runtime_platform_key_is_excluded(tmp_path: Path, role_source: str
 def test_one_outside_operator_misses_both_adoption_targets(tmp_path: Path) -> None:
     register = FakeWorld.write_register(tmp_path / "r.json", {**REGISTER_ROLES, OP2: "second QA operator key"})
     out = run(met_world(), tmp_path, register=register)
-    assert out.status("m01") == "not_met" and out.metric("m01")["achieved"] == "1"
+    assert out.status("m01") == "not_met"
+    assert out.metric("m01")["achieved"] == "1"
     assert out.metric("m01")["reason"] == (
         "Only 1 agent is registered by outside operators; the other 5 belong to wallets the team controls. "
         "The target is 2."
     )
-    assert out.status("m02") == "not_met" and out.metric("m02")["achieved"] == "1"
+    assert out.status("m02") == "not_met"
+    assert out.metric("m02")["achieved"] == "1"
     assert out.metric("m02")["reason"] == "Only 1 outside operator wallet owns an agent. The target is 2."
 
 
