@@ -674,9 +674,11 @@ def test_a_stuck_payout_can_still_be_released_after_a_restart(monkeypatch: pytes
             return released, queue, await store.claim_refund(opened.id)
 
         released, queue, reclaimed = run(store, after())
-        assert released is not None and released.status == "upheld"
+        assert released is not None
+        assert released.status == "upheld"
         assert queue == ()
-        assert reclaimed is not None and reclaimed.status == "crediting"
+        assert reclaimed is not None
+        assert reclaimed.status == "crediting"
 
 
 # ── the two stores, side by side ──────────────────────────────────────────
