@@ -1326,7 +1326,8 @@ def test_a_rejection_keeps_the_adjudicators_reason_on_the_record(monkeypatch) ->
 
     assert rejected.note == "the SEO brief was delivered in full"
     stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stored is not None and stored.note == rejected.note
+    assert stored is not None
+    assert stored.note == rejected.note
     # The platform's side is written beside the buyer's, never over it.
     assert rejected.reason == dispute.reason
 
