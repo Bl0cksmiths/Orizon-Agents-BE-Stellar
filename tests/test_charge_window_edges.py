@@ -86,7 +86,7 @@ def rpc(monkeypatch: pytest.MonkeyPatch) -> Rpc:
     return fake
 
 
-@pytest.fixture()
+@pytest.fixture
 def views(monkeypatch: pytest.MonkeyPatch, rpc: Rpc) -> Iterator[_Views]:
     fake = _Views()
     monkeypatch.setattr(settings, "stellar_payment_escrow", ESCROW_ID)
