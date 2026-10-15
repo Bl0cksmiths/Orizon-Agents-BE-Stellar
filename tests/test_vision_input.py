@@ -241,8 +241,9 @@ def test_a_slow_image_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         return httpx.Response(200, content=PNG)
 
     transport = httpx.MockTransport(slow)
+    fetching = fetch_image("https://img.example.com/a.png", transport=transport)
     with pytest.raises(ImageInputError) as info:
-        asyncio.run(fetch_image("https://img.example.com/a.png", transport=transport))
+        asyncio.run(fetching)
     assert info.value.rule == "image_timeout"
 
 
