@@ -727,15 +727,8 @@
     }
   }
 
-  function lockPiece() {
-    if (!state.active) return;
-    // 1. T-spin detection happens BEFORE we write to the board.
-    const tspin = tspinKind();
-
-    // 2. Write the piece to the board.
-    writePieceToBoard(state.active);
-
-    // 3. Clear completed lines.
+  // Removes every full row and returns how many were cleared.
+  function clearFullRows() {
     let cleared = 0;
     for (let r = ROWS - 1; r >= 0; r--) {
       if (state.board[r].every(cell => cell !== null)) {
@@ -745,6 +738,19 @@
         r++; // re-check same row index after shift
       }
     }
+    return cleared;
+  }
+
+  function lockPiece() {
+    if (!state.active) return;
+    // 1. T-spin detection happens BEFORE we write to the board.
+    const tspin = tspinKind();
+
+    // 2. Write the piece to the board.
+    writePieceToBoard(state.active);
+
+    // 3. Clear completed lines.
+    const cleared = clearFullRows();
 
     // 4. Score the result.
     let gained = 0;
