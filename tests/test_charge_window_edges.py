@@ -72,7 +72,7 @@ class Rpc(_Rpc):
         return super().get_events(start_ledger=start_ledger, end_ledger=end_ledger, **kw)
 
 
-@pytest.fixture()
+@pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     fake = Clock()
     monkeypatch.setattr(charge_window, "time", SimpleNamespace(monotonic=fake.monotonic))
