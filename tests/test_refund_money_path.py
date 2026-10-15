@@ -405,8 +405,9 @@ def test_nothing_left_of_the_settlement_is_nothing_to_credit(monkeypatch) -> Non
     first, second = _two_disputes_of_one_job(settled_usdc=0.07)
 
     asyncio.run(dispute_svc.uphold(second.id))
+    upholding = dispute_svc.uphold(first.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(first.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "nothing_to_credit"
     assert len(calls) == 1
