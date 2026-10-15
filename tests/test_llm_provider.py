@@ -71,7 +71,8 @@ def test_readiness_is_not_ready_when_claude_is_forced_without_its_key(client, mo
     monkeypatch.setattr(settings, "openai_api_key", "sk-openai")
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
     r = client.get("/readiness")
-    assert r.status_code == 503 and r.json()["llm"] == "missing_key"
+    assert r.status_code == 503
+    assert r.json()["llm"] == "missing_key"
 
 
 def test_a_missing_jev_key_never_gates_readiness(client, monkeypatch: pytest.MonkeyPatch) -> None:
