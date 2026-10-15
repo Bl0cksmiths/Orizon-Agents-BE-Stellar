@@ -369,7 +369,8 @@ def test_refunds_off_fails(tmp_path: Path) -> None:
     assert out.code == EXIT_NO_GO
     check = out.check("refunds.enabled")
     assert check["status"] == FAIL
-    assert "DISPUTE_REFUNDS_ENABLED=true" in check["fix"] and "REFUND_RECONCILE_ENABLED=true" in check["fix"]
+    assert "DISPUTE_REFUNDS_ENABLED=true" in check["fix"]
+    assert "REFUND_RECONCILE_ENABLED=true" in check["fix"]
 
 
 def test_a_durable_dispute_store_passes(tmp_path: Path) -> None:
