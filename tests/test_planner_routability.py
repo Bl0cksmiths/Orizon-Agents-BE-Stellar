@@ -46,7 +46,7 @@ def _step(agent_id: str) -> PlanStep:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def indexed_agent():
     """A story-1.02 indexed agent: present in the registry, no local worker.
     (ext_ namespace on purpose — agt_ is the seeded catalog.) The whole
