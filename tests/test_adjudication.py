@@ -771,8 +771,9 @@ def test_a_failed_transfer_leaves_the_dispute_upheld_and_still_payable(monkeypat
     dispute = a_dispute()
     chain = settler(monkeypatch, REJECTED, LANDED)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_failed"
     assert refused.value.status_code == 502
