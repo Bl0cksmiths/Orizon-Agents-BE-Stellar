@@ -89,7 +89,8 @@ def test_a_refused_plan_is_not_graded_as_a_plan():
 
 def test_wilson_interval_matches_known_values():
     lo, hi = metrics.wilson(8, 10)
-    assert lo == pytest.approx(0.4902, abs=1e-3) and hi == pytest.approx(0.9433, abs=1e-3)
+    assert lo == pytest.approx(0.4902, abs=1e-3)
+    assert hi == pytest.approx(0.9433, abs=1e-3)
     assert metrics.wilson(0, 0) is None
     assert metrics.Rate(0, 0).fmt() == "n/a (0 cases)"
 
