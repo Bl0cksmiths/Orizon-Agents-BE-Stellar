@@ -629,7 +629,9 @@
       if (typeof s.theme === 'string') state.theme = s.theme;
       if (typeof s.muted === 'boolean') state.muted = s.muted;
       if (typeof s.notifEnabled === 'boolean') state.notifEnabled = s.notifEnabled;
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or the saved JSON is corrupt: keep the default settings.
+    }
   }
   function saveSettings() {
     try {
