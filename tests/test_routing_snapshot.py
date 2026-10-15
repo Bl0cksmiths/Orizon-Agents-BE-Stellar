@@ -52,7 +52,7 @@ async def _no_sleep(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Fresh seeded registry and an empty bound set, both restored after."""
     saved = dict(state.agents)
