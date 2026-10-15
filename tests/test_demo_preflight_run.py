@@ -710,7 +710,8 @@ def test_reputation_routing_off_fails(tmp_path: Path) -> None:
     world = healthy_world()
     world.params["enabled"] = False
     check = run(world, tmp_path).check("exclusion.below_floor")
-    assert check["status"] == FAIL and "REPUTATION_ENABLED" in check["fix"]
+    assert check["status"] == FAIL
+    assert "REPUTATION_ENABLED" in check["fix"]
 
 
 def test_a_plan_that_does_not_exclude_the_agent_fails(tmp_path: Path) -> None:
