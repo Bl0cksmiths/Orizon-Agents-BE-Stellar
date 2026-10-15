@@ -183,7 +183,8 @@ def test_the_clients_shared_version_read_is_used_when_it_exists(monkeypatch: pyt
     shared = SharedVersion(2)
     monkeypatch.setattr(sc, "escrow_version", shared, raising=False)
     assert asyncio.run(guard.escrow_version()) == 2
-    assert shared.calls == [ESCROW] and escrow.calls == []
+    assert shared.calls == [ESCROW]
+    assert escrow.calls == []
 
 
 @pytest.mark.parametrize("answer", [RuntimeError("simulate failed: rpc"), 0, True])
