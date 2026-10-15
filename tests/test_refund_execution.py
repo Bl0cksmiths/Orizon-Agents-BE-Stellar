@@ -524,8 +524,10 @@ def test_a_step_price_that_is_not_a_number_refuses_rather_than_being_skipped(mon
         ),
     )
 
+    settlement = _settlement(steps=unpriced)
+    dispute = _dispute()
     with pytest.raises(RefundRefused) as exc:
-        refund_svc.creditable_for(_settlement(steps=unpriced), _dispute())
+        refund_svc.creditable_for(settlement, dispute)
 
     assert exc.value.code == "refund_amount_invalid"
 
