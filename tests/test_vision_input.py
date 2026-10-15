@@ -273,6 +273,7 @@ def test_an_unusable_upload_is_refused(data: str, rule: str) -> None:
 
 def test_an_oversized_upload_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vision_input, "MAX_IMAGE_BYTES", 10)
+    upload = {"data": base64.b64encode(PNG).decode()}
     with pytest.raises(ImageInputError) as info:
-        vision_input.decode_upload({"data": base64.b64encode(PNG).decode()}, "upload 1")
+        vision_input.decode_upload(upload, "upload 1")
     assert info.value.rule == "image_too_large"
