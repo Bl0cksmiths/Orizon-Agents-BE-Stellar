@@ -399,7 +399,8 @@ def test_a_planner_outage_serves_the_flagged_fallback(
     resp = _decompose()
 
     assert resp.planner_fallback is True
-    assert resp.models is not None and resp.models.planner is None
+    assert resp.models is not None
+    assert resp.models.planner is None
     assert resp.stages[-1].msg == "The planner could not answer; a fallback plan was served"
 
 
