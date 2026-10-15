@@ -861,7 +861,9 @@ def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
 
     assert code == uphold_dispute.EXIT_OK
-    assert DISPUTE_ID in out and JOB in out and TASK in out
+    assert DISPUTE_ID in out
+    assert JOB in out
+    assert TASK in out
     assert "promised to the buyer when the dispute was opened" in out
     assert "DISPUTE_CREDITED_FRACTION" in out
     assert "ever settled on-chain for the whole workflow" in out
