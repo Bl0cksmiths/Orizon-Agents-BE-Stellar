@@ -173,8 +173,10 @@ def test_a_superseded_read_is_served_even_past_the_stale_grace(chain, monkeypatc
     served = asyncio.run(scenario())
 
     assert served.degraded is False
-    assert served.stale is True and served.superseded is True
-    assert served.stale_age_seconds is not None and served.stale_age_seconds >= 600.0
+    assert served.stale is True
+    assert served.superseded is True
+    assert served.stale_age_seconds is not None
+    assert served.stale_age_seconds >= 600.0
     assert rep.passes_floor(served) is False
 
 
