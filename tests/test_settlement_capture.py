@@ -93,7 +93,7 @@ class _RecordingStore(InMemoryDisputeStore):
         await super().record_settlement(record)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch) -> _RecordingStore:
     """A cold store for this test, installed as the process singleton.
 
