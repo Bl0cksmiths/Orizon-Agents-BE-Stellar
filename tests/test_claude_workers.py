@@ -266,7 +266,8 @@ def test_the_agno_path_is_untouched_when_the_provider_is_openai(
 
     monkeypatch.setattr(WORKERS["agt_01h8"]._agent, "arun", arun)
     run("agt_01h8", tier="complex")
-    assert len(seen) == 1 and fake_claude.calls == []
+    assert len(seen) == 1
+    assert fake_claude.calls == []
     assert WORKERS["agt_01h8"].step_model("complex", None) == settings.worker_model
 
 
