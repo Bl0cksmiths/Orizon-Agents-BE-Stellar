@@ -220,7 +220,8 @@ def test_a_failing_store_never_stops_a_snapshot_being_built_or_served(
 
     with caplog.at_level("WARNING"):
         snap = asyncio.run(go())
-    assert snap is not None and snap.value.n == 1
+    assert snap is not None
+    assert snap.value.n == 1
     assert "snapshot doc not restored: ConnectionError: neon asleep" in caplog.text
     assert "snapshot doc not persisted: ConnectionError: neon asleep" in caplog.text
     assert "snapshot store did not close cleanly" in caplog.text
