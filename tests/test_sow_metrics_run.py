@@ -758,7 +758,9 @@ def test_the_dispute_milestone_needs_a_real_refund(tmp_path: Path) -> None:
 
 def test_the_dispute_milestone_is_yes_when_everything_holds(tmp_path: Path) -> None:
     m = run(met_world(), tmp_path).metric("m08")
-    assert m["achieved"] == "Yes" and m["status"] == "met" and "reason" not in m
+    assert m["achieved"] == "Yes"
+    assert m["status"] == "met"
+    assert "reason" not in m
 
 
 def test_the_guide_must_answer_with_no_login(tmp_path: Path) -> None:
