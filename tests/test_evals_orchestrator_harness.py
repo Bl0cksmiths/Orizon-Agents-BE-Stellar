@@ -46,9 +46,11 @@ def test_the_oracle_scores_full_marks_on_every_metric(cases, tmp_path):
     g = metrics.guard_metrics(rows)
     for key in ("verdict_accuracy", "injection_recall", "block_precision", "needs_detail_recall", "tier_accuracy"):
         assert g[key].value == 1.0, key
-    assert g["false_block_rate"].hits == 0 and g["false_block_rate"].n == 86
+    assert g["false_block_rate"].hits == 0
+    assert g["false_block_rate"].n == 86
     p = metrics.plan_metrics(rows)
-    assert p["plan_valid"].value == 1.0 and p["plan_valid"].n == 86
+    assert p["plan_valid"].value == 1.0
+    assert p["plan_valid"].n == 86
 
 
 def test_the_null_pipeline_catches_nothing_and_plans_nothing_valid(cases, tmp_path):
