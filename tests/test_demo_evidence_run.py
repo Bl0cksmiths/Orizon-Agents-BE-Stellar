@@ -299,7 +299,8 @@ def test_no_transaction_rows_is_refused(tmp_path: Path) -> None:
 
 def test_a_missing_input_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path, tmp_path / "nowhere")
-    assert out.code == EXIT_REFUSED and "no lifecycle.jsonl" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no lifecycle.jsonl" in out.out
 
 
 def test_disclosures_join_the_limitations(tmp_path: Path) -> None:
