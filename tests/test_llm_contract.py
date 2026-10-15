@@ -180,7 +180,8 @@ def test_a_constraint_the_api_does_not_enforce_is_validated_here(fake_claude: Fa
 def test_a_server_side_fallback_names_the_model_that_served(fake_claude: FakeClaude) -> None:
     fake_claude.reply(Spec(goal="g", constraints=[]), served_by="claude-opus-5")
     result = _structured(model="claude-opus-5-5")
-    assert result.served_by == "claude-opus-5" and result.model == "claude-opus-5-5"
+    assert result.served_by == "claude-opus-5"
+    assert result.model == "claude-opus-5-5"
 
 
 def test_transport_errors_surface_unchanged(fake_claude: FakeClaude) -> None:
