@@ -258,10 +258,13 @@ def test_two_concurrent_executes_against_one_authorization_start_exactly_one_run
     outcomes = asyncio.run(both())
     started = [o for o in outcomes if not isinstance(o, BaseException)]
     refused = [o for o in outcomes if isinstance(o, guard.AuthorizationRefused)]
-    assert len(started) == 1 and len(refused) == 1
+    assert len(started) == 1
+    assert len(refused) == 1
     assert refused[0].code == "authorization_used"
     assert len(runs.calls) == 1
-    assert guard._locks == {} and guard._lock_users == {}  # nothing left behind
+    # nothing left behind
+    assert guard._locks == {}
+    assert guard._lock_users == {}
 
 
 class SlowRun(RunRecorder):
