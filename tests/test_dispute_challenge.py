@@ -274,7 +274,7 @@ def test_the_ttl_is_the_time_to_sign_not_the_time_to_dispute() -> None:
     assert eb.CHALLENGE_TTL_SECONDS < 86_400
 
 
-@pytest.fixture()
+@pytest.fixture
 def empty_table():
     """An empty challenge table, restored afterwards."""
     saved = eb._challenges.copy()
