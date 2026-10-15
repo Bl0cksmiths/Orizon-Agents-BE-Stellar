@@ -321,7 +321,8 @@ def test_the_first_eviction_warns_and_names_what_was_dropped(tiny_cap, caplog):
     assert "ext_a" in dropped
     # The streak that was lost, so the operator can tell a dropped counter from
     # an agent that genuinely just started failing.
-    assert "connect_failed" in dropped and "2 consecutive" in dropped
+    assert "connect_failed" in dropped
+    assert "2 consecutive" in dropped
 
 
 def test_evictions_coalesce_to_debug_while_the_map_stays_full(tiny_cap, caplog):
