@@ -177,8 +177,10 @@ def test_a_signature_does_not_carry_over_to_a_different_body() -> None:
     tampered = BODY.replace(b'"d1"', b'"d2"')
     assert tampered != BODY
 
+    signer = Keypair.from_public_key(SIGNER.public_key)
+    message = dispatch_message(URL, tampered)
     with pytest.raises(BadSignatureError):
-        Keypair.from_public_key(SIGNER.public_key).verify_message(dispatch_message(URL, tampered), signature)
+        signer.verify_message(message, signature)
 
 
 def test_a_mnemonic_key_signs_like_a_secret_key() -> None:
