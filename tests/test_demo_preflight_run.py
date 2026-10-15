@@ -375,7 +375,8 @@ def test_refunds_off_fails(tmp_path: Path) -> None:
 
 def test_a_durable_dispute_store_passes(tmp_path: Path) -> None:
     check = run(healthy_world(), tmp_path).check("refunds.store")
-    assert check["status"] == PASS and check["required"] is True
+    assert check["status"] == PASS
+    assert check["required"] is True
 
 
 def test_an_in_memory_dispute_store_fails_and_gates(tmp_path: Path) -> None:
