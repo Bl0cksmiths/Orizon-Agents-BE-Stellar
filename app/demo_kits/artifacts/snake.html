@@ -946,6 +946,8 @@
     start();
   });
   initialsInput.addEventListener('keydown', (e) => {
+    // Keys typed here are initials, not game controls: keep them away from onKey.
+    e.stopPropagation();
     if (e.key === 'Enter') restartBtn.click();
   });
 
