@@ -468,8 +468,9 @@ def test_no_dispute_rating_line_carries_the_signing_key(monkeypatch, caplog) -> 
         _fake_submit(monkeypatch, asyncio.CancelledError())
         with pytest.raises(asyncio.CancelledError):
             _rate()
+        unknown_step = _dispute(step_index=7)
         with pytest.raises(LookupError):
-            _rate(_dispute(step_index=7))
+            _rate(unknown_step)
         underivable = _dispute(job_id_hex="9f8e7d6c")
         with pytest.raises(ValueError):
             _rate(underivable)
