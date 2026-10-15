@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from test_adjudication import (  # noqa: F401 - autouse fixtures and helpers
     _fresh_state,
     a_dispute,
@@ -38,12 +39,9 @@ def test_a_timed_out_credit_records_the_amount_it_was_for_and_never_as_credited(
     calls = _chain(monkeypatch, sc.InFlightError("poll failed: rpc dropped", signed))
     dispute = a_dispute()
 
-    try:
+    with pytest.raises(DisputeError) as unconfirmed:
         asyncio.run(dispute_svc.uphold(dispute.id))
-    except DisputeError as unconfirmed:
-        assert unconfirmed.code == "refund_unconfirmed"
-    else:  # pragma: no cover - the stub times out
-        raise AssertionError("a timed-out credit was answered as settled")
+    assert unconfirmed.value.code == "refund_unconfirmed"
 
     current, queue = _stored(dispute.id)
     assert (current.status, current.refund_tx, queue) == ("crediting", signed, [dispute.id])
