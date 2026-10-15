@@ -461,7 +461,8 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld(store: D
         opened = await store.open_dispute(a_dispute())
         # What the stale caller read, one round trip ago.
         stale = await store.get_dispute(opened.id)
-        assert stale is not None and stale.status == "open"
+        assert stale is not None
+        assert stale.status == "open"
         # Meanwhile the dispute is upheld, claimed and paid.
         await store.append_status(opened.id, "upheld")
         await store.claim_refund(opened.id)
@@ -473,7 +474,8 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld(store: D
 
     assert refused is None
     # Nothing was written: the dispute still reads as paid, with its hash.
-    assert current is not None and current.status == "credited"
+    assert current is not None
+    assert current.status == "credited"
     assert current.refund_tx == "tx_paid"
     # And so the second payout cannot even be claimed, let alone signed.
     assert second_claim is None
