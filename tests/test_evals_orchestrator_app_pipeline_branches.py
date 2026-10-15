@@ -120,9 +120,11 @@ def test_a_refusing_resolution_replaces_the_verdict_and_skips_the_plan(monkeypat
     check = SpecCheck(verdict="drifted", scores={"same_request": 0.1})
     pipeline = _pipeline(monkeypatch, check=check, resolution=Resolution(action=action, reasons=["drifted"]))
     run = asyncio.run(pipeline.run("hello", stages="all"))
-    assert run.guard.verdict == action and run.guard.tier is None
+    assert run.guard.verdict == action
+    assert run.guard.tier is None
     assert run.guard.reasons == ("watch", "drifted")
-    assert run.spec is None and run.plan is None
+    assert run.spec is None
+    assert run.plan is None
     assert run.transcript[-1]["content"] == (
         '{"verdict": "' + action + '", "tier": null, "reasons": ["watch", "drifted"]}'
     )
