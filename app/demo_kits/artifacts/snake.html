@@ -863,6 +863,11 @@
     if (state.dir.x === -dx && state.dir.y === -dy) return;
     state.pendingDir = { x: dx, y: dy };
   }
+  function steer(dx, dy) {
+    // A direction key also starts an idle game.
+    if (!state.started) { start(); }
+    setDir(dx, dy);
+  }
 
   function onKey(e) {
     const k = e.key.toLowerCase();
@@ -874,20 +879,16 @@
       return;
     }
     if (k === 'w' || k === 'arrowup') {
-      if (!state.started) { start(); }
-      setDir(0, -1);
+      steer(0, -1);
       e.preventDefault();
     } else if (k === 's' || k === 'arrowdown') {
-      if (!state.started) { start(); }
-      setDir(0, 1);
+      steer(0, 1);
       e.preventDefault();
     } else if (k === 'a' || k === 'arrowleft') {
-      if (!state.started) { start(); }
-      setDir(-1, 0);
+      steer(-1, 0);
       e.preventDefault();
     } else if (k === 'd' || k === 'arrowright') {
-      if (!state.started) { start(); }
-      setDir(1, 0);
+      steer(1, 0);
       e.preventDefault();
     }
   }
