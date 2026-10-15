@@ -205,7 +205,8 @@ def test_no_fetchable_image_fails_as_image_unavailable_without_a_model_call(
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", getaddrinfo)
     err = _failure(intent="Read https://rebind.example.com/sign.png")
-    assert err.rule == "image_unavailable" and "image_refused" in str(err)
+    assert err.rule == "image_unavailable"
+    assert "image_refused" in str(err)
     assert claude.calls == []
 
 
