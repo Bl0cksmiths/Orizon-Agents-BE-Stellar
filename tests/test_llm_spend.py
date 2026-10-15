@@ -310,7 +310,8 @@ def test_record_nowait_counts_at_once_and_persists_in_the_background() -> None:
         return counted, rows_before
 
     counted, rows_before = asyncio.run(run())
-    assert counted == 0.5 and rows_before == 0
+    assert counted == 0.5
+    assert rows_before == 0
     assert [row for row in store.rows.values()] == [(1, Usage(10, 20), 0.5)]
     # With no loop to write on, the in-memory total still holds it.
     ledger = SpendLedger(InMemorySpendStore())
