@@ -838,8 +838,13 @@
       ta.value = text;
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand('copy'); toast('copied · ' + text); }
-      catch (e2) { toast('copy failed'); }
+      try {
+        document.execCommand('copy');
+        toast('copied · ' + text);
+      } catch {
+        // Both copy paths failed; the toast tells the user, nothing else to do.
+        toast('copy failed');
+      }
       document.body.removeChild(ta);
     }
   }
