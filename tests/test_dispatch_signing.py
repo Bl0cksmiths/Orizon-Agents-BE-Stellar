@@ -161,8 +161,9 @@ def test_a_signature_for_one_endpoint_does_not_verify_for_another() -> None:
     with pytest.raises(BadSignatureError):
         pinned.verify_message(message_at_b, signature_for_a)
     # ...and B's own signature is equally useless to A.
+    message_at_a, signature_for_b = dispatch_message(URL, BODY), _signature(for_b)
     with pytest.raises(BadSignatureError):
-        pinned.verify_message(dispatch_message(URL, BODY), _signature(for_b))
+        pinned.verify_message(message_at_a, signature_for_b)
 
 
 def test_a_signature_does_not_carry_over_to_a_different_body() -> None:
