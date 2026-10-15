@@ -324,7 +324,8 @@ def test_a_settle_hash_the_ledger_never_saw_reads_no_events(world: FakeWorld, bu
     resumed = run(world, buyer, tmp_path, "--from-task", task_id, "--until", "verify", intent=False)
     assert resumed.code == EXIT_VERIFY_FAILED
     settle = next(r for r in resumed.rows() if r["event"] == "settle")
-    assert settle["tx_hash"] == "ff" * 32 and settle["onchain_status"] == "NOT_FOUND"
+    assert settle["tx_hash"] == "ff" * 32
+    assert settle["onchain_status"] == "NOT_FOUND"
     assert "events_unavailable" not in resumed.events()
 
 
