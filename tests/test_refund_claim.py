@@ -280,7 +280,8 @@ def test_releasing_twice_does_not_rewind_a_second_time(store: DisputeStore) -> N
 
     first, second = run(store, go())
 
-    assert first is not None and first.status == "upheld"
+    assert first is not None
+    assert first.status == "upheld"
     assert second is None
 
 
