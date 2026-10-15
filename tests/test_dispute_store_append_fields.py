@@ -87,7 +87,8 @@ def test_the_resolution_is_stamped_from_the_clock_once_and_never_moved() -> None
         {"status": "upheld"},
         {"status": "upheld", "resolved_at": 1.0},
     )
-    assert stamped.resolved_at == CLOCK and stamped.updated_at == CLOCK
+    assert stamped.resolved_at == CLOCK
+    assert stamped.updated_at == CLOCK
     assert kept.resolved_at == CLOCK
     assert named.resolved_at == 1.0
 
