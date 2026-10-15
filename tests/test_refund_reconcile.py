@@ -821,12 +821,14 @@ def test_the_sweep_starts_only_with_both_switches_on(monkeypatch: pytest.MonkeyP
     assert reported == started
 
 
-def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(chain: Chain) -> None:
+def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(
+    chain: Chain, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The wedge the store blocks on rather than forgets: a claim row over a
     dispute that is not mid-payout. Only a human reading the chain can say
     what it guards, so the sweep neither looks it up nor releases it."""
     memory = InMemoryDisputeStore()
-    dispute_store._store = memory
+    monkeypatch.setattr(dispute_store, "_store", memory)
 
     async def go() -> tuple[Decision, list[str]]:
         opened = await memory.open_dispute(a_dispute(payer=PAYER))
@@ -835,10 +837,7 @@ def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(c
         decision = await decide(memory)
         return decision, [c.dispute_id for c in await memory.list_refund_claims()]
 
-    try:
-        decision, held = asyncio.run(go())
-    finally:
-        dispute_store._store = None
+    decision, held = asyncio.run(go())
 
     assert decision.action == "not_crediting"
     assert held == ["dsp_0001"]
