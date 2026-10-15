@@ -142,8 +142,9 @@ def test_mfa_challenge_without_session_is_typed(monkeypatch):
         async with _client(handler) as http:
             await PdaxAuth().access_headers(http)
 
+    login = run()
     with pytest.raises(PdaxError) as exc:
-        asyncio.run(run())
+        asyncio.run(login)
     assert exc.value.code == "InvalidMfaCode"
 
 
