@@ -1188,8 +1188,9 @@ def test_an_id_nobody_issued_is_refused_by_both_decisions(monkeypatch, adjudicat
     only thing left for it to refuse."""
     no_signing(monkeypatch)
 
+    adjudicating = adjudicate("dsp_nosuchdispute")
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(adjudicate("dsp_nosuchdispute"))
+        asyncio.run(adjudicating)
 
     assert refused.value.code == "unknown_dispute"
     assert refused.value.status_code == 404
