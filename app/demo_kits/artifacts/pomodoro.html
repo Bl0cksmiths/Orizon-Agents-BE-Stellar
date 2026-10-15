@@ -778,9 +778,14 @@
     timeEl.textContent = fmtTime(remaining);
     return remaining;
   }
+  function phaseTitle(p) {
+    if (p === 'work') return 'work';
+    if (p === 'short') return 'short break';
+    return 'long break';
+  }
   function render() {
     rolloverDailyIfNeeded();
-    phaseNameEl.textContent = state.phase === 'work' ? 'work' : state.phase === 'short' ? 'short break' : 'long break';
+    phaseNameEl.textContent = phaseTitle(state.phase);
     cycleLabelEl.textContent = state.phase === 'work'
       ? `cycle ${state.cycle + 1} of 4`
       : (state.phase === 'long' ? 'long break' : `break · cycle ${state.cycle} of 4`);
