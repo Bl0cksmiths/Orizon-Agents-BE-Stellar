@@ -668,7 +668,8 @@ def test_the_card_figure_is_skipped_without_a_below_floor_agent(tmp_path: Path) 
 def test_three_routable_agents_clearing_the_floor_pass(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("exclusion.routable_count")
-    assert check["status"] == PASS and check["required"] is True
+    assert check["status"] == PASS
+    assert check["required"] is True
     assert check["detail"].startswith("3 clear 5500 bps: agt_01h8, alpha, beta")
 
 
