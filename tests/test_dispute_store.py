@@ -1360,7 +1360,8 @@ def test_settling_twice_appends_a_row_and_the_newest_one_wins(pg: PostgresDisput
     by_task, by_job, rows = run(pg, go())
 
     # The newest row by `id`, for both keys — not the first one written.
-    assert by_task is not None and by_task.job_id_hex == JOB
+    assert by_task is not None
+    assert by_task.job_id_hex == JOB
     assert by_task.window_closes_at == 1_700_259_200.0
     assert by_job == by_task
     assert len(rows) == 3
