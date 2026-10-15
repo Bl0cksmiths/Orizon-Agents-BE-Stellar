@@ -293,7 +293,8 @@ def test_a_torn_last_line_is_skipped(tmp_path: Path) -> None:
 def test_no_transaction_rows_is_refused(tmp_path: Path) -> None:
     path = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("preflight", None, network="unknown")])
     out = run(FakeLedger(), tmp_path, path)
-    assert out.code == EXIT_REFUSED and "no transaction rows" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no transaction rows" in out.out
 
 
 def test_a_missing_input_is_refused(tmp_path: Path) -> None:
