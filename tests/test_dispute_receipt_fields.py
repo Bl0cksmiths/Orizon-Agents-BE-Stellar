@@ -354,7 +354,9 @@ def test_a_confirmed_rating_is_not_walked_back_by_a_later_attempt(store: Dispute
         confirmed = await store.append_status(opened.id, "credited", rating_tx="tx_r1", rating_confirmed=True)
         retried = await store.append_status(opened.id, "credited", rating_tx="tx_r2", rating_confirmed=False)
         stored = await store.get_dispute(opened.id)
-        assert confirmed is not None and retried is not None and stored is not None
+        assert confirmed is not None
+        assert retried is not None
+        assert stored is not None
         return confirmed, retried, stored
 
     confirmed, retried, stored = asyncio.run(go())
