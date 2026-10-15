@@ -200,7 +200,8 @@ def test_mainnet_is_refused(tmp_path: Path, where: str) -> None:
     setattr(world, f"{where}_passphrase", MAINNET_PASSPHRASE)
     out = run(world, tmp_path)
     assert out.code == EXIT_REFUSED
-    assert "REFUSED:" in out.out and "testnet only" in out.out
+    assert "REFUSED:" in out.out
+    assert "testnet only" in out.out
     assert not (out.dir / "demo-preflight.json").exists()
     assert not [c for c in world.calls if c.startswith("frontend")]
 
