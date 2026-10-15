@@ -123,5 +123,6 @@ def test_the_final_check_quotes_the_deferred_list_and_the_ceiling_share(runs, tm
     assert row["chars_per_line"] == pytest.approx(row["bytes"] / row["lines"], abs=0.1)
     report = (tmp_path / "REPORT.md").read_text()
     ceiling = analysis["final_ceilings"]["code.critic"]
-    assert "### Final check" in report and f"7,000 / {ceiling:,}" in report
+    assert "### Final check" in report
+    assert f"7,000 / {ceiling:,}" in report
     assert "“Deferred: payments, email delivery.”" in report
