@@ -487,7 +487,8 @@ def test_a_timed_out_re_run_never_replaces_a_rating_the_ledger_confirmed(ledger,
     dispute = open_dispute()
 
     landed = uphold(dispute.id)
-    assert landed.rating_tx == "tx_rating_1" and landed.rating_confirmed is True
+    assert landed.rating_tx == "tx_rating_1"
+    assert landed.rating_confirmed is True
 
     # The RPC never answers the re-run, so the rating comes back TIMEOUT with a
     # hash of its own — the one way a landed rating can still time out.
