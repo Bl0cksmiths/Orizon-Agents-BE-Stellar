@@ -155,7 +155,8 @@ def test_the_spend_cap_stops_new_cases_before_it_is_passed(cases, tmp_path):
     pipeline = Scripted(failures={}, live=True, cost_per_case=0.001)
     # Each case's guard ceiling is tiny; a cap that fits a handful must stop the run there.
     outcome, rows, _ = _run(subset, pipeline, tmp_path, max_usd=0.0003, concurrency=1)
-    assert outcome.stopped and outcome.skipped_budget > 0
+    assert outcome.stopped
+    assert outcome.skipped_budget > 0
     assert len(rows) < len(subset)
 
 
