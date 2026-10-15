@@ -1505,8 +1505,9 @@ def test_an_open_or_rejected_dispute_is_never_rated(monkeypatch, rater, invalida
     opened = a_dispute()
     rejected = asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="the SEO brief was delivered in full"))
 
+    upholding = dispute_svc.uphold(rejected.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(rejected.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "dispute_rejected"
     assert rater.calls == 0
