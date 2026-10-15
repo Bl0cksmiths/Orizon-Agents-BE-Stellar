@@ -824,8 +824,9 @@ def test_a_timeout_logs_what_a_human_needs_to_reconcile_it(monkeypatch, caplog) 
     dispute = a_dispute()
     settler(monkeypatch, LOST)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER), pytest.raises(DisputeError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     # ERROR only, and from this module only: `a_dispute` logs the opening at
     # INFO and `refund_svc` logs its own view of the same timeout.
