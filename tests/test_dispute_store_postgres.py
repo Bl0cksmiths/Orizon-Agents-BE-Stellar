@@ -184,7 +184,8 @@ def test_an_append_holds_the_lock_from_its_read_until_its_write_commits(
 
     written = run(pg, go())
 
-    assert written is not None and written.status == "rejected"
+    assert written is not None
+    assert written.status == "rejected"
     assert probes == ["held"]
 
 
