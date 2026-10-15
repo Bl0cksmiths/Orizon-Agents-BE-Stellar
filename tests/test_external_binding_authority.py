@@ -146,7 +146,7 @@ def test_the_registry_id_is_read_live_not_through_the_lru_cache(monkeypatch: pyt
     monkeypatch.setattr(sc, "simulate_read", fake_read)
 
     asyncio.run(resolve_owner("ext_live_1"))
-    settings.stellar_agent_registry = OTHER_REGISTRY_ID
+    monkeypatch.setattr(settings, "stellar_agent_registry", OTHER_REGISTRY_ID)
     asyncio.run(resolve_owner("ext_live_2"))
 
     assert [contract_id for contract_id, _ in calls] == [REGISTRY_ID, OTHER_REGISTRY_ID]
