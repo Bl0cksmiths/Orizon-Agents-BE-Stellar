@@ -358,8 +358,10 @@ def test_the_external_policy_notice_names_no_agent():
     n = plan_notices.external_policy_notice()
 
     assert (n.kind, n.reason_code) == ("excluded", "external_not_routed")
-    assert n.agent_id == plan_notices.EXTERNAL_POLICY_ID and n.agent_name is None
-    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.agent_id == plan_notices.EXTERNAL_POLICY_ID
+    assert n.agent_name is None
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
     assert n.reason == "Plans currently use Orizon's built-in agents only; outside operators' agents aren't routed."
     # A sentinel no Soroban Symbol can spell, so it can never be a real agent's id.
     assert not plan_notices.EXTERNAL_POLICY_ID.replace("_", "").isalnum()
