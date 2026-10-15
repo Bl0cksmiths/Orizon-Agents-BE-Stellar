@@ -139,9 +139,11 @@ def test_the_operator_view_is_the_full_report_when_nothing_is_spent(client, monk
 def test_readiness_reports_a_pause_directly() -> None:
     asyncio.run(spend.record(model="claude-opus-5-5", purpose="planner", usage=Usage(), cost=10.0))
     public = provider.readiness()
-    assert isinstance(public, provider.LLMPublicReadiness) and public.planning == "paused"
+    assert isinstance(public, provider.LLMPublicReadiness)
+    assert public.planning == "paused"
     full = provider.readiness(operator=True)
-    assert isinstance(full, provider.LLMReadiness) and full.spend.spent_usd == 10.0
+    assert isinstance(full, provider.LLMReadiness)
+    assert full.spend.spent_usd == 10.0
 
 
 @pytest.mark.parametrize(
