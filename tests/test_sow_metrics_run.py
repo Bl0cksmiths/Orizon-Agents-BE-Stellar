@@ -498,7 +498,8 @@ def test_a_dispute_refund_needs_the_dispute_rating_and_the_refund(tmp_path: Path
     out = run(met_world(), tmp_path)
     counted = out.raw_metric("m05")["counted"]
     assert len(counted) == 1
-    assert counted[0]["payer"] == BUYER1 and counted[0]["charge"]["job_id"] == JOB1
+    assert counted[0]["payer"] == BUYER1
+    assert counted[0]["charge"]["job_id"] == JOB1
     labels = out.labels("m05")
     assert "Dispute rating on alpha — 2026-09-24 (counted: refunded)" in labels
     assert "Refund of 0.05 XLM to the payer of the disputed charge — 2026-09-24 (counted)" in labels
