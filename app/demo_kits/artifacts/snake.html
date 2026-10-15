@@ -662,6 +662,14 @@
     }
     return { x: nx, y: ny };
   }
+  // Self-collision: check against body cells (tail moves unless growing).
+  function hitsBody(nx, ny, growing) {
+    const limit = growing ? state.snake.length : state.snake.length - 1;
+    for (let i = 0; i < limit; i++) {
+      if (state.snake[i].x === nx && state.snake[i].y === ny) return true;
+    }
+    return false;
+  }
   function tick() {
     if (state.paused || state.over || !state.started) return;
     // Commit pending direction (debounced — prevents instant-reverse death).
@@ -676,11 +684,7 @@
     const willBonus = state.bonus && state.bonus.x === nx && state.bonus.y === ny;
     const growthThisTick = willEat || willBonus;
 
-    // Self-collision: check against body cells (tail moves unless growing).
-    const limit = growthThisTick ? state.snake.length : state.snake.length - 1;
-    for (let i = 0; i < limit; i++) {
-      if (state.snake[i].x === nx && state.snake[i].y === ny) return gameOver();
-    }
+    if (hitsBody(nx, ny, growthThisTick)) return gameOver();
 
     state.snake.unshift({ x: nx, y: ny });
     if (willEat) {
