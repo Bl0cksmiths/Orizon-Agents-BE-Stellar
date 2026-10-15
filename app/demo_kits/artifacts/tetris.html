@@ -87,7 +87,7 @@
     color: var(--muted);
     margin-bottom: 4px;
   }
-  .stat b {
+  .stat output {
     font-family: 'JetBrains Mono', monospace;
     font-size: 22px;
     font-weight: 600;
@@ -96,7 +96,7 @@
   }
   .stat.row { display: flex; gap: 12px; }
   .stat.row > div { flex: 1; }
-  .stat.row b { font-size: 16px; }
+  .stat.row output { font-size: 16px; }
 
   .mini-label {
     font-size: 9px;
@@ -328,22 +328,22 @@
       </div>
 
       <div class="stat">
-        <label>score</label>
-        <b id="score">0</b>
+        <label for="score">score</label>
+        <output id="score" aria-live="off">0</output>
       </div>
 
       <div class="stat row">
         <div>
-          <label>lines</label>
-          <b id="lines">0</b>
+          <label for="lines">lines</label>
+          <output id="lines" aria-live="off">0</output>
         </div>
         <div>
-          <label>level</label>
-          <b id="level">1</b>
+          <label for="level">level</label>
+          <output id="level" aria-live="off">1</output>
         </div>
         <div>
-          <label>time</label>
-          <b id="time">00:00</b>
+          <label for="time">time</label>
+          <output id="time" aria-live="off">00:00</output>
         </div>
       </div>
 
