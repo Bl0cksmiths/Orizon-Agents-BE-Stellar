@@ -76,7 +76,8 @@ def test_the_block_sets_a_built_in_agents_card_under_its_entry_and_gives_an_exte
         "  " + ROLE_CARDS["agt_11c0"].render(),
         lines[4],
     ]
-    assert lines[2].startswith("- id=agt_11c0 ") and lines[4].startswith("- id=ext_op ")
+    assert lines[2].startswith("- id=agt_11c0 ")
+    assert lines[4].startswith("- id=ext_op ")
 
 
 # ── prices in the block: exact, in the real asset ───────────────
