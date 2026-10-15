@@ -778,7 +778,8 @@ def test_a_failed_transfer_leaves_the_dispute_upheld_and_still_payable(monkeypat
     assert refused.value.status_code == 502
     assert refused.value.existing is None
     stranded = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stranded is not None and stranded.status == "upheld"
+    assert stranded is not None
+    assert stranded.status == "upheld"
     assert stranded.refund_tx is None  # nothing landed, so nothing is claimed to have
 
     # Payable again, which is the entire point of releasing the claim.
