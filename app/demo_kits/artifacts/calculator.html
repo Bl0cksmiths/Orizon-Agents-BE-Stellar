@@ -812,10 +812,10 @@
     else delete document.documentElement.dataset.theme;
   }
   function toggleTheme() {
-    const cur = document.documentElement.getAttribute('data-theme');
+    const cur = document.documentElement.dataset.theme;
     const next = cur === 'light' ? 'dark' : 'light';
-    if (next === 'light') document.documentElement.setAttribute('data-theme', 'light');
-    else document.documentElement.removeAttribute('data-theme');
+    if (next === 'light') document.documentElement.dataset.theme = 'light';
+    else delete document.documentElement.dataset.theme;
     try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
   }
 
