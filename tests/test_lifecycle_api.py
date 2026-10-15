@@ -71,7 +71,8 @@ def test_a_read_does_not_retry_an_answer() -> None:
     api, _ = _api(handler)
     with pytest.raises(ApiError) as exc:
         api.task("tsk_1", "tok")
-    assert exc.value.code == "unknown_task" and len(seen) == 1
+    assert exc.value.code == "unknown_task"
+    assert len(seen) == 1
 
 
 # ── writes never retry ──────────────────────────────────────────
