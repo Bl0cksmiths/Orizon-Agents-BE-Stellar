@@ -215,7 +215,8 @@ def test_a_tagged_transfer_that_may_have_been_sent_is_never_paid_again(monkeypat
     assert len(rpc.sent) == 1
     assert _to(rpc.sent[0]).address.type == SCAddressType.SC_ADDRESS_TYPE_MUXED_ACCOUNT
     # The hash of what was signed, so the dispute records what to look for.
-    assert outcome.tx_hash is not None and len(outcome.tx_hash) == 64
+    assert outcome.tx_hash is not None
+    assert len(outcome.tx_hash) == 64
 
 
 def test_without_a_dispute_the_transfer_is_plain(monkeypatch) -> None:
