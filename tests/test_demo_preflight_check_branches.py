@@ -350,7 +350,8 @@ def test_below_floor_fails_naming_what_it_ignored_and_the_degraded_count() -> No
         "A degraded or stale read is the prior or an old read, never a verdict. The agent must also be bound "
         "(rebind it from its owner wallet) and listed, or the card shows 'no endpoint', not 'excluded'."
     )
-    assert facts.below_floor == [] and facts.lower_bounds == {}
+    assert facts.below_floor == []
+    assert facts.lower_bounds == {}
 
 
 def test_below_floor_fails_plainly_with_nothing_ignored() -> None:
