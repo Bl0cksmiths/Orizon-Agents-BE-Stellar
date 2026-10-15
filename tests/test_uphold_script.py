@@ -2039,6 +2039,7 @@ def test_a_dry_run_never_calls_the_service(
     ids=["401", "500", "unreachable", "timeout"],
 )
 def test_a_failed_invalidation_is_a_warning_and_never_changes_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     paying: list[str],
     ledger: RatingSeam,
@@ -2054,7 +2055,7 @@ def test_a_failed_invalidation_is_a_warning_and_never_changes_the_exit_code(
     ledger.answers(rating, RATING_TX if rating == "SUCCESS" else None)
     seed()
     code_told, _ = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", SERVICE)
-    dispute_store._store = None
+    monkeypatch.setattr(dispute_store, "_store", None)
     service.answer = answer
     seed()
 
