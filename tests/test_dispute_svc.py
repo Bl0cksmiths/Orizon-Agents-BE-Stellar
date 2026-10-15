@@ -376,8 +376,9 @@ def test_no_challenge_is_minted_for_a_job_or_step_that_cannot_be_disputed() -> N
     payer = Keypair.random()
     _seed(payer.public_key)
 
+    issuing = dispute_svc.issue_dispute_challenge("ff" * 16, 0)
     with pytest.raises(DisputeError) as unknown:
-        asyncio.run(dispute_svc.issue_dispute_challenge("ff" * 16, 0))
+        asyncio.run(issuing)
     issuing = dispute_svc.issue_dispute_challenge(JOB, 7)
     with pytest.raises(DisputeError) as no_step:
         asyncio.run(issuing)
