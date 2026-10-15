@@ -299,7 +299,8 @@ def test_a_backend_that_is_not_ready_fails(tmp_path: Path) -> None:
     world.readiness.update(status="not_ready", llm="missing_key")
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "OPENAI_API_KEY" in check["fix"]
+    assert check["status"] == FAIL
+    assert "OPENAI_API_KEY" in check["fix"]
 
 
 def test_readiness_unreachable_on_the_backend_host_fails(tmp_path: Path) -> None:
