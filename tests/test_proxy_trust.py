@@ -169,7 +169,7 @@ def test_requests_nobody_can_be_told_apart_share_only_the_service_ceiling(monkey
 # expose visitors' addresses to anyone.
 
 
-@pytest.fixture()
+@pytest.fixture
 def armed_sampler():
     """Re-arm the process-wide sampler for one test and disarm it after, so
     the budget cannot leak into (or be spent by) another test."""
