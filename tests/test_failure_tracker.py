@@ -150,7 +150,8 @@ def test_a_new_failure_class_warns_again_and_names_the_transition(caplog):
     # Both ends of the transition, because "it changed" without saying from
     # what is not actionable — the operator is deciding whether their fix
     # moved the failure or their endpoint got worse.
-    assert "connect_failed" in changed and "http_status" in changed
+    assert "connect_failed" in changed
+    assert "http_status" in changed
     assert "3 consecutive" in changed
 
 
