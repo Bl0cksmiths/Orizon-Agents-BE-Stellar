@@ -85,7 +85,8 @@ def test_the_read_grant_routes_are_absent_without_d067() -> None:
 
 def test_the_read_challenge_answers_with_d067() -> None:
     body = _send(_world(), "POST", API + "/api/disputes/read-challenge", {"task_id": "tsk_x"}).json()
-    assert body["message"] == f"orizon-dispute-read:v1:tsk_x:{body['nonce']}" and body["expires_at"] == 1.0
+    assert body["message"] == f"orizon-dispute-read:v1:tsk_x:{body['nonce']}"
+    assert body["expires_at"] == 1.0
 
 
 def test_health_wakes_after_its_failures() -> None:
