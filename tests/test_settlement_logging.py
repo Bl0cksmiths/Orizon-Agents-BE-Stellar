@@ -234,7 +234,8 @@ def test_settlement_exception_is_logged_with_traceback(monkeypatch, caplog):
     msg = rec.getMessage()
     assert "tsk_settle_raise" in msg
     assert "soroban rpc unreachable" in msg
-    assert AUTH_ID_HEX in msg and PAYER in msg
+    assert AUTH_ID_HEX in msg
+    assert PAYER in msg
     assert rec.exc_info is not None
 
 
