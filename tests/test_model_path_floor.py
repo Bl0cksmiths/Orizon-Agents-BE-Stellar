@@ -56,7 +56,7 @@ def _info(agent_id: str, *, smoothed: int, lower: int, degraded: bool = False) -
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded() -> object:
     """Fresh 12-agent registry, restored after — every seeded agent has a local
     worker, so the whole catalog is dispatchable and the prompt block below is
