@@ -757,7 +757,9 @@ def test_a_buyer_that_does_not_exist_fails(tmp_path: Path) -> None:
     world = healthy_world()
     del world.accounts[BUYER]
     check = run(world, tmp_path).check("wallets.buyer")
-    assert check["status"] == FAIL and "does not exist" in check["detail"] and "friendbot" in check["fix"]
+    assert check["status"] == FAIL
+    assert "does not exist" in check["detail"]
+    assert "friendbot" in check["fix"]
 
 
 def test_an_operator_without_a_bound_agent_fails(tmp_path: Path) -> None:
