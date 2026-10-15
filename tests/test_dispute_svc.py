@@ -670,7 +670,8 @@ def test_control_characters_are_stripped_from_a_stored_reason() -> None:
 
     record = _open(payer, reason="step one\nwas \x00wrong\x1b[31m and late")
 
-    assert "\x00" not in record.reason and "\x1b" not in record.reason
+    assert "\x00" not in record.reason
+    assert "\x1b" not in record.reason
     assert "\n" in record.reason
     assert record.reason.startswith("step one")
 
