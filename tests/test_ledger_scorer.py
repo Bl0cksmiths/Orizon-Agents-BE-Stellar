@@ -98,8 +98,9 @@ def test_an_instance_with_no_storage_at_all_is_a_definite_none():
 def test_an_entry_that_is_not_a_contract_instance_raises():
     """Could-not-decode must never read as not-stored: None would mean "the
     ledger has no scorer", which is a claim about the chain."""
+    entry = _contract_data(scval.to_uint32(7))
     with pytest.raises(ValueError):
-        sc._instance_storage_address(_contract_data(scval.to_uint32(7)), sc._SCORER_STORAGE_KEY)
+        sc._instance_storage_address(entry, sc._SCORER_STORAGE_KEY)
 
 
 def test_a_scorer_that_is_not_an_address_raises():
