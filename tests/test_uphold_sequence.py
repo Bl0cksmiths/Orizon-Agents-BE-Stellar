@@ -399,7 +399,8 @@ def test_a_landed_credit_on_a_dispute_moved_mid_flight_is_recorded_anyway(
     store.script = {"append_status": [None], "get_dispute": [REAL, moved]}
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         result = _uphold()
-    assert result.status == "credited" and result.refund_tx == "tx_credit"
+    assert result.status == "credited"
+    assert result.refund_tx == "tx_credit"
     unconditional = ("append_status", DISPUTE, "credited", "credited_usdc=0.05", "refund_tx=tx_credit")
     assert store.calls == [LOAD, CLAIM, SETTLEMENT, SIBLINGS, CREDITED, LOAD, unconditional]
     (critical,) = _lines(caplog, logging.CRITICAL)
