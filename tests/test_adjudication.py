@@ -373,8 +373,9 @@ def test_a_refund_that_did_not_land_records_no_credited_amount(monkeypatch, answ
     dispute = a_dispute()
     settler(monkeypatch, answer)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == code
     stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
