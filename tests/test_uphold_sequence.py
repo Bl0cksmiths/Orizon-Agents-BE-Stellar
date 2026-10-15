@@ -366,7 +366,8 @@ def test_a_missing_settlement_reads_no_siblings_and_hands_the_claim_back(
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         err = _refused()
     assert (err.code, err.status_code) == ("settlement_missing", 409)
-    assert store.calls == [LOAD, CLAIM, SETTLEMENT, RELEASE] and seams.calls == []
+    assert store.calls == [LOAD, CLAIM, SETTLEMENT, RELEASE]
+    assert seams.calls == []
     assert _lines(caplog, logging.ERROR)[-1].endswith("amount=1.5000000 tx=- reason=settlement_missing")
 
 
