@@ -229,7 +229,7 @@ def test_the_claim_outlives_the_run(client: TestClient, monkeypatch, runs) -> No
     install(monkeypatch, FakeEscrow())
     live_plan()
     task_id = paid(client).json()["task_id"]
-    state.tasks[task_id].status = "failed"
+    monkeypatch.setattr(state.tasks[task_id], "status", "failed")
     assert paid(client).json()["error"]["code"] == "authorization_used"
     assert len(runs.calls) == 1
 
