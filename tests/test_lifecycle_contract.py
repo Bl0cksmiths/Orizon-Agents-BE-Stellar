@@ -105,8 +105,9 @@ def test_a_message_for_another_step_is_refused() -> None:
     another_step = eb.dispute_message(JOB, 4, nonce)
     with pytest.raises(SigningRefused):
         check_dispute_message(another_step, JOB, 3, nonce)
+    another_job = eb.dispute_message("0b" * 16, 3, nonce)
     with pytest.raises(SigningRefused):
-        check_dispute_message(eb.dispute_message("0b" * 16, 3, nonce), JOB, 3, nonce)
+        check_dispute_message(another_job, JOB, 3, nonce)
     with pytest.raises(SigningRefused):
         check_dispute_message(eb.dispute_message(JOB, 3, nonce), JOB, 3, "cd" * 16)
 
