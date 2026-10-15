@@ -362,7 +362,9 @@ def test_with_every_settlement_pinned_the_store_grows_loses_nothing_and_says_so(
     assert list(store._settlements) == [_job(n) for n in range(5)]
     for n, status in enumerate(statuses):
         kept = asyncio.run(store.find_dispute(_job(n), 0))
-        assert kept is not None and kept.id == f"dsp_{n}" and kept.status == status
+        assert kept is not None
+        assert kept.id == f"dsp_{n}"
+        assert kept.status == status
     claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
     assert claims == ["dsp_2", "dsp_4"]
 
@@ -371,4 +373,5 @@ def test_with_every_settlement_pinned_the_store_grows_loses_nothing_and_says_so(
     errors = [r.getMessage() for r in records if r.levelno == logging.ERROR]
     assert errors, "growing past the cap must be an ERROR"
     assert "3 over its cap of 2" in errors[-1]
-    assert "unfinished dispute" in errors[-1] and "DATABASE_URL" in errors[-1]
+    assert "unfinished dispute" in errors[-1]
+    assert "DATABASE_URL" in errors[-1]
