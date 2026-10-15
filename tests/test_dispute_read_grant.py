@@ -120,7 +120,7 @@ def empty_table():
         eb._exhausted.clear()
 
 
-@pytest.fixture()
+@pytest.fixture
 def settled(monkeypatch):
     """`TASK` settled by PAYER, with one rejected dispute on it.
 
