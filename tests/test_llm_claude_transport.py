@@ -135,7 +135,8 @@ def test_haiku_gets_no_effort_and_no_fallbacks(api: Callable[..., Recorder]) -> 
     recorder = api(_ok(_message(model="claude-haiku-4-5")))
     _plan(model="claude-haiku-4-5", effort="low")
     sent = recorder.body()
-    assert "effort" not in sent["output_config"] and "fallbacks" not in sent
+    assert "effort" not in sent["output_config"]
+    assert "fallbacks" not in sent
     assert "anthropic-beta" not in recorder.requests[0].headers
 
 
