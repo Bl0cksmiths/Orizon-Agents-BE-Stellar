@@ -164,5 +164,6 @@ def test_endpoint_rebound_after_construction_is_revalidated() -> None:
     worker = ExternalHttpWorker("ext_demo1", "external.demo", "https://operator.example/run")
     worker.endpoint_url = "https://169.254.169.254/latest/meta-data/"
 
+    running = worker.run("x", "y")
     with pytest.raises(ExternalDispatchError, match="non-public address"):
-        asyncio.run(worker.run("x", "y"))
+        asyncio.run(running)
