@@ -79,7 +79,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return fake
 
 
-@pytest.fixture()
+@pytest.fixture
 def rpc(monkeypatch: pytest.MonkeyPatch) -> Rpc:
     fake = Rpc()
     monkeypatch.setattr(sc, "_server", lambda **_kw: fake)
