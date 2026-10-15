@@ -67,11 +67,13 @@ def test_a_stream_cancelled_by_its_budget_is_recorded_as_estimated_and_still_can
         _stream(budget=0.05)
     out = math.ceil(len(PARTIAL) / claude.CHARS_PER_TOKEN)  # 200, rounded up
     calls, usage, cost = _rows(spend_ledger)[("claude-opus-5-5", "worker.code.gen")]
-    assert calls == 1 and usage == Usage(input_tokens=2_000, output_tokens=out, cache_read_tokens=8_000)
+    assert calls == 1
+    assert usage == Usage(input_tokens=2_000, output_tokens=out, cache_read_tokens=8_000)
     assert cost == pytest.approx(spend.cost_usd("claude-opus-5-5", usage))
     assert spend_ledger.snapshot().spent_usd == pytest.approx(cost, abs=1e-6)
     (line,) = [r.getMessage() for r in caplog.records if "estimated" in r.getMessage()]
-    assert "worker.code.gen" in line and "CancelledError" in line
+    assert "worker.code.gen" in line
+    assert "CancelledError" in line
 
 
 def test_a_stream_that_errors_midway_is_recorded_and_the_error_re_raised(
