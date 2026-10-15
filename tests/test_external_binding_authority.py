@@ -131,8 +131,9 @@ def test_an_unconfigured_registry_fails_closed(monkeypatch: pytest.MonkeyPatch) 
         raise AssertionError("resolve_owner read the chain with no registry configured")
 
     monkeypatch.setattr(sc, "simulate_read", must_not_read)
+    resolving = resolve_owner("ext_agent")
     with pytest.raises(OwnerLookupError):
-        asyncio.run(resolve_owner("ext_agent"))
+        asyncio.run(resolving)
 
 
 def test_the_registry_id_is_read_live_not_through_the_lru_cache(monkeypatch: pytest.MonkeyPatch) -> None:
