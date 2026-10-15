@@ -1579,7 +1579,8 @@ def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         again = asyncio.run(dispute_svc.uphold(dispute.id))
 
-    assert again == paid and again.rating_tx is None
+    assert again == paid
+    assert again.rating_tx is None
     assert rater.calls == 1  # the first attempt only
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 1
