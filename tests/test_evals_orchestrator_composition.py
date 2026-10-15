@@ -102,5 +102,6 @@ def test_the_eval_offers_the_planner_only_what_decompose_would(monkeypatch: pyte
 
     _, block, offered = _default_planner()
 
-    assert "agt_07w3" not in offered and "id=agt_07w3 " not in block
+    assert "agt_07w3" not in offered
+    assert "id=agt_07w3 " not in block
     assert "agt_11c0" in offered
