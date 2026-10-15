@@ -389,8 +389,10 @@ def test_a_failed_transfer_releases_and_a_later_uphold_can_pay(
 
     decision, released, paid_now = run(store, go())
 
-    assert decision.action == "released" and decision.chain == "FAILED"
-    assert released is not None and (released.status, released.refund_tx, released.inflight_usdc) == (
+    assert decision.action == "released"
+    assert decision.chain == "FAILED"
+    assert released is not None
+    assert (released.status, released.refund_tx, released.inflight_usdc) == (
         "upheld",
         None,
         None,
