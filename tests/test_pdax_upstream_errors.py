@@ -125,8 +125,9 @@ def test_token_shaped_2xx_missing_fields_is_typed(monkeypatch):
         async with _client(handler) as http:
             await PdaxAuth().access_headers(http)
 
+    login = run()
     with pytest.raises(PdaxError) as exc:
-        asyncio.run(run())
+        asyncio.run(login)
     assert exc.value.code == "bad_upstream_shape"
 
 
