@@ -71,7 +71,8 @@ def test_each_category_has_enough_cases_to_report_on(cases, category):
 
 def test_the_console_s_languages_are_covered(cases):
     langs = Counter(c.language for c in cases)
-    assert langs["tl"] >= 10 and langs["taglish"] >= 8
+    assert langs["tl"] >= 10
+    assert langs["taglish"] >= 8
     # Filipino in both directions: real requests AND injections, so a guard that
     # blocks everything non-English cannot score well.
     filipino = [c for c in cases if c.language in ("tl", "taglish")]
