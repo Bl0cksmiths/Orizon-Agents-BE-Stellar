@@ -420,7 +420,8 @@ def test_capacity_never_releases_an_unowned_authorization(client: TestClient, mo
     monkeypatch.setattr(orchestrator_router, "execute_plan", RunRecorder(fail=CapacityExhaustedError("full")))
     r = paid(client)
     assert (r.status_code, r.json()["detail"]) == (503, "capacity_exhausted")
-    assert "release_tx_hash" not in r.json() and releases.calls == []
+    assert "release_tx_hash" not in r.json()
+    assert releases.calls == []
 
 
 def test_an_unreadable_chain_never_releases(client: TestClient, monkeypatch, releases) -> None:
