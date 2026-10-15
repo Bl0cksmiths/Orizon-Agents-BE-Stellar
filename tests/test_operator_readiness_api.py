@@ -109,7 +109,7 @@ class World:
             raise self.raises[name]
 
 
-@pytest.fixture()
+@pytest.fixture
 def world(monkeypatch):
     rcache.clear()
     w = World()
