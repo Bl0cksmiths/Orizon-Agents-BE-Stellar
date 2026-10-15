@@ -831,7 +831,8 @@ def test_an_unreadable_registry_listing_is_coverage_unknown(world: _World) -> No
 
     report = world.report()
 
-    assert report.coverage is not None and report.coverage.agents_listed is None
+    assert report.coverage is not None
+    assert report.coverage.agents_listed is None
     assert report.degraded is True
 
 
