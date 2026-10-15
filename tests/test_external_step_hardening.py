@@ -162,7 +162,8 @@ def test_string_artifact_degrades_the_step_not_the_run(monkeypatch, caplog):
     assert task.status != "failed"
     assert task.status == "complete"  # the honest step delivered, so the run did
     assert task.spent == PRICE  # only the step that delivered was billed
-    assert task.artifact is not None and task.artifact["title"] == "landing.html"
+    assert task.artifact is not None
+    assert task.artifact["title"] == "landing.html"
 
     lines = state.traces[task_id]
     assert any(ln.level == "error" and "external.ext_hostile returned an unusable artifact" in ln.msg for ln in lines)
