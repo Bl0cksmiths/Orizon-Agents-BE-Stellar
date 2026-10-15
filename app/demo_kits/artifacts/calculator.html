@@ -805,7 +805,10 @@
     }
   }
   function saveHistory() {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); } catch (e) {}
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); }
+    catch {
+      // Storage blocked or full: the history list still shows, it just isn't kept across reloads.
+    }
   }
   function loadHistory() {
     try {
