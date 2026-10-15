@@ -853,5 +853,7 @@ def test_the_trace_and_demo_pages_are_required(tmp_path: Path, path: str) -> Non
     world.pages[path] = 404
     out = run(world, tmp_path)
     check = out.check(f"frontend.{path}")
-    assert check["status"] == FAIL and check["required"] is True and "answered 404" in check["detail"]
+    assert check["status"] == FAIL
+    assert check["required"] is True
+    assert "answered 404" in check["detail"]
     assert out.code == EXIT_NO_GO
