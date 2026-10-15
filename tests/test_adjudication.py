@@ -1030,7 +1030,8 @@ def test_a_credit_above_the_cap_never_reaches_the_signer(monkeypatch) -> None:
     # Nothing was signed, so the claim went back: the buyer is still owed, and
     # raising the ceiling makes this dispute payable without touching it.
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid is not None
+    assert unpaid.status == "upheld"
     assert unpaid.refund_tx is None
 
     monkeypatch.setattr(settings, "max_refund_usdc", 1.0)
