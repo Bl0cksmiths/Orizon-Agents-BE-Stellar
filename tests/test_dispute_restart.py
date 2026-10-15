@@ -284,7 +284,8 @@ def test_a_dispute_raised_after_a_restart_is_accepted_upheld_and_credited(
 ) -> None:
     task_id, token, _job = _before_the_restart(monkeypatch)
     recorded = asyncio.run(settlements(deployment["dsn"]))[-1]  # newest row: the one with the seal
-    assert recorded["task_id"] == task_id and recorded["payer"] == BUYER.public_key
+    assert recorded["task_id"] == task_id
+    assert recorded["payer"] == BUYER.public_key
 
     with _process(monkeypatch) as client:
         # The restart did not take the task (D-090): this process never ran
@@ -293,7 +294,8 @@ def test_a_dispute_raised_after_a_restart_is_accepted_upheld_and_credited(
         assert task_id not in state.tasks
         survived = client.get(f"/api/tasks/{task_id}", headers={"X-Task-Token": token})
         assert (survived.status_code, survived.json()["status"]) == (200, "complete")
-        assert task_id not in state.task_tokens and task_id in state.task_token_digests
+        assert task_id not in state.task_tokens
+        assert task_id in state.task_token_digests
 
         # The receipt is read from what survived: the settlement in Postgres.
         listing = client.get(f"/api/tasks/{task_id}/disputes").json()
