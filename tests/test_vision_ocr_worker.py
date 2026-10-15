@@ -159,7 +159,8 @@ def test_the_reading_is_bounded_in_code(claude: FakeClaude, monkeypatch: pytest.
     claude.reply(_draft(reading))
     out = run(context={"images": [UPLOAD]})
     image = out["images"][0]
-    assert len(image["text"]) <= 40 and image["text"].endswith("…")
+    assert len(image["text"]) <= 40
+    assert image["text"].endswith("…")
     assert len(image["blocks"]) == vision_ocr.MAX_BLOCKS
     assert len(image["tables"]) == vision_ocr.MAX_TABLES
     assert len(image["tables"][0]["rows"]) == vision_ocr.MAX_ROWS
