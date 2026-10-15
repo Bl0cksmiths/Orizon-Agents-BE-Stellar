@@ -296,7 +296,8 @@ def test_no_charge_to_the_agents_asked_about_reads_no_settler(views: _Views, rpc
 
     window = _fetch({"ext_a": OWNER_A})
 
-    assert "settler" not in views.reads and "authorization" not in views.reads
+    assert "settler" not in views.reads
+    assert "authorization" not in views.reads
     assert (window.charges, window.unattributed, window.ledgers_in_window) == (0, 0, IN_WINDOW)
     assert window.complete is True
 
