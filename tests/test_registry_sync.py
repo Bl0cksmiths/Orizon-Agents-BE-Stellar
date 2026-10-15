@@ -68,7 +68,7 @@ def clean_registry_sync():
     registry_sync._task = None
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry_configured(monkeypatch):
     """A registry contract id, so passes take the on-chain path."""
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
