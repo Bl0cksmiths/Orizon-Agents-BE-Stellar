@@ -275,7 +275,8 @@ def test_fallback_applies_the_same_thresholds(fake_jev, fake_claude):
     fake_jev.fail()
     fake_claude.reply(assessment(injection=0.37), purpose="guard.intent.fallback")
     decision = check()
-    assert decision.verdict == "allow" and decision.watch is True
+    assert decision.verdict == "allow"
+    assert decision.watch is True
 
     fake_jev.fail()
     fake_claude.reply(assessment(severity=2), purpose="guard.intent.fallback")
