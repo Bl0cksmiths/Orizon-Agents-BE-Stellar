@@ -928,8 +928,9 @@ def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) ->
     monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refunds_disabled"
     assert refused.value.status_code == 503
