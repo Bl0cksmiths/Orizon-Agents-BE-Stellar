@@ -114,8 +114,11 @@ def test_structured_validates_prices_and_records(fake_claude: FakeClaude, spend_
     assert result.cost_usd == pytest.approx(0.004)
     assert asyncio.run(spend_ledger.spent_today()) == pytest.approx(0.004)
     (call,) = fake_claude.calls
-    assert call.purpose == "improver" and call.schema_name == "Spec" and call.cache_system is True
-    assert call.json_schema is not None and call.json_schema["additionalProperties"] is False
+    assert call.purpose == "improver"
+    assert call.schema_name == "Spec"
+    assert call.cache_system is True
+    assert call.json_schema is not None
+    assert call.json_schema["additionalProperties"] is False
 
 
 def test_effort_is_always_explicit_where_taken_and_never_sent_to_haiku(fake_claude: FakeClaude) -> None:
