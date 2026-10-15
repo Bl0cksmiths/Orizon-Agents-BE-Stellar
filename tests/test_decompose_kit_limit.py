@@ -32,7 +32,7 @@ CALLER = "81.2.69.160"
 OTHER_CALLER = "2.125.160.216"
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """A fresh seeded registry and no kit thinking pause, for the real pipeline."""
 
