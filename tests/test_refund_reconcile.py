@@ -201,7 +201,8 @@ def test_a_landed_transfer_is_recorded_credited_with_what_the_transaction_moved(
 
     decision, current, claims = run(store, go())
 
-    assert decision.action == "credited" and decision.chain == "SUCCESS"
+    assert decision.action == "credited"
+    assert decision.chain == "SUCCESS"
     assert current is not None
     assert (current.status, current.refund_tx, current.credited_usdc) == ("credited", tx_hash, 0.0512)
     assert current.creditable_usdc == 1.5
