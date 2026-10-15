@@ -664,7 +664,9 @@
       const d = JSON.parse(raw);
       if (d && d.date === todayKey() && typeof d.count === 'number') state.daily = d;
       else state.daily = { count: 0, date: todayKey() };
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or the saved JSON is corrupt: keep today's zero count.
+    }
   }
   function saveDaily() {
     try { localStorage.setItem(DAILY_KEY, JSON.stringify(state.daily)); } catch (e) {}
