@@ -431,8 +431,9 @@ def test_cancellation_mid_transfer_is_logged_and_reraised(monkeypatch, caplog) -
     _fake_transfer(monkeypatch, asyncio.CancelledError())
 
     with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        crediting = refund_svc.credit_refund(_dispute(), 0.05)
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(refund_svc.credit_refund(_dispute(), 0.05))
+            asyncio.run(crediting)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
     assert any(
