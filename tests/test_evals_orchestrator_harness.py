@@ -168,8 +168,9 @@ def test_a_live_pipeline_without_a_cap_is_refused(cases, tmp_path):
 
 def test_a_variant_cannot_mix_two_kinds_of_run(cases, tmp_path):
     _run(cases[:2], SyntheticPipeline(), tmp_path)
+    pipeline = NullPipeline()
     with pytest.raises(RunRefused, match="another --variant"):
-        _run(cases[:2], NullPipeline(), tmp_path)
+        _run(cases[:2], pipeline, tmp_path)
 
 
 def test_the_app_spend_cap_stops_the_run(cases, tmp_path):
