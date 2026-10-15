@@ -738,7 +738,7 @@
       const v = evaluate(state.expr);
       state.result = String(v);
       state.error = null;
-    } catch (e) {
+    } catch {
       // Don't show error mid-typing — keep last result, only flag at "=".
     }
     render();
