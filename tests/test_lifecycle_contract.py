@@ -102,8 +102,9 @@ def test_the_dispute_message_the_server_builds_passes_the_harness_check() -> Non
 
 def test_a_message_for_another_step_is_refused() -> None:
     nonce = "ab" * 16
+    another_step = eb.dispute_message(JOB, 4, nonce)
     with pytest.raises(SigningRefused):
-        check_dispute_message(eb.dispute_message(JOB, 4, nonce), JOB, 3, nonce)
+        check_dispute_message(another_step, JOB, 3, nonce)
     with pytest.raises(SigningRefused):
         check_dispute_message(eb.dispute_message("0b" * 16, 3, nonce), JOB, 3, nonce)
     with pytest.raises(SigningRefused):
