@@ -265,7 +265,8 @@ def test_a_transaction_row_that_names_no_network_is_refused(tmp_path: Path) -> N
     h = ledger.add("x")
     path = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("settle", h, network="unknown")])
     out = run(ledger, tmp_path, path)
-    assert out.code == EXIT_REFUSED and "not testnet" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "not testnet" in out.out
 
 
 @pytest.mark.parametrize("where", ["rpc", "horizon"])
