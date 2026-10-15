@@ -1054,7 +1054,8 @@ def test_a_credit_that_computes_to_nothing_is_refused_and_hands_the_claim_back(m
     assert refused.value.code == "nothing_to_credit"
     assert refused.value.status_code == 409
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid is not None
+    assert unpaid.status == "upheld"
 
 
 def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> None:
