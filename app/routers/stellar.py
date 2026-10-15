@@ -1071,7 +1071,7 @@ async def build_reclaim(req: ReclaimReq) -> XdrResponse:
     `authorization_locked`), so the wallet is never asked to sign a
     transaction the contract will refuse. A v1 escrow holds no custody and
     answers 409 `reclaim_unsupported`; an unreadable chain is 503
-    `authorization_unverifiable` (ADR 0011).
+    `authorization_unreadable` (ADR 0011).
     """
     await authorization_guard.check_reclaimable(req.auth_id_hex, req.payer)
     try:
