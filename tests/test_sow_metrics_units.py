@@ -99,7 +99,8 @@ def test_a_404_is_an_answer_and_is_not_retried(tmp_path: Path) -> None:
 def test_the_dispute_rating_is_read_from_the_scorers_history(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path)
     counted = out.raw_metric("m05")["counted"][0]
-    assert counted["dispute_job_id"][:16] == JOB1[:16] and counted["dispute_job_id"] != JOB1
+    assert counted["dispute_job_id"][:16] == JOB1[:16]
+    assert counted["dispute_job_id"] != JOB1
 
 
 @pytest.mark.parametrize(
