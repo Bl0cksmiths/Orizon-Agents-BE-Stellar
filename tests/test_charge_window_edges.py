@@ -206,7 +206,8 @@ def test_a_page_that_fails_twice_ends_the_walk_there(clock: Clock, rpc: Rpc, cap
         advance = _advance()
 
     assert advance.out_of_time is False
-    assert advance.index is not None and advance.index.next_ledger == OLDEST + 20_000
+    assert advance.index is not None
+    assert advance.index.next_ledger == OLDEST + 20_000
     assert _warnings(caplog) == [
         f"[charges] page [{OLDEST + 20_000}, {OLDEST + 30_000}) failed: ConnectionError: rpc down"
     ]
