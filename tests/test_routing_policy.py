@@ -189,14 +189,16 @@ def test_a_top_rated_external_agent_is_never_offered_or_planned(
     resp = _decompose()
 
     (call,) = fake_claude.calls_for("planner")
-    assert f"id={EXTERNAL} " not in call.system and f"id={UNBOUND} " not in call.system
+    assert f"id={EXTERNAL} " not in call.system
+    assert f"id={UNBOUND} " not in call.system
     assert [s.agent_id for s in resp.steps] == ["agt_11c0", "agt_12r0"]
     assert all(s.executor == "built_in" for s in resp.steps)
     # The card says why ONCE, in the policy's own words, naming no outside
     # agent — not one notice per agent, and not as an endpoint problem.
     external = [n for n in resp.notices if n.reason_code == "external_not_routed"]
     assert [(n.agent_id, n.agent_name) for n in external] == [(EXTERNAL_POLICY_ID, None)]
-    assert EXTERNAL not in _codes(resp) and UNBOUND not in _codes(resp)
+    assert EXTERNAL not in _codes(resp)
+    assert UNBOUND not in _codes(resp)
     assert "unbound_endpoint" not in _codes(resp).values()
     # And its reputation was never even read: nothing could have used it.
     assert all(EXTERNAL not in ids for ids in registry)
