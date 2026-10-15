@@ -153,7 +153,7 @@ class _Views:
         raise AssertionError(f"unexpected read {function_name}")
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[_Rpc, _Views]]:
     rpc, views = _Rpc(), _Views()
     monkeypatch.setattr(settings, "stellar_payment_escrow", ESCROW_ID)
