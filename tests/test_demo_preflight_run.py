@@ -748,7 +748,9 @@ def test_an_unfunded_buyer_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("wallets.buyer")
-    assert check["status"] == FAIL and "2.5000000" in check["detail"] and BUYER in check["fix"]
+    assert check["status"] == FAIL
+    assert "2.5000000" in check["detail"]
+    assert BUYER in check["fix"]
 
 
 def test_a_buyer_that_does_not_exist_fails(tmp_path: Path) -> None:
