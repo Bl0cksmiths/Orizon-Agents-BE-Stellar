@@ -799,7 +799,8 @@ def test_the_demo_video_must_be_published_and_three_to_five_minutes(
     world = met_world()
     world.pages[DEMO_PAGE] = page
     out = run(world, tmp_path)
-    assert out.status("m10") == "not_met" and out.metric("m10")["reason"] == expected
+    assert out.status("m10") == "not_met"
+    assert out.metric("m10")["reason"] == expected
 
 
 @pytest.mark.parametrize("seconds", [180, 300])
