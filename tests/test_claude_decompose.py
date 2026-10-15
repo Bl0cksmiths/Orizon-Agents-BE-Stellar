@@ -492,7 +492,8 @@ def test_a_watch_band_intent_with_a_clean_spec_plans_from_the_spec(
     resp = _decompose()
 
     assert "USER_INPUT" not in fake_claude.calls_for("planner")[0].user
-    assert resp.guard is not None and "watch" in resp.guard.reasons
+    assert resp.guard is not None
+    assert "watch" in resp.guard.reasons
 
 
 def test_an_unsafe_spec_blocks(claude_on: None, client: TestClient, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
