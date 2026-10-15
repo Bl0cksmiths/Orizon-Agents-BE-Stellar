@@ -334,7 +334,8 @@ def test_a_refused_amount_hands_the_claim_back(store: Store, seams: Seams) -> No
     seams.amount = refund_svc.RefundRefused("refund_above_cap", "0.05 is above the cap")
     err = _refused()
     assert (err.code, err.status_code, err.message) == ("refund_above_cap", 409, "0.05 is above the cap")
-    assert err.__cause__ is None and err.__suppress_context__ is True
+    assert err.__cause__ is None
+    assert err.__suppress_context__ is True
     assert store.calls == [LOAD, CLAIM, SETTLEMENT, SIBLINGS, RELEASE]
     assert [c[0] for c in seams.calls] == ["creditable_for"]
     assert _status(store) == "upheld"
