@@ -788,6 +788,11 @@
     if (state.phase === 'long') return 'long break';
     return `break · cycle ${state.cycle} of 4`;
   }
+  function startButtonLabel() {
+    if (state.running) return 'pause · ␣';
+    if (state.pausedAtElapsedMs > 0) return 'resume · ␣';
+    return 'start · ␣';
+  }
   function render() {
     rolloverDailyIfNeeded();
     phaseNameEl.textContent = phaseTitle(state.phase);
@@ -800,7 +805,7 @@
     });
     tomatoCount.textContent = state.daily.count.toString();
     updateRingColor();
-    startBtn.textContent = state.running ? 'pause · ␣' : (state.pausedAtElapsedMs > 0 ? 'resume · ␣' : 'start · ␣');
+    startBtn.textContent = startButtonLabel();
     renderRing();
   }
 
