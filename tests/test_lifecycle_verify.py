@@ -138,7 +138,8 @@ def test_operator_delta() -> None:
     short = check_operator_deltas({OWNER: 10}, {OWNER: 500_009}, OWNERS, events, set())
     assert [c.ok for c in short] == [False]
     shared = check_operator_deltas({OWNER: 10}, {OWNER: 1}, OWNERS, events, {OWNER})
-    assert [c.ok for c in shared] == [None] and "not isolatable" in shared[0].detail
+    assert [c.ok for c in shared] == [None]
+    assert "not isolatable" in shared[0].detail
     unmeasured = check_operator_deltas({}, {}, OWNERS, events, set())
     assert [c.ok for c in unmeasured] == [None]
 
