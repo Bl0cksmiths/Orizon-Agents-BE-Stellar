@@ -283,11 +283,14 @@ def test_the_markdown_tables_every_metric(tmp_path: Path) -> None:
 
 def test_the_raw_json_lists_every_counted_and_excluded_item(tmp_path: Path) -> None:
     raw = json.loads((run(met_world(), tmp_path).dir / RAW_NAME).read_text())
-    assert raw["network"] == "testnet" and raw["exit_code"] == 0
+    assert raw["network"] == "testnet"
+    assert raw["exit_code"] == 0
     assert raw["generated_utc"] == "2026-09-21T14:13:20Z"
     by_id = {m["id"]: m for m in raw["metrics"]}
-    assert len(by_id["m01"]["counted"]) == 3 and len(by_id["m01"]["excluded"]) == 3
-    assert len(by_id["m04"]["counted"]) == 4 and len(by_id["m04"]["excluded"]) == 1
+    assert len(by_id["m01"]["counted"]) == 3
+    assert len(by_id["m01"]["excluded"]) == 3
+    assert len(by_id["m04"]["counted"]) == 4
+    assert len(by_id["m04"]["excluded"]) == 1
     assert raw["summary"]["ratings_by_kind"] == {"auto": 3, "dispute": 1}
     assert raw["summary"]["ledger_lifetime_disputes"] == 1
     assert raw["failures"] == {}
