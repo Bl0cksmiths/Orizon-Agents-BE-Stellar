@@ -527,7 +527,8 @@ def test_a_simulated_run_writes_no_rating_and_nothing_else_on_chain(client: Test
     assert client.portal is not None
     client.portal.call(_drain_workflows)
     assert state.tasks[task["task_id"]].status == "complete"  # the run delivered, so it had something to rate
-    assert chain.ratings == [] and chain.invokes == []
+    assert chain.ratings == []
+    assert chain.invokes == []
 
 
 def test_the_spy_does_see_a_paid_runs_ratings(client: TestClient, monkeypatch, chain: ChainSpy) -> None:
