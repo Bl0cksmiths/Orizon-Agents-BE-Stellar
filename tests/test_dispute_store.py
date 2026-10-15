@@ -1885,7 +1885,8 @@ def test_a_missing_driver_names_the_fix() -> None:
         dispute_store._import_asyncpg()
 
     message = str(excinfo.value)
-    assert "asyncpg" in message and "DATABASE_URL" in message
+    assert "asyncpg" in message
+    assert "DATABASE_URL" in message
 
 
 # ── get_dispute_store / close_dispute_store ───────────────────────────────
