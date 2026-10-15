@@ -916,8 +916,6 @@
 
   window.addEventListener('keydown', (e) => {
     const k = e.key;
-    // Allow standard text input on .display result for copy
-    if (e.target === resultEl) {/* fall through */}
     if (/^\d$/.test(k)) { appendTok(k); flashKey(`[data-tok="${k}"]`); e.preventDefault(); }
     else if (k === '.') { appendTok('.'); flashKey('[data-tok="."]'); e.preventDefault(); }
     else if (k === '+' || k === '-' || k === '*' || k === '/' || k === '%' || k === '^') {
