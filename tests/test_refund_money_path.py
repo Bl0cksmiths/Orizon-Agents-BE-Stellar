@@ -288,8 +288,9 @@ def test_a_cancel_after_the_transfer_was_handed_over_holds_the_claim(monkeypatch
     calls = _chain(monkeypatch, asyncio.CancelledError())
     dispute = a_dispute()
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert len(calls) == 1
     current, queue = _stored(dispute.id)
