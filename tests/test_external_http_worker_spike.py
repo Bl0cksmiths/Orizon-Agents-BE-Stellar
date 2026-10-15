@@ -94,7 +94,8 @@ def test_dispatch_carries_the_envelope_and_returns_the_output() -> None:
     # v2 since story 2.02 (ADR 0004): the envelope gained `ts` and `network`,
     # both inside the signed bytes.
     assert body["v"] == 2
-    assert isinstance(body["ts"], int) and body["ts"] > 0
+    assert isinstance(body["ts"], int)
+    assert body["ts"] > 0
     assert body["network"]
     # The operator's budget, emitted from the constant so the wire value can
     # never drift from what the worker actually enforces.
