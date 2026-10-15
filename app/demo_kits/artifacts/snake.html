@@ -873,10 +873,23 @@
       e.preventDefault();
       return;
     }
-    if (k === 'w' || k === 'arrowup') { if (!state.started) start(); setDir(0, -1); e.preventDefault(); }
-    else if (k === 's' || k === 'arrowdown') { if (!state.started) start(); setDir(0, 1); e.preventDefault(); }
-    else if (k === 'a' || k === 'arrowleft') { if (!state.started) start(); setDir(-1, 0); e.preventDefault(); }
-    else if (k === 'd' || k === 'arrowright') { if (!state.started) start(); setDir(1, 0); e.preventDefault(); }
+    if (k === 'w' || k === 'arrowup') {
+      if (!state.started) { start(); }
+      setDir(0, -1);
+      e.preventDefault();
+    } else if (k === 's' || k === 'arrowdown') {
+      if (!state.started) { start(); }
+      setDir(0, 1);
+      e.preventDefault();
+    } else if (k === 'a' || k === 'arrowleft') {
+      if (!state.started) { start(); }
+      setDir(-1, 0);
+      e.preventDefault();
+    } else if (k === 'd' || k === 'arrowright') {
+      if (!state.started) { start(); }
+      setDir(1, 0);
+      e.preventDefault();
+    }
   }
 
   // Touch swipe input
