@@ -399,7 +399,8 @@ def test_a_run_that_delivered_but_paid_nobody_gets_a_delivery_only_seal(monkeypa
     assert (task.charge_tx, task.proof_tx, task.settlement) == (SETTLE_TX, SEAL_TX, "released")
     assert (task.seal, task.seal_kind) == ("sealed", "delivery_only")
     record = store.recorded[-1]
-    assert record.proof_tx == SEAL_TX and all(s.delivered and not s.paid_usdc for s in record.steps)
+    assert record.proof_tx == SEAL_TX
+    assert all(s.delivered and not s.paid_usdc for s in record.steps)
     messages = [line.msg for line in state.traces["tsk_v2_paid_nobody"]]
     assert any(m.startswith("workflow sealed — 2 agents delivered, no payment was made") for m in messages)
     assert not any("USDC" in m and m.startswith("workflow sealed") for m in messages)
