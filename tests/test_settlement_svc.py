@@ -365,7 +365,7 @@ def test_an_unconfigured_escrow_is_unavailable(monkeypatch: pytest.MonkeyPatch) 
 def test_an_unconfigured_registry_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the registry the owner cannot be resolved, so no charge could be
     told apart from a self-payment — refuse rather than guess."""
-    settings.stellar_agent_registry = ""
+    monkeypatch.setattr(settings, "stellar_agent_registry", "")
     result = _run(monkeypatch, _FakeRpc(), _reader())
 
     assert result.unavailable == "agent registry not configured"
