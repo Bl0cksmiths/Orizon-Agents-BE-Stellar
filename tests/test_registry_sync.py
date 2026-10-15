@@ -244,7 +244,8 @@ def test_start_is_idempotent_and_stop_clears_the_task(monkeypatch):
         assert registry_sync._task is first  # no second loop
         await registry_sync.stop()
         assert registry_sync._task is None
-        assert first is not None and first.cancelled()
+        assert first is not None
+        assert first.cancelled()
 
     asyncio.run(scenario())
 
