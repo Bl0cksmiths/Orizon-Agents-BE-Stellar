@@ -444,7 +444,8 @@ def test_a_drifted_spec_is_dropped_for_the_original_words(
     resp = _decompose()
 
     planner = fake_claude.calls_for("planner")[0]
-    assert "BEGIN USER_INPUT" in planner.user and "UNDERSTOOD_REQUEST" not in planner.user
+    assert "BEGIN USER_INPUT" in planner.user
+    assert "UNDERSTOOD_REQUEST" not in planner.user
     assert resp.understood_as is None
     assert resp.stages[2].msg == "The improved request drifted from yours; planning from your own words"
 
