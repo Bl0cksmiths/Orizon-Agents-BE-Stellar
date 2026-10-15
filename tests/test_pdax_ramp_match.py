@@ -169,4 +169,6 @@ def test_a_usdc_deposit_no_offramp_claims_is_warned(
         _record(ramp_id, direction, **fields)
     record, advance, warned = _match(caplog, event)
     assert (record, advance) == (None, None)
-    assert len(warned) == 1 and "kind=crypto" in warned[0] and f"target={event.destination_address}" in warned[0]
+    assert len(warned) == 1
+    assert "kind=crypto" in warned[0]
+    assert f"target={event.destination_address}" in warned[0]
