@@ -342,7 +342,8 @@ def test_out_of_time_mid_walk_keeps_what_it_read_and_the_next_build_resumes(chai
 
     first = _fetch({"ext_a": OWNER_A}, budget=0.04)
 
-    assert first.out_of_time is True and first.complete is False
+    assert first.out_of_time is True
+    assert first.complete is False
     evidence = first.by_agent["ext_a"]
     assert evidence.truncated is True
     assert evidence.scanned_ledgers == 40_000
