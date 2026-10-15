@@ -265,7 +265,8 @@ def test_jev_outage_falls_back_to_haiku_with_a_fenced_intent(fake_jev, fake_clau
     assert call.effort is None  # Haiku 4.5 takes no effort
     assert call.schema_name == "IntentAssessment"
     assert call.system == prompts.INTENT_FALLBACK_SYSTEM
-    assert "BEGIN USER_REQUEST" in call.user and "UNTRUSTED INPUT" in call.user
+    assert "BEGIN USER_REQUEST" in call.user
+    assert "UNTRUSTED INPUT" in call.user
     assert "[redacted marker]" in call.user  # the forged END marker cannot close the real fence
     assert call.user.count("END USER_REQUEST (") == 1
 
