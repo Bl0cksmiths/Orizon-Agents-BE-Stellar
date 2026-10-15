@@ -134,7 +134,8 @@ def test_a_failure_after_the_charge_confirmed_keeps_the_charge(
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
         charge_tx, proof_tx, job_id = _settle()
 
-    assert (charge_tx, proof_tx) == (CHARGE_TX, None) and job_id is not None
+    assert (charge_tx, proof_tx) == (CHARGE_TX, None)
+    assert job_id is not None
     assert _lines()[-1] == ("error", "on-chain settlement failed", None)
     [record] = caplog.records
     assert record.exc_info is not None
