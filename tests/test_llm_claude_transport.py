@@ -112,16 +112,19 @@ def test_a_structured_opus_call_sends_effort_schema_cache_and_fallbacks(api: Cal
     result = _plan(effort="high")
     assert result.value == Plan(steps=["a", "b"])
     sent = recorder.body()
-    assert sent["model"] == "claude-opus-5-5" and sent["max_tokens"] == 16_000
+    assert sent["model"] == "claude-opus-5-5"
+    assert sent["max_tokens"] == 16_000
     assert sent["system"] == [{"type": "text", "text": "Plan the work.", "cache_control": {"type": "ephemeral"}}]
     assert sent["messages"] == [{"role": "user", "content": "build a todo app"}]
     assert sent["output_config"]["effort"] == "high"
     schema = sent["output_config"]["format"]
-    assert schema["type"] == "json_schema" and schema["schema"]["additionalProperties"] is False
+    assert schema["type"] == "json_schema"
+    assert schema["schema"]["additionalProperties"] is False
     assert sent["fallbacks"] == "default"
     assert "server-side-fallback-2026-07-01" in recorder.requests[0].headers["anthropic-beta"]
     # Never sent: thinking (always-on adaptive on Opus 5.5), forced tool_choice, a prefill.
-    assert "thinking" not in sent and "tool_choice" not in sent
+    assert "thinking" not in sent
+    assert "tool_choice" not in sent
     # 1000 in at $4 + 500 out at $20 + 4000 cache reads at $0.20, per million.
     assert result.usage == Usage(input_tokens=1000, output_tokens=500, cache_read_tokens=4000)
     assert result.cost_usd == pytest.approx(0.0148)
