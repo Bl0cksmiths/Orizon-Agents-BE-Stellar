@@ -318,7 +318,8 @@ def test_a_full_page_is_split_until_every_charge_is_read(chain: Any, monkeypatch
     window = _fetch({"ext_a": OWNER_A})
 
     assert len(_revenue(window, "ext_a")) == 5
-    assert window.complete is True and window.by_agent["ext_a"].truncated is False
+    assert window.complete is True
+    assert window.by_agent["ext_a"].truncated is False
 
 
 def test_one_ledger_denser_than_a_page_is_reported_truncated(chain: Any, monkeypatch: pytest.MonkeyPatch) -> None:
