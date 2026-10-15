@@ -311,7 +311,8 @@ def test_an_upheld_dispute_goes_straight_to_the_claim_and_is_credited(store: Sto
     _seed(store, "upheld")
     observer = object()
     result = _uphold(observer)
-    assert result.rating_tx == "tx_rated" and result.status == "credited"
+    assert result.rating_tx == "tx_rated"
+    assert result.status == "credited"
     assert store.calls == [LOAD, CLAIM, SETTLEMENT, SIBLINGS, CREDITED]
     assert seams.calls == [
         ("creditable_for", "ab" * 32, DISPUTE, 1.0, ()),
