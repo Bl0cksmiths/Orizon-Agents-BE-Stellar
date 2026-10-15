@@ -263,7 +263,8 @@ def test_invalidation_refreshes_the_agent_in_the_background(chain):
     assert chain.count("agt_01h8") == 2  # the batch after it was a cache hit
     assert (served.count, served.disputed) == (5, 1)
     stored = rcache.last_stored(_key("agt_01h8"))
-    assert stored is not None and stored.superseded is False
+    assert stored is not None
+    assert stored.superseded is False
 
 
 def test_invalidation_never_waits_on_the_refresh(chain):
