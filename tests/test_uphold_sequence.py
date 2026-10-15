@@ -217,7 +217,8 @@ def test_an_unknown_dispute_is_a_404(store: Store, seams: Seams) -> None:
     store.recording = True
     err = _refused()
     assert (err.code, err.status_code) == ("unknown_dispute", 404)
-    assert store.calls == [LOAD] and seams.calls == []
+    assert store.calls == [LOAD]
+    assert seams.calls == []
 
 
 def test_a_credited_dispute_retries_its_rating_and_signs_nothing(store: Store, seams: Seams) -> None:
