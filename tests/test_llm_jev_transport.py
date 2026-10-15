@@ -86,7 +86,8 @@ def test_a_guard_battery_is_one_call_with_typed_answers(api: Callable[..., Recor
     recorder = api(_ok())
     result = _ask()
     sent = json.loads(recorder.requests[0].content)
-    assert sent["state"] == "build me a todo app" and sent["model"] == "jev-1.13.0"
+    assert sent["state"] == "build me a todo app"
+    assert sent["model"] == "jev-1.13.0"
     assert sent["questions"]["complexity"] == QUESTIONS["complexity"]
     assert recorder.requests[0].headers["authorization"].endswith("ts-test-key")
     assert result.answers == {
