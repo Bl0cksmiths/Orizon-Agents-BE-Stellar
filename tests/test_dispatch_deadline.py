@@ -51,9 +51,10 @@ def test_a_trickling_operator_is_cut_off_at_the_deadline(short_deadline: float) 
         return httpx.Response(200, content=gen())
 
     async def go() -> None:
+        worker = _worker(trickle)
         started = time.monotonic()
         with pytest.raises(eh.ExternalDispatchError, match="no response within"):
-            await _worker(trickle).run("x", "y")
+            await worker.run("x", "y")
         elapsed = time.monotonic() - started
         # Bounded by the deadline, not by the 120 s step ceiling above us.
         assert elapsed < short_deadline * 4
