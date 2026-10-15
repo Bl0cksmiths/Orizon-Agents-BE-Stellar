@@ -310,7 +310,8 @@ def test_a_dry_run_names_every_blocker_at_once(buyer: Keypair, tmp_path: Path) -
     assert result.code == EXIT_REFUSED
     assert "dry run: 3 blocker(s)" in result.out
     assert "is not an external, bound agent" in result.out
-    assert "does not exist on testnet" in result.out and "is v1" in result.out
+    assert "does not exist on testnet" in result.out
+    assert "is v1" in result.out
 
 
 def test_a_dry_run_blocks_on_an_agent_a_real_run_refuses(buyer: Keypair, tmp_path: Path) -> None:
