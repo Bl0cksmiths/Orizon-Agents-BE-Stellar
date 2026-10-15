@@ -125,8 +125,9 @@ def test_fetch_maps_labels_skips_out_of_bound_rows_and_repeats(tmp_path):
 
 
 def test_fetch_refuses_a_revision_that_moved(tmp_path):
+    client = _mock_hf({}, sha="0" * 40)
     with pytest.raises(external.FetchError, match="not the pinned"):
-        external.fetch("deepset", client=_mock_hf({}, sha="0" * 40), cache=tmp_path)
+        external.fetch("deepset", client=client, cache=tmp_path)
 
 
 def test_fetch_reads_the_pinned_csv_files(tmp_path):
