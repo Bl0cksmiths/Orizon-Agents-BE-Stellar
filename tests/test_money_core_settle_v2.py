@@ -134,7 +134,9 @@ def test_a_receipt_count_that_does_not_match_the_payouts_seals_without_links(
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
         settle_tx, proof_tx, job_id = _settle((0.01, 0.02), frozenset({0, 1}), on_settled=on_settled)
 
-    assert settle_tx == SETTLE_TX and proof_tx is not None and job_id is not None
+    assert settle_tx == SETTLE_TX
+    assert proof_tx is not None
+    assert job_id is not None
     assert settled == [(SETTLE_TX, None)]
     [seal] = chain.named("seal")
     assert scval.to_native(seal[5]) == []
