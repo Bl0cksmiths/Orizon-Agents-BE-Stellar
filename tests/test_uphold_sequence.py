@@ -124,7 +124,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> Any:
     dispute_store._store = None
 
 
-@pytest.fixture()
+@pytest.fixture
 def seams(monkeypatch: pytest.MonkeyPatch) -> Seams:
     return Seams(monkeypatch)
 
