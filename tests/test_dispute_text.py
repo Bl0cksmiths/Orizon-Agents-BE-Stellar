@@ -112,9 +112,10 @@ def test_a_rejection_note_past_the_limit_is_refused_and_never_cut() -> None:
     """D-062, the note's half. The edge bounds it at the same number, so only an
     in-process caller reaches this; it is refused rather than trimmed."""
     dispute = _open_dispute()
+    rejection = dispute_svc.reject(dispute.id, note="n" * (dispute_svc.MAX_REASON_CHARS + 1))
 
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.reject(dispute.id, note="n" * (dispute_svc.MAX_REASON_CHARS + 1)))
+        asyncio.run(rejection)
 
     assert (refused.value.code, refused.value.status_code) == ("rejection_reason_too_long", 422)
     assert asyncio.run(dispute_store.get_dispute_store().get_dispute(dispute.id)).status == "open"
