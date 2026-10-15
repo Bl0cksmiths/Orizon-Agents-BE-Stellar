@@ -180,7 +180,9 @@ def _revenue(window: charge_window.WindowSettlements, agent_id: str) -> list[str
 
 
 # ── one scan for everyone ───────────────────────────────────────────────────
-def test_one_scan_answers_every_agent_and_costs_the_same_for_one_or_a_thousand(chain: Any) -> None:
+def test_one_scan_answers_every_agent_and_costs_the_same_for_one_or_a_thousand(
+    chain: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     rpc, views = chain
     rpc.events = [_event("ext_7", OLDEST + 50_000, auth=1, job=1), _event("ext_9", LATEST - 3, auth=2, job=2)]
     views.payers = {_auth(1).hex(): BUYER, _auth(2).hex(): BUYER}
@@ -189,7 +191,9 @@ def test_one_scan_answers_every_agent_and_costs_the_same_for_one_or_a_thousand(c
     pages_for_many = len(rpc.filters)
     payer_reads = views.reads.count("authorization")
     charge_window.reset()
-    snapshot_store._store = snapshot_store.InMemorySnapshotStore()  # a cold start, nothing stored
+    monkeypatch.setattr(
+        snapshot_store, "_store", snapshot_store.InMemorySnapshotStore()
+    )  # a cold start, nothing stored
     rpc.filters.clear()
     _fetch({"ext_7": OWNER_A})
 
