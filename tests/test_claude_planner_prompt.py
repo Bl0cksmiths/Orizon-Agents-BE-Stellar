@@ -109,8 +109,9 @@ def test_the_raw_plan_is_returned_unclamped(fake_claude: FakeClaude) -> None:
 def test_a_refusal_is_raised_for_the_caller_to_judge(fake_claude: FakeClaude) -> None:
     fake_claude.refuse(purpose="planner", category="cyber")
 
+    drafting = draft_plan("anything at all", tier="low", agents_block=BLOCK)
     with pytest.raises(LLMRefused):
-        asyncio.run(draft_plan("anything at all", tier="low", agents_block=BLOCK))
+        asyncio.run(drafting)
 
 
 def _text() -> str:
