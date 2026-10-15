@@ -134,7 +134,8 @@ def test_a_settlement_is_read_back_by_job_and_by_task() -> None:
 
     by_job, by_task = asyncio.run(go())
 
-    assert by_job is not None and by_task is not None
+    assert by_job is not None
+    assert by_task is not None
     assert by_job == by_task
     assert by_job.window_closes_at == 1_700_086_400.0
     assert by_job.settled_usdc == 3.75
