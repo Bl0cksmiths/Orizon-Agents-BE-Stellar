@@ -777,9 +777,10 @@ def test_execute_refuses_an_authorization_that_cannot_pay_for_the_plan(
     monkeypatch, captured_runs, auth, payer, status, code
 ):
     _install(monkeypatch, _Chain(auth=auth))
+    plan = _plan_for_execute()
 
     with pytest.raises(execution_svc.AuthorizationRefusedError) as refused:
-        _execute(_plan_for_execute(), payer=payer)
+        _execute(plan, payer=payer)
 
     assert (refused.value.status_code, refused.value.detail) == (status, code)
     assert captured_runs == []
