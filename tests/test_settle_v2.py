@@ -793,9 +793,10 @@ def test_execute_refuses_an_unreadable_authorization(monkeypatch, captured_runs)
         raise RuntimeError("rpc down")
 
     monkeypatch.setattr(sc, "simulate_read", down)
+    plan = _plan_for_execute()
 
     with pytest.raises(execution_svc.AuthorizationRefusedError) as refused:
-        _execute(_plan_for_execute())
+        _execute(plan)
 
     assert (refused.value.status_code, refused.value.detail) == (503, "authorization_unreadable")
     assert chain.calls == []
