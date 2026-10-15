@@ -427,7 +427,8 @@ def test_capacity_never_releases_an_unowned_authorization(client: TestClient, mo
 def test_an_unreadable_chain_never_releases(client: TestClient, monkeypatch, releases) -> None:
     install(monkeypatch, FakeEscrow(auth=ConnectionError("rpc down")))
     r = paid(client)
-    assert r.status_code == 404 and "release_tx_hash" not in r.json()
+    assert r.status_code == 404
+    assert "release_tx_hash" not in r.json()
     assert releases.calls == []
 
 
