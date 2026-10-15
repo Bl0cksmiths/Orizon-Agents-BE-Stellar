@@ -63,8 +63,9 @@ def test_retries_exhausted_raises_last(monkeypatch):
     _no_sleep(monkeypatch)
     always = [PdaxError("boom", http_status=503)] * 5
     fn, calls = _fn(always)
+    retrying = with_retries(fn, attempts=3)
     with pytest.raises(PdaxError):
-        asyncio.run(with_retries(fn, attempts=3))
+        asyncio.run(retrying)
     assert calls["n"] == 3
 
 
