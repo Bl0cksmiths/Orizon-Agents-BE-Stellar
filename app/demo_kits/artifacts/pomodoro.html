@@ -940,6 +940,17 @@
   }
 
   // ── History UI ───────────────────────────────────────────────────────────
+  function buildHistoryItem(e) {
+    const li = document.createElement('li');
+    const kind = e.kind === 'short' ? 'break' : e.kind === 'long' ? 'long' : 'work';
+    const k = document.createElement('span'); k.className = 'kind ' + e.kind; k.textContent = kind;
+    const dur = document.createElement('span'); dur.className = 'dur'; dur.textContent = fmtMinutes(e.durationMs);
+    const t = document.createElement('time');
+    const d = new Date(e.ts);
+    t.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    li.appendChild(k); li.appendChild(dur); li.appendChild(t);
+    return li;
+  }
   function renderHistory() {
     if (!state.history.length) {
       historyContent.innerHTML = '<div class="history-empty">no completed sessions yet</div>';
@@ -964,17 +975,7 @@
       h.innerHTML = `<span>${fmtDayHeading(day)}</span><span>${workCount} tomato${workCount === 1 ? '' : 'es'}</span>`;
       card.appendChild(h);
       const ul = document.createElement('ul');
-      for (const e of entries) {
-        const li = document.createElement('li');
-        const kind = e.kind === 'short' ? 'break' : e.kind === 'long' ? 'long' : 'work';
-        const k = document.createElement('span'); k.className = 'kind ' + e.kind; k.textContent = kind;
-        const dur = document.createElement('span'); dur.className = 'dur'; dur.textContent = fmtMinutes(e.durationMs);
-        const t = document.createElement('time');
-        const d = new Date(e.ts);
-        t.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        li.appendChild(k); li.appendChild(dur); li.appendChild(t);
-        ul.appendChild(li);
-      }
+      for (const e of entries) ul.appendChild(buildHistoryItem(e));
       card.appendChild(ul);
       historyContent.appendChild(card);
     }
