@@ -296,8 +296,9 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
 def test_the_mapper_refuses_a_price_the_floor_could_never_reach(stroops: int, why: str):
     # Zero and negative stay refused: the floor is positive, so it SUBSUMES
     # #44's sign check rather than replacing or duplicating it.
+    raw = _raw(DUST, price=stroops)
     with pytest.raises(registry_sync.UnbelievablePrice):
-        registry_sync._to_agent(_raw(DUST, price=stroops))
+        registry_sync._to_agent(raw)
 
 
 def test_the_minimum_itself_is_believable():
