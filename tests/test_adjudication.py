@@ -1165,8 +1165,9 @@ def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str)
     dispute = a_dispute()
     asyncio.run(dispute_store.get_dispute_store().append_status(dispute.id, status))
 
+    rejecting = dispute_svc.reject(dispute.id, note="changed my mind")
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.reject(dispute.id, note="changed my mind"))
+        asyncio.run(rejecting)
 
     assert refused.value.code == "dispute_not_open"
     assert refused.value.status_code == 409
