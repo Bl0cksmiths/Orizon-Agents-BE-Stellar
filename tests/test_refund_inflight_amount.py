@@ -57,12 +57,9 @@ def test_a_failed_credit_that_could_not_be_handed_back_records_its_amount_too(mo
     dispute = a_dispute()
     real = _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
 
-    try:
+    with pytest.raises(DisputeError) as refused:
         asyncio.run(dispute_svc.uphold(dispute.id))
-    except DisputeError as refused:
-        assert refused.code == "refund_failed"
-    else:  # pragma: no cover
-        raise AssertionError("a FAILED credit was answered as settled")
+    assert refused.value.code == "refund_failed"
 
     monkeypatch.setattr(dispute_store, "_store", real)
     current, queue = _stored(dispute.id)
