@@ -78,7 +78,8 @@ async def _assert_retained_settlements_keep_their_disputes(
             continue
         assert await store.get_dispute(dispute.id) is not None, dispute.id
         found = await store.find_dispute(dispute.job_id_hex, dispute.step_index)
-        assert found is not None and found.id == dispute.id, dispute.id
+        assert found is not None, dispute.id
+        assert found.id == dispute.id, dispute.id
 
 
 def test_a_paid_step_can_never_be_disputed_again_while_its_settlement_is_held(
