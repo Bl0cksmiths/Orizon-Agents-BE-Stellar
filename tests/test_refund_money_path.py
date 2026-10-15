@@ -123,8 +123,9 @@ def test_a_signing_key_that_will_not_parse_is_failed_and_releases(monkeypatch) -
     sc._signer_keypair.cache_clear()
     try:
         assert refund_svc.config_gap() is None
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as refused:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
     finally:
         sc._signer_keypair.cache_clear()
 
