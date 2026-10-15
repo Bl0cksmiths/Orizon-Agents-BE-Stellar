@@ -85,7 +85,7 @@ async def _noop(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def world(monkeypatch: pytest.MonkeyPatch):
     """The seeded catalog plus two bound external agents, every one scored above
     the floor, a clean reachability memory and no background probing unless a
