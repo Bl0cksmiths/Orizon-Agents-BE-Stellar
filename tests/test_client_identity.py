@@ -47,7 +47,7 @@ def _scope(forwarded: str | None, *, peer: str | None = "127.0.0.1", headers: di
     return {"type": "http", "headers": raw, "client": (peer, 1234) if peer else None}
 
 
-@pytest.fixture()
+@pytest.fixture
 def token(monkeypatch):
     monkeypatch.setattr(settings, "frontend_proxy_token", TOKEN)
     return TOKEN
