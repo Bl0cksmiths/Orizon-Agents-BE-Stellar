@@ -1769,7 +1769,8 @@ def test_a_rating_submit_that_quotes_the_key_back_leaks_it_nowhere(
     out = capsys.readouterr().out
     assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
     assert "NO ANSWER" in out
-    assert DISPUTE_ID in stderr.getvalue() and "[redacted]" in stderr.getvalue()
+    assert DISPUTE_ID in stderr.getvalue()
+    assert "[redacted]" in stderr.getvalue()
     assert key not in out
     assert key not in stderr.getvalue()
 
