@@ -381,7 +381,8 @@ def test_a_failed_rating_records_nothing_and_the_retry_lands_it(ledger, settler,
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         failed = uphold(dispute.id)
 
-    assert failed.status == "credited" and failed.refund_tx == "tx_credit"
+    assert failed.status == "credited"
+    assert failed.refund_tx == "tx_credit"
     assert failed.rating_tx is None
     assert invalidated == []
     (logged,) = svc_errors(caplog)
