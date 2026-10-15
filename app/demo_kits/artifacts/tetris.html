@@ -1029,6 +1029,7 @@
     saveScores(scores);
     return scores.slice(0, 3);
   }
+  const RANK_GLYPHS = ['◆', '◇'];   // 1st, 2nd; the rest get '·'
   function renderHighList(scores) {
     highList.innerHTML = '';
     if (!scores.length) {
@@ -1041,7 +1042,7 @@
     scores.forEach((s, i) => {
       const row = document.createElement('div');
       row.className = 'row';
-      const rank = i === 0 ? '◆' : i === 1 ? '◇' : '·';
+      const rank = RANK_GLYPHS[i] ?? '·';
       row.innerHTML = `<span class="rank">${rank}</span><span>${s.score.toLocaleString('en-US')}</span>`;
       highList.appendChild(row);
     });
