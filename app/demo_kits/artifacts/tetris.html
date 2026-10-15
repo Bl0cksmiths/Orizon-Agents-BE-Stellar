@@ -804,7 +804,6 @@
       gained = Math.round(gained * B2B_MULT);
       if (toastMsg) toastMsg = 'B2B · ' + toastMsg;
     }
-    state.b2b = wasDifficult || state.b2b && cleared === 0;
     if (wasDifficult) state.b2b = true;
     else if (cleared > 0) state.b2b = false;
 
