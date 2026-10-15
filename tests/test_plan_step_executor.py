@@ -49,7 +49,7 @@ def _bind(monkeypatch: pytest.MonkeyPatch, *ids: str) -> None:
     asyncio.run(binding_registry.refresh_bound_ids())
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The seeded catalog plus one bound external agent, and no kit pause."""
 
