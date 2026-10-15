@@ -333,7 +333,8 @@ def test_recording_the_in_flight_hash_keeps_the_claim(store: DisputeStore) -> No
 
     in_flight, queue = run(store, go())
 
-    assert in_flight is not None and in_flight.status == "crediting"
+    assert in_flight is not None
+    assert in_flight.status == "crediting"
     assert in_flight.refund_tx == "tx_inflight"
     assert queue == ["dsp_0001"]
 
