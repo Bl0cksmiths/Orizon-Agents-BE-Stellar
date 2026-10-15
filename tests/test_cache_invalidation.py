@@ -317,7 +317,7 @@ def test_clear_fences_a_flight_that_is_still_running():
 # ── reputation ──────────────────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, int]]:
     """A fake ReputationLedger, read through the REAL cache.
 
