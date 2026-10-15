@@ -764,6 +764,16 @@
     return { gained: SCORE_LINES[cleared], toastMsg };
   }
 
+  // Advances the combo chain on a clear (breaks it otherwise); returns the bonus.
+  function comboBonus(cleared) {
+    if (cleared === 0) {
+      state.combo = -1;
+      return 0;
+    }
+    state.combo++;
+    return state.combo * COMBO_BONUS * state.level;
+  }
+
   function updateLevel() {
     const newLevel = Math.max(1, Math.floor(state.lines / 10) + 1);
     if (newLevel === state.level) return;
@@ -798,13 +808,8 @@
     if (wasDifficult) state.b2b = true;
     else if (cleared > 0) state.b2b = false;
 
-    if (cleared > 0) {
-      state.combo++;
-      gained += state.combo * COMBO_BONUS * state.level;
-      if (state.combo >= 2 && !toastMsg) toastMsg = `${state.combo}× combo`;
-    } else {
-      state.combo = -1;
-    }
+    gained += comboBonus(cleared);
+    if (state.combo >= 2 && !toastMsg) toastMsg = `${state.combo}× combo`;
 
     state.score += gained;
     state.lines += cleared;
