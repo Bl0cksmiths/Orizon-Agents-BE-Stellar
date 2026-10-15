@@ -252,7 +252,7 @@ def test_a_class_reported_before_a_recovery_is_reported_again_after_it(caplog):
 # ── bounded: the cap, the eviction order, and the line it writes ─
 
 
-@pytest.fixture()
+@pytest.fixture
 def tiny_cap(monkeypatch):
     """Three slots, so eviction is exercised in four lines instead of 257.
 
