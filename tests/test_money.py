@@ -189,7 +189,8 @@ def test_the_ledger_client_converts_by_the_same_one_rule() -> None:
     assert sc.usdc_to_i128(0.00000455) == 46
     for amount in (0.0123457, 0.054, 0.1 + 0.2, 7.0):
         assert sc.usdc_to_i128(amount) == money.to_stroops(amount)
+    inf = float("inf")
     with pytest.raises(ValueError):
-        sc.usdc_to_i128(float("inf"))
+        sc.usdc_to_i128(inf)
     with pytest.raises(ValueError):
         sc.usdc_to_i128(-0.01)
