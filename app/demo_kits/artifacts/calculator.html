@@ -784,7 +784,9 @@
         const v = JSON.parse(raw);
         if (typeof v.memory === 'number') state.memory = v.memory;
       }
-    } catch (e) {}
+    } catch {
+      // Storage blocked or the saved value is corrupt: start with empty memory.
+    }
   }
   function saveHistory() {
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); } catch (e) {}
