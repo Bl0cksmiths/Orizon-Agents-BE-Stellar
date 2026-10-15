@@ -267,7 +267,8 @@ def test_text_streams_deltas_in_order_and_returns_the_whole_reply(fake_claude: F
         )
     )
     assert result.value == "<html><body>hello</body></html>" == "".join(seen)
-    assert len(seen) > 1 and fake_claude.calls[0].stream is True
+    assert len(seen) > 1
+    assert fake_claude.calls[0].stream is True
 
 
 def test_on_text_without_streaming_is_refused() -> None:
