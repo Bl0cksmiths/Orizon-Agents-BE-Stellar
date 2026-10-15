@@ -42,7 +42,7 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[list[Any]]:
     return calls
 
 
-@pytest.fixture()
+@pytest.fixture
 def held_plan() -> Iterator[StoredPlan]:
     plan = StoredPlan(
         id=PLAN_ID,
