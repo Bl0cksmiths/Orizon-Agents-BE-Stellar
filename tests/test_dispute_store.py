@@ -1574,7 +1574,8 @@ def test_a_caller_may_supply_the_moment_it_resolved(pg: PostgresDisputeStore) ->
 
     rejected = run(pg, go())
 
-    assert rejected is not None and rejected.resolved_at == 1_700_009_999.0
+    assert rejected is not None
+    assert rejected.resolved_at == 1_700_009_999.0
 
 
 def test_an_adjudicators_note_is_appended_and_read_back_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
