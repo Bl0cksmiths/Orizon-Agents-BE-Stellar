@@ -383,7 +383,9 @@ def test_never_prints_or_records_a_secret(world: FakeWorld, buyer: Keypair, tmp_
         assert secret not in result.out
         assert secret not in evidence
     state = (tmp_path / "state.json").read_text()
-    assert buyer.secret not in state and world.adjudicator_key not in state and signed not in state
+    assert buyer.secret not in state
+    assert world.adjudicator_key not in state
+    assert signed not in state
     assert stat.S_IMODE((tmp_path / "state.json").stat().st_mode) == 0o600
 
 
