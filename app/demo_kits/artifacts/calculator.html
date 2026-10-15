@@ -136,6 +136,11 @@
     min-height: 24px;
   }
   .display .result {
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    unicode-bidi: isolate;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     color: var(--text);
     font-size: clamp(28px, 4vw, 44px);
@@ -324,7 +329,7 @@
       <div class="display" id="display">
         <div class="memory-badge" id="memory-badge" aria-live="polite">M</div>
         <div class="expr" id="expr" aria-live="polite">0</div>
-        <div class="result" id="result" tabindex="0" role="button" title="click to copy">0</div>
+        <button class="result" id="result" type="button" title="click to copy">0</button>
       </div>
 
       <div class="keypad">
