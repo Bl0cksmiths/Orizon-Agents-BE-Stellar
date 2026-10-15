@@ -305,7 +305,9 @@ def test_an_unfinished_dispute_keeps_its_settlement_far_past_the_cap(
 
     assert list(store._settlements) == [_job(0), _job(19)]
     owed = asyncio.run(store.find_dispute(_job(0), 0))
-    assert owed is not None and owed.id == "dsp_owed" and owed.status == status
+    assert owed is not None
+    assert owed.id == "dsp_owed"
+    assert owed.status == status
     claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
     assert claims == (["dsp_owed"] if status == "crediting" else [])
     assert not [r for r in caplog.records if r.name == STORE_LOGGER and r.levelno >= logging.ERROR]
