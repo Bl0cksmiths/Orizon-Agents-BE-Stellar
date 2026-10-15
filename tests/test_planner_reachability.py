@@ -191,7 +191,8 @@ def test_the_free_form_planner_never_routes_to_a_fresh_failure(world, monkeypatc
     assert [s.agent_id for s in resp.steps] == [ALIVE]
     assert _codes(resp)[DEAD] == "unreachable_endpoint"
     stored = state.plans.get(resp.plan_id)
-    assert stored is not None and [n.reason_code for n in stored.notices] == [n.reason_code for n in resp.notices]
+    assert stored is not None
+    assert [n.reason_code for n in stored.notices] == [n.reason_code for n in resp.notices]
 
 
 def test_a_dead_endpoint_is_never_offered_to_the_planner(world) -> None:
