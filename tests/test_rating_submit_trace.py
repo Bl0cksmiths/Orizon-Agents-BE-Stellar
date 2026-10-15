@@ -103,7 +103,8 @@ def test_a_skipped_run_traces_why_and_warns_the_operator(monkeypatch, caplog, se
         lines = _rate()
     assert [(ln.level, ln.msg) for ln in lines] == [("error", f"ratings not submitted: {reason}")]
     warnings = [r.getMessage() for r in caplog.records if r.name == WRITER_LOG]
-    assert len(warnings) == 1 and problem in warnings[0]
+    assert len(warnings) == 1
+    assert problem in warnings[0]
 
 
 # ── a failed submit is named, never quoted ──────────────────────
