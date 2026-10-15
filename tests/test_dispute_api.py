@@ -466,7 +466,7 @@ TASK_TOKEN = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 PROVEN = {"X-Task-Token": TASK_TOKEN}
 
 
-@pytest.fixture()
+@pytest.fixture
 def proved():
     """Mint `task-1`'s read token, so a test can present it.
 
