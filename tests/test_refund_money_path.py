@@ -153,8 +153,9 @@ def test_a_transfer_lost_after_the_send_records_its_signed_hash(monkeypatch) -> 
     calls = _chain(monkeypatch, sc.InFlightError("send failed: connection reset", signed))
     dispute = a_dispute()
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as unconfirmed:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert unconfirmed.value.code == "refund_unconfirmed"
     current, queue = _stored(dispute.id)
