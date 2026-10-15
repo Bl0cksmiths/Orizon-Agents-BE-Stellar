@@ -518,8 +518,9 @@ def test_a_workflow_that_charged_nothing_cannot_be_disputed() -> None:
     payer = Keypair.random()
     _seed(payer.public_key, settled_usdc=0.0)
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "nothing_was_charged"
     assert refused.value.status_code == 409
