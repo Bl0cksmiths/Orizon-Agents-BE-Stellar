@@ -254,7 +254,8 @@ def test_a_build_without_the_adoption_route_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("build.adoption")
-    assert check["status"] == FAIL and "predates story 5.02" in check["detail"]
+    assert check["status"] == FAIL
+    assert "predates story 5.02" in check["detail"]
     assert out.status("operator.external") == SKIPPED
 
 
