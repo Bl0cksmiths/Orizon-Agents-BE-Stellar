@@ -1357,8 +1357,10 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
     messy = asyncio.run(dispute_svc.reject(a_dispute().id, note="checked\nthe \x00brief\x1b[31m in full"))
 
     assert messy.note is not None
-    assert "\x00" not in messy.note and "\x1b" not in messy.note
-    assert "\n" in messy.note and messy.note.startswith("checked")
+    assert "\x00" not in messy.note
+    assert "\x1b" not in messy.note
+    assert "\n" in messy.note
+    assert messy.note.startswith("checked")
 
     # Bounded by REFUSAL, never by a cut (D-062): a note the buyer reads with
     # its end missing is a different note.
