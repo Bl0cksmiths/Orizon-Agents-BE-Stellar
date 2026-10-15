@@ -220,7 +220,8 @@ def test_a_build_that_fails_is_not_submitted(monkeypatch):
     rpc = _rpc(monkeypatch, _FakeRpc())
     with pytest.raises(sc.NotSubmittedError, match="build failed"):
         sc._send_server_signed("CFAKELEDGER", "submit", [])
-    assert not rpc.prepared and not rpc.sent
+    assert not rpc.prepared
+    assert not rpc.sent
 
 
 def test_a_signature_that_fails_is_not_submitted(monkeypatch):
