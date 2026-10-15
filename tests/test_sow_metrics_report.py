@@ -148,8 +148,11 @@ def test_a_tx_link_is_exactly_the_testnet_explorer_with_its_hash_and_date(tmp_pa
     assert tx_links
     for link in tx_links:
         assert link["url"] == f"https://stellar.expert/explorer/testnet/tx/{link['tx_hash']}"
-        assert len(link["tx_hash"]) == 64 and int(link["tx_hash"], 16) >= 0
-        assert len(link["date"]) == 10 and link["date"][4] == "-" and link["date"][7] == "-"
+        assert len(link["tx_hash"]) == 64
+        assert int(link["tx_hash"], 16) >= 0
+        assert len(link["date"]) == 10
+        assert link["date"][4] == "-"
+        assert link["date"][7] == "-"
     refund = next(link for link in tx_links if link["label"].startswith("Refund of"))
     assert refund["tx_hash"] == out.world.marks["refund"]
     assert refund["date"] == "2026-09-24"
