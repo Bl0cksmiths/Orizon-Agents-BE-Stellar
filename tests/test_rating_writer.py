@@ -90,7 +90,8 @@ def test_no_ledger_is_disabled(monkeypatch):
     configure(monkeypatch, ledger="")
     v = asyncio.run(rw.check())
     assert v.status == "disabled"
-    assert v.gap is not None and "STELLAR_REPUTATION_LEDGER" in v.gap.problem
+    assert v.gap is not None
+    assert "STELLAR_REPUTATION_LEDGER" in v.gap.problem
 
 
 def test_no_signing_key_is_no_signer(monkeypatch):
