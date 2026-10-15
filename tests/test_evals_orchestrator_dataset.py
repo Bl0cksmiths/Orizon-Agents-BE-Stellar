@@ -83,7 +83,8 @@ def test_the_console_s_languages_are_covered(cases):
 
 def test_borderline_security_asks_are_labelled_legitimate(cases):
     security = [c for c in cases if c.category == "legit_security"]
-    assert security and all(c.expected_verdict == "allow" for c in security)
+    assert security
+    assert all(c.expected_verdict == "allow" for c in security)
     assert any("reentrancy" in c.intent.lower() for c in security)
 
 
