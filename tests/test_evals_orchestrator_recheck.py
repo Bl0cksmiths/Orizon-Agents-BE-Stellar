@@ -82,11 +82,15 @@ def test_the_code_length_section_measures_the_saved_html(runs, tmp_path):
     )
     analysis = build(campaign, recheck, tmp_path)
     first, second = analysis["code_length"]
-    assert first["lines"] == 2 and first["validator"] and first["deferred_listed"] is True
-    assert first["hit_token_ceiling"] is False and first["hit_stream_budget"] is False
+    assert first["lines"] == 2
+    assert first["validator"]
+    assert first["deferred_listed"] is True
+    assert first["hit_token_ceiling"] is False
+    assert first["hit_stream_budget"] is False
     assert second["skipped"].startswith("budget left")
     report = (tmp_path / "REPORT.md").read_text()
-    assert "## Complex code.gen after the length fix" in report and "code.gen#2 | not run" in report
+    assert "## Complex code.gen after the length fix" in report
+    assert "code.gen#2 | not run" in report
     assert (tmp_path / "r3-code-length" / "code_gen_1__index.html").exists()
 
 
