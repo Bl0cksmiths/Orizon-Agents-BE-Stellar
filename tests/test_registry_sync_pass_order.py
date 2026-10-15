@@ -128,8 +128,10 @@ def test_a_pass_reads_in_order_and_decides_each_id(chain: Any, caplog: pytest.Lo
         ("get", "ext_b"),
         ("get", "ext_bad"),
     ]
-    assert state.agents["ext_a"].source == "onchain" and state.agents["ext_b"].source == "onchain"
-    assert "ext_cheap" not in state.agents and "ext_bad" not in state.agents
+    assert state.agents["ext_a"].source == "onchain"
+    assert state.agents["ext_b"].source == "onchain"
+    assert "ext_cheap" not in state.agents
+    assert "ext_bad" not in state.agents
     assert state.agents.get(BUILT_IN) == built_in_before
     assert state.agents.get(SQUATTER) is None
     assert registry_sync._answered_ids == {"ext_a", "ext_b", "ext_cheap"}
