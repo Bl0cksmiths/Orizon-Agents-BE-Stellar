@@ -840,7 +840,8 @@ def test_a_page_that_is_not_200_fails(tmp_path: Path, status: int) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("frontend./guide/list-your-agent")
-    assert check["status"] == FAIL and f"answered {status}" in check["detail"]
+    assert check["status"] == FAIL
+    assert f"answered {status}" in check["detail"]
     if status == 307:
         assert "/login" in check["detail"]
 
