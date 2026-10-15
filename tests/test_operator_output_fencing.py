@@ -142,8 +142,10 @@ def test_critic_notes_are_fenced_per_item_and_stay_a_list(monkeypatch):
     )
 
     seen = reader.seen["external.ext_op"]
-    assert isinstance(seen["critic_notes"], list) and len(seen["critic_notes"]) == 2
-    assert isinstance(seen["critic_violations"], list) and len(seen["critic_violations"]) == 1
+    assert isinstance(seen["critic_notes"], list)
+    assert len(seen["critic_notes"]) == 2
+    assert isinstance(seen["critic_violations"], list)
+    assert len(seen["critic_violations"]) == 1
     assert all("SECURITY DIRECTIVE" in note for note in seen["critic_notes"])
     # Marker forgery: the payload's own "END <LABEL>" is neutralised, so it
     # cannot close the block it sits inside.
