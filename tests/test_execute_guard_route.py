@@ -404,11 +404,14 @@ def test_an_unowned_or_spent_authorization_is_never_released(
 ) -> None:
     install(monkeypatch, FakeEscrow(auth=live_record(**auth)))
     r = paid(client)  # PLAN_ID is unknown: the release path
-    assert r.status_code == 404 and "release_tx_hash" not in r.json()
+    assert r.status_code == 404
+    assert "release_tx_hash" not in r.json()
     live_plan(created_at=time.time() - settings.plan_ttl_seconds - 60)
     r = paid(client)
-    assert r.status_code == 410 and "release_tx_hash" not in r.json()
-    assert releases.calls == [] and runs.calls == []
+    assert r.status_code == 410
+    assert "release_tx_hash" not in r.json()
+    assert releases.calls == []
+    assert runs.calls == []
 
 
 def test_capacity_never_releases_an_unowned_authorization(client: TestClient, monkeypatch, releases) -> None:
