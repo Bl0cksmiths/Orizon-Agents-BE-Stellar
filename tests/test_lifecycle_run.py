@@ -203,7 +203,8 @@ def test_the_uphold_carries_the_adjudicator_key(world: FakeWorld, buyer: Keypair
 def test_dispute_reads_send_the_read_grant(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     run(world, buyer, tmp_path)
     reads = [c for c in world.calls if c["path"].startswith("/api/disputes/dsp_") and c["method"] == "GET"]
-    assert reads and all(c["headers"].get("x-dispute-read-grant") in world.grants for c in reads)
+    assert reads
+    assert all(c["headers"].get("x-dispute-read-grant") in world.grants for c in reads)
 
 
 def test_a_backend_without_the_read_grant_routes_still_completes(buyer: Keypair, tmp_path: Path) -> None:
