@@ -711,12 +711,16 @@ def test_a_rating_that_cannot_be_formed_is_a_records_problem_not_a_failed_refund
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         paid = uphold(dispute.id)
 
-    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.status == "credited"
+    assert paid.refund_tx == "tx_credit"
     assert paid.rating_tx is None
-    assert ledger.submits == [] and invalidated == []
+    assert ledger.submits == []
+    assert invalidated == []
     (logged,) = svc_errors(caplog)
-    assert "could not be formed" in logged and "will not mend" in logged
-    assert "derived=underivable" in logged and dispute.id in logged
+    assert "could not be formed" in logged
+    assert "will not mend" in logged
+    assert "derived=underivable" in logged
+    assert dispute.id in logged
 
 
 def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
