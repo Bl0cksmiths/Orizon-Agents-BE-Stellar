@@ -271,13 +271,14 @@
     color: var(--text);
   }
   .overlay h2.win { color: var(--primary); }
-  .overlay p {
+  .overlay p, .overlay label {
     font-size: 11px;
     color: var(--muted);
     letter-spacing: 0.12em;
     text-transform: uppercase;
     margin: 0;
   }
+  .overlay label { display: block; }
   .overlay .stats {
     display: grid;
     grid-template-columns: auto auto;
@@ -400,7 +401,7 @@
           <span>speed</span><span id="final-speed">normal</span>
         </div>
         <div id="initials-block">
-          <p>enter your initials</p>
+          <label for="initials">enter your initials</label>
           <input class="initials" id="initials" maxlength="3" autocomplete="off" />
         </div>
         <button id="restart-btn" type="button">restart · R</button>
