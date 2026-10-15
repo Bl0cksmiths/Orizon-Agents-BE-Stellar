@@ -101,7 +101,8 @@ def test_a_recheck_with_same_request_keeps_it_unprefixed(monkeypatch):
     run = asyncio.run(pipeline.run("hello", stages="all"))
     assert run.guard.scores == {"injection": 0.1, "recheck_harmful": 0.3, "same_request": 0.9}
     assert run.guard.reasons == ("watch",)
-    assert run.plan is not None and run.plan.raw == {"planned_from": "hello"}
+    assert run.plan is not None
+    assert run.plan.raw == {"planned_from": "hello"}
 
 
 def test_an_unavailable_recheck_is_a_pipeline_error(monkeypatch):
