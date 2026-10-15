@@ -851,7 +851,8 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
 
     assert refused.value.code == "refund_unconfirmed"
     stuck = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stuck is not None and stuck.status == "crediting"
+    assert stuck is not None
+    assert stuck.status == "crediting"
     assert stuck.refund_tx == "tx_who_knows"
 
 
