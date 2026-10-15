@@ -92,9 +92,10 @@ def test_a_rejection_note_nobody_can_see_is_refused(note: str) -> None:
     """D-059, the note's half: the buyer's receipt would show `rejected`
     beside an explanation that displays as nothing."""
     dispute = _open_dispute()
+    rejection = dispute_svc.reject(dispute.id, note=note)
 
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.reject(dispute.id, note=note))
+        asyncio.run(rejection)
 
     assert (refused.value.code, refused.value.status_code) == ("rejection_reason_required", 422)
 
