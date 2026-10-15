@@ -349,8 +349,9 @@ def test_ask_refuses_empty_input_and_an_oversized_state(fake_jev: FakeJev) -> No
     blank_state = jev.ask(purpose="guard", state="  ", questions=_QUESTIONS)
     with pytest.raises(ValueError):
         asyncio.run(blank_state)
+    oversized = jev.ask(purpose="guard", state="x" * (jev.MAX_STATE_CHARS + 1), questions=_QUESTIONS)
     with pytest.raises(JevUnavailable) as caught:
-        asyncio.run(jev.ask(purpose="guard", state="x" * (jev.MAX_STATE_CHARS + 1), questions=_QUESTIONS))
+        asyncio.run(oversized)
     assert caught.value.reason == "state_too_large"
     assert fake_jev.calls == []
 
