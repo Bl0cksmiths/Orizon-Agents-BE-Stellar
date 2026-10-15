@@ -28,7 +28,7 @@ PLAN_ID = "pln_auth0001"
 ROUTE = "/api/stellar/build/authorize"
 
 
-@pytest.fixture()
+@pytest.fixture
 def built(monkeypatch: pytest.MonkeyPatch) -> list[list[Any]]:
     """The `authorize` arguments the route asked the client to build."""
     calls: list[list[Any]] = []
