@@ -142,7 +142,8 @@ def test_a_claim_over_an_unreadable_dispute_is_missing(monkeypatch: pytest.Monke
     assert world.decide() == Decision(
         "dsp_0001", "missing", AGE, detail="a refund claim over a dispute that cannot be read"
     )
-    assert world.store.calls == ["get_dispute dsp_0001"] and world.calls == []
+    assert world.store.calls == ["get_dispute dsp_0001"]
+    assert world.calls == []
 
 
 def test_a_claim_gone_from_the_queue_was_settled_while_the_pass_ran(monkeypatch: pytest.MonkeyPatch) -> None:
