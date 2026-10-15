@@ -172,7 +172,8 @@ def test_a_bad_tx_is_refused(tmp_path: Path, args: list[str], says: str) -> None
     out = run(ledger, tmp_path, *(a.replace("HASH", h) for a in args))
     assert out.code == EXIT_REFUSED, out.out
     assert says in out.out
-    assert not out.dir.exists() and ledger.calls == []
+    assert not out.dir.exists()
+    assert ledger.calls == []
 
 
 @pytest.mark.parametrize(
