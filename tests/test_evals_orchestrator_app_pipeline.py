@@ -127,8 +127,9 @@ def test_a_guard_outage_is_an_error_not_a_verdict(cases):
     pipeline = AppPipeline.create(live=False, cases=cases)
     jev.set_transport(RecordingJev(testing.OfflineJev()))
     claude.set_transport(RecordingClaude(testing.OfflineClaude()))
+    guarding = pipeline.run(cases[0].intent, stages="guard")
     with pytest.raises(PipelineUnavailable) as caught:
-        asyncio.run(pipeline.run(cases[0].intent, stages="guard"))
+        asyncio.run(guarding)
     assert caught.value.failure_class == "guard_unavailable"
 
 
