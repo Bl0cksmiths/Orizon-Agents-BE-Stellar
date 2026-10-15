@@ -187,7 +187,8 @@ def test_an_unconfirmed_seal_with_nobody_to_hand_it_to_still_returns_the_settle(
 
     settle_tx, proof_tx, job_id = _settle((0.01,), frozenset({0}))
 
-    assert (settle_tx, proof_tx) == (SETTLE_TX, None) and job_id is not None
+    assert (settle_tx, proof_tx) == (SETTLE_TX, None)
+    assert job_id is not None
     assert state.tasks[TASK].seal == "pending"
     assert _lines()[-1] == (
         "error",
