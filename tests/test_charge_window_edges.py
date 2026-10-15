@@ -339,7 +339,8 @@ def test_a_window_short_of_the_tip_is_logged_as_a_failed_read(
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         window = _fetch({"ext_a": OWNER_A})
 
-    assert window.by_agent["ext_a"].truncated is True and window.out_of_time is False
+    assert window.by_agent["ext_a"].truncated is True
+    assert window.out_of_time is False
     assert _warnings(caplog)[-1] == (
         f"[charges] window read to ledger {OLDEST + 19_999} of {LATEST} (a read failed) — settlements are a floor"
     )
