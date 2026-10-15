@@ -226,8 +226,9 @@ def test_a_hand_rolled_over_cap_amount_never_reaches_the_signer(monkeypatch) -> 
 
 def test_a_zero_amount_never_reaches_the_signer(monkeypatch) -> None:
     _no_signing(monkeypatch)
+    crediting = refund_svc.credit_refund(_dispute(), 0.0)
     with pytest.raises(RefundRefused) as exc:
-        asyncio.run(refund_svc.credit_refund(_dispute(), 0.0))
+        asyncio.run(crediting)
     assert exc.value.code == "nothing_to_credit"
 
 
