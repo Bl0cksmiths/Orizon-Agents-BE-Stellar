@@ -1144,8 +1144,9 @@ def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
 
     caplog.clear()
     other = a_dispute(step=1)
+    rejecting = dispute_svc.reject(other.id, note=" \t\x1b\x07 ")
     with caplog.at_level(logging.INFO, logger=SVC_LOGGER), pytest.raises(DisputeError):
-        asyncio.run(dispute_svc.reject(other.id, note=" \t\x1b\x07 "))
+        asyncio.run(rejecting)
 
     (refusal,) = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "refused" in r.getMessage()]
     assert "rejection_reason_required" in refusal
