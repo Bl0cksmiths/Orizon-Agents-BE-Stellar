@@ -106,7 +106,7 @@ class FakeStore:
             self.traces[(task.id, seq)] = TraceLine(t=f"00.{seq:03d}", level="exec", msg=msg).model_dump_json()
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeStore]:
     """A fresh store AND a fresh journal: the suite's own journal is the
     process observer, and its queue must not leak between tests."""
