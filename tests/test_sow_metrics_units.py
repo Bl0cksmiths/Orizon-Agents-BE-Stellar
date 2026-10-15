@@ -36,7 +36,9 @@ def test_an_undecodable_argument_does_not_hide_the_operation() -> None:
     record = next(r for r in world.histories[SIGNER] if r["transaction_hash"] == world.marks["settle1"])
     record["parameters"][2]["value"] = "not base64 xdr"
     op = chain.operation_from_horizon(record)
-    assert op.function == "settle" and op.args[0] is None and len(op.args) == 4
+    assert op.function == "settle"
+    assert op.args[0] is None
+    assert len(op.args) == 4
 
 
 @pytest.mark.parametrize(
