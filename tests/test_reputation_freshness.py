@@ -395,7 +395,7 @@ async def _noop(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch):
     """Fresh seeded registry, restored after; kit thinking-sleep no-op'd."""
     saved = dict(state.agents)
