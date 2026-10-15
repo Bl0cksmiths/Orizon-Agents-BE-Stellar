@@ -80,7 +80,8 @@ def test_a_missing_jev_key_never_gates_readiness(client, monkeypatch: pytest.Mon
     monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
     monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
     r = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY})
-    assert r.status_code == 200 and r.json()["orchestrator"]["typesafe_key"] is False
+    assert r.status_code == 200
+    assert r.json()["orchestrator"]["typesafe_key"] is False
 
 
 def _spend_past_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
