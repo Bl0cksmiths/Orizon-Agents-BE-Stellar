@@ -818,6 +818,10 @@
     state.rafHandle = requestAnimationFrame(tick);
   }
 
+  function tomatoTally(n) {
+    const suffix = n === 1 ? '' : 'es';
+    return `${n} tomato${suffix}`;
+  }
   function finishPhase() {
     const completedKind = state.phase;
     const completedDur = state.phaseDurationMs;
@@ -832,7 +836,7 @@
     sendNotification(
       completedKind === 'work' ? 'Time for a break' : 'Back to work',
       completedKind === 'work'
-        ? `Nice — ${state.daily.count} tomato${state.daily.count === 1 ? '' : 'es'} today.`
+        ? `Nice — ${tomatoTally(state.daily.count)} today.`
         : 'Break is over. Refocus.',
     );
     const np = nextPhase();
