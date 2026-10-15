@@ -549,8 +549,9 @@ def test_a_verdict_on_a_dispute_with_no_history_drops_no_claim_row(pg: PostgresD
     run(pg, pg.list_refund_claims())  # the schema, created the store's own way
     asyncio.run(execute(pg_dsn, "INSERT INTO refund_claims (dispute_id, claimed_at) VALUES ('dsp_ghost', 1.0)"))
 
+    appending = pg.append_status("dsp_ghost", "credited", refund_tx="tx_guess")
     with pytest.raises(KeyError):
-        run(pg, pg.append_status("dsp_ghost", "credited", refund_tx="tx_guess"))
+        run(pg, appending)
 
     assert list(asyncio.run(claims(pg_dsn))) == ["dsp_ghost"]
 
