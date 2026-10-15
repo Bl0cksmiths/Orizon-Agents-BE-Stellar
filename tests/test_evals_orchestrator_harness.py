@@ -69,8 +69,11 @@ def test_the_null_pipeline_catches_nothing_and_plans_nothing_valid(cases, tmp_pa
 def test_rows_carry_what_the_report_needs(cases, tmp_path):
     _, rows, _ = _run(cases[:3], SyntheticPipeline(), tmp_path, stages="all")
     for r in rows:
-        assert r["prompt_id"] and r["prompt"] and r["tags"][0] == r["meta"]["expected"]["category"]
-        assert r["split"] in ("train", "test") and r["status"] == "ok"
+        assert r["prompt_id"]
+        assert r["prompt"]
+        assert r["tags"][0] == r["meta"]["expected"]["category"]
+        assert r["split"] in ("train", "test")
+        assert r["status"] == "ok"
         assert set(r["usage"]) == {
             "input_tokens",
             "output_tokens",
@@ -79,7 +82,8 @@ def test_rows_carry_what_the_report_needs(cases, tmp_path):
         }
         assert (tmp_path / "baseline" / "traces" / f"{r['prompt_id']}_rep0.json").exists()
     state = json.loads((tmp_path / "_state.json").read_text())
-    assert state["metrics"][0]["id"] == "verdict_ok" and state["metrics"][0]["kind"] == "binary"
+    assert state["metrics"][0]["id"] == "verdict_ok"
+    assert state["metrics"][0]["kind"] == "binary"
     assert set(state["train_ids"]) | set(state["test_ids"]) == {c.id for c in cases[:3]}
 
 
