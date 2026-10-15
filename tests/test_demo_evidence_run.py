@@ -211,7 +211,8 @@ def test_a_malformed_hash_is_never_asked_or_published(tmp_path: Path) -> None:
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_NOT_SUCCESS
     assert out.json()["items"] == []
-    assert "MALFORMED" in out.sheet() and "not 64 hex" in out.sheet()
+    assert "MALFORMED" in out.sheet()
+    assert "not 64 hex" in out.sheet()
     assert "rpc getTransaction" not in ledger.calls
 
 
