@@ -606,13 +606,15 @@ def test_a_stale_uphold_is_refused_rather_than_racing_a_live_adjudication(monkey
     won, lost = asyncio.run(race())
 
     assert won.code == "refund_failed"
-    assert lost.code == "adjudication_in_progress" and lost.status_code == 409
+    assert lost.code == "adjudication_in_progress"
+    assert lost.status_code == 409
     assert len(chain.calls) == 1
     # Refused, never stranded: the dispute is upheld and still owed.
     assert store._disputes[dispute.id].status == "upheld"
     assert asyncio.run(store.list_refund_claims()) == ()
     paid = asyncio.run(dispute_svc.uphold(dispute.id))
-    assert paid.status == "credited" and len(chain.calls) == 2
+    assert paid.status == "credited"
+    assert len(chain.calls) == 2
 
 
 def test_an_in_flight_hash_the_store_would_not_record_still_refuses_with_the_hash(monkeypatch, caplog) -> None:
