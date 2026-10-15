@@ -271,7 +271,8 @@ def test_a_run_whose_trace_has_no_rating_records_none(world: FakeWorld, buyer: K
     world._write_ratings = lambda *_args: None  # type: ignore[method-assign]
     result = run(world, buyer, tmp_path, "--until", "poll")
     assert result.code == EXIT_OK, result.out
-    assert "rating" not in result.events() and "rating_unresolved" not in result.events()
+    assert "rating" not in result.events()
+    assert "rating_unresolved" not in result.events()
     assert "events_unavailable" not in result.events()
 
 
