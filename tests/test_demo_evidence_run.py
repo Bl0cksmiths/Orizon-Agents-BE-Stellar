@@ -147,7 +147,8 @@ def test_several_runs_keep_their_order_and_a_repeated_hash_once(tmp_path: Path) 
     out = run(ledger, tmp_path, first.parent, second)  # a directory and a file
     assert out.code == EXIT_OK, out.out
     items = [i["tx_hash"] for i in out.json()["items"]]
-    assert items[:6] == list(h1.values()) and items[6:] == list(h2.values())
+    assert items[:6] == list(h1.values())
+    assert items[6:] == list(h2.values())
     assert "1 repeated hash(es)" in out.sheet()
 
 
