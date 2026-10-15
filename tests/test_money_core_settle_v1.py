@@ -91,7 +91,8 @@ def test_an_undecodable_receipt_id_seals_without_a_link_and_says_so(
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
         _, proof_tx, job_id = _settle()
 
-    assert proof_tx == SEAL_TX and job_id is not None
+    assert proof_tx == SEAL_TX
+    assert job_id is not None
     assert _sealed_receipts(chain) == []
     assert ("error", "charge receipt id missing — sealing attestation without receipt link", None) in _lines()
     assert [r.getMessage() for r in caplog.records] == [
