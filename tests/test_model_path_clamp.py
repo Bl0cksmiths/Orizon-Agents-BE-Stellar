@@ -65,7 +65,7 @@ def _info(agent_id: str, *, smoothed: int, lower: int) -> RepInfo:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded() -> object:
     """Fresh 12-agent registry, restored after. `seed_registry` builds new
     `Agent` objects, so the delisting below mutates copies thrown away here."""
