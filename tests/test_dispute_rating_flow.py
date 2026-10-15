@@ -616,7 +616,8 @@ def test_a_rating_recorded_before_the_confirmation_existed_is_confirmed_by_a_rep
 
     assert confirmed.rating_confirmed is True
     assert confirmed.rating_tx == rated.rating_tx
-    assert ledger.replays == 1 and len(settler.transfers) == 1
+    assert ledger.replays == 1
+    assert len(settler.transfers) == 1
 
 
 # ── across disputes, and across every outcome ───────────────────
