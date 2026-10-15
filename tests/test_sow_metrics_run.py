@@ -673,7 +673,8 @@ def test_reputation_gating_needs_the_floor_on(tmp_path: Path, params: dict[str, 
     world = met_world()
     world.params = params
     out = run(world, tmp_path)
-    assert out.status("m07") == "not_met" and out.metric("m07")["reason"] == expected
+    assert out.status("m07") == "not_met"
+    assert out.metric("m07")["reason"] == expected
 
 
 def _v1_world() -> FakeWorld:
