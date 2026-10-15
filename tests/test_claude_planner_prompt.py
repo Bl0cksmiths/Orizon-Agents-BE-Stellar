@@ -135,7 +135,8 @@ def test_the_instructions_compose_pipelines_instead_of_one_code_step() -> None:
     text = _text()
 
     # The old default — prefer code.gen, often as a single step — is gone.
-    assert "single-step plan" not in text and "prefer it" not in text
+    assert "single-step plan" not in text
+    assert "prefer it" not in text
     assert "Use every listed specialist whose work makes this deliverable better, and no other" in text
     assert "Order the steps so each one's output flows into the steps after it" in text
     assert "Never add a step that contributes nothing to this request" in text
