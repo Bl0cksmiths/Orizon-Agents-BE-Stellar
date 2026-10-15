@@ -486,7 +486,6 @@
     nextBonusAt: 0,
     score: 0,
     best: 0,
-    length: 3,
     paused: false,
     over: false,
     started: false,
@@ -690,12 +689,10 @@
     state.snake.unshift({ x: nx, y: ny });
     if (willEat) {
       state.score += 10;
-      state.length++;
       beep(660, 80);
       spawnFood();
     } else if (willBonus) {
       state.score += 50;
-      state.length += 3;
       beep(880, 80);
       beep(1320, 80);   // a quick two-tone for bonus
       state.bonus = null;
@@ -711,7 +708,8 @@
   // ── HUD ──────────────────────────────────────────────────────────────────
   function updateHud() {
     scoreEl.textContent = state.score.toString();
-    lengthEl.textContent = state.length.toString();
+    // Length is read off the body, so the counter always matches the snake on the board.
+    lengthEl.textContent = state.snake.length.toString();
     bestEl.textContent = state.best.toString();
   }
 
@@ -758,7 +756,7 @@
     arr.push({
       name: (name || '???').toUpperCase().slice(0, 3).padEnd(3, '?'),
       score: state.score,
-      length: state.length,
+      length: state.snake.length,
       speed: state.speed,
       ts: Date.now(),
     });
@@ -802,7 +800,6 @@
     state.dir = { x: 1, y: 0 };
     state.pendingDir = { x: 1, y: 0 };
     state.score = 0;
-    state.length = 3;
     state.paused = false;
     state.over = false;
     state.started = false;
@@ -837,7 +834,7 @@
     if (state.tickHandle) clearInterval(state.tickHandle);
     if (state.bonusTimer) clearTimeout(state.bonusTimer);
     finalScore.textContent = state.score.toLocaleString('en-US');
-    finalLength.textContent = String(state.length);
+    finalLength.textContent = String(state.snake.length);
     finalSpeed.textContent = state.speed;
     const willPrompt = qualifiesForLb();
     initialsBlock.style.display = willPrompt ? '' : 'none';
