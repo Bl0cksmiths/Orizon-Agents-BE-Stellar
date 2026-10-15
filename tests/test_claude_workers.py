@@ -367,7 +367,8 @@ def _baked_kit() -> dict[str, Any]:
 def test_code_gen_serves_a_baked_artifact_without_asking(claude: FakeClaude) -> None:
     context = {"kit": _baked_kit()}
     out = run("agt_11c0", context=context)
-    assert out["source"] == "baked" and claude.calls == []
+    assert out["source"] == "baked"
+    assert claude.calls == []
     assert WORKERS["agt_11c0"].step_model(None, context) is None
 
 
