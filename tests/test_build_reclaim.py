@@ -44,7 +44,7 @@ def escrow(monkeypatch: pytest.MonkeyPatch) -> None:
     guard.forget_versions()
 
 
-@pytest.fixture()
+@pytest.fixture
 def builds(monkeypatch: pytest.MonkeyPatch) -> BuildRecorder:
     recorder = BuildRecorder()
     monkeypatch.setattr(sc, "build_invoke_xdr", recorder)
