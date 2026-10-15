@@ -276,7 +276,8 @@ def test_a_secret_in_the_code_is_redacted_and_reported(claude: FakeClaude) -> No
     claude.reply(_tagged(("app/page.tsx", leaky)))
     out = run()
     content = out["artifact"]["files"][0]["content"]
-    assert "ABCDEFGHIJKLMNOPQRSTUVWX" not in content and "[redacted secret]" in content
+    assert "ABCDEFGHIJKLMNOPQRSTUVWX" not in content
+    assert "[redacted secret]" in content
     assert "ABCDEFGHIJKLMNOPQRSTUVWX" not in out["artifact"]["preview_html"]
     assert out["validator_violations"] == ["secret_redacted:app/page.tsx"]
 
