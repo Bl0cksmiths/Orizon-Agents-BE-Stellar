@@ -1513,7 +1513,8 @@ def test_an_open_or_rejected_dispute_is_never_rated(monkeypatch, rater, invalida
     assert invalidated == []
     for dispute_id in (opened.id, rejected.id):
         stored = asyncio.run(dispute_svc.get_dispute(dispute_id))
-        assert stored is not None and stored.rating_tx is None
+        assert stored is not None
+        assert stored.rating_tx is None
 
 
 @pytest.mark.parametrize(("answer", "code"), [(REJECTED, "refund_failed"), (LOST, "refund_unconfirmed")])
