@@ -112,11 +112,14 @@ def test_a_screened_request_is_planned_on_opus_from_the_improved_spec(
     assert planner.model == "claude-opus-5-5"
     assert planner.effort == "medium"  # moderate request
     # Planned from the checked spec, not the raw words.
-    assert "BEGIN UNDERSTOOD_REQUEST" in planner.user and "USER_INPUT" not in planner.user
+    assert "BEGIN UNDERSTOOD_REQUEST" in planner.user
+    assert "USER_INPUT" not in planner.user
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
     assert resp.planner_fallback is False
     assert resp.tier == "moderate"
-    assert resp.guard is not None and resp.guard.verdict == "allow" and resp.guard.tier == "moderate"
+    assert resp.guard is not None
+    assert resp.guard.verdict == "allow"
+    assert resp.guard.tier == "moderate"
     assert resp.understood_as is not None
     assert resp.understood_as.goal == SPEC_DRAFT.goal
     assert resp.models is not None
@@ -130,7 +133,8 @@ def test_a_screened_request_is_planned_on_opus_from_the_improved_spec(
         ("recheck", "Improved request re-checked by jev"),
         ("plan", "Planned by Claude Opus 5.5 (effort medium)"),
     ]
-    assert fake_claude.pending == 0 and fake_jev.pending == 0
+    assert fake_claude.pending == 0
+    assert fake_jev.pending == 0
 
 
 def test_a_step_tier_is_capped_at_the_requests_tier(
