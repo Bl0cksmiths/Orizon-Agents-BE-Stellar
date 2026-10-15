@@ -733,7 +733,8 @@ def test_only_one_pass_runs_at_a_time(store: DisputeStore, chain: Chain, configu
 
     first, second = run(store, go())
 
-    assert first.skipped is None and first.outcomes == {"pending": 1}
+    assert first.skipped is None
+    assert first.outcomes == {"pending": 1}
     assert second.skipped == "a pass is already running"
     assert chain.asked == ["tx_slow"]
 
