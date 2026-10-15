@@ -751,11 +751,13 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         paid = uphold(dispute.id)
 
-    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.status == "credited"
+    assert paid.refund_tx == "tx_credit"
     assert paid.rating_tx is None
     assert invalidated == [AGENT]  # it landed, whatever the store says
     (logged,) = svc_errors(caplog)
-    assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "was SUCCESS but could not be recorded" in logged
+    assert "tx=tx_rating_1" in logged
     assert "append_status(dispute_id, 'credited', rating_tx=<the tx above>, rating_confirmed=True)" in logged, (
         f"the operator was not told the whole write: {logged}"
     )
