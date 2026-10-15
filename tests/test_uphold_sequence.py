@@ -237,7 +237,8 @@ def test_an_answered_dispute_is_refused_before_anything_else(
     _seed(store, status)
     err = _refused()
     assert (err.code, err.status_code) == (code, 409)
-    assert store.calls == [LOAD] and seams.calls == []
+    assert store.calls == [LOAD]
+    assert seams.calls == []
 
 
 def test_a_deployment_that_cannot_sign_claims_nothing(
