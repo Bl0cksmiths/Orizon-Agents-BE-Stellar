@@ -526,7 +526,8 @@ def test_no_below_floor_agent_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("exclusion.below_floor")
-    assert check["status"] == FAIL and "below 5500 bps" in check["detail"]
+    assert check["status"] == FAIL
+    assert "below 5500 bps" in check["detail"]
 
 
 @pytest.mark.parametrize("flag", ["degraded", "stale"])
