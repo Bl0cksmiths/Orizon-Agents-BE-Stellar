@@ -331,8 +331,9 @@ def test_the_api_ceiling_still_binds_when_the_charge_cap_is_raised(monkeypatch):
     # ceiling is the TIGHTER of the charge cap and our own API's le=10_000.
     monkeypatch.setattr(settings, "max_charge_usdc", 1_000_000.0)
 
+    raw = _raw(EVIL, price=50_000 * 10_000_000)
     with pytest.raises(registry_sync.UnbelievablePrice):
-        registry_sync._to_agent(_raw(EVIL, price=50_000 * 10_000_000))
+        registry_sync._to_agent(raw)
     assert registry_sync._to_agent(_raw(EVIL, price=9_000 * 10_000_000)).price == pytest.approx(9_000.0)
 
 
