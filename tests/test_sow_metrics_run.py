@@ -460,9 +460,12 @@ def test_a_v1_charge_to_an_outside_agent_counts(tmp_path: Path) -> None:
 def test_each_escrow_is_read_by_its_version(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path)
     escrows = {e["contract"]: e for e in out.raw()["summary"]["escrows"]}
-    assert escrows[ESCROW_V2]["version"] == 2 and escrows[ESCROW_V2]["live"] is True
-    assert escrows[ESCROW_V1]["version"] == 1 and escrows[ESCROW_V1]["live"] is False
-    assert escrows[ESCROW_V2]["receipts"] == 4 and escrows[ESCROW_V1]["receipts"] == 1
+    assert escrows[ESCROW_V2]["version"] == 2
+    assert escrows[ESCROW_V2]["live"] is True
+    assert escrows[ESCROW_V1]["version"] == 1
+    assert escrows[ESCROW_V1]["live"] is False
+    assert escrows[ESCROW_V2]["receipts"] == 4
+    assert escrows[ESCROW_V1]["receipts"] == 1
     kinds = [link["label"] for link in out.metric("m04")["links"] if link["kind"] == "contract"]
     assert kinds == [
         "PaymentEscrow v2 contract (live) (every charge it recorded)",
