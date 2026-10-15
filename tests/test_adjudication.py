@@ -805,7 +805,8 @@ def test_a_timed_out_transfer_keeps_the_claim_and_the_next_uphold_refuses(monkey
     assert refused.value.status_code == 504
     assert "never retried" in refused.value.message
     in_flight = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert in_flight is not None and in_flight.status == "crediting"
+    assert in_flight is not None
+    assert in_flight.status == "crediting"
     assert in_flight.refund_tx == "tx_inflight"  # the reconciliation starts from the record
 
     with pytest.raises(DisputeError) as again:
