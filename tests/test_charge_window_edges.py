@@ -145,7 +145,8 @@ def test_a_dense_ledger_whose_rest_fails_resumes_just_past_it(
 
     index = advance.index
     assert index is not None
-    assert index.lossy_ledger == dense and index.next_ledger == LATEST + 1
+    assert index.lossy_ledger == dense
+    assert index.next_ledger == LATEST + 1
     assert [c.charge.ledger for c in index.charges] == [dense, dense, dense + 50]
     assert rpc.pages.count((dense + 1, OLDEST + 10_000)) == 2  # asked twice, then given up
     assert (dense + 1, dense + 1 + 10_000) in rpc.pages  # the walk resumes past the dense ledger
