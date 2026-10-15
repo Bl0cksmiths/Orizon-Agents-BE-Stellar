@@ -41,7 +41,7 @@ def store(monkeypatch):
     return fresh
 
 
-@pytest.fixture()
+@pytest.fixture
 def no_dns(monkeypatch):
     """Stub the bind-time resolution and record it. The suite is hermetic, and
     several tests assert this was NOT reached."""
