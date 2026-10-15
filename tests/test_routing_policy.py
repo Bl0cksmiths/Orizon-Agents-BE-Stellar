@@ -87,7 +87,7 @@ def _onchain(agent_id: str) -> Agent:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
     """Seeded catalog + a top-rated bound external + an unbound one + a simulated
     built-in agent. Yields the agent-id lists each reputation read asked for."""
