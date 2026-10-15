@@ -151,7 +151,8 @@ def test_a_claim_gone_from_the_queue_was_settled_while_the_pass_ran(monkeypatch:
     assert world.decide() == Decision(
         "dsp_0001", "already_settled", AGE, TX, detail="the claim was settled while this pass ran (now credited)"
     )
-    assert world.store.calls == ["get_dispute dsp_0001", "list_refund_claims"] and world.calls == []
+    assert world.store.calls == ["get_dispute dsp_0001", "list_refund_claims"]
+    assert world.calls == []
 
 
 def test_a_claim_still_held_over_a_dispute_not_crediting_is_a_wedge(monkeypatch: pytest.MonkeyPatch) -> None:
