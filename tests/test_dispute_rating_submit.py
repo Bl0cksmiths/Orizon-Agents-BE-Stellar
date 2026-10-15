@@ -191,7 +191,8 @@ def test_a_landed_rating_is_a_success_with_one_info_line(monkeypatch, caplog) ->
     assert (outcome.job_id_hex, outcome.rating, outcome.weight_stroops) == (DERIVED, DISPUTE_RATING, WEIGHT)
     records = [r for r in caplog.records if r.name == "app.services.dispute_rating"]
     assert [r.levelno for r in records] == [logging.INFO], "a success is exactly one INFO line"
-    assert "rating_tx" in records[0].getMessage() and _names_every_fact(records[0].getMessage())
+    assert "rating_tx" in records[0].getMessage()
+    assert _names_every_fact(records[0].getMessage())
 
 
 def test_a_ledger_failed_transaction_is_failed_and_keeps_its_hash(monkeypatch, caplog) -> None:
