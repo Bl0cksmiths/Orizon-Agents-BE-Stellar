@@ -246,8 +246,10 @@ def test_a_just_expired_read_is_served_stale_when_the_refresh_is_slow(chain):
     # batch waited before serving it — and not a great deal more.
     ttl = settings.reputation_read_ttl_seconds
     assert ttl + 2.3 <= served.stale_age_seconds <= ttl + 3.3
-    assert fresh.stale is False and fresh.stale_age_seconds is None
-    assert after.stale is False and after.degraded is False
+    assert fresh.stale is False
+    assert fresh.stale_age_seconds is None
+    assert after.stale is False
+    assert after.degraded is False
 
 
 def test_a_read_expired_past_the_grace_degrades_to_the_prior(chain, monkeypatch):
