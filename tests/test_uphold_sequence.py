@@ -114,7 +114,7 @@ class Seams:
         return dataclasses.replace(credited, rating_tx="tx_retried")
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
     monkeypatch.setattr(settings, "dispute_credited_fraction", 1.0)
