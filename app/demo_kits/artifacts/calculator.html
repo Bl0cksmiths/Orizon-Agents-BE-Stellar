@@ -789,7 +789,9 @@
   // ── Persistence ──────────────────────────────────────────────────────────
   function saveState() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ memory: state.memory })); }
-    catch (e) {}
+    catch {
+      // Storage blocked or full: memory still works, it just isn't kept across reloads.
+    }
   }
   function loadState() {
     try {
