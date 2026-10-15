@@ -602,12 +602,16 @@
     return s;
   }
 
+  function errorText(code) {
+    if (code === '/0') return 'Error · /0';
+    if (code === 'overflow') return 'Error · overflow';
+    return 'Error · syntax';
+  }
+
   function render() {
     exprEl.textContent = state.expr || '0';
     if (state.error) {
-      resultEl.textContent = state.error === '/0' ? 'Error · /0'
-        : state.error === 'overflow' ? 'Error · overflow'
-        : 'Error · syntax';
+      resultEl.textContent = errorText(state.error);
       resultEl.classList.add('error');
     } else {
       resultEl.textContent = formatNum(parseFloat(state.result));
