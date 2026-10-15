@@ -436,7 +436,8 @@ def test_money_round_trips_through_double_precision_and_jsonb_exactly(pg: Postgr
     read, settled = run(pg, go())
 
     assert read == [(amount, amount, amount) for amount in AMOUNTS]
-    assert settled is not None and settled.settled_usdc == AMOUNTS[0]
+    assert settled is not None
+    assert settled.settled_usdc == AMOUNTS[0]
     assert tuple(step.price_usdc for step in settled.steps) == AMOUNTS
 
 
