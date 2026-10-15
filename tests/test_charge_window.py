@@ -471,7 +471,8 @@ def test_a_restart_resumes_from_the_persisted_index(chain: Any) -> None:
     views.payers = {_auth(1).hex(): BUYER}
     _fetch({"ext_a": OWNER_A})
     stored = asyncio.run(snapshot_store._store.load(charge_window.INDEX_NAME, snapshot_store.deployment_scope()))
-    assert stored is not None and json.loads(stored.body)["next_ledger"] == LATEST + 1
+    assert stored is not None
+    assert json.loads(stored.body)["next_ledger"] == LATEST + 1
 
     charge_window.reset()  # a new process: nothing in memory
     rpc.latest += 10
