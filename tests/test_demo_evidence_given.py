@@ -223,8 +223,10 @@ def test_a_given_hash_from_another_network_is_refused(tmp_path: Path, args: list
     rows = rows_file(tmp_path, [{"kind": "settle", "tx_hash": h, "network": "public"}])
     out = run(ledger, tmp_path, *(a.replace("ROWS", str(rows)).replace("HASH", h) for a in args))
     assert out.code == EXIT_REFUSED, out.out
-    assert "testnet only" in out.out and "'public'" in out.out
-    assert not out.dir.exists() and ledger.calls == []
+    assert "testnet only" in out.out
+    assert "'public'" in out.out
+    assert not out.dir.exists()
+    assert ledger.calls == []
 
 
 @pytest.mark.parametrize("where", ["rpc", "horizon"])
