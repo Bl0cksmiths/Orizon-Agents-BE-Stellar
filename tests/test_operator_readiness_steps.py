@@ -110,7 +110,7 @@ def _evidence(*entries: SettlementEntry, unavailable: str | None = None) -> Sett
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(monkeypatch):
     """A deployment that records ratings, so first_run can be judged."""
     monkeypatch.setattr(settings, "reputation_enabled", True)
