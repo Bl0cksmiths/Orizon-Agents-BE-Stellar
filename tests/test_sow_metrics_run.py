@@ -1008,7 +1008,8 @@ def test_a_404_page_is_never_linked(tmp_path: Path) -> None:
     assert not [u for u in urls if u.startswith(FRONTEND)], urls
     for metric_id in ("m09", "m10"):
         m = out.metric(metric_id)
-        assert m["links"] == [] and m["status"] == "not_met"
+        assert m["links"] == []
+        assert m["status"] == "not_met"
         assert m["method"].endswith(
             "The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
         )
