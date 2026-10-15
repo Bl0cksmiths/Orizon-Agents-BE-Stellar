@@ -376,13 +376,20 @@ def test_a_table_created_by_story_4_02_is_migrated_in_place(pg: PostgresDisputeS
         "rating_confirmed": "boolean",
     }
     # The rows 4.02 wrote read as "not known", never as a zero or a 1970.
-    assert old is not None and old.status == "upheld" and old.reason == "from 4.02"
+    assert old is not None
+    assert old.status == "upheld"
+    assert old.reason == "from 4.02"
     assert (old.note, old.credited_usdc, old.updated_at, old.rating_confirmed) == (None, None, None, None)
     assert (rows[0]["updated_at"], rows[1]["updated_at"]) == (None, None)
     # And the dispute is payable through today's code.
-    assert claimed is not None and claimed.status == "crediting" and claimed.resolved_at == 200.0
-    assert credited is not None and credited.credited_usdc == 1.5 and credited.updated_at is not None
-    assert rated is not None and (rated.refund_tx, rated.rating_tx, rated.rating_confirmed) == (
+    assert claimed is not None
+    assert claimed.status == "crediting"
+    assert claimed.resolved_at == 200.0
+    assert credited is not None
+    assert credited.credited_usdc == 1.5
+    assert credited.updated_at is not None
+    assert rated is not None
+    assert (rated.refund_tx, rated.rating_tx, rated.rating_confirmed) == (
         "tx_refund",
         "tx_rating",
         True,
