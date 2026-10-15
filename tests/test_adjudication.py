@@ -1364,8 +1364,9 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
 
     # Bounded by REFUSAL, never by a cut (D-062): a note the buyer reads with
     # its end missing is a different note.
+    rejecting = dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000)
     with pytest.raises(DisputeError) as too_long:
-        asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
+        asyncio.run(rejecting)
 
     assert too_long.value.code == "rejection_reason_too_long"
 
