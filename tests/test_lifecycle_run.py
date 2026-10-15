@@ -396,7 +396,8 @@ def test_a_server_that_echoes_the_signed_envelope_is_redacted(buyer: Keypair, tm
     result = run(world, buyer, tmp_path)
     assert result.code == EXIT_STAGE_FAILED
     signed = world.call_log("/api/stellar/submit")[0]["json"]["signed_xdr"]
-    assert "validation_error" in result.out and "[redacted]" in result.out
+    assert "validation_error" in result.out
+    assert "[redacted]" in result.out
     assert signed not in result.out
     assert signed not in (tmp_path / "lifecycle.jsonl").read_text()
     assert signed not in (tmp_path / "lifecycle.md").read_text()
