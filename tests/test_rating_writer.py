@@ -115,7 +115,8 @@ def test_a_key_that_does_not_parse_is_no_signer_and_never_quoted(monkeypatch):
     monkeypatch.setattr(sc, "signer_public_key", _bad_key)
     v = asyncio.run(rw.check())
     assert v.status == "no_signer"
-    assert v.gap is not None and "STELLAR_SIGNING_KEY is set but" in v.gap.problem
+    assert v.gap is not None
+    assert "STELLAR_SIGNING_KEY is set but" in v.gap.problem
     assert secret_ish not in repr(v)
 
 
