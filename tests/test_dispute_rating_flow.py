@@ -535,7 +535,8 @@ def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_reso
     assert retried.rating_tx is None
     assert invalidated == []
     (logged,) = svc_errors(caplog)
-    assert "COLLISION" in logged and "timeout with no hash" in logged
+    assert "COLLISION" in logged
+    assert "timeout with no hash" in logged
     assert len(settler.transfers) == 1
 
 
