@@ -639,8 +639,10 @@ def test_a_bound_of_5489_prints_below_the_floor_and_passes(tmp_path: Path) -> No
     world.reputations["lowrep"] = rep("lowrep", 5489)
     out = run(world, tmp_path)
     check = out.check("exclusion.card_figure")
-    assert check["status"] == PASS and check["required"] is True, check
-    assert "lowrep: 2.74 (5489 bps)" in check["detail"] and "2.75 (5500 bps)" in check["detail"]
+    assert check["status"] == PASS, check
+    assert check["required"] is True, check
+    assert "lowrep: 2.74 (5489 bps)" in check["detail"]
+    assert "2.75 (5500 bps)" in check["detail"]
     assert out.code == EXIT_GO, out.out
 
 
