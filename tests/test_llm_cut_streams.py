@@ -84,7 +84,8 @@ def test_a_stream_that_errors_midway_is_recorded_and_the_error_re_raised(
         _stream()
     assert caught.value.reason == "overloaded"
     _calls, usage, _cost = _rows(spend_ledger)[("claude-opus-5-5", "worker.code.gen")]
-    assert usage.input_tokens == 500 and usage.output_tokens == 200
+    assert usage.input_tokens == 500
+    assert usage.output_tokens == 200
 
 
 def test_a_client_error_in_the_text_callback_is_recorded_too(
