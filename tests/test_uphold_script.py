@@ -1279,7 +1279,8 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
 
     assert code == uphold_dispute.EXIT_TIMEOUT
-    assert "TIMED OUT" in out and "MAY STILL LAND" in out
+    assert "TIMED OUT" in out
+    assert "MAY STILL LAND" in out
     assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
     assert "STILL HELD" in out
     assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
