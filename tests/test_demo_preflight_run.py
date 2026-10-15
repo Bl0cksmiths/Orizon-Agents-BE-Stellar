@@ -489,7 +489,8 @@ def test_fault_injection_on_the_operator_endpoint_fails(tmp_path: Path, how: str
         world.agent_headers["X-Fault-Injection"] = "hang_after:0 (scope process)"
     out = run(world, tmp_path)
     check = out.check("operator.endpoint")
-    assert check["status"] == FAIL and "fault injection is on" in check["detail"]
+    assert check["status"] == FAIL
+    assert "fault injection is on" in check["detail"]
     assert ("fault_injection: 'hang_after:0 (scope process)'" in check["detail"]) is (how != "header")
     assert ("X-Fault-Injection header" in check["detail"]) is (how != "field")
     assert "FAULT_MODE" in check["fix"]
