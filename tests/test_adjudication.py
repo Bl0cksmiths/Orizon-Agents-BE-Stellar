@@ -1640,7 +1640,9 @@ def test_a_signing_key_that_goes_missing_after_the_credit_stops_the_rating_and_s
     chain = settler(monkeypatch, LANDED)
 
     paid = asyncio.run(dispute_svc.uphold(dispute.id))
-    assert paid.status == "credited" and paid.rating_tx == "tx_rating" and rater.calls == 1
+    assert paid.status == "credited"
+    assert paid.rating_tx == "tx_rating"
+    assert rater.calls == 1
 
     monkeypatch.setattr(settings, "stellar_signing_key", "")
     trap_the_refund(monkeypatch)  # a rating-only retry must sign nothing either
@@ -1651,7 +1653,9 @@ def test_a_signing_key_that_goes_missing_after_the_credit_stops_the_rating_and_s
         again = asyncio.run(dispute_svc.uphold(dispute.id))
 
     assert again == paid  # paid, and not re-rated
-    assert rater.calls == 1 and invalidated == [] and len(chain.calls) == 1
+    assert rater.calls == 1
+    assert invalidated == []
+    assert len(chain.calls) == 1
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 1
     for fact in ("STELLAR_SIGNING_KEY is unset", dispute.id, JOB, "agt_writer", dispute.payer):
