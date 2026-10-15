@@ -363,9 +363,10 @@ def test_a_job_that_never_settled_cannot_be_disputed() -> None:
     _seed(payer.public_key)
     unknown = "ff" * 16
     nonce = "0" * 32
+    signature = _sign(payer, dispute_message(unknown, 0, nonce))
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer, job=unknown, nonce=nonce, signature=_sign(payer, dispute_message(unknown, 0, nonce)))
+        _open(payer, job=unknown, nonce=nonce, signature=signature)
 
     assert refused.value.code == "unknown_job"
     assert refused.value.status_code == 404
