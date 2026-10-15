@@ -147,7 +147,8 @@ def test_research_pro_fits_the_live_evals_long_answer_into_its_contract(claude: 
     assert all(len(f["claim"]) <= 200 for f in out["findings"])
     # Whole sentences kept: the 120-character first sentence of each claim.
     assert all(f["claim"].endswith(".") for f in out["findings"])
-    assert len(out["summary"]) <= 300 and out["summary"].endswith(".")
+    assert len(out["summary"]) <= 300
+    assert out["summary"].endswith(".")
     assert len(out["sources"]) == 6
     assert out["findings"][0]["confidence"] == 1.0
     assert out["counts"] == {"findings": 6, "sources": 6}
