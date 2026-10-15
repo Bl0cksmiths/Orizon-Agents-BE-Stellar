@@ -489,7 +489,8 @@ def test_settlements_are_read_newest_first_by_id_too(pg: PostgresDisputeStore, p
     # The last row WRITTEN, not the latest window: a settlement is a fact about
     # a moment, and the newest fact wins.
     assert count == 3
-    assert latest is not None and latest.window_closes_at == 1_700_200_000.0
+    assert latest is not None
+    assert latest.window_closes_at == 1_700_200_000.0
 
 
 # ── what a transition carries forward ─────────────────────────────────────
