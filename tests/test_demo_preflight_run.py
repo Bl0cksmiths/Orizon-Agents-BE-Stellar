@@ -276,7 +276,9 @@ def test_a_build_without_the_5_01_readiness_fields_fails(tmp_path: Path, field: 
     del world.readiness[field]
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "predates story 5.01" in check["detail"] and field in check["detail"]
+    assert check["status"] == FAIL
+    assert "predates story 5.01" in check["detail"]
+    assert field in check["detail"]
     assert out.code == EXIT_NO_GO
 
 
