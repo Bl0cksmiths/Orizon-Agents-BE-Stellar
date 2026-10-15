@@ -685,7 +685,8 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
         assert invalidated == [AGENT] * drops
 
     assert len(settler.transfers) == 1
-    assert len(ledger.submits) == 3 and ledger.replays == 2
+    assert len(ledger.submits) == 3
+    assert ledger.replays == 2
 
 
 # ── when the rating step itself breaks ──────────────────────────
