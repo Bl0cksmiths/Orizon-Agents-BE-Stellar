@@ -416,7 +416,8 @@ def test_an_over_long_artifact_title_is_capped_in_the_trace(monkeypatch):
     assert "T" * 181 not in traced.msg
     # Only the trace is capped: the artifact is still handed back whole.
     artifact = state.tasks["tsk_hostile_long_title"].artifact
-    assert artifact is not None and artifact["title"] == title
+    assert artifact is not None
+    assert artifact["title"] == title
 
 
 @pytest.mark.parametrize(
