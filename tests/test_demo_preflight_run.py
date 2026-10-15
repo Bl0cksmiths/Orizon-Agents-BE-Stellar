@@ -436,7 +436,8 @@ def test_an_external_operator_that_is_not_ready_is_named_with_its_step(tmp_path:
     assert out.code == EXIT_NO_GO
     check = out.check("operator.ready")
     assert check["status"] == FAIL
-    assert "beta: `reachable` is failed" in check["detail"] and "fix reachable" in check["detail"]
+    assert "beta: `reachable` is failed" in check["detail"]
+    assert "fix reachable" in check["detail"]
     assert "alpha" not in check["detail"]
 
 
