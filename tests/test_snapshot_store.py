@@ -185,7 +185,8 @@ def test_without_an_age_limit_a_row_of_any_age_is_restored(store: InMemorySnapsh
     asyncio.run(_boot())
 
     snap = cell.current()
-    assert snap is not None and snap.value.n == 7
+    assert snap is not None
+    assert snap.value.n == 7
     assert snap.source == "persisted"
     assert snap.age_seconds() >= 30 * 86_400 - 1
 
