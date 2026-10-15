@@ -153,8 +153,9 @@ def test_successful_read_never_logs_at_info(fake_rpc, caplog):
 
 def test_failed_read_logs_error_naming_the_stage(fake_rpc, caplog):
     fake_rpc(fail_on="load_account")
+    registry = sc.contract_ids().agent_registry
     with caplog.at_level(logging.DEBUG, logger=RPC_LOGGER), pytest.raises(RuntimeError):
-        sc.simulate_read(sc.contract_ids().agent_registry, "get", [])
+        sc.simulate_read(registry, "get", [])
 
     errors = _rpc_lines(caplog, logging.ERROR)
     assert len(errors) == 1, errors
