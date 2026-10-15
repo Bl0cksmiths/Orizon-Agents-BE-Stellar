@@ -150,8 +150,10 @@ def _no_signing(monkeypatch) -> None:
 def test_a_step_the_settlement_does_not_have_refuses(monkeypatch, caplog) -> None:
     _no_signing(monkeypatch)
     with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        settlement = _settlement()
+        dispute = _dispute(step_index=7)
         with pytest.raises(RefundRefused) as exc:
-            refund_svc.creditable_for(_settlement(), _dispute(step_index=7))
+            refund_svc.creditable_for(settlement, dispute)
 
     assert exc.value.code == "nothing_to_credit"
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
