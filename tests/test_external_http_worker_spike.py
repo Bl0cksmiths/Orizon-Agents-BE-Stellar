@@ -236,8 +236,9 @@ def test_connect_failure_retries_once_then_raises() -> None:
     async def go() -> None:
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport, base_url="https://operator.example") as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())
     assert calls["n"] == 2  # original attempt + exactly one retry
