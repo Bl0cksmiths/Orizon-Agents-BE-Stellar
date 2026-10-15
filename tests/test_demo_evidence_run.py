@@ -201,7 +201,8 @@ def test_a_hash_the_ledger_does_not_know_is_never_published(tmp_path: Path) -> N
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_NOT_SUCCESS
     assert out.json()["items"] == []
-    assert "NOT_FOUND" in out.sheet() and ghost not in out.description()
+    assert "NOT_FOUND" in out.sheet()
+    assert ghost not in out.description()
 
 
 def test_a_malformed_hash_is_never_asked_or_published(tmp_path: Path) -> None:
