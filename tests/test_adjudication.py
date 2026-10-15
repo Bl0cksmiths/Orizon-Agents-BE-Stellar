@@ -1172,7 +1172,8 @@ def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str)
     assert refused.value.status_code == 409
     assert status in refused.value.message  # the adjudicator is told what it IS
     unchanged = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unchanged is not None and unchanged.status == status
+    assert unchanged is not None
+    assert unchanged.status == status
 
 
 @pytest.mark.parametrize(
