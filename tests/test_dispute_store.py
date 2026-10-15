@@ -589,8 +589,10 @@ def test_a_claim_and_a_release_clear_the_in_flight_amount_with_the_hash(store: D
 
     released, reclaimed = run(store, go())
 
-    assert released is not None and (released.refund_tx, released.inflight_usdc) == (None, None)
-    assert reclaimed is not None and (reclaimed.refund_tx, reclaimed.inflight_usdc) == (None, None)
+    assert released is not None
+    assert (released.refund_tx, released.inflight_usdc) == (None, None)
+    assert reclaimed is not None
+    assert (reclaimed.refund_tx, reclaimed.inflight_usdc) == (None, None)
 
 
 def test_the_in_flight_column_is_added_to_a_table_that_already_exists(pg: PostgresDisputeStore, pg_dsn: str) -> None:
