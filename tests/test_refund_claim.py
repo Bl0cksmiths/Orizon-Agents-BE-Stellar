@@ -535,7 +535,8 @@ def test_a_refused_verdict_leaves_the_mutex_over_a_live_payout(store: DisputeSto
 
     assert refused is None
     # The payout is untouched: still mid-flight, still held, still findable.
-    assert current is not None and current.status == "crediting"
+    assert current is not None
+    assert current.status == "crediting"
     assert queue == ["dsp_0001"]
 
 
