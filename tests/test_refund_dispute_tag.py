@@ -147,7 +147,8 @@ def test_the_signed_refund_pays_the_payer_muxed_with_its_dispute_id(monkeypatch)
     m_address = Address.from_xdr_sc_address(to.address).address
     assert MuxedAccount.from_account(m_address).account_id == PAYER
     assert MuxedAccount.from_account(m_address).account_muxed_id == DISPUTE_ID_MUX
-    assert amount.i128.lo.uint64 == 500_000 and amount.i128.hi.int64 == 0
+    assert amount.i128.lo.uint64 == 500_000
+    assert amount.i128.hi.int64 == 0
 
 
 # ── the fallback ────────────────────────────────────────────────────
