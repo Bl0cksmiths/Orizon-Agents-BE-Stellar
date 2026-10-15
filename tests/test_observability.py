@@ -207,7 +207,8 @@ def test_envelope_identity_never_leaks_the_xdr():
     tx_hash, source = sc.envelope_identity(xdr)
     assert source == kp.public_key
     assert len(tx_hash) == 64
-    assert tx_hash not in xdr and source not in xdr
+    assert tx_hash not in xdr
+    assert source not in xdr
     # Undecodable input must degrade to placeholders, never raise.
     assert sc.envelope_identity("not-xdr") == ("unparseable", "unknown")
 
