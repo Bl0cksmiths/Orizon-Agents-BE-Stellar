@@ -660,9 +660,11 @@ def test_a_release_naming_a_transfer_refuses_a_claim_taken_again_over_another(st
 
     no_hash_yet, stale, held, current, after = run(store, go())
 
-    assert no_hash_yet is None and stale is None
+    assert no_hash_yet is None
+    assert stale is None
     assert held == ["dsp_0001"]
-    assert current is not None and current.status == "upheld"
+    assert current is not None
+    assert current.status == "upheld"
     assert after == ()
 
 
