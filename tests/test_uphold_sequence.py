@@ -208,7 +208,8 @@ def test_the_master_switch_refuses_before_the_store_is_read(
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         err = _refused()
     assert (err.code, err.status_code) == ("refunds_disabled", 503)
-    assert store.calls == [] and seams.calls == []
+    assert store.calls == []
+    assert seams.calls == []
     assert _lines(caplog, logging.WARNING) == [f"adjudication refused: dispute={DISPUTE} reason=refunds_disabled"]
 
 
