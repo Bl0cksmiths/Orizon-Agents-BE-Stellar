@@ -345,7 +345,9 @@ def test_simulated_exclusion_is_policy_not_a_verdict_on_the_agent():
 
     assert (n.kind, n.reason_code) == ("excluded", "simulated_worker")
     assert (n.agent_id, n.agent_name) == ("agt_03d9", "code.next")
-    assert n.lower_bound_bps is None and n.count is None and n.floor_bps == FLOOR
+    assert n.lower_bound_bps is None
+    assert n.count is None
+    assert n.floor_bps == FLOOR
     assert n.reason == (
         "its built-in worker only simulates this agent's output so far (a buyer is never charged for simulated "
         "work, so the planner passed it over)"
