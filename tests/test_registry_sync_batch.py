@@ -66,7 +66,7 @@ class _Registry:
         return {i: self.records[i] for i in agent_ids if i in self.records and i not in self.batch_skips}
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> Any:
     agents_before = dict(state.agents)
     answered_before = set(registry_sync._answered_ids)
