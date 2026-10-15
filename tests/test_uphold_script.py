@@ -1020,7 +1020,8 @@ def test_the_preview_stacks_the_two_ids_and_underlines_the_bytes_they_share(
     underline = lines[lines.index(rating_line) + 1]
     column = job_line.index(JOB)
 
-    assert derived[:16] == JOB[:16] and derived != JOB
+    assert derived[:16] == JOB[:16]
+    assert derived != JOB
     assert rating_line.index(derived) == column
     assert underline[:column].strip() == ""
     assert underline[column : column + 17] == "^" * 16 + " "
