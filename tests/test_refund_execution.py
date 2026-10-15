@@ -412,8 +412,10 @@ def test_refund_logs_never_carry_the_signing_key(monkeypatch, caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="app.services.refund_svc"):
         amount = refund_svc.creditable_for(_settlement(settled_usdc=0.01), _dispute(creditable_usdc=0.09))
         asyncio.run(refund_svc.credit_refund(_dispute(), amount))
+        settlement = _settlement()
+        dispute = _dispute(step_index=7)
         with pytest.raises(RefundRefused):
-            refund_svc.creditable_for(_settlement(), _dispute(step_index=7))
+            refund_svc.creditable_for(settlement, dispute)
 
     records = [r for r in caplog.records if r.name == "app.services.refund_svc"]
     assert records
