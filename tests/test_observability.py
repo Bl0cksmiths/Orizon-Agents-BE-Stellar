@@ -104,7 +104,7 @@ class _FakeServer:
 _TEST_AGENT_REGISTRY = "CAPHXWU53UZUZJGV7IAE57NNMH3YYB5MTWO6YA53KKMXSFVLOITBJ3GQ"
 
 
-@pytest.fixture()
+@pytest.fixture
 def fake_rpc(monkeypatch):
     """Point client._server() at a scriptable in-process fake."""
     # contract_ids() is lru_cached, so the id has to be in place before the
