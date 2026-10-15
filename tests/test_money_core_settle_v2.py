@@ -230,7 +230,8 @@ def test_a_failure_after_the_settle_confirmed_keeps_its_hash_and_settlement(
     with caplog.at_level(logging.ERROR, logger="app.services.execution_svc"):
         settle_tx, proof_tx, job_id = _settle((0.01,), frozenset({0}), on_settled=on_settled)
 
-    assert (settle_tx, proof_tx) == (SETTLE_TX, None) and job_id is not None
+    assert (settle_tx, proof_tx) == (SETTLE_TX, None)
+    assert job_id is not None
     assert [name for name, _ in chain.calls] == ["settle"]
     assert _lines()[-1] == ("error", "on-chain settlement failed", None)
     assert state.tasks[TASK].settlement == "settled"
