@@ -551,8 +551,9 @@ def test_one_stroop_over_the_ceiling_is_refused(monkeypatch) -> None:
     monkeypatch.setattr(settings, "max_refund_usdc", 0.05)
     calls = _fake_transfer(monkeypatch, {"status": "SUCCESS", "hash": "refund_tx"})
 
+    crediting = refund_svc.credit_refund(_dispute(), 0.0500001)
     with pytest.raises(RefundRefused) as refused:
-        asyncio.run(refund_svc.credit_refund(_dispute(), 0.0500001))
+        asyncio.run(crediting)
 
     assert refused.value.code == "refund_above_cap"
     assert calls == []
