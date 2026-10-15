@@ -106,7 +106,8 @@ def test_a_fiat_deposit_naming_an_offramp_is_warned_not_matched(caplog: pytest.L
     _record("r_off", "offramp", identifier="on-1", deposit_address=ADDRESS)
     record, advance, warned = _match(caplog, _fiat())
     assert (record, advance) == (None, None)
-    assert len(warned) == 1 and "kind=fiat" in warned[0]
+    assert len(warned) == 1
+    assert "kind=fiat" in warned[0]
 
 
 # ── crypto: an off-ramp, matched by deposit address and tag ──────────────
