@@ -603,7 +603,8 @@ def test_a_below_floor_agent_that_is_not_routable_does_not_count(tmp_path: Path,
 
 def test_a_bound_listed_below_floor_agent_counts(tmp_path: Path) -> None:
     check = run(healthy_world(), tmp_path).check("exclusion.below_floor")
-    assert check["status"] == PASS and check["detail"] == "lowrep (4100 < 5500 bps)"
+    assert check["status"] == PASS
+    assert check["detail"] == "lowrep (4100 < 5500 bps)"
 
 
 def test_a_seeded_agent_below_the_floor_does_not_count(tmp_path: Path) -> None:
