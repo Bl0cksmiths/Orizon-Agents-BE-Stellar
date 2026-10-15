@@ -298,7 +298,8 @@ def test_a_recovery_clears_the_failure(caplog: pytest.LogCaptureFixture) -> None
     with caplog.at_level("INFO"):
         snap = _run(go)
     assert snap is not None
-    assert cell.status().last_error is None and cell.status().failing_since is None
+    assert cell.status().last_error is None
+    assert cell.status().failing_since is None
     assert "snapshot test recovered" in caplog.text
 
 
