@@ -1002,8 +1002,9 @@ def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
 
     monkeypatch.setattr(refund_svc, "execute_refund", _cancelled_mid_flight)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     unaccounted = asyncio.run(dispute_svc.get_dispute(dispute.id))
     assert unaccounted is not None
