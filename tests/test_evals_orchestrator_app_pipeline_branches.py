@@ -90,7 +90,8 @@ def test_a_recheck_without_same_request_keeps_only_prefixed_scores(monkeypatch):
     run = asyncio.run(pipeline.run("hello", stages="all"))
     assert run.guard.scores == {"injection": 0.1, "recheck_injection": 0.2}
     assert run.spec == _SPEC.model_dump()
-    assert run.plan is not None and run.plan.raw == {"planned_from": "spec"}
+    assert run.plan is not None
+    assert run.plan.raw == {"planned_from": "spec"}
 
 
 def test_a_recheck_with_same_request_keeps_it_unprefixed(monkeypatch):
