@@ -493,7 +493,8 @@ def test_the_v1_charge_goes_out_with_exactly_the_args_it_always_had(monkeypatch,
         sc.bytes16(job_id),
     ]
     assert [a.to_xdr() for a in charge] == [a.to_xdr() for a in expected]
-    assert chain.named("settle") == [] and chain.reads == []
+    assert chain.named("settle") == []
+    assert chain.reads == []
     assert store.recorded[0].steps[0].paid_usdc is None
 
 
