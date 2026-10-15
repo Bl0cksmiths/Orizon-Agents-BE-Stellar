@@ -41,7 +41,8 @@ def test_warn_holds() -> None:
 def test_a_required_skip_is_never_a_pass() -> None:
     code, line = verdict([_check(PASS), _check(SKIPPED)])
     assert code == EXIT_INCOMPLETE
-    assert line.startswith("NO-GO") and "skipped is not a pass" in line
+    assert line.startswith("NO-GO")
+    assert "skipped is not a pass" in line
 
 
 def test_an_advisory_skip_or_fail_does_not_gate() -> None:
