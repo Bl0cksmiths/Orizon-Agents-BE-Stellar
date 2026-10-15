@@ -749,7 +749,8 @@ def test_a_rejection_holding_a_stale_open_read_never_drops_a_live_payout(monkeyp
 
     rejection, credit = asyncio.run(race())
 
-    assert rejection.code == "dispute_not_open" and rejection.status_code == 409
+    assert rejection.code == "dispute_not_open"
+    assert rejection.status_code == 409
     assert "crediting" in rejection.message, f"the adjudicator was not told the real status: {rejection.message}"
     assert credit.code == "refund_unconfirmed"
     # The in-flight payout keeps both of the things that make it reconcilable:
