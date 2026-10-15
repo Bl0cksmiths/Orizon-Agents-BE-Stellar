@@ -431,7 +431,8 @@ def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution(store: Dispute
         opened = await store.open_dispute(a_dispute())
         upheld = await store.append_status(opened.id, "upheld", resolved_at=0.0)
         credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund")
-        assert upheld is not None and credited is not None
+        assert upheld is not None
+        assert credited is not None
         return upheld.resolved_at, credited.resolved_at
 
     assert run(store, go(store)) == (0.0, 0.0)
