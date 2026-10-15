@@ -550,7 +550,8 @@ def test_an_operator_who_is_the_settler_is_not_isolatable_even_behind_the_proxy(
     result = run(world, buyer, tmp_path, "--until", "verify")
     assert result.code == EXIT_OK, result.out
     (delta,) = [c for c in result.row("settlement_checks")["detail"]["checks"] if c["name"].startswith("v2_operator")]
-    assert delta["ok"] is None and "not isolatable" in delta["detail"]
+    assert delta["ok"] is None
+    assert "not isolatable" in delta["detail"]
 
 
 def test_a_settle_past_the_rpcs_event_window_fails_verification_and_says_why(buyer: Keypair, tmp_path: Path) -> None:
