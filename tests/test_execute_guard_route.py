@@ -187,7 +187,8 @@ def test_v1_runs_exactly_as_before(client: TestClient, monkeypatch, runs, releas
     assert paid(client, auth=upper, payer=OTHER).status_code == 200
     # Handed on exactly as sent — the case included — as it always was.
     assert runs.calls == [(PLAN_ID, upper, OTHER), (PLAN_ID, upper, OTHER)]
-    assert guard.claimed_by(AUTH) is None and releases.calls == []
+    assert guard.claimed_by(AUTH) is None
+    assert releases.calls == []
     assert escrow.calls == [(ESCROW, "version")]
 
 
