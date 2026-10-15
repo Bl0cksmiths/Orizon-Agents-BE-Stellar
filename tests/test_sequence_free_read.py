@@ -41,7 +41,7 @@ class _Server:
         return _Simulation()
 
 
-@pytest.fixture()
+@pytest.fixture
 def server(monkeypatch) -> _Server:
     fake = _Server()
     monkeypatch.setattr(sc, "_server", lambda **_kw: fake)
