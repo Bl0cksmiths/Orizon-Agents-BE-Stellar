@@ -209,7 +209,8 @@ def test_the_suite_default_is_offline_and_not_configured() -> None:
     with pytest.raises(LLMNotConfigured) as caught:
         _structured()
     assert caught.value.reason == "missing_key"
-    assert settings.anthropic_api_key == "" and settings.typesafe_api_key == ""
+    assert settings.anthropic_api_key == ""
+    assert settings.typesafe_api_key == ""
 
 
 # ── the cap ────────────────────────────────────────────────────────────────
