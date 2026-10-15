@@ -175,7 +175,8 @@ def test_the_app_spend_cap_stops_the_run(cases, tmp_path):
     pipeline = Scripted(failures={cases[0].id: SpendCapReached("daily cap")})
     outcome, _, errors = _run(cases[:5], pipeline, tmp_path, concurrency=1)
     assert errors[0]["failure_class"] == "spend_cap"
-    assert outcome.stopped and outcome.skipped_budget == 4
+    assert outcome.stopped
+    assert outcome.skipped_budget == 4
 
 
 @dataclass
