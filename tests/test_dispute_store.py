@@ -1861,7 +1861,8 @@ def test_every_statement_and_every_acquire_names_its_own_bound() -> None:
     asyncio.run(go())
 
     # Every statement the store sent, the DDL included, named a bound.
-    assert pool.statements and None not in pool.timeouts
+    assert pool.statements
+    assert None not in pool.timeouts
     assert len(pool.timeouts) == len(pool.statements)
     # And the two calls that take a connection of their own — the DDL and
     # append_status — bounded the wait for it: longer than a command, so a
