@@ -311,7 +311,7 @@ def test_without_a_database_nothing_is_queued(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ── reading: a task this process never ran ──────────────────────────────
-@pytest.fixture()
+@pytest.fixture
 def client_on(store: FakeStore, client: Any) -> Any:
     return client
 
