@@ -221,8 +221,9 @@ def test_a_failure_between_the_claim_and_the_transfer_hands_the_claim_back(monke
     dispute = a_dispute()
     real = _flaky(monkeypatch, "get_settlement", error)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(type(error)):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     monkeypatch.setattr(dispute_store, "_store", real)
     assert calls == []  # nothing was signed
