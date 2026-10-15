@@ -175,8 +175,10 @@ def test_a_step_that_never_delivered_refuses(monkeypatch) -> None:
 
 def test_a_credit_that_computes_to_zero_refuses(monkeypatch) -> None:
     _no_signing(monkeypatch)
+    settlement = _settlement()
+    dispute = _dispute(creditable_usdc=0.0)
     with pytest.raises(RefundRefused) as exc:
-        refund_svc.creditable_for(_settlement(), _dispute(creditable_usdc=0.0))
+        refund_svc.creditable_for(settlement, dispute)
     assert exc.value.code == "nothing_to_credit"
 
     # Zero from the other direction: a workflow that settled for nothing.
