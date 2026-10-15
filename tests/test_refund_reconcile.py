@@ -643,7 +643,8 @@ def test_a_chain_amount_that_disagrees_with_the_record_is_left_for_a_human(store
     decision, current = run(store, go())
 
     assert decision.action == "amount_mismatch"
-    assert current is not None and current.status == "crediting"
+    assert current is not None
+    assert current.status == "crediting"
 
 
 def test_a_claim_with_no_hash_is_never_touched(store: DisputeStore, chain: Chain) -> None:
