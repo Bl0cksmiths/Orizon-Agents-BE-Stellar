@@ -248,7 +248,8 @@ def test_nothing_to_read_is_refused(tmp_path: Path) -> None:
 
 def test_an_empty_rows_file_alone_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path, "--rows", str(rows_file(tmp_path, [])))
-    assert out.code == EXIT_REFUSED and "no transaction rows" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no transaction rows" in out.out
 
 
 # ── merged with the harness ─────────────────────────────────────
