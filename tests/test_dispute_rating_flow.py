@@ -873,8 +873,9 @@ def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(
     heard: list[dispute_rating.RatingOutcome] = []
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
 
+    upholding = dispute_svc.uphold(dispute.id, on_rating=heard.append)
     with pytest.raises(dispute_svc.DisputeError):
-        asyncio.run(dispute_svc.uphold(dispute.id, on_rating=heard.append))
+        asyncio.run(upholding)
 
     assert heard == []
     assert ledger.submits == []
