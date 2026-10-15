@@ -447,7 +447,8 @@ def test_zero_delivered_is_an_empty_settle_under_v2(monkeypatch, store):
     [settle] = chain.named("settle")
     assert _payouts(settle) == []
     assert scval.to_native(settle[2]) == execution_svc.unsettled_job_id("tsk_v2_nothing")
-    assert chain.named("seal") == [] and store.recorded == []
+    assert chain.named("seal") == []
+    assert store.recorded == []
     assert state.tasks["tsk_v2_nothing"].settlement == "released"
 
 
