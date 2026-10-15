@@ -280,4 +280,5 @@ def test_events_are_filtered_to_the_transaction_and_decoded() -> None:
     other = {**event, "txHash": "t2"}
     reader, _ = _chain(_rpc({"getEvents": {"result": {"events": [event, other]}}}))
     (found,) = reader.events("C1", 5, tx_hash="t1")
-    assert found.topics == ["charged", "ext"] and found.value == ["01" * 16, 5]
+    assert found.topics == ["charged", "ext"]
+    assert found.value == ["01" * 16, 5]
