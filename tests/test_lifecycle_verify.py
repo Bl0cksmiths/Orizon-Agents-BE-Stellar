@@ -88,7 +88,8 @@ def test_a_charged_event_for_the_wrong_amount_fails() -> None:
 
 def test_a_charged_event_for_another_job_fails() -> None:
     checks, _ = check_charged_events([_charged("ext", 500_000, job="ff" * 16)], _settlement(), OWNERS)
-    assert checks[0].ok is False and "other than" in checks[0].detail
+    assert checks[0].ok is False
+    assert "other than" in checks[0].detail
 
 
 def test_paying_an_undelivered_step_fails() -> None:
