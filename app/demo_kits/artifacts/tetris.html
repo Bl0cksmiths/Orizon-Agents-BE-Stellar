@@ -741,6 +741,29 @@
     return cleared;
   }
 
+  // Base points (before the level multiplier) and the toast for one lock.
+  function clearAward(tspin, cleared) {
+    if (tspin === 'full' && cleared > 0) {
+      return {
+        gained: SCORE_TSPIN_CLEARS[cleared] || 0,
+        toastMsg: ['', 'T-Spin Single', 'T-Spin Double', 'T-Spin Triple'][cleared],
+      };
+    }
+    if (tspin === 'mini' && cleared > 0) {
+      return {
+        gained: SCORE_TSPIN_MINI_CLEARS[cleared] || 0,
+        toastMsg: cleared === 1 ? 'T-Spin Mini' : 'T-Spin Mini Double',
+      };
+    }
+    if (tspin === 'full') return { gained: SCORE_TSPIN.full, toastMsg: 'T-Spin' };
+    if (tspin === 'mini') return { gained: SCORE_TSPIN.mini, toastMsg: null };
+    if (cleared === 0) return { gained: 0, toastMsg: null };
+    let toastMsg = null;
+    if (cleared === 4) toastMsg = '✦ TETRIS';
+    else if (cleared === 3) toastMsg = 'Triple';
+    return { gained: SCORE_LINES[cleared], toastMsg };
+  }
+
   function lockPiece() {
     if (!state.active) return;
     // 1. T-spin detection happens BEFORE we write to the board.
@@ -753,26 +776,8 @@
     const cleared = clearFullRows();
 
     // 4. Score the result.
-    let gained = 0;
-    let toastMsg = null;
+    let { gained, toastMsg } = clearAward(tspin, cleared);
     const wasDifficult = (cleared === 4) || (tspin !== 'none' && cleared > 0);
-
-    if (tspin === 'full' && cleared > 0) {
-      gained = SCORE_TSPIN_CLEARS[cleared] || 0;
-      toastMsg = ['', 'T-Spin Single', 'T-Spin Double', 'T-Spin Triple'][cleared];
-    } else if (tspin === 'mini' && cleared > 0) {
-      gained = SCORE_TSPIN_MINI_CLEARS[cleared] || 0;
-      toastMsg = cleared === 1 ? 'T-Spin Mini' : 'T-Spin Mini Double';
-    } else if (tspin === 'full') {
-      gained = SCORE_TSPIN.full;
-      toastMsg = 'T-Spin';
-    } else if (tspin === 'mini') {
-      gained = SCORE_TSPIN.mini;
-    } else if (cleared > 0) {
-      gained = SCORE_LINES[cleared];
-      if (cleared === 4) toastMsg = '✦ TETRIS';
-      else if (cleared === 3) toastMsg = 'Triple';
-    }
 
     gained *= state.level;
     if (wasDifficult && state.b2b && gained > 0) {
