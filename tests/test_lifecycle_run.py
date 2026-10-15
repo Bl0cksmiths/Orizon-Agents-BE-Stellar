@@ -139,7 +139,8 @@ def test_v2_lifecycle_records_every_hash_with_the_ledgers_status(
         "seal_on_registry",
     }
     md = (tmp_path / "lifecycle.md").read_text()
-    assert "## Transactions" in md and "## Reputation snapshots" in md
+    assert "## Transactions" in md
+    assert "## Reputation snapshots" in md
     assert result.row("settle")["tx_hash"][:8] in md
 
 
