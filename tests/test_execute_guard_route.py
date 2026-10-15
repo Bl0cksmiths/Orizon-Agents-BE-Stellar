@@ -195,7 +195,8 @@ def test_v1_runs_exactly_as_before(client: TestClient, monkeypatch, runs, releas
 def test_v1_refusals_keep_their_old_envelopes(client: TestClient, monkeypatch, releases) -> None:
     install(monkeypatch, FakeEscrow(version=None))
     r = paid(client, plan_id="pln_nowhere")
-    assert r.status_code == 404 and r.json()["detail"] == "unknown plan_id: pln_nowhere"
+    assert r.status_code == 404
+    assert r.json()["detail"] == "unknown plan_id: pln_nowhere"
     assert "release_tx_hash" not in r.json()
 
     live_plan(created_at=time.time() - settings.plan_ttl_seconds - 60)
