@@ -279,7 +279,9 @@ def test_an_external_owner_counts_with_its_settled_workflow_linked(world: _World
     report = world.report()
 
     assert _totals(report) == (1, 1, 1)
-    assert report.degraded is False and report.unreadable_agents == [] and report.excluded == []
+    assert report.degraded is False
+    assert report.unreadable_agents == []
+    assert report.excluded == []
     (operator,) = report.operators
     assert operator.owner == EXT_A
     assert operator.owner_explorer == f"https://stellar.expert/explorer/testnet/account/{EXT_A}"
