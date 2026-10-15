@@ -254,8 +254,9 @@ def test_a_release_that_fails_after_failed_records_the_failed_hash(monkeypatch) 
     dispute = a_dispute()
     real = _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     monkeypatch.setattr(dispute_store, "_store", real)
     assert refused.value.code == "refund_failed"
