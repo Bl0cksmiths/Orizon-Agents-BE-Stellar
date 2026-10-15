@@ -87,7 +87,8 @@ def test_the_postgres_store_is_named_at_boot_before_any_request(
     assert lines[0].levelno == logging.INFO
     message = lines[0].getMessage()
     assert "dispute store: postgres" in message
-    assert "dsn-password-7c1e" not in message and "db.internal.example" not in message
+    assert "dsn-password-7c1e" not in message
+    assert "db.internal.example" not in message
 
 
 # ── /readiness ─────────────────────────────────────────────────────────────
