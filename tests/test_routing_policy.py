@@ -121,7 +121,7 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
     state.agents.update(saved)
 
 
-@pytest.fixture()
+@pytest.fixture
 def claude_on(monkeypatch: pytest.MonkeyPatch, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
 
