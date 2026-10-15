@@ -118,7 +118,8 @@ def test_a_malformed_content_length_is_left_to_the_byte_meter():
     small = [{"type": "http.request", "body": b"x" * 50, "more_body": False}]
     sent, raised = _drive(middleware, _http([(b"content-length", b"abc")]), small)
     assert raised is None
-    assert [m.get("status") for m in sent] == [200, None] and sent[1]["body"] == b"50"
+    assert [m.get("status") for m in sent] == [200, None]
+    assert sent[1]["body"] == b"50"
 
     large = [{"type": "http.request", "body": b"x" * 101, "more_body": False}]
     sent, raised = _drive(middleware, _http([(b"content-length", b"abc")]), large)
