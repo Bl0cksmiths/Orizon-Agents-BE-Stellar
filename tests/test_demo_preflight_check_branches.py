@@ -281,7 +281,8 @@ def test_below_floor_reread_that_gives_no_answer_fails() -> None:
     assert check.detail.startswith(f"GET {API}/api/stellar/reputation gave no answer after retries")
     assert check.fix == "Rerun; the reputation route did not answer."
     assert sleeps == [5.0]
-    assert facts.floor_bps == 5500 and facts.reputations is None
+    assert facts.floor_bps == 5500
+    assert facts.reputations is None
 
 
 def test_below_floor_reread_that_is_refused_names_the_read() -> None:
