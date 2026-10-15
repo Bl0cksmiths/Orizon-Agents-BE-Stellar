@@ -376,7 +376,8 @@ def test_no_key_means_not_configured_and_nothing_is_sent(api: Callable[..., Reco
     monkeypatch.setattr(settings, "anthropic_api_key", "  ")
     with pytest.raises(LLMNotConfigured) as caught:
         _plan()
-    assert caught.value.reason == "missing_key" and recorder.requests == []
+    assert caught.value.reason == "missing_key"
+    assert recorder.requests == []
     assert spend.snapshot().spent_usd == 0.0
 
 
