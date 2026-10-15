@@ -315,8 +315,9 @@ def test_ask_is_not_held_to_the_cap_by_default(fake_jev: FakeJev, monkeypatch: p
     monkeypatch.setattr(settings, "llm_daily_spend_cap_usd", 0.0)
     fake_jev.answer({"injection": 0.1, "complexity": "low", "harm": score(0)}, persistent=True)
     asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+    held_to_the_cap = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS, enforce_cap=True)
     with pytest.raises(SpendCapReached):
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS, enforce_cap=True))
+        asyncio.run(held_to_the_cap)
 
 
 def test_a_question_left_unanswered_fails_the_fake_loudly(fake_jev: FakeJev) -> None:
