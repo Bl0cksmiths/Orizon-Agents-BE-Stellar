@@ -171,5 +171,6 @@ def test_the_instructions_name_only_agents_the_catalog_has() -> None:
 
 def test_the_instructions_carry_nothing_per_request() -> None:
     # A timestamp, an id or a model name here would change the cached prefix.
-    assert "{" not in CLAUDE_INSTRUCTIONS and "}" not in CLAUDE_INSTRUCTIONS
+    assert "{" not in CLAUDE_INSTRUCTIONS
+    assert "}" not in CLAUDE_INSTRUCTIONS
     assert orchestrator.planner_system("X") == f"{CLAUDE_INSTRUCTIONS}\n\nX"
