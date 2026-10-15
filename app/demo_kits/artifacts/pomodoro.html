@@ -650,7 +650,9 @@
         const cutoff = Date.now() - 14 * 86400000;
         state.history = arr.filter(e => e && typeof e.ts === 'number' && e.ts >= cutoff);
       }
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or the saved JSON is corrupt: start with an empty history.
+    }
   }
   function saveHistory() {
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); } catch (e) {}
