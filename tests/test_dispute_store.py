@@ -628,8 +628,11 @@ def test_the_in_flight_column_is_added_to_a_table_that_already_exists(pg: Postgr
     before, after, columns = run(pg, go())
 
     assert [c["data_type"] for c in columns] == ["double precision"]
-    assert before is not None and before.refund_tx == "tx_before_the_sweep" and before.inflight_usdc is None
-    assert after is not None and (after.refund_tx, after.inflight_usdc) == ("tx_before_the_sweep", 1.5)
+    assert before is not None
+    assert before.refund_tx == "tx_before_the_sweep"
+    assert before.inflight_usdc is None
+    assert after is not None
+    assert (after.refund_tx, after.inflight_usdc) == ("tx_before_the_sweep", 1.5)
 
 
 def test_a_release_naming_a_transfer_refuses_a_claim_taken_again_over_another(store: DisputeStore) -> None:
