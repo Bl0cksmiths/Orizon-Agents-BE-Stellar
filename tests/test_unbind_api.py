@@ -266,7 +266,8 @@ def test_a_non_owner_cannot_unbind_and_nothing_changes(client, monkeypatch, stor
     assert r.json()["error"]["code"] == "not_agent_owner"
     # Nothing moved: the binding is intact and the agent is still routable.
     record = stored(store, "ub_imp1")
-    assert record is not None and record.endpoint_url == ENDPOINT
+    assert record is not None
+    assert record.endpoint_url == ENDPOINT
     assert binding_registry.is_dispatchable("ub_imp1") is True
     # And the attempt did not burn the honest owner's challenge — otherwise
     # anyone could grief a revocation in progress by guessing at it.
