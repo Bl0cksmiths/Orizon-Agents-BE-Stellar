@@ -470,8 +470,9 @@ def test_no_dispute_rating_line_carries_the_signing_key(monkeypatch, caplog) -> 
             _rate()
         with pytest.raises(LookupError):
             _rate(_dispute(step_index=7))
+        underivable = _dispute(job_id_hex="9f8e7d6c")
         with pytest.raises(ValueError):
-            _rate(_dispute(job_id_hex="9f8e7d6c"))
+            _rate(underivable)
 
     records = [r for r in caplog.records if r.name == "app.services.dispute_rating"]
     assert len(records) == len(answers) + 3
