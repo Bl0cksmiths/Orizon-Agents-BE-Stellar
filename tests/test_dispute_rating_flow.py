@@ -425,10 +425,12 @@ def test_a_replay_with_nothing_on_record_is_a_loud_collision_and_the_buyer_keeps
         collided = uphold(dispute.id)
         again = uphold(dispute.id)
 
-    assert collided.status == "credited" and collided.refund_tx == "tx_credit"
+    assert collided.status == "credited"
+    assert collided.refund_tx == "tx_credit"
     assert collided.rating_tx is None  # never reads as fully resolved
     assert again == collided
-    assert ledger.submits == [] and ledger.replays == 2
+    assert ledger.submits == []
+    assert ledger.replays == 2
     assert invalidated == []
     assert len(settler.transfers) == 1
     logged = svc_errors(caplog)
