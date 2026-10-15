@@ -297,8 +297,9 @@ def test_recheck_lets_the_spend_cap_through(fake_jev):
 def test_spend_cap_outranks_an_outage_in_the_other_call(fake_jev, fake_claude):
     fake_jev.fail(JevUnavailable("timeout"), purpose="guard.spec")
     fake_jev.fail(SpendCapReached(spent_usd=10, cap_usd=10, retry_after=60), purpose="guard.spec.same")
+    rechecking = recheck(INTENT, SPEC)
     with pytest.raises(SpendCapReached):
-        asyncio.run(recheck(INTENT, SPEC))
+        asyncio.run(rechecking)
     assert fake_claude.calls == []  # paused, not quietly re-run on the fallback
 
 
