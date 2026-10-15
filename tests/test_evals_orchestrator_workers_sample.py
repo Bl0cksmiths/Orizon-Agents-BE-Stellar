@@ -176,7 +176,8 @@ def test_a_job_that_does_not_fit_the_budget_is_skipped(monkeypatch, tmp_path, cl
     jobs = (_job("agt_01h8", typical_usd=0.009), _job("agt_01h8", label="copywrite#2", typical_usd=0.009))
     results = asyncio.run(run_sample(tmp_path, jobs, budget_usd=0.013))
     first, second = results["copywrite"], results["copywrite#2"]
-    assert first["error"] is None and first["cost_usd"] > 0
+    assert first["error"] is None
+    assert first["cost_usd"] > 0
     left = 0.013 - first["cost_usd"]
     assert second == {"worker": "copywrite", "label": "copywrite#2", "skipped": f"budget left {left:.4f} USD"}
     assert _files(tmp_path)["copywrite_2.json"] == json.dumps(second, indent=2) + "\n"
