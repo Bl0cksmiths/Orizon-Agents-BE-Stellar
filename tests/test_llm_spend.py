@@ -166,8 +166,9 @@ def test_a_failed_write_is_logged_and_the_spend_still_counts(
 def test_record_refuses_a_bad_purpose_or_cost() -> None:
     ledger = _ledger(Clock(NOON))
     for purpose, cost in (("Planner Call", 0.1), ("", 0.1), ("planner", -1.0), ("planner", float("nan"))):
+        recording = ledger.record(model="m", purpose=purpose, usage=Usage(), cost=cost)
         with pytest.raises(ValueError):
-            asyncio.run(ledger.record(model="m", purpose=purpose, usage=Usage(), cost=cost))
+            asyncio.run(recording)
 
 
 def test_seconds_until_reset_counts_to_the_next_utc_midnight() -> None:
