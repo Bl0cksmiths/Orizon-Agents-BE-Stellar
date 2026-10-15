@@ -478,7 +478,8 @@ def test_an_unconfirmed_transfer_records_its_hash_keeps_the_claim_and_is_a_504(s
     assert (err.code, err.status_code) == ("refund_unconfirmed", 504)
     assert store.calls == [LOAD, CLAIM, SETTLEMENT, SIBLINGS, IN_FLIGHT]
     current = asyncio.run(InMemoryDisputeStore.get_dispute(store, DISPUTE))
-    assert current is not None and (current.status, current.refund_tx, current.inflight_usdc) == (
+    assert current is not None
+    assert (current.status, current.refund_tx, current.inflight_usdc) == (
         "crediting",
         "tx_lost",
         0.05,
