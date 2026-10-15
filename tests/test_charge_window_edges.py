@@ -242,7 +242,8 @@ def test_a_held_index_for_another_escrow_is_not_resumed(clock: Clock, rpc: Rpc) 
 
     advance = _advance(held)
 
-    assert advance.index is not None and advance.index.escrow_id == ESCROW_ID
+    assert advance.index is not None
+    assert advance.index.escrow_id == ESCROW_ID
     assert rpc.pages[0] == (OLDEST, OLDEST + 10_000)
 
 
