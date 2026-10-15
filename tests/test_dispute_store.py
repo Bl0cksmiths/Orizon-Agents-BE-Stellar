@@ -515,7 +515,8 @@ def test_a_transition_that_names_no_expectation_still_lands_unconditionally(stor
 
     recorded = run(store, go())
 
-    assert recorded is not None and recorded.status == "credited"
+    assert recorded is not None
+    assert recorded.status == "credited"
     assert recorded.refund_tx == "tx_reconciled"
 
 
