@@ -212,7 +212,8 @@ def test_copywrite_fits_long_bodies_and_extra_sections(claude: FakeClaude) -> No
         }
     )
     out = run("agt_01h8")
-    assert len(out["sections"]) == 5 and all(len(s["body"]) <= 280 for s in out["sections"])
+    assert len(out["sections"]) == 5
+    assert all(len(s["body"]) <= 280 for s in out["sections"])
 
 
 def test_copywrite_with_one_section_is_still_invalid(claude: FakeClaude) -> None:
