@@ -169,7 +169,7 @@ def registry_configured(monkeypatch):
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
 
 
-@pytest.fixture()
+@pytest.fixture
 def planner_sees(monkeypatch):
     """Put a bound (therefore dispatchable) external agent with a chosen name
     in front of the planner, and return its AVAILABLE_AGENTS entry."""
