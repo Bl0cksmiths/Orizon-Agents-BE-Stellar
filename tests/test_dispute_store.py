@@ -417,8 +417,9 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
     in the caller, and a store that invented one would hide it."""
     store = InMemoryDisputeStore()
 
+    transition = store.append_status("dsp_never", "upheld")
     with pytest.raises(KeyError):
-        asyncio.run(store.append_status("dsp_never", "upheld"))
+        asyncio.run(transition)
 
 
 def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution(store: DisputeStore) -> None:
