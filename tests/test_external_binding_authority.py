@@ -115,8 +115,9 @@ def test_a_read_without_an_address_raises(monkeypatch: pytest.MonkeyPatch) -> No
         rcache.clear()
         fake_read, _ = _reads(empty)
         monkeypatch.setattr(sc, "simulate_read", fake_read)
+        resolving = resolve_owner("ext_agent")
         with pytest.raises(OwnerLookupError):
-            asyncio.run(resolve_owner("ext_agent"))
+            asyncio.run(resolving)
 
 
 def test_an_unconfigured_registry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
