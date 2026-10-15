@@ -110,7 +110,8 @@ def test_settled_event_spent_and_returned() -> None:
     assert not check_settled_event([], _settlement(), 500_000, 700_000).ok
     assert not check_settled_event([_settled(1, 1), _settled(1, 1)], _settlement(), 1, None).ok
     unknown_max = check_settled_event([_settled(500_000, 9)], _settlement(), 500_000, None)
-    assert unknown_max.ok and "not cross-checked" in unknown_max.detail
+    assert unknown_max.ok
+    assert "not cross-checked" in unknown_max.detail
 
 
 def test_authorization_view() -> None:
