@@ -466,8 +466,9 @@ def test_the_window_is_judged_on_the_stamped_value_not_the_setting(monkeypatch) 
     _seed(payer.public_key, job="beef" * 8, task="tsk_open", window_seconds=3600.0)
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 365 * 86_400.0)
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as still_closed:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
     assert still_closed.value.code == "dispute_window_closed"
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 0.0)
