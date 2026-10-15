@@ -76,7 +76,7 @@ def _scored(overrides: dict[str, RepInfo]) -> dict[str, RepInfo]:
     return reps
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     """Fresh 12-agent registry, restored after; kit thinking-sleep no-op'd."""
     saved = dict(state.agents)
