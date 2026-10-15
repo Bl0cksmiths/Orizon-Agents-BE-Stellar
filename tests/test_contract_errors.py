@@ -230,7 +230,8 @@ def test_a_signature_that_fails_is_not_submitted(monkeypatch):
     rpc = _rpc(monkeypatch, _FakeRpc(), keypair=public_only)
     with pytest.raises(sc.NotSubmittedError, match="sign failed"):
         sc._send_server_signed(LEDGER_ID, "submit", [])
-    assert rpc.prepared and not rpc.sent
+    assert rpc.prepared
+    assert not rpc.sent
 
 
 @pytest.mark.parametrize("key", ["", "SNOTAKEY", "abandon " * 11 + "zebra"])
