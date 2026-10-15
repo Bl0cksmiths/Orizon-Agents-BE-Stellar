@@ -335,7 +335,8 @@ def test_the_fallback_guard_stands_in_and_is_named(claude_on: None, fake_claude:
     resp = _decompose()
 
     assert resp.stages[0].msg == "Request checked by Claude Haiku 4.5, standing in for jev (tier: low)"
-    assert resp.models is not None and resp.models.guard == "claude-haiku-4-5"
+    assert resp.models is not None
+    assert resp.models.guard == "claude-haiku-4-5"
 
 
 def test_the_spend_cap_pauses_planning_with_retry_after(
