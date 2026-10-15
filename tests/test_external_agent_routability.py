@@ -77,7 +77,7 @@ def _external(agent_id: str) -> Agent:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def external_agents(monkeypatch):
     """Two workerless indexed agents — one bound, one not — and a bound set
     that is emptied again afterwards so nothing leaks into the next test."""
