@@ -686,7 +686,8 @@ def test_evidence_is_appended_across_a_resume(world: FakeWorld, buyer: Keypair, 
 def test_dry_run_reads_and_signs_nothing(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     result = run(world, buyer, tmp_path / "run", "--dry-run")
     assert result.code == EXIT_OK
-    assert "DRY RUN" in result.out and "POST /api/stellar/submit" in result.out
+    assert "DRY RUN" in result.out
+    assert "POST /api/stellar/submit" in result.out
     assert not [c for c in world.calls if c["method"] == "POST" and not c["path"] == "/"]
     assert not (tmp_path / "run").exists()
 
