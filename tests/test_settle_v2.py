@@ -737,9 +737,10 @@ def captured_runs(monkeypatch) -> list[dict[str, Any]]:
 def test_execute_refuses_an_authorization_that_expires_before_a_worst_case_run(monkeypatch, captured_runs):
     needed = execution_svc.worst_case_run_seconds(6)
     _install(monkeypatch, _Chain(auth=_auth(expires_at=int(time.time() + needed - 30))))
+    plan = _plan_for_execute()
 
     with pytest.raises(execution_svc.AuthorizationRefusedError) as refused:
-        _execute(_plan_for_execute())
+        _execute(plan)
 
     assert (refused.value.status_code, refused.value.detail) == (409, "authorization_expiring")
     assert captured_runs == []
