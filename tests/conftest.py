@@ -173,7 +173,7 @@ def pre_pipeline_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator_svc, "claude_workers", lambda: True)
 
 
-@pytest.fixture()
+@pytest.fixture
 def client():
     with TestClient(app) as c:
         yield c
