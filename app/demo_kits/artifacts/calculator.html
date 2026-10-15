@@ -562,7 +562,7 @@
   }
 
   function evaluate(srcRaw) {
-    const src = srcRaw.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-').replace(/π/g, 'pi');
+    const src = srcRaw.replaceAll('×', '*').replaceAll('÷', '/').replaceAll('−', '-').replaceAll('π', 'pi');
     if (!src.trim()) return 0;
     const tokens = resolveUnary(tokenize(src));
     const rpn = toRPN(tokens);
