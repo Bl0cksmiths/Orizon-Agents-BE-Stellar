@@ -167,7 +167,8 @@ def test_a_dispute_that_is_not_upheld_cannot_be_claimed(store: DisputeStore, sta
     claimed, stored, queue = run(store, go())
 
     assert claimed is None
-    assert stored is not None and stored.status == status
+    assert stored is not None
+    assert stored.status == status
     assert queue == []
 
 
