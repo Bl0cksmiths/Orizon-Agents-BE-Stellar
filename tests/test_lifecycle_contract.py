@@ -141,10 +141,14 @@ def test_the_rating_trace_lines_are_the_ones_execution_writes() -> None:
     tx = "1234567890abcdef"
     landed = f"reputation → Code Smith rated 90/100 · tx {tx[:10]}…"
     m = RATED_LINE.match(landed)
-    assert m and m.group("name") == "Code Smith" and m.group("prefix") == tx[:10]
+    assert m
+    assert m.group("name") == "Code Smith"
+    assert m.group("prefix") == tx[:10]
     unlanded = f"reputation submit failed for Code Smith: did not land · tx {tx[:10]}…"
     u = UNLANDED_LINE.match(unlanded)
-    assert u and u.group("name") == "Code Smith" and u.group("prefix") == tx[:10]
+    assert u
+    assert u.group("name") == "Code Smith"
+    assert u.group("prefix") == tx[:10]
 
 
 @pytest.mark.parametrize(
