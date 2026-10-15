@@ -517,7 +517,8 @@ def test_a_hash_older_than_the_rpc_s_history_never_releases_and_never_credits(
 
     decision, unchanged = _unchanged(store, _real_gap)
 
-    assert decision.action == "history_gap" and unchanged
+    assert decision.action == "history_gap"
+    assert unchanged
 
 
 def test_an_unknown_rpc_status_never_releases(store: DisputeStore, chain: Chain) -> None:
