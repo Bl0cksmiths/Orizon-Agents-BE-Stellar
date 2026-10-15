@@ -229,7 +229,8 @@ def test_a_dry_run_on_a_network_without_a_sac_reads_no_balance(
     world.stellar_network = without_sac  # type: ignore[method-assign]
     result = run(world, buyer, tmp_path / "run", "--dry-run")
     assert result.code == EXIT_OK, result.out
-    assert "buyer balance" not in result.out and "does not exist" not in result.out
+    assert "buyer balance" not in result.out
+    assert "does not exist" not in result.out
 
 
 def test_a_dry_resume_past_decompose_does_not_block_on_an_unfunded_buyer(
