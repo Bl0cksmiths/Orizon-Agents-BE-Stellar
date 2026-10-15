@@ -139,7 +139,8 @@ def test_a_given_hash_the_ledger_does_not_know_is_never_published(tmp_path: Path
     out = run(ledger, tmp_path, "--rows", str(rows_file(tmp_path, [{"kind": "settle", "tx_hash": ghost}])))
     assert out.code == EXIT_NOT_SUCCESS
     assert out.items() == []
-    assert "NOT_FOUND" in out.sheet() and ghost not in out.description()
+    assert "NOT_FOUND" in out.sheet()
+    assert ghost not in out.description()
 
 
 def test_a_malformed_given_hash_is_listed_and_never_asked(tmp_path: Path) -> None:
