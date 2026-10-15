@@ -727,7 +727,11 @@
     }
   }
   function saveLb(arr) {
-    try { localStorage.setItem(LB_KEY, JSON.stringify(arr.slice(0, 5))); } catch (e) {}
+    try {
+      localStorage.setItem(LB_KEY, JSON.stringify(arr.slice(0, 5)));
+    } catch (e) {
+      // Storage is blocked or full: the score just isn't kept, and the game plays on.
+    }
   }
   function renderLb() {
     const arr = loadLb();
@@ -786,7 +790,9 @@
   function savePrefs() {
     try {
       localStorage.setItem(PREF_KEY, JSON.stringify({ wrap: state.wrap, speed: state.speed }));
-    } catch (e) {}
+    } catch (e) {
+      // Storage is blocked or full: the choice still applies, it just won't survive a reload.
+    }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
