@@ -197,7 +197,8 @@ def test_a_partially_failing_read_degrades_only_the_agents_it_failed_for(
     assert [(s.agent_id, s.rep_degraded, s.rep_source) for s in resp.steps] == [("agt_03d9", True, "prior")]
     note = next(n for n in resp.notices if n.agent_id == BAD)
     assert (note.kind, note.reason_code) == ("excluded", "below_floor")
-    assert note.lower_bound_bps is not None and note.lower_bound_bps < settings.reputation_floor_bps
+    assert note.lower_bound_bps is not None
+    assert note.lower_bound_bps < settings.reputation_floor_bps
 
 
 def test_an_agent_registered_during_the_reputation_read_is_not_offered(
