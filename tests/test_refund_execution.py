@@ -252,8 +252,10 @@ def test_a_promise_that_is_not_a_number_refuses_before_any_bound(monkeypatch, ca
     assert math.isnan(refund_svc.credited_amount_usdc(0.05, nan))
 
     with caplog.at_level(logging.ERROR, logger="app.services.refund_svc"):
+        settlement = _settlement()
+        dispute = _dispute(creditable_usdc=nan)
         with pytest.raises(RefundRefused) as exc:
-            refund_svc.creditable_for(_settlement(), _dispute(creditable_usdc=nan))
+            refund_svc.creditable_for(settlement, dispute)
 
     assert exc.value.code == "refund_amount_invalid"
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
