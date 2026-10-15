@@ -398,7 +398,8 @@ def test_a_settler_that_cannot_pay_a_refund_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path, "--max-refund", "1.0")
     check = out.check("refunds.settler_balance")
     assert check["status"] == FAIL
-    assert "2.5000000" in check["detail"] and "3.0000000" in check["detail"]
+    assert "2.5000000" in check["detail"]
+    assert "3.0000000" in check["detail"]
     assert "0.5000000" in check["fix"]
     assert out.code == EXIT_NO_GO
 
