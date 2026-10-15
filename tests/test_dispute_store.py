@@ -541,8 +541,9 @@ def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation(store: Dispu
     """None means "this dispute has moved"; KeyError means "there is no such
     dispute". Folding the second into the first would let a caller with a typo
     in an id read it as a lost race and move on."""
+    transition = store.append_status("dsp_never", "upheld", expected_status="open")
     with pytest.raises(KeyError):
-        run(store, store.append_status("dsp_never", "upheld", expected_status="open"))
+        run(store, transition)
 
 
 # ── the in-flight amount ──────────────────────────────────────────────────
