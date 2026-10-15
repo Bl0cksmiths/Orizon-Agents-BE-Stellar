@@ -100,9 +100,12 @@ def test_anonymous_callers_see_paused_and_when_it_lifts_but_never_the_numbers(
         assert set(orchestrator) == {"provider", "planning", "resets_at"}
         assert orchestrator["planning"] == "paused"
         resets = datetime.fromisoformat(orchestrator["resets_at"])
-        assert resets.tzinfo is not None and (resets.hour, resets.minute, resets.second) == (0, 0, 0)
+        assert resets.tzinfo is not None
+        assert (resets.hour, resets.minute, resets.second) == (0, 0, 0)
         assert 0 < (resets - datetime.now(UTC)).total_seconds() <= 86_400
-        assert "0.0125" not in r.text and "cap_usd" not in r.text and "spent_usd" not in r.text
+        assert "0.0125" not in r.text
+        assert "cap_usd" not in r.text
+        assert "spent_usd" not in r.text
 
 
 def test_the_operator_key_adds_the_spend_figures(client, monkeypatch: pytest.MonkeyPatch) -> None:
