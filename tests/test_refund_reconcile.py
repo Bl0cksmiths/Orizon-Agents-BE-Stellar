@@ -346,8 +346,10 @@ def test_a_verdict_never_touches_a_dispute_claimed_again_over_another_transfer(
 
     decision, current, held = run(store, go())
 
-    assert moved and decision.action == "lost_race"
-    assert current is not None and (current.status, current.refund_tx, current.credited_usdc) == (
+    assert moved
+    assert decision.action == "lost_race"
+    assert current is not None
+    assert (current.status, current.refund_tx, current.credited_usdc) == (
         "crediting",
         "tx_new",
         None,
