@@ -421,7 +421,8 @@ def test_a_run_that_paid_someone_is_sealed_as_paid_and_names_only_the_paid(monke
     _run(_plan((0.01, 0.02)), "tsk_v2_paid_some")
 
     [seal] = chain.named("seal")
-    assert scval.to_native(seal[4]) == ["agt_1"] and scval.to_native(seal[6]) == 200_000
+    assert scval.to_native(seal[4]) == ["agt_1"]
+    assert scval.to_native(seal[6]) == 200_000
     task = state.tasks["tsk_v2_paid_some"]
     assert (task.seal, task.seal_kind) == ("sealed", "paid")
 
