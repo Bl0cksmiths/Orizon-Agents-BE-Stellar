@@ -456,8 +456,7 @@
   // becomes a special op "u-" with high precedence.
   function resolveUnary(tokens) {
     const out = [];
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
+    for (const t of tokens) {
       if (t.kind === 'op' && t.value === '-') {
         const prev = out[out.length - 1];
         if (!prev || prev.kind === 'op' || prev.kind === 'lparen' || prev.kind === 'fn') {
