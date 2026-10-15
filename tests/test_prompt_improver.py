@@ -289,8 +289,9 @@ def test_recheck_fallback_refusal_is_unsafe(fake_jev, fake_claude):
 def test_recheck_lets_the_spend_cap_through(fake_jev):
     fake_jev.fail(SpendCapReached(spent_usd=10, cap_usd=10, retry_after=60), purpose="guard.spec")
     fake_jev.answer({"same_request": 0.9}, purpose="guard.spec.same")
+    rechecking = recheck(INTENT, SPEC)
     with pytest.raises(SpendCapReached):
-        asyncio.run(recheck(INTENT, SPEC))
+        asyncio.run(rechecking)
 
 
 def test_spend_cap_outranks_an_outage_in_the_other_call(fake_jev, fake_claude):
