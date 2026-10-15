@@ -971,8 +971,9 @@ def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(
     store = dispute_store.get_dispute_store()
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as refused:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert refused.value.code == "refunds_not_configured"
     assert refused.value.status_code == 503
