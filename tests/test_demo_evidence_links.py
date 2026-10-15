@@ -134,7 +134,8 @@ def test_a_created_at_that_is_not_a_timestamp_gets_no_link(tmp_path: Path) -> No
     h = ledger.add("x", created_at="yesterday")
     out = run(ledger, tmp_path, "--tx", f"settle={h}")
     assert out.code == EXIT_UNREADABLE
-    assert out.body()["items"] == [] and "no ledger date" in out.out
+    assert out.body()["items"] == []
+    assert "no ledger date" in out.out
 
 
 def test_only_verified_hashes_become_links(tmp_path: Path) -> None:
