@@ -321,7 +321,8 @@ def test_a_v1_escrow_fails_naming_d039(tmp_path: Path) -> None:
     assert out.code == EXIT_NO_GO
     check = out.check("escrow.version")
     assert check["status"] == FAIL
-    assert "D-039" in check["detail"] and ESCROW in check["detail"]
+    assert "D-039" in check["detail"]
+    assert ESCROW in check["detail"]
     assert "STELLAR_PAYMENT_ESCROW" in check["fix"]
     assert out.status("escrow.settler") == SKIPPED
 
