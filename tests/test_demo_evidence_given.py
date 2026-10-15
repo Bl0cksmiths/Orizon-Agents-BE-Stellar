@@ -242,7 +242,8 @@ def test_given_hashes_on_a_mainnet_ledger_are_refused(tmp_path: Path, where: str
 
 def test_nothing_to_read_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path)
-    assert out.code == EXIT_REFUSED and "nothing to read" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "nothing to read" in out.out
 
 
 def test_an_empty_rows_file_alone_is_refused(tmp_path: Path) -> None:
