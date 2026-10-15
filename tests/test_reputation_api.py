@@ -54,7 +54,7 @@ def _info(agent_id: str, *, smoothed: int, lower: int) -> RepInfo:
 # ── read endpoints ──────────────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def rated_ledger(monkeypatch):
     """A configured ledger holding DISTINCT evidence per seeded agent, read
     through the real cache. The read-endpoint tests used to pass only because
