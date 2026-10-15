@@ -708,13 +708,22 @@
     if (s[start - 1] === '-' && /^\d/.test(body)) return s.slice(start - 1);
     return body;
   }
+  // Whether the "-" at index i subtracts rather than signs the number after
+  // it: it follows an operand (a digit, ".", ")" or the constant π, pi or e),
+  // the case resolveUnary() leaves as binary minus.
+  function isSubtraction(s, i) {
+    return /[\d.)πie]$/.test(s.slice(0, i).trimEnd());
+  }
   function neg() {
-    // Find the last number in the expression and toggle its sign.
+    // Find the last number in the expression and toggle its sign. After a
+    // subtraction the sign goes after the "-": 3-5 becomes 3--5, as 3+5
+    // becomes 3+-5.
     if (state.error) return;
     const cur = trailingNumber(state.expr);
     if (cur) {
       const start = state.expr.length - cur.length;
-      const flipped = cur.startsWith('-') ? cur.slice(1) : '-' + cur;
+      const signed = cur.startsWith('-') && !isSubtraction(state.expr, start);
+      const flipped = signed ? cur.slice(1) : '-' + cur;
       state.expr = state.expr.slice(0, start) + flipped;
       tryLiveEval();
     } else if (state.result && state.result !== '0') {
