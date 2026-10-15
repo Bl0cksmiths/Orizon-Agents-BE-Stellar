@@ -387,7 +387,8 @@ def test_two_concurrent_claims_produce_exactly_one_claim(store: DisputeStore) ->
     assert len([result for result in raced if result is not None]) == 1
     assert len([result for result in raced if result is None]) == 1
     assert queue == ["dsp_0001"]
-    assert stored is not None and stored.status == "crediting"
+    assert stored is not None
+    assert stored.status == "crediting"
 
 
 def test_the_losing_claimants_write_no_row(pg: PostgresDisputeStore, pg_dsn: str) -> None:
