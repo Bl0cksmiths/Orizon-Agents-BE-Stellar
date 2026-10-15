@@ -194,7 +194,8 @@ def test_hostile_field_shapes_never_sink_the_run(monkeypatch, label, hostile):
 
     assert task.status == "complete", f"{label} sank the run"
     assert task.spent == PRICE, f"{label} was billed despite being unusable"
-    assert task.artifact is not None and task.artifact["title"] == "landing.html"
+    assert task.artifact is not None
+    assert task.artifact["title"] == "landing.html"
     lines = state.traces[task_id]
     assert any(ln.level == "error" and "unusable" in ln.msg for ln in lines)
 
