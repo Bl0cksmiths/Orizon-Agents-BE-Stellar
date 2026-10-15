@@ -93,7 +93,9 @@ def test_a_signer_that_is_not_the_scorer_names_both_addresses_and_the_fix(caplog
     record = _line(caplog, rw.WriterVerdict("not_scorer", signer=SIGNER, scorer=OTHER))
     assert record.levelno == logging.WARNING
     message = record.getMessage()
-    assert SIGNER in message and OTHER in message and LEDGER in message
+    assert SIGNER in message
+    assert OTHER in message
+    assert LEDGER in message
     assert "Unauthorized" in message
     assert f"set_scorer({SIGNER})" in message
 
