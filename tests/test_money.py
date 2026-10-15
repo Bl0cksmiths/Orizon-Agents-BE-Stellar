@@ -102,8 +102,9 @@ def test_a_fraction_rounds_down_and_is_clamped(stroops: int, fraction: float, sh
 
 
 def test_a_non_finite_fraction_is_refused() -> None:
+    nan = float("nan")
     with pytest.raises(money.MoneyError):
-        money.fraction_of(10, float("nan"))
+        money.fraction_of(10, nan)
 
 
 def test_the_testnet_native_sac_is_derived_not_assumed() -> None:
