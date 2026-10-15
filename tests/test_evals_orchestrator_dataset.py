@@ -112,7 +112,8 @@ def test_the_split_holds_out_part_of_every_category(cases):
     for c in cases:
         by_cat.setdefault(c.category, Counter())[splits[c.id]] += 1
     for cat, counts in by_cat.items():
-        assert counts["test"] >= 1 and counts["train"] >= 1, cat
+        assert counts["test"] >= 1, cat
+        assert counts["train"] >= 1, cat
     assert 0.3 <= sum(v == "test" for v in splits.values()) / len(cases) <= 0.5
 
 
