@@ -46,7 +46,8 @@ def test_live_without_keys_is_refused(tmp_path, capsys, monkeypatch):
     code = cli.main(["run", "--live", "--max-usd", "1", "--flow-dir", str(tmp_path)])
     assert code == cli.EXIT_REFUSED
     err = capsys.readouterr().err
-    assert "ANTHROPIC_API_KEY" in err and "TYPESAFE_API_KEY" in err
+    assert "ANTHROPIC_API_KEY" in err
+    assert "TYPESAFE_API_KEY" in err
 
 
 def test_live_only_applies_to_the_real_pipeline(tmp_path, capsys):
