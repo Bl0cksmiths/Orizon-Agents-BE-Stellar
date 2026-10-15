@@ -410,8 +410,9 @@ def test_no_challenge_slot_is_spent_on_a_step_that_can_never_be_disputed(seeded:
     and the price are public in `SettlementView`, so the mint asks them too."""
     _seed(Keypair.random().public_key, **seeded)
 
+    issuing = dispute_svc.issue_dispute_challenge(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+        asyncio.run(issuing)
 
     assert (refused.value.code, refused.value.status_code) == (code, 409)
     assert len(eb._challenges) == 0
