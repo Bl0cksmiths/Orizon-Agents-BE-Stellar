@@ -643,7 +643,8 @@ def test_an_in_flight_hash_the_store_would_not_record_still_refuses_with_the_has
         with pytest.raises(DisputeError) as refused:
             asyncio.run(dispute_svc.uphold(dispute.id))
 
-    assert refused.value.code == "refund_unconfirmed" and refused.value.status_code == 504
+    assert refused.value.code == "refund_unconfirmed"
+    assert refused.value.status_code == 504
     stuck = store._disputes[dispute.id]
     assert stuck.status == "crediting"
     assert stuck.refund_tx is None, "the hash was not recorded, so the log is the only place it exists"
