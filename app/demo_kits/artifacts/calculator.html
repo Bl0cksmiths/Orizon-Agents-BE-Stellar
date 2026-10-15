@@ -713,7 +713,7 @@
       state.expr = state.expr.slice(0, start) + flipped;
       tryLiveEval();
     } else if (state.result && state.result !== '0') {
-      const r = parseFloat(state.result);
+      const r = Number.parseFloat(state.result);
       state.result = String(-r);
       render();
     }
