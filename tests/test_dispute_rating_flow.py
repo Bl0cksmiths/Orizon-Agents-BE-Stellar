@@ -314,16 +314,19 @@ def test_a_timed_out_rating_that_never_landed_is_replaced_by_the_retry(ledger, s
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         unconfirmed = uphold(dispute.id)
 
-    assert unconfirmed.status == "credited" and unconfirmed.refund_tx == "tx_credit"
+    assert unconfirmed.status == "credited"
+    assert unconfirmed.refund_tx == "tx_credit"
     assert unconfirmed.rating_tx == "tx_rating_1"
     assert invalidated == []
     (logged,) = svc_errors(caplog)
-    assert "unconfirmed" in logged and "tx_rating_1" in logged
+    assert "unconfirmed" in logged
+    assert "tx_rating_1" in logged
 
     settled = uphold(dispute.id)
 
     assert settled.rating_tx == "tx_rating_2"
-    assert ledger.replays == 0 and len(ledger.submits) == 2
+    assert ledger.replays == 0
+    assert len(ledger.submits) == 2
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
 
