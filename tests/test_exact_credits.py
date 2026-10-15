@@ -94,8 +94,9 @@ def test_the_credits_a_settlement_can_pay_stay_within_what_each_step_and_the_run
 def test_an_undelivered_step_is_never_creditable() -> None:
     step = SettlementStep(0, "agt_0", None, 0.05, False, None, paid_usdc=0.0, planned_stroops=500_000)
     settlement = a_settlement(steps=(step,), settled_usdc=0.0)
+    dispute = a_dispute(creditable_usdc=0.05)
     with pytest.raises(refund_svc.RefundRefused):
-        refund_svc.creditable_for(settlement, a_dispute(creditable_usdc=0.05), 1.0)
+        refund_svc.creditable_for(settlement, dispute, 1.0)
 
 
 def test_the_policy_fraction_shown_is_never_rounded_up() -> None:
