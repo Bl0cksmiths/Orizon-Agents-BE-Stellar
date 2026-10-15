@@ -449,4 +449,5 @@ def test_the_receipt_survives_a_restart(monkeypatch: pytest.MonkeyPatch) -> None
 
     with process(monkeypatch, database) as store:
         assert asyncio.run(store.get_dispute(opened.id)) == confirmed
-        assert confirmed.rating_confirmed is True and confirmed.credited_usdc == 1.25
+        assert confirmed.rating_confirmed is True
+        assert confirmed.credited_usdc == 1.25
