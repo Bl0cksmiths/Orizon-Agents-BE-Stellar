@@ -162,7 +162,8 @@ def test_an_unreadable_version_is_503_and_never_runs(client: TestClient, monkeyp
     live_plan()
     r = paid(client)
     assert (r.status_code, r.json()["error"]["code"]) == (503, "authorization_unreadable")
-    assert runs.calls == [] and releases.calls == []
+    assert runs.calls == []
+    assert releases.calls == []
     assert guard.claimed_by(AUTH) is None
 
 
