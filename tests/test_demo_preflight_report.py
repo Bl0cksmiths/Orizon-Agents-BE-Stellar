@@ -88,7 +88,9 @@ def test_reports_mask_anything_shaped_like_a_secret(tmp_path: Path) -> None:
     body = render_json([check], Facts(), RUN, code, line)
     markdown = render_markdown([check], Facts(), RUN, code, line)
     for text in (json.dumps(body), markdown):
-        assert seed not in text and blob not in text and "[redacted]" in text
+        assert seed not in text
+        assert blob not in text
+        assert "[redacted]" in text
 
 
 def test_scrub_leaves_the_evidence_alone() -> None:
