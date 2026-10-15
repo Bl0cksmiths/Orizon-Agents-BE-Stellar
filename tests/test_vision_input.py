@@ -75,8 +75,9 @@ def _fetch(url: str, server: Server) -> Any:
 
 
 def _refused(url: str, server: Server | None = None) -> ImageInputError:
+    served = server or Server({})
     with pytest.raises(ImageInputError) as info:
-        _fetch(url, server or Server({}))
+        _fetch(url, served)
     return info.value
 
 
