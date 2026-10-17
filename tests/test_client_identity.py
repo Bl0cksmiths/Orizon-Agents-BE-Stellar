@@ -47,7 +47,7 @@ def _scope(forwarded: str | None, *, peer: str | None = "127.0.0.1", headers: di
     return {"type": "http", "headers": raw, "client": (peer, 1234) if peer else None}
 
 
-@pytest.fixture()
+@pytest.fixture
 def token(monkeypatch):
     monkeypatch.setattr(settings, "frontend_proxy_token", TOKEN)
     return TOKEN
@@ -82,7 +82,8 @@ def test_two_visitors_behind_the_same_edge_are_two_identities() -> None:
     a = client_identity(_scope(f"{VISITOR}, {CLOUDFLARE_EDGE}, {RENDER_INTERNAL}"))
     b = client_identity(_scope(f"{OTHER_VISITOR}, {CLOUDFLARE_EDGE}, {RENDER_INTERNAL}"))
 
-    assert a == VISITOR and b == OTHER_VISITOR
+    assert a == VISITOR
+    assert b == OTHER_VISITOR
 
 
 @pytest.mark.parametrize(

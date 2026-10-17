@@ -201,7 +201,8 @@ def test_a_landed_transfer_is_recorded_credited_with_what_the_transaction_moved(
 
     decision, current, claims = run(store, go())
 
-    assert decision.action == "credited" and decision.chain == "SUCCESS"
+    assert decision.action == "credited"
+    assert decision.chain == "SUCCESS"
     assert current is not None
     assert (current.status, current.refund_tx, current.credited_usdc) == ("credited", tx_hash, 0.0512)
     assert current.creditable_usdc == 1.5
@@ -232,7 +233,8 @@ def test_the_real_testnet_refund_decodes_to_the_amount_it_moved(
 
     current = run(store, go())
 
-    assert current is not None and current.credited_usdc == REAL_AMOUNT_STROOPS / 10_000_000 == 0.054
+    assert current is not None
+    assert current.credited_usdc == REAL_AMOUNT_STROOPS / 10_000_000 == 0.054
 
 
 def test_two_sweeps_racing_one_success_record_it_exactly_once(
@@ -344,8 +346,10 @@ def test_a_verdict_never_touches_a_dispute_claimed_again_over_another_transfer(
 
     decision, current, held = run(store, go())
 
-    assert moved and decision.action == "lost_race"
-    assert current is not None and (current.status, current.refund_tx, current.credited_usdc) == (
+    assert moved
+    assert decision.action == "lost_race"
+    assert current is not None
+    assert (current.status, current.refund_tx, current.credited_usdc) == (
         "crediting",
         "tx_new",
         None,
@@ -385,8 +389,10 @@ def test_a_failed_transfer_releases_and_a_later_uphold_can_pay(
 
     decision, released, paid_now = run(store, go())
 
-    assert decision.action == "released" and decision.chain == "FAILED"
-    assert released is not None and (released.status, released.refund_tx, released.inflight_usdc) == (
+    assert decision.action == "released"
+    assert decision.chain == "FAILED"
+    assert released is not None
+    assert (released.status, released.refund_tx, released.inflight_usdc) == (
         "upheld",
         None,
         None,
@@ -423,7 +429,8 @@ def test_not_found_before_max_time_and_its_margin_never_releases(
     decision, current, held = run(store, go())
 
     assert decision.action == "pending"
-    assert current is not None and (current.status, current.refund_tx) == ("crediting", "tx_unconfirmed")
+    assert current is not None
+    assert (current.status, current.refund_tx) == ("crediting", "tx_unconfirmed")
     assert held == [current.id]
 
 
@@ -438,8 +445,10 @@ def test_not_found_after_max_time_and_its_margin_releases(store: DisputeStore, c
 
     decision, current, claims = run(store, go())
 
-    assert decision.action == "expired_released" and decision.chain == "NOT_FOUND"
-    assert current is not None and (current.status, current.refund_tx) == ("upheld", None)
+    assert decision.action == "expired_released"
+    assert decision.chain == "NOT_FOUND"
+    assert current is not None
+    assert (current.status, current.refund_tx) == ("upheld", None)
     assert claims == ()
 
 
@@ -485,7 +494,8 @@ def test_an_rpc_error_never_releases_and_never_credits(store: DisputeStore, chai
 
     decision, unchanged = _unchanged(store, lambda _: None)
 
-    assert decision.action == "rpc_error" and unchanged
+    assert decision.action == "rpc_error"
+    assert unchanged
 
 
 def test_a_hash_older_than_the_rpc_s_history_never_releases_and_never_credits(
@@ -507,7 +517,8 @@ def test_a_hash_older_than_the_rpc_s_history_never_releases_and_never_credits(
 
     decision, unchanged = _unchanged(store, _real_gap)
 
-    assert decision.action == "history_gap" and unchanged
+    assert decision.action == "history_gap"
+    assert unchanged
 
 
 def test_an_unknown_rpc_status_never_releases(store: DisputeStore, chain: Chain) -> None:
@@ -515,7 +526,8 @@ def test_an_unknown_rpc_status_never_releases(store: DisputeStore, chain: Chain)
 
     decision, unchanged = _unchanged(store, lambda _: None)
 
-    assert decision.action == "rpc_error" and unchanged
+    assert decision.action == "rpc_error"
+    assert unchanged
 
 
 @pytest.mark.parametrize(
@@ -615,7 +627,8 @@ def test_an_answer_about_another_transaction_is_never_acted_on(store: DisputeSto
         store, lambda _: chain.answers.update(tx_on_record=an_answer("tx_on_record", "SUCCESS", envelope=envelope))
     )
 
-    assert decision.action == "not_this_refund" and "hashes to" in decision.detail
+    assert decision.action == "not_this_refund"
+    assert "hashes to" in decision.detail
     assert unchanged
 
 
@@ -630,7 +643,8 @@ def test_a_chain_amount_that_disagrees_with_the_record_is_left_for_a_human(store
     decision, current = run(store, go())
 
     assert decision.action == "amount_mismatch"
-    assert current is not None and current.status == "crediting"
+    assert current is not None
+    assert current.status == "crediting"
 
 
 def test_a_claim_with_no_hash_is_never_touched(store: DisputeStore, chain: Chain) -> None:
@@ -646,7 +660,8 @@ def test_a_claim_with_no_hash_is_never_touched(store: DisputeStore, chain: Chain
 
     decision, unchanged = run(store, go())
 
-    assert decision.action == "no_hash" and unchanged
+    assert decision.action == "no_hash"
+    assert unchanged
     assert chain.asked == []
 
 
@@ -691,7 +706,8 @@ def test_a_pass_reports_what_it_did_by_action(store: DisputeStore, chain: Chain,
 
     report = run(store, go())
 
-    assert report.skipped is None and report.outcomes == {"credited": 1}
+    assert report.skipped is None
+    assert report.outcomes == {"credited": 1}
     assert refund_reconcile.status()["last_outcomes"] == {"credited": 1}
 
 
@@ -717,7 +733,8 @@ def test_only_one_pass_runs_at_a_time(store: DisputeStore, chain: Chain, configu
 
     first, second = run(store, go())
 
-    assert first.skipped is None and first.outcomes == {"pending": 1}
+    assert first.skipped is None
+    assert first.outcomes == {"pending": 1}
     assert second.skipped == "a pass is already running"
     assert chain.asked == ["tx_slow"]
 
@@ -776,7 +793,8 @@ def test_a_pass_on_a_deployment_that_cannot_pay_reads_nothing(
 
     report = run(store, go())
 
-    assert report.skipped is not None and report.outcomes == {}
+    assert report.skipped is not None
+    assert report.outcomes == {}
     assert chain.asked == []
 
 
@@ -803,12 +821,14 @@ def test_the_sweep_starts_only_with_both_switches_on(monkeypatch: pytest.MonkeyP
     assert reported == started
 
 
-def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(chain: Chain) -> None:
+def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(
+    chain: Chain, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The wedge the store blocks on rather than forgets: a claim row over a
     dispute that is not mid-payout. Only a human reading the chain can say
     what it guards, so the sweep neither looks it up nor releases it."""
     memory = InMemoryDisputeStore()
-    dispute_store._store = memory
+    monkeypatch.setattr(dispute_store, "_store", memory)
 
     async def go() -> tuple[Decision, list[str]]:
         opened = await memory.open_dispute(a_dispute(payer=PAYER))
@@ -817,10 +837,7 @@ def test_a_claim_held_over_a_dispute_that_is_not_crediting_is_left_for_a_human(c
         decision = await decide(memory)
         return decision, [c.dispute_id for c in await memory.list_refund_claims()]
 
-    try:
-        decision, held = asyncio.run(go())
-    finally:
-        dispute_store._store = None
+    decision, held = asyncio.run(go())
 
     assert decision.action == "not_crediting"
     assert held == ["dsp_0001"]
@@ -872,10 +889,13 @@ def test_readiness_reports_the_sweep_and_its_last_pass_by_count_only(
         response = client.get("/readiness")
 
     reconcile = response.json()["disputes"]["reconcile"]
-    assert reconcile["enabled"] is True and reconcile["running"] is False
-    assert reconcile["last_outcomes"] == {"credited": 1} and reconcile["last_skipped"] is None
+    assert reconcile["enabled"] is True
+    assert reconcile["running"] is False
+    assert reconcile["last_outcomes"] == {"credited": 1}
+    assert reconcile["last_skipped"] is None
     assert isinstance(reconcile["last_run_at"], float)
-    assert dispute_id not in response.text and tx_hash not in response.text
+    assert dispute_id not in response.text
+    assert tx_hash not in response.text
 
 
 def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
@@ -895,8 +915,10 @@ def test_the_app_starts_the_sweep_with_its_lifespan_and_stops_it_on_shutdown(
         during = client.get("/readiness").json()["disputes"]["reconcile"]
         task = refund_reconcile._task
 
-    assert during["enabled"] is True and during["running"] is True
-    assert task is not None and task.cancelled()
+    assert during["enabled"] is True
+    assert during["running"] is True
+    assert task is not None
+    assert task.cancelled()
     assert refund_reconcile._task is None
 
 

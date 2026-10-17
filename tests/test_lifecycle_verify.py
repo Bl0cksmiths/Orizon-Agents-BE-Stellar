@@ -67,7 +67,8 @@ def test_a_stated_paid_amount_is_what_the_events_are_held_to() -> None:
 
 def test_one_charged_event_per_paid_step_passes() -> None:
     checks, paid = check_charged_events([_charged("ext", 500_000)], _settlement(), OWNERS)
-    assert paid == 500_000 and passed(checks)
+    assert paid == 500_000
+    assert passed(checks)
 
 
 def test_a_missing_charged_event_fails() -> None:
@@ -87,7 +88,8 @@ def test_a_charged_event_for_the_wrong_amount_fails() -> None:
 
 def test_a_charged_event_for_another_job_fails() -> None:
     checks, _ = check_charged_events([_charged("ext", 500_000, job="ff" * 16)], _settlement(), OWNERS)
-    assert checks[0].ok is False and "other than" in checks[0].detail
+    assert checks[0].ok is False
+    assert "other than" in checks[0].detail
 
 
 def test_paying_an_undelivered_step_fails() -> None:
@@ -108,7 +110,8 @@ def test_settled_event_spent_and_returned() -> None:
     assert not check_settled_event([], _settlement(), 500_000, 700_000).ok
     assert not check_settled_event([_settled(1, 1), _settled(1, 1)], _settlement(), 1, None).ok
     unknown_max = check_settled_event([_settled(500_000, 9)], _settlement(), 500_000, None)
-    assert unknown_max.ok and "not cross-checked" in unknown_max.detail
+    assert unknown_max.ok
+    assert "not cross-checked" in unknown_max.detail
 
 
 def test_authorization_view() -> None:
@@ -135,7 +138,8 @@ def test_operator_delta() -> None:
     short = check_operator_deltas({OWNER: 10}, {OWNER: 500_009}, OWNERS, events, set())
     assert [c.ok for c in short] == [False]
     shared = check_operator_deltas({OWNER: 10}, {OWNER: 1}, OWNERS, events, {OWNER})
-    assert [c.ok for c in shared] == [None] and "not isolatable" in shared[0].detail
+    assert [c.ok for c in shared] == [None]
+    assert "not isolatable" in shared[0].detail
     unmeasured = check_operator_deltas({}, {}, OWNERS, events, set())
     assert [c.ok for c in unmeasured] == [None]
 
@@ -190,7 +194,8 @@ def test_the_seal_carries_exactly_the_delivered_steps_receipts() -> None:
     stray = _with_receipts()
     stray["steps"][2]["receipt_id_hex"] = "0d" * 16
     check = check_seal_receipts_are_delivered_steps(att, stray)
-    assert check.ok is False and "undelivered step(s) [2] carry a receipt" in check.detail
+    assert check.ok is False
+    assert "undelivered step(s) [2] carry a receipt" in check.detail
     assert check_seal_receipts_are_delivered_steps(None, _with_receipts()).ok is False
     # an older backend records no per-step receipt: not measured
     assert check_seal_receipts_are_delivered_steps(att, _settlement()).ok is None

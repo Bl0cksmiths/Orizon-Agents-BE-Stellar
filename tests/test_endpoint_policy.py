@@ -185,8 +185,9 @@ def test_a_resolver_failure_is_unresolvable_host() -> None:
 def test_an_unusable_answer_is_unresolvable_host(infos: list[tuple[Any, ...]]) -> None:
     # No addresses, or an address we cannot parse and therefore cannot judge —
     # either way there is nothing here we are willing to dispatch to.
+    resolver = _Resolver(infos)
     with pytest.raises(EndpointPolicyError) as exc:
-        _check("https://operator.example/run", _Resolver(infos))
+        _check("https://operator.example/run", resolver)
     assert exc.value.rule == "unresolvable_host"
 
 

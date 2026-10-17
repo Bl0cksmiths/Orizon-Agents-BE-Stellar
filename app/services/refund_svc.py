@@ -617,7 +617,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         # outage at `load_account` wedged every uphold it met, and only a hand
         # edit could pay the buyer. Anything else still falls through to the
         # catch-all, because only this type carries that proof.
-        logger.error(
+        logger.exception(
             "dispute %s: refund transfer was refused before it was sent — no funds moved: %s "
             "(job %s, payer %s, %.7f USDC)",
             dispute.id,
@@ -632,7 +632,7 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
         # was signed and sent, carrying the signed transaction's hash; keep it,
         # so the dispute records what a reconciliation asks the ledger about.
         in_flight = e.tx_hash if isinstance(e, sc.InFlightError) else None
-        logger.error(
+        logger.exception(
             "dispute %s: refund transfer raised and MAY HAVE LANDED — do not retry: %s "
             "(hash %s, job %s, payer %s, %.7f USDC)",
             dispute.id,
@@ -641,7 +641,6 @@ async def credit_refund(dispute: DisputeRecord, amount_usdc: float) -> RefundOut
             dispute.job_id_hex,
             dispute.payer,
             amount_usdc,
-            exc_info=True,
         )
         return RefundOutcome("TIMEOUT", in_flight, amount_usdc)
 

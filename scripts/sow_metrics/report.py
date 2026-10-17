@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .collect import Snapshot
-from .config import BLOCK_NAME, EXPLORER, MARKDOWN_NAME, RAW_NAME, SOW_ROWS
+from .config import BLOCK_NAME, EXPLORER, MARKDOWN_NAME, RAW_NAME, SOW_ROWS, SowRow
 from .metrics import LINK_KINDS, MET, NOT_MET, Metric
 
 BLOCK_KEYS = ("id", "category", "metric", "target", "achieved", "status", "reason", "method", "links")
@@ -75,27 +75,47 @@ def block_problems(block: Any) -> list[str]:
         if not isinstance(entry, dict):
             problems.append(f"{where}: not an object")
             continue
-        keys = tuple(entry)
-        expected = BLOCK_KEYS if entry.get("status") == NOT_MET else tuple(k for k in BLOCK_KEYS if k != "reason")
-        if keys != expected:
-            problems.append(f"{where}: keys {keys} are not {expected}")
-        for key, want in (("id", row.id), ("category", row.category), ("metric", row.metric), ("target", row.target)):
-            if entry.get(key) != want:
-                problems.append(f"{where}: {key} {entry.get(key)!r} is not the SOW's {want!r}")
+        problems.extend(_key_problems(where, entry))
+        problems.extend(_wording_problems(where, row, entry))
         if entry.get("status") not in (MET, NOT_MET):
             problems.append(f"{where}: status {entry.get('status')!r}")
-        for key in ("achieved", "method"):
-            if not isinstance(entry.get(key), str) or not entry[key].strip():
-                problems.append(f"{where}: {key} is empty")
-        if entry.get("status") == NOT_MET and (not isinstance(entry.get("reason"), str) or not entry["reason"].strip()):
-            problems.append(f"{where}: a miss needs a reason")
-        links = entry.get("links")
-        if not isinstance(links, list):
-            problems.append(f"{where}: links is not a list")
-            continue
-        for i, link in enumerate(links):
-            problems.extend(f"{where} link {i}: {p}" for p in link_problems(link))
+        problems.extend(_text_problems(where, entry))
+        problems.extend(_links_problems(where, entry.get("links")))
     return problems
+
+
+def _key_problems(where: str, entry: dict[str, Any]) -> list[str]:
+    """The entry's keys, in the frozen order: `reason` only on a miss."""
+    keys = tuple(entry)
+    expected = BLOCK_KEYS if entry.get("status") == NOT_MET else tuple(k for k in BLOCK_KEYS if k != "reason")
+    return [] if keys == expected else [f"{where}: keys {keys} are not {expected}"]
+
+
+def _wording_problems(where: str, row: SowRow, entry: dict[str, Any]) -> list[str]:
+    """The entry's id, category, metric and target, each the SOW's own words."""
+    wanted = (("id", row.id), ("category", row.category), ("metric", row.metric), ("target", row.target))
+    return [
+        f"{where}: {key} {entry.get(key)!r} is not the SOW's {want!r}" for key, want in wanted if entry.get(key) != want
+    ]
+
+
+def _blank(value: Any) -> bool:
+    return not isinstance(value, str) or not value.strip()
+
+
+def _text_problems(where: str, entry: dict[str, Any]) -> list[str]:
+    """The entry's achieved and method, and a miss's reason: each words, never blank."""
+    problems = [f"{where}: {key} is empty" for key in ("achieved", "method") if _blank(entry.get(key))]
+    if entry.get("status") == NOT_MET and _blank(entry.get("reason")):
+        problems.append(f"{where}: a miss needs a reason")
+    return problems
+
+
+def _links_problems(where: str, links: Any) -> list[str]:
+    """An entry's `links`: a list, each link of the frozen shape."""
+    if not isinstance(links, list):
+        return [f"{where}: links is not a list"]
+    return [f"{where} link {i}: {p}" for i, link in enumerate(links) for p in link_problems(link)]
 
 
 def link_problems(link: Any) -> list[str]:
@@ -108,23 +128,39 @@ def link_problems(link: Any) -> list[str]:
     kind, url = link.get("kind"), link.get("url")
     if kind not in LINK_KINDS:
         out.append(f"kind {kind!r}")
-    if not isinstance(url, str) or not url.startswith("https://"):
-        out.append(f"url {url!r} is not https")
-    elif kind in EXPLORER_URL and not EXPLORER_URL[kind].fullmatch(url):
-        out.append(f"url {url!r} is not a testnet explorer {kind} link")
+    problem = _url_problem(kind, url)
+    if problem:
+        out.append(problem)
     problem = label_problem(link.get("label"))
     if problem:
         out.append(f"label {problem}")
-    if "tx_hash" in link:
-        if kind != "tx" or not re.fullmatch(r"[0-9a-f]{64}", str(link["tx_hash"])):
-            out.append("tx_hash must be 64 hex on a tx link")
-        elif not str(url).endswith("/" + str(link["tx_hash"])):
-            out.append("tx_hash does not match the url")
-    if kind == "tx" and "tx_hash" not in link:
-        out.append("a tx link carries its tx_hash")
+    problem = _tx_hash_problem(link, kind, url)
+    if problem:
+        out.append(problem)
     if "date" in link and not _DATE.fullmatch(str(link["date"])):
         out.append(f"date {link['date']!r} is not YYYY-MM-DD")
     return out
+
+
+def _url_problem(kind: Any, url: Any) -> str | None:
+    """An https URL, and for an explorer kind exactly the testnet explorer's."""
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return f"url {url!r} is not https"
+    if kind in EXPLORER_URL and not EXPLORER_URL[kind].fullmatch(url):
+        return f"url {url!r} is not a testnet explorer {kind} link"
+    return None
+
+
+def _tx_hash_problem(link: dict[str, Any], kind: Any, url: Any) -> str | None:
+    """A tx link carries its 64-hex `tx_hash`, the one its URL ends with; no other kind carries one."""
+    if "tx_hash" not in link:
+        return "a tx link carries its tx_hash" if kind == "tx" else None
+    tx_hash = str(link["tx_hash"])
+    if kind != "tx" or not re.fullmatch(r"[0-9a-f]{64}", tx_hash):
+        return "tx_hash must be 64 hex on a tx link"
+    if not str(url).endswith("/" + tx_hash):
+        return "tx_hash does not match the url"
+    return None
 
 
 def _cell(value: object) -> str:

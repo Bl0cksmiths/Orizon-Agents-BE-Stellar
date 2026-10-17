@@ -219,6 +219,23 @@ def _joined(segments: list[dict[str, str]]) -> str:
     return "\n".join(parts)
 
 
+def _language_segments(
+    code: str, expected: dict[str, Segment], got: dict[str, str], issues: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """One complete language's segments in source order, each bounded; a
+    placeholder a segment lost is listed in `issues`."""
+    out_segments: list[dict[str, str]] = []
+    for sid, seg in expected.items():
+        text = got[sid].strip()
+        if len(text) > MAX_SEGMENT_CHARS * 2:
+            text = text[: MAX_SEGMENT_CHARS * 2].rstrip() + "…"
+        lost = placeholder_issues(seg.text, text)
+        if lost:
+            issues.append({"language": code, "problem": "placeholders", "segments": [sid], "tokens": lost[:10]})
+        out_segments.append({"id": sid, "role": seg.role, "label": seg.label, "source": seg.text, "text": text})
+    return out_segments
+
+
 def fit_translations(
     draft: TranslateDraft, segments: list[Segment]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -242,15 +259,7 @@ def fit_translations(
         if missing:
             issues.append({"language": code, "problem": "incomplete", "segments": missing[:10]})
             continue
-        out_segments: list[dict[str, str]] = []
-        for sid, seg in expected.items():
-            text = got[sid].strip()
-            if len(text) > MAX_SEGMENT_CHARS * 2:
-                text = text[: MAX_SEGMENT_CHARS * 2].rstrip() + "…"
-            lost = placeholder_issues(seg.text, text)
-            if lost:
-                issues.append({"language": code, "problem": "placeholders", "segments": [sid], "tokens": lost[:10]})
-            out_segments.append({"id": sid, "role": seg.role, "label": seg.label, "source": seg.text, "text": text})
+        out_segments = _language_segments(code, expected, got, issues)
         name = trim_text(lang.name, 40) or code
         text = _joined(out_segments)
         languages.append({"language": code, "lang": code, "name": name, "text": text, "segments": out_segments})

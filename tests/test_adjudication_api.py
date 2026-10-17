@@ -103,7 +103,7 @@ def dispute_error(code: str, status: int) -> Exception:
     return exc
 
 
-@pytest.fixture()
+@pytest.fixture
 def adjudicating(hermetic_settings, monkeypatch):
     """A deployment that CAN adjudicate: master switch on, operator key set.
 

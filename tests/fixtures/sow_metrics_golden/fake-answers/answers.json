@@ -1,0 +1,301 @@
+[
+ [
+  "GET https://orizon.test/api/stellar/network",
+  200,
+  "{\"network\":\"testnet\",\"rpc_url\":\"https://rpc.test\",\"network_passphrase\":\"Test SDF Network ; September 2015\",\"admin\":\"GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO\",\"dispatch_signer\":\"GDIMDIW7AW7CCHLN25B6PXMPPBKIGCUK7VIF6CZFJY5JRKWJ4HQHD7CA\",\"asset\":\"native\",\"asset_sac\":\"CDWXYW7WPNSOOSTX2ERIJT2GOMIWSTQQEJLNG6ZEZM6LZVQIM4LME54V\",\"contracts\":{\"agent_registry\":\"CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN\",\"reputation_ledger\":\"CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA\",\"payment_escrow\":\"CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX\",\"attestation_registry\":\"CC6MPEYHMS43PKFZXPIBMG2WR2DJIZWQYTX252AANJLPH2HG3AVWTTYL\"}}"
+ ],
+ [
+  "GET https://orizon.test/api/stellar/reputation/params",
+  200,
+  "{\"enabled\":true,\"floor_bps\":5500,\"prior_bps\":7000,\"network\":\"testnet\"}"
+ ],
+ [
+  "GET https://orizon.test/api/ecosystem/adoption",
+  200,
+  "{\"network\":\"testnet\",\"operators\":[{\"owner\":\"GBXZSLYTTOFUALWIVA3H5GMGLZWRM63NBI5X2IGM3UYOAG3SH6KZPTLF\",\"agents\":[{\"agent_id\":\"alpha\",\"name\":\"Alpha\",\"active\":true,\"bound\":true,\"settled_workflows\":[]}]},{\"owner\":\"GBL32VQIVY7O4766EQQMQ77IETKMCOU6IHHT2E2OQVJ75WJ6IJ3GDV6R\",\"agents\":[{\"agent_id\":\"beta\",\"name\":\"Beta\",\"active\":true,\"bound\":true,\"settled_workflows\":[]},{\"agent_id\":\"gamma\",\"name\":\"Gamma\",\"active\":true,\"bound\":true,\"settled_workflows\":[]}]},{\"owner\":\"GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO\",\"agents\":[{\"agent_id\":\"house_agent\",\"name\":\"House_Agent\",\"active\":true,\"bound\":false,\"settled_workflows\":[]}]},{\"owner\":\"GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ\",\"agents\":[{\"agent_id\":\"qa_agent\",\"name\":\"Qa_Agent\",\"active\":true,\"bound\":false,\"settled_workflows\":[]}]},{\"owner\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\",\"agents\":[{\"agent_id\":\"signer_agent\",\"name\":\"Signer_Agent\",\"active\":true,\"bound\":false,\"settled_workflows\":[]}]}]}"
+ ],
+ [
+  "GET https://orizon.test/api/nothing",
+  404,
+  "{\"detail\":\"Not Found\"}"
+ ],
+ [
+  "GET https://orizon.test/down",
+  503,
+  "{\"error\":\"down\"}"
+ ],
+ [
+  "GET https://backend.test/readiness",
+  200,
+  "{\"status\":\"ready\",\"ratings\":{\"writer\":\"scorer\",\"signer\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\",\"scorer\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\"},\"disputes\":{\"store\":\"postgres\",\"reconcile\":{\"enabled\":true,\"running\":true}},\"escrow\":{\"contract\":\"CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX\",\"version\":2}}"
+ ],
+ [
+  "GET https://backend.test/openapi.json",
+  200,
+  "{\"openapi\": \"3.1.0\", \"paths\": {\"/api/disputes\": {\"post\": {}}, \"/api/disputes/{dispute_id}\": {\"get\": {}}, \"/api/disputes/{dispute_id}/reject\": {\"post\": {}}, \"/api/disputes/{dispute_id}/uphold\": {\"post\": {}}, \"/api/stellar/build/register-agent\": {\"post\": {}}, \"/readiness\": {\"get\": {}}}}"
+ ],
+ [
+  "GET https://backend.test/down",
+  503,
+  "{\"error\":\"down\"}"
+ ],
+ [
+  "GET https://backend.test/nothing",
+  404,
+  "{\"detail\":\"Not Found\"}"
+ ],
+ [
+  "GET https://front.test/app/register",
+  200,
+  "<html>register</html>"
+ ],
+ [
+  "GET https://front.test/moved",
+  308,
+  ""
+ ],
+ [
+  "GET https://front.test/nothing",
+  404,
+  "<html>not found</html>"
+ ],
+ [
+  "GET https://github-api.test/repos/Bl0cksmiths/Orizon-Agents-FE-Stellar",
+  200,
+  "{\"full_name\":\"Bl0cksmiths/Orizon-Agents-FE-Stellar\",\"private\":false,\"license\":{\"spdx_id\":\"MIT\",\"key\":\"mit\"}}"
+ ],
+ [
+  "GET https://github-api.test/repos/Some/private",
+  403,
+  "{\"message\":\"Not Found\"}"
+ ],
+ [
+  "GET https://github-api.test/repos/Some/unlicensed",
+  200,
+  "{\"full_name\":\"Some/unlicensed\",\"private\":false,\"license\":null}"
+ ],
+ [
+  "GET https://github-api.test/repos/Some/missing",
+  404,
+  "{\"message\":\"Not Found\"}"
+ ],
+ [
+  "GET https://horizon.test/",
+  200,
+  "{\"network_passphrase\":\"Test SDF Network ; September 2015\"}"
+ ],
+ [
+  "GET https://horizon.test/accounts/GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N/operations?limit=2",
+  200,
+  "{\"_embedded\":{\"records\":[{\"id\":\"1000006\",\"paging_token\":\"1000006\",\"transaction_successful\":true,\"source_account\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\",\"type\":\"invoke_host_function\",\"created_at\":\"2026-09-18T12:00:00Z\",\"transaction_hash\":\"9b66130d2c7c05ee662b24fdca0a32bfda1a0cb1102fb3e53168eb61b378fc6d\",\"function\":\"HostFunctionTypeHostFunctionTypeInvokeContract\",\"parameters\":[{\"value\":\"AAAAEgAAAAGHJJGjDWDVmJYt5ue4NKt2sqpl+6sQLG66quas3COIIg==\",\"type\":\"Address\"},{\"value\":\"AAAADwAAAAhyZWdpc3Rlcg==\",\"type\":\"Sym\"},{\"value\":\"AAAAEgAAAAAAAAAAS5iWtkXP4ASd7MWdXA8Am1sE1tP+RWSCjHIaLcp+TPk=\",\"type\":\"Val\"},{\"value\":\"AAAADwAAAAxzaWduZXJfYWdlbnQ=\",\"type\":\"Val\"},{\"value\":\"AAAADgAAAAxzaWduZXJfYWdlbnQ=\",\"type\":\"Val\"},{\"value\":\"AAAAEAAAAAEAAAAA\",\"type\":\"Val\"},{\"value\":\"AAAACgAAAAAAAAAAAAAAAAAAAAA=\",\"type\":\"Val\"}],\"asset_balance_changes\":[]},{\"id\":\"1000016\",\"paging_token\":\"1000016\",\"transaction_successful\":true,\"source_account\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\",\"type\":\"invoke_host_function\",\"created_at\":\"2026-09-21T10:00:00Z\",\"transaction_hash\":\"eb6142a63cec25237fb684ae1519830811eed751e6e01378c84d3485ff72c6dc\",\"function\":\"HostFunctionTypeHostFunctionTypeInvokeContract\",\"parameters\":[{\"value\":\"AAAAEgAAAAG4fN2IVxfHQgOAnkhx1MOEe1CituAEjIRpGqanGF+M/Q==\",\"type\":\"Address\"},{\"value\":\"AAAADwAAAAZzZXR0bGUAAA==\",\"type\":\"Sym\"},{\"value\":\"AAAAEgAAAAAAAAAAS5iWtkXP4ASd7MWdXA8Am1sE1tP+RWSCjHIaLcp+TPk=\",\"type\":\"Val\"},{\"value\":\"AAAADQAAABAAAAAAAAAAAAAAAAAAAAAA\",\"type\":\"Val\"},{\"value\":\"AAAADQAAABACarY5wh34qoDleJNwqdsb\",\"type\":\"Val\"},{\"value\":\"AAAAEAAAAAEAAAABAAAAEQAAAAEAAAACAAAADwAAAAhhZ2VudF9pZAAAAA8AAAAFYWxwaGEAAAAAAAAPAAAABmFtb3VudAAAAAAACgAAAAAAAAAAAAAAAAAPQkA=\",\"type\":\"Val\"}],\"asset_balance_changes\":[]}]}}"
+ ],
+ [
+  "GET https://horizon.test/accounts/GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N/operations?limit=2&cursor=1000010",
+  200,
+  "{\"_embedded\":{\"records\":[{\"id\":\"1000016\",\"paging_token\":\"1000016\",\"transaction_successful\":true,\"source_account\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\",\"type\":\"invoke_host_function\",\"created_at\":\"2026-09-21T10:00:00Z\",\"transaction_hash\":\"eb6142a63cec25237fb684ae1519830811eed751e6e01378c84d3485ff72c6dc\",\"function\":\"HostFunctionTypeHostFunctionTypeInvokeContract\",\"parameters\":[{\"value\":\"AAAAEgAAAAG4fN2IVxfHQgOAnkhx1MOEe1CituAEjIRpGqanGF+M/Q==\",\"type\":\"Address\"},{\"value\":\"AAAADwAAAAZzZXR0bGUAAA==\",\"type\":\"Sym\"},{\"value\":\"AAAAEgAAAAAAAAAAS5iWtkXP4ASd7MWdXA8Am1sE1tP+RWSCjHIaLcp+TPk=\",\"type\":\"Val\"},{\"value\":\"AAAADQAAABAAAAAAAAAAAAAAAAAAAAAA\",\"type\":\"Val\"},{\"value\":\"AAAADQAAABACarY5wh34qoDleJNwqdsb\",\"type\":\"Val\"},{\"value\":\"AAAAEAAAAAEAAAABAAAAEQAAAAEAAAACAAAADwAAAAhhZ2VudF9pZAAAAA8AAAAFYWxwaGEAAAAAAAAPAAAABmFtb3VudAAAAAAACgAAAAAAAAAAAAAAAAAPQkA=\",\"type\":\"Val\"}],\"asset_balance_changes\":[]},{\"id\":\"1000018\",\"paging_token\":\"1000018\",\"transaction_successful\":true,\"source_account\":\"GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N\",\"type\":\"invoke_host_function\",\"created_at\":\"2026-09-22T10:00:00Z\",\"transaction_hash\":\"d2e1ae97b92f28113c71d63ea2250041330628ed1c2abec23e99c8e44e4b6664\",\"function\":\"HostFunctionTypeHostFunctionTypeInvokeContract\",\"parameters\":[{\"value\":\"AAAAEgAAAAG4fN2IVxfHQgOAnkhx1MOEe1CituAEjIRpGqanGF+M/Q==\",\"type\":\"Address\"},{\"value\":\"AAAADwAAAAZzZXR0bGUAAA==\",\"type\":\"Sym\"},{\"value\":\"AAAAEgAAAAAAAAAAS5iWtkXP4ASd7MWdXA8Am1sE1tP+RWSCjHIaLcp+TPk=\",\"type\":\"Val\"},{\"value\":\"AAAADQAAABAAAAAAAAAAAAAAAAAAAAAC\",\"type\":\"Val\"},{\"value\":\"AAAADQAAABAOdTSHh5+4qbuKvvAxUsRA\",\"type\":\"Val\"},{\"value\":\"AAAAEAAAAAEAAAABAAAAEQAAAAEAAAACAAAADwAAAAhhZ2VudF9pZAAAAA8AAAAEYmV0YQAAAA8AAAAGYW1vdW50AAAAAAAKAAAAAAAAAAAAAAAAAB6EgA==\",\"type\":\"Val\"}],\"asset_balance_changes\":[]}]}}"
+ ],
+ [
+  "GET https://horizon.test/accounts/GBL32VQIVY7O4766EQQMQ77IETKMCOU6IHHT2E2OQVJ75WJ6IJ3GDV6R/operations",
+  503,
+  "{\"status\":503}"
+ ],
+ [
+  "GET https://horizon.test/accounts/GALLVOW6PFITP33PWDHIJZ4P3YC2VN5XGT5O7V3Y2E5R5ZNMGN367F6M/operations",
+  404,
+  "{\"status\":404}"
+ ],
+ [
+  "GET https://horizon.test/nothing",
+  404,
+  "{\"status\":404}"
+ ],
+ [
+  "POST to the API",
+  "AssertionError: the generator must only read, but sent POST https://orizon.test/api/stellar/network"
+ ],
+ [
+  "GET elsewhere",
+  "AssertionError: unexpected request GET https://elsewhere.test/"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"no\"}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"results\":[{\"xdr\":\"AAAAEAAAAAEAAAAGAAAADwAAAAtob3VzZV9hZ2VudAAAAAAPAAAACHFhX2FnZW50AAAADwAAAAxzaWduZXJfYWdlbnQAAAAPAAAABWFscGhhAAAAAAAADwAAAARiZXRhAAAADwAAAAVnYW1tYQAAAA==\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"results\":[{\"xdr\":\"AAAAEgAAAAAAAAAA3n9ewchOdqkwtHbfRPMQxYUnShevQ3GiP8nPPOm2GPc=\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"results\":[{\"xdr\":\"AAAAEQAAAAEAAAAHAAAADwAAAAZhY3RpdmUAAAAAAAAAAAABAAAADwAAAAJpZAAAAAAADwAAAAVhbHBoYQAAAAAAAA8AAAAEbmFtZQAAAA4AAAAFQWxwaGEAAAAAAAAPAAAABW93bmVyAAAAAAAAEgAAAAAAAAAAb5kvE5uLQC7IqDZ+mYZebRZ7bQo7fSDM3TDgG3I/lZcAAAAPAAAABXByaWNlAAAAAAAACgAAAAAAAAAAAAAAAAABhqAAAAAPAAAADXJlZ2lzdGVyZWRfYXQAAAAAAAAFAAAAAGqueUAAAAAPAAAABnNraWxscwAAAAAAEAAAAAEAAAABAAAADwAAAAF4AAAA\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"error\":\"HostError: Error(Contract, #2)\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate get",
+  "SimulationError: HostError: Error(Contract, #2)"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"error\":\"HostError: no fake for CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN.price\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate price",
+  "SimulationError: HostError: no fake for CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN.price"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"results\":[{\"xdr\":\"AAAAAwAAAAI=\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"error\":\"HostError: Error(WasmVm, MissingValue)\\n\\nEvent log: function not found\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate version",
+  "SimulationError: HostError: Error(WasmVm, MissingValue)"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"results\":[{\"xdr\":\"AAAAEQAAAAEAAAAFAAAADwAAAAhhZ2VudF9pZAAAAA8AAAAFYWxwaGEAAAAAAAAPAAAABmFtb3VudAAAAAAACgAAAAAAAAAAAAAAAAAPQkAAAAAPAAAAB2F1dGhfaWQAAAAADQAAABAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAZqb2JfaWQAAAAAAA0AAAAQAmq2OcId+KqA5XiTcKnbGwAAAA8AAAAKc2V0dGxlZF9hdAAAAAAABQAAAABqsQAg\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"error\":\"HostError: Error(Contract, #2)\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate receipt",
+  "SimulationError: HostError: Error(Contract, #2)"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"results\":[{\"xdr\":\"AAAAEQAAAAEAAAAHAAAADwAAAAhhZ2VudF9pZAAAAA8AAAAFYWxwaGEAAAAAAAAPAAAACmV4cGlyZXNfYXQAAAAAAAUAAAAAAAAAAQAAAA8AAAAKbWF4X2Ftb3VudAAAAAAACgAAAAAAAAAAAAAAAAAPQkEAAAAPAAAABXBheWVyAAAAAAAAEgAAAAAAAAAAKoAQBi8Uq/0hOsNL8sQzCvWeFNiPJkKu8P77V8c+ZfMAAAAPAAAAB3Jldm9rZWQAAAAAAAAAAAAAAAAPAAAAB3NldHRsZWQAAAAAAAAAAAEAAAAPAAAABXNwZW50AAAAAAAACgAAAAAAAAAAAAAAAAAPQkA=\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"results\":[{\"xdr\":\"AAAAEQAAAAEAAAAGAAAADwAAAAhhZ2VudF9pZAAAAA8AAAALaG91c2VfYWdlbnQAAAAADwAAAApleHBpcmVzX2F0AAAAAAAFAAAAAAAAAAEAAAAPAAAACm1heF9hbW91bnQAAAAAAAoAAAAAAAAAAAAAAAAAIspAAAAADwAAAAVwYXllcgAAAAAAABIAAAAAAAAAAN5/XsHITnapMLR230TzEMWFJ0oXr0Nxoj/Jzzzpthj3AAAADwAAAAdyZXZva2VkAAAAAAAAAAAAAAAADwAAAAVzcGVudAAAAAAAAAoAAAAAAAAAAAAAAAAAEWUg\",\"auth\":[]}],\"latestLedger\":1}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"error\":\"HostError: Error(Contract, #2)\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate authorization",
+  "SimulationError: HostError: Error(Contract, #2)"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"error\":\"HostError: Error(Contract, #2)\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate receipt",
+  "SimulationError: HostError: Error(Contract, #2)"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":14,\"result\":{\"error\":\"HostError: no fake for CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX.nonce\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate nonce",
+  "SimulationError: HostError: no fake for CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX.nonce"
+ ],
+ [
+  "POST https://rpc.test",
+  503,
+  "{\"error\":\"unavailable\"}"
+ ],
+ [
+  "simulate rep_state",
+  "RetryableStatus: HTTP 503"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":16,\"result\":{\"error\":\"HostError: no fake for CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA.avg_bps\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate avg_bps",
+  "SimulationError: HostError: no fake for CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA.avg_bps"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":17,\"result\":{\"error\":\"HostError: no fake for CDWXYW7WPNSOOSTX2ERIJT2GOMIWSTQQEJLNG6ZEZM6LZVQIM4LME54V.balance\",\"latestLedger\":1}}"
+ ],
+ [
+  "simulate balance",
+  "SimulationError: HostError: no fake for CDWXYW7WPNSOOSTX2ERIJT2GOMIWSTQQEJLNG6ZEZM6LZVQIM4LME54V.balance"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":18,\"result\":{\"entries\":[{\"key\":\"AAAABgAAAAH+FAELT+gzA4UvBGfJGe+afKCJuR6W46rX1CbdhweSlwAAABQAAAAB\",\"xdr\":\"AAAABgAAAAAAAAAB/hQBC0/oMwOFLwRnyRnvmnygibkeluOq19Qm3YcHkpcAAAAUAAAAAQAAABMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAgAAABAAAAABAAAAAQAAAA8AAAAFQWRtaW4AAAAAAAASAAAAAAAAAADef17ByE52qTC0dt9E8xDFhSdKF69DcaI/yc886bYY9wAAABAAAAABAAAAAQAAAA8AAAAGU2NvcmVyAAAAAAASAAAAAAAAAABLmJa2Rc/gBJ3sxZ1cDwCbWwTW0/5FZIKMchotyn5M+Q==\"}]}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":19,\"result\":{\"entries\":[{\"key\":\"AAAABgAAAAG4fN2IVxfHQgOAnkhx1MOEe1CituAEjIRpGqanGF+M/QAAABQAAAAB\",\"xdr\":\"AAAABgAAAAAAAAABuHzdiFcXx0IDgJ5IcdTDhHtQorbgBIyEaRqmpxhfjP0AAAAUAAAAAQAAABMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAABQAAABAAAAABAAAAAQAAAA8AAAAFQWRtaW4AAAAAAAASAAAAAAAAAADef17ByE52qTC0dt9E8xDFhSdKF69DcaI/yc886bYY9wAAABAAAAABAAAAAQAAAA8AAAAFTm9uY2UAAAAAAAAFAAAAAAAAAAcAAAAQAAAAAQAAAAEAAAAPAAAACFJlZ2lzdHJ5AAAAEgAAAAGHJJGjDWDVmJYt5ue4NKt2sqpl+6sQLG66quas3COIIgAAABAAAAABAAAAAQAAAA8AAAAHU2V0dGxlcgAAAAASAAAAAAAAAABLmJa2Rc/gBJ3sxZ1cDwCbWwTW0/5FZIKMchotyn5M+QAAABAAAAABAAAAAQAAAA8AAAAEVXNkYwAAABIAAAAB7Xxb9ntk50p30SKEz0ZzEWlOECJW03skyzy81ghnFsI=\"}]}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":20,\"result\":{\"entries\":[{\"key\":\"AAAABgAAAAGHJJGjDWDVmJYt5ue4NKt2sqpl+6sQLG66quas3COIIgAAABQAAAAB\",\"xdr\":\"AAAABgAAAAAAAAABhySRow1g1ZiWLebnuDSrdrKqZfurECxuuqrmrNwjiCIAAAAUAAAAAQAAABMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAQAAABAAAAABAAAAAQAAAA8AAAAFQWRtaW4AAAAAAAASAAAAAAAAAADef17ByE52qTC0dt9E8xDFhSdKF69DcaI/yc886bYY9w==\"}]}}"
+ ],
+ [
+  "POST https://rpc.test",
+  200,
+  "{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"entries\":[],\"latestLedger\":1}}"
+ ],
+ [
+  "instance storage",
+  "SimulationError: CDWXYW7WPNSOOSTX2ERIJT2GOMIWSTQQEJLNG6ZEZM6LZVQIM4LME54V has no contract instance on this network"
+ ],
+ [
+  "POST https://rpc.test",
+  503,
+  "{\"error\":\"unavailable\"}"
+ ],
+ [
+  "simulate while down",
+  "RetryableStatus: HTTP 503"
+ ],
+ [
+  "POST https://rpc.test",
+  503,
+  "{\"error\":\"unavailable\"}"
+ ],
+ [
+  "instance storage while down",
+  "RetryableStatus: HTTP 503"
+ ],
+ [
+  "POST https://rpc.test",
+  503,
+  "{\"error\":\"unavailable\"}"
+ ],
+ [
+  "rpc while down",
+  "RetryableStatus: HTTP 503"
+ ]
+]

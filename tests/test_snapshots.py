@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -81,14 +82,19 @@ def test_a_snapshot_carries_its_body_gzip_and_a_weak_etag() -> None:
     assert isinstance(snap, snapshots.Snapshot)
     assert snap.body == b'{"n": 1}'
     assert gzip.decompress(snap.gzip_body) == snap.body
-    assert snap.etag.startswith('W/"') and snap.etag.endswith('"')
+    assert snap.etag.startswith('W/"')
+    assert snap.etag.endswith('"')
     assert snap.etag == snapshots.etag_for(snap.body)
     assert snap.source == "live"
 
 
 def test_the_etag_changes_with_the_body_and_only_with_it() -> None:
-    assert snapshots.etag_for(b"a") == snapshots.etag_for(b"a")
-    assert snapshots.etag_for(b"a") != snapshots.etag_for(b"b")
+    first = snapshots.etag_for(b"a")
+    again = snapshots.etag_for(bytes(bytearray(b"a")))  # an equal body that is a different object
+
+    assert first == again
+    assert re.fullmatch(r'W/"[0-9a-f]{24}"', first)
+    assert first != snapshots.etag_for(b"b")
 
 
 # ── serving ─────────────────────────────────────────────────────────────────
@@ -167,8 +173,10 @@ def test_a_zero_bound_never_waits_but_starts_the_build() -> None:
         return snap, building, await cell.get(wait_seconds=0)
 
     snap, building, after = _run(go)  # type: ignore[misc]
-    assert snap is None and building is True
-    assert after is not None and after.value.n == 1  # type: ignore[attr-defined]
+    assert snap is None
+    assert building is True
+    assert after is not None
+    assert after.value.n == 1  # type: ignore[attr-defined]
 
 
 def test_a_caller_that_gives_up_does_not_cancel_the_build() -> None:
@@ -231,14 +239,16 @@ def test_a_failed_build_keeps_the_last_snapshot_and_records_why(caplog: pytest.L
         assert task is not None
         await task
         again = await cell.get(wait_seconds=None)
-        assert served is first and again is first
+        assert served is first
+        assert again is first
         return builder.calls, again.value.n  # type: ignore[union-attr]
 
     with caplog.at_level("WARNING"):
         calls, n = _run(go)  # type: ignore[misc]
     assert (calls, n) == (2, 1)
     status = cell.status()
-    assert status.ready and status.last_error == "RuntimeError: rpc down"
+    assert status.ready
+    assert status.last_error == "RuntimeError: rpc down"
     assert status.failing_since is not None
     assert "snapshot test build failed" in caplog.text
     assert "still serving" in caplog.text
@@ -288,7 +298,8 @@ def test_a_recovery_clears_the_failure(caplog: pytest.LogCaptureFixture) -> None
     with caplog.at_level("INFO"):
         snap = _run(go)
     assert snap is not None
-    assert cell.status().last_error is None and cell.status().failing_since is None
+    assert cell.status().last_error is None
+    assert cell.status().failing_since is None
     assert "snapshot test recovered" in caplog.text
 
 
@@ -357,7 +368,8 @@ def test_a_seed_is_served_until_a_live_build_replaces_it_and_never_after() -> No
 
     served, live, reseeded = _run(go)  # type: ignore[misc]
     assert served is old
-    assert live.source == "live" and live.value.n == 1  # type: ignore[attr-defined]
+    assert live.source == "live"
+    assert live.value.n == 1  # type: ignore[attr-defined]
     assert reseeded is False
 
 

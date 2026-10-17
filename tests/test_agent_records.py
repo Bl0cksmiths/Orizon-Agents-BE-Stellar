@@ -80,7 +80,7 @@ class _Ledger:
         return GetLedgerEntriesResponse(entries=list(reversed(entries)), latestLedger=1)
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(monkeypatch: pytest.MonkeyPatch) -> Any:
     def install(stored: dict[str, stellar_xdr.SCVal]) -> _Ledger:
         fake = _Ledger(stored)

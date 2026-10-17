@@ -292,7 +292,7 @@ def test_lifespan_schedules_the_retry_only_when_the_boot_load_failed(monkeypatch
     # the loop to destroy on the way out.
     assert binding_registry._retry_task is None
 
-    binding_registry._loaded = False
+    monkeypatch.setattr(binding_registry, "_loaded", False)
     healthy = _FlakyStore(failures=0, agent_ids=frozenset({AGENT}))
     monkeypatch.setattr(binding_registry, "get_binding_store", lambda: healthy)
 

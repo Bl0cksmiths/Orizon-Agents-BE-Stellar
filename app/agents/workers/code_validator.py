@@ -19,16 +19,22 @@ Two jobs:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 _EXTERNAL_SCRIPT = re.compile(
     r'<script\b[^>]*\ssrc=["\'](?!data:|javascript:|#|/|\./|\.\./)([^"\']+)',
     re.IGNORECASE,
 )
-_EXTERNAL_STYLESHEET = re.compile(
-    r'<link\b[^>]*\srel=["\']stylesheet["\'][^>]*\shref=["\'](?!data:|#|/|\./|\.\./)([^"\']+)',
+# An external stylesheet is a <link> whose last remote href has a
+# rel="stylesheet" before it in the same tag. Matched as two single-quantifier
+# scans (see `_external_stylesheets`): one pattern holding both `[^>]*` runs
+# backtracks quadratically on a tag of repeated rel attributes.
+_LINK_HREF = re.compile(
+    r'<link\b[^>]*(?P<attr>\shref=["\'])(?!data:|#|/|\./|\.\./)(?P<url>[^"\']+)',
     re.IGNORECASE,
 )
+_STYLESHEET_REL = re.compile(r'\srel=["\']stylesheet["\']', re.IGNORECASE)
 _EXTERNAL_IMG = re.compile(
     r'<img\b[^>]*\ssrc=["\'](https?:)([^"\']+)',
     re.IGNORECASE,
@@ -51,7 +57,9 @@ _HAS_VIEWPORT = re.compile(
 # handlers, and javascript: URLs. Prose and markup are ignored by construction.
 _SCRIPT_BLOCK = re.compile(r"<script\b[^>]*>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
 _INLINE_HANDLER = re.compile(r"""\son[a-z]{2,}\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-_JS_URL = re.compile(r"""(?:href|src|action)\s*=\s*["']?\s*javascript:([^"'>]*)""", re.IGNORECASE)
+# The optional quote owns the whitespace after it, so no two quantifiers can
+# share a run of spaces and an unterminated attribute is rejected in linear time.
+_JS_URL = re.compile(r"""(?:href|src|action)\s*=\s*(?:["']\s*)?javascript:([^"'>]*)""", re.IGNORECASE)
 
 # (regex, short human-readable label). Deliberately narrow: `localStorage` is
 # NOT here — all four demo kits persist state with it, it is the documented
@@ -208,6 +216,21 @@ MIN_DEPTH_LINES = 200
 MIN_DEPTH_SOURCE_CHARS = 12_000
 
 
+def _external_stylesheets(html: str) -> Iterator[str]:
+    """The remote href of each external stylesheet <link>, in document order.
+
+    Walks the matches the way `finditer` would: past a hit it resumes at its
+    end, past a <link> with no stylesheet rel before its href at the next char.
+    """
+    pos = 0
+    while link := _LINK_HREF.search(html, pos):
+        if _STYLESHEET_REL.search(html, link.start(), link.start("attr")):
+            yield link.group("url")
+            pos = link.end()
+        else:
+            pos = link.start() + 1
+
+
 def validate_html(html: str) -> list[str]:
     """
     Return a list of human-readable violation strings. Empty list = clean.
@@ -230,8 +253,8 @@ def validate_html(html: str) -> list[str]:
     # External asset violations (break sandbox, violate 'single-file' rule)
     for m in _EXTERNAL_SCRIPT.finditer(html):
         v.append(f'external <script src="{m.group(1)[:80]}"> — inline the JS instead')
-    for m in _EXTERNAL_STYLESHEET.finditer(html):
-        v.append(f'external <link stylesheet href="{m.group(1)[:80]}"> — inline the CSS')
+    for url in _external_stylesheets(html):
+        v.append(f'external <link stylesheet href="{url[:80]}"> — inline the CSS')
     for m in _EXTERNAL_IMG.finditer(html):
         v.append(f'external <img src="{m.group(1)}{m.group(2)[:80]}"> — use inline SVG or data URI')
 

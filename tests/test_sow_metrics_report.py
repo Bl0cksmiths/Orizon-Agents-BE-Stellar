@@ -90,7 +90,8 @@ def test_every_missed_entry_carries_a_reason(tmp_path: Path) -> None:
     assert [m["status"] for m in block] == ["not_met"] * 11
     for entry in block:
         assert list(entry) == MISS_KEYS, entry["id"]
-        assert entry["reason"].strip() and entry["reason"].endswith("."), entry
+        assert entry["reason"].strip(), entry
+        assert entry["reason"].endswith("."), entry
 
 
 def test_one_met_entry_is_pinned_exactly(tmp_path: Path) -> None:
@@ -147,8 +148,11 @@ def test_a_tx_link_is_exactly_the_testnet_explorer_with_its_hash_and_date(tmp_pa
     assert tx_links
     for link in tx_links:
         assert link["url"] == f"https://stellar.expert/explorer/testnet/tx/{link['tx_hash']}"
-        assert len(link["tx_hash"]) == 64 and int(link["tx_hash"], 16) >= 0
-        assert len(link["date"]) == 10 and link["date"][4] == "-" and link["date"][7] == "-"
+        assert len(link["tx_hash"]) == 64
+        assert int(link["tx_hash"], 16) >= 0
+        assert len(link["date"]) == 10
+        assert link["date"][4] == "-"
+        assert link["date"][7] == "-"
     refund = next(link for link in tx_links if link["label"].startswith("Refund of"))
     assert refund["tx_hash"] == out.world.marks["refund"]
     assert refund["date"] == "2026-09-24"
@@ -233,14 +237,15 @@ def test_the_generator_refuses_to_write_a_block_that_breaks_the_shape(
 ) -> None:
     real = metrics_module.m09
 
-    def leaky(snap: Any, rules: Any, pending: Any = None) -> Any:
-        m = real(snap, rules, pending)
+    def leaky(snap: Any, pending: Any = None) -> Any:
+        m = real(snap, pending)
         m.links[0] = metrics_module.Link(f"guide by {ADMIN}", m.links[0].url, "page")
         return m
 
     monkeypatch.setattr(metrics_module, "m09", leaky)
+    world = met_world()
     with pytest.raises(ValueError, match="contains a Stellar address"):
-        run(met_world(), tmp_path)
+        run(world, tmp_path)
     assert not (tmp_path / "metrics" / BLOCK_NAME).exists()
 
 
@@ -261,7 +266,8 @@ def test_the_block_is_byte_identical_across_runs(tmp_path: Path) -> None:
         now=lambda: 1_900_000_000.0,  # a different clock: the block carries no time
     )
     assert (tmp_path / "b" / BLOCK_NAME).read_bytes() == first
-    assert b"1790000000" not in first and b"1900000000" not in first
+    assert b"1790000000" not in first
+    assert b"1900000000" not in first
 
 
 def test_the_markdown_tables_every_metric(tmp_path: Path) -> None:
@@ -278,11 +284,14 @@ def test_the_markdown_tables_every_metric(tmp_path: Path) -> None:
 
 def test_the_raw_json_lists_every_counted_and_excluded_item(tmp_path: Path) -> None:
     raw = json.loads((run(met_world(), tmp_path).dir / RAW_NAME).read_text())
-    assert raw["network"] == "testnet" and raw["exit_code"] == 0
+    assert raw["network"] == "testnet"
+    assert raw["exit_code"] == 0
     assert raw["generated_utc"] == "2026-09-21T14:13:20Z"
     by_id = {m["id"]: m for m in raw["metrics"]}
-    assert len(by_id["m01"]["counted"]) == 3 and len(by_id["m01"]["excluded"]) == 3
-    assert len(by_id["m04"]["counted"]) == 4 and len(by_id["m04"]["excluded"]) == 1
+    assert len(by_id["m01"]["counted"]) == 3
+    assert len(by_id["m01"]["excluded"]) == 3
+    assert len(by_id["m04"]["counted"]) == 4
+    assert len(by_id["m04"]["excluded"]) == 1
     assert raw["summary"]["ratings_by_kind"] == {"auto": 3, "dispute": 1}
     assert raw["summary"]["ledger_lifetime_disputes"] == 1
     assert raw["failures"] == {}

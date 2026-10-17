@@ -27,7 +27,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from ..config import settings
 from ..stellar import client as sc
@@ -172,6 +172,81 @@ def not_submitted_reason(exc: BaseException) -> str:
     return head if len(head) <= _REASON_LIMIT else head[: _REASON_LIMIT - 1] + "…"
 
 
+def _refused_by_ledger(
+    dispute: DisputeRecord, e: sc.ContractError, facts: str, derived_hex: str, weight: int
+) -> RatingOutcome:
+    """The outcome of a submit the ledger refused at simulation: REPLAY for `Replay`, FAILED otherwise."""
+    if e.code == _LEDGER_REPLAY:
+        # WARNING, not ERROR: on a retry this is the expected answer from an
+        # attempt that already landed. Only the caller, holding the
+        # dispute's history, can tell that apart from a collision.
+        logger.warning(
+            "dispute %s: rating refused as a Replay — the ledger already holds a rating under this "
+            "agent and derived id (%s)",
+            dispute.id,
+            facts,
+        )
+        return RatingOutcome("REPLAY", None, derived_hex, DISPUTE_RATING, weight)
+    reason = rating_writer.failure_reason(e)
+    if e.code == _LEDGER_UNAUTHORIZED:
+        # Spelled out because this exact misconfiguration once left a
+        # deployment's ledger at zero ratings with nobody able to say why:
+        # a signer that is not the Scorer is refused on every rating it signs.
+        logger.error(
+            "dispute %s: rating refused with %s — this deployment's signer is NOT the Scorer of "
+            "ReputationLedger %s, so no rating it submits can land. A misconfiguration, not a verdict on "
+            "the dispute: the ledger admin must call set_scorer with the signer's address (the boot line "
+            "and ratings on /readiness name both). Nothing was written (%s)",
+            dispute.id,
+            reason,
+            settings.stellar_reputation_ledger,
+            facts,
+        )
+    else:
+        logger.error(
+            "dispute %s: rating refused by the ledger with %s, nothing was written (%s)",
+            dispute.id,
+            reason,
+            facts,
+            exc_info=True,
+        )
+    return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
+
+
+def _classify_answer(
+    dispute: DisputeRecord, raw: dict[str, Any], facts: str, derived_hex: str, weight: int
+) -> RatingOutcome:
+    """The outcome of a submit the client answered: SUCCESS only with a hash, else FAILED or TIMEOUT."""
+    raw_hash = raw.get("hash")
+    tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
+    status = str(raw.get("status") or "")
+
+    if status == "SUCCESS" and tx_hash:
+        logger.info("dispute %s: rating written — tx %s (%s)", dispute.id, tx_hash, facts)
+        return RatingOutcome("SUCCESS", tx_hash, derived_hex, DISPUTE_RATING, weight)
+
+    if status == "FAILED":
+        logger.error(
+            "dispute %s: rating transaction failed on the ledger, nothing was written — hash=%s (%s)",
+            dispute.id,
+            tx_hash,
+            facts,
+        )
+        return RatingOutcome(
+            "FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight, "the ledger failed the transaction"
+        )
+
+    logger.error(
+        "dispute %s: rating unconfirmed and MAY STILL LAND — a retry cannot double it, the replay guard "
+        "refuses a second: status=%s hash=%s (%s)",
+        dispute.id,
+        status or "missing",
+        tx_hash,
+        facts,
+    )
+    return RatingOutcome("TIMEOUT", tx_hash, derived_hex, DISPUTE_RATING, weight)
+
+
 async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRecord) -> RatingOutcome:
     """Write `dispute`'s rating to the ReputationLedger once, and classify the answer.
 
@@ -240,7 +315,7 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
     try:
         derived = dispute_job_id(bytes.fromhex(dispute.job_id_hex), dispute.step_index)
     except ValueError:
-        logger.error(
+        logger.exception(
             "dispute %s: cannot rate — job %s step %d yields no derived id (agent %s, payer %s, credited %s, "
             "refund %s)",
             dispute.id,
@@ -250,7 +325,6 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
             dispute.payer,
             credited,
             dispute.refund_tx,
-            exc_info=True,
         )
         raise
     derived_hex = derived.hex()
@@ -273,87 +347,24 @@ async def submit_dispute_rating(dispute: DisputeRecord, settlement: SettlementRe
         logger.error("dispute %s: rating submit cancelled mid-flight and MAY HAVE LANDED (%s)", dispute.id, facts)
         raise
     except sc.ContractError as e:
-        if e.code == _LEDGER_REPLAY:
-            # WARNING, not ERROR: on a retry this is the expected answer from an
-            # attempt that already landed. Only the caller, holding the
-            # dispute's history, can tell that apart from a collision.
-            logger.warning(
-                "dispute %s: rating refused as a Replay — the ledger already holds a rating under this "
-                "agent and derived id (%s)",
-                dispute.id,
-                facts,
-            )
-            return RatingOutcome("REPLAY", None, derived_hex, DISPUTE_RATING, weight)
-        reason = rating_writer.failure_reason(e)
-        if e.code == _LEDGER_UNAUTHORIZED:
-            # Spelled out because this exact misconfiguration once left a
-            # deployment's ledger at zero ratings with nobody able to say why:
-            # a signer that is not the Scorer is refused on every rating it signs.
-            logger.error(
-                "dispute %s: rating refused with %s — this deployment's signer is NOT the Scorer of "
-                "ReputationLedger %s, so no rating it submits can land. A misconfiguration, not a verdict on "
-                "the dispute: the ledger admin must call set_scorer with the signer's address (the boot line "
-                "and ratings on /readiness name both). Nothing was written (%s)",
-                dispute.id,
-                reason,
-                settings.stellar_reputation_ledger,
-                facts,
-            )
-        else:
-            logger.error(
-                "dispute %s: rating refused by the ledger with %s, nothing was written (%s)",
-                dispute.id,
-                reason,
-                facts,
-                exc_info=True,
-            )
-        return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
+        return _refused_by_ledger(dispute, e, facts, derived_hex, weight)
     except sc.NotSubmittedError as e:
         reason = not_submitted_reason(e)
-        logger.error(
+        logger.exception(
             "dispute %s: rating refused before it was submitted — nothing was sent and nothing is in "
             "flight, and a retry is refused the same way until the cause is fixed: %s (%s)",
             dispute.id,
             reason,
             facts,
-            exc_info=True,
         )
         return RatingOutcome("FAILED", None, derived_hex, DISPUTE_RATING, weight, reason)
     except Exception as e:
-        logger.error(
+        logger.exception(
             "dispute %s: rating submit raised and MAY HAVE LANDED: %s (%s)",
             dispute.id,
             e,
             facts,
-            exc_info=True,
         )
         return RatingOutcome("TIMEOUT", None, derived_hex, DISPUTE_RATING, weight)
 
-    raw_hash = raw.get("hash")
-    tx_hash = raw_hash if isinstance(raw_hash, str) and raw_hash else None
-    status = str(raw.get("status") or "")
-
-    if status == "SUCCESS" and tx_hash:
-        logger.info("dispute %s: rating written — tx %s (%s)", dispute.id, tx_hash, facts)
-        return RatingOutcome("SUCCESS", tx_hash, derived_hex, DISPUTE_RATING, weight)
-
-    if status == "FAILED":
-        logger.error(
-            "dispute %s: rating transaction failed on the ledger, nothing was written — hash=%s (%s)",
-            dispute.id,
-            tx_hash,
-            facts,
-        )
-        return RatingOutcome(
-            "FAILED", tx_hash, derived_hex, DISPUTE_RATING, weight, "the ledger failed the transaction"
-        )
-
-    logger.error(
-        "dispute %s: rating unconfirmed and MAY STILL LAND — a retry cannot double it, the replay guard "
-        "refuses a second: status=%s hash=%s (%s)",
-        dispute.id,
-        status or "missing",
-        tx_hash,
-        facts,
-    )
-    return RatingOutcome("TIMEOUT", tx_hash, derived_hex, DISPUTE_RATING, weight)
+    return _classify_answer(dispute, raw, facts, derived_hex, weight)

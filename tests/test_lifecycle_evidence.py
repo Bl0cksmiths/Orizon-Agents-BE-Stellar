@@ -42,7 +42,8 @@ def test_every_append_is_on_disk_and_rendered_before_it_returns(tmp_path: Path) 
     assert rows[1]["explorer"] == f"https://stellar.expert/explorer/testnet/tx/{HASH}"
     md = log.markdown.read_text()
     assert f"[{HASH[:8]}…{HASH[-6:]}](https://stellar.expert/explorer/testnet/tx/{HASH})" in md
-    assert "| SUCCESS | CESCROW |" in md and "0.0500000 XLM (native)" in md
+    assert "| SUCCESS | CESCROW |" in md
+    assert "0.0500000 XLM (native)" in md
 
 
 def test_the_log_is_append_only_across_instances(tmp_path: Path) -> None:
@@ -91,13 +92,15 @@ def test_state_is_written_owner_only_and_round_trips(tmp_path: Path) -> None:
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
     assert "state.json" in (tmp_path / ".gitignore").read_text().splitlines()
     loaded = store.load()
-    assert loaded == state and loaded.completed == ["decompose"]
+    assert loaded == state
+    assert loaded.completed == ["decompose"]
 
 
 def test_state_ignores_fields_a_newer_harness_wrote(tmp_path: Path) -> None:
     (tmp_path / "state.json").write_text(json.dumps({"run_id": "r1", "from_the_future": 1}))
     loaded = StateStore(tmp_path).load()
-    assert loaded is not None and loaded.run_id == "r1"
+    assert loaded is not None
+    assert loaded.run_id == "r1"
 
 
 # ── redaction ───────────────────────────────────────────────────
@@ -113,7 +116,9 @@ def test_secret_shapes_are_masked_even_unregistered() -> None:
     kp = Keypair.random()
     xdr_like = "AAAAAgAAAAB+" + "Q" * 200 + "=="
     out = Redactor().scrub(f"seed {kp.secret} envelope {xdr_like} sig {'Zm9v' * 20}+w==")
-    assert kp.secret not in out and xdr_like not in out and "Zm9v" not in out
+    assert kp.secret not in out
+    assert xdr_like not in out
+    assert "Zm9v" not in out
 
 
 def test_evidence_values_are_never_masked() -> None:

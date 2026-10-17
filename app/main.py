@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Header, Request
 from fastapi.encoders import jsonable_encoder
@@ -452,6 +452,20 @@ app.add_middleware(OriginLockMiddleware)
 # headers too, not just responses that reached the router.
 app.add_middleware(SecurityHeadersMiddleware)
 
+# Outside every layer that makes or rewrites a body, so artifact/trace
+# payloads (30–76 kB) leave the stack compressed while the rate limiter still
+# sees the raw request. The two layers outside it only add headers, so neither
+# touches the compressed bytes, and CORS appends its `Vary: Origin` to the
+# `Vary: Accept-Encoding` set here rather than replacing it.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Right inside CORS: every response the app makes — including the limiter's
+# 429s, the origin lock's 403s and the body cap's 413s — carries an
+# X-Request-ID, and the logged duration covers every layer but CORS's own
+# header stamping. A preflight is the exception: CORS answers it before this
+# layer runs (see below).
+app.add_middleware(RequestContextMiddleware)
+
 # This project's Vercel production/preview origins only — a broad
 # `.*\.vercel\.app` would let ANY hosted Vercel page drive the
 # unauthenticated LLM routes from visitors' browsers.
@@ -465,6 +479,25 @@ def _cors_allows(origin: str) -> bool:
     return origin in strict_cors_origins(settings.cors_origin_list) or _CORS_ORIGIN_REGEX.fullmatch(origin) is not None
 
 
+# Added last → outermost of the middleware registered here. A browser hides a
+# cross-origin response without Access-Control-Allow-Origin from the page that
+# asked for it, so the console sees an opaque network failure instead of the
+# envelope it can explain. The header therefore has to reach every response a
+# layer makes on its own — the limiter's 429, the origin lock's 403, the body
+# cap's 413 — and outermost is the one position no layer added later can end
+# up outside of.
+#
+# What that costs, on purpose: CORS answers a preflight itself, before
+# RequestContext runs, so a preflight carries no X-Request-ID and leaves no
+# access-log line. Nothing a client could use is lost — a browser never shows
+# a preflight's headers to script, so nobody could quote that id — and a
+# preflight never reached the limiter or the origin lock either: it is a
+# constant answer computed from this config, and the console proxies
+# same-origin, so it sends none today. Every other response, the refusals
+# included, still passes through RequestContext on its way out.
+#
+# Starlette's ServerErrorMiddleware still wraps even this layer, so the 500
+# handler below stamps CORS by hand through _cors_allows.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=strict_cors_origins(settings.cors_origin_list),
@@ -500,15 +533,6 @@ app.add_middleware(
         "Retry-After",
     ],
 )
-
-# Added last → runs outermost, so artifact/trace payloads (30–76 kB) leave the
-# stack compressed while the rate limiter still sees the raw request.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
-
-# Outermost of all: every response — including 429s from the limiter and
-# CORS rejections — carries an X-Request-ID, and the logged duration covers
-# the full middleware stack.
-app.add_middleware(RequestContextMiddleware)
 
 # Details that are already machine-readable tokens ("invalid_api_key",
 # "build_failed") are promoted to the envelope's error code as-is.
@@ -607,8 +631,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Log the full traceback server-side; never leak exception text to clients."""
     logger.exception("unhandled error on %s %s", request.method, request.url.path)
-    # This handler runs on the OUTERMOST layer (ServerErrorMiddleware), so the
-    # security-header, rate-limit, and CORS middleware never see the response.
+    # This handler runs on the OUTERMOST layer (ServerErrorMiddleware, which
+    # Starlette always puts outside the registered middleware — CORS included,
+    # outermost of those though it is), so the security-header, rate-limit,
+    # and CORS middleware never see the response.
     # Stamp the hardening headers — and the CORS header for known origins —
     # by hand, or browsers report an opaque CORS failure instead of letting
     # the frontend read this JSON envelope.
@@ -657,7 +683,7 @@ async def root() -> dict[str, str]:
     return {"service": "orizon-agents", "status": "online"}
 
 
-@app.get("/health", tags=["meta"], summary="Liveness probe", response_model=HealthResponse)
+@app.get("/health", tags=["meta"], summary="Liveness probe")
 async def health() -> HealthResponse:
     """Liveness probe — process is up and serving. The body comes from the
     shared `health_payload()`, so this route and the proxy-reachable
@@ -868,16 +894,17 @@ class ReadinessResponse(BaseModel):
     "/readiness",
     tags=["meta"],
     summary="Readiness probe with per-dependency status",
-    response_model=ReadinessResponse,
     responses={503: {"model": ReadinessResponse, "description": "A required dependency is not configured."}},
 )
 async def readiness(
     response: Response,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-        description="Optional. The operator's API_KEY adds the AI spend figures to `orchestrator`.",
-    ),
+    x_api_key: Annotated[
+        str | None,
+        Header(
+            alias="X-API-Key",
+            description="Optional. The operator's API_KEY adds the AI spend figures to `orchestrator`.",
+        ),
+    ] = None,
 ) -> ReadinessResponse:
     """503 only when a dependency the API cannot serve without is missing:
     the LLM key or the Stellar contract/RPC config. The signing key is

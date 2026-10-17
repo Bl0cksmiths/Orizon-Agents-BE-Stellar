@@ -32,7 +32,7 @@ def _worker(handler, endpoint: str = "https://operator.example/run") -> eh.Exter
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def short_deadline(monkeypatch: pytest.MonkeyPatch) -> float:
     """A 1 s budget so the suite stays fast; the mechanism is identical."""
     monkeypatch.setattr(eh, "DISPATCH_DEADLINE_SECONDS", 1.0)
@@ -51,9 +51,10 @@ def test_a_trickling_operator_is_cut_off_at_the_deadline(short_deadline: float) 
         return httpx.Response(200, content=gen())
 
     async def go() -> None:
+        worker = _worker(trickle)
         started = time.monotonic()
         with pytest.raises(eh.ExternalDispatchError, match="no response within"):
-            await _worker(trickle).run("x", "y")
+            await worker.run("x", "y")
         elapsed = time.monotonic() - started
         # Bounded by the deadline, not by the 120 s step ceiling above us.
         assert elapsed < short_deadline * 4
@@ -73,8 +74,9 @@ def test_a_slow_operator_is_not_retried(short_deadline: float) -> None:
         return httpx.Response(200, json={"summary": "too late"})
 
     async def go() -> None:
+        worker = _worker(slow)
         with pytest.raises(eh.ExternalDispatchError):
-            await _worker(slow).run("x", "y")
+            await worker.run("x", "y")
 
     asyncio.run(go())
     assert calls["n"] == 1

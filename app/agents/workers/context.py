@@ -139,9 +139,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
-    # JWTs and bearer tokens.
+    # JWTs and bearer tokens. (?i) already folds A-Z over lowercase.
     re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{16,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Z0-9._~+/=\-]{16,}"),
     # key = value / key: value for credential-named keys.
     re.compile(
         r"(?i)\b(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|password|passwd)"
@@ -656,6 +656,16 @@ def _render(role: str, payload: Payload) -> str:
     return _clip(sanitize_untrusted(scrub_secrets("\n".join(lines))), MAX_ITEM_CHARS)
 
 
+def _within(text: str, room: int) -> str | None:
+    """`text` whole when it fits in `room`, clipped to it when it does not, or
+    None when `room` is too small to hold a useful item."""
+    if len(text) <= room:
+        return text
+    if room < MIN_ITEM_CHARS:
+        return None
+    return _clip(text, room)
+
+
 def _external_roles(context: Mapping[str, Any]) -> list[str]:
     return [k for k in context if isinstance(k, str) and k.startswith(EXTERNAL_PREFIX)]
 
@@ -688,12 +698,10 @@ def upstream(
         payload = payload_for(role, context.get(role))
         if payload is None:
             continue
-        text = _render(role, payload)
         room = MAX_TOTAL_CHARS - used - (2 if items else 0)
-        if len(text) > room:
-            if room < MIN_ITEM_CHARS:
-                continue
-            text = _clip(text, room)
+        text = _within(_render(role, payload), room)
+        if text is None:
+            continue
         items.append(HandoffItem(role=role, payload=payload, text=text))
         used += len(text) + (2 if len(items) > 1 else 0)
     return Handoff(consumer=consumer, items=tuple(items))

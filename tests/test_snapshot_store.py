@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,11 +62,11 @@ def _cell(builds: _Builds, name: str = "doc") -> SnapshotCell[_Doc]:
 
 
 @pytest.fixture
-def store(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySnapshotStore]:
+def store(monkeypatch: pytest.MonkeyPatch) -> InMemorySnapshotStore:
     s = InMemorySnapshotStore()
     monkeypatch.setattr(snapshot_store, "_store", s)
     monkeypatch.setattr(snapshots, "_boot_hooks", [])
-    yield s
+    return s
 
 
 async def _drain_saves() -> None:
@@ -185,7 +184,8 @@ def test_without_an_age_limit_a_row_of_any_age_is_restored(store: InMemorySnapsh
     asyncio.run(_boot())
 
     snap = cell.current()
-    assert snap is not None and snap.value.n == 7
+    assert snap is not None
+    assert snap.value.n == 7
     assert snap.source == "persisted"
     assert snap.age_seconds() >= 30 * 86_400 - 1
 
@@ -219,7 +219,8 @@ def test_a_failing_store_never_stops_a_snapshot_being_built_or_served(
 
     with caplog.at_level("WARNING"):
         snap = asyncio.run(go())
-    assert snap is not None and snap.value.n == 1
+    assert snap is not None
+    assert snap.value.n == 1
     assert "snapshot doc not restored: ConnectionError: neon asleep" in caplog.text
     assert "snapshot doc not persisted: ConnectionError: neon asleep" in caplog.text
     assert "snapshot store did not close cleanly" in caplog.text

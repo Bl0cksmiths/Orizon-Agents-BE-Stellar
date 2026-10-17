@@ -1,0 +1,91 @@
+{
+  "valid": [],
+  "not a list": [
+    "the block must be a list of 11 metrics"
+  ],
+  "too short": [
+    "the block must be a list of 11 metrics"
+  ],
+  "entry not an object": [
+    "m04: not an object"
+  ],
+  "keys reordered": [
+    "m01: keys ('category', 'id', 'metric', 'target', 'achieved', 'status', 'method', 'links') are not ('id', 'category', 'metric', 'target', 'achieved', 'status', 'method', 'links')"
+  ],
+  "sow wording changed": [
+    "m02: id 'm99' is not the SOW's 'm02'",
+    "m02: category 'Other' is not the SOW's 'Adoption targets'",
+    "m02: metric 'Something else' is not the SOW's 'Unique external operator wallet addresses'",
+    "m02: target '≥ 1' is not the SOW's '≥ 2'"
+  ],
+  "status unknown": [
+    "m04: status 'partly'"
+  ],
+  "achieved and method empty": [
+    "m05: achieved is empty",
+    "m05: method is empty"
+  ],
+  "miss without a reason": [
+    "m06: keys ('id', 'category', 'metric', 'target', 'achieved', 'status', 'method', 'links') are not ('id', 'category', 'metric', 'target', 'achieved', 'status', 'reason', 'method', 'links')",
+    "m06: a miss needs a reason"
+  ],
+  "miss with an empty reason": [
+    "m06: keys ('id', 'category', 'metric', 'target', 'achieved', 'status', 'method', 'links', 'reason') are not ('id', 'category', 'metric', 'target', 'achieved', 'status', 'reason', 'method', 'links')",
+    "m06: a miss needs a reason"
+  ],
+  "links not a list": [
+    "m07: links is not a list"
+  ],
+  "link not an object": [
+    "m08 link 0: not an object"
+  ],
+  "link keys wrong": [
+    "m03 link 2: keys ('label', 'url', 'kind', 'tx_hash', 'date', 'extra')"
+  ],
+  "link keys out of order": [
+    "m03 link 0: keys ('url', 'label', 'kind')"
+  ],
+  "link kind unknown": [
+    "m03 link 2: kind 'blog'",
+    "m03 link 2: tx_hash must be 64 hex on a tx link"
+  ],
+  "link url not https": [
+    "m03 link 2: url 'http://stellar.expert/x' is not https",
+    "m03 link 2: tx_hash does not match the url"
+  ],
+  "link url not a string": [
+    "m03 link 2: url 5 is not https",
+    "m03 link 2: tx_hash does not match the url"
+  ],
+  "tx url not the explorer": [
+    "m03 link 2: url 'https://example.com/tx/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a testnet explorer tx link",
+    "m03 link 2: tx_hash does not match the url"
+  ],
+  "label empty": [
+    "m03 link 2: label is empty"
+  ],
+  "label not a string": [
+    "m03 link 2: label is empty"
+  ],
+  "label with an address": [
+    "m03 link 2: label contains a Stellar address"
+  ],
+  "label with a hash": [
+    "m03 link 2: label contains a transaction hash"
+  ],
+  "tx_hash not hex": [
+    "m03 link 2: tx_hash must be 64 hex on a tx link"
+  ],
+  "tx_hash on a page link": [
+    "m03 link 2: tx_hash must be 64 hex on a tx link"
+  ],
+  "tx_hash not the url's": [
+    "m03 link 2: tx_hash does not match the url"
+  ],
+  "tx link without tx_hash": [
+    "m03 link 2: a tx link carries its tx_hash"
+  ],
+  "date not a day": [
+    "m03 link 2: date '21 Sep 2026' is not YYYY-MM-DD"
+  ]
+}

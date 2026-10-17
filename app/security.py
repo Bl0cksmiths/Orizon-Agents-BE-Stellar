@@ -39,7 +39,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 
 from fastapi import Header, HTTPException, Security
 from fastapi.security import APIKeyHeader
@@ -225,13 +225,19 @@ class SecretRedactionLogFilter(logging.Filter):
     and masked here too, and when masking changed it, folded into the message
     with `exc_info` cleared: exactly how `JsonLogFormatter` already presents a
     traceback, so the line is unchanged apart from the mask.
+
+    It never drops a record: `filter` returns the record to log, which since
+    Python 3.12 is the record handlers go on to format. It is the very record
+    it was given, masked in place, so a logger or handler further along sees
+    the same masked object either way.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def filter(self, record: logging.LogRecord) -> logging.LogRecord:
         try:
             message = record.getMessage()
-        except Exception:  # noqa: BLE001 — a malformed record is logging's to report, not ours to drop
-            return True
+        except Exception:  # noqa: BLE001
+            # A malformed record is logging's to report, not ours to drop.
+            return record
         masked = redact_secrets(message)
         if record.exc_info:
             trace = _EXCEPTION_FORMATTER.formatException(record.exc_info)
@@ -243,7 +249,7 @@ class SecretRedactionLogFilter(logging.Filter):
         if masked != message:
             record.msg = masked
             record.args = None
-        return True
+        return record
 
 
 # Resolved key for a forwarded chain that is too short to contain a client
@@ -327,7 +333,13 @@ def client_key(scope: dict, hops: int | None = None) -> str:
 # serves every *.onrender.com service through Cloudflare, so the hop Render's
 # proxy appends to X-Forwarded-For is a Cloudflare edge. They change rarely;
 # a missing range degrades to "no identity" (see below), never to a spoofable one.
-_CLOUDFLARE_NETWORKS = tuple(
+#
+# Hard-coded on purpose: these are public, vendor-published network ranges used
+# only to RECOGNISE an edge hop, never addresses we connect to, so there is no
+# host to make configurable. Last checked 2026-10-15 against
+# https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6
+# (15 IPv4 + 7 IPv6 CIDRs, identical to the list below).
+_CLOUDFLARE_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = tuple(
     ipaddress.ip_network(net)
     for net in (
         "173.245.48.0/20",
@@ -427,6 +439,14 @@ def client_identity(scope: dict) -> str | None:
     if not raw:
         peer = scope.get("client")
         return peer[0] if peer else None
+    return _forwarded_caller(chain)
+
+
+def _forwarded_caller(chain: list[str]) -> str | None:
+    """The caller a forwarded chain names, read from the RIGHT: past the
+    entries that are not publicly routable, then past at most one Cloudflare
+    edge. None when no entry is left, or the one left cannot be a visitor
+    (see `client_identity`)."""
     index = len(chain) - 1
     while index >= 0:
         ip = _ip(chain[index])
@@ -706,6 +726,12 @@ async def require_adjudicator(
 
 # An exact origin: https with a host (and optional port), or plain http to the
 # loopback only, for local development. No path, no wildcard, no `null`.
+#
+# The `http://` below is deliberate and safe: it matches only localhost and
+# 127.0.0.1, an origin that is a page on the visitor's OWN machine, whose
+# traffic never crosses a network that could read or rewrite it. Every other
+# plain-http origin is dropped, and the Vercel origin regex in app/main.py is
+# https-only, so no public origin is ever admitted over plain http.
 _SECURE_ORIGIN = re.compile(r"https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?")
 _LOOPBACK_ORIGIN = re.compile(r"http://(localhost|127\.0\.0\.1)(:\d{1,5})?")
 
@@ -741,6 +767,8 @@ _BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (b"x-frame-options", b"DENY"),
     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
 )
+# The ASGI message that carries a response's status and headers.
+_RESPONSE_START = "http.response.start"
 # This API renders nothing, so nothing in a response may load, run or frame:
 # a body a browser is tricked into rendering stays inert text.
 _API_CSP = b"default-src 'none'; frame-ancestors 'none'"
@@ -774,7 +802,7 @@ class SecurityHeadersMiddleware:
         extra = security_headers(scope.get("path", ""))
 
         async def send_with_headers(message: dict) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 message["headers"] = list(message.get("headers") or []) + extra
             await send(message)
 
@@ -794,10 +822,12 @@ class RequestContextMiddleware:
     correlated with server logs. Probe paths (EXEMPT_PATHS) still get the
     header but are not logged, to keep the log free of health-check noise.
 
-    Being the outermost layer, this is also where the forwarded-chain sample
-    is taken (see ForwardedChainSampler): the sample line and the access line
-    for the same request carry the same request id, so the raw chain and the
-    key it resolved to can be read side by side.
+    Being the outermost layer but for CORS (app/main.py), this is also where
+    the forwarded-chain sample is taken (see ForwardedChainSampler): the
+    sample line and the access line for the same request carry the same
+    request id, so the raw chain and the key it resolved to can be read side
+    by side. A CORS preflight is answered before it reaches this layer, so it
+    gets no request id, no access line and no sample.
     """
 
     def __init__(self, app: Any) -> None:
@@ -841,7 +871,7 @@ class RequestContextMiddleware:
         started = time.monotonic()
 
         async def send_with_context(message: dict) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 message["headers"] = list(message.get("headers") or []) + [
                     (b"x-request-id", request_id.encode("latin-1")),
                 ]
@@ -896,8 +926,9 @@ class BodyLimitMiddleware:
     """
 
     DEFAULT_LIMIT = 1_048_576  # 1 MiB — comfortably above any legitimate payload
-    # Routes that buffer the entire body up front get a tighter budget.
-    PATH_LIMITS: dict[str, int] = {"/api/pdax/webhooks/receive": 65_536}
+    # Routes that buffer the entire body up front get a tighter budget. The
+    # default for `path_limits`; an explicit `path_limits` replaces it whole.
+    DEFAULT_PATH_LIMITS: dict[str, int] = {"/api/pdax/webhooks/receive": 65_536}
 
     def __init__(
         self,
@@ -907,7 +938,7 @@ class BodyLimitMiddleware:
     ) -> None:
         self.app = app
         self.limit = self.DEFAULT_LIMIT if limit is None else limit
-        self.path_limits = dict(self.PATH_LIMITS) if path_limits is None else path_limits
+        self.path_limits = dict(self.DEFAULT_PATH_LIMITS) if path_limits is None else path_limits
 
     @staticmethod
     async def _send_413(send: Any) -> None:
@@ -924,7 +955,7 @@ class BodyLimitMiddleware:
         ).encode()
         await send(
             {
-                "type": "http.response.start",
+                "type": _RESPONSE_START,
                 "status": 413,
                 "headers": [
                     (b"content-type", b"application/json"),
@@ -934,21 +965,26 @@ class BodyLimitMiddleware:
         )
         await send({"type": "http.response.body", "body": body})
 
+    @staticmethod
+    def _declares_over(scope: dict, limit: int) -> bool:
+        """Whether the request's Content-Length declares more than `limit`."""
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared is None:
+            return False
+        try:
+            return int(declared) > limit
+        except ValueError:
+            return False  # malformed length — the server rejects it downstream
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
         limit = self.path_limits.get(scope.get("path", ""), self.limit)
-        headers = dict(scope.get("headers") or [])
-        declared = headers.get(b"content-length")
-        if declared is not None:
-            try:
-                if int(declared) > limit:
-                    await self._send_413(send)
-                    return
-            except ValueError:
-                pass  # malformed length — the server rejects it downstream
+        if self._declares_over(scope, limit):
+            await self._send_413(send)
+            return
 
         # Chunked (or lying) bodies: meter the bytes the app actually reads.
         received = 0
@@ -965,7 +1001,7 @@ class BodyLimitMiddleware:
 
         async def send_tracking(message: dict) -> None:
             nonlocal response_started
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 response_started = True
             await send(message)
 
@@ -1056,7 +1092,7 @@ class RateLimitMiddleware:
             ).encode()
             await send(
                 {
-                    "type": "http.response.start",
+                    "type": _RESPONSE_START,
                     "status": 429,
                     "headers": [
                         (b"content-type", b"application/json"),
@@ -1076,7 +1112,7 @@ class RateLimitMiddleware:
         remaining = str(max(0, self.limit - len(dq))).encode()
 
         async def send_with_quota(message: dict) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _RESPONSE_START:
                 message["headers"] = list(message.get("headers") or []) + [
                     (b"x-ratelimit-limit", limit_header),
                     (b"x-ratelimit-remaining", remaining),

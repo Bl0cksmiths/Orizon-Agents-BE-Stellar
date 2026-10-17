@@ -32,7 +32,7 @@ ENDPOINT = "https://operator.example/run"
 OTHER_ENDPOINT = "https://other.example/run"
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch):
     """A fresh binding store per test, injected at the router's seam so the
     tests never depend on the resolver's internal singleton."""
@@ -41,7 +41,7 @@ def store(monkeypatch):
     return fresh
 
 
-@pytest.fixture()
+@pytest.fixture
 def no_dns(monkeypatch):
     """Stub the bind-time resolution and record it. The suite is hermetic, and
     several tests assert this was NOT reached."""

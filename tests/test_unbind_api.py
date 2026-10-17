@@ -39,7 +39,7 @@ from app.services.external_binding import OwnerLookupError
 ENDPOINT = "https://operator.example/run"
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch):
     """A fresh binding store per test, injected at the router's seam so the
     tests never depend on the resolver's internal singleton."""
@@ -62,7 +62,7 @@ def routable_set():
     binding_registry._bound_ids.update(saved)
 
 
-@pytest.fixture()
+@pytest.fixture
 def no_dns(monkeypatch):
     """Stub the bind-time resolution: the suite is hermetic, and these tests
     need a real bind in place before they can revoke it."""
@@ -266,7 +266,8 @@ def test_a_non_owner_cannot_unbind_and_nothing_changes(client, monkeypatch, stor
     assert r.json()["error"]["code"] == "not_agent_owner"
     # Nothing moved: the binding is intact and the agent is still routable.
     record = stored(store, "ub_imp1")
-    assert record is not None and record.endpoint_url == ENDPOINT
+    assert record is not None
+    assert record.endpoint_url == ENDPOINT
     assert binding_registry.is_dispatchable("ub_imp1") is True
     # And the attempt did not burn the honest owner's challenge — otherwise
     # anyone could grief a revocation in progress by guessing at it.

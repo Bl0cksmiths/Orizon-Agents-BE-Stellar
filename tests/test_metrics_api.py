@@ -481,7 +481,8 @@ def test_series_is_fourteen_utc_days_oldest_first_with_empty_days(store) -> None
     dates = [d.date for d in result.series]
     assert dates[0] == "2026-09-08"
     assert dates[-1] == "2026-09-21" == datetime.fromtimestamp(NOW, UTC).date().isoformat()
-    assert dates == sorted(dates) and len(set(dates)) == 14
+    assert dates == sorted(dates)
+    assert len(set(dates)) == 14
     counts = [d.settled for d in result.series]
     assert counts == [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1]
 

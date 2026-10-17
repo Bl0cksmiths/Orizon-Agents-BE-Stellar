@@ -90,14 +90,14 @@ class _Store(InMemoryDisputeStore):
         await super().record_settlement(record)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch) -> _Store:
     fresh = _Store()
     monkeypatch.setattr(dispute_store, "_store", fresh)
     return fresh
 
 
-@pytest.fixture()
+@pytest.fixture
 def ratings(monkeypatch) -> list[tuple[str, bytes, int, str]]:
     """Every rating the run submits, as (agent_id, job_id, rating, kind)."""
     monkeypatch.setattr(settings, "reputation_enabled", True)
@@ -201,7 +201,8 @@ def test_a_hung_endpoint_is_not_charged_and_the_workflow_still_seals(monkeypatch
 
     # The settlement a dispute is judged against says the same thing.
     record = store.recorded[-1]
-    assert record.proof_tx == SEAL_TX and record.settled_usdc == pytest.approx(PRICES[DELIVERS])
+    assert record.proof_tx == SEAL_TX
+    assert record.settled_usdc == pytest.approx(PRICES[DELIVERS])
     by_step = {s.step_index: s for s in record.steps}
     assert (by_step[delivered_at].delivered, by_step[delivered_at].paid_usdc) == (True, PRICES[DELIVERS])
     assert by_step[delivered_at].receipt_id_hex == _receipt(0).hex()
@@ -226,7 +227,8 @@ def test_a_hung_endpoint_is_not_charged_and_the_workflow_still_seals(monkeypatch
     task = state.tasks[task_id]
     assert (task.status, task.spent, task.settlement) == ("complete", PRICES[DELIVERS], "settled")
     assert (task.charge_tx, task.proof_tx) == (SETTLE_TX, SEAL_TX)
-    assert task.artifact is not None and task.artifact["title"] == "Page"
+    assert task.artifact is not None
+    assert task.artifact["title"] == "Page"
     assert [f["path"] for f in task.artifact["files"]] == ["index.html"]
 
 

@@ -61,6 +61,7 @@ from . import external_binding as eb
 from .dispute_store import (
     DisputeRecord,
     DisputeStatus,
+    DisputeStore,
     DuplicateDisputeError,
     SettlementRecord,
     SettlementStep,
@@ -1429,7 +1430,7 @@ async def _hand_back(
         await store.release_refund_claim(claimed.id)
         return True
     except Exception:
-        logger.error(
+        logger.exception(
             "dispute %s: NOTHING WAS PAID (%s) but the refund claim could NOT be released — it stays crediting;"
             " release it by hand (job %s, payer %s, failed tx %s)",
             claimed.id,
@@ -1437,7 +1438,6 @@ async def _hand_back(
             claimed.job_id_hex,
             claimed.payer,
             failed_tx or "-",
-            exc_info=True,
         )
     if failed_tx is not None:
         try:
@@ -1449,13 +1449,209 @@ async def _hand_back(
                 expected_status="crediting",
             )
         except Exception:
-            logger.error(
+            logger.exception(
                 "dispute %s: the FAILED refund tx %s could not be recorded either — it is in this line only",
                 claimed.id,
                 failed_tx,
-                exc_info=True,
             )
     return False
+
+
+async def _record_credit(
+    store: DisputeStore, dispute_id: str, claimed: DisputeRecord, outcome: refund_svc.RefundOutcome
+) -> DisputeRecord:
+    """Record a credit that LANDED as `credited`, with the hash and what it moved.
+
+    Recorded even over a dispute that moved mid-flight, because the money has
+    moved. A record that cannot be written at all is logged at ERROR and
+    raised: the claim stays held and the dispute stays `crediting`.
+    """
+    try:
+        # Conditional on `crediting`, the status this outcome was decided
+        # from: while the claim is held nothing else may move the dispute.
+        written = await store.append_status(
+            dispute_id,
+            "credited",
+            refund_tx=outcome.tx_hash,
+            credited_usdc=outcome.amount_usdc,
+            expected_status="crediting",
+        )
+        if written is None:
+            # Something moved it mid-flight — only an operator can, by
+            # releasing or editing a dispute whose transfer was out, which
+            # docs/disputes.md warns against — and a second uphold may
+            # already have paid it. The money HAS moved, so it is recorded
+            # anyway: a record that hid a landed credit would invite a
+            # third. CRITICAL, because this is the one line that says a
+            # buyer may have been paid twice.
+            moved = await store.get_dispute(dispute_id)
+            logger.critical(
+                "dispute %s: %.7f USDC LANDED as tx %s on a dispute no longer in crediting (now %s, refund tx"
+                " %s) — an operator intervened mid-flight; POSSIBLE DOUBLE PAYMENT, reconcile by hand; the"
+                " landed credit is recorded (job %s, payer %s)",
+                dispute_id,
+                outcome.amount_usdc,
+                outcome.tx_hash,
+                moved.status if moved else "missing",
+                moved.refund_tx if moved else "-",
+                claimed.job_id_hex,
+                claimed.payer,
+            )
+            written = await store.append_status(
+                dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
+            )
+        return _recorded(written, dispute_id, "credited")
+    except Exception:
+        # The money has MOVED and nothing else would say so where anyone
+        # would see it: `credit_refund`'s SUCCESS line is INFO, and an
+        # exception let out from here reaches the caller as a bare 500
+        # carrying no dispute, job, payer, amount or hash at all. Logged
+        # before it is re-raised, because re-raising is still right: the
+        # claim stays held and the dispute stays `crediting`, which is
+        # exactly what a credit that landed and could not be recorded is.
+        logger.exception(
+            "dispute %s: %.7f USDC LANDED as tx %s and the credit could NOT be recorded — the dispute"
+            " stays crediting with its claim held; record it by hand (job %s, payer %s)",
+            dispute_id,
+            outcome.amount_usdc,
+            outcome.tx_hash,
+            claimed.job_id_hex,
+            claimed.payer,
+        )
+        raise
+
+
+async def _record_in_flight(
+    store: DisputeStore, dispute_id: str, claimed: DisputeRecord, outcome: refund_svc.RefundOutcome
+) -> None:
+    """Record an UNCONFIRMED transfer's hash and amount on the dispute it was for.
+
+    The claim stays held and the dispute stays `crediting` whatever happens
+    here, so a write that fails costs only the record of the hash: it is
+    logged at ERROR in its place, never raised.
+    """
+    try:
+        # Conditional on `crediting`, as the credited write is. Losing it
+        # means somebody moved the dispute while the transfer was out; that
+        # record is theirs and is not overwritten, and this line is what says
+        # a transfer that may still land was sent against it.
+        if (
+            await store.append_status(
+                dispute_id,
+                "crediting",
+                refund_tx=outcome.tx_hash,
+                inflight_usdc=outcome.amount_usdc,
+                expected_status="crediting",
+            )
+            is None
+        ):
+            moved = await store.get_dispute(dispute_id)
+            logger.critical(
+                "dispute %s: refund tx %s is UNCONFIRMED and MAY STILL LAND, but the dispute is no longer in"
+                " crediting (now %s) — an operator intervened mid-flight; it was NOT overwritten, and a"
+                " second credit may follow — reconcile by hand (job %s, payer %s, %.7f USDC)",
+                dispute_id,
+                outcome.tx_hash,
+                moved.status if moved else "missing",
+                claimed.job_id_hex,
+                claimed.payer,
+                outcome.amount_usdc,
+            )
+    except Exception:
+        # Only the HASH was lost. `claim_refund` already moved this dispute to
+        # `crediting` and the claim is still held, so both of the things that
+        # stop a second transfer are in place whatever happened here. The
+        # refusal below is therefore still the right answer and still carries
+        # the hash, and raising instead would answer a 500 that says strictly
+        # less than the 504 does. So this logs what the record will not say,
+        # and the caller is answered properly.
+        logger.exception(
+            "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
+            " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
+            dispute_id,
+            outcome.tx_hash,
+            claimed.job_id_hex,
+            claimed.payer,
+            outcome.amount_usdc,
+        )
+
+
+async def _price_claim(store: DisputeStore, claimed: DisputeRecord) -> tuple[SettlementRecord, float]:
+    """The settlement a claimed dispute is paid against and the amount to pay, or the claim handed back.
+
+    Every way out of here without an answer — a refusal, a missing
+    settlement, any exception at all — releases the claim, because nothing
+    has been signed yet.
+    """
+    # From the claim to the transfer NOTHING HAS BEEN SIGNED, so whatever goes
+    # wrong in between — the store dropping out mid-read, a cancellation, a
+    # bug — hands the claim back. Left held, it parks the dispute in
+    # `crediting` with no hash: exactly what a transfer still on the network
+    # looks like, so every later uphold refuses and only a human can pay the
+    # buyer, for money that never moved. The guard ends where `credit_refund`
+    # begins; past that line a transfer MAY have been sent and nothing may
+    # ever be released on a guess.
+    try:
+        settlement = await store.get_settlement(claimed.job_id_hex)
+        amount_usdc = (
+            0.0
+            if settlement is None
+            else refund_svc.creditable_for(
+                settlement,
+                claimed,
+                settings.dispute_credited_fraction,
+                credited_elsewhere_usdc=_credited_elsewhere(
+                    claimed, await store.list_disputes_for_task(claimed.task_id)
+                ),
+            )
+        )
+    except refund_svc.RefundRefused as refused:
+        await _hand_back(claimed, refused.code)
+        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
+    except BaseException:
+        await _hand_back(claimed, "the uphold failed before anything was signed")
+        raise
+    if settlement is None:
+        # The amount is bounded by what the settlement says actually moved
+        # (D4), so without the settlement there is no number that is safe to
+        # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
+        # settlement to price it from can only be paid by a human, and the
+        # claim is handed back so that a human still can.
+        await _hand_back(claimed, "settlement_missing")
+        raise _refuse_credit(
+            claimed,
+            "settlement_missing",
+            409,
+            "the settlement this dispute was judged against is no longer on record,"
+            " so the credit cannot be bounded by what was actually charged",
+            amount_usdc=claimed.creditable_usdc,
+            level=logging.ERROR,
+        )
+    return settlement, amount_usdc
+
+
+async def _after_a_lost_uphold(dispute_id: str, *, on_rating: RatingObserver | None) -> DisputeRecord:
+    """The answer when the `open → upheld` compare-and-set lost: the one the dispute now has, or a refusal."""
+    # The record moved under the read this decision was made on, so
+    # nothing may be decided from it: it is read again and asked the
+    # same three questions. A dispute that is merely `upheld` by now
+    # has another adjudication running on it this instant — one that
+    # is about to claim — and this caller refuses rather than racing
+    # it, because the claim is the last gate and nothing should arrive
+    # at it holding a record it already knows is stale.
+    current = await _load_for_adjudication(dispute_id)
+    settled = await _already_adjudicated(current, on_rating=on_rating)
+    if settled is not None:
+        return settled
+    raise _refuse_credit(
+        current,
+        "adjudication_in_progress",
+        409,
+        "another adjudication of this dispute is already running and may be paying it —"
+        " nothing was signed here; read the dispute back before deciding again",
+        amount_usdc=current.creditable_usdc,
+        tx_hash=current.refund_tx,
+    )
 
 
 async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) -> DisputeRecord:
@@ -1603,26 +1799,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     if dispute.status == "open":
         upheld = await store.append_status(dispute_id, "upheld", expected_status="open")
         if upheld is None:
-            # The record moved under the read this decision was made on, so
-            # nothing may be decided from it: it is read again and asked the
-            # same three questions. A dispute that is merely `upheld` by now
-            # has another adjudication running on it this instant — one that
-            # is about to claim — and this caller refuses rather than racing
-            # it, because the claim is the last gate and nothing should arrive
-            # at it holding a record it already knows is stale.
-            current = await _load_for_adjudication(dispute_id)
-            settled = await _already_adjudicated(current, on_rating=on_rating)
-            if settled is not None:
-                return settled
-            raise _refuse_credit(
-                current,
-                "adjudication_in_progress",
-                409,
-                "another adjudication of this dispute is already running and may be paying it —"
-                " nothing was signed here; read the dispute back before deciding again",
-                amount_usdc=current.creditable_usdc,
-                tx_hash=current.refund_tx,
-            )
+            return await _after_a_lost_uphold(dispute_id, on_rating=on_rating)
         dispute = upheld
 
     claimed = await store.claim_refund(dispute_id)
@@ -1635,50 +1812,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         logger.info("dispute %s is already claimed (%s) — nothing signed here", current.id, current.status)
         return current
 
-    # From the claim to the transfer NOTHING HAS BEEN SIGNED, so whatever goes
-    # wrong in between — the store dropping out mid-read, a cancellation, a
-    # bug — hands the claim back. Left held, it parks the dispute in
-    # `crediting` with no hash: exactly what a transfer still on the network
-    # looks like, so every later uphold refuses and only a human can pay the
-    # buyer, for money that never moved. The guard ends where `credit_refund`
-    # begins; past that line a transfer MAY have been sent and nothing may
-    # ever be released on a guess.
-    try:
-        settlement = await store.get_settlement(claimed.job_id_hex)
-        amount_usdc = (
-            0.0
-            if settlement is None
-            else refund_svc.creditable_for(
-                settlement,
-                claimed,
-                settings.dispute_credited_fraction,
-                credited_elsewhere_usdc=_credited_elsewhere(
-                    claimed, await store.list_disputes_for_task(claimed.task_id)
-                ),
-            )
-        )
-    except refund_svc.RefundRefused as refused:
-        await _hand_back(claimed, refused.code)
-        raise _refuse_credit(claimed, refused.code, 409, refused.message) from None
-    except BaseException:
-        await _hand_back(claimed, "the uphold failed before anything was signed")
-        raise
-    if settlement is None:
-        # The amount is bounded by what the settlement says actually moved
-        # (D4), so without the settlement there is no number that is safe to
-        # pay. ERROR, not WARNING: a buyer with an upheld dispute and no
-        # settlement to price it from can only be paid by a human, and the
-        # claim is handed back so that a human still can.
-        await _hand_back(claimed, "settlement_missing")
-        raise _refuse_credit(
-            claimed,
-            "settlement_missing",
-            409,
-            "the settlement this dispute was judged against is no longer on record,"
-            " so the credit cannot be bounded by what was actually charged",
-            amount_usdc=claimed.creditable_usdc,
-            level=logging.ERROR,
-        )
+    settlement, amount_usdc = await _price_claim(store, claimed)
 
     try:
         outcome = await refund_svc.credit_refund(claimed, amount_usdc)
@@ -1699,60 +1833,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         # step price at today's fraction and by what the charge settled. The
         # receipt prints this beside the refund hash, so it must be the number
         # the hash proves.
-        try:
-            # Conditional on `crediting`, the status this outcome was decided
-            # from: while the claim is held nothing else may move the dispute.
-            written = await store.append_status(
-                dispute_id,
-                "credited",
-                refund_tx=outcome.tx_hash,
-                credited_usdc=outcome.amount_usdc,
-                expected_status="crediting",
-            )
-            if written is None:
-                # Something moved it mid-flight — only an operator can, by
-                # releasing or editing a dispute whose transfer was out, which
-                # docs/disputes.md warns against — and a second uphold may
-                # already have paid it. The money HAS moved, so it is recorded
-                # anyway: a record that hid a landed credit would invite a
-                # third. CRITICAL, because this is the one line that says a
-                # buyer may have been paid twice.
-                moved = await store.get_dispute(dispute_id)
-                logger.critical(
-                    "dispute %s: %.7f USDC LANDED as tx %s on a dispute no longer in crediting (now %s, refund tx"
-                    " %s) — an operator intervened mid-flight; POSSIBLE DOUBLE PAYMENT, reconcile by hand; the"
-                    " landed credit is recorded (job %s, payer %s)",
-                    dispute_id,
-                    outcome.amount_usdc,
-                    outcome.tx_hash,
-                    moved.status if moved else "missing",
-                    moved.refund_tx if moved else "-",
-                    claimed.job_id_hex,
-                    claimed.payer,
-                )
-                written = await store.append_status(
-                    dispute_id, "credited", refund_tx=outcome.tx_hash, credited_usdc=outcome.amount_usdc
-                )
-            credited = _recorded(written, dispute_id, "credited")
-        except Exception:
-            # The money has MOVED and nothing else would say so where anyone
-            # would see it: `credit_refund`'s SUCCESS line is INFO, and an
-            # exception let out from here reaches the caller as a bare 500
-            # carrying no dispute, job, payer, amount or hash at all. Logged
-            # before it is re-raised, because re-raising is still right: the
-            # claim stays held and the dispute stays `crediting`, which is
-            # exactly what a credit that landed and could not be recorded is.
-            logger.error(
-                "dispute %s: %.7f USDC LANDED as tx %s and the credit could NOT be recorded — the dispute"
-                " stays crediting with its claim held; record it by hand (job %s, payer %s)",
-                dispute_id,
-                outcome.amount_usdc,
-                outcome.tx_hash,
-                claimed.job_id_hex,
-                claimed.payer,
-                exc_info=True,
-            )
-            raise
+        credited = await _record_credit(store, dispute_id, claimed, outcome)
         await _note_credit_on_workflow(credited, outcome.amount_usdc, outcome.tx_hash)
         # Only now, with the credit landed AND recorded, is the agent rated —
         # and against the settlement the credit was just bounded by, so the
@@ -1791,51 +1872,7 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
     # never as `credited_usdc`: the reconcile sweep that later finds it landed
     # checks the chain's figure against this one, and a receipt must not show
     # a payment that may never arrive.
-    try:
-        # Conditional on `crediting`, as the credited write above is. Losing it
-        # means somebody moved the dispute while the transfer was out; that
-        # record is theirs and is not overwritten, and this line is what says
-        # a transfer that may still land was sent against it.
-        if (
-            await store.append_status(
-                dispute_id,
-                "crediting",
-                refund_tx=outcome.tx_hash,
-                inflight_usdc=outcome.amount_usdc,
-                expected_status="crediting",
-            )
-            is None
-        ):
-            moved = await store.get_dispute(dispute_id)
-            logger.critical(
-                "dispute %s: refund tx %s is UNCONFIRMED and MAY STILL LAND, but the dispute is no longer in"
-                " crediting (now %s) — an operator intervened mid-flight; it was NOT overwritten, and a"
-                " second credit may follow — reconcile by hand (job %s, payer %s, %.7f USDC)",
-                dispute_id,
-                outcome.tx_hash,
-                moved.status if moved else "missing",
-                claimed.job_id_hex,
-                claimed.payer,
-                outcome.amount_usdc,
-            )
-    except Exception:
-        # Only the HASH was lost. `claim_refund` already moved this dispute to
-        # `crediting` and the claim is still held, so both of the things that
-        # stop a second transfer are in place whatever happened here. The
-        # refusal below is therefore still the right answer and still carries
-        # the hash, and raising instead would answer a 500 that says strictly
-        # less than the 504 does. So this logs what the record will not say,
-        # and the caller is answered properly.
-        logger.error(
-            "dispute %s: the in-flight refund hash %s could NOT be recorded — the dispute is crediting with its"
-            " claim held, and the hash is in this line only (job %s, payer %s, %.7f USDC)",
-            dispute_id,
-            outcome.tx_hash,
-            claimed.job_id_hex,
-            claimed.payer,
-            outcome.amount_usdc,
-            exc_info=True,
-        )
+    await _record_in_flight(store, dispute_id, claimed, outcome)
     raise _refuse_credit(
         claimed,
         "refund_unconfirmed",

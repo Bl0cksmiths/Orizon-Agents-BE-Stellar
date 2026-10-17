@@ -134,7 +134,8 @@ def test_a_settlement_is_read_back_by_job_and_by_task() -> None:
 
     by_job, by_task = asyncio.run(go())
 
-    assert by_job is not None and by_task is not None
+    assert by_job is not None
+    assert by_task is not None
     assert by_job == by_task
     assert by_job.window_closes_at == 1_700_086_400.0
     assert by_job.settled_usdc == 3.75
@@ -178,8 +179,10 @@ def test_the_step_breakdown_is_addressable_by_step_index() -> None:
     settled = asyncio.run(go())
 
     assert settled is not None
-    assert settled.step(0) is not None and settled.step(0).price_usdc == 1.5  # type: ignore[union-attr]
-    assert settled.step(1) is not None and settled.step(1).delivered is False  # type: ignore[union-attr]
+    assert settled.step(0) is not None
+    assert settled.step(0).price_usdc == 1.5  # type: ignore[union-attr]
+    assert settled.step(1) is not None
+    assert settled.step(1).delivered is False  # type: ignore[union-attr]
     assert settled.step(7) is None
 
 
@@ -220,8 +223,9 @@ def test_a_second_dispute_of_the_same_step_is_refused_with_the_first() -> None:
 
     first = asyncio.run(go())
 
+    second_try = store.open_dispute(a_dispute(id="dsp_0002", reason="a second try"))
     with pytest.raises(DuplicateDisputeError) as excinfo:
-        asyncio.run(store.open_dispute(a_dispute(id="dsp_0002", reason="a second try")))
+        asyncio.run(second_try)
 
     assert excinfo.value.existing == first
     assert excinfo.value.existing.reason == "the summary was empty"
@@ -327,7 +331,8 @@ def test_a_transition_moves_the_status_and_stamps_the_resolution() -> None:
     after = time.time()
 
     assert updated.status == "upheld"
-    assert updated.resolved_at is not None and before <= updated.resolved_at <= after
+    assert updated.resolved_at is not None
+    assert before <= updated.resolved_at <= after
     assert stored == updated
     # Everything the buyer was told at opening time is still exactly what it was.
     assert updated.reason == "the summary was empty"
@@ -412,8 +417,9 @@ def test_a_transition_on_an_unknown_dispute_is_a_key_error() -> None:
     in the caller, and a store that invented one would hide it."""
     store = InMemoryDisputeStore()
 
+    transition = store.append_status("dsp_never", "upheld")
     with pytest.raises(KeyError):
-        asyncio.run(store.append_status("dsp_never", "upheld"))
+        asyncio.run(transition)
 
 
 def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution(store: DisputeStore) -> None:
@@ -427,7 +433,8 @@ def test_a_resolution_stamped_at_epoch_zero_is_still_a_resolution(store: Dispute
         opened = await store.open_dispute(a_dispute())
         upheld = await store.append_status(opened.id, "upheld", resolved_at=0.0)
         credited = await store.append_status(opened.id, "credited", refund_tx="tx_refund")
-        assert upheld is not None and credited is not None
+        assert upheld is not None
+        assert credited is not None
         return upheld.resolved_at, credited.resolved_at
 
     assert run(store, go(store)) == (0.0, 0.0)
@@ -456,7 +463,8 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld(store: D
         opened = await store.open_dispute(a_dispute())
         # What the stale caller read, one round trip ago.
         stale = await store.get_dispute(opened.id)
-        assert stale is not None and stale.status == "open"
+        assert stale is not None
+        assert stale.status == "open"
         # Meanwhile the dispute is upheld, claimed and paid.
         await store.append_status(opened.id, "upheld")
         await store.claim_refund(opened.id)
@@ -468,7 +476,8 @@ def test_a_stale_decision_cannot_drag_a_credited_dispute_back_to_upheld(store: D
 
     assert refused is None
     # Nothing was written: the dispute still reads as paid, with its hash.
-    assert current is not None and current.status == "credited"
+    assert current is not None
+    assert current.status == "credited"
     assert current.refund_tx == "tx_paid"
     # And so the second payout cannot even be claimed, let alone signed.
     assert second_claim is None
@@ -488,7 +497,8 @@ def test_a_stale_decision_cannot_pay_a_dispute_that_was_rejected(store: DisputeS
     refused, current = run(store, go())
 
     assert refused is None
-    assert current is not None and current.status == "rejected"
+    assert current is not None
+    assert current.status == "rejected"
     # The buyer's explanation is still the one they were given.
     assert current.note == NOTE
 
@@ -507,7 +517,8 @@ def test_a_transition_that_names_no_expectation_still_lands_unconditionally(stor
 
     recorded = run(store, go())
 
-    assert recorded is not None and recorded.status == "credited"
+    assert recorded is not None
+    assert recorded.status == "credited"
     assert recorded.refund_tx == "tx_reconciled"
 
 
@@ -522,15 +533,17 @@ def test_a_transition_that_matches_the_expectation_is_written(store: DisputeStor
 
     upheld = run(store, go())
 
-    assert upheld is not None and upheld.status == "upheld"
+    assert upheld is not None
+    assert upheld.status == "upheld"
 
 
 def test_an_unknown_dispute_is_a_key_error_even_with_an_expectation(store: DisputeStore) -> None:
     """None means "this dispute has moved"; KeyError means "there is no such
     dispute". Folding the second into the first would let a caller with a typo
     in an id read it as a lost race and move on."""
+    transition = store.append_status("dsp_never", "upheld", expected_status="open")
     with pytest.raises(KeyError):
-        run(store, store.append_status("dsp_never", "upheld", expected_status="open"))
+        run(store, transition)
 
 
 # ── the in-flight amount ──────────────────────────────────────────────────
@@ -579,8 +592,10 @@ def test_a_claim_and_a_release_clear_the_in_flight_amount_with_the_hash(store: D
 
     released, reclaimed = run(store, go())
 
-    assert released is not None and (released.refund_tx, released.inflight_usdc) == (None, None)
-    assert reclaimed is not None and (reclaimed.refund_tx, reclaimed.inflight_usdc) == (None, None)
+    assert released is not None
+    assert (released.refund_tx, released.inflight_usdc) == (None, None)
+    assert reclaimed is not None
+    assert (reclaimed.refund_tx, reclaimed.inflight_usdc) == (None, None)
 
 
 def test_the_in_flight_column_is_added_to_a_table_that_already_exists(pg: PostgresDisputeStore, pg_dsn: str) -> None:
@@ -616,8 +631,11 @@ def test_the_in_flight_column_is_added_to_a_table_that_already_exists(pg: Postgr
     before, after, columns = run(pg, go())
 
     assert [c["data_type"] for c in columns] == ["double precision"]
-    assert before is not None and before.refund_tx == "tx_before_the_sweep" and before.inflight_usdc is None
-    assert after is not None and (after.refund_tx, after.inflight_usdc) == ("tx_before_the_sweep", 1.5)
+    assert before is not None
+    assert before.refund_tx == "tx_before_the_sweep"
+    assert before.inflight_usdc is None
+    assert after is not None
+    assert (after.refund_tx, after.inflight_usdc) == ("tx_before_the_sweep", 1.5)
 
 
 def test_a_release_naming_a_transfer_refuses_a_claim_taken_again_over_another(store: DisputeStore) -> None:
@@ -645,9 +663,11 @@ def test_a_release_naming_a_transfer_refuses_a_claim_taken_again_over_another(st
 
     no_hash_yet, stale, held, current, after = run(store, go())
 
-    assert no_hash_yet is None and stale is None
+    assert no_hash_yet is None
+    assert stale is None
     assert held == ["dsp_0001"]
-    assert current is not None and current.status == "upheld"
+    assert current is not None
+    assert current.status == "upheld"
     assert after == ()
 
 
@@ -685,7 +705,8 @@ def test_a_credit_naming_a_transfer_refuses_a_dispute_now_waiting_on_another(sto
 
     assert refused is None
     assert held == ["dsp_0001"]
-    assert landed is not None and (landed.status, landed.refund_tx, landed.credited_usdc) == ("credited", "tx_new", 1.5)
+    assert landed is not None
+    assert (landed.status, landed.refund_tx, landed.credited_usdc) == ("credited", "tx_new", 1.5)
     assert after == ()
 
 
@@ -1311,7 +1332,8 @@ def test_a_settlement_round_trips_through_the_json_column(pg: PostgresDisputeSto
     stored, kinds = run(pg, go())
 
     assert stored == a_settlement()
-    assert stored is not None and stored.steps == STEPS
+    assert stored is not None
+    assert stored.steps == STEPS
     # It really went through JSON: the column holds a JSON array, not text.
     assert kinds == [{"t": "array"}]
 
@@ -1341,7 +1363,8 @@ def test_settling_twice_appends_a_row_and_the_newest_one_wins(pg: PostgresDisput
     by_task, by_job, rows = run(pg, go())
 
     # The newest row by `id`, for both keys — not the first one written.
-    assert by_task is not None and by_task.job_id_hex == JOB
+    assert by_task is not None
+    assert by_task.job_id_hex == JOB
     assert by_task.window_closes_at == 1_700_259_200.0
     assert by_job == by_task
     assert len(rows) == 3
@@ -1479,7 +1502,8 @@ def test_a_transition_appends_a_row_and_leaves_the_opening_one_alone(pg: Postgre
 
     credited, rows = run(pg, go())
 
-    assert credited is not None and credited.status == "credited"
+    assert credited is not None
+    assert credited.status == "credited"
     assert credited.refund_tx == "tx_refund"
     assert len(rows) == 2
     # The opening row still says exactly what it always said.
@@ -1538,9 +1562,11 @@ def test_the_moment_a_dispute_resolved_is_stamped_once_and_never_moved(pg: Postg
     upheld, credited, rows = run(pg, go())
     after = time.time()
 
-    assert upheld is not None and upheld.resolved_at is not None
+    assert upheld is not None
+    assert upheld.resolved_at is not None
     assert before <= upheld.resolved_at <= after
-    assert credited is not None and credited.resolved_at == upheld.resolved_at
+    assert credited is not None
+    assert credited.resolved_at == upheld.resolved_at
     assert rows[-1]["resolved_at"] == upheld.resolved_at
 
 
@@ -1551,7 +1577,8 @@ def test_a_caller_may_supply_the_moment_it_resolved(pg: PostgresDisputeStore) ->
 
     rejected = run(pg, go())
 
-    assert rejected is not None and rejected.resolved_at == 1_700_009_999.0
+    assert rejected is not None
+    assert rejected.resolved_at == 1_700_009_999.0
 
 
 def test_an_adjudicators_note_is_appended_and_read_back_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
@@ -1567,8 +1594,11 @@ def test_an_adjudicators_note_is_appended_and_read_back_in_postgres(pg: Postgres
 
     rejected, stored, rows = run(pg, go())
 
-    assert rejected is not None and rejected.note == NOTE
-    assert stored is not None and stored.note == NOTE and stored.rating_tx == "tx_rating"
+    assert rejected is not None
+    assert rejected.note == NOTE
+    assert stored is not None
+    assert stored.note == NOTE
+    assert stored.rating_tx == "tx_rating"
     assert [row["note"] for row in rows] == [None, NOTE, NOTE]
 
 
@@ -1589,8 +1619,9 @@ def test_the_note_column_is_added_to_a_table_that_already_exists() -> None:
 def test_a_transition_on_an_unknown_dispute_is_a_key_error_in_postgres(pg: PostgresDisputeStore, pg_dsn: str) -> None:
     """`INSERT ... SELECT FROM latest` writes nothing when there is no history,
     so the store says so instead of inventing a dispute out of an id."""
+    transition = pg.append_status("dsp_never", "upheld")
     with pytest.raises(KeyError):
-        run(pg, pg.append_status("dsp_never", "upheld"))
+        run(pg, transition)
 
     assert asyncio.run(events(pg_dsn)) == []
 
@@ -1638,8 +1669,9 @@ def test_a_refused_transition_is_told_apart_from_an_unknown_dispute(pg: Postgres
 
     assert run(pg, go()) is None
 
+    transition = pg.append_status("dsp_never", "credited", expected_status="open")
     with pytest.raises(KeyError):
-        run(pg, pg.append_status("dsp_never", "credited", expected_status="open"))
+        run(pg, transition)
 
 
 # ── two transitions at once ───────────────────────────────────────────────
@@ -1834,7 +1866,8 @@ def test_every_statement_and_every_acquire_names_its_own_bound() -> None:
     asyncio.run(go())
 
     # Every statement the store sent, the DDL included, named a bound.
-    assert pool.statements and None not in pool.timeouts
+    assert pool.statements
+    assert None not in pool.timeouts
     assert len(pool.timeouts) == len(pool.statements)
     # And the two calls that take a connection of their own — the DDL and
     # append_status — bounded the wait for it: longer than a command, so a
@@ -1857,7 +1890,8 @@ def test_a_missing_driver_names_the_fix() -> None:
         dispute_store._import_asyncpg()
 
     message = str(excinfo.value)
-    assert "asyncpg" in message and "DATABASE_URL" in message
+    assert "asyncpg" in message
+    assert "DATABASE_URL" in message
 
 
 # ── get_dispute_store / close_dispute_store ───────────────────────────────
@@ -1981,4 +2015,5 @@ def test_choosing_the_in_memory_store_is_a_warning_that_records_are_not_kept(
     assert chosen.levelno == logging.WARNING
     message = chosen.getMessage()
     assert "dispute and settlement records are held in memory only" in message
-    assert "LOST on restart" in message and f"cap of {dispute_store._MAX_IN_MEMORY}" in message
+    assert "LOST on restart" in message
+    assert f"cap of {dispute_store._MAX_IN_MEMORY}" in message

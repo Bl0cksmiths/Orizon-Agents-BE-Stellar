@@ -62,7 +62,7 @@ class _Store(InMemoryDisputeStore):
         await super().record_settlement(record)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch) -> _Store:
     fresh = _Store()
     monkeypatch.setattr(dispute_store, "_store", fresh)
@@ -312,8 +312,9 @@ def test_payout_plan_merges_per_agent_past_sixteen_and_refuses_past_sixteen_agen
     assert len(per_step.payouts) == 16
 
     distinct = _plan(tuple(0.01 for _ in range(17)))
+    all_delivered = frozenset(range(17))
     with pytest.raises(execution_svc._PayoutRefused):
-        execution_svc._payout_plan(distinct, frozenset(range(17)), {})
+        execution_svc._payout_plan(distinct, all_delivered, {})
 
 
 # ── S1: only agents with a confirmed on-chain owner are named ───────────
@@ -399,7 +400,8 @@ def test_a_run_that_delivered_but_paid_nobody_gets_a_delivery_only_seal(monkeypa
     assert (task.charge_tx, task.proof_tx, task.settlement) == (SETTLE_TX, SEAL_TX, "released")
     assert (task.seal, task.seal_kind) == ("sealed", "delivery_only")
     record = store.recorded[-1]
-    assert record.proof_tx == SEAL_TX and all(s.delivered and not s.paid_usdc for s in record.steps)
+    assert record.proof_tx == SEAL_TX
+    assert all(s.delivered and not s.paid_usdc for s in record.steps)
     messages = [line.msg for line in state.traces["tsk_v2_paid_nobody"]]
     assert any(m.startswith("workflow sealed — 2 agents delivered, no payment was made") for m in messages)
     assert not any("USDC" in m and m.startswith("workflow sealed") for m in messages)
@@ -420,7 +422,8 @@ def test_a_run_that_paid_someone_is_sealed_as_paid_and_names_only_the_paid(monke
     _run(_plan((0.01, 0.02)), "tsk_v2_paid_some")
 
     [seal] = chain.named("seal")
-    assert scval.to_native(seal[4]) == ["agt_1"] and scval.to_native(seal[6]) == 200_000
+    assert scval.to_native(seal[4]) == ["agt_1"]
+    assert scval.to_native(seal[6]) == 200_000
     task = state.tasks["tsk_v2_paid_some"]
     assert (task.seal, task.seal_kind) == ("sealed", "paid")
 
@@ -445,7 +448,8 @@ def test_zero_delivered_is_an_empty_settle_under_v2(monkeypatch, store):
     [settle] = chain.named("settle")
     assert _payouts(settle) == []
     assert scval.to_native(settle[2]) == execution_svc.unsettled_job_id("tsk_v2_nothing")
-    assert chain.named("seal") == [] and store.recorded == []
+    assert chain.named("seal") == []
+    assert store.recorded == []
     assert state.tasks["tsk_v2_nothing"].settlement == "released"
 
 
@@ -455,7 +459,8 @@ def test_zero_delivered_is_a_skip_under_v1(monkeypatch, store):
 
     _run(_plan((0.05,)), "tsk_v2_nothing_v1")
 
-    assert chain.calls == [] and chain.reads == []
+    assert chain.calls == []
+    assert chain.reads == []
     assert state.tasks["tsk_v2_nothing_v1"].settlement == "skipped"
 
 
@@ -489,7 +494,8 @@ def test_the_v1_charge_goes_out_with_exactly_the_args_it_always_had(monkeypatch,
         sc.bytes16(job_id),
     ]
     assert [a.to_xdr() for a in charge] == [a.to_xdr() for a in expected]
-    assert chain.named("settle") == [] and chain.reads == []
+    assert chain.named("settle") == []
+    assert chain.reads == []
     assert store.recorded[0].steps[0].paid_usdc is None
 
 
@@ -717,7 +723,7 @@ def _execute(plan: StoredPlan, payer: str = PAYER) -> str:
     return asyncio.run(execution_svc.execute_plan(plan, auth_id_hex=AUTH_ID_HEX, payer=payer))
 
 
-@pytest.fixture()
+@pytest.fixture
 def captured_runs(monkeypatch) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
 
@@ -731,9 +737,10 @@ def captured_runs(monkeypatch) -> list[dict[str, Any]]:
 def test_execute_refuses_an_authorization_that_expires_before_a_worst_case_run(monkeypatch, captured_runs):
     needed = execution_svc.worst_case_run_seconds(6)
     _install(monkeypatch, _Chain(auth=_auth(expires_at=int(time.time() + needed - 30))))
+    plan = _plan_for_execute()
 
     with pytest.raises(execution_svc.AuthorizationRefusedError) as refused:
-        _execute(_plan_for_execute())
+        _execute(plan)
 
     assert (refused.value.status_code, refused.value.detail) == (409, "authorization_expiring")
     assert captured_runs == []
@@ -770,9 +777,10 @@ def test_execute_refuses_an_authorization_that_cannot_pay_for_the_plan(
     monkeypatch, captured_runs, auth, payer, status, code
 ):
     _install(monkeypatch, _Chain(auth=auth))
+    plan = _plan_for_execute()
 
     with pytest.raises(execution_svc.AuthorizationRefusedError) as refused:
-        _execute(_plan_for_execute(), payer=payer)
+        _execute(plan, payer=payer)
 
     assert (refused.value.status_code, refused.value.detail) == (status, code)
     assert captured_runs == []
@@ -785,9 +793,10 @@ def test_execute_refuses_an_unreadable_authorization(monkeypatch, captured_runs)
         raise RuntimeError("rpc down")
 
     monkeypatch.setattr(sc, "simulate_read", down)
+    plan = _plan_for_execute()
 
     with pytest.raises(execution_svc.AuthorizationRefusedError) as refused:
-        _execute(_plan_for_execute())
+        _execute(plan)
 
     assert (refused.value.status_code, refused.value.detail) == (503, "authorization_unreadable")
     assert chain.calls == []

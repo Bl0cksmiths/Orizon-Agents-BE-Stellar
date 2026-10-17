@@ -373,12 +373,14 @@ def test_a_refund_that_did_not_land_records_no_credited_amount(monkeypatch, answ
     dispute = a_dispute()
     settler(monkeypatch, answer)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == code
     stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stored is not None and stored.status != "credited"
+    assert stored is not None
+    assert stored.status != "credited"
     assert stored.credited_usdc is None
 
 
@@ -571,7 +573,8 @@ def test_a_second_uphold_holding_a_stale_open_read_never_signs_a_second_transfer
     won, lost = asyncio.run(race())
 
     assert len(chain.calls) == 1, f"the settler signed {len(chain.calls)} transfers for one dispute"
-    assert won.status == "credited" and won.refund_tx == "tx_credit"
+    assert won.status == "credited"
+    assert won.refund_tx == "tx_credit"
     assert lost == won, "the loser was answered with something other than the credit that exists"
     final = store._disputes[dispute.id]
     assert (final.status, final.refund_tx, final.credited_usdc) == ("credited", "tx_credit", 0.05)
@@ -604,13 +607,15 @@ def test_a_stale_uphold_is_refused_rather_than_racing_a_live_adjudication(monkey
     won, lost = asyncio.run(race())
 
     assert won.code == "refund_failed"
-    assert lost.code == "adjudication_in_progress" and lost.status_code == 409
+    assert lost.code == "adjudication_in_progress"
+    assert lost.status_code == 409
     assert len(chain.calls) == 1
     # Refused, never stranded: the dispute is upheld and still owed.
     assert store._disputes[dispute.id].status == "upheld"
     assert asyncio.run(store.list_refund_claims()) == ()
     paid = asyncio.run(dispute_svc.uphold(dispute.id))
-    assert paid.status == "credited" and len(chain.calls) == 2
+    assert paid.status == "credited"
+    assert len(chain.calls) == 2
 
 
 def test_an_in_flight_hash_the_store_would_not_record_still_refuses_with_the_hash(monkeypatch, caplog) -> None:
@@ -636,10 +641,12 @@ def test_an_in_flight_hash_the_store_would_not_record_still_refuses_with_the_has
     monkeypatch.setattr(store, "append_status", _refuses_the_hash)
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as refused:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
-    assert refused.value.code == "refund_unconfirmed" and refused.value.status_code == 504
+    assert refused.value.code == "refund_unconfirmed"
+    assert refused.value.status_code == 504
     stuck = store._disputes[dispute.id]
     assert stuck.status == "crediting"
     assert stuck.refund_tx is None, "the hash was not recorded, so the log is the only place it exists"
@@ -694,7 +701,8 @@ def test_a_stale_uphold_landing_mid_flight_leaves_the_buyer_payable(monkeypatch,
     lost, won = asyncio.run(race())
 
     assert mid_flight == [("crediting", "refund_in_flight")]
-    assert lost.code == "refund_in_flight" and lost.status_code == 409
+    assert lost.code == "refund_in_flight"
+    assert lost.status_code == 409
     assert won.code == "refund_failed"
     assert len(chain.calls) == 1
     # FAILED means nothing moved, so the claim went back and the buyer can
@@ -743,7 +751,8 @@ def test_a_rejection_holding_a_stale_open_read_never_drops_a_live_payout(monkeyp
 
     rejection, credit = asyncio.run(race())
 
-    assert rejection.code == "dispute_not_open" and rejection.status_code == 409
+    assert rejection.code == "dispute_not_open"
+    assert rejection.status_code == 409
     assert "crediting" in rejection.message, f"the adjudicator was not told the real status: {rejection.message}"
     assert credit.code == "refund_unconfirmed"
     # The in-flight payout keeps both of the things that make it reconcilable:
@@ -764,14 +773,16 @@ def test_a_failed_transfer_leaves_the_dispute_upheld_and_still_payable(monkeypat
     dispute = a_dispute()
     chain = settler(monkeypatch, REJECTED, LANDED)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_failed"
     assert refused.value.status_code == 502
     assert refused.value.existing is None
     stranded = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stranded is not None and stranded.status == "upheld"
+    assert stranded is not None
+    assert stranded.status == "upheld"
     assert stranded.refund_tx is None  # nothing landed, so nothing is claimed to have
 
     # Payable again, which is the entire point of releasing the claim.
@@ -790,18 +801,21 @@ def test_a_timed_out_transfer_keeps_the_claim_and_the_next_uphold_refuses(monkey
     dispute = a_dispute()
     chain = settler(monkeypatch, LOST)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_unconfirmed"
     assert refused.value.status_code == 504
     assert "never retried" in refused.value.message
     in_flight = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert in_flight is not None and in_flight.status == "crediting"
+    assert in_flight is not None
+    assert in_flight.status == "crediting"
     assert in_flight.refund_tx == "tx_inflight"  # the reconciliation starts from the record
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as again:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert again.value.code == "refund_in_flight"
     assert again.value.status_code == 409
@@ -815,8 +829,9 @@ def test_a_timeout_logs_what_a_human_needs_to_reconcile_it(monkeypatch, caplog) 
     dispute = a_dispute()
     settler(monkeypatch, LOST)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER), pytest.raises(DisputeError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     # ERROR only, and from this module only: `a_dispute` logs the opening at
     # INFO and `refund_svc` logs its own view of the same timeout.
@@ -837,12 +852,14 @@ def test_an_unrecognised_transfer_status_is_treated_as_unconfirmed(monkeypatch) 
     dispute = a_dispute()
     settler(monkeypatch, {"status": "PENDING", "hash": "tx_who_knows"})
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_unconfirmed"
     stuck = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stuck is not None and stuck.status == "crediting"
+    assert stuck is not None
+    assert stuck.status == "crediting"
     assert stuck.refund_tx == "tx_who_knows"
 
 
@@ -885,8 +902,9 @@ def test_a_landed_credit_the_store_would_not_record_is_logged_with_every_id(
     monkeypatch.setattr(store, "append_status", _unreachable)
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(RuntimeError, match=raised):
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     # The claim is what stops a second payment, so it must outlive the failure.
     assert store._disputes[dispute.id].status == "crediting"
@@ -918,8 +936,9 @@ def test_the_refund_switch_refuses_before_the_store_is_even_read(monkeypatch) ->
     monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refunds_disabled"
     assert refused.value.status_code == 503
@@ -961,8 +980,9 @@ def test_a_deployment_that_cannot_sign_a_credit_claims_nothing(
     store = dispute_store.get_dispute_store()
 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as refused:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert refused.value.code == "refunds_not_configured"
     assert refused.value.status_code == 503
@@ -992,11 +1012,13 @@ def test_a_cancelled_transfer_never_releases_the_claim(monkeypatch) -> None:
 
     monkeypatch.setattr(refund_svc, "execute_refund", _cancelled_mid_flight)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     unaccounted = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unaccounted is not None and unaccounted.status == "crediting"
+    assert unaccounted is not None
+    assert unaccounted.status == "crediting"
 
 
 # ── refusals raised before the settler's key is touched ─────────
@@ -1011,15 +1033,17 @@ def test_a_credit_above_the_cap_never_reaches_the_signer(monkeypatch) -> None:
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)  # the step settled for 0.05
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_above_cap"
     assert refused.value.status_code == 409
     # Nothing was signed, so the claim went back: the buyer is still owed, and
     # raising the ceiling makes this dispute payable without touching it.
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid is not None
+    assert unpaid.status == "upheld"
     assert unpaid.refund_tx is None
 
     monkeypatch.setattr(settings, "max_refund_usdc", 1.0)
@@ -1036,13 +1060,15 @@ def test_a_credit_that_computes_to_nothing_is_refused_and_hands_the_claim_back(m
     monkeypatch.setattr(settings, "dispute_credited_fraction", 0.0)
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "nothing_to_credit"
     assert refused.value.status_code == 409
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid is not None
+    assert unpaid.status == "upheld"
 
 
 def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> None:
@@ -1055,13 +1081,15 @@ def test_a_dispute_whose_settlement_is_gone_cannot_be_priced(monkeypatch) -> Non
     dispute_store.get_dispute_store()._settlements.clear()
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "settlement_missing"
     assert refused.value.status_code == 409
     unpaid = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unpaid is not None and unpaid.status == "upheld"
+    assert unpaid is not None
+    assert unpaid.status == "upheld"
 
 
 # ── rejection, and what a rejected dispute may never become ─────
@@ -1090,13 +1118,15 @@ def test_a_rejected_dispute_can_never_be_credited(monkeypatch) -> None:
     asyncio.run(dispute_svc.reject(dispute.id, note="the output matched the brief"))
     no_signing(monkeypatch)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "dispute_rejected"
     assert refused.value.status_code == 409
     still_rejected = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert still_rejected is not None and still_rejected.status == "rejected"
+    assert still_rejected is not None
+    assert still_rejected.status == "rejected"
 
 
 def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
@@ -1120,19 +1150,24 @@ def test_a_rejection_reason_never_reaches_the_log(monkeypatch, caplog) -> None:
     assert len(logged) == 1
     assert reason not in logged[0]
     assert "noted=yes" in logged[0]
-    assert dispute.id in logged[0] and JOB in logged[0] and dispute.payer in logged[0]
+    assert dispute.id in logged[0]
+    assert JOB in logged[0]
+    assert dispute.payer in logged[0]
     # ...and it is on the record, cleaned and otherwise verbatim, which is the
     # other half of the same decision.
     assert rejected.note == reason
 
     caplog.clear()
     other = a_dispute(step=1)
+    rejecting = dispute_svc.reject(other.id, note=" \t\x1b\x07 ")
     with caplog.at_level(logging.INFO, logger=SVC_LOGGER), pytest.raises(DisputeError):
-        asyncio.run(dispute_svc.reject(other.id, note=" \t\x1b\x07 "))
+        asyncio.run(rejecting)
 
     (refusal,) = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and "refused" in r.getMessage()]
-    assert "rejection_reason_required" in refusal and other.id in refusal
-    assert "\x1b" not in refusal and "\x07" not in refusal
+    assert "rejection_reason_required" in refusal
+    assert other.id in refusal
+    assert "\x1b" not in refusal
+    assert "\x07" not in refusal
 
 
 @pytest.mark.parametrize("status", ["upheld", "crediting", "credited", "rejected"])
@@ -1146,14 +1181,16 @@ def test_a_dispute_that_is_not_open_cannot_be_rejected(monkeypatch, status: str)
     dispute = a_dispute()
     asyncio.run(dispute_store.get_dispute_store().append_status(dispute.id, status))
 
+    rejecting = dispute_svc.reject(dispute.id, note="changed my mind")
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.reject(dispute.id, note="changed my mind"))
+        asyncio.run(rejecting)
 
     assert refused.value.code == "dispute_not_open"
     assert refused.value.status_code == 409
     assert status in refused.value.message  # the adjudicator is told what it IS
     unchanged = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert unchanged is not None and unchanged.status == status
+    assert unchanged is not None
+    assert unchanged.status == status
 
 
 @pytest.mark.parametrize(
@@ -1168,8 +1205,9 @@ def test_an_id_nobody_issued_is_refused_by_both_decisions(monkeypatch, adjudicat
     only thing left for it to refuse."""
     no_signing(monkeypatch)
 
+    adjudicating = adjudicate("dsp_nosuchdispute")
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(adjudicate("dsp_nosuchdispute"))
+        asyncio.run(adjudicating)
 
     assert refused.value.code == "unknown_dispute"
     assert refused.value.status_code == 404
@@ -1306,7 +1344,8 @@ def test_a_rejection_keeps_the_adjudicators_reason_on_the_record(monkeypatch) ->
 
     assert rejected.note == "the SEO brief was delivered in full"
     stored = asyncio.run(dispute_svc.get_dispute(dispute.id))
-    assert stored is not None and stored.note == rejected.note
+    assert stored is not None
+    assert stored.note == rejected.note
     # The platform's side is written beside the buyer's, never over it.
     assert rejected.reason == dispute.reason
 
@@ -1336,13 +1375,16 @@ def test_a_rejection_note_is_cleaned_and_bounded_before_it_is_stored(monkeypatch
     messy = asyncio.run(dispute_svc.reject(a_dispute().id, note="checked\nthe \x00brief\x1b[31m in full"))
 
     assert messy.note is not None
-    assert "\x00" not in messy.note and "\x1b" not in messy.note
-    assert "\n" in messy.note and messy.note.startswith("checked")
+    assert "\x00" not in messy.note
+    assert "\x1b" not in messy.note
+    assert "\n" in messy.note
+    assert messy.note.startswith("checked")
 
     # Bounded by REFUSAL, never by a cut (D-062): a note the buyer reads with
     # its end missing is a different note.
+    rejecting = dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000)
     with pytest.raises(DisputeError) as too_long:
-        asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="x" * 5_000))
+        asyncio.run(rejecting)
 
     assert too_long.value.code == "rejection_reason_too_long"
 
@@ -1386,15 +1428,17 @@ def test_a_rejection_without_a_usable_reason_is_refused_before_anything_is_writt
 
     monkeypatch.setattr(store, "get_dispute", _must_not_be_read)
 
+    rejecting = dispute_svc.reject(dispute.id, note=cast(str, note))
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.reject(dispute.id, note=cast(str, note)))
+        asyncio.run(rejecting)
 
     assert refused.value.code == "rejection_reason_required"
     assert refused.value.status_code == 422
     assert refused.value.existing is None
     # Nothing written: the record is the very one the buyer opened.
     assert store._disputes[dispute.id] is as_opened
-    assert as_opened.status == "open" and as_opened.note is None
+    assert as_opened.status == "open"
+    assert as_opened.note is None
 
 
 # ── the dispute rating: after the credit, never instead of it ───
@@ -1481,15 +1525,17 @@ def test_an_open_or_rejected_dispute_is_never_rated(monkeypatch, rater, invalida
     opened = a_dispute()
     rejected = asyncio.run(dispute_svc.reject(a_dispute(step=1).id, note="the SEO brief was delivered in full"))
 
+    upholding = dispute_svc.uphold(rejected.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(rejected.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "dispute_rejected"
     assert rater.calls == 0
     assert invalidated == []
     for dispute_id in (opened.id, rejected.id):
         stored = asyncio.run(dispute_svc.get_dispute(dispute_id))
-        assert stored is not None and stored.rating_tx is None
+        assert stored is not None
+        assert stored.rating_tx is None
 
 
 @pytest.mark.parametrize(("answer", "code"), [(REJECTED, "refund_failed"), (LOST, "refund_unconfirmed")])
@@ -1504,13 +1550,15 @@ def test_an_upheld_dispute_whose_credit_did_not_land_is_never_rated(
     dispute = a_dispute()
     settler(monkeypatch, answer)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
     assert refused.value.code == code
 
     if answer is LOST:
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError):
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert rater.calls == 0
 
@@ -1524,7 +1572,8 @@ def test_a_repeat_uphold_lands_a_rating_that_failed_without_a_second_credit(monk
     chain = settler(monkeypatch, LANDED)
     rater.script = ["FAILED"]
     paid = asyncio.run(dispute_svc.uphold(dispute.id))
-    assert paid.status == "credited" and paid.rating_tx is None
+    assert paid.status == "credited"
+    assert paid.rating_tx is None
     assert invalidated == []
 
     trap_the_refund(monkeypatch)
@@ -1553,7 +1602,8 @@ def test_a_rating_with_no_settlement_to_weight_it_is_not_attempted(monkeypatch, 
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         again = asyncio.run(dispute_svc.uphold(dispute.id))
 
-    assert again == paid and again.rating_tx is None
+    assert again == paid
+    assert again.rating_tx is None
     assert rater.calls == 1  # the first attempt only
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 1
@@ -1585,8 +1635,10 @@ def test_a_deployment_that_cannot_rate_submits_nothing_and_says_why(
         paid = asyncio.run(dispute_svc.uphold(dispute.id))
         again = asyncio.run(dispute_svc.uphold(dispute.id))
 
-    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
-    assert paid.rating_tx is None and again == paid
+    assert paid.status == "credited"
+    assert paid.refund_tx == "tx_credit"
+    assert paid.rating_tx is None
+    assert again == paid
     assert rater.calls == 0
     assert invalidated == []
     assert len(chain.calls) == 1
@@ -1611,7 +1663,9 @@ def test_a_signing_key_that_goes_missing_after_the_credit_stops_the_rating_and_s
     chain = settler(monkeypatch, LANDED)
 
     paid = asyncio.run(dispute_svc.uphold(dispute.id))
-    assert paid.status == "credited" and paid.rating_tx == "tx_rating" and rater.calls == 1
+    assert paid.status == "credited"
+    assert paid.rating_tx == "tx_rating"
+    assert rater.calls == 1
 
     monkeypatch.setattr(settings, "stellar_signing_key", "")
     trap_the_refund(monkeypatch)  # a rating-only retry must sign nothing either
@@ -1622,7 +1676,9 @@ def test_a_signing_key_that_goes_missing_after_the_credit_stops_the_rating_and_s
         again = asyncio.run(dispute_svc.uphold(dispute.id))
 
     assert again == paid  # paid, and not re-rated
-    assert rater.calls == 1 and invalidated == [] and len(chain.calls) == 1
+    assert rater.calls == 1
+    assert invalidated == []
+    assert len(chain.calls) == 1
     logged = [r.getMessage() for r in caplog.records if r.name == SVC_LOGGER and r.levelno == logging.ERROR]
     assert len(logged) == 1
     for fact in ("STELLAR_SIGNING_KEY is unset", dispute.id, JOB, "agt_writer", dispute.payer):

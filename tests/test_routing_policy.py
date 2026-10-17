@@ -87,7 +87,7 @@ def _onchain(agent_id: str) -> Agent:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
     """Seeded catalog + a top-rated bound external + an unbound one + a simulated
     built-in agent. Yields the agent-id lists each reputation read asked for."""
@@ -121,7 +121,7 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
     state.agents.update(saved)
 
 
-@pytest.fixture()
+@pytest.fixture
 def claude_on(monkeypatch: pytest.MonkeyPatch, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
 
@@ -189,14 +189,16 @@ def test_a_top_rated_external_agent_is_never_offered_or_planned(
     resp = _decompose()
 
     (call,) = fake_claude.calls_for("planner")
-    assert f"id={EXTERNAL} " not in call.system and f"id={UNBOUND} " not in call.system
+    assert f"id={EXTERNAL} " not in call.system
+    assert f"id={UNBOUND} " not in call.system
     assert [s.agent_id for s in resp.steps] == ["agt_11c0", "agt_12r0"]
     assert all(s.executor == "built_in" for s in resp.steps)
     # The card says why ONCE, in the policy's own words, naming no outside
     # agent — not one notice per agent, and not as an endpoint problem.
     external = [n for n in resp.notices if n.reason_code == "external_not_routed"]
     assert [(n.agent_id, n.agent_name) for n in external] == [(EXTERNAL_POLICY_ID, None)]
-    assert EXTERNAL not in _codes(resp) and UNBOUND not in _codes(resp)
+    assert EXTERNAL not in _codes(resp)
+    assert UNBOUND not in _codes(resp)
     assert "unbound_endpoint" not in _codes(resp).values()
     # And its reputation was never even read: nothing could have used it.
     assert all(EXTERNAL not in ids for ids in registry)
@@ -214,22 +216,23 @@ def test_a_plan_of_only_external_steps_falls_back_to_a_built_in_agent(
 
 
 def test_the_clamp_holds_the_policy_if_the_switch_turns_off_mid_plan(
-    registry: list[list[str]], claude_on: None, fake_claude: FakeClaude, fake_jev: FakeJev
+    registry: list[list[str]],
+    claude_on: None,
+    fake_claude: FakeClaude,
+    fake_jev: FakeJev,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Offered under the switch ON; the switch is OFF by the time the plan
     # comes back. The clamp asks again at the point of use.
-    settings.planner_route_external = True
+    monkeypatch.setattr(settings, "planner_route_external", True)
 
     def planner(request: Any) -> ModelPlan:
         assert f"id={EXTERNAL} " in request.system
-        settings.planner_route_external = False
+        monkeypatch.setattr(settings, "planner_route_external", False)
         return _plan(EXTERNAL, "agt_11c0")
 
     _screened(fake_claude, fake_jev, planner)
-    try:
-        resp = _decompose()
-    finally:
-        settings.planner_route_external = False
+    resp = _decompose()
 
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
 
@@ -250,7 +253,8 @@ def test_the_legacy_planner_holds_the_same_policy(registry: list[list[str]], mon
 
     resp = _decompose("write a haiku about databases")
 
-    assert f"id={EXTERNAL} " not in seen[0] and f"id={SIMULATED} " not in seen[0]
+    assert f"id={EXTERNAL} " not in seen[0]
+    assert f"id={SIMULATED} " not in seen[0]
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
     assert _codes(resp)[EXTERNAL_POLICY_ID] == "external_not_routed"
     assert _codes(resp)[SIMULATED] == "simulated_worker"
@@ -316,7 +320,8 @@ def test_one_policy_notice_however_many_outside_agents_are_listed(
             state.agents.pop(f"ext_crowd{i:02d}", None)
 
     external = [n for n in shortlist.notices if n.reason_code == "external_not_routed"]
-    assert len(external) == 1 and external[0].agent_id == EXTERNAL_POLICY_ID
+    assert len(external) == 1
+    assert external[0].agent_id == EXTERNAL_POLICY_ID
     assert all(not n.agent_id.startswith("ext_") for n in shortlist.notices)
     # The per-agent detail is in the server log, not on the card.
     assert any("ext_crowd00" in r.getMessage() and EXTERNAL in r.getMessage() for r in caplog.records)
@@ -347,7 +352,8 @@ def test_with_the_switch_on_an_external_agent_competes_on_merit(
     resp = _decompose()
 
     (call,) = fake_claude.calls_for("planner")
-    assert f"id={EXTERNAL} " in call.system and f"id={UNBOUND} " not in call.system
+    assert f"id={EXTERNAL} " in call.system
+    assert f"id={UNBOUND} " not in call.system
     assert [s.agent_id for s in resp.steps] == [EXTERNAL, "agt_01h8"]
     assert resp.steps[0].executor == "external"
     codes = _codes(resp)

@@ -94,7 +94,7 @@ def _external(agent_id: str) -> Agent:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def marketplace(client, monkeypatch):
     """The catalog plus two indexed on-chain agents, one bound and one not.
     The whole registry is restored afterwards, not just the two added here."""

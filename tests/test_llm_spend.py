@@ -159,14 +159,16 @@ def test_a_failed_write_is_logged_and_the_spend_still_counts(
 
     asyncio.run(run())
     messages = " ".join(r.getMessage() for r in caplog.records)
-    assert "not persisted" in messages and "unreadable" in messages
+    assert "not persisted" in messages
+    assert "unreadable" in messages
 
 
 def test_record_refuses_a_bad_purpose_or_cost() -> None:
     ledger = _ledger(Clock(NOON))
     for purpose, cost in (("Planner Call", 0.1), ("", 0.1), ("planner", -1.0), ("planner", float("nan"))):
+        recording = ledger.record(model="m", purpose=purpose, usage=Usage(), cost=cost)
         with pytest.raises(ValueError):
-            asyncio.run(ledger.record(model="m", purpose=purpose, usage=Usage(), cost=cost))
+            asyncio.run(recording)
 
 
 def test_seconds_until_reset_counts_to_the_next_utc_midnight() -> None:
@@ -234,7 +236,8 @@ def test_postgres_rows_increment_per_day_model_and_purpose(pg_dsn: str) -> None:
         return total, before, rows
 
     total, before, rows = asyncio.run(run())
-    assert total == pytest.approx(0.751) and before == 0.0
+    assert total == pytest.approx(0.751)
+    assert before == 0.0
     assert rows == [
         {
             "model": "claude-opus-5-5",
@@ -308,7 +311,8 @@ def test_record_nowait_counts_at_once_and_persists_in_the_background() -> None:
         return counted, rows_before
 
     counted, rows_before = asyncio.run(run())
-    assert counted == 0.5 and rows_before == 0
+    assert counted == 0.5
+    assert rows_before == 0
     assert [row for row in store.rows.values()] == [(1, Usage(10, 20), 0.5)]
     # With no loop to write on, the in-memory total still holds it.
     ledger = SpendLedger(InMemorySpendStore())

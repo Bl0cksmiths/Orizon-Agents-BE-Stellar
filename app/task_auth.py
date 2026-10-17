@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from fastapi import Header, HTTPException, Query, Request
 
 from .config import settings
-from .security import header_secret_matches
+from .security import ErrorEnvelope, header_secret_matches
 from .services import task_persistence
 from .state import read_token_digest, state
 
@@ -325,3 +325,17 @@ async def require_task_read(
         # Nothing is lost: the id is in the path the caller sent, in the access
         # log line, and joinable to both through the request id.
         raise HTTPException(404, "unknown_task")
+
+
+# What `require_task_read` and the routes behind it answer besides the body,
+# for those routes' `responses=`.
+TASK_READ_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {
+        "model": ErrorEnvelope,
+        "description": "`unknown_task` — no such task, or the read token does not prove it. The two are one answer.",
+    },
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`task_store_unavailable` (+ Retry-After) — the task store could not be read.",
+    },
+}

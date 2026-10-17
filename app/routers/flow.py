@@ -25,6 +25,6 @@ DEFAULT_FLOW = Flow(
 )
 
 
-@router.get("/flow/default", response_model=Flow, summary="Default agent-graph flow layout")
+@router.get("/flow/default", summary="Default agent-graph flow layout")
 async def default_flow() -> Flow:
     return DEFAULT_FLOW

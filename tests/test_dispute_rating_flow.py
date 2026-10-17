@@ -314,16 +314,19 @@ def test_a_timed_out_rating_that_never_landed_is_replaced_by_the_retry(ledger, s
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         unconfirmed = uphold(dispute.id)
 
-    assert unconfirmed.status == "credited" and unconfirmed.refund_tx == "tx_credit"
+    assert unconfirmed.status == "credited"
+    assert unconfirmed.refund_tx == "tx_credit"
     assert unconfirmed.rating_tx == "tx_rating_1"
     assert invalidated == []
     (logged,) = svc_errors(caplog)
-    assert "unconfirmed" in logged and "tx_rating_1" in logged
+    assert "unconfirmed" in logged
+    assert "tx_rating_1" in logged
 
     settled = uphold(dispute.id)
 
     assert settled.rating_tx == "tx_rating_2"
-    assert ledger.replays == 0 and len(ledger.submits) == 2
+    assert ledger.replays == 0
+    assert len(ledger.submits) == 2
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
 
@@ -342,7 +345,8 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     dispute = open_dispute()
     ledger.script = ["late"]
     unconfirmed = uphold(dispute.id)
-    assert unconfirmed.rating_tx == "tx_rating_1" and invalidated == []
+    assert unconfirmed.rating_tx == "tx_rating_1"
+    assert invalidated == []
     assert unconfirmed.rating_confirmed is False
 
     confirmed = uphold(dispute.id)
@@ -351,9 +355,11 @@ def test_a_timed_out_rating_that_landed_is_confirmed_by_the_retry(ledger, settle
     # them: only the confirmation moved, and the moment it was recorded.
     assert confirmed.rating_confirmed is True
     assert confirmed == replace(unconfirmed, rating_confirmed=True, updated_at=confirmed.updated_at)
-    assert confirmed.updated_at is not None and unconfirmed.updated_at is not None
+    assert confirmed.updated_at is not None
+    assert unconfirmed.updated_at is not None
     assert confirmed.updated_at >= unconfirmed.updated_at
-    assert ledger.replays == 1 and len(ledger.submits) == 1
+    assert ledger.replays == 1
+    assert len(ledger.submits) == 1
     assert invalidated == [AGENT]
     assert len(settler.transfers) == 1
 
@@ -375,7 +381,8 @@ def test_a_failed_rating_records_nothing_and_the_retry_lands_it(ledger, settler,
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         failed = uphold(dispute.id)
 
-    assert failed.status == "credited" and failed.refund_tx == "tx_credit"
+    assert failed.status == "credited"
+    assert failed.refund_tx == "tx_credit"
     assert failed.rating_tx is None
     assert invalidated == []
     (logged,) = svc_errors(caplog)
@@ -418,10 +425,12 @@ def test_a_replay_with_nothing_on_record_is_a_loud_collision_and_the_buyer_keeps
         collided = uphold(dispute.id)
         again = uphold(dispute.id)
 
-    assert collided.status == "credited" and collided.refund_tx == "tx_credit"
+    assert collided.status == "credited"
+    assert collided.refund_tx == "tx_credit"
     assert collided.rating_tx is None  # never reads as fully resolved
     assert again == collided
-    assert ledger.submits == [] and ledger.replays == 2
+    assert ledger.submits == []
+    assert ledger.replays == 2
     assert invalidated == []
     assert len(settler.transfers) == 1
     logged = svc_errors(caplog)
@@ -478,7 +487,8 @@ def test_a_timed_out_re_run_never_replaces_a_rating_the_ledger_confirmed(ledger,
     dispute = open_dispute()
 
     landed = uphold(dispute.id)
-    assert landed.rating_tx == "tx_rating_1" and landed.rating_confirmed is True
+    assert landed.rating_tx == "tx_rating_1"
+    assert landed.rating_confirmed is True
 
     # The RPC never answers the re-run, so the rating comes back TIMEOUT with a
     # hash of its own — the one way a landed rating can still time out.
@@ -525,7 +535,8 @@ def test_a_hashless_timeout_that_landed_is_reported_as_a_collision_never_as_reso
     assert retried.rating_tx is None
     assert invalidated == []
     (logged,) = svc_errors(caplog)
-    assert "COLLISION" in logged and "timeout with no hash" in logged
+    assert "COLLISION" in logged
+    assert "timeout with no hash" in logged
     assert len(settler.transfers) == 1
 
 
@@ -561,7 +572,8 @@ def test_each_rating_answer_records_whether_the_rating_is_known_to_have_landed(
 
     rated = uphold(dispute.id)
 
-    assert rated.status == "credited" and rated.refund_tx == "tx_credit"
+    assert rated.status == "credited"
+    assert rated.refund_tx == "tx_credit"
     assert rated.rating_tx == rating_tx
     assert rated.rating_confirmed is rating_confirmed
     assert asyncio.run(dispute_svc.get_dispute(dispute.id)) == rated
@@ -581,8 +593,10 @@ def test_a_failed_retry_leaves_an_unconfirmed_rating_as_it_was(ledger, settler, 
     failed = uphold(dispute.id)
 
     assert failed == unconfirmed
-    assert failed.rating_tx == "tx_rating_1" and failed.rating_confirmed is False
-    assert len(ledger.submits) == 2 and ledger.replays == 0
+    assert failed.rating_tx == "tx_rating_1"
+    assert failed.rating_confirmed is False
+    assert len(ledger.submits) == 2
+    assert ledger.replays == 0
     assert invalidated == []
 
 
@@ -602,7 +616,8 @@ def test_a_rating_recorded_before_the_confirmation_existed_is_confirmed_by_a_rep
 
     assert confirmed.rating_confirmed is True
     assert confirmed.rating_tx == rated.rating_tx
-    assert ledger.replays == 1 and len(settler.transfers) == 1
+    assert ledger.replays == 1
+    assert len(settler.transfers) == 1
 
 
 # ── across disputes, and across every outcome ───────────────────
@@ -670,7 +685,8 @@ def test_every_rating_outcome_in_turn_never_re_signs_the_refund(monkeypatch, led
         assert invalidated == [AGENT] * drops
 
     assert len(settler.transfers) == 1
-    assert len(ledger.submits) == 3 and ledger.replays == 2
+    assert len(ledger.submits) == 3
+    assert ledger.replays == 2
 
 
 # ── when the rating step itself breaks ──────────────────────────
@@ -695,12 +711,16 @@ def test_a_rating_that_cannot_be_formed_is_a_records_problem_not_a_failed_refund
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         paid = uphold(dispute.id)
 
-    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.status == "credited"
+    assert paid.refund_tx == "tx_credit"
     assert paid.rating_tx is None
-    assert ledger.submits == [] and invalidated == []
+    assert ledger.submits == []
+    assert invalidated == []
     (logged,) = svc_errors(caplog)
-    assert "could not be formed" in logged and "will not mend" in logged
-    assert "derived=underivable" in logged and dispute.id in logged
+    assert "could not be formed" in logged
+    assert "will not mend" in logged
+    assert "derived=underivable" in logged
+    assert dispute.id in logged
 
 
 def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
@@ -731,11 +751,13 @@ def test_a_landed_rating_the_store_would_not_record_is_logged_with_its_hash(
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         paid = uphold(dispute.id)
 
-    assert paid.status == "credited" and paid.refund_tx == "tx_credit"
+    assert paid.status == "credited"
+    assert paid.refund_tx == "tx_credit"
     assert paid.rating_tx is None
     assert invalidated == [AGENT]  # it landed, whatever the store says
     (logged,) = svc_errors(caplog)
-    assert "was SUCCESS but could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "was SUCCESS but could not be recorded" in logged
+    assert "tx=tx_rating_1" in logged
     assert "append_status(dispute_id, 'credited', rating_tx=<the tx above>, rating_confirmed=True)" in logged, (
         f"the operator was not told the whole write: {logged}"
     )
@@ -766,7 +788,8 @@ def test_an_unconfirmed_rating_the_store_would_not_record_is_not_reported_as_con
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         paid = uphold(dispute.id)
 
-    assert paid.status == "credited" and paid.rating_tx is None
+    assert paid.status == "credited"
+    assert paid.rating_tx is None
     unrecorded = [m for m in svc_errors(caplog) if "could not be recorded" in m]
     assert len(unrecorded) == 1
     assert "was TIMEOUT but could not be recorded" in unrecorded[0]
@@ -801,16 +824,19 @@ def test_a_confirmation_the_store_would_not_record_is_left_for_the_next_uphold(
     with caplog.at_level(logging.ERROR, logger=SVC_LOGGER):
         answered = uphold(dispute.id)
 
-    assert answered == unconfirmed and answered.rating_confirmed is False
+    assert answered == unconfirmed
+    assert answered.rating_confirmed is False
     assert invalidated == [AGENT]  # the replay proved it landed, whatever the store says
     (logged,) = svc_errors(caplog)
-    assert "confirmation could not be recorded" in logged and "tx=tx_rating_1" in logged
+    assert "confirmation could not be recorded" in logged
+    assert "tx=tx_rating_1" in logged
     assert "by hand" not in logged
 
     monkeypatch.setattr(store, "append_status", real_append)
     confirmed = uphold(dispute.id)
 
-    assert confirmed.rating_confirmed is True and confirmed.rating_tx == "tx_rating_1"
+    assert confirmed.rating_confirmed is True
+    assert confirmed.rating_tx == "tx_rating_1"
     assert len(settler.transfers) == 1
 
 
@@ -847,8 +873,9 @@ def test_the_rating_observer_hears_nothing_when_no_rating_was_submitted(
     heard: list[dispute_rating.RatingOutcome] = []
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
 
+    upholding = dispute_svc.uphold(dispute.id, on_rating=heard.append)
     with pytest.raises(dispute_svc.DisputeError):
-        asyncio.run(dispute_svc.uphold(dispute.id, on_rating=heard.append))
+        asyncio.run(upholding)
 
     assert heard == []
     assert ledger.submits == []
@@ -972,9 +999,12 @@ def test_a_rating_refused_before_the_send_is_failed_and_nothing_is_in_flight(
 
     (outcome,) = seen
     assert (outcome.status, outcome.tx_hash) == ("FAILED", None)
-    assert outcome.reason is not None and cause in outcome.reason
-    assert after.status == "credited" and after.refund_tx == "tx_credit"
-    assert after.rating_tx is None and after.rating_confirmed is None
+    assert outcome.reason is not None
+    assert cause in outcome.reason
+    assert after.status == "credited"
+    assert after.refund_tx == "tx_credit"
+    assert after.rating_tx is None
+    assert after.rating_confirmed is None
     assert invalidated == []
     if fail_at in ("ERROR", "TRY_AGAIN_LATER"):
         assert rpc.sent == 1  # the RPC answered the send, and holds nothing
@@ -1003,7 +1033,8 @@ def test_a_rating_lost_after_the_send_is_still_a_timeout_with_its_hash_in_flight
     (outcome,) = seen
     assert (outcome.status, outcome.tx_hash, outcome.reason) == ("TIMEOUT", IN_FLIGHT, None)
     assert rpc.sent == 1
-    assert after.rating_tx == IN_FLIGHT and after.rating_confirmed is False
+    assert after.rating_tx == IN_FLIGHT
+    assert after.rating_confirmed is False
     (logged,) = svc_errors(caplog)
     for fact in ("outcome=TIMEOUT", "may still land", "credited_usdc=0.0500000", dispute.id, JOB, AGENT, IN_FLIGHT):
         assert fact in logged, (fact, logged)
@@ -1022,4 +1053,5 @@ def test_a_send_that_raised_is_still_a_timeout(monkeypatch, settler, invalidated
     (outcome,) = seen
     assert outcome.status == "TIMEOUT"
     (logged,) = svc_errors(caplog)
-    assert "outcome=TIMEOUT" in logged and "credited_usdc=0.0500000" in logged
+    assert "outcome=TIMEOUT" in logged
+    assert "credited_usdc=0.0500000" in logged

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -234,6 +235,15 @@ def _check_unavailable(model: str | None = None) -> SpecCheck:
     return SpecCheck(verdict="unavailable", reasons=["guard_unavailable"], model=model)
 
 
+def _error_to_raise(errors: Sequence[BaseException]) -> BaseException:
+    """The one exception a failed pair of concurrent jev calls surfaces.
+
+    The spend cap outranks any outage, so the caller pauses rather than falls
+    back; otherwise the first error in call order. ``errors`` is never empty.
+    """
+    return next((error for error in errors if isinstance(error, SpendCapReached)), errors[0])
+
+
 async def _jev_recheck(original: str, spec_text: str, policy: GuardPolicy) -> SpecCheck:
     safety_call = jev.ask(purpose="guard.spec", state=spec_text, questions=guard_prompts.SPEC_SAFETY_BATTERY)
     same_call = jev.ask(
@@ -241,12 +251,12 @@ async def _jev_recheck(original: str, spec_text: str, policy: GuardPolicy) -> Sp
         state=guard_prompts.spec_state(original, spec_text),
         questions=guard_prompts.SAME_REQUEST_BATTERY,
     )
-    # Both calls run to completion (no orphaned request), then the spend cap
-    # outranks any outage so the caller can pause rather than fall back.
+    # Both calls run to completion (no orphaned request), then exactly one
+    # error surfaces, chosen by _error_to_raise.
     safety, same = await asyncio.gather(safety_call, same_call, return_exceptions=True)
     if isinstance(safety, BaseException) or isinstance(same, BaseException):
-        errors = [o for o in (safety, same) if isinstance(o, BaseException)]
-        raise next((e for e in errors if isinstance(e, SpendCapReached)), errors[0])
+        errors: list[BaseException] = [o for o in (safety, same) if isinstance(o, BaseException)]
+        raise _error_to_raise(errors)
     return judge_spec(
         same_request=unit(answer(same.answers, "same_request", "noul"), "same_request"),
         injection=unit(answer(safety.answers, "injection", "noul"), "injection"),
@@ -285,7 +295,7 @@ async def _fallback_recheck(original: str, spec_text: str, policy: GuardPolicy) 
     except LLMRefused:
         return SpecCheck(verdict="unsafe", reasons=["refused", "fallback"], source="fallback", model=model)
     except (LLMError, MalformedAnswer) as exc:
-        logger.error("spec re-check unavailable: jev and fallback both failed (%s)", type(exc).__name__)
+        logger.exception("spec re-check unavailable: jev and fallback both failed (%s)", type(exc).__name__)
         return _check_unavailable(model)
 
 
@@ -339,6 +349,26 @@ def _unavailable() -> Resolution:
     )
 
 
+def _without_spec(*, watch: bool, strict: bool) -> Resolution:
+    """No spec to plan from: the original, unless the request must plan from a clean spec."""
+    if strict:
+        return _blocked(["watch", "no_spec"]) if watch else _unavailable()
+    return Resolution(action="use_original", reasons=["no_spec"])
+
+
+def _not_clean(verdict: CheckVerdict, *, watch: bool, user_edited: bool) -> Resolution:
+    """A spec that re-checked drifted or watch: blocked for a watch-band request,
+    asked again (drifted) or blocked when the buyer edited it, and otherwise
+    discarded for the original."""
+    if watch:
+        return _blocked(["injection", "watch", verdict])
+    if user_edited:
+        if verdict == "drifted":
+            return Resolution(action="needs_detail", reasons=["drifted"], message=guard_prompts.EDIT_CHANGED_REQUEST)
+        return _blocked(["injection", "watch"])
+    return Resolution(action="use_original", reasons=[verdict])
+
+
 def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bool = False) -> Resolution:
     """Combine the intent decision and the spec re-check.
 
@@ -358,20 +388,11 @@ def resolve(decision: GuardDecision, check: SpecCheck | None, *, user_edited: bo
 
     strict = decision.watch or user_edited
     if check is None:
-        if strict:
-            return _blocked(["watch", "no_spec"]) if decision.watch else _unavailable()
-        return Resolution(action="use_original", reasons=["no_spec"])
+        return _without_spec(watch=decision.watch, strict=strict)
     if check.verdict == "unsafe":
         return _blocked([r for r in check.reasons if r != "fallback"] or ["harmful"])
     if check.verdict == "clean":
         return Resolution(action="use_spec")
     if check.verdict == "unavailable":
         return _unavailable() if strict else Resolution(action="use_original", reasons=["recheck_unavailable"])
-    # drifted or watch
-    if decision.watch:
-        return _blocked(["injection", "watch", check.verdict])
-    if user_edited:
-        if check.verdict == "drifted":
-            return Resolution(action="needs_detail", reasons=["drifted"], message=guard_prompts.EDIT_CHANGED_REQUEST)
-        return _blocked(["injection", "watch"])
-    return Resolution(action="use_original", reasons=[check.verdict])
+    return _not_clean(check.verdict, watch=decision.watch, user_edited=user_edited)

@@ -22,11 +22,15 @@ def test_every_built_in_agent_has_a_card_and_nothing_else_does() -> None:
 def test_a_card_renders_as_one_line_that_cannot_pass_for_an_entry(agent_id: str) -> None:
     line = ROLE_CARDS[agent_id].render()
 
-    assert "\n" not in line and "\r" not in line
+    assert "\n" not in line
+    assert "\r" not in line
     # AVAILABLE_AGENTS entries are `key=value` fields; a card has none.
     assert "=" not in line
     assert not line.startswith("-")
-    assert line.startswith("does: ") and "; reads: " in line and "; hands on: " in line and "; use when: " in line
+    assert line.startswith("does: ")
+    assert "; reads: " in line
+    assert "; hands on: " in line
+    assert "; use when: " in line
 
 
 @pytest.mark.parametrize("agent_id", SEEDED_IDS)
@@ -72,7 +76,8 @@ def test_the_block_sets_a_built_in_agents_card_under_its_entry_and_gives_an_exte
         "  " + ROLE_CARDS["agt_11c0"].render(),
         lines[4],
     ]
-    assert lines[2].startswith("- id=agt_11c0 ") and lines[4].startswith("- id=ext_op ")
+    assert lines[2].startswith("- id=agt_11c0 ")
+    assert lines[4].startswith("- id=ext_op ")
 
 
 # ── prices in the block: exact, in the real asset ───────────────
@@ -130,4 +135,8 @@ def test_the_block_is_byte_stable_between_calls() -> None:
 
     agents = [_priced(0.0125)]
 
-    assert render_agents_block(agents, {}) == render_agents_block(agents, {})
+    first = render_agents_block(agents, {})
+    second = render_agents_block(agents, {})
+
+    assert first == second
+    assert '- id=agt_01h8 name="copywrite.v3" price=0.0125 ' in first

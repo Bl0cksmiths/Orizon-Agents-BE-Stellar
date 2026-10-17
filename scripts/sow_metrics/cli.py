@@ -14,7 +14,7 @@ from stellar_sdk import StrKey
 
 from .api import Reads
 from .chain import ChainReader
-from .collect import FAILURES, collect
+from .collect import FAILURES, Snapshot, collect
 from .config import (
     DEFAULT_API,
     DEFAULT_BACKEND,
@@ -34,7 +34,7 @@ from .config import (
     normalize_base,
     parse_pending_link,
 )
-from .metrics import MET, measure, withhold_external
+from .metrics import MET, Metric, measure, withhold_external
 from .register import RegisterError
 from .register import load as load_register
 from .report import RunFacts, block_problems, dump_block, render_block, render_markdown, render_raw, write
@@ -167,6 +167,64 @@ def confirm_testnet(reads: Reads, chain: ChainReader) -> dict[str, object]:
     return network
 
 
+def _run_facts(cfg: RunConfig, stamp: float) -> RunFacts:
+    """Where and when this run measured, for the Markdown and the raw JSON."""
+    return RunFacts(
+        api=cfg.api,
+        backend=cfg.backend,
+        frontend=cfg.frontend,
+        rpc_url=cfg.rpc_url,
+        horizon_url=cfg.horizon_url,
+        github_api=cfg.github_api,
+        generated_at=int(stamp),
+        generated_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
+        withheld_external=cfg.withhold_external,
+    )
+
+
+def _status_word(m: Metric) -> str:
+    """The metric's console status, padded to one width."""
+    if m.status == MET:
+        return "MET    "
+    return "NOT MET" if m.measured else "UNREAD "
+
+
+def _unused_pending_links(snap: Snapshot, pending_links: dict[str, PendingLink]) -> list[str]:
+    """A note for each pending link whose page did not answer 404, so it stood in for nothing."""
+    notes = []
+    for metric_id in sorted(pending_links):
+        page = snap.pages.get(PAGE_METRICS[metric_id])
+        if page is None or page.status != 404:
+            status = "could not be read" if page is None else f"answered HTTP {page.status}"
+            notes.append(f"note: --pending-link {metric_id} was not used: {PAGE_METRICS[metric_id]} {status}, not 404")
+    return notes
+
+
+def _say_findings(say: Callable[[str], None], metrics: list[Metric], snap: Snapshot, cfg: RunConfig) -> None:
+    """Each metric's line, then every failed read, warning and note."""
+    for m in metrics:
+        say(f"[{_status_word(m)}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
+    for source, failure in sorted(snap.failures.items()):
+        say(f"read failed: {source}: {failure}")
+    for warning in snap.warnings:
+        say(f"warning: {warning}")
+    if cfg.withhold_external:
+        say(
+            "note: outside operators' agent ids, wallets and hashes are held back from the block and the Markdown "
+            "until their consent is recorded (--publish-external links them); the raw JSON keeps them, so do not "
+            "publish it"
+        )
+    for note in _unused_pending_links(snap, cfg.pending_links):
+        say(note)
+
+
+def _summary(metrics: list[Metric]) -> str:
+    """How many were met, and how many could not be measured when any could not."""
+    met = sum(1 for m in metrics if m.status == MET)
+    unread = sum(1 for m in metrics if not m.measured)
+    return f"{met} of {len(metrics)} met" + (f", {unread} not measured" if unread else "")
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -214,43 +272,12 @@ def main(
     if problems:  # a generator bug, never a finding: refuse to write a block the index cannot take
         raise ValueError("the metrics block breaks its frozen shape: " + "; ".join(problems))
 
-    stamp = now() if now else time.time()
-    run = RunFacts(
-        api=cfg.api,
-        backend=cfg.backend,
-        frontend=cfg.frontend,
-        rpc_url=cfg.rpc_url,
-        horizon_url=cfg.horizon_url,
-        github_api=cfg.github_api,
-        generated_at=int(stamp),
-        generated_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
-        withheld_external=cfg.withhold_external,
-    )
-    for m in metrics:
-        status = "MET    " if m.status == MET else ("UNREAD " if not m.measured else "NOT MET")
-        say(f"[{status}] {m.row.id} {m.row.metric} — target {m.row.target}, achieved {m.achieved}")
-    for source, failure in sorted(snap.failures.items()):
-        say(f"read failed: {source}: {failure}")
-    for warning in snap.warnings:
-        say(f"warning: {warning}")
-    if cfg.withhold_external:
-        say(
-            "note: outside operators' agent ids, wallets and hashes are held back from the block and the Markdown "
-            "until their consent is recorded (--publish-external links them); the raw JSON keeps them, so do not "
-            "publish it"
-        )
-    for metric_id in sorted(cfg.pending_links):
-        page = snap.pages.get(PAGE_METRICS[metric_id])
-        if page is None or page.status != 404:
-            status = "could not be read" if page is None else f"answered HTTP {page.status}"
-            say(f"note: --pending-link {metric_id} was not used: {PAGE_METRICS[metric_id]} {status}, not 404")
+    run = _run_facts(cfg, now() if now else time.time())
+    _say_findings(say, metrics, snap, cfg)
     if cfg.out_dir is not None:
         paths = write(cfg.out_dir, block, render_markdown(metrics, run, code), render_raw(metrics, snap, run, code))
         say("wrote " + ", ".join(str(p) for p in paths))
     if args.print_block:
         out.write(dump_block(block))
-    met = sum(1 for m in metrics if m.status == MET)
-    unread = sum(1 for m in metrics if not m.measured)
-    summary = f"{met} of {len(metrics)} met" + (f", {unread} not measured" if unread else "")
-    say(f"exit {code}: {summary}")
+    say(f"exit {code}: {_summary(metrics)}")
     return code

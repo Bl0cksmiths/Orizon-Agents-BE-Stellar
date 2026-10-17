@@ -102,8 +102,9 @@ def test_a_fraction_rounds_down_and_is_clamped(stroops: int, fraction: float, sh
 
 
 def test_a_non_finite_fraction_is_refused() -> None:
+    nan = float("nan")
     with pytest.raises(money.MoneyError):
-        money.fraction_of(10, float("nan"))
+        money.fraction_of(10, nan)
 
 
 def test_the_testnet_native_sac_is_derived_not_assumed() -> None:
@@ -188,7 +189,8 @@ def test_the_ledger_client_converts_by_the_same_one_rule() -> None:
     assert sc.usdc_to_i128(0.00000455) == 46
     for amount in (0.0123457, 0.054, 0.1 + 0.2, 7.0):
         assert sc.usdc_to_i128(amount) == money.to_stroops(amount)
+    inf = float("inf")
     with pytest.raises(ValueError):
-        sc.usdc_to_i128(float("inf"))
+        sc.usdc_to_i128(inf)
     with pytest.raises(ValueError):
         sc.usdc_to_i128(-0.01)

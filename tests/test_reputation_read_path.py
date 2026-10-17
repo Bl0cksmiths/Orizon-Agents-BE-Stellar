@@ -67,7 +67,7 @@ class Chain:
         return value
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch) -> Chain:
     fake = Chain()
     monkeypatch.setattr(settings, "reputation_enabled", True)
@@ -246,8 +246,10 @@ def test_a_just_expired_read_is_served_stale_when_the_refresh_is_slow(chain):
     # batch waited before serving it — and not a great deal more.
     ttl = settings.reputation_read_ttl_seconds
     assert ttl + 2.3 <= served.stale_age_seconds <= ttl + 3.3
-    assert fresh.stale is False and fresh.stale_age_seconds is None
-    assert after.stale is False and after.degraded is False
+    assert fresh.stale is False
+    assert fresh.stale_age_seconds is None
+    assert after.stale is False
+    assert after.degraded is False
 
 
 def test_a_read_expired_past_the_grace_degrades_to_the_prior(chain, monkeypatch):
@@ -314,7 +316,8 @@ def test_an_invalidated_read_is_served_superseded_never_the_prior(chain):
     assert served.degraded is False
     assert served.source == "onchain"
     assert served.stale is True
-    assert served.stale_age_seconds is not None and 0.0 <= served.stale_age_seconds < 5.0
+    assert served.stale_age_seconds is not None
+    assert 0.0 <= served.stale_age_seconds < 5.0
     assert served.superseded is True
     assert served.model_dump(exclude={"stale", "stale_age_seconds"}) == before.model_dump(
         exclude={"stale", "stale_age_seconds"}
@@ -387,7 +390,8 @@ def test_boot_does_not_wait_for_the_prewarm(chain):
     try:
         with TestClient(app) as client:
             assert client.get("/health").status_code == 200
-            assert rep._prewarm_task is not None and not rep._prewarm_task.done()
+            assert rep._prewarm_task is not None
+            assert not rep._prewarm_task.done()
             chain.release("agt_01h8")
             _join_prewarm(client)
     finally:

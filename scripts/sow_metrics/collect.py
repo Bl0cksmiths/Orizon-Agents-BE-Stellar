@@ -183,6 +183,25 @@ def _int(value: Any) -> int:
 
 
 # ── the platform's own keys ──────────────────────────────────────────────
+def _add_key(snap: Snapshot, address: Any, role: str) -> None:
+    """Record a platform key under its first-named role; anything that is not an account is ignored."""
+    if _is_account(address):
+        snap.platform.setdefault(address, role)
+
+
+def _read_registry_admin(snap: Snapshot, chain: ChainReader) -> None:
+    """The registry's own `admin()`, when the live API names a registry."""
+    registry = snap.contract("agent_registry")
+    if not registry:
+        return
+    try:
+        admin = chain.simulate(registry, "admin")
+        _add_key(snap, admin, "registry admin")
+        snap.registry_admin = admin if _is_account(admin) else None
+    except FAILURES as exc:
+        snap.fail("platform_keys", exc)
+
+
 def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     """The keys this deployment demonstrably holds or names, each with its role.
 
@@ -192,25 +211,13 @@ def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
     contract holds in its instance storage. A failed read leaves an owner we
     cannot rule out, so it fails `platform_keys` and every count that needs it.
     """
-
-    def add(address: Any, role: str) -> None:
-        if _is_account(address):
-            snap.platform.setdefault(address, role)
-
-    add(snap.network.get("admin"), "network admin key")
-    add(snap.network.get("dispatch_signer"), "dispatch signer")
+    _add_key(snap, snap.network.get("admin"), "network admin key")
+    _add_key(snap, snap.network.get("dispatch_signer"), "dispatch signer")
     ratings = (snap.readiness or {}).get("ratings") or {}
-    add(ratings.get("signer"), "ratings signer")
-    add(ratings.get("scorer"), "ratings scorer")
+    _add_key(snap, ratings.get("signer"), "ratings signer")
+    _add_key(snap, ratings.get("scorer"), "ratings scorer")
 
-    registry = snap.contract("agent_registry")
-    if registry:
-        try:
-            admin = chain.simulate(registry, "admin")
-            add(admin, "registry admin")
-            snap.registry_admin = admin if _is_account(admin) else None
-        except FAILURES as exc:
-            snap.fail("platform_keys", exc)
+    _read_registry_admin(snap, chain)
     for name, roles in (
         ("reputation_ledger", {"Admin": "reputation ledger admin", "Scorer": "reputation ledger scorer"}),
         ("attestation_registry", {"Admin": "attestation registry admin", "Sealer": "attestation sealer"}),
@@ -224,7 +231,7 @@ def read_platform_keys(snap: Snapshot, chain: ChainReader) -> None:
             snap.fail("platform_keys", exc)
             continue
         for key, role in roles.items():
-            add(storage.get(key), role)
+            _add_key(snap, storage.get(key), role)
 
 
 # ── the registry ─────────────────────────────────────────────────────────
@@ -362,6 +369,48 @@ def _match_charges(snap: Snapshot, op: Operation) -> None:
         snap.charge_txs.setdefault((r.escrow, r.id_hex), TxRef(op.tx_hash, op.date))
 
 
+def _record_rating(snap: Snapshot, op: Operation) -> None:
+    """A ledger `submit(caller, agent_id, job_id, rating, weight, payer, kind)`: counted by kind, kept if a dispute."""
+    kind = str(op.args[6])
+    snap.rating_kinds[kind] = snap.rating_kinds.get(kind, 0) + 1
+    if op.args[6] == "dispute":
+        snap.dispute_ratings.append(
+            DisputeRating(
+                agent_id=str(op.args[1]),
+                job_id=str(op.args[2]),
+                payer=op.args[5] if _is_account(op.args[5]) else None,
+                rating=op.args[3] if isinstance(op.args[3], int) else None,
+                tx_hash=op.tx_hash,
+                created_at=op.created_at,
+            )
+        )
+
+
+def _record_transfers(snap: Snapshot, op: Operation) -> None:
+    """Every asset movement of one asset-contract transfer that a platform key paid out: refund candidates."""
+    for change in op.balance_changes:
+        if change.kind == "transfer" and change.source in snap.platform and change.destination:
+            snap.transfers.append(
+                Transfer(
+                    source=change.source,
+                    destination=change.destination,
+                    amount_stroops=change.amount_stroops,
+                    tx_hash=op.tx_hash,
+                    created_at=op.created_at,
+                    muxed_id=change.destination_muxed_id,
+                )
+            )
+
+
+def _read_operation(snap: Snapshot, op: Operation, ledger: str | None, sac: str | None) -> None:
+    """One contract call a platform key made: a charge it settled, a rating it wrote, or a transfer it paid."""
+    _match_charges(snap, op)
+    if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7:
+        _record_rating(snap, op)
+    if op.contract_id == sac and op.function == "transfer":
+        _record_transfers(snap, op)
+
+
 def history(snap: Snapshot, chain: ChainReader, account: str) -> list[Operation]:
     if account not in snap.histories:
         snap.histories[account] = chain.operations(account)
@@ -390,35 +439,7 @@ def read_histories(snap: Snapshot, chain: ChainReader) -> None:
             seen.add(op.id)
             if op.contract_id is None:
                 continue
-            _match_charges(snap, op)
-            if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7:
-                kind = str(op.args[6])
-                snap.rating_kinds[kind] = snap.rating_kinds.get(kind, 0) + 1
-            if op.contract_id == ledger and op.function == "submit" and len(op.args) >= 7 and op.args[6] == "dispute":
-                # submit(caller, agent_id, job_id, rating, weight, payer, kind)
-                snap.dispute_ratings.append(
-                    DisputeRating(
-                        agent_id=str(op.args[1]),
-                        job_id=str(op.args[2]),
-                        payer=op.args[5] if _is_account(op.args[5]) else None,
-                        rating=op.args[3] if isinstance(op.args[3], int) else None,
-                        tx_hash=op.tx_hash,
-                        created_at=op.created_at,
-                    )
-                )
-            if op.contract_id == sac and op.function == "transfer":
-                for change in op.balance_changes:
-                    if change.kind == "transfer" and change.source in snap.platform and change.destination:
-                        snap.transfers.append(
-                            Transfer(
-                                source=change.source,
-                                destination=change.destination,
-                                amount_stroops=change.amount_stroops,
-                                tx_hash=op.tx_hash,
-                                created_at=op.created_at,
-                                muxed_id=change.destination_muxed_id,
-                            )
-                        )
+            _read_operation(snap, op, ledger, sac)
     snap.dispute_ratings.sort(key=lambda d: (d.created_at, d.tx_hash))
     snap.transfers.sort(key=lambda t: (t.created_at, t.tx_hash))
 
@@ -486,14 +507,49 @@ def read_bound(snap: Snapshot, reads: Reads) -> None:
             f"the adoption report answered HTTP {answer.status} without its operators, so no bound count is stated"
         )
         return
+    snap.bound = _bound_flags(operators)
+
+
+def _operator_agents(operator: Any) -> list[Any]:
+    """One adoption report operator's `agents`, or none when either is not of the report's shape."""
+    agents = operator.get("agents") if isinstance(operator, dict) else None
+    return agents if isinstance(agents, list) else []
+
+
+def _bound_flags(operators: list[Any]) -> dict[str, bool | None]:
+    """Agent id -> the report's `bound` flag (None when not a boolean); entries of the wrong shape are skipped."""
     bound: dict[str, bool | None] = {}
     for operator in operators:
-        agents = operator.get("agents") if isinstance(operator, dict) else None
-        for agent in agents if isinstance(agents, list) else []:
+        for agent in _operator_agents(operator):
             if isinstance(agent, dict) and isinstance(agent.get("agent_id"), str):
                 flag = agent.get("bound")
                 bound[agent["agent_id"]] = flag if isinstance(flag, bool) else None
-    snap.bound = bound
+    return bound
+
+
+def _read_params(snap: Snapshot, reads: Reads) -> None:
+    """The live reputation settings: an answer that is not a JSON object is a failed read."""
+    params = _read(snap, "params", reads.reputation_params)
+    if params is None:
+        return
+    if params.ok and isinstance(params.body, dict):
+        snap.params = params.body
+    else:
+        snap.failures["params"] = f"{params.url} answered HTTP {params.status}"
+
+
+def _read_openapi(snap: Snapshot, reads: Reads) -> None:
+    """The backend's published routes, as `METHOD /path`: an answer without `paths` is a failed read."""
+    spec = _read(snap, "openapi", reads.openapi)
+    if spec is None:
+        return
+    paths = spec.obj().get("paths")
+    if spec.ok and isinstance(paths, dict):
+        snap.openapi_routes = {
+            f"{method.upper()} {path}" for path, ops in paths.items() if isinstance(ops, dict) for method in ops
+        }
+    else:
+        snap.failures["openapi"] = f"{spec.url} answered HTTP {spec.status}"
 
 
 def read_deployment(snap: Snapshot, reads: Reads) -> None:
@@ -502,21 +558,8 @@ def read_deployment(snap: Snapshot, reads: Reads) -> None:
         openapi=f"{reads.backend}/openapi.json",
         readiness=f"{reads.backend}/readiness",
     )
-    params = _read(snap, "params", reads.reputation_params)
-    if params is not None:
-        if params.ok and isinstance(params.body, dict):
-            snap.params = params.body
-        else:
-            snap.failures["params"] = f"{params.url} answered HTTP {params.status}"
-    spec = _read(snap, "openapi", reads.openapi)
-    if spec is not None:
-        paths = spec.obj().get("paths")
-        if spec.ok and isinstance(paths, dict):
-            snap.openapi_routes = {
-                f"{method.upper()} {path}" for path, ops in paths.items() if isinstance(ops, dict) for method in ops
-            }
-        else:
-            snap.failures["openapi"] = f"{spec.url} answered HTTP {spec.status}"
+    _read_params(snap, reads)
+    _read_openapi(snap, reads)
     for path in (REGISTER_PAGE, GUIDE_PAGE, DEMO_PAGE):
         snap.page_urls[path] = reads.page_url(path)
         page = _read(snap, f"page:{path}", partial(reads.page, path))

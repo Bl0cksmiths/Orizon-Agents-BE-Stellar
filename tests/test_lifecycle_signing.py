@@ -77,18 +77,19 @@ def test_signs_the_authorize_it_asked_for() -> None:
 )
 def test_refuses_an_envelope_that_is_not_the_call(change: dict[str, object], complaint: str) -> None:
     kp = Keypair.random()
-    with pytest.raises(SigningRefused, match="refusing to sign|operation"):
-        try:
-            sign_authorize(_envelope(kp.public_key, **change), kp, TESTNET_PASSPHRASE, _expect(kp))  # type: ignore[arg-type]
-        except SigningRefused as exc:
-            assert complaint in str(exc)
-            raise
+    envelope = _envelope(kp.public_key, **change)  # type: ignore[arg-type]
+    expected = _expect(kp)
+    with pytest.raises(SigningRefused, match="refusing to sign|operation") as refused:
+        sign_authorize(envelope, kp, TESTNET_PASSPHRASE, expected)
+    assert complaint in str(refused.value)
 
 
 def test_refuses_an_envelope_from_another_source_account() -> None:
     kp = Keypair.random()
+    envelope = _envelope(Keypair.random().public_key, payer=kp.public_key)
+    expected = _expect(kp)
     with pytest.raises(SigningRefused, match="is not the buyer"):
-        sign_authorize(_envelope(Keypair.random().public_key, payer=kp.public_key), kp, TESTNET_PASSPHRASE, _expect(kp))
+        sign_authorize(envelope, kp, TESTNET_PASSPHRASE, expected)
 
 
 def test_an_envelope_built_for_another_network_does_not_verify_here() -> None:
@@ -97,8 +98,10 @@ def test_an_envelope_built_for_another_network_does_not_verify_here() -> None:
     signed = sign_authorize(xdr, kp, TESTNET_PASSPHRASE, _expect(kp))
     # signed under the TESTNET passphrase, so a mainnet node would reject it
     main_env = TransactionEnvelope.from_xdr(signed.signed_xdr, "Public Global Stellar Network ; September 2015")
+    digest = main_env.hash()
+    signature = main_env.signatures[0].signature
     with pytest.raises(BadSignatureError):
-        kp.verify(main_env.hash(), main_env.signatures[0].signature)
+        kp.verify(digest, signature)
 
 
 def test_sep53_message_signature() -> None:

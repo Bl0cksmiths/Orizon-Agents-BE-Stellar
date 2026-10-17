@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -180,23 +181,24 @@ class FakeRpc:
         return SimulateTransactionResponse(results=[result], latestLedger=LATEST)
 
     def _view(self, contract: str, fn: str, args: list[Any]) -> stellar_xdr.SCVal:
-        if contract == REGISTRY and fn == "list_ids":
-            return scval.to_vec([scval.to_symbol(i) for i in self.ids])
-        if contract == REGISTRY and fn == "get":
-            return self._record(args[0])
-        if contract == REGISTRY and fn == "owner_of":
-            return scval.to_address(self.records[args[0]]["owner"])
-        if contract == REGISTRY and fn == "admin":
-            return scval.to_address(ADMIN)
-        if contract == ESCROW and fn == "settler":
-            return scval.to_address(SETTLER)
-        if contract == ESCROW and fn == "admin":
-            return scval.to_address(ADMIN)
-        if contract == ESCROW and fn == "authorization":
-            return scval.to_map({scval.to_symbol("payer"): scval.to_address(self.payers[bytes(args[0]).hex()])})
-        if contract == SAC and fn == "name":
-            return scval.to_string("native")
-        raise AssertionError(f"unexpected view {contract}.{fn}")
+        # Each answer is built only when asked for: a missing agent or
+        # authorization raises KeyError, which simulate_transaction reports.
+        views: dict[tuple[str, str], Callable[[], stellar_xdr.SCVal]] = {
+            (REGISTRY, "list_ids"): lambda: scval.to_vec([scval.to_symbol(i) for i in self.ids]),
+            (REGISTRY, "get"): lambda: self._record(args[0]),
+            (REGISTRY, "owner_of"): lambda: scval.to_address(self.records[args[0]]["owner"]),
+            (REGISTRY, "admin"): lambda: scval.to_address(ADMIN),
+            (ESCROW, "settler"): lambda: scval.to_address(SETTLER),
+            (ESCROW, "admin"): lambda: scval.to_address(ADMIN),
+            (ESCROW, "authorization"): lambda: scval.to_map(
+                {scval.to_symbol("payer"): scval.to_address(self.payers[bytes(args[0]).hex()])}
+            ),
+            (SAC, "name"): lambda: scval.to_string("native"),
+        }
+        view = views.get((contract, fn))
+        if view is None:
+            raise AssertionError(f"unexpected view {contract}.{fn}")
+        return view()
 
     def get_latest_ledger(self) -> Any:
         self._wait("get_latest_ledger")

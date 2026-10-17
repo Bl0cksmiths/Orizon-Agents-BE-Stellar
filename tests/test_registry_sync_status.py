@@ -61,7 +61,7 @@ def fresh_status(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     state.agents.update(agents_before)
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
 
@@ -170,8 +170,9 @@ def test_a_failed_list_ids_leaves_synced_false(registry_configured: None, monkey
 
     monkeypatch.setattr(registry_sync.sc, "simulate_read", down)
 
+    syncing = registry_sync.sync_once()
     with pytest.raises(RuntimeError):
-        asyncio.run(registry_sync.sync_once())
+        asyncio.run(syncing)
 
     assert registry_sync.status().synced is False
     assert registry_sync.status().syncing is False
@@ -234,8 +235,9 @@ def test_a_later_failing_pass_keeps_the_latch_and_its_count(
     full = registry_sync.status()
 
     monkeypatch.setattr(registry_sync.sc, "simulate_read", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    syncing = registry_sync.sync_once()
     with pytest.raises(RuntimeError):
-        asyncio.run(registry_sync.sync_once())
+        asyncio.run(syncing)
 
     assert registry_sync.status() == full
 
@@ -299,7 +301,7 @@ _AGENTS_SNAPSHOT = [
 ]
 
 
-@pytest.fixture()
+@pytest.fixture
 def two_agents(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """One seeded and one bound on-chain agent, after the lifespan has seeded."""
     monkeypatch.setattr(binding_registry, "_bound_ids", {"ext_a"})

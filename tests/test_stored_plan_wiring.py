@@ -30,7 +30,7 @@ BAD = "agt_04m1"
 UNREAD = "agt_12r0"
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     saved = dict(state.agents)
     state.agents.clear()

@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from stellar_sdk import Address, InvokeHostFunction, Keypair, StrKey, scval
+from stellar_sdk import Address, InvokeHostFunction, Keypair, Network, StrKey, scval
 from stellar_sdk import TransactionEnvelope as SdkEnvelope
 from stellar_sdk import xdr as stellar_xdr
 
@@ -42,7 +43,8 @@ FRONTEND = "https://front.test"
 RPC = "https://rpc.test"
 HORIZON = "https://horizon.test"
 GITHUB = "https://github-api.test"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
+NOT_FOUND = "Not Found"  # the body text of a 404 from FastAPI and from GitHub
 
 
 def _contract(tag: str) -> str:
@@ -107,6 +109,44 @@ def _map(fields: dict[str, stellar_xdr.SCVal]) -> stellar_xdr.SCVal:
     return scval.to_map({_sym(k): v for k, v in sorted(fields.items())})
 
 
+def _sim_value(ok: Callable[[Any], httpx.Response], value: stellar_xdr.SCVal) -> httpx.Response:
+    """A simulation that returned `value`."""
+    return ok({"results": [{"xdr": value.to_xdr(), "auth": []}], "latestLedger": 1})
+
+
+def _sim_fail(ok: Callable[[Any], httpx.Response], message: str) -> httpx.Response:
+    """A simulation the host failed, with its error `message`."""
+    return ok({"error": message, "latestLedger": 1})
+
+
+def _receipt_map(fields: dict[str, Any]) -> stellar_xdr.SCVal:
+    """An escrow receipt as the contract's `receipt(id)` view returns it."""
+    return _map(
+        {
+            "auth_id": scval.to_bytes(fields["auth_id"]),
+            "agent_id": _sym(fields["agent_id"]),
+            "amount": scval.to_int128(fields["amount"]),
+            "job_id": scval.to_bytes(bytes.fromhex(fields["job_id"])),
+            "settled_at": scval.to_uint64(fields["settled_at"]),
+        }
+    )
+
+
+def _authorization_map(fields: dict[str, Any], version: int) -> stellar_xdr.SCVal:
+    """An escrow authorization as the contract's `authorization(id)` view returns it: v2 adds `settled`."""
+    return _map(
+        {
+            "payer": scval.to_address(fields["payer"]),
+            "agent_id": _sym(fields["agent_id"]),
+            "max_amount": scval.to_int128(fields["max_amount"]),
+            "spent": scval.to_int128(fields["spent"]),
+            "expires_at": scval.to_uint64(1),
+            "revoked": scval.to_bool(False),
+            **({"settled": scval.to_bool(fields["spent"] > 0)} if version >= 2 else {}),
+        }
+    )
+
+
 @dataclass
 class Escrow:
     version: int
@@ -114,6 +154,32 @@ class Escrow:
     admin: str
     # One entry per id the Nonce issued: ("auth", fields) | ("receipt", fields) | ("gone", {}).
     ids: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+
+def _escrow_record(
+    e: Escrow, fn: str, args: list[stellar_xdr.SCVal], ok: Callable[[Any], httpx.Response]
+) -> httpx.Response:
+    """`receipt(id)` or `authorization(id)`: the id's record when it is of that kind, else the contract's error."""
+    index = int.from_bytes(scval.from_bytes(args[0]), "big")
+    kind, fields = e.ids[index] if index < len(e.ids) else ("gone", {})
+    if (fn == "receipt" and kind != "receipt") or (fn == "authorization" and kind != "auth"):
+        return _sim_fail(ok, "HostError: Error(Contract, #2)")
+    if kind == "receipt":
+        return _sim_value(ok, _receipt_map(fields))
+    return _sim_value(ok, _authorization_map(fields, e.version))
+
+
+def _escrow_view(
+    e: Escrow, fn: str, args: list[stellar_xdr.SCVal], ok: Callable[[Any], httpx.Response]
+) -> httpx.Response | None:
+    """An escrow's `version` (v1 has none), `receipt(id)` and `authorization(id)`; None for any other function."""
+    if fn == "version":
+        if e.version < 2:
+            return _sim_fail(ok, "HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
+        return _sim_value(ok, scval.to_uint32(e.version))
+    if fn in ("receipt", "authorization"):
+        return _escrow_record(e, fn, args, ok)
+    return None
 
 
 def demo_html(state: str | None, seconds: int | None = None) -> str:
@@ -354,33 +420,13 @@ class FakeWorld:
             return self.api(path)
         if url.startswith(BACKEND):
             self.calls.append(f"backend {path}")
-            if path in self.api_down:
-                return _json(503, {"error": "down"})
-            if path == "/readiness":
-                return _json(200, self.readiness)
-            if path == "/openapi.json":
-                paths: dict[str, dict[str, Any]] = {}
-                for route in self.routes:
-                    method, route_path = route.split(" ", 1)
-                    paths.setdefault(route_path, {})[method.lower()] = {}
-                return _json(200, {"openapi": "3.1.0", "paths": paths})
-            return _json(404, {"detail": "Not Found"})
+            return self.backend(path)
         if url.startswith(FRONTEND):
             self.calls.append(f"frontend {path}")
-            status, body = self.pages.get(path, (404, "<html>not found</html>"))
-            if status in (301, 302, 307, 308):
-                return httpx.Response(status, headers={"location": f"{FRONTEND}/login"})
-            return httpx.Response(status, text=body, headers={"content-type": "text/html"})
+            return self.frontend(path)
         if url.startswith(GITHUB):
             self.calls.append(f"github {path}")
-            name = path.removeprefix("/repos/")
-            if self.github_status is not None:
-                return _json(self.github_status, {"message": "API rate limit exceeded"})
-            status, spdx = self.repos.get(name, (404, None))
-            if status != 200:
-                return _json(status, {"message": "Not Found"})
-            license_ = None if spdx is None else {"spdx_id": spdx, "key": spdx.lower()}
-            return _json(200, {"full_name": name, "private": False, "license": license_})
+            return self.github(path)
         if url.startswith(RPC):
             payload = json.loads(request.content)
             self.calls.append(f"rpc {payload.get('method')}")
@@ -391,6 +437,38 @@ class FakeWorld:
             self.calls.append(f"horizon {path}")
             return self.horizon(request)
         raise AssertionError(f"unexpected request {request.method} {url}")
+
+    def backend(self, path: str) -> httpx.Response:
+        """The backend's own host: /readiness and /openapi.json (the route list built from `routes`)."""
+        if path in self.api_down:
+            return _json(503, {"error": "down"})
+        if path == "/readiness":
+            return _json(200, self.readiness)
+        if path == "/openapi.json":
+            paths: dict[str, dict[str, Any]] = {}
+            for route in self.routes:
+                method, route_path = route.split(" ", 1)
+                paths.setdefault(route_path, {})[method.lower()] = {}
+            return _json(200, {"openapi": "3.1.0", "paths": paths})
+        return _json(404, {"detail": NOT_FOUND})
+
+    def frontend(self, path: str) -> httpx.Response:
+        """A frontend page from `pages`: a redirect points at the login page, a missing page answers 404."""
+        status, body = self.pages.get(path, (404, "<html>not found</html>"))
+        if status in (301, 302, 307, 308):
+            return httpx.Response(status, headers={"location": f"{FRONTEND}/login"})
+        return httpx.Response(status, text=body, headers={"content-type": "text/html"})
+
+    def github(self, path: str) -> httpx.Response:
+        """GitHub's repository read, from `repos`; `github_status` overrides every answer."""
+        name = path.removeprefix("/repos/")
+        if self.github_status is not None:
+            return _json(self.github_status, {"message": "API rate limit exceeded"})
+        status, spdx = self.repos.get(name, (404, None))
+        if status != 200:
+            return _json(status, {"message": NOT_FOUND})
+        license_ = None if spdx is None else {"spdx_id": spdx, "key": spdx.lower()}
+        return _json(200, {"full_name": name, "private": False, "license": license_})
 
     def api(self, path: str) -> httpx.Response:
         if path in self.api_down:
@@ -418,7 +496,7 @@ class FakeWorld:
             return _json(200, self.params)
         if path == "/api/ecosystem/adoption":
             return _json(200, {"network": "testnet", "operators": self._adoption_operators()})
-        return _json(404, {"detail": "Not Found"})
+        return _json(404, {"detail": NOT_FOUND})
 
     def _adoption_operators(self) -> list[dict[str, Any]]:
         """Every agent grouped by owner, with its `bound` flag. The generator reads only the flags."""
@@ -478,6 +556,35 @@ class FakeWorld:
             return {"Admin": scval.to_address(self.registry_admin)}
         return None
 
+    def _registry_view(
+        self, fn: str, args: list[stellar_xdr.SCVal], ok: Callable[[Any], httpx.Response]
+    ) -> httpx.Response | None:
+        """The registry's `list_ids`, `admin` and `get(id)`; None for any other function."""
+        if fn == "list_ids":
+            return _sim_value(ok, scval.to_vec([_sym(a) for a in self.agents]))
+        if fn == "admin":
+            return _sim_value(ok, scval.to_address(self.registry_admin))
+        if fn != "get":
+            return None
+        agent_id = scval.from_symbol(args[0])
+        a = self.agents.get(agent_id)
+        if a is None:
+            return _sim_fail(ok, "HostError: Error(Contract, #2)")
+        return _sim_value(
+            ok,
+            _map(
+                {
+                    "id": _sym(agent_id),
+                    "owner": scval.to_address(a["owner"]),
+                    "name": scval.to_string(a["name"]),
+                    "skills": scval.to_vec([_sym("x")]),
+                    "price": scval.to_int128(100_000),
+                    "active": scval.to_bool(a["active"]),
+                    "registered_at": scval.to_uint64(a["registered_at"]),
+                }
+            ),
+        )
+
     def simulate(self, tx_xdr: str, ok: Any) -> httpx.Response:
         env = SdkEnvelope.from_xdr(tx_xdr, TESTNET_PASSPHRASE)
         op = env.transaction.operations[0]
@@ -490,74 +597,18 @@ class FakeWorld:
         if (contract, fn) in self.simulate_down_for:
             return _json(503, {"error": "unavailable"})
 
-        def value(v: stellar_xdr.SCVal) -> httpx.Response:
-            return ok({"results": [{"xdr": v.to_xdr(), "auth": []}], "latestLedger": 1})
-
-        def fail(msg: str) -> httpx.Response:
-            return ok({"error": msg, "latestLedger": 1})
-
         if contract == REGISTRY:
-            if fn == "list_ids":
-                return value(scval.to_vec([_sym(a) for a in self.agents]))
-            if fn == "admin":
-                return value(scval.to_address(self.registry_admin))
-            if fn == "get":
-                agent_id = scval.from_symbol(args[0])
-                a = self.agents.get(agent_id)
-                if a is None:
-                    return fail("HostError: Error(Contract, #2)")
-                return value(
-                    _map(
-                        {
-                            "id": _sym(agent_id),
-                            "owner": scval.to_address(a["owner"]),
-                            "name": scval.to_string(a["name"]),
-                            "skills": scval.to_vec([_sym("x")]),
-                            "price": scval.to_int128(100_000),
-                            "active": scval.to_bool(a["active"]),
-                            "registered_at": scval.to_uint64(a["registered_at"]),
-                        }
-                    )
-                )
+            answer = self._registry_view(fn, args, ok)
+            if answer is not None:
+                return answer
         if contract in self.escrows:
-            e = self.escrows[contract]
-            if fn == "version":
-                if e.version < 2:
-                    return fail("HostError: Error(WasmVm, MissingValue)\n\nEvent log: function not found")
-                return value(scval.to_uint32(e.version))
-            if fn in ("receipt", "authorization"):
-                index = int.from_bytes(scval.from_bytes(args[0]), "big")
-                kind, fields = e.ids[index] if index < len(e.ids) else ("gone", {})
-                if (fn == "receipt" and kind != "receipt") or (fn == "authorization" and kind != "auth"):
-                    return fail("HostError: Error(Contract, #2)")
-                if kind == "receipt":
-                    return value(
-                        _map(
-                            {
-                                "auth_id": scval.to_bytes(fields["auth_id"]),
-                                "agent_id": _sym(fields["agent_id"]),
-                                "amount": scval.to_int128(fields["amount"]),
-                                "job_id": scval.to_bytes(bytes.fromhex(fields["job_id"])),
-                                "settled_at": scval.to_uint64(fields["settled_at"]),
-                            }
-                        )
-                    )
-                return value(
-                    _map(
-                        {
-                            "payer": scval.to_address(fields["payer"]),
-                            "agent_id": _sym(fields["agent_id"]),
-                            "max_amount": scval.to_int128(fields["max_amount"]),
-                            "spent": scval.to_int128(fields["spent"]),
-                            "expires_at": scval.to_uint64(1),
-                            "revoked": scval.to_bool(False),
-                            **({"settled": scval.to_bool(fields["spent"] > 0)} if e.version >= 2 else {}),
-                        }
-                    )
-                )
+            answer = _escrow_view(self.escrows[contract], fn, args, ok)
+            if answer is not None:
+                return answer
         if contract == LEDGER and fn == "rep_state":
             agent_id = scval.from_symbol(args[0])
-            return value(
+            return _sim_value(
+                ok,
                 _map(
                     {
                         "count": scval.to_uint32(3),
@@ -566,9 +617,9 @@ class FakeWorld:
                         "sum_w": scval.to_int128(1),
                         "weight": scval.to_int128(1),
                     }
-                )
+                ),
             )
-        return fail(f"HostError: no fake for {contract}.{fn}")
+        return _sim_fail(ok, f"HostError: no fake for {contract}.{fn}")
 
     # ── Horizon ─────────────────────────────────────────────────
     def horizon(self, request: httpx.Request) -> httpx.Response:

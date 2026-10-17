@@ -38,7 +38,7 @@ CONTRACT_ERROR = RuntimeError("simulate failed: HostError: Error(Contract, #1)")
 
 
 @pytest.fixture(autouse=True)
-def configured_registry(hermetic_settings: Any) -> Any:
+def configured_registry(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Give resolve_owner a registry id, and an empty read cache per test.
 
     conftest forces `stellar_agent_registry` to "" so the hermetic suite can
@@ -47,7 +47,7 @@ def configured_registry(hermetic_settings: Any) -> Any:
     ordering (and its restore) is not left to chance.
     """
     rcache.clear()
-    settings.stellar_agent_registry = REGISTRY_ID
+    monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
     yield settings
     rcache.clear()
 
@@ -104,8 +104,9 @@ def test_an_unreadable_chain_raises_instead_of_returning_none(
     fake_read, _ = _reads(failure)
     monkeypatch.setattr(sc, "simulate_read", fake_read)
 
+    resolving = resolve_owner("ext_agent")
     with pytest.raises(OwnerLookupError):
-        asyncio.run(resolve_owner("ext_agent"))
+        asyncio.run(resolving)
 
 
 def test_a_read_without_an_address_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,8 +116,9 @@ def test_a_read_without_an_address_raises(monkeypatch: pytest.MonkeyPatch) -> No
         rcache.clear()
         fake_read, _ = _reads(empty)
         monkeypatch.setattr(sc, "simulate_read", fake_read)
+        resolving = resolve_owner("ext_agent")
         with pytest.raises(OwnerLookupError):
-            asyncio.run(resolve_owner("ext_agent"))
+            asyncio.run(resolving)
 
 
 def test_an_unconfigured_registry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,14 +127,15 @@ def test_an_unconfigured_registry_fails_closed(monkeypatch: pytest.MonkeyPatch) 
     This is also the hermetic suite's own configuration, so the default posture
     of this function with no chain available is "deny".
     """
-    settings.stellar_agent_registry = ""
+    monkeypatch.setattr(settings, "stellar_agent_registry", "")
 
     def must_not_read(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("resolve_owner read the chain with no registry configured")
 
     monkeypatch.setattr(sc, "simulate_read", must_not_read)
+    resolving = resolve_owner("ext_agent")
     with pytest.raises(OwnerLookupError):
-        asyncio.run(resolve_owner("ext_agent"))
+        asyncio.run(resolving)
 
 
 def test_the_registry_id_is_read_live_not_through_the_lru_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,7 +146,7 @@ def test_the_registry_id_is_read_live_not_through_the_lru_cache(monkeypatch: pyt
     monkeypatch.setattr(sc, "simulate_read", fake_read)
 
     asyncio.run(resolve_owner("ext_live_1"))
-    settings.stellar_agent_registry = OTHER_REGISTRY_ID
+    monkeypatch.setattr(settings, "stellar_agent_registry", OTHER_REGISTRY_ID)
     asyncio.run(resolve_owner("ext_live_2"))
 
     assert [contract_id for contract_id, _ in calls] == [REGISTRY_ID, OTHER_REGISTRY_ID]

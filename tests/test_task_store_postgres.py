@@ -143,8 +143,9 @@ def test_a_value_the_database_refuses_is_reported_as_refused(pg_dsn: str) -> Non
     """Retrying refused data cannot succeed, so it is told apart from a
     database that is merely unreachable."""
     store = PostgresTaskStore(pg_dsn)
+    writing = store.write(WriteBatch(traces=(TraceRow("tsk_00000000000000a1", 2**31, "{}"),)))
     with pytest.raises(TaskStoreRejected):
-        _run(store, store.write(WriteBatch(traces=(TraceRow("tsk_00000000000000a1", 2**31, "{}"),))))
+        _run(store, writing)
 
 
 def test_an_unreadable_row_is_absent_rather_than_an_outage_forever(pg_dsn: str) -> None:

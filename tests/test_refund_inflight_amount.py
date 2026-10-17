@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from test_adjudication import (  # noqa: F401 - autouse fixtures and helpers
     _fresh_state,
     a_dispute,
@@ -38,16 +39,14 @@ def test_a_timed_out_credit_records_the_amount_it_was_for_and_never_as_credited(
     calls = _chain(monkeypatch, sc.InFlightError("poll failed: rpc dropped", signed))
     dispute = a_dispute()
 
-    try:
+    with pytest.raises(DisputeError) as unconfirmed:
         asyncio.run(dispute_svc.uphold(dispute.id))
-    except DisputeError as unconfirmed:
-        assert unconfirmed.code == "refund_unconfirmed"
-    else:  # pragma: no cover - the stub times out
-        raise AssertionError("a timed-out credit was answered as settled")
+    assert unconfirmed.value.code == "refund_unconfirmed"
 
     current, queue = _stored(dispute.id)
     assert (current.status, current.refund_tx, queue) == ("crediting", signed, [dispute.id])
-    assert current.inflight_usdc is not None and current.inflight_usdc > 0
+    assert current.inflight_usdc is not None
+    assert current.inflight_usdc > 0
     assert current.inflight_usdc == _sent_usdc(calls)
     # The receipt's "what landed" is untouched: nothing is known to have.
     assert current.credited_usdc is None
@@ -58,12 +57,9 @@ def test_a_failed_credit_that_could_not_be_handed_back_records_its_amount_too(mo
     dispute = a_dispute()
     real = _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
 
-    try:
+    with pytest.raises(DisputeError) as refused:
         asyncio.run(dispute_svc.uphold(dispute.id))
-    except DisputeError as refused:
-        assert refused.code == "refund_failed"
-    else:  # pragma: no cover
-        raise AssertionError("a FAILED credit was answered as settled")
+    assert refused.value.code == "refund_failed"
 
     monkeypatch.setattr(dispute_store, "_store", real)
     current, queue = _stored(dispute.id)

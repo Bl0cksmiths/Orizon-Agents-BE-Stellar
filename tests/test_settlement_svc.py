@@ -245,12 +245,10 @@ def configured(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     # stand-in reader here puts it in place BEFORE the `client` fixture runs;
     # tests that need their own reader override it afterwards.
     monkeypatch.setattr(sc, "simulate_read", _reader())
-    saved = (settings.stellar_payment_escrow, settings.stellar_asset_sac)
-    settings.stellar_agent_registry = REGISTRY_ID
-    settings.stellar_payment_escrow = ESCROW_ID
-    settings.stellar_asset_sac = SAC_ID
+    monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
+    monkeypatch.setattr(settings, "stellar_payment_escrow", ESCROW_ID)
+    monkeypatch.setattr(settings, "stellar_asset_sac", SAC_ID)
     yield settings
-    settings.stellar_payment_escrow, settings.stellar_asset_sac = saved
     rcache.clear()
 
 
@@ -357,7 +355,7 @@ def test_the_first_page_failing_is_unavailable(monkeypatch: pytest.MonkeyPatch) 
 def test_an_unconfigured_escrow_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """No escrow id means no events to read, which is a configuration fact and
     not an earnings fact."""
-    settings.stellar_payment_escrow = ""
+    monkeypatch.setattr(settings, "stellar_payment_escrow", "")
     result = _run(monkeypatch, _FakeRpc(), _reader())
 
     assert result.unavailable == "escrow contract not configured"
@@ -367,7 +365,7 @@ def test_an_unconfigured_escrow_is_unavailable(monkeypatch: pytest.MonkeyPatch) 
 def test_an_unconfigured_registry_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the registry the owner cannot be resolved, so no charge could be
     told apart from a self-payment — refuse rather than guess."""
-    settings.stellar_agent_registry = ""
+    monkeypatch.setattr(settings, "stellar_agent_registry", "")
     result = _run(monkeypatch, _FakeRpc(), _reader())
 
     assert result.unavailable == "agent registry not configured"
@@ -726,7 +724,7 @@ def test_a_payer_budget_timeout_excludes_every_charge(monkeypatch: pytest.Monkey
 def test_an_unconfigured_sac_reports_an_unknown_asset(monkeypatch: pytest.MonkeyPatch) -> None:
     """No SAC id means nothing to ask what the amounts are denominated in.
     Saying so beats defaulting to a unit the deployment may not use."""
-    settings.stellar_asset_sac = ""
+    monkeypatch.setattr(settings, "stellar_asset_sac", "")
     result = _run(monkeypatch, _FakeRpc(), _reader())
 
     assert result.asset == "unknown"
@@ -891,6 +889,7 @@ def test_the_sdk_never_hands_us_an_event_without_a_transaction_hash() -> None:
     future SDK relaxes this field to optional, the service starts receiving
     events it cannot decode at all and this is where that shows up."""
     assert EventInfo.model_fields["transaction_hash"].is_required()
+    value = scval.to_vec([]).to_xdr()
     with pytest.raises(pydantic.ValidationError):
         EventInfo(
             type="contract",
@@ -899,7 +898,7 @@ def test_the_sdk_never_hands_us_an_event_without_a_transaction_hash() -> None:
             contractId=ESCROW_ID,
             id="1000010-0",
             topic=[],
-            value=scval.to_vec([]).to_xdr(),
+            value=value,
             inSuccessfulContractCall=True,
             operationIndex=0,
             transactionIndex=0,

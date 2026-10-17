@@ -320,6 +320,36 @@ def check_settlement_tx(tx: dict[str, Any]) -> list[Check]:
     return [Check("tx_succeeded", successful, detail)]
 
 
+def _read_network_config(client: httpx.Client, base: str, network: str, checks: list[Check]) -> dict[str, Any]:
+    """`GET /api/stellar/network`, its checks appended to `checks`; {} when it
+    cannot be read. Without it the asset cannot be reported honestly, and an
+    unlabelled payout is not evidence — so a failed read is a failed check,
+    not a skipped one."""
+    network_resp = client.get(f"{base}/api/stellar/network")
+    if network_resp.status_code != 200:
+        checks.append(Check("network_config_read", False, f"/api/stellar/network returned {network_resp.status_code}"))
+        return {}
+    config: dict[str, Any] = network_resp.json()
+    checks.append(Check("network_config_read", True, f"asset SAC {config.get('asset_sac') or '-'}"))
+    checks.extend(check_network_config(config, network))
+    return config
+
+
+def _find_credit(client: httpx.Client, horizon: str, tx: str, owner: str) -> Credit | None:
+    """The credit to `owner` in transaction `tx`: from its operations' balance
+    changes first (a SAC transfer), else from its effects (a classic payment).
+    A Horizon read that does not answer 200 is treated as holding none."""
+    credit = None
+    ops = client.get(f"{horizon}/transactions/{tx}/operations", params={"limit": 200})
+    if ops.status_code == 200:
+        credit = find_credit_in_operations(_records(ops.json()), owner)
+    if credit is None:
+        effects = client.get(f"{horizon}/transactions/{tx}/effects", params={"limit": 200})
+        if effects.status_code == 200:
+            credit = find_credit_in_effects(_records(effects.json()), owner)
+    return credit
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Verify an external agent's settlement evidence (story 2.04).")
     p.add_argument("--agent", required=True, help="agent id")
@@ -336,19 +366,7 @@ def main() -> int:
     base = args.api_base.rstrip("/")
 
     with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-        config: dict[str, Any] = {}
-        network_resp = client.get(f"{base}/api/stellar/network")
-        if network_resp.status_code != 200:
-            # Without this the asset cannot be reported honestly, and an
-            # unlabelled payout is not evidence — so it is a failed check, not
-            # a skipped one.
-            checks.append(
-                Check("network_config_read", False, f"/api/stellar/network returned {network_resp.status_code}")
-            )
-        else:
-            config = network_resp.json()
-            checks.append(Check("network_config_read", True, f"asset SAC {config.get('asset_sac') or '-'}"))
-            checks.extend(check_network_config(config, args.network))
+        config = _read_network_config(client, base, args.network, checks)
 
         agent_resp = client.get(f"{base}/api/stellar/agent/{args.agent}")
         if agent_resp.status_code != 200:
@@ -372,14 +390,7 @@ def main() -> int:
         else:
             checks.append(Check("tx_on_horizon", True, "transaction found on Horizon"))
             checks.extend(check_settlement_tx(tx_resp.json()))
-
-            ops = client.get(f"{horizon}/transactions/{args.tx}/operations", params={"limit": 200})
-            if ops.status_code == 200:
-                credit = find_credit_in_operations(_records(ops.json()), args.owner)
-            if credit is None:
-                effects = client.get(f"{horizon}/transactions/{args.tx}/effects", params={"limit": 200})
-                if effects.status_code == 200:
-                    credit = find_credit_in_effects(_records(effects.json()), args.owner)
+            credit = _find_credit(client, horizon, args.tx, args.owner)
             checks.extend(check_owner_credited(credit, args.owner, args.amount))
 
     print(f"\nExternal settlement evidence — agent {args.agent} - tx {args.tx[:12]}...\n")

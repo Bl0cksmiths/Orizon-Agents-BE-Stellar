@@ -24,7 +24,14 @@ from pydantic import BaseModel, Field, model_validator
 from .. import http_cache, money
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
-from ..security import CodedHTTPException, _operator_key_scheme, check_operator_key, require_api_key, require_seal_key
+from ..security import (
+    CodedHTTPException,
+    ErrorEnvelope,
+    _operator_key_scheme,
+    check_operator_key,
+    require_api_key,
+    require_seal_key,
+)
 from ..services import authorization_guard, registry_sync, reputation_svc, settlement_svc, snapshots, task_persistence
 from ..services.dispatch_signing import dispatch_signer_address
 from ..services.snapshots import KeepWarm, SnapshotCell
@@ -199,7 +206,7 @@ def _sac_name(asset: money.AssetInfo) -> str:
     return f"{asset.code}:{asset.issuer}"
 
 
-@router.get("/network", response_model=NetworkInfo)
+@router.get("/network")
 async def network() -> NetworkInfo:
     ids = sc.contract_ids()
     return NetworkInfo(
@@ -222,14 +229,25 @@ async def network() -> NetworkInfo:
 # AGENT_ID_PATTERN now lives in app/schemas.py — the binding router bounds an
 # agent id with the same rule, and an SSRF-adjacent charset must have one owner.
 
-# Job/auth ids are 16-byte BytesN rendered hex — exactly 32 hex chars. Same
-# reasoning as AGENT_ID_PATTERN: bound the path param at the router edge so a
-# malformed id is a 422 with no RPC round-trip and no stack trace.
-JOB_ID_HEX_PATTERN = r"^[0-9a-fA-F]{32}$"
+# Job, auth and receipt ids are 16-byte BytesN rendered hex — exactly 32 hex
+# chars. Same reasoning as AGENT_ID_PATTERN: bound the id at the router edge so
+# a malformed one is a 422 with no RPC round-trip and no stack trace.
+ID16_HEX_PATTERN = r"^[0-9a-fA-F]{32}$"
+
+# A Stellar account (G…) address, StrKey-encoded: 56 base32 chars.
+STELLAR_ADDRESS_PATTERN = r"^G[A-Z2-7]{55}$"
 
 
 # ── reads ───────────────────────────────────────────────────────
-@router.get("/agent/{agent_id}", response_model=AgentRead)
+@router.get(
+    "/agent/{agent_id}",
+    responses={
+        404: {
+            "model": ErrorEnvelope,
+            "description": "`agent_read_failed` — no such agent, or the registry read failed.",
+        }
+    },
+)
 async def read_agent(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> AgentRead:
     """Read an Agent from AgentRegistry.get(id)."""
     try:
@@ -256,7 +274,15 @@ class SyncResponse(BaseModel):
     synced: int
 
 
-@router.post("/agents/sync", response_model=SyncResponse)
+@router.post(
+    "/agents/sync",
+    responses={
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`registry_sync_failed` — the sync pass failed; keep polling /api/agents.",
+        }
+    },
+)
 async def trigger_registry_sync() -> SyncResponse:
     """Run one registry-sync pass now — the FE's post-registration fast path.
 
@@ -298,7 +324,7 @@ def _reserved_id_message(agent_id: str) -> str | None:
     return None
 
 
-@router.get("/agent-id-available/{agent_id}", response_model=AgentIdAvailability)
+@router.get("/agent-id-available/{agent_id}")
 async def agent_id_available(agent_id: str = Path(..., max_length=64)) -> AgentIdAvailability:
     """Advisory pre-signature check for the registration form (id blur).
 
@@ -413,7 +439,10 @@ reputation_svc.on_change(lambda _agent_id: reputation_cell.invalidate())
 @router.get(
     "/reputation",
     response_model=ReputationBatch,
-    responses={304: {"description": "Not modified: the `If-None-Match` ETag is current."}},
+    responses={
+        304: {"description": "Not modified: the `If-None-Match` ETag is current."},
+        503: {"model": ErrorEnvelope, "description": "`reputation_unavailable` — no reputation batch could be built."},
+    },
 )
 async def read_reputations(request: Request) -> Response:
     """Smoothed reputation for every registered agent, plus the routing
@@ -461,7 +490,7 @@ def _snapshot_row(agent_id: str) -> ReputationInfo | None:
 # routes in declaration order, so this must come first or "params" would be
 # read as an agent id. That makes `params` unusable AS an agent id, so it is
 # reserved at registration (RESERVED_AGENT_IDS).
-@router.get("/reputation/params", response_model=ReputationParams)
+@router.get("/reputation/params")
 async def reputation_params() -> ReputationParams:
     """The reputation system's parameter set — pure config, no RPC call."""
     return ReputationParams(
@@ -481,7 +510,12 @@ async def reputation_params() -> ReputationParams:
     )
 
 
-@router.get("/reputation/{agent_id}", response_model=ReputationInfo)
+@router.get(
+    "/reputation/{agent_id}",
+    responses={
+        404: {"model": ErrorEnvelope, "description": "`unknown_agent` — the registry does not hold this agent id."}
+    },
+)
 async def read_reputation(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
 ) -> ReputationInfo:
@@ -574,7 +608,6 @@ class InvalidatedReputation(BaseModel):
 
 @router.post(
     "/reputation/{agent_id}/invalidate",
-    response_model=InvalidatedReputation,
     summary="Drop one agent's cached reputation (operator only)",
     dependencies=[Depends(require_operator_key), Depends(invalidation_budget)],
 )
@@ -605,8 +638,16 @@ async def invalidate_reputation(
     )
 
 
-@router.get("/attestation/{job_id_hex}", response_model=AttestationRead)
-async def read_attestation(job_id_hex: str = Path(..., pattern=JOB_ID_HEX_PATTERN)) -> AttestationRead:
+@router.get(
+    "/attestation/{job_id_hex}",
+    responses={
+        400: {
+            "model": ErrorEnvelope,
+            "description": "`attestation_read_failed` — nothing is sealed for this job id, or the read failed.",
+        }
+    },
+)
+async def read_attestation(job_id_hex: str = Path(..., pattern=ID16_HEX_PATTERN)) -> AttestationRead:
     """Read an on-chain Attestation by hex-encoded 16-byte job_id."""
     try:
         # The path pattern already guarantees 32 hex chars, so this decode
@@ -631,7 +672,7 @@ async def read_attestation(job_id_hex: str = Path(..., pattern=JOB_ID_HEX_PATTER
         raise HTTPException(400, "attestation_read_failed") from e
 
 
-@router.get("/settlement/{agent_id}", response_model=SettlementEvidence)
+@router.get("/settlement/{agent_id}")
 async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> SettlementEvidence:
     """On-chain settlement evidence for one agent: every `charged` event Soroban
     RPC still holds for it, with the platform's own payments separated out.
@@ -649,8 +690,15 @@ async def read_settlement(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -
 
 
 # ── writes (user signs via Freighter) ───────────────────────────
+# The 400 every owner-signed agent build answers.
+_OWNER_BUILD_FAILED: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`owner_account_unfunded` — the owner's account is not on-chain yet; or `build_failed`.",
+}
+
+
 class RegisterAgentReq(BaseModel):
-    owner: str = Field(..., pattern=r"^G[A-Z2-7]{55}$", description="G... address of the agent owner")
+    owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the agent owner")
     # Soroban Symbol charset — anything outside it would only fail on-chain,
     # AFTER the user has already signed. Reject it at the API instead.
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
@@ -659,7 +707,16 @@ class RegisterAgentReq(BaseModel):
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
 
-@router.post("/build/register-agent", response_model=XdrResponse)
+@router.post(
+    "/build/register-agent",
+    responses={
+        400: _OWNER_BUILD_FAILED,
+        409: {
+            "model": ErrorEnvelope,
+            "description": "`id_reserved` — a seeded or route name; or `id_taken` — already registered.",
+        },
+    },
+)
 async def build_register_agent(req: RegisterAgentReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.register. Owner signs via Freighter."""
     from stellar_sdk.exceptions import AccountNotFoundException
@@ -742,12 +799,18 @@ async def _agent_exists(agent_id: str) -> bool:
 
 
 class UpdatePriceReq(BaseModel):
-    owner: str = Field(..., pattern=r"^G[A-Z2-7]{55}$", description="G... address of the owner (the signer)")
+    owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the owner (the signer)")
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
     price_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
 
 
-@router.post("/build/update-price", response_model=XdrResponse)
+@router.post(
+    "/build/update-price",
+    responses={
+        400: _OWNER_BUILD_FAILED,
+        404: {"model": ErrorEnvelope, "description": "`agent_not_found` — the registry holds no such agent."},
+    },
+)
 async def build_update_price(req: UpdatePriceReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.update_price. Owner signs via Freighter.
 
@@ -783,12 +846,18 @@ async def build_update_price(req: UpdatePriceReq) -> XdrResponse:
 
 
 class SetActiveReq(BaseModel):
-    owner: str = Field(..., pattern=r"^G[A-Z2-7]{55}$", description="G... address of the owner (the signer)")
+    owner: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN, description="G... address of the owner (the signer)")
     agent_id: str = Field(..., pattern=AGENT_ID_PATTERN)
     active: bool = Field(..., description="True relists the agent, False delists it")
 
 
-@router.post("/build/set-active", response_model=XdrResponse)
+@router.post(
+    "/build/set-active",
+    responses={
+        400: _OWNER_BUILD_FAILED,
+        404: {"model": ErrorEnvelope, "description": "`agent_not_found` — the registry holds no such agent."},
+    },
+)
 async def build_set_active(req: SetActiveReq) -> XdrResponse:
     """Build unsigned XDR for AgentRegistry.set_active (delist / relist). Owner signs.
 
@@ -820,13 +889,19 @@ async def build_set_active(req: SetActiveReq) -> XdrResponse:
         raise HTTPException(400, "build_failed") from e
 
 
+# The 400 the escrow builds answer when the transaction cannot be built.
+_BUILD_FAILED: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`build_failed` — the transaction could not be built.",
+}
+
 # The authorize route's ceiling on one authorization: 10 000 whole units of the
 # asset, as the legacy float field has always been bounded.
 MAX_AUTHORIZE_STROOPS = 10_000 * money.STROOPS_PER_UNIT
 
 
 class AuthorizeReq(BaseModel):
-    payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
+    payer: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN)
     # Same Symbol charset rule as registration — a bad id here also only
     # fails on-chain, after the payer signed the authorization envelope.
     # The console labels the authorization with the PLAN id (finding S2).
@@ -900,7 +975,16 @@ async def _refuse_if_not_the_plans_total(req: AuthorizeReq) -> None:
         )
 
 
-@router.post("/build/authorize", response_model=AuthorizeXdrResponse)
+@router.post(
+    "/build/authorize",
+    responses={
+        400: _BUILD_FAILED,
+        409: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_amount_mismatch` — not exactly the held plan's total.",
+        },
+    },
+)
 async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
     """Build unsigned XDR for PaymentEscrow.authorize (x402 pre-auth).
 
@@ -950,12 +1034,33 @@ async def build_authorize(req: AuthorizeReq) -> AuthorizeXdrResponse:
 
 
 class ReclaimReq(BaseModel):
-    payer: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")
+    payer: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN)
     # Lowercase only: the id as the escrow's events and our receipts print it.
     auth_id_hex: str = Field(..., pattern=r"^[0-9a-f]{32}$")
 
 
-@router.post("/build/reclaim", response_model=XdrResponse)
+@router.post(
+    "/build/reclaim",
+    responses={
+        400: _BUILD_FAILED,
+        403: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_payer_mismatch` — another wallet made this authorization.",
+        },
+        404: {"model": ErrorEnvelope, "description": "`authorization_not_found` — no such authorization."},
+        409: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`reclaim_unsupported` (a v1 escrow), `authorization_settled`, `authorization_revoked`, or "
+                "`authorization_locked` (not yet expired)."
+            ),
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_unreadable` — it could not be read on-chain. Retry.",
+        },
+    },
+)
 async def build_reclaim(req: ReclaimReq) -> XdrResponse:
     """Build unsigned XDR for PaymentEscrow v2 `reclaim(payer, auth_id)`. The payer signs.
 
@@ -966,7 +1071,7 @@ async def build_reclaim(req: ReclaimReq) -> XdrResponse:
     `authorization_locked`), so the wallet is never asked to sign a
     transaction the contract will refuse. A v1 escrow holds no custody and
     answers 409 `reclaim_unsupported`; an unreadable chain is 503
-    `authorization_unverifiable` (ADR 0011).
+    `authorization_unreadable` (ADR 0011).
     """
     await authorization_guard.check_reclaimable(req.auth_id_hex, req.payer)
     try:
@@ -990,7 +1095,15 @@ class SubmitReq(BaseModel):
     signed_xdr: str = Field(..., min_length=1, max_length=32_768)
 
 
-@router.post("/submit")
+@router.post(
+    "/submit",
+    responses={
+        400: {
+            "model": ErrorEnvelope,
+            "description": "`submit_failed` — the submit itself failed. A transaction that FAILED on-chain is a 200.",
+        },
+    },
+)
 async def submit_signed(req: SubmitReq) -> dict:
     """Submit a Freighter-signed transaction XDR."""
     # Identify the transaction WITHOUT logging the envelope: signed XDR is
@@ -1012,10 +1125,17 @@ async def submit_signed(req: SubmitReq) -> dict:
 
 
 # ── writes (backend signs with STELLAR_SIGNING_KEY) ──────────────
+# `require_api_key`'s and `require_seal_key`'s refusal of a wrong key.
+_INVALID_API_KEY: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`invalid_api_key` — API_KEY is set and `X-API-Key` does not match it.",
+}
+
+
 class ChargeReq(BaseModel):
-    auth_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
+    auth_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
     amount_usdc: float = Field(..., gt=0, le=10_000, allow_inf_nan=False)
-    job_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
+    job_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
 
 
 async def _refuse_charge_on_v2() -> None:
@@ -1038,7 +1158,16 @@ async def _refuse_charge_on_v2() -> None:
         )
 
 
-@router.post("/server/charge", dependencies=[Depends(require_api_key)])
+@router.post(
+    "/server/charge",
+    dependencies=[Depends(require_api_key)],
+    responses={
+        400: {"model": ErrorEnvelope, "description": "`amount_exceeds_charge_cap`, or `charge_failed`."},
+        401: _INVALID_API_KEY,
+        409: {"model": ErrorEnvelope, "description": "`charge_unsupported_on_v2` — a v2 escrow has no charge."},
+        503: {"model": ErrorEnvelope, "description": "The backend signing key is not configured."},
+    },
+)
 async def server_charge(req: ChargeReq) -> dict:
     """Backend-signed PaymentEscrow.charge (the backend is the `settler` role). v1 only.
 
@@ -1085,15 +1214,28 @@ async def server_charge(req: ChargeReq) -> dict:
 
 
 class SealReq(BaseModel):
-    job_id_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{32}$")
-    orchestrator: str = Field(..., pattern=r"^G[A-Z2-7]{55}$")  # G-address of the workflow owner
+    job_id_hex: str = Field(..., pattern=ID16_HEX_PATTERN)
+    orchestrator: str = Field(..., pattern=STELLAR_ADDRESS_PATTERN)  # G-address of the workflow owner
     intent_hash_hex: str = Field(..., pattern=r"^[0-9a-fA-F]{64}$")
     agents: list[Annotated[str, Field(min_length=1, max_length=32)]] = Field(..., max_length=32)
-    receipts_hex: list[Annotated[str, Field(pattern=r"^[0-9a-fA-F]{32}$")]] = Field(..., max_length=32)
+    receipts_hex: list[Annotated[str, Field(pattern=ID16_HEX_PATTERN)]] = Field(..., max_length=32)
     total_spent_usdc: float = Field(..., ge=0, le=100_000, allow_inf_nan=False)
 
 
-@router.post("/server/seal", dependencies=[Depends(require_seal_key)])
+@router.post(
+    "/server/seal",
+    dependencies=[Depends(require_seal_key)],
+    responses={
+        400: {"model": ErrorEnvelope, "description": "`seal_failed` — the seal did not go through."},
+        401: _INVALID_API_KEY,
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`operator_key_not_configured` — API_KEY is empty; or the backend signing key is not configured."
+            ),
+        },
+    },
+)
 async def server_seal(req: SealReq) -> dict:
     """Backend-signed AttestationRegistry.seal (backend is the `sealer` role)."""
     if not settings.stellar_signing_key:
@@ -1143,7 +1285,7 @@ async def server_seal(req: SealReq) -> dict:
 
 
 # ── handy: new 16-byte id ──────────────────────────────────────
-@router.get("/new-id", response_model=NewIdResponse)
+@router.get("/new-id")
 async def new_id() -> NewIdResponse:
     """Produce a random 16-byte id (hex) — useful for job_id / auth_id."""
     return NewIdResponse(id_hex=secrets.token_hex(16))

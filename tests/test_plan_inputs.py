@@ -30,7 +30,7 @@ def _inputs(*agent_ids: str, kit: bool = False) -> list[list[int] | None]:
     return [s.inputs_from for s in orchestrator_svc._with_inputs(steps, kit=kit)]
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded() -> Iterator[None]:
     saved = dict(state.agents)
     state.agents.clear()

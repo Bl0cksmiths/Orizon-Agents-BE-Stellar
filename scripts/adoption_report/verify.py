@@ -37,7 +37,7 @@ import httpx
 from stellar_sdk import StrKey
 
 from .api import AdoptionClaim, AgentClaim, ExclusionClaim, OperatorClaim, WorkflowClaim
-from .chain import ChainReader, RpcError, SimulationError, TxRecord
+from .chain import ChainEvent, ChainReader, RpcError, SimulationError, TxRecord
 from .config import EXPLORER_ACCOUNT, EXPLORER_TX, TARGETS, usdc_to_stroops
 from .register import TeamRegister
 from .retry import RetryableStatus
@@ -118,55 +118,67 @@ def _passed(checks: list[Check]) -> bool:
 
 
 # ── workflows ───────────────────────────────────────────────────
-def _charged_proof(
-    tx: TxRecord, escrow: str, agent_id: str, claim: WorkflowClaim, subject: str
+def _matching_charge(named: list[ChainEvent], want_amount: int, want_job: str) -> list[Any] | None:
+    """The data of the first `charged` event carrying the claimed amount and
+    job (`[_, auth_id, amount, job, ...]`), or None when none does."""
+    for e in named:
+        data = e.value if isinstance(e.value, list) else []
+        if len(data) > 3 and int(data[2]) == want_amount and str(data[3]).lower() == want_job:
+            return data
+    return None
+
+
+def _event_proof(
+    tx: TxRecord, events: list[ChainEvent], escrow: str, agent_id: str, want_amount: int, want_job: str, subject: str
 ) -> tuple[Check, str | None, str]:
-    """(the check, the authorization id it names, which proof was used)."""
-    want_amount = usdc_to_stroops(claim.amount_usdc)
-    want_job = claim.job_id_hex.lower()
-    if tx.events is not None:
-        charged = [e for e in tx.events if e.contract_id == escrow and e.topics and e.topics[0] == "charged"]
-        named = [e for e in charged if len(e.topics) > 1 and e.topics[1] == agent_id]
-        if not named:
-            others = sorted({str(e.topics[1]) for e in charged if len(e.topics) > 1})
-            return (
-                Check(
-                    subject,
-                    "charged_names_agent",
-                    False,
-                    f"tx {tx.tx_hash} emitted {len(charged)} charged event(s) from the escrow, naming {others}; "
-                    f"none names agent {agent_id}",
-                ),
-                None,
-                "",
-            )
-        for e in named:
-            data = e.value if isinstance(e.value, list) else []
-            if len(data) > 3 and int(data[2]) == want_amount and str(data[3]).lower() == want_job:
-                return (
-                    Check(
-                        subject,
-                        "charged_names_agent",
-                        True,
-                        f"charged({agent_id}) for {want_amount} stroops, job {want_job} (RPC contract events)",
-                    ),
-                    str(data[1]),
-                    "charged event",
-                )
-        seen = [(int(d[2]), str(d[3])) for d in (e.value for e in named) if isinstance(d, list) and len(d) > 3]
+    """The proof inside the RPC's event window: an escrow `charged` event
+    naming the agent, with the claimed amount and job in its data."""
+    charged = [e for e in events if e.contract_id == escrow and e.topics and e.topics[0] == "charged"]
+    named = [e for e in charged if len(e.topics) > 1 and e.topics[1] == agent_id]
+    if not named:
+        others = sorted({str(e.topics[1]) for e in charged if len(e.topics) > 1})
         return (
             Check(
                 subject,
                 "charged_names_agent",
                 False,
-                f"charged event(s) for {agent_id} in tx {tx.tx_hash} carry (stroops, job) {seen}; "
-                f"the API claims ({want_amount}, {want_job})",
+                f"tx {tx.tx_hash} emitted {len(charged)} charged event(s) from the escrow, naming {others}; "
+                f"none names agent {agent_id}",
             ),
             None,
             "",
         )
+    data = _matching_charge(named, want_amount, want_job)
+    if data is not None:
+        return (
+            Check(
+                subject,
+                "charged_names_agent",
+                True,
+                f"charged({agent_id}) for {want_amount} stroops, job {want_job} (RPC contract events)",
+            ),
+            str(data[1]),
+            "charged event",
+        )
+    seen = [(int(d[2]), str(d[3])) for d in (e.value for e in named) if isinstance(d, list) and len(d) > 3]
+    return (
+        Check(
+            subject,
+            "charged_names_agent",
+            False,
+            f"charged event(s) for {agent_id} in tx {tx.tx_hash} carry (stroops, job) {seen}; "
+            f"the API claims ({want_amount}, {want_job})",
+        ),
+        None,
+        "",
+    )
 
-    # Horizon answered: no events. The settle invocation's own arguments.
+
+def _settle_proof(
+    tx: TxRecord, escrow: str, agent_id: str, want_amount: int, want_job: str, subject: str
+) -> tuple[Check, str | None, str]:
+    """The proof past the RPC's event window: a SUCCESSFUL escrow `settle`
+    whose own payouts name the agent for the amount, on the claimed job."""
     for call in tx.invocations:
         if call.contract_id != escrow or call.function != "settle" or len(call.args) < 4:
             continue
@@ -202,6 +214,19 @@ def _charged_proof(
         None,
         "",
     )
+
+
+def _charged_proof(
+    tx: TxRecord, escrow: str, agent_id: str, claim: WorkflowClaim, subject: str
+) -> tuple[Check, str | None, str]:
+    """(the check, the authorization id it names, which proof was used)."""
+    want_amount = usdc_to_stroops(claim.amount_usdc)
+    want_job = claim.job_id_hex.lower()
+    if tx.events is not None:
+        return _event_proof(tx, tx.events, escrow, agent_id, want_amount, want_job, subject)
+
+    # Horizon answered: no events. The settle invocation's own arguments.
+    return _settle_proof(tx, escrow, agent_id, want_amount, want_job, subject)
 
 
 def verify_workflow(

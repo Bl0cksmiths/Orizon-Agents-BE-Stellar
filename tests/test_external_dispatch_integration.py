@@ -56,8 +56,9 @@ def test_operator_chosen_keys_never_survive() -> None:
 
 
 def test_a_hostile_artifact_shape_fails_the_step_not_the_run() -> None:
+    handler = _responds({"summary": "done", "artifact": "boom"})
     with pytest.raises(eh.ExternalDispatchError, match="rule: artifact_not_an_object"):
-        _run(_responds({"summary": "done", "artifact": "boom"}))
+        _run(handler)
 
 
 def test_deeply_nested_json_fails_the_step_not_the_run() -> None:
@@ -72,8 +73,9 @@ def test_deeply_nested_json_fails_the_step_not_the_run() -> None:
     worker = eh.ExternalHttpWorker(
         "ext_demo1", "external.ext_demo1", ENDPOINT, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
+    step = worker.run("x", "y")
     with pytest.raises(eh.ExternalDispatchError):
-        asyncio.run(worker.run("x", "y"))
+        asyncio.run(step)
 
 
 def test_the_signature_covers_the_exact_bytes_sent(hermetic_settings) -> None:

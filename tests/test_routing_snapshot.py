@@ -52,7 +52,7 @@ async def _no_sleep(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Fresh seeded registry and an empty bound set, both restored after."""
     saved = dict(state.agents)
@@ -118,7 +118,7 @@ def test_reputation_is_read_only_for_listed_dispatchable_agents(seeded: None, mo
     assert sorted(asked[0]) == sorted(a.id for a in state.list_agents() if a.source == "seeded" and a.id != "agt_03d9")
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(seeded: None, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """The real reputation read path over a fake Soroban simulation.
 
@@ -197,7 +197,8 @@ def test_a_partially_failing_read_degrades_only_the_agents_it_failed_for(
     assert [(s.agent_id, s.rep_degraded, s.rep_source) for s in resp.steps] == [("agt_03d9", True, "prior")]
     note = next(n for n in resp.notices if n.agent_id == BAD)
     assert (note.kind, note.reason_code) == ("excluded", "below_floor")
-    assert note.lower_bound_bps is not None and note.lower_bound_bps < settings.reputation_floor_bps
+    assert note.lower_bound_bps is not None
+    assert note.lower_bound_bps < settings.reputation_floor_bps
 
 
 def test_an_agent_registered_during_the_reputation_read_is_not_offered(

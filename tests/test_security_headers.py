@@ -20,7 +20,7 @@ API_CSP = "default-src 'none'; frame-ancestors 'none'"
 HSTS = "max-age=63072000; includeSubDomains"
 
 
-@pytest.fixture()
+@pytest.fixture
 def client():
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c

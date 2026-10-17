@@ -78,7 +78,8 @@ async def _assert_retained_settlements_keep_their_disputes(
             continue
         assert await store.get_dispute(dispute.id) is not None, dispute.id
         found = await store.find_dispute(dispute.job_id_hex, dispute.step_index)
-        assert found is not None and found.id == dispute.id, dispute.id
+        assert found is not None, dispute.id
+        assert found.id == dispute.id, dispute.id
 
 
 def test_a_paid_step_can_never_be_disputed_again_while_its_settlement_is_held(
@@ -110,10 +111,13 @@ def test_a_paid_step_can_never_be_disputed_again_while_its_settlement_is_held(
         return
 
     original = asyncio.run(store.find_dispute(_job(0), 0))
-    assert original is not None and original.id == "dsp_paid"
-    assert original.status == "credited" and original.refund_tx == "tx_refund"
+    assert original is not None
+    assert original.id == "dsp_paid"
+    assert original.status == "credited"
+    assert original.refund_tx == "tx_refund"
+    again = store.open_dispute(_dispute("dsp_again", 0, 0))
     with pytest.raises(DuplicateDisputeError) as refused:
-        asyncio.run(store.open_dispute(_dispute("dsp_again", 0, 0)))
+        asyncio.run(again)
     assert refused.value.existing.id == "dsp_paid"
     assert asyncio.run(store.get_dispute("dsp_again")) is None
 
@@ -210,7 +214,8 @@ def test_every_retained_settlement_keeps_every_dispute_ever_opened_on_it(
             for dispute_id, last in status.items():
                 held = store._disputes.get(dispute_id)
                 if last in UNFINISHED:
-                    assert held is not None and held.status == last, (dispute_id, last)
+                    assert held is not None, (dispute_id, last)
+                    assert held.status == last, (dispute_id, last)
                 else:
                     assert held is None or held.status == last, (dispute_id, last)
             claimed = {c.dispute_id for c in await store.list_refund_claims()}
@@ -263,7 +268,8 @@ def test_the_order_disputes_are_opened_in_does_not_decide_what_is_kept(monkeypat
     assert asyncio.run(store.get_settlement(_job(0))) is None
     assert asyncio.run(store.get_dispute("dsp_0")) is None
     newest = asyncio.run(store.get_settlement_by_task("task_0"))
-    assert newest is not None and newest.job_id_hex == _job(1)
+    assert newest is not None
+    assert newest.job_id_hex == _job(1)
 
 
 # ── what is still owed is never shed ──────────────────────────────────────
@@ -300,7 +306,9 @@ def test_an_unfinished_dispute_keeps_its_settlement_far_past_the_cap(
 
     assert list(store._settlements) == [_job(0), _job(19)]
     owed = asyncio.run(store.find_dispute(_job(0), 0))
-    assert owed is not None and owed.id == "dsp_owed" and owed.status == status
+    assert owed is not None
+    assert owed.id == "dsp_owed"
+    assert owed.status == status
     claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
     assert claims == (["dsp_owed"] if status == "crediting" else [])
     assert not [r for r in caplog.records if r.name == STORE_LOGGER and r.levelno >= logging.ERROR]
@@ -355,7 +363,9 @@ def test_with_every_settlement_pinned_the_store_grows_loses_nothing_and_says_so(
     assert list(store._settlements) == [_job(n) for n in range(5)]
     for n, status in enumerate(statuses):
         kept = asyncio.run(store.find_dispute(_job(n), 0))
-        assert kept is not None and kept.id == f"dsp_{n}" and kept.status == status
+        assert kept is not None
+        assert kept.id == f"dsp_{n}"
+        assert kept.status == status
     claims = [c.dispute_id for c in asyncio.run(store.list_refund_claims())]
     assert claims == ["dsp_2", "dsp_4"]
 
@@ -364,4 +374,5 @@ def test_with_every_settlement_pinned_the_store_grows_loses_nothing_and_says_so(
     errors = [r.getMessage() for r in records if r.levelno == logging.ERROR]
     assert errors, "growing past the cap must be an ERROR"
     assert "3 over its cap of 2" in errors[-1]
-    assert "unfinished dispute" in errors[-1] and "DATABASE_URL" in errors[-1]
+    assert "unfinished dispute" in errors[-1]
+    assert "DATABASE_URL" in errors[-1]

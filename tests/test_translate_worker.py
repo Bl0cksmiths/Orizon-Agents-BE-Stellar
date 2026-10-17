@@ -76,7 +76,8 @@ def test_upstream_copy_is_translated_segment_by_segment_on_haiku(claude: FakeCla
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.translate.42", "claude-haiku-4-5", None)
-    assert call.schema_name == "TranslateDraft" and call.system == translate.INSTRUCTIONS
+    assert call.schema_name == "TranslateDraft"
+    assert call.system == translate.INSTRUCTIONS
     assert call.max_tokens == translate.MAX_TOKENS
     user = call.user
     assert user.index("END USER_INPUT") < user.index("BEGIN TEXT_TO_TRANSLATE") < user.index("[S1] (Hero headline)")
@@ -84,7 +85,8 @@ def test_upstream_copy_is_translated_segment_by_segment_on_haiku(claude: FakeCla
 
     assert [t["language"] for t in out["translations"]] == ["tl", "es"]
     tl = out["translations"][0]
-    assert tl["name"] == "Tagalog" and tl["lang"] == "tl"
+    assert tl["name"] == "Tagalog"
+    assert tl["lang"] == "tl"
     assert tl["text"] == "\n".join(TL.values())
     assert tl["segments"][1] == {
         "id": "S2",
@@ -200,6 +202,30 @@ def test_at_most_four_languages(claude: FakeClaude) -> None:
     assert [t["language"] for t in out["translations"]] == codes[: translate.MAX_LANGUAGES]
 
 
+def test_fit_translations_skips_blank_source_and_repeated_codes_and_bounds_a_segment() -> None:
+    segments = [translate.Segment(id="S1", role="copywrite.v3", label="Hero headline", text="Fix it")]
+    long = "a" * (translate.MAX_SEGMENT_CHARS * 2 + 10)
+    draft = translate.TranslateDraft.model_validate(
+        {
+            "source_language": " EN ",
+            "source_text": "",
+            "languages": [
+                {"code": "  ", "name": "Blank", "segments": [{"id": "S1", "text": "x"}]},
+                {"code": "en", "name": "English", "segments": [{"id": "S1", "text": "x"}]},
+                {"code": "es  MX", "name": "", "segments": [{"id": " S1 ", "text": f"  {long}  "}]},
+                {"code": "ES mx", "name": "Spanish", "segments": [{"id": "S1", "text": "y"}]},
+            ],
+        }
+    )
+    languages, issues = translate.fit_translations(draft, segments)
+    assert issues == []
+    assert [(t["language"], t["name"]) for t in languages] == [("es MX", "es MX")]  # the code stands in for a name
+    assert languages[0]["text"] == "a" * (translate.MAX_SEGMENT_CHARS * 2) + "…"
+    assert languages[0]["segments"] == [
+        {"id": "S1", "role": "copywrite.v3", "label": "Hero headline", "source": "Fix it", "text": languages[0]["text"]}
+    ]
+
+
 @pytest.mark.parametrize(
     ("script", "kw", "rule"),
     [
@@ -226,7 +252,8 @@ def test_a_translation_the_model_did_not_deliver_fails_the_step(
 ) -> None:
     script(claude)
     err = _failure(**({"context": {"copywrite.v3": COPY}} | kw))
-    assert err.rule == rule and "MODEL-PROSE" not in str(err)
+    assert err.rule == rule
+    assert "MODEL-PROSE" not in str(err)
 
 
 def test_a_slow_translation_fails_inside_the_step_deadline(claude: FakeClaude, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -236,8 +263,9 @@ def test_a_slow_translation_fails_inside_the_step_deadline(claude: FakeClaude, m
     monkeypatch.setattr(translate, "BUDGET_SECONDS", 0.05)
     claude.cut_stream("", purpose="worker.translate.42")  # never answers
     step = WORKER.run(INTENT, RATIONALE, context={"copywrite.v3": COPY})
+    bounded = asyncio.wait_for(step, timeout=2)
     with pytest.raises(ModelStepError) as info:  # a TimeoutError here means no budget of its own
-        asyncio.run(asyncio.wait_for(step, timeout=2))
+        asyncio.run(bounded)
     assert info.value.rule == "model_truncated"
 
 

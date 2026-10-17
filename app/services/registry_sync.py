@@ -427,6 +427,57 @@ def _refuse_price(agent_id: str, reason: UnbelievablePrice) -> None:
     )
 
 
+def _skip_seeded(agent_id: str) -> None:
+    """Leave an on-chain `agt_` id unindexed, warning about it once per process.
+
+    Seeded namespace: add_agent is an upsert, so indexing this id would
+    clobber a worker-backed catalog agent.
+    """
+    if agent_id not in _skipped_agt_ids:
+        _skipped_agt_ids.add(agent_id)
+        logger.warning(
+            "registry sync: skipping on-chain id %r — the agt_ namespace is the "
+            "seeded catalog, and upserting it would clobber a worker-backed agent",
+            agent_id,
+        )
+
+
+async def _read_agent(contract_id: str, agent_id: str, batched: dict[str, dict[str, Any]]) -> Agent | None:
+    """One listed id as an Agent: from the batch, else its own `get`. None when refused or unreadable."""
+    try:
+        known = batched.get(agent_id)
+        raw = (
+            known
+            if known is not None
+            else await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
+        )
+        # Answered: whatever the mapper makes of it, the chain has told
+        # us about this id, so it no longer holds the mirror partial.
+        _answered_ids.add(agent_id)
+        return _to_agent(raw)
+    except UnbelievablePrice as e:
+        # Must precede the catch-all: UnbelievablePrice is a ValueError,
+        # and a refusal is a policy decision, not a read failure.
+        _refuse_price(agent_id, e)
+        return None
+    except Exception as e:
+        logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+        return None
+
+
+def _close_pass(ids: list[str]) -> None:
+    """Record the pass as full when every listed non-`agt_` id has answered, or name those that have not."""
+    unanswered = [i for i in ids if not i.startswith("agt_") and i not in _answered_ids]
+    if unanswered:
+        logger.debug(
+            "registry sync: pass not full — %d listed id(s) have never answered a read: %s",
+            len(unanswered),
+            ", ".join(unanswered[:5]),
+        )
+    else:
+        _record_full_pass()
+
+
 async def sync_once() -> int:
     """Run one full sync pass; returns the number of agents upserted.
 
@@ -478,49 +529,17 @@ async def _pass() -> int:
         if agent_id in built_in:
             continue  # checked above; never upserted over the catalog agent
         if agent_id.startswith("agt_"):
-            # Seeded namespace: add_agent is an upsert, so indexing this
-            # id would clobber a worker-backed catalog agent.
-            if agent_id not in _skipped_agt_ids:
-                _skipped_agt_ids.add(agent_id)
-                logger.warning(
-                    "registry sync: skipping on-chain id %r — the agt_ namespace is the "
-                    "seeded catalog, and upserting it would clobber a worker-backed agent",
-                    agent_id,
-                )
+            _skip_seeded(agent_id)
             continue
-        try:
-            known = batched.get(agent_id)
-            raw = (
-                known
-                if known is not None
-                else await asyncio.to_thread(sc.simulate_read, contract_id, "get", [sc.sym(agent_id)])
-            )
-            # Answered: whatever the mapper makes of it, the chain has told
-            # us about this id, so it no longer holds the mirror partial.
-            _answered_ids.add(agent_id)
-            agent = _to_agent(raw)
-        except UnbelievablePrice as e:
-            # Must precede the catch-all: UnbelievablePrice is a ValueError,
-            # and a refusal is a policy decision, not a read failure.
-            _refuse_price(agent_id, e)
-            continue
-        except Exception as e:
-            logger.warning("registry sync: failed to index %r: %s", agent_id, _describe(e))
+        agent = await _read_agent(contract_id, agent_id, batched)
+        if agent is None:
             continue
         # Believable again after a refusal — re-arm the warning so an
         # operator flip-flopping across the cap stays visible in the log.
         _refused_price_ids.discard(agent_id)
         state.add_agent(agent)
         synced += 1
-    unanswered = [i for i in ids if not i.startswith("agt_") and i not in _answered_ids]
-    if unanswered:
-        logger.debug(
-            "registry sync: pass not full — %d listed id(s) have never answered a read: %s",
-            len(unanswered),
-            ", ".join(unanswered[:5]),
-        )
-    else:
-        _record_full_pass()
+    _close_pass(ids)
     return synced
 
 
@@ -618,6 +637,7 @@ async def wait_first_pass(timeout_seconds: float) -> bool:
         return True
     if not timeout_seconds > 0:
         # REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS=0: the operator chose not to wait.
+        # Not `<= 0`, which a NaN bound would slip past into `wait_for`.
         return False
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout_seconds)

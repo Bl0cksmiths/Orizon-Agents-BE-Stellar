@@ -184,7 +184,8 @@ def test_an_append_holds_the_lock_from_its_read_until_its_write_commits(
 
     written = run(pg, go())
 
-    assert written is not None and written.status == "rejected"
+    assert written is not None
+    assert written.status == "rejected"
     assert probes == ["held"]
 
 
@@ -237,7 +238,8 @@ def test_a_claim_racing_a_claim_is_settled_by_the_primary_key(
         assert trail == ["open", "upheld", "crediting"]
         assert held["dsp_0001"] == 1.0  # still the other claimant's row
     else:
-        assert claimed is not None and claimed.status == "crediting"
+        assert claimed is not None
+        assert claimed.status == "crediting"
         assert trail == ["open", "upheld", "crediting"]
         assert held["dsp_0001"] != 1.0
 
@@ -374,13 +376,20 @@ def test_a_table_created_by_story_4_02_is_migrated_in_place(pg: PostgresDisputeS
         "rating_confirmed": "boolean",
     }
     # The rows 4.02 wrote read as "not known", never as a zero or a 1970.
-    assert old is not None and old.status == "upheld" and old.reason == "from 4.02"
+    assert old is not None
+    assert old.status == "upheld"
+    assert old.reason == "from 4.02"
     assert (old.note, old.credited_usdc, old.updated_at, old.rating_confirmed) == (None, None, None, None)
     assert (rows[0]["updated_at"], rows[1]["updated_at"]) == (None, None)
     # And the dispute is payable through today's code.
-    assert claimed is not None and claimed.status == "crediting" and claimed.resolved_at == 200.0
-    assert credited is not None and credited.credited_usdc == 1.5 and credited.updated_at is not None
-    assert rated is not None and (rated.refund_tx, rated.rating_tx, rated.rating_confirmed) == (
+    assert claimed is not None
+    assert claimed.status == "crediting"
+    assert claimed.resolved_at == 200.0
+    assert credited is not None
+    assert credited.credited_usdc == 1.5
+    assert credited.updated_at is not None
+    assert rated is not None
+    assert (rated.refund_tx, rated.rating_tx, rated.rating_confirmed) == (
         "tx_refund",
         "tx_rating",
         True,
@@ -427,7 +436,8 @@ def test_money_round_trips_through_double_precision_and_jsonb_exactly(pg: Postgr
     read, settled = run(pg, go())
 
     assert read == [(amount, amount, amount) for amount in AMOUNTS]
-    assert settled is not None and settled.settled_usdc == AMOUNTS[0]
+    assert settled is not None
+    assert settled.settled_usdc == AMOUNTS[0]
     assert tuple(step.price_usdc for step in settled.steps) == AMOUNTS
 
 
@@ -462,7 +472,8 @@ def test_every_read_answers_with_the_newest_row_by_id(pg: PostgresDisputeStore, 
 
     assert trail == ["open", "upheld", "crediting", "upheld", "crediting"]
     assert newest == "crediting"
-    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert reclaimed is not None
+    assert reclaimed.status == "crediting"
     assert by_id == by_step == reclaimed
     assert listed == (reclaimed,)
 
@@ -478,7 +489,8 @@ def test_settlements_are_read_newest_first_by_id_too(pg: PostgresDisputeStore, p
     # The last row WRITTEN, not the latest window: a settlement is a fact about
     # a moment, and the newest fact wins.
     assert count == 3
-    assert latest is not None and latest.window_closes_at == 1_700_200_000.0
+    assert latest is not None
+    assert latest.window_closes_at == 1_700_200_000.0
 
 
 # ── what a transition carries forward ─────────────────────────────────────
@@ -504,7 +516,8 @@ def test_a_later_transition_carries_the_refund_hash_and_the_credit_forward(
     for record in (rated, noted):
         assert record is not None
         assert (record.refund_tx, record.credited_usdc, record.rating_tx) == ("tx_paid", 1.25, "tx_rating")
-    assert noted is not None and noted.note == "reconciled"
+    assert noted is not None
+    assert noted.note == "reconciled"
     # On the rows themselves, not only on what the call returned.
     assert [row["refund_tx"] for row in rows] == [None, None, None, "tx_paid", "tx_paid", "tx_paid"]
 

@@ -125,7 +125,7 @@ def fresh_challenge_limiter(monkeypatch):
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def challenge_stub(monkeypatch):
     """Point the challenge mint at a known nonce; record every call."""
     calls: list[tuple[str, int]] = []
@@ -376,7 +376,8 @@ def test_every_unusable_reason_is_one_code_that_names_the_bound(client, monkeypa
     assert str(dispute_svc.MAX_REASON_CHARS) in body["error"]["message"]
     # Nothing the buyer wrote comes back.
     if reason.strip():
-        assert reason not in r.text and "q" * 50 not in r.text
+        assert reason not in r.text
+        assert "q" * 50 not in r.text
 
 
 def test_the_published_schema_still_states_the_reason_bound(client):
@@ -465,7 +466,7 @@ TASK_TOKEN = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 PROVEN = {"X-Task-Token": TASK_TOKEN}
 
 
-@pytest.fixture()
+@pytest.fixture
 def proved():
     """Mint `task-1`'s read token, so a test can present it.
 

@@ -1,0 +1,15 @@
+exit code 0
+sow metrics · api https://orizon.test · backend https://backend.test · frontend https://front.test · testnet only, read-only
+[NOT MET] m01 Externally-operated agents registered on Testnet — target ≥ 2, achieved 0
+[NOT MET] m02 Unique external operator wallet addresses — target ≥ 2, achieved 0
+[NOT MET] m03 Workflows routed to external agents & settled on Testnet — target ≥ 3, achieved 0
+[NOT MET] m04 On-chain USDC settlements (charges) recorded — target ≥ 3, achieved 0
+[NOT MET] m05 Dispute → partial-refund settlements — target ≥ 1, achieved 0
+[NOT MET] m06 Permissionless AgentRegistry.register flow live on the dApp — target Yes, achieved No
+[NOT MET] m07 Reputation-gated routing (reads avg_bps, applies a floor) live — target Yes, achieved No
+[NOT MET] m08 Automated dispute window + partial-credit refund live — target Yes, achieved Partly: the dispute routes are deployed, but no dispute window has opened yet, because no payment has settled on escrow v2, and refunds are switched off.
+[NOT MET] m09 Public "List your agent on Orizon" integration guide published — target Yes, achieved No
+[NOT MET] m10 3–5 min demo video published — target Yes, achieved No
+[NOT MET] m11 All source code released under MIT License — target Yes, achieved No
+wrote <tmp>/metrics/sow-metrics.block.json, <tmp>/metrics/sow-metrics.md, <tmp>/metrics/sow-metrics.raw.json
+exit 0: 0 of 11 met

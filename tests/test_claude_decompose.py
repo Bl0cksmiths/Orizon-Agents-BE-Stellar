@@ -49,7 +49,7 @@ def _plan(*steps: tuple[str, str]) -> ModelPlan:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def claude_on(fake_claude: FakeClaude, fake_jev: FakeJev, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The Claude provider, a fresh seeded registry, and no kit thinking pause."""
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
@@ -112,11 +112,14 @@ def test_a_screened_request_is_planned_on_opus_from_the_improved_spec(
     assert planner.model == "claude-opus-5-5"
     assert planner.effort == "medium"  # moderate request
     # Planned from the checked spec, not the raw words.
-    assert "BEGIN UNDERSTOOD_REQUEST" in planner.user and "USER_INPUT" not in planner.user
+    assert "BEGIN UNDERSTOOD_REQUEST" in planner.user
+    assert "USER_INPUT" not in planner.user
     assert [s.agent_id for s in resp.steps] == ["agt_11c0"]
     assert resp.planner_fallback is False
     assert resp.tier == "moderate"
-    assert resp.guard is not None and resp.guard.verdict == "allow" and resp.guard.tier == "moderate"
+    assert resp.guard is not None
+    assert resp.guard.verdict == "allow"
+    assert resp.guard.tier == "moderate"
     assert resp.understood_as is not None
     assert resp.understood_as.goal == SPEC_DRAFT.goal
     assert resp.models is not None
@@ -130,7 +133,8 @@ def test_a_screened_request_is_planned_on_opus_from_the_improved_spec(
         ("recheck", "Improved request re-checked by jev"),
         ("plan", "Planned by Claude Opus 5.5 (effort medium)"),
     ]
-    assert fake_claude.pending == 0 and fake_jev.pending == 0
+    assert fake_claude.pending == 0
+    assert fake_jev.pending == 0
 
 
 def test_a_step_tier_is_capped_at_the_requests_tier(
@@ -175,7 +179,8 @@ def test_a_low_confidence_tier_is_rounded_up_and_said(
     resp = _decompose()
 
     assert resp.tier == "moderate"
-    assert resp.guard is not None and "tier_rounded_up" in resp.guard.reasons
+    assert resp.guard is not None
+    assert "tier_rounded_up" in resp.guard.reasons
 
 
 # ── the clamp is the same clamp ────────────────────────────────
@@ -248,7 +253,8 @@ def test_no_routable_agent_refuses_before_any_paid_call(
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
         _decompose()
 
-    assert fake_claude.calls == [] and fake_jev.calls == []
+    assert fake_claude.calls == []
+    assert fake_jev.calls == []
 
 
 # ── refusals ───────────────────────────────────────────────────
@@ -329,7 +335,8 @@ def test_the_fallback_guard_stands_in_and_is_named(claude_on: None, fake_claude:
     resp = _decompose()
 
     assert resp.stages[0].msg == "Request checked by Claude Haiku 4.5, standing in for jev (tier: low)"
-    assert resp.models is not None and resp.models.guard == "claude-haiku-4-5"
+    assert resp.models is not None
+    assert resp.models.guard == "claude-haiku-4-5"
 
 
 def test_the_spend_cap_pauses_planning_with_retry_after(
@@ -392,7 +399,8 @@ def test_a_planner_outage_serves_the_flagged_fallback(
     resp = _decompose()
 
     assert resp.planner_fallback is True
-    assert resp.models is not None and resp.models.planner is None
+    assert resp.models is not None
+    assert resp.models.planner is None
     assert resp.stages[-1].msg == "The planner could not answer; a fallback plan was served"
 
 
@@ -436,7 +444,8 @@ def test_a_drifted_spec_is_dropped_for_the_original_words(
     resp = _decompose()
 
     planner = fake_claude.calls_for("planner")[0]
-    assert "BEGIN USER_INPUT" in planner.user and "UNDERSTOOD_REQUEST" not in planner.user
+    assert "BEGIN USER_INPUT" in planner.user
+    assert "UNDERSTOOD_REQUEST" not in planner.user
     assert resp.understood_as is None
     assert resp.stages[2].msg == "The improved request drifted from yours; planning from your own words"
 
@@ -452,7 +461,8 @@ def test_a_failed_improver_plans_from_the_original_words(
 
     assert "BEGIN USER_INPUT" in fake_claude.calls_for("planner")[0].user
     assert resp.understood_as is None
-    assert resp.models is not None and resp.models.improver is None
+    assert resp.models is not None
+    assert resp.models.improver is None
     assert [s.stage for s in resp.stages] == ["guard", "improve", "plan"]
     assert resp.stages[1].msg == "Prompt improvement unavailable"
     assert fake_jev.calls_for("guard.spec") == []
@@ -482,7 +492,8 @@ def test_a_watch_band_intent_with_a_clean_spec_plans_from_the_spec(
     resp = _decompose()
 
     assert "USER_INPUT" not in fake_claude.calls_for("planner")[0].user
-    assert resp.guard is not None and "watch" in resp.guard.reasons
+    assert resp.guard is not None
+    assert "watch" in resp.guard.reasons
 
 
 def test_an_unsafe_spec_blocks(claude_on: None, client: TestClient, fake_claude: FakeClaude, fake_jev: FakeJev) -> None:
@@ -596,7 +607,8 @@ def test_a_kit_passes_the_guard_and_keeps_its_fixed_plan(
     assert [s.tier for s in resp.steps] == ["low", "low", "low", "moderate", "moderate", "low"]
     assert fake_claude.calls == []  # no improver, no planner
     assert resp.understood_as is None
-    assert resp.models is not None and resp.models.planner is None
+    assert resp.models is not None
+    assert resp.models.planner is None
     assert [(s.stage, s.msg) for s in resp.stages] == [
         ("guard", "Request checked by jev (tier: moderate)"),
         ("plan", f"Curated demo plan: {detect_kit(KIT_INTENT).brand.name}"),  # type: ignore[union-attr]
@@ -636,7 +648,8 @@ def test_a_kit_still_plans_while_the_spend_cap_pauses_ai(
     resp = _decompose(KIT_INTENT)
 
     assert len(resp.steps) == 6
-    assert resp.guard is None and resp.tier is None
+    assert resp.guard is None
+    assert resp.tier is None
     assert [s.tier for s in resp.steps] == [None] * 6
     assert resp.stages[0].msg == "Request check paused: today's AI budget is spent; curated demo served"
     assert fake_claude.calls_for("planner") == []
@@ -650,7 +663,8 @@ def test_a_kit_is_still_checked_by_jev_past_the_spend_cap(
 
     resp = _decompose(KIT_INTENT)
 
-    assert resp.guard is not None and resp.guard.verdict == "allow"
+    assert resp.guard is not None
+    assert resp.guard.verdict == "allow"
 
 
 def test_a_free_form_request_pauses_when_the_cap_stops_the_guard(
@@ -699,7 +713,11 @@ def test_the_openai_provider_runs_the_legacy_planner_untouched(
     resp = _decompose(spec=None)
 
     assert len(prompts) == 1
-    assert fake_claude.calls == [] and fake_jev.calls == []
+    assert fake_claude.calls == []
+    assert fake_jev.calls == []
     # Nothing on the legacy path judged a tier, so none is served or stored.
-    assert resp.steps[0].tier is None and resp.tier is None
-    assert resp.guard is None and resp.models is None and resp.stages == []
+    assert resp.steps[0].tier is None
+    assert resp.tier is None
+    assert resp.guard is None
+    assert resp.models is None
+    assert resp.stages == []

@@ -129,24 +129,20 @@ def forbid_uphold(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_store():
+def _fresh_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """A store per test.
 
     It is a process singleton, and `DATABASE_URL` in the environment of whoever
     runs the suite must not turn one of these into a live query — the hermetic
     fixture in conftest does not clear that one.
     """
-    saved = settings.database_url, settings.stellar_network, settings.stellar_network_passphrase
-    settings.database_url = ""
+    monkeypatch.setattr(settings, "database_url", "")
     # Pinned so the explorer URLs asserted below are the ones a testnet operator
     # sees, rather than whatever network a developer's .env happens to name —
     # the passphrase too, since that is what the links are keyed on (D-074).
-    settings.stellar_network = "testnet"
-    settings.stellar_network_passphrase = TESTNET_PASSPHRASE
-    dispute_store._store = None
-    yield
-    dispute_store._store = None
-    settings.database_url, settings.stellar_network, settings.stellar_network_passphrase = saved
+    monkeypatch.setattr(settings, "stellar_network", "testnet")
+    monkeypatch.setattr(settings, "stellar_network_passphrase", TESTNET_PASSPHRASE)
+    monkeypatch.setattr(dispute_store, "_store", None)
 
 
 @pytest.fixture(autouse=True)
@@ -791,10 +787,12 @@ def test_a_non_finite_credit_exits_the_same_way_through_either_door(
     assert uphold.calls == [DISPUTE_ID]
 
     assert from_preview == from_live == uphold_dispute.EXIT_UNEXPECTED
-    assert "refund_amount_invalid" in preview_out and "refund_amount_invalid" in live_out
+    assert "refund_amount_invalid" in preview_out
+    assert "refund_amount_invalid" in live_out
     # Neither door signed anything: the finiteness test is made before the
     # amount can reach the settler's key, on both of them.
-    assert "nothing was signed" in preview_out and "nothing was signed" in live_out
+    assert "nothing was signed" in preview_out
+    assert "nothing was signed" in live_out
 
 
 def test_every_refusal_code_is_non_zero_and_distinct() -> None:
@@ -859,7 +857,9 @@ def test_a_dry_run_prints_the_three_bounds_the_cap_and_the_payer(
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID, "--dry-run")
 
     assert code == uphold_dispute.EXIT_OK
-    assert DISPUTE_ID in out and JOB in out and TASK in out
+    assert DISPUTE_ID in out
+    assert JOB in out
+    assert TASK in out
     assert "promised to the buyer when the dispute was opened" in out
     assert "DISPUTE_CREDITED_FRACTION" in out
     assert "ever settled on-chain for the whole workflow" in out
@@ -1016,7 +1016,8 @@ def test_the_preview_stacks_the_two_ids_and_underlines_the_bytes_they_share(
     underline = lines[lines.index(rating_line) + 1]
     column = job_line.index(JOB)
 
-    assert derived[:16] == JOB[:16] and derived != JOB
+    assert derived[:16] == JOB[:16]
+    assert derived != JOB
     assert rating_line.index(derived) == column
     assert underline[:column].strip() == ""
     assert underline[column : column + 17] == "^" * 16 + " "
@@ -1241,7 +1242,8 @@ def test_a_clean_live_run_prints_both_transactions_as_the_dispute_evidence(
     refund_url = f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}"
     rating_url = f"https://stellar.expert/explorer/testnet/tx/{RATING_TX}"
     assert code == uphold_dispute.EXIT_OK
-    assert paying == [DISPUTE_ID] and ledger.calls == [DISPUTE_ID]
+    assert paying == [DISPUTE_ID]
+    assert ledger.calls == [DISPUTE_ID]
     assert f"CREDITED — {CREDITABLE_USDC:.7f} USDC paid to {PAYER}" in out
     assert "status:    credited" in out
     assert f"tx:        {REFUND_TX}" in out
@@ -1273,7 +1275,8 @@ def test_a_timed_out_transfer_is_reported_as_maybe_landed_and_never_as_a_failure
     code, out = invoke(capsys, "--dispute-id", DISPUTE_ID)
 
     assert code == uphold_dispute.EXIT_TIMEOUT
-    assert "TIMED OUT" in out and "MAY STILL LAND" in out
+    assert "TIMED OUT" in out
+    assert "MAY STILL LAND" in out
     assert "DO NOT RE-RUN THIS SCRIPT YET — A TRANSFER MAY BE LIVE" in out
     assert "STILL HELD" in out
     assert f"https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
@@ -1466,9 +1469,12 @@ def test_a_rating_that_failed_after_the_credit_landed_says_the_buyer_is_paid_and
     # Never the 4.03 advice, never a claim that nothing was signed, never a PASS.
     assert "DO NOT RE-RUN" not in out
     assert "nothing was signed" not in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
     record = stored()
-    assert record.status == "credited" and record.refund_tx == REFUND_TX and record.rating_tx is None
+    assert record.status == "credited"
+    assert record.refund_tx == REFUND_TX
+    assert record.rating_tx is None
 
 
 def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on_record(
@@ -1490,7 +1496,8 @@ def test_a_rating_that_timed_out_is_not_reported_as_landed_though_its_hash_is_on
     assert "TIMED OUT — submitted and unconfirmed; it may still land." in out
     assert f"check it:  https://stellar.expert/explorer/testnet/tx/{in_flight}" in out
     assert "RE-RUNNING THIS SCRIPT IS SAFE HERE" in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
 
 
 def test_a_rating_success_with_no_hash_is_not_reported_as_landed(
@@ -1505,7 +1512,8 @@ def test_a_rating_success_with_no_hash_is_not_reported_as_landed(
 
     assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
     assert "submitted and unconfirmed" in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
 
 
 def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_consequence_did_not_land(
@@ -1529,8 +1537,10 @@ def test_a_rating_collision_is_judged_from_the_ledgers_answer_and_says_the_conse
     assert f"dispute:   {DISPUTE_ID}" in out
     assert f"rating id: {rating_id_hex()}" in out
     assert f"https://stellar.expert/explorer/testnet/contract/{LEDGER}" in out
-    assert "must not" in out and "be reported as resolved" in out
-    assert "RATED" not in out and "ON-CHAIN EVIDENCE" not in out
+    assert "must not" in out
+    assert "be reported as resolved" in out
+    assert "RATED" not in out
+    assert "ON-CHAIN EVIDENCE" not in out
     assert stored().rating_tx is None
 
 
@@ -1586,7 +1596,8 @@ def test_a_rerun_after_a_rating_that_did_not_land_writes_the_rating_and_signs_no
     assert code == uphold_dispute.EXIT_OK
     assert paying == []
     assert ledger.calls == [DISPUTE_ID]
-    assert "CREDITED EARLIER" in out and "this one signed no transfer" in out
+    assert "CREDITED EARLIER" in out
+    assert "this one signed no transfer" in out
     assert f"refund: https://stellar.expert/explorer/testnet/tx/{REFUND_TX}" in out
     assert f"rating: https://stellar.expert/explorer/testnet/tx/{RATING_TX}" in out
     assert stored().rating_tx == RATING_TX
@@ -1754,7 +1765,8 @@ def test_a_rating_submit_that_quotes_the_key_back_leaks_it_nowhere(
     out = capsys.readouterr().out
     assert code == uphold_dispute.EXIT_RATING_NOT_LANDED
     assert "NO ANSWER" in out
-    assert DISPUTE_ID in stderr.getvalue() and "[redacted]" in stderr.getvalue()
+    assert DISPUTE_ID in stderr.getvalue()
+    assert "[redacted]" in stderr.getvalue()
     assert key not in out
     assert key not in stderr.getvalue()
 
@@ -1920,7 +1932,8 @@ def test_a_live_run_given_the_service_url_invalidates_its_cached_score_after_the
     # be refilled with the pre-dispute score by the next read.
     assert service.ratings_before_call == [1]
     assert f"{SERVICE} dropped its cached score for {AGENT}" in out
-    assert "NOT TOLD" not in out and "could not tell" not in out
+    assert "NOT TOLD" not in out
+    assert "could not tell" not in out
     # The key went over the wire, never to the terminal.
     assert configured["api_key"] not in out
 
@@ -2022,6 +2035,7 @@ def test_a_dry_run_never_calls_the_service(
     ids=["401", "500", "unreachable", "timeout"],
 )
 def test_a_failed_invalidation_is_a_warning_and_never_changes_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     paying: list[str],
     ledger: RatingSeam,
@@ -2037,7 +2051,7 @@ def test_a_failed_invalidation_is_a_warning_and_never_changes_the_exit_code(
     ledger.answers(rating, RATING_TX if rating == "SUCCESS" else None)
     seed()
     code_told, _ = invoke(capsys, "--dispute-id", DISPUTE_ID, "--service-url", SERVICE)
-    dispute_store._store = None
+    monkeypatch.setattr(dispute_store, "_store", None)
     service.answer = answer
     seed()
 

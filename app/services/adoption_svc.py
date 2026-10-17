@@ -101,24 +101,31 @@ def load_team_register(path: Path = REGISTER_PATH) -> tuple[TeamWallet, ...]:
     first_seen: dict[str, int] = {}
     wallets: list[TeamWallet] = []
     for index, entry in enumerate(raw["wallets"]):
-        label = f"{name} entry {index}"
-        if not isinstance(entry, dict):
-            raise TeamRegisterError(f"{label}: expected an object, got {type(entry).__name__}")
-        if set(entry) != _ENTRY_FIELDS:
-            raise TeamRegisterError(f"{label}: expected exactly address, role and evidence, got {sorted(entry)}")
-        address = entry["address"]
-        if not isinstance(address, str) or not StrKey.is_valid_ed25519_public_key(address):
-            raise TeamRegisterError(f"{label}: {address!r} is not a valid Stellar account id (G-strkey)")
-        label = f"{label} ({address})"
-        for key in ("role", "evidence"):
-            value = entry[key]
-            if not isinstance(value, str) or not value.strip():
-                raise TeamRegisterError(f"{label}: `{key}` must be a non-empty string")
-        if address in first_seen:
-            raise TeamRegisterError(f"{label}: duplicates entry {first_seen[address]}")
-        first_seen[address] = index
-        wallets.append(TeamWallet(address=address, role=entry["role"].strip(), evidence=entry["evidence"].strip()))
+        wallet = _register_entry(entry, f"{name} entry {index}")
+        if wallet.address in first_seen:
+            raise TeamRegisterError(
+                f"{name} entry {index} ({wallet.address}): duplicates entry {first_seen[wallet.address]}"
+            )
+        first_seen[wallet.address] = index
+        wallets.append(wallet)
     return tuple(wallets)
+
+
+def _register_entry(entry: object, label: str) -> TeamWallet:
+    """One register entry, validated; `label` names it in the error raised."""
+    if not isinstance(entry, dict):
+        raise TeamRegisterError(f"{label}: expected an object, got {type(entry).__name__}")
+    if set(entry) != _ENTRY_FIELDS:
+        raise TeamRegisterError(f"{label}: expected exactly address, role and evidence, got {sorted(entry)}")
+    address = entry["address"]
+    if not isinstance(address, str) or not StrKey.is_valid_ed25519_public_key(address):
+        raise TeamRegisterError(f"{label}: {address!r} is not a valid Stellar account id (G-strkey)")
+    label = f"{label} ({address})"
+    for key in ("role", "evidence"):
+        value = entry[key]
+        if not isinstance(value, str) or not value.strip():
+            raise TeamRegisterError(f"{label}: `{key}` must be a non-empty string")
+    return TeamWallet(address=address, role=entry["role"].strip(), evidence=entry["evidence"].strip())
 
 
 # Loaded at import: the router imports this module and `app.main` imports the
@@ -527,13 +534,58 @@ def forget_owners() -> None:
     _owners_read.clear()
 
 
-async def _owner_or_none(agent_id: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> str | None:
-    """The live `owner_of`, or None when it could not be established."""
+async def _owner_or_none(agent_id: str) -> str | None:
+    """The live `owner_of`, or None when it could not be established.
+
+    Unbounded here: the caller holds the deadline and answers its expiry, as
+    `_probe_owners` does, with the same warning and the same None.
+    """
     try:
-        return await asyncio.wait_for(external_binding.resolve_owner(agent_id), timeout=timeout)
+        return await external_binding.resolve_owner(agent_id)
     except (external_binding.OwnerLookupError, TimeoutError) as e:
         logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
         return None
+
+
+async def _batch_owners(registry_id: str, agent_ids: list[str], deadline: float) -> dict[str, str]:
+    """The owners one read of the registry's storage names for `agent_ids`,
+    by `deadline`; a record with no usable owner is left out, and a read that
+    failed answers none."""
+    try:
+        records = await asyncio.wait_for(
+            asyncio.to_thread(sc.read_agent_records, registry_id, agent_ids), timeout=deadline - time.monotonic()
+        )
+    except Exception as e:
+        logger.warning("[adoption] registry records unreadable: %s", _describe(e))
+        records = {}
+    owners: dict[str, str] = {}
+    for agent_id, record in records.items():
+        owner = record.get("owner")
+        if isinstance(owner, str) and owner:
+            owners[agent_id] = owner
+    return owners
+
+
+async def _probe_owners(agent_ids: list[str], deadline: float) -> tuple[dict[str, str], bool]:
+    """`owner_of` for each of `agent_ids`, by `deadline`: the owners it
+    established, and whether any probe was skipped because time ran out."""
+    late = False
+
+    async def _probe(agent_id: str) -> str | None:
+        nonlocal late
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            late = True
+            return None
+        try:
+            async with asyncio.timeout(min(remaining, PROBE_TIMEOUT_SECONDS)):
+                return await _owner_or_none(agent_id)
+        except TimeoutError as e:
+            logger.warning("[adoption] owner of %s unreadable: %s", agent_id, _describe(e))
+            return None
+
+    found = zip(agent_ids, await _bounded(agent_ids, _probe), strict=True)
+    return {agent_id: owner for agent_id, owner in found if owner is not None}, late
 
 
 async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, str], bool]:
@@ -550,32 +602,12 @@ async def _owners_of(agent_ids: list[str], deadline: float) -> tuple[dict[str, s
     owners = {i: _owners_read[(registry_id, i)] for i in agent_ids if (registry_id, i) in _owners_read}
     rest = [i for i in agent_ids if i not in owners]
     if rest and time.monotonic() < deadline:
-        try:
-            records = await asyncio.wait_for(
-                asyncio.to_thread(sc.read_agent_records, registry_id, rest), timeout=deadline - time.monotonic()
-            )
-        except Exception as e:
-            logger.warning("[adoption] registry records unreadable: %s", _describe(e))
-            records = {}
-        for agent_id, record in records.items():
-            owner = record.get("owner")
-            if isinstance(owner, str) and owner:
-                owners[agent_id] = owner
+        owners.update(await _batch_owners(registry_id, rest, deadline))
         rest = [i for i in rest if i not in owners]
     probe = rest[:MAX_OWNER_PROBES_PER_BUILD]
-    left = len(rest) > len(probe)
-
-    async def _probe(agent_id: str) -> str | None:
-        nonlocal left
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            left = True
-            return None
-        return await _owner_or_none(agent_id, min(remaining, PROBE_TIMEOUT_SECONDS))
-
-    for agent_id, owner in zip(probe, await _bounded(probe, _probe), strict=True):
-        if owner is not None:
-            owners[agent_id] = owner
+    probed, late = await _probe_owners(probe, deadline)
+    owners.update(probed)
+    left = len(rest) > len(probe) or late
     for agent_id, owner in owners.items():
         _owners_read[(registry_id, agent_id)] = owner
     return owners, left
@@ -687,6 +719,91 @@ def _external_agent(
 
 
 # ── the report ────────────────────────────────────────────────────────────
+def _mirrored_owners(mirrored: dict[str, Agent]) -> tuple[dict[str, str], set[str]]:
+    """The owner of each mirrored agent, and the ids of those with none recorded."""
+    owners: dict[str, str] = {}
+    ownerless: set[str] = set()
+    for agent in mirrored.values():
+        if agent.owner:
+            owners[agent.id] = agent.owner
+        else:
+            ownerless.add(agent.id)
+    return owners, ownerless
+
+
+def _split_unmirrored(
+    agent_ids: list[str], owners: dict[str, str], rule: OwnerRule
+) -> tuple[dict[str, str], list[str]]:
+    """Ids the mirror lacks, split: those whose owner was read and is ours,
+    with that owner (listed under `excluded`, never counted), and the rest."""
+    ours: dict[str, str] = {}
+    unknown: list[str] = []
+    for agent_id in agent_ids:
+        owner = owners.get(agent_id)
+        if owner is not None and rule.classify(owner) is not None:
+            ours[agent_id] = owner
+        else:
+            # An on-chain agent the mirror does not hold and that is not ours:
+            # we cannot say whether it is operated, so it is not counted — and
+            # not silently dropped either.
+            unknown.append(agent_id)
+    return ours, unknown
+
+
+def _partition_owners(
+    owners: dict[str, str], rule: OwnerRule, mirrored: dict[str, Agent]
+) -> tuple[dict[str, ExcludedOwner], dict[str, list[Agent]]]:
+    """Every accounted agent by owner, in id order: ours, as `excluded` rows
+    naming why, and outside operators' mirrored agents, by owner."""
+    excluded: dict[str, ExcludedOwner] = {}
+    external: dict[str, list[Agent]] = {}
+    for agent_id, owner in sorted(owners.items()):
+        verdict = rule.classify(owner)
+        if verdict is not None:
+            reason, role = verdict
+            row = excluded.setdefault(
+                owner,
+                ExcludedOwner(owner=owner, owner_explorer=_account_link(owner), reason=reason, role=role, agent_ids=[]),
+            )
+            row.agent_ids.append(agent_id)
+        else:
+            external.setdefault(owner, []).append(mirrored[agent_id])
+    return excluded, external
+
+
+def _coverage(gap: _Unmirrored, accounted: int, window: charge_window.WindowSettlements | None) -> AdoptionCoverage:
+    """What this build read: the registry listing (None when it could not be
+    read) and the settlement window scan (zeros when it never ran)."""
+    return AdoptionCoverage(
+        agents_listed=gap.total if gap.listed else None,
+        agents_accounted=accounted,
+        settlement_ledgers_scanned=window.ledgers_scanned if window is not None else 0,
+        settlement_ledgers_in_window=window.ledgers_in_window if window is not None else 0,
+        external_charges=window.charges if window is not None else 0,
+        external_charges_unattributed=window.unattributed if window is not None else 0,
+    )
+
+
+def _window_days(results: dict[str, _AgentResult]) -> float:
+    """The span the settlement scan covered, in days.
+
+    One scan answers every agent, so this is its span — or 0 when it never
+    ran; kept as the smallest so the claim holds for every agent regardless."""
+    windows = [r.window_days for r in results.values() if r.window_days is not None]
+    return min(windows) if windows else 0.0
+
+
+def _totals(operators: list[AdoptionOperator], *, external_agents: int) -> AdoptionCounts:
+    """§6.3's three numbers, from the operators and their agents' settled workflows."""
+    # One workflow that paid two external agents is ONE workflow.
+    jobs = {w.job_id_hex for op in operators for a in op.agents for w in a.settled_workflows}
+    return AdoptionCounts(
+        external_agents=external_agents,
+        unique_operator_wallets=len(operators),
+        settled_external_workflows=len(jobs),
+    )
+
+
 async def build_report() -> AdoptionReport:
     """Compute the report. Never raises for a failed read, and stops reading
     at REPORT_WORK_BUDGET_SECONDS.
@@ -699,46 +816,21 @@ async def build_report() -> AdoptionReport:
     started = time.monotonic()
     deadline = started + REPORT_WORK_BUDGET_SECONDS
     rule = await owner_rule()
-    classify = rule.classify
     team_roles = rule.team_roles
     degraded = bool(rule.unreadable)
-    unreadable: set[str] = set()
 
     mirrored = onchain_mirror()
-    owners: dict[str, str] = {}
-    for agent in mirrored.values():
-        if agent.owner:
-            owners[agent.id] = agent.owner
-        else:
-            unreadable.add(agent.id)
+    owners, unreadable = _mirrored_owners(mirrored)
 
     gap = await _unmirrored(set(mirrored))
     if not gap.listed:
         degraded = True
     gap_owners, owners_left = await _owners_of(gap.ids, deadline)
-    for agent_id in gap.ids:
-        owner = gap_owners.get(agent_id)
-        if owner is not None and classify(owner) is not None:
-            owners[agent_id] = owner  # ours: listed under `excluded`, never counted
-        else:
-            # An on-chain agent the mirror does not hold and that is not ours:
-            # we cannot say whether it is operated, so it is not counted — and
-            # not silently dropped either.
-            unreadable.add(agent_id)
+    ours, unknown = _split_unmirrored(gap.ids, gap_owners, rule)
+    owners.update(ours)
+    unreadable.update(unknown)
 
-    excluded: dict[str, ExcludedOwner] = {}
-    external: dict[str, list[Agent]] = {}
-    for agent_id, owner in sorted(owners.items()):
-        verdict = classify(owner)
-        if verdict is not None:
-            reason, role = verdict
-            row = excluded.setdefault(
-                owner,
-                ExcludedOwner(owner=owner, owner_explorer=_account_link(owner), reason=reason, role=role, agent_ids=[]),
-            )
-            row.agent_ids.append(agent_id)
-        else:
-            external.setdefault(owner, []).append(mirrored[agent_id])
+    excluded, external = _partition_owners(owners, rule, mirrored)
 
     externals = [a for owner in sorted(external) for a in external[owner]]
     bound_ids, window = await asyncio.gather(_bound_ids(), _window({a.id: owners[a.id] for a in externals}, deadline))
@@ -747,10 +839,7 @@ async def build_report() -> AdoptionReport:
     for result in results.values():
         if not result.complete:
             unreadable.add(result.agent.agent_id)
-    # One scan answers every agent, so this is its span — or 0 when it never
-    # ran; kept as the smallest so the claim holds for every agent regardless.
-    windows = [r.window_days for r in results.values() if r.window_days is not None]
-    window_days = min(windows) if windows else 0.0
+    window_days = _window_days(results)
     complete = not owners_left and not (window is not None and window.out_of_time)
     if unreadable or not complete:
         degraded = True
@@ -763,21 +852,8 @@ async def build_report() -> AdoptionReport:
         )
         for owner in sorted(external)
     ]
-    # One workflow that paid two external agents is ONE workflow.
-    jobs = {w.job_id_hex for op in operators for a in op.agents for w in a.settled_workflows}
-    totals = AdoptionCounts(
-        external_agents=len(externals),
-        unique_operator_wallets=len(external),
-        settled_external_workflows=len(jobs),
-    )
-    coverage = AdoptionCoverage(
-        agents_listed=gap.total if gap.listed else None,
-        agents_accounted=len(owners),
-        settlement_ledgers_scanned=window.ledgers_scanned if window is not None else 0,
-        settlement_ledgers_in_window=window.ledgers_in_window if window is not None else 0,
-        external_charges=window.charges if window is not None else 0,
-        external_charges_unattributed=window.unattributed if window is not None else 0,
-    )
+    totals = _totals(operators, external_agents=len(externals))
+    coverage = _coverage(gap, len(owners), window)
     report = AdoptionReport(
         network=_network(),
         generated_at=int(time.time()),

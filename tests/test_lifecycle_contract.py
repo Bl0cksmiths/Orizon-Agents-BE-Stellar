@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import inspect
+import time
 from typing import Any
 
 import pytest
@@ -101,19 +102,23 @@ def test_the_dispute_message_the_server_builds_passes_the_harness_check() -> Non
 
 def test_a_message_for_another_step_is_refused() -> None:
     nonce = "ab" * 16
+    another_step = eb.dispute_message(JOB, 4, nonce)
     with pytest.raises(SigningRefused):
-        check_dispute_message(eb.dispute_message(JOB, 4, nonce), JOB, 3, nonce)
+        check_dispute_message(another_step, JOB, 3, nonce)
+    another_job = eb.dispute_message("0b" * 16, 3, nonce)
     with pytest.raises(SigningRefused):
-        check_dispute_message(eb.dispute_message("0b" * 16, 3, nonce), JOB, 3, nonce)
+        check_dispute_message(another_job, JOB, 3, nonce)
+    message = eb.dispute_message(JOB, 3, nonce)
     with pytest.raises(SigningRefused):
-        check_dispute_message(eb.dispute_message(JOB, 3, nonce), JOB, 3, "cd" * 16)
+        check_dispute_message(message, JOB, 3, "cd" * 16)
 
 
 def test_the_read_message_the_server_builds_passes_the_harness_check() -> None:
     nonce = "ef" * 16
     check_read_message(eb.dispute_read_message("tsk_abc123", nonce), "tsk_abc123", nonce)
+    another_task = eb.dispute_read_message("tsk_other", nonce)
     with pytest.raises(SigningRefused):
-        check_read_message(eb.dispute_read_message("tsk_other", nonce), "tsk_abc123", nonce)
+        check_read_message(another_task, "tsk_abc123", nonce)
 
 
 def test_the_harness_signature_verifies_as_the_backend_verifies_it() -> None:
@@ -123,8 +128,10 @@ def test_the_harness_signature_verifies_as_the_backend_verifies_it() -> None:
     assert eb._signature_matches(kp.public_key, message, signature)
     # and it is SEP-53, the wallet's encoding — not a raw-bytes signature
     raw = base64.b64decode(signature)
+    verifier = Keypair.from_public_key(kp.public_key)
+    message_bytes = message.encode()
     with pytest.raises(ValueError):
-        Keypair.from_public_key(kp.public_key).verify(message.encode(), raw)
+        verifier.verify(message_bytes, raw)
 
 
 # ── the stroop conversion and the trace lines ───────────────────
@@ -140,7 +147,49 @@ def test_the_rating_trace_lines_are_the_ones_execution_writes() -> None:
     tx = "1234567890abcdef"
     landed = f"reputation → Code Smith rated 90/100 · tx {tx[:10]}…"
     m = RATED_LINE.match(landed)
-    assert m and m.group("name") == "Code Smith" and m.group("prefix") == tx[:10]
+    assert m
+    assert m.group("name") == "Code Smith"
+    assert m.group("prefix") == tx[:10]
     unlanded = f"reputation submit failed for Code Smith: did not land · tx {tx[:10]}…"
     u = UNLANDED_LINE.match(unlanded)
-    assert u and u.group("name") == "Code Smith" and u.group("prefix") == tx[:10]
+    assert u
+    assert u.group("name") == "Code Smith"
+    assert u.group("prefix") == tx[:10]
+
+
+@pytest.mark.parametrize(
+    ("line", "name", "prefix"),
+    [
+        ("reputation submit failed for Code Smith: did not land · tx 1234567890…", "Code Smith", "1234567890"),
+        ("reputation submit failed for agent:v2: timeout · tx abcdef0123…", "agent:v2", "abcdef0123"),
+        ("reputation submit failed for Bot: rpc said: no · tx 9 · tx abcdef0123…", "Bot", "abcdef0123"),
+        ("reputation submit failed for Ünï Bot:  · tx 0000000000…", "Ünï Bot", "0000000000"),
+        ("reputation submit failed for :  : r · tx abcdef0123…", ":  ", "abcdef0123"),
+        ("reputation submit failed for Bot: x · tx abcdef0123…\n", "Bot", "abcdef0123"),
+    ],
+)
+def test_an_unlanded_line_names_the_agent_before_the_first_colon(line: str, name: str, prefix: str) -> None:
+    u = UNLANDED_LINE.match(line)
+    assert u
+    assert (u.group("name"), u.group("prefix")) == (name, prefix)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "reputation submit failed for : x · tx abcdef0123…",
+        "reputation submit failed for Bot · tx abcdef0123…",
+        "reputation submit failed for Bot: x · tx abcdef012…",
+        "reputation submit failed for Bot: x · tx ABCDEF0123…",
+        "reputation submit failed for B\not: x · tx abcdef0123…",
+    ],
+)
+def test_a_line_that_is_not_an_unlanded_rating_does_not_match(line: str) -> None:
+    assert UNLANDED_LINE.match(line) is None
+
+
+def test_the_unlanded_line_stays_linear_on_a_line_full_of_colons() -> None:
+    # The lazy `.+?` name took ~4 s on this line; the pattern now answers in well under a millisecond.
+    started = time.perf_counter()
+    assert UNLANDED_LINE.match("reputation submit failed for " + "a: " * 50_000 + "x") is None
+    assert time.perf_counter() - started < 0.5

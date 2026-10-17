@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.sow_metrics import chain
-from scripts.sow_metrics.config import GUIDE_PAGE, normalize_base
+from scripts.sow_metrics.config import GUIDE_PAGE, PendingLink, normalize_base, parse_pending_link
 from scripts.sow_metrics.fakes import BUYER1, JOB1, SIGNER, met_world
 from scripts.sow_metrics.metrics import amount, demo_state
 from scripts.sow_metrics.register import RegisterError
@@ -36,7 +36,9 @@ def test_an_undecodable_argument_does_not_hide_the_operation() -> None:
     record = next(r for r in world.histories[SIGNER] if r["transaction_hash"] == world.marks["settle1"])
     record["parameters"][2]["value"] = "not base64 xdr"
     op = chain.operation_from_horizon(record)
-    assert op.function == "settle" and op.args[0] is None and len(op.args) == 4
+    assert op.function == "settle"
+    assert op.args[0] is None
+    assert len(op.args) == 4
 
 
 @pytest.mark.parametrize(
@@ -97,7 +99,8 @@ def test_a_404_is_an_answer_and_is_not_retried(tmp_path: Path) -> None:
 def test_the_dispute_rating_is_read_from_the_scorers_history(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path)
     counted = out.raw_metric("m05")["counted"][0]
-    assert counted["dispute_job_id"][:16] == JOB1[:16] and counted["dispute_job_id"] != JOB1
+    assert counted["dispute_job_id"][:16] == JOB1[:16]
+    assert counted["dispute_job_id"] != JOB1
 
 
 @pytest.mark.parametrize(
@@ -129,3 +132,22 @@ def test_a_bad_register_is_refused_with_its_reason(tmp_path: Path, content: str 
         path.write_text(content)
     with pytest.raises(RegisterError, match=message):
         load_register(path)
+
+
+@pytest.mark.parametrize("number", ["1", "91", "1200"])
+def test_a_pending_link_takes_a_pull_request_number(number: str) -> None:
+    url = f"https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/{number}"
+    assert parse_pending_link(f"m09={url}") == (
+        "m09",
+        PendingLink(
+            url,
+            f"Pull request #{number} in Bl0cksmiths/Orizon-Agents-FE-Stellar that adds the "
+            f"{GUIDE_PAGE} page (not deployed yet)",
+        ),
+    )
+
+
+@pytest.mark.parametrize("number", ["0", "012", "", "9a", "\u0663", "1\u0663", "\uff11"])
+def test_a_pending_link_refuses_anything_but_an_ascii_pull_request_number(number: str) -> None:
+    with pytest.raises(ValueError, match="is not a GitHub pull request URL"):
+        parse_pending_link(f"m09=https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar/pull/{number}")

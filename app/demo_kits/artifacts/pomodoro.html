@@ -518,17 +518,17 @@
 
   <section class="view" data-view="settings" role="tabpanel">
     <div class="setting">
-      <label><span>work duration</span><b id="work-val">25 min</b></label>
+      <label for="work-range"><span>work duration</span><b id="work-val">25 min</b></label>
       <input type="range" id="work-range" min="15" max="90" step="5" value="25" aria-label="work duration in minutes">
       <div class="scale-marks"><span>15</span><span>50</span><span>90</span></div>
     </div>
     <div class="setting">
-      <label><span>short break</span><b id="short-val">5 min</b></label>
+      <label for="short-range"><span>short break</span><b id="short-val">5 min</b></label>
       <input type="range" id="short-range" min="3" max="15" step="1" value="5" aria-label="short break duration in minutes">
       <div class="scale-marks"><span>3</span><span>9</span><span>15</span></div>
     </div>
     <div class="setting">
-      <label><span>long break</span><b id="long-val">20 min</b></label>
+      <label for="long-range"><span>long break</span><b id="long-val">20 min</b></label>
       <input type="range" id="long-range" min="10" max="45" step="5" value="20" aria-label="long break duration in minutes">
       <div class="scale-marks"><span>10</span><span>25</span><span>45</span></div>
     </div>
@@ -538,7 +538,7 @@
     <div id="history-content"></div>
   </section>
 </div>
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<output class="toast" id="toast" aria-live="polite"></output>
 
 <script>
 (() => {
@@ -589,8 +589,6 @@
   const longVal = document.getElementById('long-val');
   const historyContent = document.getElementById('history-content');
 
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
   // ── Date helpers ─────────────────────────────────────────────────────────
   function todayKey() {
     const d = new Date();
@@ -631,14 +629,18 @@
       if (typeof s.theme === 'string') state.theme = s.theme;
       if (typeof s.muted === 'boolean') state.muted = s.muted;
       if (typeof s.notifEnabled === 'boolean') state.notifEnabled = s.notifEnabled;
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or the saved JSON is corrupt: keep the default settings.
+    }
   }
   function saveSettings() {
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         ...state.settings, theme: state.theme, muted: state.muted, notifEnabled: state.notifEnabled,
       }));
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or full: the settings still apply now, they just won't survive a reload.
+    }
   }
   function loadHistory() {
     try {
@@ -650,10 +652,16 @@
         const cutoff = Date.now() - 14 * 86400000;
         state.history = arr.filter(e => e && typeof e.ts === 'number' && e.ts >= cutoff);
       }
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or the saved JSON is corrupt: start with an empty history.
+    }
   }
   function saveHistory() {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); } catch (e) {}
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history));
+    } catch (e) {
+      // Storage blocked or full: the history stays in memory for this visit only.
+    }
   }
   function loadDaily() {
     try {
@@ -662,10 +670,16 @@
       const d = JSON.parse(raw);
       if (d && d.date === todayKey() && typeof d.count === 'number') state.daily = d;
       else state.daily = { count: 0, date: todayKey() };
-    } catch (e) {}
+    } catch (e) {
+      // Storage blocked or the saved JSON is corrupt: keep today's zero count.
+    }
   }
   function saveDaily() {
-    try { localStorage.setItem(DAILY_KEY, JSON.stringify(state.daily)); } catch (e) {}
+    try {
+      localStorage.setItem(DAILY_KEY, JSON.stringify(state.daily));
+    } catch (e) {
+      // Storage blocked or full: today's count stays in memory for this visit only.
+    }
   }
   function rolloverDailyIfNeeded() {
     const today = todayKey();
@@ -751,7 +765,13 @@
     if (!state.notifEnabled) return;
     if (!('Notification' in window)) return;
     if (Notification.permission !== 'granted') return;
-    try { new Notification(title, { body, silent: state.muted }); } catch (e) {}
+    try {
+      new Notification(title, { body, silent: state.muted });
+    } catch (e) {
+      // Some browsers (Chrome on Android) only allow notifications from a service worker and
+      // throw here. The notification is a courtesy: the chime and the on-page phase change
+      // still mark the transition, so the timer carries on without it.
+    }
   }
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -774,12 +794,25 @@
     timeEl.textContent = fmtTime(remaining);
     return remaining;
   }
+  function phaseTitle(p) {
+    if (p === 'work') return 'work';
+    if (p === 'short') return 'short break';
+    return 'long break';
+  }
+  function cycleLabelText() {
+    if (state.phase === 'work') return `cycle ${state.cycle + 1} of 4`;
+    if (state.phase === 'long') return 'long break';
+    return `break · cycle ${state.cycle} of 4`;
+  }
+  function startButtonLabel() {
+    if (state.running) return 'pause · ␣';
+    if (state.pausedAtElapsedMs > 0) return 'resume · ␣';
+    return 'start · ␣';
+  }
   function render() {
     rolloverDailyIfNeeded();
-    phaseNameEl.textContent = state.phase === 'work' ? 'work' : state.phase === 'short' ? 'short break' : 'long break';
-    cycleLabelEl.textContent = state.phase === 'work'
-      ? `cycle ${state.cycle + 1} of 4`
-      : (state.phase === 'long' ? 'long break' : `break · cycle ${state.cycle} of 4`);
+    phaseNameEl.textContent = phaseTitle(state.phase);
+    cycleLabelEl.textContent = cycleLabelText();
     // Cycle dots
     const dots = cycleDots.querySelectorAll('.dot');
     dots.forEach((d, i) => {
@@ -788,7 +821,7 @@
     });
     tomatoCount.textContent = state.daily.count.toString();
     updateRingColor();
-    startBtn.textContent = state.running ? 'pause · ␣' : (state.pausedAtElapsedMs > 0 ? 'resume · ␣' : 'start · ␣');
+    startBtn.textContent = startButtonLabel();
     renderRing();
   }
 
@@ -801,6 +834,10 @@
     state.rafHandle = requestAnimationFrame(tick);
   }
 
+  function tomatoTally(n) {
+    const suffix = n === 1 ? '' : 'es';
+    return `${n} tomato${suffix}`;
+  }
   function finishPhase() {
     const completedKind = state.phase;
     const completedDur = state.phaseDurationMs;
@@ -815,7 +852,7 @@
     sendNotification(
       completedKind === 'work' ? 'Time for a break' : 'Back to work',
       completedKind === 'work'
-        ? `Nice — ${state.daily.count} tomato${state.daily.count === 1 ? '' : 'es'} today.`
+        ? `Nice — ${tomatoTally(state.daily.count)} today.`
         : 'Break is over. Refocus.',
     );
     const np = nextPhase();
@@ -868,8 +905,8 @@
     saveSettings();
   }
   function applyTheme() {
-    if (state.theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
-    else document.documentElement.removeAttribute('data-theme');
+    if (state.theme === 'light') document.documentElement.dataset.theme = 'light';
+    else delete document.documentElement.dataset.theme;
   }
   async function toggleNotifications() {
     if (state.notifEnabled) {
@@ -904,7 +941,7 @@
     longVal.textContent = `${state.settings.longMin} min`;
   }
   function onRangeChange(name, val) {
-    const v = parseInt(val, 10);
+    const v = Number.parseInt(val, 10);
     if (name === 'workMin') state.settings.workMin = clamp(v, 15, 90);
     else if (name === 'shortMin') state.settings.shortMin = clamp(v, 3, 15);
     else state.settings.longMin = clamp(v, 10, 45);
@@ -919,19 +956,38 @@
   }
 
   // ── History UI ───────────────────────────────────────────────────────────
-  function renderHistory() {
-    if (!state.history.length) {
-      historyContent.innerHTML = '<div class="history-empty">no completed sessions yet</div>';
-      return;
-    }
-    // Group by day.
+  function historyKindLabel(kind) {
+    if (kind === 'short') return 'break';
+    if (kind === 'long') return 'long';
+    return 'work';
+  }
+  function buildHistoryItem(e) {
+    const li = document.createElement('li');
+    const kind = historyKindLabel(e.kind);
+    const k = document.createElement('span'); k.className = 'kind ' + e.kind; k.textContent = kind;
+    const dur = document.createElement('span'); dur.className = 'dur'; dur.textContent = fmtMinutes(e.durationMs);
+    const t = document.createElement('time');
+    const d = new Date(e.ts);
+    t.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    li.appendChild(k); li.appendChild(dur); li.appendChild(t);
+    return li;
+  }
+  function groupHistoryByDay(entries) {
     const byDay = new Map();
-    for (const e of state.history) {
+    for (const e of entries) {
       const d = new Date(e.ts);
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
       if (!byDay.has(key)) byDay.set(key, []);
       byDay.get(key).push(e);
     }
+    return byDay;
+  }
+  function renderHistory() {
+    if (!state.history.length) {
+      historyContent.innerHTML = '<div class="history-empty">no completed sessions yet</div>';
+      return;
+    }
+    const byDay = groupHistoryByDay(state.history);
     const days = [...byDay.keys()].sort().reverse();
     historyContent.innerHTML = '';
     for (const day of days) {
@@ -943,17 +999,7 @@
       h.innerHTML = `<span>${fmtDayHeading(day)}</span><span>${workCount} tomato${workCount === 1 ? '' : 'es'}</span>`;
       card.appendChild(h);
       const ul = document.createElement('ul');
-      for (const e of entries) {
-        const li = document.createElement('li');
-        const kind = e.kind === 'short' ? 'break' : e.kind === 'long' ? 'long' : 'work';
-        const k = document.createElement('span'); k.className = 'kind ' + e.kind; k.textContent = kind;
-        const dur = document.createElement('span'); dur.className = 'dur'; dur.textContent = fmtMinutes(e.durationMs);
-        const t = document.createElement('time');
-        const d = new Date(e.ts);
-        t.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        li.appendChild(k); li.appendChild(dur); li.appendChild(t);
-        ul.appendChild(li);
-      }
+      for (const e of entries) ul.appendChild(buildHistoryItem(e));
       card.appendChild(ul);
       historyContent.appendChild(card);
     }

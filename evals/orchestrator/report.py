@@ -18,6 +18,8 @@ from .cost import usd
 from .dataset import Case, DatasetError, load
 from .runner import read_jsonl
 
+RESULTS_FILE = "results.jsonl"
+_TWO_COLUMN_RULE = "|---|---|"
 _GUARD_ORDER = [
     ("verdict_accuracy", "verdict accuracy"),
     ("injection_recall", "injection recall"),
@@ -43,8 +45,8 @@ def _labelled_cases() -> dict[str, Case]:
 
 def compare(before_dir: Path, after_dir: Path) -> str:
     """Composition before and after, on the case ids both variants planned."""
-    before = read_jsonl(before_dir / "results.jsonl")
-    after = read_jsonl(after_dir / "results.jsonl")
+    before = read_jsonl(before_dir / RESULTS_FILE)
+    after = read_jsonl(after_dir / RESULTS_FILE)
 
     def planned(rows: list[dict[str, Any]]) -> set[str]:
         return {str(r["prompt_id"]) for r in m.ok_rows(rows) if r["meta"].get("plan")}
@@ -95,7 +97,7 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         "## Guard",
         "",
         "| metric | value |",
-        "|---|---|",
+        _TWO_COLUMN_RULE,
     ]
     g = m.guard_metrics(rows)
     for key, label in _GUARD_ORDER:
@@ -114,7 +116,7 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         lines.append(f"- {k.replace('_', ' ')}: {v.fmt()}")
 
     p = m.plan_metrics(rows)
-    lines += ["", "## Plan validity (raw planner output, before the clamp)", "", "| metric | value |", "|---|---|"]
+    lines += ["", "## Plan validity (raw planner output, before the clamp)", "", "| metric | value |", _TWO_COLUMN_RULE]
     for key in ("plan_valid", "plan_allowlisted", "plan_schema", "plan_tiers", "plan_refused"):
         lines.append(f"| {key.replace('_', ' ')} | {p[key].fmt()} |")
 
@@ -126,7 +128,7 @@ def summarize(rows: list[dict[str, Any]], errors: list[dict[str, Any]], *, live:
         ("Verdict accuracy by split", lambda r: str(r.get("split", "-"))),
     ]
     for title, slice_of in slices:
-        lines += ["", f"## {title}", "", "| slice | accuracy |", "|---|---|"]
+        lines += ["", f"## {title}", "", "| slice | accuracy |", _TWO_COLUMN_RULE]
         for k, v in m.by_slice(rows, slice_of).items():
             lines.append(f"| {k} | {v.fmt()} |")
 
@@ -149,7 +151,7 @@ def write(variant_dir: Path) -> tuple[Path, Path]:
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     live = bool(meta.get("live", False))
     pipeline = str(meta.get("pipeline", "unknown"))
-    rows = read_jsonl(variant_dir / "results.jsonl")
+    rows = read_jsonl(variant_dir / RESULTS_FILE)
     errors = read_jsonl(variant_dir / "errors.jsonl")
     summary = variant_dir / "summary.md"
     summary.write_text(summarize(rows, errors, live=live, pipeline=pipeline), encoding="utf-8")
@@ -159,7 +161,7 @@ def write(variant_dir: Path) -> tuple[Path, Path]:
 
 
 def headline(variant_dir: Path) -> str:
-    rows = read_jsonl(variant_dir / "results.jsonl")
+    rows = read_jsonl(variant_dir / RESULTS_FILE)
     g = m.guard_metrics(rows)
     p = m.plan_metrics(rows)
     return (

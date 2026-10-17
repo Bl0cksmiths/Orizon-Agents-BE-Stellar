@@ -71,7 +71,8 @@ def test_readiness_is_not_ready_when_claude_is_forced_without_its_key(client, mo
     monkeypatch.setattr(settings, "openai_api_key", "sk-openai")
     monkeypatch.setattr(settings, "orchestrator_provider", "anthropic")
     r = client.get("/readiness")
-    assert r.status_code == 503 and r.json()["llm"] == "missing_key"
+    assert r.status_code == 503
+    assert r.json()["llm"] == "missing_key"
 
 
 def test_a_missing_jev_key_never_gates_readiness(client, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,7 +80,8 @@ def test_a_missing_jev_key_never_gates_readiness(client, monkeypatch: pytest.Mon
     monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant")
     monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
     r = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY})
-    assert r.status_code == 200 and r.json()["orchestrator"]["typesafe_key"] is False
+    assert r.status_code == 200
+    assert r.json()["orchestrator"]["typesafe_key"] is False
 
 
 def _spend_past_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,16 +100,20 @@ def test_anonymous_callers_see_paused_and_when_it_lifts_but_never_the_numbers(
         assert set(orchestrator) == {"provider", "planning", "resets_at"}
         assert orchestrator["planning"] == "paused"
         resets = datetime.fromisoformat(orchestrator["resets_at"])
-        assert resets.tzinfo is not None and (resets.hour, resets.minute, resets.second) == (0, 0, 0)
+        assert resets.tzinfo is not None
+        assert (resets.hour, resets.minute, resets.second) == (0, 0, 0)
         assert 0 < (resets - datetime.now(UTC)).total_seconds() <= 86_400
-        assert "0.0125" not in r.text and "cap_usd" not in r.text and "spent_usd" not in r.text
+        assert "0.0125" not in r.text
+        assert "cap_usd" not in r.text
+        assert "spent_usd" not in r.text
 
 
 def test_the_operator_key_adds_the_spend_figures(client, monkeypatch: pytest.MonkeyPatch) -> None:
     _spend_past_the_cap(monkeypatch)
     monkeypatch.setattr(settings, "api_key", OPERATOR_KEY)
     orchestrator = client.get("/readiness", headers={"X-API-Key": OPERATOR_KEY}).json()["orchestrator"]
-    assert orchestrator["planning"] == "paused" and orchestrator["resets_at"] is not None
+    assert orchestrator["planning"] == "paused"
+    assert orchestrator["resets_at"] is not None
     assert orchestrator["spend"] == {
         "day": datetime.now(UTC).date().isoformat(),
         "spent_usd": 0.0125,
@@ -133,9 +139,11 @@ def test_the_operator_view_is_the_full_report_when_nothing_is_spent(client, monk
 def test_readiness_reports_a_pause_directly() -> None:
     asyncio.run(spend.record(model="claude-opus-5-5", purpose="planner", usage=Usage(), cost=10.0))
     public = provider.readiness()
-    assert isinstance(public, provider.LLMPublicReadiness) and public.planning == "paused"
+    assert isinstance(public, provider.LLMPublicReadiness)
+    assert public.planning == "paused"
     full = provider.readiness(operator=True)
-    assert isinstance(full, provider.LLMReadiness) and full.spend.spent_usd == 10.0
+    assert isinstance(full, provider.LLMReadiness)
+    assert full.spend.spent_usd == 10.0
 
 
 @pytest.mark.parametrize(
@@ -184,7 +192,8 @@ def test_close_releases_the_clients_and_the_ledger(monkeypatch: pytest.MonkeyPat
     jev.set_transport(Closable("jev"))  # type: ignore[arg-type]
     ledger = spend.get_ledger()
     asyncio.run(provider.close())
-    assert closed == ["claude", "jev"] and spend.get_ledger() is not ledger
+    assert closed == ["claude", "jev"]
+    assert spend.get_ledger() is not ledger
 
 
 def test_the_app_shuts_the_model_layer_down(monkeypatch: pytest.MonkeyPatch) -> None:

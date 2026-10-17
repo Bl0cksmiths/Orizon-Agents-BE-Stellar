@@ -110,7 +110,8 @@ class _Rpc:
         self.filters.append(filters)
         if end_ledger is None:  # the retention probe
             return self._response([])
-        assert start_ledger is not None and cursor is None
+        assert start_ledger is not None
+        assert cursor is None
         self.pages.append((start_ledger, end_ledger))
         if self.on_page is not None:
             self.on_page(len(self.pages))
@@ -152,7 +153,7 @@ class _Views:
         raise AssertionError(f"unexpected read {function_name}")
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[_Rpc, _Views]]:
     rpc, views = _Rpc(), _Views()
     monkeypatch.setattr(settings, "stellar_payment_escrow", ESCROW_ID)
@@ -179,7 +180,9 @@ def _revenue(window: charge_window.WindowSettlements, agent_id: str) -> list[str
 
 
 # ── one scan for everyone ───────────────────────────────────────────────────
-def test_one_scan_answers_every_agent_and_costs_the_same_for_one_or_a_thousand(chain: Any) -> None:
+def test_one_scan_answers_every_agent_and_costs_the_same_for_one_or_a_thousand(
+    chain: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     rpc, views = chain
     rpc.events = [_event("ext_7", OLDEST + 50_000, auth=1, job=1), _event("ext_9", LATEST - 3, auth=2, job=2)]
     views.payers = {_auth(1).hex(): BUYER, _auth(2).hex(): BUYER}
@@ -188,7 +191,9 @@ def test_one_scan_answers_every_agent_and_costs_the_same_for_one_or_a_thousand(c
     pages_for_many = len(rpc.filters)
     payer_reads = views.reads.count("authorization")
     charge_window.reset()
-    snapshot_store._store = snapshot_store.InMemorySnapshotStore()  # a cold start, nothing stored
+    monkeypatch.setattr(
+        snapshot_store, "_store", snapshot_store.InMemorySnapshotStore()
+    )  # a cold start, nothing stored
     rpc.filters.clear()
     _fetch({"ext_7": OWNER_A})
 
@@ -317,7 +322,8 @@ def test_a_full_page_is_split_until_every_charge_is_read(chain: Any, monkeypatch
     window = _fetch({"ext_a": OWNER_A})
 
     assert len(_revenue(window, "ext_a")) == 5
-    assert window.complete is True and window.by_agent["ext_a"].truncated is False
+    assert window.complete is True
+    assert window.by_agent["ext_a"].truncated is False
 
 
 def test_one_ledger_denser_than_a_page_is_reported_truncated(chain: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,7 +346,8 @@ def test_out_of_time_mid_walk_keeps_what_it_read_and_the_next_build_resumes(chai
 
     first = _fetch({"ext_a": OWNER_A}, budget=0.04)
 
-    assert first.out_of_time is True and first.complete is False
+    assert first.out_of_time is True
+    assert first.complete is False
     evidence = first.by_agent["ext_a"]
     assert evidence.truncated is True
     assert evidence.scanned_ledgers == 40_000
@@ -383,7 +390,8 @@ def test_a_page_that_fails_is_resumed_from_not_restarted(chain: Any, error: Exce
 
     first = _fetch({"ext_a": OWNER_A})
 
-    assert first.complete is False and first.out_of_time is False
+    assert first.complete is False
+    assert first.out_of_time is False
     assert first.by_agent["ext_a"].truncated is True
     assert first.by_agent["ext_a"].scanned_ledgers == 20_000
     rpc.page_errors = {}
@@ -414,7 +422,8 @@ def test_no_anchor_with_an_index_held_serves_it_as_truncated(chain: Any) -> None
     window = _fetch({"ext_a": OWNER_A})
 
     evidence = window.by_agent["ext_a"]
-    assert evidence.unavailable is None and evidence.truncated is True
+    assert evidence.unavailable is None
+    assert evidence.truncated is True
     assert len(_revenue(window, "ext_a")) == 1
     assert window.complete is False
 
@@ -442,9 +451,11 @@ def test_nothing_read_before_the_deadline_is_out_of_time_never_zero(chain: Any) 
 
     window = asyncio.run(charge_window.fetch_settlements({"ext_a": OWNER_A}, deadline=time.monotonic() - 1))
 
-    assert window.out_of_time is True and window.complete is False
+    assert window.out_of_time is True
+    assert window.complete is False
     assert window.by_agent["ext_a"].unavailable is not None
-    assert rpc.pages == [] and "authorization" not in views.reads
+    assert rpc.pages == []
+    assert "authorization" not in views.reads
 
 
 @pytest.mark.parametrize("unset", ["stellar_payment_escrow", "stellar_agent_registry"])
@@ -464,7 +475,8 @@ def test_a_restart_resumes_from_the_persisted_index(chain: Any) -> None:
     views.payers = {_auth(1).hex(): BUYER}
     _fetch({"ext_a": OWNER_A})
     stored = asyncio.run(snapshot_store._store.load(charge_window.INDEX_NAME, snapshot_store.deployment_scope()))
-    assert stored is not None and json.loads(stored.body)["next_ledger"] == LATEST + 1
+    assert stored is not None
+    assert json.loads(stored.body)["next_ledger"] == LATEST + 1
 
     charge_window.reset()  # a new process: nothing in memory
     rpc.latest += 10

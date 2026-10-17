@@ -45,7 +45,7 @@ def health_payload() -> HealthResponse:
     )
 
 
-@router.get("/health", response_model=HealthResponse, summary="Liveness probe (proxy-reachable)")
+@router.get("/health", summary="Liveness probe (proxy-reachable)")
 async def health() -> HealthResponse:
     """Byte-for-byte the root `/health` body, reachable through the frontend's
     `/api/*` proxy so the browser and external monitors can confirm the

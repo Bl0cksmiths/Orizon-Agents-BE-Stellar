@@ -234,7 +234,8 @@ def test_settlement_exception_is_logged_with_traceback(monkeypatch, caplog):
     msg = rec.getMessage()
     assert "tsk_settle_raise" in msg
     assert "soroban rpc unreachable" in msg
-    assert AUTH_ID_HEX in msg and PAYER in msg
+    assert AUTH_ID_HEX in msg
+    assert PAYER in msg
     assert rec.exc_info is not None
 
 
@@ -363,7 +364,8 @@ def test_rating_submit_failure_is_logged(monkeypatch, caplog):
     assert records, "a dropped reputation submit was never logged"
     msg = records[0].getMessage()
     assert "tsk_settle_rating" in msg
-    assert "w.x" in msg and "agt_x" in msg
+    assert "w.x" in msg
+    assert "agt_x" in msg
     assert "sequence collision" in msg
     assert JOB_ID.hex() in msg
     assert records[0].exc_info is not None

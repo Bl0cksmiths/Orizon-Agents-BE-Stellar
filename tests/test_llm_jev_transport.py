@@ -86,7 +86,8 @@ def test_a_guard_battery_is_one_call_with_typed_answers(api: Callable[..., Recor
     recorder = api(_ok())
     result = _ask()
     sent = json.loads(recorder.requests[0].content)
-    assert sent["state"] == "build me a todo app" and sent["model"] == "jev-1.13.0"
+    assert sent["state"] == "build me a todo app"
+    assert sent["model"] == "jev-1.13.0"
     assert sent["questions"]["complexity"] == QUESTIONS["complexity"]
     assert recorder.requests[0].headers["authorization"].endswith("ts-test-key")
     assert result.answers == {
@@ -173,7 +174,8 @@ def test_no_key_means_unavailable_and_nothing_is_sent(api: Callable[..., Recorde
     monkeypatch.setattr(settings, "typesafe_api_key", "")
     with pytest.raises(JevUnavailable) as caught:
         _ask()
-    assert caught.value.reason == "missing_key" and recorder.requests == []
+    assert caught.value.reason == "missing_key"
+    assert recorder.requests == []
 
 
 def test_a_key_the_sdk_refuses_is_unavailable_before_any_request(
@@ -183,7 +185,8 @@ def test_a_key_the_sdk_refuses_is_unavailable_before_any_request(
     monkeypatch.setattr(settings, "typesafe_api_key", "has whitespace inside")
     with pytest.raises(JevUnavailable) as caught:
         _ask()
-    assert caught.value.reason == "missing_key" and recorder.requests == []
+    assert caught.value.reason == "missing_key"
+    assert recorder.requests == []
 
 
 def test_one_client_per_loop_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,4 +201,5 @@ def test_one_client_per_loop_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
         return first, again, rotated
 
     first, again, rotated = asyncio.run(clients())
-    assert first is again and rotated is not first
+    assert first is again
+    assert rotated is not first

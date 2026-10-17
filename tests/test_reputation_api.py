@@ -54,7 +54,7 @@ def _info(agent_id: str, *, smoothed: int, lower: int) -> RepInfo:
 # ── read endpoints ──────────────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def rated_ledger(monkeypatch):
     """A configured ledger holding DISTINCT evidence per seeded agent, read
     through the real cache. The read-endpoint tests used to pass only because
@@ -167,7 +167,8 @@ def test_params_is_reserved_so_no_agent_is_shadowed_by_the_route(client):
     assert availability["reason"] == "id_reserved"
     # And the route itself still answers with the config.
     body = client.get("/api/stellar/reputation/params").json()
-    assert "prior_weight_usdc" in body and "agent_id" not in body
+    assert "prior_weight_usdc" in body
+    assert "agent_id" not in body
 
 
 def test_routing_constants_are_read_per_request(client, monkeypatch):
@@ -201,7 +202,7 @@ def test_routing_constants_are_read_per_request(client, monkeypatch):
 # ── degradation on the wire ─────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def unreadable_ledger(monkeypatch):
     """Reputation configured against a ledger whose every read fails.
 
@@ -446,7 +447,8 @@ def test_submit_ratings_is_best_effort(monkeypatch):
     job_id = b"\x01" * 16
     assert [c[1] for c in calls] == [job_id, execution_svc.settlement_job_id(job_id, 1)]
     assert all(c[5] == "auto" for c in calls)
-    assert calls[0][2] == 95 and calls[1][2] == 20
+    assert calls[0][2] == 95
+    assert calls[1][2] == 20
 
     lines = state.traces[task_id]
     proofs = [ln for ln in lines if ln.level == "proof"]

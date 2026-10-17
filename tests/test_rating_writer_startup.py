@@ -84,7 +84,8 @@ def test_a_signer_that_is_the_scorer_says_so_at_info(caplog):
     record = _line(caplog, rw.WriterVerdict("scorer", signer=SIGNER, scorer=SIGNER))
     assert record.levelno == logging.INFO
     message = record.getMessage()
-    assert SIGNER in message and LEDGER in message
+    assert SIGNER in message
+    assert LEDGER in message
     assert "wallet-authorized" in message
 
 
@@ -92,7 +93,9 @@ def test_a_signer_that_is_not_the_scorer_names_both_addresses_and_the_fix(caplog
     record = _line(caplog, rw.WriterVerdict("not_scorer", signer=SIGNER, scorer=OTHER))
     assert record.levelno == logging.WARNING
     message = record.getMessage()
-    assert SIGNER in message and OTHER in message and LEDGER in message
+    assert SIGNER in message
+    assert OTHER in message
+    assert LEDGER in message
     assert "Unauthorized" in message
     assert f"set_scorer({SIGNER})" in message
 
@@ -141,7 +144,8 @@ def test_start_checks_and_reports_without_being_awaited(monkeypatch, caplog):
     async def _boot():
         rw.start()
         task = rw._report_task
-        assert task is not None and not task.done()  # start() returned first
+        assert task is not None
+        assert not task.done()  # start() returned first
         await task
 
     with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
@@ -193,8 +197,10 @@ def test_stop_cancels_a_check_still_waiting_on_the_chain(monkeypatch, caplog):
 
     with caplog.at_level(logging.DEBUG, logger=WRITER_LOG):
         report_task = asyncio.run(_boot_then_shut_down())
-    assert report_task is not None and report_task.cancelled()
-    assert rw._report_task is None and rw._read_task is None
+    assert report_task is not None
+    assert report_task.cancelled()
+    assert rw._report_task is None
+    assert rw._read_task is None
     assert _writer_records(caplog) == []
 
 
@@ -254,7 +260,8 @@ def test_boot_reports_the_verdict(monkeypatch, caplog):
         client.get("/health")
         record = _wait_for_line(client, caplog)
     assert record.levelno == logging.WARNING
-    assert SIGNER in record.getMessage() and OTHER in record.getMessage()
+    assert SIGNER in record.getMessage()
+    assert OTHER in record.getMessage()
 
 
 def test_the_hermetic_default_boots_disabled_without_a_chain_read(monkeypatch, caplog):
@@ -280,7 +287,8 @@ def test_boot_does_not_wait_for_the_chain(monkeypatch):
             # Served while the chain read is still hung: lifespan returned
             # without waiting on it. Asserted on the task, not on a wall-clock
             # budget a slow runner could blow.
-            assert rw._report_task is not None and not rw._report_task.done()
+            assert rw._report_task is not None
+            assert not rw._report_task.done()
             assert client.get("/readiness").json()["ratings"]["writer"] == "unchecked"
         finally:
             # Inside the client: its loop's executor would otherwise wait out

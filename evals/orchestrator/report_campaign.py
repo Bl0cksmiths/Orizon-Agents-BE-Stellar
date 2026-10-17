@@ -16,6 +16,8 @@ from .dataset import TIERS
 from .metrics import TIER_COLUMNS
 
 NARRATIVES = ("summary", "recommendations", "limitations", "diagnoses", "stage_notes", "worker_notes")
+_TO_BE_WRITTEN = "_(to be written)_"
+_JEV_MODEL = "jev-1.13.0"  # the jev build the campaign's guard stages ran on
 
 
 def _block(name: str, keep: dict[str, str], placeholder: str) -> str:
@@ -48,6 +50,11 @@ def _count(x: float | None) -> str:
 
 def _f1(x: float) -> str:
     return f"{x:.3f}"
+
+
+def _table_rule(columns: int) -> str:
+    """A markdown table's header rule for `columns` columns: `|---|---|` for two."""
+    return "|---" * columns + "|"
 
 
 def _guard_table(cols: list[tuple[str, dict[str, Any]]]) -> list[str]:
@@ -83,6 +90,349 @@ def _confusion(conf: dict[str, dict[str, int]]) -> list[str]:
     return out
 
 
+def _worker_outcome(w: dict[str, Any]) -> str:
+    """A sampled worker's outcome cell: its failure, its artifact with the
+    validator's count, or the start of its summary."""
+    out = w["output"]
+    if w["error"]:
+        return f"FAILED: {w['error']}"
+    if not out.get("artifact_title"):
+        return str(out.get("summary", ""))[:220]
+    counts = out.get("counts") or {}
+    lines = counts.get("lines")
+    viol = out.get("validator_violations", out.get("critic_violations"))
+    return (
+        f"“{out['artifact_title']}”"
+        + (f", {lines} lines" if lines else "")
+        + f", validator violations: {len(viol) if viol is not None else 'n/a'}; {out.get('summary', '')}"
+    )
+
+
+def _workers_section(a: dict[str, Any], keep: dict[str, str]) -> list[str]:
+    """§9: each sampled worker once, with its model, cost and outcome."""
+    L: list[str] = []
+    add = L.append
+    add("## 9. Worker sample (stage 5)")
+    add("")
+    add("| worker | tier → model | input (case) | latency | cost | outcome |")
+    add(_table_rule(6))
+    for name, w in a["s5"].items():
+        if "worker" not in w:
+            continue
+        call = w["calls"][0] if w["calls"] else {}
+        model = call.get("model", "—")
+        outcome = _worker_outcome(w)
+        add(
+            f"| {name} | {model} | {w['case_id'] or 'sample contract'} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
+        )
+    add("")
+    add(_block("worker_notes", keep, ""))
+    add("")
+    return L
+
+
+def _errors_section(a: dict[str, Any], keep: dict[str, str], diag: dict[str, str]) -> list[str]:
+    """§10: every misclassified in-repo case with its diagnosis, then the stage 4 tier misses."""
+    L: list[str] = []
+    add = L.append
+    add("## 10. Error analysis — every misclassified in-repo case")
+    add("")
+    add("| case | stage (reps wrong) | expected → got | reasons | key scores | intent | diagnosis |")
+    add(_table_rule(7))
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for m in a["misclassified"]:
+        grouped.setdefault((m["id"], m["stage"]), []).append(m)
+    for (cid, stage), ms in sorted(grouped.items()):
+        m = ms[0]
+        scores = ", ".join(
+            f"{k} {v}" for k, v in m["scores"].items() if k in ("injection", "harmful", "severity", "real_request")
+        )
+        intent = m["intent"].replace("|", "\\|").replace("\n", " ")
+        add(
+            f"| {cid} | {stage} ({len(ms)}) | {m['expected']} → {m['got']} | {', '.join(m['reasons']) or '—'} | {scores} | {intent[:110]} | {diag.get(cid, '')} |"
+        )
+    add("")
+    add("Tier misses in stage 4 (expected → routed; raw jev choice and its confidence):")
+    add("")
+    add("| case | expected | raw choice | confidence | routed | cause |")
+    add(_table_rule(6))
+    for t in a["tier_misses_s4"]:
+        cause = "round-up of a correct raw choice" if t["raw"] == t["expected"] else "raw choice"
+        add(f"| {t['id']} | {t['expected']} | {t['raw']} | {t['confidence']} | {t['routed']} | {cause} |")
+    add("")
+    add(_block("diagnoses", keep, "- id: diagnosis"))
+    add("")
+    return L
+
+
+def _sweep_section(a: dict[str, Any]) -> list[str]:
+    """§11: the threshold sweep, the watch line, the tier rules and the recommended policy."""
+    L: list[str] = []
+    add = L.append
+    add("## 11. Threshold sweep and tier rules")
+    add("")
+    add(
+        "Replayed over recorded scores (stage 1 rep 0 + stage 2), no new calls. One knob at a time, picked on the train "
+        "split (never more wrong refusals than today), judged on the held-out test split. Full curves in `sweep.md`."
+    )
+    add("")
+    add("| knob | today | picked on train | held-out today | held-out at pick |")
+    add(_table_rule(5))
+    heads = {
+        "injection_block": ("injection_recall", "false_block"),
+        "harmful_block": ("harmful_recall", "false_block"),
+        "severity_block": ("harmful_recall", "false_block"),
+        "real_request_min": ("needs_detail_recall", "false_needs_detail"),
+        "complexity_confidence_min": ("tier_accuracy", "under_tier"),
+    }
+    for k in a["sweep"]:
+        x, y = heads[k["knob"]]
+        st_, pk = k["start_test"], k["picked_test"]
+        picked = "—" if k["picked"] is None else f"{k['picked']:.2f}"
+        add(
+            f"| `{k['knob']}` | {k['start']:.2f} | {picked} | {x} {pct(getattr(st_, x))}; {y} {pct(getattr(st_, y))} | {x} {pct(getattr(pk, x))}; {y} {pct(getattr(pk, y))} |"
+        )
+    add("")
+    add("Watch line (stage 4 rows, which carry re-check scores):")
+    add("")
+    add("| injection_watch | injection recall | false block | cases in the band |")
+    add(_table_rule(4))
+    for w in a["watch_sweep"]:
+        add(f"| {w['injection_watch']:.2f} | {pct(w['injection_recall'])} | {pct(w['false_block'])} | {w['watched']} |")
+    add("")
+    add(
+        "Complexity round-up rules over the legit cases jev allowed (stage 1, 3 reps pooled), with where the request lands:"
+    )
+    add("")
+    add(
+        "| rule | tier accuracy | under-tier | over-tier | Haiku / Sonnet / Opus | held-out tier accuracy | planning $/request |"
+    )
+    add(_table_rule(7))
+    held = {r["rule"]: r for r in a["tier_rules_s1_test"]}
+    for r in a["tier_rules_s1"]:
+        m = r["routed"]
+        h = held[r["rule"]]["accuracy"]
+        add(
+            f"| {r['rule']} | {pct(r['accuracy'])} | {pct(r['under_tier'])} | {pct(r['over_tier'])} | {m['low']} / {m['moderate']} / {m['complex']} | {pct(h)} | {usd(r['planning_usd_per_request'])} |"
+        )
+    add("")
+    add(
+        "Tier → step model: "
+        + ", ".join(f"{t} → {TIER_MODEL[t]}" for t in TIERS)
+        + ". Planning cost differs little by tier; the tier's real cost is in execution (see the code.gen timings in §7)."
+    )
+    add("")
+    rec = a["recommended"]
+    add("### Recommended policy, judged on the held-out split")
+    add("")
+    add("| | today | recommended |")
+    add(_table_rule(3))
+    add(
+        "| thresholds | "
+        + ", ".join(f"{k} {v}" for k, v in rec["today"].items())
+        + " | "
+        + ", ".join(f"{k} {v}" for k, v in rec["policy"].items())
+        + " |"
+    )
+    for key in ("injection_recall", "harmful_recall", "false_block", "needs_detail_recall", "false_needs_detail"):
+        add(
+            f"| {key.replace('_', ' ')} (held-out) | {pct(rec['held_out_today'][key])} | {pct(rec['held_out_recommended'][key])} |"
+        )
+    add(
+        f"| tier accuracy with the recommended tier rule (held-out) | {pct(rec['tier_today_test'])} | {pct(rec['tier_rule_test'])} |"
+    )
+    add("")
+    return L
+
+
+def _cost_section(a: dict[str, Any]) -> list[str]:
+    """§8: spend per stage and model, per request, per day under the cap, and prompt caching."""
+    costs = a["costs"]
+    s4 = a["s4"]
+    pr = s4["per_request"]
+    L: list[str] = []
+    add = L.append
+    add("## 8. Cost")
+    add("")
+    add("| stage | calls | list price | booked by the app's ledger |")
+    add(_table_rule(4))
+    for s in ("smoke", "s1-guard", "s2-external", "s3-haiku", "s4-full"):
+        c = costs[s]
+        add(f"| {s} | {c['calls']} | {usd(c['list_price_usd'])} | {usd(c['app_booked_usd'])} |")
+    w5 = costs["s5-workers"]
+    add(f"| s5-workers | 7 + 2 | {usd(w5['list_price_usd'] + w5['diagnostic_reruns_usd'])} | — |")
+    add(f"| **total** | | **{usd(a['grand_total_usd'])}** | |")
+    add("")
+    add("By model in stage 4:")
+    add("")
+    add("| model | calls | input | output | cache read | cache write | list price |")
+    add(_table_rule(7))
+    for m, v in costs["s4-full"]["by_model"].items():
+        add(
+            f"| {m} | {int(v['calls'])} | {int(v['input_tokens'])} | {int(v['output_tokens'])} | {int(v['cache_read_input_tokens'])} | {int(v['cache_creation_input_tokens'])} | {usd(v['usd'])} |"
+        )
+    add("")
+    add("Per request (planning only: guard + improve + re-check + plan; executing a plan's steps is extra):")
+    add("")
+    add("| | cost |")
+    add(_table_rule(2))
+    add(f"| refused request (guard only) | {usd(pr['mean_refused_request'])} |")
+    add(
+        f"| planned request, mean | {usd(pr['mean_planned_request'])} (p50 {usd(pr['planned_spread']['p50'])}, p95 {usd(pr['planned_spread']['p95'])}, max {usd(pr['planned_spread']['max'])}) |"
+    )
+    for t in TIERS:
+        bt = pr["by_tier"][t]
+        if bt["requests"]:
+            add(
+                f"| planned at tier {t} (n={bt['requests']}) | {usd(bt['mean_request_usd'])} (planner call {usd(bt['mean_plan_call_usd'])}; planner output tokens p50 {bt['plan_output_tokens'].get('p50', 'n/a')}, max {bt['plan_output_tokens'].get('max', 'n/a')}) |"
+            )
+    add(f"| this dataset's mix (51% planned) | {usd(pr['mean_per_request_mix'])} |")
+    add("")
+    add("| requests / day | planning spend, dataset mix | planning spend, every request planned |")
+    add(_table_rule(3))
+    for v in (50, 200, 1000):
+        add(f"| {v} | {usd(pr['daily_projection_mix'][v])} | {usd(pr['daily_projection_all_planned'][v])} |")
+    add("")
+    add(
+        f"The ${DAILY_CAP_USD:.0f}/day cap covers about {_count(pr['requests_per_cap_planned'])} planned requests "
+        f"(≈{_count(pr['requests_per_cap_mix'])} at this dataset's mix) if nothing is executed. Executions draw on the "
+        "same cap: one Sonnet code.gen + code.critic pair cost "
+        f"{usd(sum(a['s5'].get(w, {}).get('cost_usd', 0.0) for w in ('code.gen', 'code.critic')))} in stage 5."
+    )
+    add("")
+    add("### Prompt caching")
+    add("")
+    add("| stage | calls | calls reading the cache | calls writing it | share of prompt tokens served from cache |")
+    add(_table_rule(5))
+    for k, v in s4["caching"].items():
+        add(
+            f"| {k} | {v['calls']} | {pct(v['calls_with_cache_read'])} | {v['calls_with_cache_write']} | {100 * v['cached_share_of_prompt_tokens']:.1f}% |"
+        )
+    add("")
+    return L
+
+
+def _latency_section(a: dict[str, Any]) -> list[str]:
+    """§7: p50 / p95 / max per model call and per request end to end."""
+    s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
+    L: list[str] = []
+    add = L.append
+    add("## 7. Latency")
+    add("")
+    add("p50 / p95 / max, per model call and per request end to end.")
+    add("")
+    add("| stage | latency |")
+    add(_table_rule(2))
+    add(f"| jev guard (stage 1) | {fmt_s(s1['latency'].get('guard', {}))} |")
+    add(f"| jev guard (stage 2, external) | {fmt_s(s2['latency'].get('guard', {}))} |")
+    add(f"| Haiku fallback guard (stage 3) | {fmt_s(s3['latency'].get('guard_fallback', {}))} |")
+    for k, label in (
+        ("guard", "jev guard (stage 4)"),
+        ("improve", "Sonnet 5.5 improver"),
+        ("recheck", "jev re-check (2 calls, parallel)"),
+        ("plan", "Opus 5.5 planner"),
+    ):
+        add(f"| {label} | {fmt_s(s4['latency'].get(k, {}))} |")
+    add(f"| end to end, refused requests (guard only) | {fmt_s(s4['latency'].get('end_to_end_refused', {}))} |")
+    add(f"| end to end, planned requests | {fmt_s(s4['latency'].get('end_to_end_planned', {}))} |")
+    for name, w in a["s5"].items():
+        if "worker" in w:
+            add(f"| worker {name} | {w['latency_s']:.2f} s (n=1) |")
+    add("")
+    add(
+        "Reference measurements supplied by the owner's earlier smoke tests (same day, not re-run here): jev ≈0.3 s per check; code.gen on Sonnet 5.5 (moderate) 35.4 s, 282 lines, 0 validator violations, $0.07; code.gen on Opus 5.5 (complex, effort high) 268.5 s, 747 lines, 0 violations, $0.68."
+    )
+    add("")
+    return L
+
+
+def _pipeline_section(a: dict[str, Any]) -> list[str]:
+    """§6: the improver, the spec re-check and the raw plans of stage 4."""
+    s4 = a["s4"]
+    pipe = s4["pipeline"]
+    L: list[str] = []
+    add = L.append
+    add("## 6. Full pipeline (stage 4)")
+    add("")
+    rv = pipe["recheck_verdicts"]
+    add(
+        f"- Requests improved by Sonnet 5.5: {pipe['improved']}; improver failures (planned from the original): {pct(pipe['improver_failed'])}."
+    )
+    add(
+        "- Spec re-check verdicts (recomputed with `prompt_improver.judge_spec`): "
+        + ", ".join(f"{k} {v}" for k, v in rv.items())
+        + f"; drift rate {pct(pipe['drift_rate'])}; planned from the spec {pct(pipe['planned_from_spec'])}."
+    )
+    add(f"- Blocked by the re-check after an allow: {', '.join(pipe['blocked_after_recheck']) or 'none'}.")
+    add(
+        f"- Requests planned: {pipe['planned']}, of which not legitimate by label: {', '.join(pipe['planned_non_legit']) or 'none'}."
+    )
+    add("")
+    add("Plan validity on the RAW planner output (before `orchestrator_svc` clamps it):")
+    add("")
+    add("| check | value |")
+    add(_table_rule(2))
+    for key in ("plan_valid", "plan_schema", "plan_allowlisted", "plan_tiers"):
+        add(f"| {key.replace('_', ' ')} | {pct(pipe[key])} |")
+    add(f"| refused by the planner | {len(pipe['plan_refused'])} |")
+    add(f"| truncated (max_tokens) | {len(pipe['plan_truncated'])} |")
+    add(f"| steps whose tier is above the plan's tier | {pipe['steps_above_plan_tier']} |")
+    add("")
+    add(
+        "Invalid plans: "
+        + (
+            "; ".join(f"{x['id']} ({', '.join(x['failed'])})" for x in pipe["invalid"])
+            or "none — every raw plan passed every check"
+        )
+        + "."
+    )
+    add("")
+    add("- Steps per plan: " + ", ".join(f"{k} step(s) × {v}" for k, v in pipe["step_counts"].items()) + ".")
+    add("- Step tiers: " + ", ".join(f"{k} {v}" for k, v in sorted(pipe["step_tiers"].items())) + ".")
+    add("- Agents chosen: " + ", ".join(f"{k} × {v}" for k, v in pipe["agents"].items()) + ".")
+    add("")
+    add("### Tier confusion (jev, stage 4)")
+    add("")
+    L += _confusion(s4["guard"]["tier_confusion"])
+    add("")
+    return L
+
+
+def _external_section(a: dict[str, Any]) -> list[str]:
+    """§4: the guard on the pinned public benchmarks, per source and per label."""
+    ext = a["s2"]["external"]
+    L: list[str] = []
+    add = L.append
+    add("## 4. External benchmarks (stage 2)")
+    add("")
+    add(
+        "Fetched at run time, pinned, never committed (rows here carry ids, labels and scores only). deepset/"
+        "prompt-injections (Apache-2.0, revision 4f61ecb0, train + test, 18 rows over the 500-character API bound "
+        "skipped): label 1 → should block, 0 → should not. JailbreakBench/JBB-Behaviors (MIT, revision 886acc35): "
+        "harmful behaviours → should block, benign contrast behaviours → should not. `needs_detail` counts as "
+        "not blocking."
+    )
+    add("")
+    add("| source | n | block precision | block recall | specificity | F1 |")
+    add(_table_rule(6))
+    for src, v in ext.items():
+        p = v["prf"]
+        n = p["tp"] + p["fp"] + p["fn"] + p["tn"]
+        add(f"| {src} | {n} | {pct(p['precision'])} | {pct(p['recall'])} | {pct(p['specificity'])} | {_f1(p['f1'])} |")
+    add("")
+    add("| source / label | n | blocked | needs detail | allowed |")
+    add(_table_rule(5))
+    for src, v in ext.items():
+        if src == "all":
+            continue
+        for cat, c in v["categories"].items():
+            add(
+                f"| {src.split('@')[0]} / {cat} | {c['n']} | {pct(c['blocked'])} | {pct(c['needs_detail'])} | {pct(c['allowed'])} |"
+            )
+    add("")
+    return L
+
+
 def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     d = a["dataset"]
     s1, s2, s3, s4 = a["s1"], a["s2"], a["s3"], a["s4"]
@@ -105,13 +455,13 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("")
     add("## 1. Executive summary")
     add("")
-    add(_block("summary", keep, "_(to be written)_"))
+    add(_block("summary", keep, _TO_BE_WRITTEN))
     add("")
     add("### Headline numbers")
     add("")
     g1 = s1["pooled"]
     add("| | value |")
-    add("|---|---|")
+    add(_table_rule(2))
     add(f"| in-repo verdict accuracy, jev (168 cases × 3 reps) | {pct(g1['verdict_accuracy'])} |")
     add(
         f"| injection recall / block precision, jev | {pct(g1['injection_recall'])} / {pct(g1['injection_precision'])} |"
@@ -153,7 +503,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     )
     add("")
     add("| | composition |")
-    add("|---|---|")
+    add(_table_rule(2))
     add("| expected verdict | " + ", ".join(f"{k} {v}" for k, v in sorted(d["verdicts"].items())) + " |")
     add("| expected tier (allow only) | " + ", ".join(f"{k} {v}" for k, v in sorted(d["tiers"].items())) + " |")
     add("| category | " + ", ".join(f"{k} {v}" for k, v in sorted(d["categories"].items())) + " |")
@@ -169,13 +519,13 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("### Stages")
     add("")
     add("| stage | what ran | cases × reps | models | cap | spent (list price) |")
-    add("|---|---|---|---|---|---|")
+    add(_table_rule(6))
     stage_rows = [
         (
             "1 guard",
             "jev intent battery via `intent_guard.check_intent`",
             f"{d['cases']} × 3",
-            "jev-1.13.0",
+            _JEV_MODEL,
             0.10,
             costs["s1-guard"]["list_price_usd"],
         ),
@@ -183,7 +533,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
             "2 external",
             "the same guard on public benchmarks",
             f"{sum(s2['external']['all']['prf'][k] for k in ('tp', 'fp', 'fn', 'tn'))} × 1",
-            "jev-1.13.0",
+            _JEV_MODEL,
             0.50,
             costs["s2-external"]["list_price_usd"],
         ),
@@ -211,7 +561,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
             3.0,
             costs["s5-workers"]["list_price_usd"] + costs["s5-workers"]["diagnostic_reruns_usd"],
         ),
-        ("smoke", "two guard checks before stage 1", "2 × 1", "jev-1.13.0", None, costs["smoke"]["list_price_usd"]),
+        ("smoke", "two guard checks before stage 1", "2 × 1", _JEV_MODEL, None, costs["smoke"]["list_price_usd"]),
     ]
     for name, what, n, models, cap, spent in stage_rows:
         add(f"| {name} | {what} | {n} | {models} | {usd(cap) if cap is not None else '—'} | {usd(spent)} |")
@@ -247,14 +597,14 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("### By category (jev, stage 1)")
     add("")
     add("| category | verdict accuracy |")
-    add("|---|---|")
+    add(_table_rule(2))
     for k, v in g1["by_category"].items():
         add(f"| {k} | {pct(v)} |")
     add("")
     add("### By language (jev, stage 1)")
     add("")
     add("| language | verdict accuracy |")
-    add("|---|---|")
+    add(_table_rule(2))
     for k, v in sorted(g1["by_language"].items(), key=lambda kv: -kv[1].n):
         add(f"| {k} | {pct(v)} |")
     add("")
@@ -279,33 +629,7 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     add("- Accuracy per repetition: " + ", ".join(pct(r) for r in st["per_rep_accuracy"]) + ".")
     add("")
 
-    add("## 4. External benchmarks (stage 2)")
-    add("")
-    add(
-        "Fetched at run time, pinned, never committed (rows here carry ids, labels and scores only). deepset/"
-        "prompt-injections (Apache-2.0, revision 4f61ecb0, train + test, 18 rows over the 500-character API bound "
-        "skipped): label 1 → should block, 0 → should not. JailbreakBench/JBB-Behaviors (MIT, revision 886acc35): "
-        "harmful behaviours → should block, benign contrast behaviours → should not. `needs_detail` counts as "
-        "not blocking."
-    )
-    add("")
-    add("| source | n | block precision | block recall | specificity | F1 |")
-    add("|---|---|---|---|---|---|")
-    for src, v in ext.items():
-        p = v["prf"]
-        n = p["tp"] + p["fp"] + p["fn"] + p["tn"]
-        add(f"| {src} | {n} | {pct(p['precision'])} | {pct(p['recall'])} | {pct(p['specificity'])} | {_f1(p['f1'])} |")
-    add("")
-    add("| source / label | n | blocked | needs detail | allowed |")
-    add("|---|---|---|---|---|")
-    for src, v in ext.items():
-        if src == "all":
-            continue
-        for cat, c in v["categories"].items():
-            add(
-                f"| {src.split('@')[0]} / {cat} | {c['n']} | {pct(c['blocked'])} | {pct(c['needs_detail'])} | {pct(c['allowed'])} |"
-            )
-    add("")
+    L += _external_section(a)
 
     ag = s3["agreement_with_jev"]
     add("## 5. Backup guard: Claude Haiku 4.5 vs jev (stage 3)")
@@ -318,286 +642,37 @@ def render_report(a: dict[str, Any], keep: dict[str, str]) -> str:
     )
     add("")
     add("| case | expected | jev | Haiku |")
-    add("|---|---|---|---|")
+    add(_table_rule(4))
     for x in ag["disagreements"]:
         add(f"| {x['id']} | {x['expected']} | {x['jev']} | {x['haiku']} |")
     add("")
 
-    add("## 6. Full pipeline (stage 4)")
-    add("")
-    rv = pipe["recheck_verdicts"]
-    add(
-        f"- Requests improved by Sonnet 5.5: {pipe['improved']}; improver failures (planned from the original): {pct(pipe['improver_failed'])}."
-    )
-    add(
-        "- Spec re-check verdicts (recomputed with `prompt_improver.judge_spec`): "
-        + ", ".join(f"{k} {v}" for k, v in rv.items())
-        + f"; drift rate {pct(pipe['drift_rate'])}; planned from the spec {pct(pipe['planned_from_spec'])}."
-    )
-    add(f"- Blocked by the re-check after an allow: {', '.join(pipe['blocked_after_recheck']) or 'none'}.")
-    add(
-        f"- Requests planned: {pipe['planned']}, of which not legitimate by label: {', '.join(pipe['planned_non_legit']) or 'none'}."
-    )
-    add("")
-    add("Plan validity on the RAW planner output (before `orchestrator_svc` clamps it):")
-    add("")
-    add("| check | value |")
-    add("|---|---|")
-    for key in ("plan_valid", "plan_schema", "plan_allowlisted", "plan_tiers"):
-        add(f"| {key.replace('_', ' ')} | {pct(pipe[key])} |")
-    add(f"| refused by the planner | {len(pipe['plan_refused'])} |")
-    add(f"| truncated (max_tokens) | {len(pipe['plan_truncated'])} |")
-    add(f"| steps whose tier is above the plan's tier | {pipe['steps_above_plan_tier']} |")
-    add("")
-    add(
-        "Invalid plans: "
-        + (
-            "; ".join(f"{x['id']} ({', '.join(x['failed'])})" for x in pipe["invalid"])
-            or "none — every raw plan passed every check"
-        )
-        + "."
-    )
-    add("")
-    add("- Steps per plan: " + ", ".join(f"{k} step(s) × {v}" for k, v in pipe["step_counts"].items()) + ".")
-    add("- Step tiers: " + ", ".join(f"{k} {v}" for k, v in sorted(pipe["step_tiers"].items())) + ".")
-    add("- Agents chosen: " + ", ".join(f"{k} × {v}" for k, v in pipe["agents"].items()) + ".")
-    add("")
-    add("### Tier confusion (jev, stage 4)")
-    add("")
-    L += _confusion(s4["guard"]["tier_confusion"])
-    add("")
+    L += _pipeline_section(a)
 
-    add("## 7. Latency")
-    add("")
-    add("p50 / p95 / max, per model call and per request end to end.")
-    add("")
-    add("| stage | latency |")
-    add("|---|---|")
-    add(f"| jev guard (stage 1) | {fmt_s(s1['latency'].get('guard', {}))} |")
-    add(f"| jev guard (stage 2, external) | {fmt_s(s2['latency'].get('guard', {}))} |")
-    add(f"| Haiku fallback guard (stage 3) | {fmt_s(s3['latency'].get('guard_fallback', {}))} |")
-    for k, label in (
-        ("guard", "jev guard (stage 4)"),
-        ("improve", "Sonnet 5.5 improver"),
-        ("recheck", "jev re-check (2 calls, parallel)"),
-        ("plan", "Opus 5.5 planner"),
-    ):
-        add(f"| {label} | {fmt_s(s4['latency'].get(k, {}))} |")
-    add(f"| end to end, refused requests (guard only) | {fmt_s(s4['latency'].get('end_to_end_refused', {}))} |")
-    add(f"| end to end, planned requests | {fmt_s(s4['latency'].get('end_to_end_planned', {}))} |")
-    for name, w in a["s5"].items():
-        if "worker" in w:
-            add(f"| worker {name} | {w['latency_s']:.2f} s (n=1) |")
-    add("")
-    add(
-        "Reference measurements supplied by the owner's earlier smoke tests (same day, not re-run here): jev ≈0.3 s per check; code.gen on Sonnet 5.5 (moderate) 35.4 s, 282 lines, 0 validator violations, $0.07; code.gen on Opus 5.5 (complex, effort high) 268.5 s, 747 lines, 0 violations, $0.68."
-    )
-    add("")
+    L += _latency_section(a)
 
-    add("## 8. Cost")
-    add("")
-    add("| stage | calls | list price | booked by the app's ledger |")
-    add("|---|---|---|---|")
-    for s in ("smoke", "s1-guard", "s2-external", "s3-haiku", "s4-full"):
-        c = costs[s]
-        add(f"| {s} | {c['calls']} | {usd(c['list_price_usd'])} | {usd(c['app_booked_usd'])} |")
-    w5 = costs["s5-workers"]
-    add(f"| s5-workers | 7 + 2 | {usd(w5['list_price_usd'] + w5['diagnostic_reruns_usd'])} | — |")
-    add(f"| **total** | | **{usd(a['grand_total_usd'])}** | |")
-    add("")
-    add("By model in stage 4:")
-    add("")
-    add("| model | calls | input | output | cache read | cache write | list price |")
-    add("|---|---|---|---|---|---|---|")
-    for m, v in costs["s4-full"]["by_model"].items():
-        add(
-            f"| {m} | {int(v['calls'])} | {int(v['input_tokens'])} | {int(v['output_tokens'])} | {int(v['cache_read_input_tokens'])} | {int(v['cache_creation_input_tokens'])} | {usd(v['usd'])} |"
-        )
-    add("")
-    add("Per request (planning only: guard + improve + re-check + plan; executing a plan's steps is extra):")
-    add("")
-    add("| | cost |")
-    add("|---|---|")
-    add(f"| refused request (guard only) | {usd(pr['mean_refused_request'])} |")
-    add(
-        f"| planned request, mean | {usd(pr['mean_planned_request'])} (p50 {usd(pr['planned_spread']['p50'])}, p95 {usd(pr['planned_spread']['p95'])}, max {usd(pr['planned_spread']['max'])}) |"
-    )
-    for t in TIERS:
-        bt = pr["by_tier"][t]
-        if bt["requests"]:
-            add(
-                f"| planned at tier {t} (n={bt['requests']}) | {usd(bt['mean_request_usd'])} (planner call {usd(bt['mean_plan_call_usd'])}; planner output tokens p50 {bt['plan_output_tokens'].get('p50', 'n/a')}, max {bt['plan_output_tokens'].get('max', 'n/a')}) |"
-            )
-    add(f"| this dataset's mix (51% planned) | {usd(pr['mean_per_request_mix'])} |")
-    add("")
-    add("| requests / day | planning spend, dataset mix | planning spend, every request planned |")
-    add("|---|---|---|")
-    for v in (50, 200, 1000):
-        add(f"| {v} | {usd(pr['daily_projection_mix'][v])} | {usd(pr['daily_projection_all_planned'][v])} |")
-    add("")
-    add(
-        f"The ${DAILY_CAP_USD:.0f}/day cap covers about {_count(pr['requests_per_cap_planned'])} planned requests "
-        f"(≈{_count(pr['requests_per_cap_mix'])} at this dataset's mix) if nothing is executed. Executions draw on the "
-        "same cap: one Sonnet code.gen + code.critic pair cost "
-        f"{usd(sum(a['s5'].get(w, {}).get('cost_usd', 0.0) for w in ('code.gen', 'code.critic')))} in stage 5."
-    )
-    add("")
-    add("### Prompt caching")
-    add("")
-    add("| stage | calls | calls reading the cache | calls writing it | share of prompt tokens served from cache |")
-    add("|---|---|---|---|---|")
-    for k, v in s4["caching"].items():
-        add(
-            f"| {k} | {v['calls']} | {pct(v['calls_with_cache_read'])} | {v['calls_with_cache_write']} | {100 * v['cached_share_of_prompt_tokens']:.1f}% |"
-        )
-    add("")
+    L += _cost_section(a)
 
-    add("## 9. Worker sample (stage 5)")
-    add("")
-    add("| worker | tier → model | input (case) | latency | cost | outcome |")
-    add("|---|---|---|---|---|---|")
-    for name, w in a["s5"].items():
-        if "worker" not in w:
-            continue
-        call = w["calls"][0] if w["calls"] else {}
-        model = call.get("model", "—")
-        out = w["output"]
-        if w["error"]:
-            outcome = f"FAILED: {w['error']}"
-        elif out.get("artifact_title"):
-            counts = out.get("counts") or {}
-            lines = counts.get("lines")
-            viol = out.get("validator_violations", out.get("critic_violations"))
-            outcome = (
-                f"“{out['artifact_title']}”"
-                + (f", {lines} lines" if lines else "")
-                + f", validator violations: {len(viol) if viol is not None else 'n/a'}; {out.get('summary', '')}"
-            )
-        else:
-            outcome = str(out.get("summary", ""))[:220]
-        add(
-            f"| {name} | {model} | {w['case_id'] or 'sample contract'} | {w['latency_s']:.1f} s | {usd(w['cost_usd'])} | {outcome} |"
-        )
-    add("")
-    add(_block("worker_notes", keep, ""))
-    add("")
+    L += _workers_section(a, keep)
 
-    add("## 10. Error analysis — every misclassified in-repo case")
-    add("")
-    add("| case | stage (reps wrong) | expected → got | reasons | key scores | intent | diagnosis |")
-    add("|---|---|---|---|---|---|---|")
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for m in a["misclassified"]:
-        grouped.setdefault((m["id"], m["stage"]), []).append(m)
-    for (cid, stage), ms in sorted(grouped.items()):
-        m = ms[0]
-        scores = ", ".join(
-            f"{k} {v}" for k, v in m["scores"].items() if k in ("injection", "harmful", "severity", "real_request")
-        )
-        intent = m["intent"].replace("|", "\\|").replace("\n", " ")
-        add(
-            f"| {cid} | {stage} ({len(ms)}) | {m['expected']} → {m['got']} | {', '.join(m['reasons']) or '—'} | {scores} | {intent[:110]} | {diag.get(cid, '')} |"
-        )
-    add("")
-    add("Tier misses in stage 4 (expected → routed; raw jev choice and its confidence):")
-    add("")
-    add("| case | expected | raw choice | confidence | routed | cause |")
-    add("|---|---|---|---|---|---|")
-    for t in a["tier_misses_s4"]:
-        cause = "round-up of a correct raw choice" if t["raw"] == t["expected"] else "raw choice"
-        add(f"| {t['id']} | {t['expected']} | {t['raw']} | {t['confidence']} | {t['routed']} | {cause} |")
-    add("")
-    add(_block("diagnoses", keep, "- id: diagnosis"))
-    add("")
+    L += _errors_section(a, keep, diag)
 
-    add("## 11. Threshold sweep and tier rules")
-    add("")
-    add(
-        "Replayed over recorded scores (stage 1 rep 0 + stage 2), no new calls. One knob at a time, picked on the train "
-        "split (never more wrong refusals than today), judged on the held-out test split. Full curves in `sweep.md`."
-    )
-    add("")
-    add("| knob | today | picked on train | held-out today | held-out at pick |")
-    add("|---|---|---|---|---|")
-    heads = {
-        "injection_block": ("injection_recall", "false_block"),
-        "harmful_block": ("harmful_recall", "false_block"),
-        "severity_block": ("harmful_recall", "false_block"),
-        "real_request_min": ("needs_detail_recall", "false_needs_detail"),
-        "complexity_confidence_min": ("tier_accuracy", "under_tier"),
-    }
-    for k in a["sweep"]:
-        x, y = heads[k["knob"]]
-        st_, pk = k["start_test"], k["picked_test"]
-        picked = "—" if k["picked"] is None else f"{k['picked']:.2f}"
-        add(
-            f"| `{k['knob']}` | {k['start']:.2f} | {picked} | {x} {pct(getattr(st_, x))}; {y} {pct(getattr(st_, y))} | {x} {pct(getattr(pk, x))}; {y} {pct(getattr(pk, y))} |"
-        )
-    add("")
-    add("Watch line (stage 4 rows, which carry re-check scores):")
-    add("")
-    add("| injection_watch | injection recall | false block | cases in the band |")
-    add("|---|---|---|---|")
-    for w in a["watch_sweep"]:
-        add(f"| {w['injection_watch']:.2f} | {pct(w['injection_recall'])} | {pct(w['false_block'])} | {w['watched']} |")
-    add("")
-    add(
-        "Complexity round-up rules over the legit cases jev allowed (stage 1, 3 reps pooled), with where the request lands:"
-    )
-    add("")
-    add(
-        "| rule | tier accuracy | under-tier | over-tier | Haiku / Sonnet / Opus | held-out tier accuracy | planning $/request |"
-    )
-    add("|---|---|---|---|---|---|---|")
-    held = {r["rule"]: r for r in a["tier_rules_s1_test"]}
-    for r in a["tier_rules_s1"]:
-        m = r["routed"]
-        h = held[r["rule"]]["accuracy"]
-        add(
-            f"| {r['rule']} | {pct(r['accuracy'])} | {pct(r['under_tier'])} | {pct(r['over_tier'])} | {m['low']} / {m['moderate']} / {m['complex']} | {pct(h)} | {usd(r['planning_usd_per_request'])} |"
-        )
-    add("")
-    add(
-        "Tier → step model: "
-        + ", ".join(f"{t} → {TIER_MODEL[t]}" for t in TIERS)
-        + ". Planning cost differs little by tier; the tier's real cost is in execution (see the code.gen timings in §7)."
-    )
-    add("")
-    rec = a["recommended"]
-    add("### Recommended policy, judged on the held-out split")
-    add("")
-    add("| | today | recommended |")
-    add("|---|---|---|")
-    add(
-        "| thresholds | "
-        + ", ".join(f"{k} {v}" for k, v in rec["today"].items())
-        + " | "
-        + ", ".join(f"{k} {v}" for k, v in rec["policy"].items())
-        + " |"
-    )
-    for key in ("injection_recall", "harmful_recall", "false_block", "needs_detail_recall", "false_needs_detail"):
-        add(
-            f"| {key.replace('_', ' ')} (held-out) | {pct(rec['held_out_today'][key])} | {pct(rec['held_out_recommended'][key])} |"
-        )
-    add(
-        f"| tier accuracy with the recommended tier rule (held-out) | {pct(rec['tier_today_test'])} | {pct(rec['tier_rule_test'])} |"
-    )
-    add("")
+    L += _sweep_section(a)
 
     add("## 12. Recommendations")
     add("")
     add("Recommendations only; no production threshold or rule was changed by this work.")
     add("")
-    add(_block("recommendations", keep, "_(to be written)_"))
+    add(_block("recommendations", keep, _TO_BE_WRITTEN))
     add("")
     add("## 13. Limitations")
     add("")
-    add(_block("limitations", keep, "_(to be written)_"))
+    add(_block("limitations", keep, _TO_BE_WRITTEN))
     add("")
     add("## 14. Files")
     add("")
     add("| file | contents |")
-    add("|---|---|")
+    add(_table_rule(2))
     add("| `metrics.json` | every figure in this report |")
     add("| `costs.json` | spend per stage and model, list price and as booked by the app |")
     add("| `sweep.md` | full threshold curves and tier-rule tables |")

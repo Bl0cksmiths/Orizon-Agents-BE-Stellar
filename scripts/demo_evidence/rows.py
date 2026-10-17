@@ -130,6 +130,75 @@ def _dispute_status(event: str, detail: dict[str, Any]) -> str | None:
     return None if status is None else str(status)
 
 
+def _records(path: Path) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+    """Every JSON object line of `path` with its `<file>:<line>`, and how many
+    lines were not one (a torn write). Blank lines are neither."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InputError(f"{path}: cannot be read: {exc}") from exc
+    records: list[tuple[str, dict[str, Any]]] = []
+    unreadable = 0
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            unreadable += 1
+            continue
+        if not isinstance(raw, dict):
+            unreadable += 1
+            continue
+        records.append((f"{path}:{number}", raw))
+    return records, unreadable
+
+
+def _tx_row(raw: dict[str, Any], detail: dict[str, Any], where: str, tx_hash: str) -> TxRow:
+    """A harness row with a (normalised) hash, as the transaction the video shows."""
+    seq = raw.get("seq")
+    return TxRow(
+        source=where,
+        run_id=str(raw.get("run_id") or ""),
+        seq=seq if isinstance(seq, int) else None,
+        stage=str(raw.get("stage") or ""),
+        event=str(raw.get("event") or ""),
+        utc=str(raw.get("utc") or ""),
+        tx_hash=tx_hash,
+        agent=_str(raw.get("agent")),
+        amount=_str(raw.get("amount")),
+        asset=_str(raw.get("asset")),
+        contract=_str(raw.get("contract")),
+        recorded_status=_str(raw.get("onchain_status")),
+        summary=str(detail.get("summary") or ""),
+    )
+
+
+def _screen(raw: dict[str, Any], where: str, disputes: dict[str, str | None]) -> tuple[str, dict[str, Any]] | None:
+    """Check one row's network, note the status of the dispute it names in
+    `disputes`, and return its normalised hash and its detail; None for a row
+    without a hash (context, not a transaction).
+
+    Raises `WrongNetwork` for a row naming another network, and for a hash row
+    that does not name testnet."""
+    network = str(raw.get("network") or "")
+    tx_hash = raw.get("tx_hash")
+    if network not in _NO_NETWORK and network != TESTNET:
+        raise WrongNetwork(f"{where}: a row from network {network!r}; the video's evidence is testnet only")
+    raw_detail = raw.get("detail")
+    detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+    if detail.get("dispute_id"):
+        disputes[str(detail["dispute_id"])] = _dispute_status(str(raw.get("event") or ""), detail)
+    if not tx_hash:
+        return None
+    if network != TESTNET:
+        raise WrongNetwork(
+            f"{where}: a transaction row whose network is {network or 'unset'!r}, not testnet; refusing to "
+            "publish a hash whose network the row does not name"
+        )
+    return str(tx_hash).strip().lower(), detail
+
+
 def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     """Every transaction row of every input, in input order then file order. Raises on another network.
 
@@ -143,60 +212,18 @@ def load(paths: list[Path], *, require_rows: bool = True) -> Loaded:
     duplicates = 0
     disputes: dict[str, str | None] = {}
     for path in files:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise InputError(f"{path}: cannot be read: {exc}") from exc
-        for number, line in enumerate(lines, start=1):
-            if not line.strip():
+        records, unreadable = _records(path)
+        skipped += unreadable
+        for where, raw in records:
+            screened = _screen(raw, where, disputes)
+            if screened is None:
                 continue
-            where = f"{path}:{number}"
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
-            if not isinstance(raw, dict):
-                skipped += 1
-                continue
-            network = str(raw.get("network") or "")
-            tx_hash = raw.get("tx_hash")
-            if network not in _NO_NETWORK and network != TESTNET:
-                raise WrongNetwork(f"{where}: a row from network {network!r}; the video's evidence is testnet only")
-            raw_detail = raw.get("detail")
-            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
-            if detail.get("dispute_id"):
-                disputes[str(detail["dispute_id"])] = _dispute_status(str(raw.get("event") or ""), detail)
-            if not tx_hash:
-                continue
-            if network != TESTNET:
-                raise WrongNetwork(
-                    f"{where}: a transaction row whose network is {network or 'unset'!r}, not testnet; refusing to "
-                    "publish a hash whose network the row does not name"
-                )
-            tx_hash = str(tx_hash).strip().lower()
+            tx_hash, detail = screened
             if tx_hash in seen:
                 duplicates += 1
                 continue
             seen.add(tx_hash)
-            seq = raw.get("seq")
-            rows.append(
-                TxRow(
-                    source=where,
-                    run_id=str(raw.get("run_id") or ""),
-                    seq=seq if isinstance(seq, int) else None,
-                    stage=str(raw.get("stage") or ""),
-                    event=str(raw.get("event") or ""),
-                    utc=str(raw.get("utc") or ""),
-                    tx_hash=tx_hash,
-                    agent=_str(raw.get("agent")),
-                    amount=_str(raw.get("amount")),
-                    asset=_str(raw.get("asset")),
-                    contract=_str(raw.get("contract")),
-                    recorded_status=_str(raw.get("onchain_status")),
-                    summary=str(detail.get("summary") or ""),
-                )
-            )
+            rows.append(_tx_row(raw, detail, where, tx_hash))
     if not rows and require_rows:
         raise InputError(f"no transaction rows in {', '.join(str(f) for f in files)}")
     return Loaded(

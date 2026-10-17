@@ -177,14 +177,17 @@ def test_two_upholds_racing_into_the_claim_sign_one_transfer(
 
     # The FAILED attempt: one transfer, refused, the claim handed back.
     assert first == "refund_failed"
-    assert after_failure is not None and after_failure.status == "upheld"
+    assert after_failure is not None
+    assert after_failure.status == "upheld"
     assert held_after_failure == {}
 
     # The race: exactly one more transfer, for the step's price, to the payer.
     assert chain.signed == [(dispute.payer, 0.05), (dispute.payer, 0.05)]
     assert all(isinstance(result, DisputeRecord) for result in raced), raced
     assert sorted(result.status for result in raced) in (["credited", "crediting"], ["credited", "credited"])
-    assert final is not None and final.status == "credited" and final.refund_tx == "tx_credit"
+    assert final is not None
+    assert final.status == "credited"
+    assert final.refund_tx == "tx_credit"
     assert held == {}
     # One claim after the release, not two: the loser wrote no `crediting` row.
     assert trail == ["open", "upheld", "crediting", "upheld", "crediting", "credited"]
@@ -232,7 +235,8 @@ def test_two_upholds_of_an_open_dispute_sign_one_transfer(
             assert other.code in ("adjudication_in_progress", "refund_in_flight"), other.code
         else:
             assert isinstance(other, DisputeRecord), other
-    assert final is not None and final.status == "credited"
+    assert final is not None
+    assert final.status == "credited"
     assert held == {}
     # One verdict and one claim on the trail, whoever won.
     assert trail == ["open", "upheld", "crediting", "credited"]

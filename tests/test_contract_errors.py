@@ -193,7 +193,8 @@ def test_a_host_simulation_failure_is_not_submitted(monkeypatch):
     # Raised as itself, not rewrapped by the stage guard around it: the head
     # is the host's error, once, which is what an operator reads.
     assert str(caught.value) == f"prepare failed: {HOST_SIMULATION_ERROR}"
-    assert rpc.prepared and not rpc.sent
+    assert rpc.prepared
+    assert not rpc.sent
 
 
 def test_a_contract_rejection_is_not_submitted_either(monkeypatch):
@@ -219,7 +220,8 @@ def test_a_build_that_fails_is_not_submitted(monkeypatch):
     rpc = _rpc(monkeypatch, _FakeRpc())
     with pytest.raises(sc.NotSubmittedError, match="build failed"):
         sc._send_server_signed("CFAKELEDGER", "submit", [])
-    assert not rpc.prepared and not rpc.sent
+    assert not rpc.prepared
+    assert not rpc.sent
 
 
 def test_a_signature_that_fails_is_not_submitted(monkeypatch):
@@ -228,7 +230,8 @@ def test_a_signature_that_fails_is_not_submitted(monkeypatch):
     rpc = _rpc(monkeypatch, _FakeRpc(), keypair=public_only)
     with pytest.raises(sc.NotSubmittedError, match="sign failed"):
         sc._send_server_signed(LEDGER_ID, "submit", [])
-    assert rpc.prepared and not rpc.sent
+    assert rpc.prepared
+    assert not rpc.sent
 
 
 @pytest.mark.parametrize("key", ["", "SNOTAKEY", "abandon " * 11 + "zebra"])
@@ -292,7 +295,8 @@ def test_a_send_that_raises_carries_the_hash_of_what_it_signed(monkeypatch):
     rpc = _rpc(monkeypatch, _SigningRpc(fail_at="send_raises"))
     with pytest.raises(sc.InFlightError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
-    assert rpc.signed_hash is not None and len(rpc.signed_hash) == 64
+    assert rpc.signed_hash is not None
+    assert len(rpc.signed_hash) == 64
     assert caught.value.tx_hash == rpc.signed_hash
 
 
@@ -311,8 +315,9 @@ class _PollRaises(_FakeRpc):
 def test_a_poll_that_raises_after_the_send_carries_the_pending_hash(monkeypatch):
     """Sent and PENDING, then the poll itself raised: in flight, with its hash."""
     _rpc(monkeypatch, _PollRaises())
+    invocation = sc.invoke_with_server_key_async(LEDGER_ID, "submit", [])
     with pytest.raises(sc.InFlightError) as caught:
-        asyncio.run(sc.invoke_with_server_key_async(LEDGER_ID, "submit", []))
+        asyncio.run(invocation)
     assert caught.value.tx_hash == PENDING_HASH
     assert isinstance(caught.value.__cause__, ConnectionError)
     with pytest.raises(sc.InFlightError) as caught_sync:
@@ -334,12 +339,9 @@ def test_not_submitted_is_still_caught_by_an_except_runtime_error(monkeypatch):
     """The subclass is the compatibility promise: a caller written against
     RuntimeError, as the charge and seal paths were, still catches it."""
     _rpc(monkeypatch, _FakeRpc(fail_at="simulate"))
-    try:
+    with pytest.raises(RuntimeError) as caught:
         sc._send_server_signed(LEDGER_ID, "submit", [])
-    except RuntimeError as caught:
-        assert isinstance(caught, sc.NotSubmittedError)
-    else:  # pragma: no cover - the simulation always refuses
-        pytest.fail("the refused simulation raised nothing")
+    assert isinstance(caught.value, sc.NotSubmittedError)
 
 
 def test_a_user_signed_envelope_that_will_not_decode_is_not_submitted(monkeypatch):

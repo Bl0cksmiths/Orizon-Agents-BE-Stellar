@@ -38,9 +38,11 @@ def owned(auth_id: str = AUTH, payer: str = PAYER, plan_id: str = "pln_0a1b2c3d"
 def test_a_matching_v2_authorization_is_owned(monkeypatch: pytest.MonkeyPatch) -> None:
     escrow = install(monkeypatch, FakeEscrow())
     verified = asyncio.run(owned(AUTH.upper()))
-    assert verified.enforced and verified.escrow_version == 2
+    assert verified.enforced
+    assert verified.escrow_version == 2
     assert verified.auth_id_hex == AUTH
-    assert verified.authorization is not None and verified.authorization.label == "pln_0a1b2c3d"
+    assert verified.authorization is not None
+    assert verified.authorization.label == "pln_0a1b2c3d"
     assert escrow.calls == [(ESCROW, "version"), (ESCROW, "authorization")]
 
 
@@ -149,7 +151,9 @@ def test_v1_is_never_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     """v1 has no `version()`: nothing is read past that, and nothing is refused, whatever the input."""
     escrow = install(monkeypatch, FakeEscrow(version=None, auth=RuntimeError("never read")))
     verified = asyncio.run(owned(payer=OTHER, plan_id="pln_ffffffff"))
-    assert not verified.enforced and verified.escrow_version == 1 and verified.authorization is None
+    assert not verified.enforced
+    assert verified.escrow_version == 1
+    assert verified.authorization is None
     assert escrow.calls == [(ESCROW, "version")]
 
 
@@ -179,7 +183,8 @@ def test_the_clients_shared_version_read_is_used_when_it_exists(monkeypatch: pyt
     shared = SharedVersion(2)
     monkeypatch.setattr(sc, "escrow_version", shared, raising=False)
     assert asyncio.run(guard.escrow_version()) == 2
-    assert shared.calls == [ESCROW] and escrow.calls == []
+    assert shared.calls == [ESCROW]
+    assert escrow.calls == []
 
 
 @pytest.mark.parametrize("answer", [RuntimeError("simulate failed: rpc"), 0, True])

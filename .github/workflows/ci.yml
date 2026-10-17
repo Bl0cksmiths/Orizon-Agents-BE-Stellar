@@ -25,12 +25,17 @@ jobs:
     # every append queues on all live in that SQL, and a fake pool can only
     # restate what it was meant to do — ten of eleven mutants to it once passed
     # the whole suite. 16 because it is what the audit proved the SQL on.
+    #
+    # Trust auth, so there is no password at all rather than a throwaway one
+    # written into the repo: the database lives only as long as this job, holds
+    # nothing but the tests' own rows, and the runner VM it is published on
+    # accepts no inbound connections.
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_USER: orizon
-          POSTGRES_PASSWORD: orizon
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: orizon_test
         ports:
           - 5432:5432
@@ -98,5 +103,5 @@ jobs:
       - name: Test (with coverage gate)
         run: python -m pytest -q --cov
         env:
-          ORIZON_TEST_PG_DSN: postgresql://orizon:orizon@localhost:5432/orizon_test
+          ORIZON_TEST_PG_DSN: postgresql://orizon@localhost:5432/orizon_test
           ORIZON_TEST_PG_REQUIRED: "1"

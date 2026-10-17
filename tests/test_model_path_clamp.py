@@ -65,7 +65,7 @@ def _info(agent_id: str, *, smoothed: int, lower: int) -> RepInfo:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded() -> object:
     """Fresh 12-agent registry, restored after. `seed_registry` builds new
     `Agent` objects, so the delisting below mutates copies thrown away here."""
@@ -301,8 +301,9 @@ def test_plan_is_refused_when_every_offered_agent_leaves_during_planning(
         return _plan("agt_11c0")
 
     before = set(state.plans)
+    reps = _clearing_reps()
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
-        _decompose(monkeypatch, _clearing_reps(), _arun)
+        _decompose(monkeypatch, reps, _arun)
     # Nothing was minted for /execute to find.
     assert set(state.plans) == before
 
@@ -325,8 +326,9 @@ def test_plan_is_refused_before_the_llm_when_nothing_can_be_offered(
         return _plan("agt_11c0")
 
     before = set(state.plans)
+    reps = _clearing_reps()
     with pytest.raises(orchestrator_svc.NoRoutableAgentsError):
-        _decompose(monkeypatch, _clearing_reps(), _arun)
+        _decompose(monkeypatch, reps, _arun)
     assert set(state.plans) == before
     assert calls == []
 

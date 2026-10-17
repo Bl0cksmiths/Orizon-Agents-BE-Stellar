@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,7 @@ import pytest
 from scripts.demo_evidence.cli import main
 from scripts.demo_evidence.config import EXIT_NOT_SUCCESS, EXIT_OK, EXIT_UNREADABLE, KIND_INDEX_ITEM, KINDS
 from scripts.demo_evidence.fakes import HORIZON, RPC, FakeLedger, row, write_jsonl
-from scripts.demo_evidence.links import label_problem, utc_date
+from scripts.demo_evidence.links import _strip_edges, label_problem, utc_date
 
 ADDRESS = "GBI2I" + "A" * 47 + "ADBH"
 
@@ -132,7 +134,8 @@ def test_a_created_at_that_is_not_a_timestamp_gets_no_link(tmp_path: Path) -> No
     h = ledger.add("x", created_at="yesterday")
     out = run(ledger, tmp_path, "--tx", f"settle={h}")
     assert out.code == EXIT_UNREADABLE
-    assert out.body()["items"] == [] and "no ledger date" in out.out
+    assert out.body()["items"] == []
+    assert "no ledger date" in out.out
 
 
 def test_only_verified_hashes_become_links(tmp_path: Path) -> None:
@@ -267,6 +270,20 @@ def test_the_label_rule_accepts_words_that_quote_an_id(label: str) -> None:
     assert label_problem(label) is None
 
 
+# Punctuation is stripped from both ends of a token, never from its middle, so a
+# quoted id is still recognised as an id however it is wrapped.
+@pytest.mark.parametrize("token", ["(GABC…WXYZ", "GABC…WXYZ),", "(GABC…WXYZ),", "__GABC…WXYZ__", "«abcd…ef01»"])
+def test_the_label_rule_sees_an_id_through_the_punctuation_at_its_ends(token: str) -> None:
+    assert label_problem(f"Paid {token}") == "must be at least two words of plain language, not just an id"
+
+
+@pytest.mark.parametrize(
+    "label", ["«Settlement» —paid—", "(Settlement), paid!", "Settlement ... paid", "_Settlement_ paid"]
+)
+def test_the_label_rule_counts_words_wrapped_in_punctuation(label: str) -> None:
+    assert label_problem(label) is None
+
+
 @pytest.mark.parametrize(
     ("created_at", "date"),
     [
@@ -279,3 +296,48 @@ def test_the_label_rule_accepts_words_that_quote_an_id(label: str) -> None:
 )
 def test_utc_date(created_at: str, date: str | None) -> None:
     assert utc_date(created_at) == date
+
+
+# The validator's edge rule as a regex: the scan that replaced it must strip exactly the same.
+_EDGES_REGEX = re.compile(r"^[\W_]+|[\W_]+$")
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        "!!!",
+        "___",
+        "word",
+        "(word)",
+        "_word_",
+        "—word—",
+        "“quoted”,",
+        "a!b",
+        "!a!b!",
+        "…GBI2I…ADBH…",
+        "café.",
+        "²nd",
+        "Ⅻ.",
+        "٣٤!",
+        "x_",
+        "\u0301e\u0301",
+    ],
+)
+def test_the_edge_scan_strips_what_the_validators_regex_strips(token: str) -> None:
+    assert _strip_edges(token) == _EDGES_REGEX.sub("", token)
+
+
+def test_the_edge_scan_matches_the_regex_on_random_tokens() -> None:
+    rng = random.Random(501)
+    alphabet = "aZ09_!.-…—“”'é²Ⅻ٣\u0301 "
+    for _ in range(5_000):
+        token = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+        assert _strip_edges(token) == _EDGES_REGEX.sub("", token), repr(token)
+
+
+def test_a_long_run_of_punctuation_inside_a_word_is_checked_in_linear_time() -> None:
+    # The regex took ~8 s on this token; the scan takes well under a millisecond.
+    started = time.perf_counter()
+    assert label_problem("Paid ab" + "!" * 50_000 + "ab") is None
+    assert time.perf_counter() - started < 0.5

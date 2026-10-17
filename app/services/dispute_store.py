@@ -44,7 +44,7 @@ import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from ..config import settings
 from .pg_schema import create_schema
@@ -1145,6 +1145,17 @@ class DisputeStore(Protocol):
     async def close(self) -> None: ...
 
 
+_T = TypeVar("_T")
+
+
+def _named_or_kept(named: _T | None, kept: _T) -> _T:
+    """What a transition names, or what the dispute already held when it names None.
+
+    `is not None`, never truthiness: False and 0.0 are answers to record.
+    """
+    return named if named is not None else kept
+
+
 class InMemoryDisputeStore:
     """The fallback when DATABASE_URL is unset: local dev and the test suite.
 
@@ -1362,16 +1373,12 @@ class InMemoryDisputeStore:
         updated = replace(
             current,
             status=status,
-            refund_tx=refund_tx if refund_tx is not None else current.refund_tx,
-            rating_tx=rating_tx if rating_tx is not None else current.rating_tx,
-            note=note if note is not None else current.note,
-            resolved_at=(
-                resolved_at
-                if resolved_at is not None
-                else (current.resolved_at if current.resolved_at is not None else now)
-            ),
-            credited_usdc=credited_usdc if credited_usdc is not None else current.credited_usdc,
-            inflight_usdc=inflight_usdc if inflight_usdc is not None else current.inflight_usdc,
+            refund_tx=_named_or_kept(refund_tx, current.refund_tx),
+            rating_tx=_named_or_kept(rating_tx, current.rating_tx),
+            note=_named_or_kept(note, current.note),
+            resolved_at=_named_or_kept(resolved_at, _named_or_kept(current.resolved_at, now)),
+            credited_usdc=_named_or_kept(credited_usdc, current.credited_usdc),
+            inflight_usdc=_named_or_kept(inflight_usdc, current.inflight_usdc),
             updated_at=now,
             # Monotonic, as the CASE in _APPEND_STATUS_SQL is: a rating the
             # ledger has vouched for cannot be taken back by a later attempt
@@ -1379,9 +1386,7 @@ class InMemoryDisputeStore:
             # and FALSE are different answers here and only one of them is a
             # confirmation.
             rating_confirmed=(
-                True
-                if current.rating_confirmed is True
-                else (rating_confirmed if rating_confirmed is not None else current.rating_confirmed)
+                True if current.rating_confirmed is True else _named_or_kept(rating_confirmed, current.rating_confirmed)
             ),
         )
         self._disputes[dispute_id] = updated

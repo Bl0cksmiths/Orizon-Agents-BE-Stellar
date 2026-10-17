@@ -1,18 +1,21 @@
 import base64
-import binascii
 import logging
 import math
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from stellar_sdk import Network
 
 from .pdax_environments import BASE_URLS as PDAX_BASE_URLS
 from .pdax_environments import moves_real_value as pdax_moves_real_value
 
 logger = logging.getLogger(__name__)
 
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+# The network passphrases are public protocol identifiers, not credentials: read
+# from stellar_sdk so they are spelled once, by the SDK that signs with them.
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
+TESTNET_PASSPHRASE = Network.TESTNET_NETWORK_PASSPHRASE
 
 # Every spelling of STELLAR_NETWORK that names the public network: ours, and
 # `public`/`pubnet` as Horizon and Stellar Expert say it. Read through
@@ -60,6 +63,9 @@ REPUTATION_READ_BUDGET_TOLERANCE = 1e-9
 # `tests/test_config_validators.py` asserts the two agree, which is the check
 # an import would have been for.
 _MIN_API_KEY_CHARS = 8
+
+# Joins the faults a boot validator names into one sentence.
+_FAULT_JOINER = "; and "
 
 
 def _seconds(value: float) -> str:
@@ -409,7 +415,7 @@ class Settings(BaseSettings):
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
     stellar_rpc_url: str = "https://soroban-testnet.stellar.org"
-    stellar_network_passphrase: str = "Test SDF Network ; September 2015"
+    stellar_network_passphrase: str = TESTNET_PASSPHRASE
 
     # Deployed contract IDs — empty until the backend is wired on-chain.
     stellar_agent_registry: str = ""
@@ -718,7 +724,7 @@ class Settings(BaseSettings):
             )
         if exposures:
             raise ValueError(
-                "API_KEY is required because " + "; and ".join(exposures) + ". Without it every "
+                "API_KEY is required because " + _FAULT_JOINER.join(exposures) + ". Without it every "
                 "money-moving route is anonymous. Set API_KEY (in the Render dashboard for the "
                 "deployed service) and send it as the X-API-Key header, or remove the "
                 "credentials above to run a read-only/demo deployment."
@@ -820,7 +826,7 @@ class Settings(BaseSettings):
             # The key is a credential: name the variable and the faults, never
             # echo the value or its length beyond the bound it failed.
             raise ValueError(
-                "API_KEY cannot be used as configured because " + "; and ".join(faults) + ". Set API_KEY "
+                "API_KEY cannot be used as configured because " + _FAULT_JOINER.join(faults) + ". Set API_KEY "
                 "(in the Render dashboard for the deployed service) to at least "
                 f"{_MIN_API_KEY_CHARS} printable ascii characters with no surrounding whitespace — "
                 "otherwise the adjudication routes answer 401 to the operator's own key, "
@@ -904,7 +910,7 @@ class Settings(BaseSettings):
             )
         if faults:
             raise ValueError(
-                "A money bound cannot be used as configured: " + "; and ".join(faults) + ". Set each named "
+                "A money bound cannot be used as configured: " + _FAULT_JOINER.join(faults) + ". Set each named "
                 "variable (in the Render dashboard for the deployed service) to a plain decimal number within "
                 "the rule stated, or unset it to take the default."
             )
@@ -960,7 +966,7 @@ class Settings(BaseSettings):
             faults.append("REPUTATION_STALE_GRACE_SECONDS is not a finite number of seconds, zero or above")
         if faults:
             raise ValueError(
-                "A reputation setting cannot be used as configured: " + "; and ".join(faults) + ". Set each "
+                "A reputation setting cannot be used as configured: " + _FAULT_JOINER.join(faults) + ". Set each "
                 "named variable (in the Render dashboard for the deployed service) to a plain number within the "
                 "rule stated, or unset it to take the default."
             )
@@ -1140,7 +1146,7 @@ class Settings(BaseSettings):
                 )
         if faults:
             raise ValueError(
-                "The reputation batch cannot be sized as configured: " + "; and ".join(faults) + ". Raise "
+                "The reputation batch cannot be sized as configured: " + _FAULT_JOINER.join(faults) + ". Raise "
                 "REPUTATION_BATCH_TIMEOUT_SECONDS (within the planning budget) or REPUTATION_READ_CONCURRENCY, "
                 "or unset the named variables to take the defaults."
             )
@@ -1148,17 +1154,38 @@ class Settings(BaseSettings):
 
     # ── Startup reports (log, never raise) ────────────────────────
     # The validators above refuse to boot because the misconfiguration they
-    # catch would EXPOSE money routes or sign on the wrong network. The ones
-    # below catch a different class: values that are merely wrong, and whose
-    # only victim is the deployment itself. This service is live on mainnet
-    # with autoDeploy on, so a validator that wrongly rejects a real config
-    # takes the product down on merge — a cost that is never worth paying to
-    # improve an error message. They log loudly at startup instead, naming the
-    # variable and what breaks, so the operator does not have to trace a 500
-    # three layers down at request time.
+    # catch would EXPOSE money routes or sign on the wrong network. The
+    # reports below catch a different class: values that are merely wrong, and
+    # whose only victim is the deployment itself. This service is live on
+    # mainnet with autoDeploy on, so a validator that wrongly rejects a real
+    # config takes the product down on merge — a cost that is never worth
+    # paying to improve an error message. They log loudly at startup instead,
+    # naming the variable and what breaks, so the operator does not have to
+    # trace a 500 three layers down at request time.
+    #
+    # They are deliberately NOT validators. A validator's job is to accept or
+    # refuse; one that can only ever hand `self` back unchanged is a log line
+    # wearing a validator's contract, and it implies a refusal it can never
+    # make. They run from `model_post_init` instead, pydantic's hook for side
+    # effects after field validation, which returns nothing.
 
-    @model_validator(mode="after")
-    def _report_unknown_pdax_environment(self) -> "Settings":
+    def model_post_init(self, context: Any, /) -> None:
+        """Run the startup reports once the fields are validated.
+
+        Pydantic calls this hook once per construction, so each report logs
+        exactly once per Settings(), in the order below. It runs after every
+        field validator and BEFORE the model validators above, so a boot that
+        one of them goes on to refuse still logs its reports first: the
+        operator reading that deploy log sees every problem in one pass. No
+        report echoes a credential, so that is safe to print beside a refusal.
+        """
+        super().model_post_init(context)
+        self._report_unknown_pdax_environment()
+        self._report_malformed_pdax_otp_secret()
+        self._report_malformed_stellar_signing_key()
+        self._report_contract_reads_without_a_source_address()
+
+    def _report_unknown_pdax_environment(self) -> None:
         """Name a mistyped PDAX_ENVIRONMENT at startup, not at first use.
 
         base_url() (app/pdax/config.py) raises RuntimeError lazily when the
@@ -1183,10 +1210,8 @@ class Settings(BaseSettings):
                 self.pdax_environment,
                 ", ".join(PDAX_ENVIRONMENTS),
             )
-        return self
 
-    @model_validator(mode="after")
-    def _report_malformed_pdax_otp_secret(self) -> "Settings":
+    def _report_malformed_pdax_otp_secret(self) -> None:
         """Name a mistyped PDAX_OTP_SECRET at startup, not at the MFA challenge.
 
         totp_now() (app/pdax/totp.py) base32-decodes the seed the first time
@@ -1202,12 +1227,12 @@ class Settings(BaseSettings):
         """
         secret = self.pdax_otp_secret.strip().replace(" ", "").upper()
         if not secret:
-            return self
+            return
         remainder = len(secret) % 8
         padded = secret + ("=" * (8 - remainder)) if remainder else secret
         try:
             base64.b32decode(padded)
-        except (binascii.Error, ValueError):
+        except ValueError:  # binascii.Error is a ValueError
             # The seed itself is a credential: name the variable, never echo
             # the value or the decoder's message (which quotes the input).
             logger.error(
@@ -1216,10 +1241,8 @@ class Settings(BaseSettings):
                 "authenticate. Re-copy the TOTP seed from the PDAX console, or unset "
                 "PDAX_OTP_SECRET if the account has no MFA."
             )
-        return self
 
-    @model_validator(mode="after")
-    def _report_malformed_stellar_signing_key(self) -> "Settings":
+    def _report_malformed_stellar_signing_key(self) -> None:
         """Name a malformed STELLAR_SIGNING_KEY at startup, not on the money path.
 
         _signer_keypair() (app/stellar/client.py) parses the key lazily and
@@ -1240,7 +1263,7 @@ class Settings(BaseSettings):
         """
         secret = self.stellar_signing_key.strip()
         if not secret:
-            return self
+            return
         # Imported here, not at module scope: app.config is imported by
         # everything (including the smoke scripts) and stellar_sdk costs
         # ~250ms to import. This runs once, at construction.
@@ -1259,10 +1282,8 @@ class Settings(BaseSettings):
                 "backend-signed transaction will fail, so /api/stellar/server/charge and "
                 "/server/seal will answer 400 charge_failed. Re-inject the key from host secrets."
             )
-        return self
 
-    @model_validator(mode="after")
-    def _report_contract_reads_without_a_source_address(self) -> "Settings":
+    def _report_contract_reads_without_a_source_address(self) -> None:
         """Name a missing STELLAR_ADMIN_ADDRESS at startup, not per request.
 
         Every simulate_read needs a source account, and app/stellar/client.py
@@ -1280,7 +1301,7 @@ class Settings(BaseSettings):
         /readiness already calls incomplete on the contract ids alone.
         """
         if self.stellar_admin_address.strip():
-            return self
+            return
         configured = [
             name
             for name, value in (
@@ -1300,7 +1321,6 @@ class Settings(BaseSettings):
                 "not_ready. Set STELLAR_ADMIN_ADDRESS to the G… address that funds simulation.",
                 ", ".join(configured),
             )
-        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

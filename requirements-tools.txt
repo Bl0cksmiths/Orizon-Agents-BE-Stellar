@@ -2,8 +2,10 @@
 # of requirements.lock, constrained to the versions the lock just installed, so
 # a tool can never move a locked package (.github/workflows/ci.yml).
 pytest>=8
-ruff>=0.9
-mypy>=2
+# Pinned: a newer ruff brings new rules (0.17 flags UP041/UP017 across the
+# tree), so CI would fail on files a change never touched. Bump on purpose.
+ruff==0.16.0
+mypy==2.3.0
 pytest-cov>=7
 # A throwaway Postgres 16 for the dispute store's real-SQL tests
 # (tests/conftest.py `pg_dsn`). Local only: CI runs a postgres service and

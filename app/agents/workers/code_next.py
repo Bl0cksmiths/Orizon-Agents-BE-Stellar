@@ -238,6 +238,19 @@ def parse_next_reply(reply: str) -> tuple[str, str, list[tuple[str, str]]]:
     return title or "Untitled component", summary, files
 
 
+def _content_violations(path: str, content: str, scrubbed: str, *, asks_network: bool) -> list[str]:
+    """What a kept file's content was flagged for: a redacted secret, a
+    network call the request did not ask for, an unsafe call."""
+    found: list[str] = []
+    if scrubbed != content:
+        found.append(f"secret_redacted:{path}")
+    if not asks_network and _NETWORK_RE.search(scrubbed):
+        found.append(f"network_call:{path}")
+    if _EXECUTION_RE.search(scrubbed):
+        found.append(f"unsafe_call:{path}")
+    return found
+
+
 def fit_files(files: list[tuple[str, str]], request: str) -> tuple[list[dict[str, str]], list[str]]:
     """The files that may ship, bounded and scrubbed; and the violations found.
 
@@ -263,12 +276,7 @@ def fit_files(files: list[tuple[str, str]], request: str) -> tuple[list[dict[str
             violations.append(f"dropped_file:too_large:{path}")
             continue
         scrubbed = scrub_secrets(content)
-        if scrubbed != content:
-            violations.append(f"secret_redacted:{path}")
-        if not asks_network and _NETWORK_RE.search(scrubbed):
-            violations.append(f"network_call:{path}")
-        if _EXECUTION_RE.search(scrubbed):
-            violations.append(f"unsafe_call:{path}")
+        violations += _content_violations(path, content, scrubbed, asks_network=asks_network)
         total += len(scrubbed)
         language = _language(path) or "text"
         kept.append({"path": path, "language": language, "content": scrubbed})

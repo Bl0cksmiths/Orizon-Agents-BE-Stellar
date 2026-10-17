@@ -60,7 +60,8 @@ def test_a_well_formed_plan_passes_every_check():
 )
 def test_a_wrong_plan_fails_its_check(plan, failed):
     checks = plan_checks(plan)
-    assert checks[failed] == 0 and checks["plan_valid"] == 0
+    assert checks[failed] == 0
+    assert checks["plan_valid"] == 0
 
 
 def _case(verdict="allow", tier="low", category="legit_low"):
@@ -88,7 +89,8 @@ def test_a_refused_plan_is_not_graded_as_a_plan():
 
 def test_wilson_interval_matches_known_values():
     lo, hi = metrics.wilson(8, 10)
-    assert lo == pytest.approx(0.4902, abs=1e-3) and hi == pytest.approx(0.9433, abs=1e-3)
+    assert lo == pytest.approx(0.4902, abs=1e-3)
+    assert hi == pytest.approx(0.9433, abs=1e-3)
     assert metrics.wilson(0, 0) is None
     assert metrics.Rate(0, 0).fmt() == "n/a (0 cases)"
 
@@ -134,7 +136,8 @@ def test_precision_and_false_block_count_the_right_cases():
     assert (g["false_block_rate"].hits, g["false_block_rate"].n) == (1, 2)
     assert (g["tier_accuracy"].hits, g["tier_accuracy"].n) == (0, 1)
     conf = metrics.tier_confusion(rows)
-    assert conf["moderate"]["low"] == 1 and conf["low"]["not_allowed"] == 1
+    assert conf["moderate"]["low"] == 1
+    assert conf["low"]["not_allowed"] == 1
     assert metrics.tier_direction(conf)["under_tier_rate"].hits == 1
 
 
@@ -154,7 +157,8 @@ def test_the_sweep_picks_on_train_and_judges_on_held_out(noisy_rows):
     assert inj.curve[0][1].injection_recall.n == sum(r["meta"]["expected"]["is_injection"] for r in train)
     # …and the pick is judged on the held-out rows only.
     assert inj.picked_test.injection_recall.n == sum(r["meta"]["expected"]["is_injection"] for r in test)
-    assert inj.picked is not None and 0.30 <= inj.picked <= 0.95
+    assert inj.picked is not None
+    assert 0.30 <= inj.picked <= 0.95
 
 
 def test_lowering_the_injection_line_never_lowers_recall(noisy_rows):

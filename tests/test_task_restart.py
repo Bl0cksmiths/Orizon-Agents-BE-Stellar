@@ -63,7 +63,9 @@ def _other_token(token: str) -> str:
 def test_the_other_token_is_never_the_token() -> None:
     for token in ("abcx", "abcA", "abcB", "x", "A"):
         other = _other_token(token)
-        assert other != token and len(other) == len(token) and other[:-1] == token[:-1]
+        assert other != token
+        assert len(other) == len(token)
+        assert other[:-1] == token[:-1]
 
 
 def _comparable(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -99,12 +101,14 @@ def test_a_paid_task_and_its_receipt_survive_a_restart(
     assert after["settlement"]["charge_tx"] == SETTLE_TX
     assert any(line["settlement"] == "settled" for line in after["trace"])
     # A finished run's stream replays what was recorded and ends.
-    assert stream.status_code == 200 and "event: done" in stream.text
+    assert stream.status_code == 200
+    assert "event: done" in stream.text
     # The token is still the only way in, and the store never held it.
     for refused in (anonymous, wrong):
         assert (refused.status_code, refused.json()["error"]["code"]) == (404, "unknown_task")
     [row] = asyncio.run(fetch(deployment["dsn"], "SELECT * FROM task_records WHERE task_id = $1", task_id))
-    assert token not in str(row) and row["read_token_sha256"]
+    assert token not in str(row)
+    assert row["read_token_sha256"]
 
 
 def test_a_plan_built_before_a_restart_executes_after_it(

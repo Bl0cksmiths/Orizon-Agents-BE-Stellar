@@ -169,7 +169,8 @@ def test_two_steps_by_one_agent_rate_under_two_ids(monkeypatch) -> None:
 
     assert calls[0]["agent_id"] == calls[1]["agent_id"]
     assert calls[0]["job_id"] != calls[1]["job_id"]
-    assert calls[0]["weight"] == 500_000 and calls[1]["weight"] == WEIGHT
+    assert calls[0]["weight"] == 500_000
+    assert calls[1]["weight"] == WEIGHT
 
 
 def test_the_rating_is_below_what_the_settler_gives_a_non_delivery() -> None:
@@ -190,7 +191,8 @@ def test_a_landed_rating_is_a_success_with_one_info_line(monkeypatch, caplog) ->
     assert (outcome.job_id_hex, outcome.rating, outcome.weight_stroops) == (DERIVED, DISPUTE_RATING, WEIGHT)
     records = [r for r in caplog.records if r.name == "app.services.dispute_rating"]
     assert [r.levelno for r in records] == [logging.INFO], "a success is exactly one INFO line"
-    assert "rating_tx" in records[0].getMessage() and _names_every_fact(records[0].getMessage())
+    assert "rating_tx" in records[0].getMessage()
+    assert _names_every_fact(records[0].getMessage())
 
 
 def test_a_ledger_failed_transaction_is_failed_and_keeps_its_hash(monkeypatch, caplog) -> None:
@@ -371,7 +373,9 @@ def test_every_failure_line_carries_what_the_payer_was_credited(monkeypatch, cap
         _rate(credited)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
-    assert msgs and all("credited 0.0700000 USDC" in m and "refund tx_refund" in m for m in msgs), msgs
+    assert msgs, msgs
+    assert all("credited 0.0700000 USDC" in m for m in msgs), msgs
+    assert all("refund tx_refund" in m for m in msgs), msgs
 
 
 def test_a_not_submitted_reason_never_quotes_the_signing_key() -> None:
@@ -418,8 +422,9 @@ def test_a_step_the_settlement_lacks_raises_instead_of_rating(monkeypatch, caplo
     _no_submit(monkeypatch)
 
     with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        unknown_step = _dispute(step_index=7)
         with pytest.raises(LookupError):
-            _rate(_dispute(step_index=7))
+            _rate(unknown_step)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
     assert any(DISPUTE_ID in m and JOB in m and "no step 7" in m and PAYER in m for m in msgs), (
@@ -432,8 +437,9 @@ def test_a_job_id_that_will_not_derive_raises_instead_of_rating(monkeypatch, cap
     _no_submit(monkeypatch)
 
     with caplog.at_level(logging.ERROR, logger="app.services.dispute_rating"):
+        underivable = _dispute(job_id_hex=job_id_hex)
         with pytest.raises(ValueError):
-            _rate(_dispute(job_id_hex=job_id_hex))
+            _rate(underivable)
 
     msgs = [r.getMessage() for r in _records(caplog, logging.ERROR)]
     assert any(DISPUTE_ID in m and job_id_hex in m and PAYER in m for m in msgs), (
@@ -464,10 +470,12 @@ def test_no_dispute_rating_line_carries_the_signing_key(monkeypatch, caplog) -> 
         _fake_submit(monkeypatch, asyncio.CancelledError())
         with pytest.raises(asyncio.CancelledError):
             _rate()
+        unknown_step = _dispute(step_index=7)
         with pytest.raises(LookupError):
-            _rate(_dispute(step_index=7))
+            _rate(unknown_step)
+        underivable = _dispute(job_id_hex="9f8e7d6c")
         with pytest.raises(ValueError):
-            _rate(_dispute(job_id_hex="9f8e7d6c"))
+            _rate(underivable)
 
     records = [r for r in caplog.records if r.name == "app.services.dispute_rating"]
     assert len(records) == len(answers) + 3

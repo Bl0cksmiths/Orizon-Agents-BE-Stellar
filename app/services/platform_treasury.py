@@ -36,7 +36,7 @@ TREASURY_ROLE = "platform treasury (built-in agents' payee)"
 
 # A Soroban Symbol: what `register` takes for an id and for each skill.
 _SYMBOL_MAX_CHARS = 32
-_NOT_SYMBOL = re.compile(r"[^A-Za-z0-9_]")
+_NOT_SYMBOL = re.compile(r"\W", re.ASCII)  # ASCII: `\W` is exactly [^A-Za-z0-9_]
 
 
 class TreasuryError(ValueError):

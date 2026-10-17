@@ -54,7 +54,7 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> Any:
         state.traces.pop(key, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     fresh = _Store()
     monkeypatch.setattr(dispute_store, "_store", fresh)
@@ -141,7 +141,8 @@ def test_the_task_is_settled_and_complete_while_the_seal_is_still_in_flight(
         assert (mid.status, mid.settlement, mid.charge_tx, mid.proof_tx) == ("complete", "settled", SETTLE_TX, None)
         assert mid.spent == pytest.approx(0.03)
         # The dispute window opened at the settle, exactly where it always did.
-        assert store.recorded and store.recorded[0].proof_tx is None
+        assert store.recorded
+        assert store.recorded[0].proof_tx is None
 
         chain.release.set()
         await run

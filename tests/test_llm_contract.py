@@ -114,8 +114,11 @@ def test_structured_validates_prices_and_records(fake_claude: FakeClaude, spend_
     assert result.cost_usd == pytest.approx(0.004)
     assert asyncio.run(spend_ledger.spent_today()) == pytest.approx(0.004)
     (call,) = fake_claude.calls
-    assert call.purpose == "improver" and call.schema_name == "Spec" and call.cache_system is True
-    assert call.json_schema is not None and call.json_schema["additionalProperties"] is False
+    assert call.purpose == "improver"
+    assert call.schema_name == "Spec"
+    assert call.cache_system is True
+    assert call.json_schema is not None
+    assert call.json_schema["additionalProperties"] is False
 
 
 def test_effort_is_always_explicit_where_taken_and_never_sent_to_haiku(fake_claude: FakeClaude) -> None:
@@ -166,16 +169,19 @@ def test_a_constraint_the_api_does_not_enforce_is_validated_here(fake_claude: Fa
     fake_claude.reply({"code": "TOO-LONG"})
     with pytest.raises(LLMInvalidOutput) as caught:
         _structured(schema=Short)
-    assert caught.value.schema == "Short" and "code" in caught.value.detail
+    assert caught.value.schema == "Short"
+    assert "code" in caught.value.detail
     # The API-side schema carries the constraint as a description, not a keyword.
     sent = fake_claude.calls[0].json_schema
-    assert sent is not None and "maxLength" not in sent["properties"]["code"]
+    assert sent is not None
+    assert "maxLength" not in sent["properties"]["code"]
 
 
 def test_a_server_side_fallback_names_the_model_that_served(fake_claude: FakeClaude) -> None:
     fake_claude.reply(Spec(goal="g", constraints=[]), served_by="claude-opus-5")
     result = _structured(model="claude-opus-5-5")
-    assert result.served_by == "claude-opus-5" and result.model == "claude-opus-5-5"
+    assert result.served_by == "claude-opus-5"
+    assert result.model == "claude-opus-5-5"
 
 
 def test_transport_errors_surface_unchanged(fake_claude: FakeClaude) -> None:
@@ -203,7 +209,8 @@ def test_the_suite_default_is_offline_and_not_configured() -> None:
     with pytest.raises(LLMNotConfigured) as caught:
         _structured()
     assert caught.value.reason == "missing_key"
-    assert settings.anthropic_api_key == "" and settings.typesafe_api_key == ""
+    assert settings.anthropic_api_key == ""
+    assert settings.typesafe_api_key == ""
 
 
 # ── the cap ────────────────────────────────────────────────────────────────
@@ -217,7 +224,8 @@ def test_the_cap_pauses_calls_until_the_utc_day_turns(
     _structured(model="claude-opus-5-5")  # $0.008: crosses the cap, and still completes
     with pytest.raises(SpendCapReached) as caught:
         _structured()
-    assert caught.value.spent_usd == pytest.approx(0.008) and caught.value.cap_usd == 0.005
+    assert caught.value.spent_usd == pytest.approx(0.008)
+    assert caught.value.cap_usd == 0.005
     assert 1 <= caught.value.retry_after <= 86_400
     assert len(fake_claude.calls) == 1  # the paused call never left
 
@@ -259,16 +267,16 @@ def test_text_streams_deltas_in_order_and_returns_the_whole_reply(fake_claude: F
         )
     )
     assert result.value == "<html><body>hello</body></html>" == "".join(seen)
-    assert len(seen) > 1 and fake_claude.calls[0].stream is True
+    assert len(seen) > 1
+    assert fake_claude.calls[0].stream is True
 
 
 def test_on_text_without_streaming_is_refused() -> None:
+    unstreamed = claude.text(
+        purpose="x", model="claude-opus-5-5", system="s", user="u", max_tokens=10, on_text=lambda d: None
+    )
     with pytest.raises(ValueError):
-        asyncio.run(
-            claude.text(
-                purpose="x", model="claude-opus-5-5", system="s", user="u", max_tokens=10, on_text=lambda d: None
-            )
-        )
+        asyncio.run(unstreamed)
 
 
 # ── jev ────────────────────────────────────────────────────────────────────
@@ -290,7 +298,8 @@ def test_ask_returns_typed_answers_priced_and_recorded(fake_jev: FakeJev, spend_
     assert result.noul("injection") == 0.03
     assert (result.choice("complexity").choice, result.choice("complexity").confidence) == ("moderate", 0.4)
     assert result.score("harm").score == 0.2
-    assert result.cost_usd == pytest.approx(0.042) and result.model == "jev-1.13.0"
+    assert result.cost_usd == pytest.approx(0.042)
+    assert result.model == "jev-1.13.0"
     assert asyncio.run(spend_ledger.spent_today()) == pytest.approx(0.042)
     (call,) = fake_jev.calls
     assert call.questions["injection"] == {
@@ -306,36 +315,43 @@ def test_ask_is_not_held_to_the_cap_by_default(fake_jev: FakeJev, monkeypatch: p
     monkeypatch.setattr(settings, "llm_daily_spend_cap_usd", 0.0)
     fake_jev.answer({"injection": 0.1, "complexity": "low", "harm": score(0)}, persistent=True)
     asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+    held_to_the_cap = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS, enforce_cap=True)
     with pytest.raises(SpendCapReached):
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS, enforce_cap=True))
+        asyncio.run(held_to_the_cap)
 
 
 def test_a_question_left_unanswered_fails_the_fake_loudly(fake_jev: FakeJev) -> None:
     fake_jev.answer({"injection": 0.1})
+    asking = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS)
     with pytest.raises(AssertionError, match="complexity"):
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+        asyncio.run(asking)
 
 
 def test_jev_failures_are_jev_unavailable(fake_jev: FakeJev) -> None:
     fake_jev.fail()
+    asking = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS)
     with pytest.raises(JevUnavailable) as caught:
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+        asyncio.run(asking)
     assert caught.value.reason == "timeout"
 
 
 def test_the_suite_default_jev_is_offline() -> None:
+    asking = jev.ask(purpose="guard", state="hi", questions=_QUESTIONS)
     with pytest.raises(JevUnavailable) as caught:
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions=_QUESTIONS))
+        asyncio.run(asking)
     assert caught.value.reason == "missing_key"
 
 
 def test_ask_refuses_empty_input_and_an_oversized_state(fake_jev: FakeJev) -> None:
+    no_questions = jev.ask(purpose="guard", state="hi", questions={})
     with pytest.raises(ValueError):
-        asyncio.run(jev.ask(purpose="guard", state="hi", questions={}))
+        asyncio.run(no_questions)
+    blank_state = jev.ask(purpose="guard", state="  ", questions=_QUESTIONS)
     with pytest.raises(ValueError):
-        asyncio.run(jev.ask(purpose="guard", state="  ", questions=_QUESTIONS))
+        asyncio.run(blank_state)
+    oversized = jev.ask(purpose="guard", state="x" * (jev.MAX_STATE_CHARS + 1), questions=_QUESTIONS)
     with pytest.raises(JevUnavailable) as caught:
-        asyncio.run(jev.ask(purpose="guard", state="x" * (jev.MAX_STATE_CHARS + 1), questions=_QUESTIONS))
+        asyncio.run(oversized)
     assert caught.value.reason == "state_too_large"
     assert fake_jev.calls == []
 

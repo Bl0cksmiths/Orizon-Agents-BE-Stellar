@@ -13,7 +13,7 @@ from stellar_sdk import scval
 from scripts.lifecycle.api import ApiError, OrizonApi, UnknownOutcome
 from scripts.lifecycle.chain import ChainReader, SimulationError
 from scripts.lifecycle.config import TESTNET_PASSPHRASE, normalize_api_base
-from scripts.lifecycle.retry import RetryPolicy
+from scripts.lifecycle.retry import RetryableStatus, RetryPolicy
 
 BASE = "https://api.fake"
 RPC = "https://rpc.fake"
@@ -71,7 +71,8 @@ def test_a_read_does_not_retry_an_answer() -> None:
     api, _ = _api(handler)
     with pytest.raises(ApiError) as exc:
         api.task("tsk_1", "tok")
-    assert exc.value.code == "unknown_task" and len(seen) == 1
+    assert exc.value.code == "unknown_task"
+    assert len(seen) == 1
 
 
 # ── writes never retry ──────────────────────────────────────────
@@ -93,7 +94,8 @@ def test_a_write_with_a_lost_answer_is_unknown_and_sent_once(call: Any, answer: 
     api, slept = _api(handler)
     with pytest.raises(UnknownOutcome):
         call(api)
-    assert len(seen) == 1 and slept == []
+    assert len(seen) == 1
+    assert slept == []
 
 
 def test_submit_failed_is_unknown_because_it_may_have_been_sent() -> None:
@@ -116,7 +118,8 @@ def test_an_app_refusal_on_a_write_is_definite() -> None:
     api, _ = _api(handler)
     with pytest.raises(ApiError) as exc:
         api.execute("pln_1", "00" * 16, "GB")
-    assert exc.value.code == "capacity_exhausted" and len(seen) == 1
+    assert exc.value.code == "capacity_exhausted"
+    assert len(seen) == 1
     handler, _ = _sequence(_envelope(502, "refund_failed"))
     api, _ = _api(handler)
     with pytest.raises(ApiError):
@@ -144,9 +147,11 @@ def test_headers_and_bodies_are_the_dapps() -> None:
     api.uphold("dsp_1", "opkey")
     api.build_authorize("GB", 700_000, 600, "orizon_batch")
     assert captured[0].headers["x-task-token"] == "tok"
-    assert captured[1].headers["x-dispute-read-grant"] == "grant" and "x-task-token" not in captured[1].headers
+    assert captured[1].headers["x-dispute-read-grant"] == "grant"
+    assert "x-task-token" not in captured[1].headers
     assert captured[2].headers["x-dispute-read-grant"] == "grant"
-    assert captured[3].headers["x-api-key"] == "opkey" and captured[3].url.path == "/api/disputes/dsp_1/uphold"
+    assert captured[3].headers["x-api-key"] == "opkey"
+    assert captured[3].url.path == "/api/disputes/dsp_1/uphold"
     assert captured[4].read() == (
         b'{"payer":"GB","agent_id":"orizon_batch","max_amount_stroops":700000,"ttl_seconds":600}'
     )
@@ -256,7 +261,7 @@ def test_an_rpc_outage_is_never_read_as_v1() -> None:
         return httpx.Response(503, text="down")
 
     reader, _ = _chain(down)
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RetryableStatus, match="HTTP 503") as exc:
         reader.escrow_version(
             "CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI",
             "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV",
@@ -275,4 +280,5 @@ def test_events_are_filtered_to_the_transaction_and_decoded() -> None:
     other = {**event, "txHash": "t2"}
     reader, _ = _chain(_rpc({"getEvents": {"result": {"events": [event, other]}}}))
     (found,) = reader.events("C1", 5, tx_hash="t1")
-    assert found.topics == ["charged", "ext"] and found.value == ["01" * 16, 5]
+    assert found.topics == ["charged", "ext"]
+    assert found.value == ["01" * 16, 5]

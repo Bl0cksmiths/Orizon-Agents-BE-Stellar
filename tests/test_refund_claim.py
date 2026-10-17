@@ -167,7 +167,8 @@ def test_a_dispute_that_is_not_upheld_cannot_be_claimed(store: DisputeStore, sta
     claimed, stored, queue = run(store, go())
 
     assert claimed is None
-    assert stored is not None and stored.status == status
+    assert stored is not None
+    assert stored.status == status
     assert queue == []
 
 
@@ -205,9 +206,11 @@ def test_a_release_restores_upheld_and_a_later_claim_succeeds(store: DisputeStor
 
     released, after_release, reclaimed, after_reclaim = run(store, go())
 
-    assert released is not None and released.status == "upheld"
+    assert released is not None
+    assert released.status == "upheld"
     assert after_release == []
-    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert reclaimed is not None
+    assert reclaimed.status == "crediting"
     assert after_reclaim == ["dsp_0001"]
 
 
@@ -235,8 +238,10 @@ def test_a_failed_attempts_hash_never_follows_the_dispute_into_the_next_one(stor
     timed_out, released, reclaimed = run(store, go())
 
     assert timed_out.refund_tx == "tx_never_settled"  # the in-flight hash was on record
-    assert released is not None and released.refund_tx is None
-    assert reclaimed is not None and reclaimed.status == "crediting"
+    assert released is not None
+    assert released.refund_tx is None
+    assert reclaimed is not None
+    assert reclaimed.status == "crediting"
     assert reclaimed.refund_tx is None
 
 
@@ -259,7 +264,8 @@ def test_a_dispute_that_is_not_crediting_cannot_be_released(store: DisputeStore,
     released, stored, queue = run(store, go())
 
     assert released is None
-    assert stored is not None and stored.status == status
+    assert stored is not None
+    assert stored.status == status
     assert queue == []
 
 
@@ -274,7 +280,8 @@ def test_releasing_twice_does_not_rewind_a_second_time(store: DisputeStore) -> N
 
     first, second = run(store, go())
 
-    assert first is not None and first.status == "upheld"
+    assert first is not None
+    assert first.status == "upheld"
     assert second is None
 
 
@@ -326,7 +333,8 @@ def test_recording_the_in_flight_hash_keeps_the_claim(store: DisputeStore) -> No
 
     in_flight, queue = run(store, go())
 
-    assert in_flight is not None and in_flight.status == "crediting"
+    assert in_flight is not None
+    assert in_flight.status == "crediting"
     assert in_flight.refund_tx == "tx_inflight"
     assert queue == ["dsp_0001"]
 
@@ -350,8 +358,10 @@ def test_a_claim_does_not_move_the_moment_the_dispute_resolved(store: DisputeSto
     upheld, claimed, released = run(store, go())
 
     assert upheld.resolved_at == 1_700_009_999.0
-    assert claimed is not None and claimed.resolved_at == 1_700_009_999.0
-    assert released is not None and released.resolved_at == 1_700_009_999.0
+    assert claimed is not None
+    assert claimed.resolved_at == 1_700_009_999.0
+    assert released is not None
+    assert released.resolved_at == 1_700_009_999.0
 
 
 # ── the race the mutex exists for ─────────────────────────────────────────
@@ -377,7 +387,8 @@ def test_two_concurrent_claims_produce_exactly_one_claim(store: DisputeStore) ->
     assert len([result for result in raced if result is not None]) == 1
     assert len([result for result in raced if result is None]) == 1
     assert queue == ["dsp_0001"]
-    assert stored is not None and stored.status == "crediting"
+    assert stored is not None
+    assert stored.status == "crediting"
 
 
 def test_the_losing_claimants_write_no_row(pg: PostgresDisputeStore, pg_dsn: str) -> None:
@@ -498,7 +509,8 @@ def test_a_claim_left_over_a_payable_dispute_blocks_instead_of_paying_twice(
     assert released is None
     assert after_refusals == ["dsp_0001"]
     assert after_unfinishing == ["dsp_0001"]
-    assert resolved is not None and resolved.status == "credited"
+    assert resolved is not None
+    assert resolved.status == "credited"
     assert after_resolution == []
 
 
@@ -523,7 +535,8 @@ def test_a_refused_verdict_leaves_the_mutex_over_a_live_payout(store: DisputeSto
 
     assert refused is None
     # The payout is untouched: still mid-flight, still held, still findable.
-    assert current is not None and current.status == "crediting"
+    assert current is not None
+    assert current.status == "crediting"
     assert queue == ["dsp_0001"]
 
 
@@ -536,8 +549,9 @@ def test_a_verdict_on_a_dispute_with_no_history_drops_no_claim_row(pg: PostgresD
     run(pg, pg.list_refund_claims())  # the schema, created the store's own way
     asyncio.run(execute(pg_dsn, "INSERT INTO refund_claims (dispute_id, claimed_at) VALUES ('dsp_ghost', 1.0)"))
 
+    appending = pg.append_status("dsp_ghost", "credited", refund_tx="tx_guess")
     with pytest.raises(KeyError):
-        run(pg, pg.append_status("dsp_ghost", "credited", refund_tx="tx_guess"))
+        run(pg, appending)
 
     assert list(asyncio.run(claims(pg_dsn))) == ["dsp_ghost"]
 
@@ -574,9 +588,11 @@ def test_a_verdict_racing_a_claim_does_not_drop_the_claim_it_lost_to(pg: Postgre
 
     claimed, refused, current, queue = run(pg, go())
 
-    assert claimed is not None and claimed.status == "crediting"
+    assert claimed is not None
+    assert claimed.status == "crediting"
     assert refused is None
-    assert current is not None and current.status == "crediting"
+    assert current is not None
+    assert current.status == "crediting"
     assert queue == ["dsp_0001"]
 
 
@@ -607,7 +623,8 @@ def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(
             return opened, await store.claim_refund(opened.id)
 
         opened, claimed = run(store, before())
-        assert claimed is not None and claimed.status == "crediting"
+        assert claimed is not None
+        assert claimed.status == "crediting"
         claimed_at = asyncio.run(claims(pg_dsn))[opened.id]
 
     assert dispute_store._store is None
@@ -622,7 +639,8 @@ def test_a_payout_in_flight_when_the_process_died_is_still_blocked_after_it(
             )
 
         restored, reclaimed, queue = run(store, after())
-        assert restored is not None and restored.status == "crediting"
+        assert restored is not None
+        assert restored.status == "crediting"
         # Still blocked: the mutex came back held, so this process refuses to
         # pay a buyer the last one may already have paid.
         assert reclaimed is None
@@ -657,9 +675,11 @@ def test_a_stuck_payout_can_still_be_released_after_a_restart(monkeypatch: pytes
             return released, queue, await store.claim_refund(opened.id)
 
         released, queue, reclaimed = run(store, after())
-        assert released is not None and released.status == "upheld"
+        assert released is not None
+        assert released.status == "upheld"
         assert queue == ()
-        assert reclaimed is not None and reclaimed.status == "crediting"
+        assert reclaimed is not None
+        assert reclaimed.status == "crediting"
 
 
 # ── the two stores, side by side ──────────────────────────────────────────

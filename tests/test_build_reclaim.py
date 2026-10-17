@@ -44,7 +44,7 @@ def escrow(monkeypatch: pytest.MonkeyPatch) -> None:
     guard.forget_versions()
 
 
-@pytest.fixture()
+@pytest.fixture
 def builds(monkeypatch: pytest.MonkeyPatch) -> BuildRecorder:
     recorder = BuildRecorder()
     monkeypatch.setattr(sc, "build_invoke_xdr", recorder)
@@ -121,7 +121,8 @@ def test_every_refusal_is_named_before_anything_is_built(
     install(monkeypatch, FakeEscrow(auth=auth))
     r = reclaim(client, payer=payer)
     assert r.status_code == status
-    assert r.json()["detail"] == code and r.json()["error"]["code"] == code
+    assert r.json()["detail"] == code
+    assert r.json()["error"]["code"] == code
     assert builds.calls == []
 
 
@@ -169,7 +170,8 @@ def test_v1_has_nothing_to_reclaim(client: TestClient, monkeypatch: pytest.Monke
     escrow = install(monkeypatch, FakeEscrow(version=None, auth=RuntimeError("never read")))
     r = reclaim(client)
     assert (r.status_code, r.json()["error"]["code"]) == (409, "reclaim_unsupported")
-    assert builds.calls == [] and escrow.calls == [(ESCROW, "version")]
+    assert builds.calls == []
+    assert escrow.calls == [(ESCROW, "version")]
 
 
 @pytest.mark.parametrize("where", ["version", "authorization"])
@@ -209,7 +211,8 @@ def test_the_body_is_validated_before_any_read(
     escrow = install(monkeypatch, FakeEscrow(auth=expired()))
     r = client.post("/api/stellar/build/reclaim", json=body)
     assert r.status_code == 422
-    assert escrow.calls == [] and builds.calls == []
+    assert escrow.calls == []
+    assert builds.calls == []
 
 
 def test_it_spends_the_service_rate_limit_like_its_siblings(

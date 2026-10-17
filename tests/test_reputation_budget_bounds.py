@@ -123,7 +123,8 @@ def _advice(decompose: float, bound: float) -> tuple[float, float]:
         _settings(decompose_timeout_seconds=decompose, reputation_batch_timeout_seconds=bound)
     message = str(exc.value)
     lower, higher = _LOWER_THE_BOUND_TO.search(message), _RAISE_THE_BUDGET_TO.search(message)
-    assert lower and higher, message
+    assert lower, message
+    assert higher, message
     return float(lower.group(1)), float(higher.group(1))
 
 

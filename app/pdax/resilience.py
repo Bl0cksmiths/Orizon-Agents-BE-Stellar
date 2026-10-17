@@ -10,11 +10,11 @@ full jitter — never on 4xx validation errors, which won't succeed on retry.
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
+from .. import pacing
 from .errors import PdaxError
 
 T = TypeVar("T")
@@ -71,7 +71,7 @@ async def with_retries(
             last = e
             if i == attempts - 1 or not is_retryable(e):
                 raise
-            delay = min(max_delay, base_delay * (2**i)) * (0.5 + random.random())
+            delay = min(max_delay, base_delay * (2**i)) * pacing.jitter(0.5, 1.0)
             await asyncio.sleep(delay)
     assert last is not None
     raise last

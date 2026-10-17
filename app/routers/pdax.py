@@ -12,7 +12,7 @@ snake_case codes, upstream detail logged server-side only — see _fail).
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
@@ -77,7 +77,7 @@ from ..pdax.models.withdrawals import (
     FiatWithdrawRequest,
     FiatWithdrawResult,
 )
-from ..security import require_api_key
+from ..security import ErrorEnvelope, require_api_key
 
 router = APIRouter(prefix="/pdax", tags=["pdax"])
 
@@ -89,6 +89,27 @@ secured = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 logger = logging.getLogger(__name__)
+
+# The `responses=` entry for `_fail`'s collapsed upstream failure.
+_UPSTREAM_UNAVAILABLE: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`upstream_unavailable` — PDAX failed, or refused this backend's own credentials.",
+}
+# `require_api_key`'s refusal, on the `secured` routes.
+_INVALID_API_KEY: dict[str, Any] = {
+    "model": ErrorEnvelope,
+    "description": "`invalid_api_key` — API_KEY is set and `X-API-Key` does not match it.",
+}
+# The two ramp pricing routes check the amount before PDAX is asked.
+_RAMP_PRICING_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: _INVALID_API_KEY,
+    422: {
+        "model": ErrorEnvelope,
+        "description": "The amount is not a positive decimal within its cap, or invalid input.",
+    },
+    502: _UPSTREAM_UNAVAILABLE,
+}
+_RAMP_NOT_FOUND: dict[str, Any] = {"model": ErrorEnvelope, "description": "No ramp with this id in this process."}
 
 
 def _fail(e: PdaxError) -> HTTPException:
@@ -370,7 +391,14 @@ async def webhook_register(req: WebhookRegisterRequest) -> WebhookRegistration:
         raise _fail(e) from e
 
 
-@router.post("/webhooks/receive")
+@router.post(
+    "/webhooks/receive",
+    responses={
+        400: {"model": ErrorEnvelope, "description": "The payload is not a JSON object, or not an event PDAX defines."},
+        401: {"model": ErrorEnvelope, "description": "The `x-pdax-signature` HMAC does not verify."},
+        502: _UPSTREAM_UNAVAILABLE,
+    },
+)
 async def webhook_receive(request: Request) -> dict:
     """Inbound endpoint PDAX POSTs crypto/fiat events to. Validates the
     optional HMAC signature, then parses the event into a typed model."""
@@ -474,7 +502,7 @@ async def reference_countries() -> dict:
 
 
 # ── ramp (PHP <-> USDCXLM orchestration) ────────────────────────
-@secured.post("/ramp/estimate")
+@secured.post("/ramp/estimate", responses=_RAMP_PRICING_RESPONSES)
 async def ramp_estimate(
     direction: Literal["onramp", "offramp"],
     amount: str = Query(..., max_length=32),
@@ -492,7 +520,7 @@ async def ramp_estimate(
         raise _fail(e) from e
 
 
-@secured.post("/ramp/funding-quote")
+@secured.post("/ramp/funding-quote", responses=_RAMP_PRICING_RESPONSES)
 async def ramp_funding_quote(usdc: str = Query(..., max_length=32)) -> FundingQuote:
     """Pesos to pay to fund a workflow costing `usdc` USDC — buffered + rounded
     up so the amount always covers it."""
@@ -558,7 +586,7 @@ async def ramp_list(
     }
 
 
-@secured.get("/ramp/{ramp_id}")
+@secured.get("/ramp/{ramp_id}", responses={401: _INVALID_API_KEY, 404: _RAMP_NOT_FOUND})
 async def ramp_status(ramp_id: str) -> RampRecord:
     """Current state + stage history of a single ramp."""
     record = pr.ramp_store.get(ramp_id)
@@ -567,7 +595,10 @@ async def ramp_status(ramp_id: str) -> RampRecord:
     return record
 
 
-@secured.post("/ramp/{ramp_id}/reconcile")
+@secured.post(
+    "/ramp/{ramp_id}/reconcile",
+    responses={401: _INVALID_API_KEY, 404: _RAMP_NOT_FOUND, 502: _UPSTREAM_UNAVAILABLE},
+)
 async def ramp_reconcile(ramp_id: str = Path(..., max_length=64)) -> RampRecord:
     """Check PDAX for settlement and advance the ramp — used by the UI to track
     progress without relying on PDAX's redirect page."""

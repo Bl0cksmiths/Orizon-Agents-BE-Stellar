@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import ipaddress
 import re
 import socket
@@ -217,7 +216,7 @@ def decode_upload(item: Mapping[str, Any], label: str) -> ImageBlock:
     """An uploaded image as an `ImageBlock`, checked like a fetched one."""
     try:
         data = base64.b64decode(str(item.get("data", "")), validate=True)
-    except (binascii.Error, ValueError) as e:
+    except ValueError as e:  # binascii.Error is a ValueError
         raise ImageInputError("image_unsupported", label, "upload is not valid base64") from e
     return _block(data, label)
 

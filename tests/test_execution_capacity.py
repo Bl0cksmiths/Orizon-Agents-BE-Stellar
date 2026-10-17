@@ -49,8 +49,9 @@ def test_execute_plan_rejects_at_capacity(monkeypatch):
         execution_svc._track_background_task(blocker)
         tasks_before = dict(state.tasks)
         try:
+            plan = _plan("pln_cap_svc")
             with pytest.raises(execution_svc.CapacityExhaustedError):
-                await execution_svc.execute_plan(_plan("pln_cap_svc"))
+                await execution_svc.execute_plan(plan)
         finally:
             blocker.cancel()
             await asyncio.gather(blocker, return_exceptions=True)

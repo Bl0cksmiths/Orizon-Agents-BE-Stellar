@@ -25,11 +25,12 @@ import base64
 import hashlib
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from stellar_sdk import Account, Address, Keypair, TransactionBuilder, TransactionEnvelope, scval
+from stellar_sdk import Account, Address, Keypair, Network, TransactionBuilder, TransactionEnvelope, scval
 from stellar_sdk import xdr as stellar_xdr
 from stellar_sdk.operation import InvokeHostFunction
 
@@ -45,7 +46,7 @@ REGISTRY = "CAPHXWU53UZUZJGV7IAE57NNMH3YYB5MTWO6YA53KKMXSFVLOITBJ3GQ"
 LEDGER = "CDCSOBEVZUPQZV5GV4D6KYHZCLNGW2KXY74RUHSZ3EZUXF34DPW422ZT"
 ATTEST = "CBYUZKOET43UXTBXZUJIBBJW5ODGD2J2AZVVXCR3QONGOCAHOXQQHEGK"
 SAC = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 AGENT = "ext_agent"
 AGENT_NAME = "External Agent"
@@ -55,6 +56,10 @@ AGENT_2_NAME = "Faulty Agent"
 SEEDED = "agt_writer"
 SEEDED_NAME = "Writer"
 FEE = 100
+
+
+# (step index, plan step, amount paid in stroops, receipt id hex) for each step a v2 settle paid.
+_PaidStep = tuple[int, dict[str, Any], int, str]
 
 
 def _b64(val: stellar_xdr.SCVal) -> str:
@@ -204,120 +209,147 @@ class FakeWorld:
         return httpx.Response(599, text=f"no fake for {url}")
 
     # ── the API ─────────────────────────────────────────────────
-    def api(self, method: str, path: str, body: Any, headers: httpx.Headers) -> httpx.Response:
-        if path == "/api/health":
-            if self.health_failures > 0:
-                self.health_failures -= 1
-                return httpx.Response(503, text="<html>waking</html>")
-            return _json(200, {"status": "ok", "version": "t", "uptime_seconds": 1.0})
-        if path == "/readiness":
-            if not self.readiness_reachable:
-                return httpx.Response(404, text="<html>not found</html>")
-            return _json(
-                200,
-                {"status": "ready", "ratings": {"writer": "scorer", "signer": self.settler, "scorer": self.settler}},
-            )
-        if path == "/api/stellar/network":
-            return _json(
-                200,
-                {
-                    "network": "testnet" if self.passphrase == TESTNET_PASSPHRASE else "mainnet",
-                    "rpc_url": RPC,
-                    "network_passphrase": self.passphrase,
-                    "admin": self.settler,
-                    "dispatch_signer": None,
-                    "asset": "native",
-                    "asset_sac": SAC,
-                    "contracts": {
-                        "agent_registry": REGISTRY,
-                        "reputation_ledger": LEDGER,
-                        "payment_escrow": ESCROW,
-                        "attestation_registry": ATTEST,
-                    },
+    def health(self) -> httpx.Response:
+        """GET /api/health: Render's sleeping page while the backend wakes, then the health body."""
+        if self.health_failures > 0:
+            self.health_failures -= 1
+            return httpx.Response(503, text="<html>waking</html>")
+        return _json(200, {"status": "ok", "version": "t", "uptime_seconds": 1.0})
+
+    def stellar_network(self) -> httpx.Response:
+        """GET /api/stellar/network: the network, its RPC and every contract id the API names."""
+        return _json(
+            200,
+            {
+                "network": "testnet" if self.passphrase == TESTNET_PASSPHRASE else "mainnet",
+                "rpc_url": RPC,
+                "network_passphrase": self.passphrase,
+                "admin": self.settler,
+                "dispatch_signer": None,
+                "asset": "native",
+                "asset_sac": SAC,
+                "contracts": {
+                    "agent_registry": REGISTRY,
+                    "reputation_ledger": LEDGER,
+                    "payment_escrow": ESCROW,
+                    "attestation_registry": ATTEST,
                 },
+            },
+        )
+
+    def agents_list(self) -> httpx.Response:
+        """GET /api/agents: the external agent (and the second, when on), then the seeded one."""
+        return _json(
+            200,
+            [
+                {
+                    "id": AGENT,
+                    "name": AGENT_NAME,
+                    "skills": ["code"],
+                    "price": self.agent_price,
+                    "rep": 4.0,
+                    "status": "online",
+                    "runs": 0,
+                    "owner": self.owner,
+                    "source": "onchain",
+                    "bound": self.agent_bound,
+                },
+                *(
+                    [
+                        {
+                            "id": AGENT_2,
+                            "name": AGENT_2_NAME,
+                            "skills": ["review"],
+                            "price": self.agent_price,
+                            "rep": 4.0,
+                            "status": "online",
+                            "runs": 0,
+                            "owner": self.owner_2,
+                            "source": "onchain",
+                            "bound": True,
+                        }
+                    ]
+                    if self.second_agent
+                    else []
+                ),
+                {
+                    "id": SEEDED,
+                    "name": SEEDED_NAME,
+                    "skills": ["copy"],
+                    "price": self.seeded_price,
+                    "rep": 4.0,
+                    "status": "online",
+                    "runs": 0,
+                    "owner": None,
+                    "source": "seeded",
+                    "bound": None,
+                },
+            ],
+        )
+
+    def api(self, method: str, path: str, body: Any, headers: httpx.Headers) -> httpx.Response:
+        route = self.api_fixed(body).get(path)
+        if route is not None:
+            return route()
+        posted = self.api_posts(body).get(path)
+        if posted is not None and method == "POST":
+            return posted()
+        return self.api_by_id(path, headers)
+
+    def api_fixed(self, body: Any) -> dict[str, Callable[[], httpx.Response]]:
+        """The API's fixed paths that answer any method, as the world is now."""
+        not_found = _err(404, "not_found")
+        routes: dict[str, Callable[[], httpx.Response]] = {
+            "/api/health": self.health,
+            "/readiness": self.readiness_report,
+            "/api/stellar/network": self.stellar_network,
+            "/api/agents": self.agents_list,
+            f"/api/stellar/agent/{AGENT}": lambda: _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}}),
+            "/api/stellar/reputation": lambda: _json(
+                200, {"reputations": {AGENT: dict(self.rep)}, "floor_bps": 5500, "prior_bps": 7000}
+            ),
+            "/api/stellar/build/authorize": lambda: self.build_authorize(body),
+            "/api/stellar/submit": lambda: self.submit(body),
+            "/api/orchestrator/execute": lambda: self.execute(body),
+            "/api/disputes/challenge": lambda: self.dispute_challenge(body),
+            "/api/disputes/read-challenge": lambda: self.read_challenge(body) if self.d067 else not_found,
+            "/api/disputes/read-grant": lambda: self.read_grant(body) if self.d067 else not_found,
+        }
+        if self.second_agent:
+            routes[f"/api/stellar/agent/{AGENT_2}"] = lambda: _json(
+                200, {"agent": {"owner": self.owner_2, "name": AGENT_2_NAME}}
             )
-        if path == "/api/agents":
-            return _json(
-                200,
-                [
-                    {
-                        "id": AGENT,
-                        "name": AGENT_NAME,
-                        "skills": ["code"],
-                        "price": self.agent_price,
-                        "rep": 4.0,
-                        "status": "online",
-                        "runs": 0,
-                        "owner": self.owner,
-                        "source": "onchain",
-                        "bound": self.agent_bound,
-                    },
-                    *(
-                        [
-                            {
-                                "id": AGENT_2,
-                                "name": AGENT_2_NAME,
-                                "skills": ["review"],
-                                "price": self.agent_price,
-                                "rep": 4.0,
-                                "status": "online",
-                                "runs": 0,
-                                "owner": self.owner_2,
-                                "source": "onchain",
-                                "bound": True,
-                            }
-                        ]
-                        if self.second_agent
-                        else []
-                    ),
-                    {
-                        "id": SEEDED,
-                        "name": SEEDED_NAME,
-                        "skills": ["copy"],
-                        "price": self.seeded_price,
-                        "rep": 4.0,
-                        "status": "online",
-                        "runs": 0,
-                        "owner": None,
-                        "source": "seeded",
-                        "bound": None,
-                    },
-                ],
-            )
-        if path == f"/api/stellar/agent/{AGENT}":
-            return _json(200, {"agent": {"owner": self.owner, "name": AGENT_NAME}})
-        if path == f"/api/stellar/agent/{AGENT_2}" and self.second_agent:
-            return _json(200, {"agent": {"owner": self.owner_2, "name": AGENT_2_NAME}})
-        if path.startswith("/api/stellar/agent/"):
-            return _err(404, "agent_read_failed")
-        if path == "/api/stellar/reputation":
-            return _json(200, {"reputations": {AGENT: dict(self.rep)}, "floor_bps": 5500, "prior_bps": 7000})
-        if path == "/api/orchestrator/decompose" and method == "POST":
-            return self.decompose(body)
-        if path == "/api/stellar/build/authorize":
-            return self.build_authorize(body)
-        if path == "/api/stellar/submit":
-            return self.submit(body)
-        if path == "/api/orchestrator/execute":
-            return self.execute(body)
-        if path.startswith("/api/tasks/") and path.endswith("/disputes"):
-            return self.task_disputes(path.split("/")[3], headers)
-        if path.startswith("/api/tasks/"):
-            return self.task(path.split("/")[3], headers)
-        if path.startswith("/api/trace/"):
-            return self.trace(path.split("/")[3], headers)
-        if path == "/api/disputes/challenge":
-            return self.dispute_challenge(body)
-        if path == "/api/disputes/read-challenge":
-            return self.read_challenge(body) if self.d067 else _err(404, "not_found")
-        if path == "/api/disputes/read-grant":
-            return self.read_grant(body) if self.d067 else _err(404, "not_found")
-        if path == "/api/disputes" and method == "POST":
-            return self.open_dispute(body)
-        if path.startswith("/api/disputes/") and path.endswith("/uphold"):
-            return self.uphold(path.split("/")[3], headers)
-        if path.startswith("/api/disputes/"):
-            return self.get_dispute(path.split("/")[3])
+        return routes
+
+    def api_posts(self, body: Any) -> dict[str, Callable[[], httpx.Response]]:
+        """The API's fixed paths that answer only a POST."""
+        return {
+            "/api/orchestrator/decompose": lambda: self.decompose(body),
+            "/api/disputes": lambda: self.open_dispute(body),
+        }
+
+    def readiness_report(self) -> httpx.Response:
+        """GET /readiness: root-level, so the frontend's proxy (which forwards /api/* only) answers 404."""
+        if not self.readiness_reachable:
+            return httpx.Response(404, text="<html>not found</html>")
+        return _json(
+            200,
+            {"status": "ready", "ratings": {"writer": "scorer", "signer": self.settler, "scorer": self.settler}},
+        )
+
+    def api_by_id(self, path: str, headers: httpx.Headers) -> httpx.Response:
+        """The API's routes with an id in the path, matched in order; any other path is not found."""
+        routes: tuple[tuple[str, str, Callable[[str], httpx.Response]], ...] = (
+            ("/api/stellar/agent/", "", lambda _agent_id: _err(404, "agent_read_failed")),
+            ("/api/tasks/", "/disputes", lambda task_id: self.task_disputes(task_id, headers)),
+            ("/api/tasks/", "", lambda task_id: self.task(task_id, headers)),
+            ("/api/trace/", "", lambda task_id: self.trace(task_id, headers)),
+            ("/api/disputes/", "/uphold", lambda dispute_id: self.uphold(dispute_id, headers)),
+            ("/api/disputes/", "", self.get_dispute),
+        )
+        for prefix, suffix, route in routes:
+            if path.startswith(prefix) and path.endswith(suffix):
+                return route(path.split("/")[3])
         return _err(404, "not_found")
 
     def decompose(self, body: Any) -> httpx.Response:
@@ -475,17 +507,19 @@ class FakeWorld:
             return _err(404, "unknown_task")
         return _json(200, self.traces[task_id])
 
-    def finish(self, task_id: str) -> None:
-        """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
-        task = self.tasks[task_id]
-        steps = (self.plan or {})["steps"]
-        auth_id, payer = task["_auth"], task["_payer"]
-        auth = self.authorizations[auth_id]
-        job = secrets.token_hex(16)
-        trace = self.traces[task_id]
-        delivered = [s for s in steps if s["agent_id"] not in self.undelivered]
+    def _rate_agent(self, rating: int) -> None:
+        """AGENT's reputation after one more on-chain rating: up for a pass, down for a fail."""
+        self.rep.update(
+            count=self.rep["count"] + 1,
+            source="onchain",
+            smoothed_bps=self.rep["smoothed_bps"] + (400 if rating > 50 else -900),
+            lower_bound_bps=self.rep["lower_bound_bps"] + (200 if rating > 50 else -700),
+        )
 
-        # one rating per dispatched step, as `_submit_ratings` writes them
+    def _write_ratings(
+        self, steps: list[dict[str, Any]], delivered: list[dict[str, Any]], job: str, trace: list[dict[str, Any]]
+    ) -> None:
+        """One rating per dispatched step, as `_submit_ratings` writes them: on the ledger and in the trace."""
         for s in steps:
             rating = 90 if s in delivered else self.failed_rating
             on_ledger = rating if s in delivered or self.ledger_failed_rating is None else self.ledger_failed_rating
@@ -511,75 +545,128 @@ class FakeWorld:
                 }
             )
             if s["agent_id"] == AGENT:
-                self.rep.update(
-                    count=self.rep["count"] + 1,
-                    source="onchain",
-                    smoothed_bps=self.rep["smoothed_bps"] + (400 if rating > 50 else -900),
-                    lower_bound_bps=self.rep["lower_bound_bps"] + (200 if rating > 50 else -700),
-                )
+                self._rate_agent(rating)
 
-        paid_steps: list[tuple[int, dict[str, Any], int, str]] = []
-        if self.escrow_version >= 2:
-            charge_tx = self._tx(fee=FEE)
-            spent = 0
-            owners = self.owners()
-            for index, s in enumerate(steps):
-                if (s not in delivered and not self.pays_undelivered) or s["agent_id"] not in owners:
-                    continue  # a seeded agent has no on-chain owner, so no payout
-                amount = usdc_to_stroops(s["est_price_usdc"])
-                receipt = secrets.token_hex(16)
-                self._event(
-                    ESCROW,
-                    charge_tx,
-                    [scval.to_symbol("charged"), scval.to_symbol(s["agent_id"])],
-                    scval.to_vec(
-                        [
-                            scval.to_bytes(bytes.fromhex(receipt)),
-                            scval.to_bytes(bytes.fromhex(auth_id)),
-                            scval.to_int128(amount),
-                            scval.to_bytes(bytes.fromhex(job)),
-                        ]
-                    ),
-                )
-                self.balances[owners[s["agent_id"]]] += amount - (1 if self.tamper_payout else 0)
-                spent += amount
-                paid_steps.append((index, s, amount, receipt))
-            returned = auth["max_amount"] - spent - self.withheld
-            self.balances[payer] += returned
-            auth.update(spent=spent, settled=True)
+    def _settle_v2(
+        self,
+        steps: list[dict[str, Any]],
+        delivered: list[dict[str, Any]],
+        auth_id: str,
+        auth: dict[str, Any],
+        payer: str,
+        job: str,
+    ) -> tuple[str, float, list[_PaidStep]]:
+        """v2's settle: one `charged` payout per paid step, the remainder back to the payer, one `settled`.
+
+        Returns (the settle's hash, what it spent in USDC, the steps it paid).
+        """
+        paid_steps: list[_PaidStep] = []
+        charge_tx = self._tx(fee=FEE)
+        spent = 0
+        owners = self.owners()
+        for index, s in enumerate(steps):
+            if (s not in delivered and not self.pays_undelivered) or s["agent_id"] not in owners:
+                continue  # a seeded agent has no on-chain owner, so no payout
+            amount = usdc_to_stroops(s["est_price_usdc"])
+            receipt = secrets.token_hex(16)
             self._event(
                 ESCROW,
                 charge_tx,
-                [scval.to_symbol("settled")],
+                [scval.to_symbol("charged"), scval.to_symbol(s["agent_id"])],
                 scval.to_vec(
                     [
+                        scval.to_bytes(bytes.fromhex(receipt)),
                         scval.to_bytes(bytes.fromhex(auth_id)),
+                        scval.to_int128(amount),
                         scval.to_bytes(bytes.fromhex(job)),
-                        scval.to_int128(spent),
-                        scval.to_int128(returned),
                     ]
                 ),
             )
-            settled_usdc = spent / 10_000_000
+            self.balances[owners[s["agent_id"]]] += amount - (1 if self.tamper_payout else 0)
+            spent += amount
+            paid_steps.append((index, s, amount, receipt))
+        returned = auth["max_amount"] - spent - self.withheld
+        self.balances[payer] += returned
+        auth.update(spent=spent, settled=True)
+        self._event(
+            ESCROW,
+            charge_tx,
+            [scval.to_symbol("settled")],
+            scval.to_vec(
+                [
+                    scval.to_bytes(bytes.fromhex(auth_id)),
+                    scval.to_bytes(bytes.fromhex(job)),
+                    scval.to_int128(spent),
+                    scval.to_int128(returned),
+                ]
+            ),
+        )
+        return charge_tx, spent / 10_000_000, paid_steps
+
+    def _charge_v1(self, delivered: list[dict[str, Any]], auth_id: str, job: str) -> tuple[str, float, bool]:
+        """v1's batch charge of every delivered step: (its hash, the USDC charged, whether it succeeded)."""
+        charge_tx = self._tx(status="SUCCESS" if self.charge_succeeds else "FAILED")
+        settled_usdc = sum(s["est_price_usdc"] for s in delivered)
+        settled = self.charge_succeeds
+        if settled:
+            self._event(
+                ESCROW,
+                charge_tx,
+                [scval.to_symbol("charged"), scval.to_symbol("orizon_batch")],
+                scval.to_vec(
+                    [
+                        scval.to_bytes(secrets.token_bytes(16)),
+                        scval.to_bytes(bytes.fromhex(auth_id)),
+                        scval.to_int128(usdc_to_stroops(settled_usdc)),
+                        scval.to_bytes(bytes.fromhex(job)),
+                    ]
+                ),
+            )
+        return charge_tx, settled_usdc, settled
+
+    def _view_steps(
+        self, steps: list[dict[str, Any]], delivered: list[dict[str, Any]], paid_steps: list[_PaidStep]
+    ) -> list[dict[str, Any]]:
+        """The settlement record's steps, in plan order."""
+        return [self._view_step(index, s, delivered, paid_steps) for index, s in enumerate(steps)]
+
+    def _view_step(
+        self, index: int, s: dict[str, Any], delivered: list[dict[str, Any]], paid_steps: list[_PaidStep]
+    ) -> dict[str, Any]:
+        """One settlement step; v2 adds what the step was paid and its receipt."""
+        paid = next(((a, r) for i, _, a, r in paid_steps if i == index), None)
+        step = {
+            "step_index": index,
+            "agent_id": s["agent_id"],
+            "agent_name": s["agent_name"],
+            "price_usdc": s["est_price_usdc"],
+            "delivered": s in delivered,
+            "creditable_usdc": s["est_price_usdc"] if s in delivered else 0.0,
+            "output_summary": "ok" if s in delivered else None,
+        }
+        if self.v2_receipt_fields and self.escrow_version >= 2:
+            step["paid_usdc"] = paid[0] / 10_000_000 if paid else None
+            step["receipt_id_hex"] = paid[1] if paid else None
+        return step
+
+    def finish(self, task_id: str) -> None:
+        """Run the workflow: ratings, settle (v2) or charge (v1), seal."""
+        task = self.tasks[task_id]
+        steps = (self.plan or {})["steps"]
+        auth_id, payer = task["_auth"], task["_payer"]
+        auth = self.authorizations[auth_id]
+        job = secrets.token_hex(16)
+        trace = self.traces[task_id]
+        delivered = [s for s in steps if s["agent_id"] not in self.undelivered]
+
+        self._write_ratings(steps, delivered, job, trace)
+
+        paid_steps: list[_PaidStep] = []
+        if self.escrow_version >= 2:
+            charge_tx, settled_usdc, paid_steps = self._settle_v2(steps, delivered, auth_id, auth, payer, job)
             settled = True
         else:
-            charge_tx = self._tx(status="SUCCESS" if self.charge_succeeds else "FAILED")
-            settled_usdc = sum(s["est_price_usdc"] for s in delivered)
-            settled = self.charge_succeeds
-            if settled:
-                self._event(
-                    ESCROW,
-                    charge_tx,
-                    [scval.to_symbol("charged"), scval.to_symbol("orizon_batch")],
-                    scval.to_vec(
-                        [
-                            scval.to_bytes(secrets.token_bytes(16)),
-                            scval.to_bytes(bytes.fromhex(auth_id)),
-                            scval.to_int128(usdc_to_stroops(settled_usdc)),
-                            scval.to_bytes(bytes.fromhex(job)),
-                        ]
-                    ),
-                )
+            charge_tx, settled_usdc, settled = self._charge_v1(delivered, auth_id, job)
 
         proof_tx = None
         if settled:
@@ -593,22 +680,7 @@ class FakeWorld:
                 "total_spent": usdc_to_stroops(settled_usdc),
                 "sealed_at": 1_900_000_100,
             }
-            view_steps = []
-            for index, s in enumerate(steps):
-                paid = next(((a, r) for i, _, a, r in paid_steps if i == index), None)
-                step = {
-                    "step_index": index,
-                    "agent_id": s["agent_id"],
-                    "agent_name": s["agent_name"],
-                    "price_usdc": s["est_price_usdc"],
-                    "delivered": s in delivered,
-                    "creditable_usdc": s["est_price_usdc"] if s in delivered else 0.0,
-                    "output_summary": "ok" if s in delivered else None,
-                }
-                if self.v2_receipt_fields and self.escrow_version >= 2:
-                    step["paid_usdc"] = paid[0] / 10_000_000 if paid else None
-                    step["receipt_id_hex"] = paid[1] if paid else None
-                view_steps.append(step)
+            view_steps = self._view_steps(steps, delivered, paid_steps)
             self.settlements[task_id] = {
                 "job_id_hex": job,
                 "payer": payer,
@@ -814,6 +886,53 @@ class FakeWorld:
             return ok(self.simulate(params["transaction"]))
         return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601, "message": "no"}})
 
+    def _sim_value(self, v: stellar_xdr.SCVal) -> dict[str, Any]:
+        """A simulation that returned `v`."""
+        return {"results": [{"xdr": _b64(v), "auth": []}], "latestLedger": self.ledger}
+
+    def _sim_fail(self, msg: str) -> dict[str, Any]:
+        """A simulation that failed with `msg`."""
+        return {"error": msg, "latestLedger": self.ledger}
+
+    def _view_attestation(self, args: list[Any]) -> dict[str, Any]:
+        """AttestationRegistry.get(job_id): the sealed attestation, or the contract's not-found trap."""
+        a = self.attestations.get(bytes(args[0]).hex())
+        if a is None:
+            return self._sim_fail("HostError: Error(Contract, #2)")
+        return self._sim_value(
+            scval.to_map(
+                {
+                    scval.to_symbol("agents"): scval.to_vec([scval.to_symbol(x) for x in a["agents"]]),
+                    scval.to_symbol("intent_hash"): scval.to_bytes(bytes.fromhex(a["intent_hash"])),
+                    scval.to_symbol("orchestrator"): scval.to_address(a["orchestrator"]),
+                    scval.to_symbol("receipts"): scval.to_vec(
+                        [scval.to_bytes(bytes.fromhex(r)) for r in a["receipts"]]
+                    ),
+                    scval.to_symbol("sealed_at"): scval.to_uint64(a["sealed_at"]),
+                    scval.to_symbol("total_spent"): scval.to_int128(a["total_spent"]),
+                }
+            )
+        )
+
+    def _view_authorization(self, args: list[Any]) -> dict[str, Any]:
+        """PaymentEscrow.authorization(auth_id): the v2 record, or the contract's not-found trap."""
+        a = self.authorizations.get(bytes(args[0]).hex())
+        if a is None:
+            return self._sim_fail("HostError: Error(Contract, #2)")
+        return self._sim_value(
+            scval.to_map(
+                {
+                    scval.to_symbol("agent_id"): scval.to_symbol(a["agent_id"]),
+                    scval.to_symbol("expires_at"): scval.to_uint64(a["expires_at"]),
+                    scval.to_symbol("max_amount"): scval.to_int128(a["max_amount"]),
+                    scval.to_symbol("payer"): scval.to_address(a["payer"]),
+                    scval.to_symbol("revoked"): scval.to_bool(a["revoked"]),
+                    scval.to_symbol("settled"): scval.to_bool(a["settled"]),
+                    scval.to_symbol("spent"): scval.to_int128(a["spent"]),
+                }
+            )
+        )
+
     def simulate(self, tx_xdr: str) -> dict[str, Any]:
         env = TransactionEnvelope.from_xdr(tx_xdr, self.passphrase)
         op = env.transaction.operations[0]
@@ -823,64 +942,43 @@ class FakeWorld:
         contract = Address.from_xdr_sc_address(invoke.contract_address).address
         fn = invoke.function_name.sc_symbol.decode()
         args: list[Any] = [scval.to_native(a) for a in invoke.args]
+        view = self.views().get((contract, fn))
+        if view is None:
+            return self._sim_fail(f"no fake for {contract}.{fn}")
+        return view(args)
 
-        def value(v: stellar_xdr.SCVal) -> dict[str, Any]:
-            return {"results": [{"xdr": _b64(v), "auth": []}], "latestLedger": self.ledger}
+    def views(self) -> dict[tuple[str, str], Callable[[list[Any]], dict[str, Any]]]:
+        """(contract, function) -> the simulation of that contract view, given its decoded args."""
+        return {
+            (ESCROW, "version"): self._view_version,
+            (SAC, "balance"): self._view_balance,
+            (ATTEST, "get"): self._view_attestation,
+            (ESCROW, "settler"): self._view_settler,
+            (ESCROW, "authorization"): self._view_authorization,
+        }
 
-        def fail(msg: str) -> dict[str, Any]:
-            return {"error": msg, "latestLedger": self.ledger}
+    def _view_version(self, args: list[Any]) -> dict[str, Any]:
+        """PaymentEscrow.version(): 2 on v2; v1 has no such function."""
+        return (
+            self._sim_value(scval.to_uint32(2))
+            if self.escrow_version >= 2
+            else self._sim_fail("HostError: Error(WasmVm, MissingValue)")
+        )
 
-        if contract == ESCROW and fn == "version":
-            return (
-                value(scval.to_uint32(2))
-                if self.escrow_version >= 2
-                else fail("HostError: Error(WasmVm, MissingValue)")
+    def _view_balance(self, args: list[Any]) -> dict[str, Any]:
+        """The SAC's balance(address)."""
+        if args[0].address not in self.balances:
+            # testnet's native SAC traps on a missing account (seen live)
+            return self._sim_fail(
+                "HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing"
             )
-        if contract == SAC and fn == "balance":
-            if args[0].address not in self.balances:
-                # testnet's native SAC traps on a missing account (seen live)
-                return fail("HostError: Error(Contract, #6)\n\nEvent log (newest first): account entry is missing")
-            return value(scval.to_int128(self.balances[args[0].address]))
-        if contract == ATTEST and fn == "get":
-            a = self.attestations.get(bytes(args[0]).hex())
-            if a is None:
-                return fail("HostError: Error(Contract, #2)")
-            return value(
-                scval.to_map(
-                    {
-                        scval.to_symbol("agents"): scval.to_vec([scval.to_symbol(x) for x in a["agents"]]),
-                        scval.to_symbol("intent_hash"): scval.to_bytes(bytes.fromhex(a["intent_hash"])),
-                        scval.to_symbol("orchestrator"): scval.to_address(a["orchestrator"]),
-                        scval.to_symbol("receipts"): scval.to_vec(
-                            [scval.to_bytes(bytes.fromhex(r)) for r in a["receipts"]]
-                        ),
-                        scval.to_symbol("sealed_at"): scval.to_uint64(a["sealed_at"]),
-                        scval.to_symbol("total_spent"): scval.to_int128(a["total_spent"]),
-                    }
-                )
-            )
-        if contract == ESCROW and fn == "settler":
-            if self.escrow_version < 2:
-                return fail("HostError: Error(WasmVm, MissingValue)")
-            return value(scval.to_address(self.settler))
-        if contract == ESCROW and fn == "authorization":
-            a = self.authorizations.get(bytes(args[0]).hex())
-            if a is None:
-                return fail("HostError: Error(Contract, #2)")
-            return value(
-                scval.to_map(
-                    {
-                        scval.to_symbol("agent_id"): scval.to_symbol(a["agent_id"]),
-                        scval.to_symbol("expires_at"): scval.to_uint64(a["expires_at"]),
-                        scval.to_symbol("max_amount"): scval.to_int128(a["max_amount"]),
-                        scval.to_symbol("payer"): scval.to_address(a["payer"]),
-                        scval.to_symbol("revoked"): scval.to_bool(a["revoked"]),
-                        scval.to_symbol("settled"): scval.to_bool(a["settled"]),
-                        scval.to_symbol("spent"): scval.to_int128(a["spent"]),
-                    }
-                )
-            )
-        return fail(f"no fake for {contract}.{fn}")
+        return self._sim_value(scval.to_int128(self.balances[args[0].address]))
+
+    def _view_settler(self, args: list[Any]) -> dict[str, Any]:
+        """PaymentEscrow.settler(): v2 only."""
+        if self.escrow_version < 2:
+            return self._sim_fail("HostError: Error(WasmVm, MissingValue)")
+        return self._sim_value(scval.to_address(self.settler))
 
     # ── Horizon ─────────────────────────────────────────────────
     def horizon(self, path: str) -> httpx.Response:

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import random
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from ... import pacing
 from ...config import settings
 from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
@@ -124,7 +123,7 @@ class ResearchPro(ModelWorker):
 
         # ── Kit fast path: deterministic feature brief, no LLM ──────────────
         if kit:
-            await asyncio.sleep(0.35 + random.random() * 0.25)
+            await pacing.pause(0.35, 0.25)
             features = kit.get("features", []) or []
             findings = [
                 {

@@ -67,9 +67,12 @@ class _CaseLog:
 
 _current: contextvars.ContextVar[_CaseLog | None] = contextvars.ContextVar("eval_case_log", default=None)
 
+_GUARD_PURPOSE = "guard.intent"
+_GUARD_FALLBACK_PURPOSE = "guard.intent.fallback"
+
 _STAGE = {
-    "guard.intent": "guard",
-    "guard.intent.fallback": "guard_fallback",
+    _GUARD_PURPOSE: "guard",
+    _GUARD_FALLBACK_PURPOSE: "guard_fallback",
     "improve.spec": "improve",
     "guard.spec": "recheck",
     "guard.spec.same": "recheck",
@@ -80,6 +83,23 @@ _STAGE = {
 
 def _stage(purpose: str) -> str:
     return _STAGE.get(purpose, purpose)
+
+
+def _timing_first_token(request: claude.ClaudeRequest, started: float, first: list[float]) -> claude.ClaudeRequest:
+    """The streamed request with an `on_text` that notes the first delta's
+    latency (in ms since `started`) into `first`, then hands every delta on to
+    the caller's own callback, awaiting it when it is async."""
+    original = request.on_text
+
+    async def on_text(delta: str) -> None:
+        if not first:
+            first.append((time.perf_counter() - started) * 1000)
+        if original is not None:
+            maybe = original(delta)
+            if inspect.isawaitable(maybe):
+                await maybe
+
+    return dataclasses.replace(request, on_text=on_text)
 
 
 class RecordingClaude:
@@ -93,17 +113,7 @@ class RecordingClaude:
         started = time.perf_counter()
         first: list[float] = []
         if request.stream:
-            original = request.on_text
-
-            async def on_text(delta: str) -> None:
-                if not first:
-                    first.append((time.perf_counter() - started) * 1000)
-                if original is not None:
-                    maybe = original(delta)
-                    if inspect.isawaitable(maybe):
-                        await maybe
-
-            request = dataclasses.replace(request, on_text=on_text)
+            request = _timing_first_token(request, started, first)
         completion = await self.inner.complete(request)
         if log is not None:
             usage = completion.usage
@@ -127,7 +137,7 @@ class RecordingClaude:
             )
             log.transcript.append({"role": "tool_call", "name": request.purpose, "content": request.user})
             log.transcript.append({"role": "tool_result", "name": request.purpose, "content": completion.text})
-            if request.purpose == "guard.intent.fallback":
+            if request.purpose == _GUARD_FALLBACK_PURPOSE:
                 try:
                     log.raw_tier = json.loads(completion.text).get("complexity")
                 except (ValueError, AttributeError):
@@ -158,7 +168,7 @@ class RecordingJev:
             answers = {k: _answer_json(v) for k, v in reply.answers.items()}
             log.transcript.append({"role": "tool_call", "name": request.purpose, "content": request.state})
             log.transcript.append({"role": "tool_result", "name": request.purpose, "content": json.dumps(answers)})
-            if request.purpose == "guard.intent":
+            if request.purpose == _GUARD_PURPOSE:
                 choice = reply.answers.get("complexity")
                 log.raw_tier = getattr(choice, "choice", None)
         return reply
@@ -221,6 +231,40 @@ def _default_planner() -> tuple[PlanFn, str, frozenset[str]]:
     # The Claude planner's view: it only runs where the workers run on Claude.
     agents = [a for a in seeded_agents() if plannable(a, on_claude=True)]
     return draft_plan, render_agents_block(agents, {}), frozenset(a.id for a in agents)
+
+
+def _merge_recheck_scores(scores: dict[str, float], check: prompt_improver.SpecCheck) -> None:
+    """Add the re-check's scores beside the guard's: each prefixed `recheck_`,
+    except `same_request`, which only the re-check produces."""
+    scores.update({f"recheck_{k}": v for k, v in check.scores.items() if k != "same_request"})
+    if "same_request" in check.scores:
+        scores["same_request"] = check.scores["same_request"]
+
+
+async def _improve(intent: str, reasons: list[str]) -> prompt_improver.Spec | None:
+    """The improver's spec, or None with the failure noted in `reasons`.
+
+    The app writes the spec before the guard's tier is known, on its
+    provisional tier; the eval asks for the same spec. A spend cap stops the
+    run; any other model failure leaves the app planning from the original."""
+    try:
+        return await prompt_improver.improve(intent, PROVISIONAL_IMPROVER_TIER)
+    except AppSpendCapReached:
+        raise
+    except LLMError as e:
+        reasons.append(f"no_spec:{type(e).__name__}")
+        return None
+
+
+async def _recheck(
+    intent: str, spec: prompt_improver.Spec | None, scores: dict[str, float]
+) -> prompt_improver.SpecCheck | None:
+    """jev's re-check of the spec against the intent, its scores merged into
+    `scores`; None when there is no spec to check."""
+    check = await prompt_improver.recheck(intent, spec) if spec is not None else None
+    if check is not None:
+        _merge_recheck_scores(scores, check)
+    return check
 
 
 @dataclass
@@ -291,20 +335,8 @@ class AppPipeline:
         plan: PlanObservation | None = None
 
         if stages == "all" and verdict == "allow" and tier is not None:
-            spec = None
-            try:
-                # The app writes the spec before the guard's tier is known, on
-                # its provisional tier; the eval asks for the same spec.
-                spec = await prompt_improver.improve(intent, PROVISIONAL_IMPROVER_TIER)
-            except AppSpendCapReached:
-                raise
-            except LLMError as e:  # the app plans from the original on any improver failure
-                reasons.append(f"no_spec:{type(e).__name__}")
-            check = await prompt_improver.recheck(intent, spec) if spec is not None else None
-            if check is not None:
-                scores.update({f"recheck_{k}": v for k, v in check.scores.items() if k != "same_request"})
-                if "same_request" in check.scores:
-                    scores["same_request"] = check.scores["same_request"]
+            spec = await _improve(intent, reasons)
+            check = await _recheck(intent, spec, scores)
             resolution = prompt_improver.resolve(decision, check)
             if resolution.action == "unavailable":
                 raise PipelineUnavailable("guard_unavailable", "the spec re-check could not run", log.calls)
@@ -422,8 +454,8 @@ def scripted_fakes(cases: list[Case], *, noise: float, seed: int) -> tuple[Any, 
             "complexity_confidence": s.get("complexity_confidence", 0.9),
         }
 
-    fake_claude.respond_with(fallback_assessment, purpose="guard.intent.fallback")
-    fake_jev.respond_with(guard_answers, purpose="guard.intent")
+    fake_claude.respond_with(fallback_assessment, purpose=_GUARD_FALLBACK_PURPOSE)
+    fake_jev.respond_with(guard_answers, purpose=_GUARD_PURPOSE)
     fake_jev.respond_with(spec_answers, purpose="guard.spec")
     fake_jev.respond_with(spec_answers, purpose="guard.spec.same")
     fake_claude.respond_with(improve, purpose="improve.spec")

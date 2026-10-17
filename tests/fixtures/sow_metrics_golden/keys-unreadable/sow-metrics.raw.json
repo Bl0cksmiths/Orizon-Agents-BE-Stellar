@@ -1,0 +1,255 @@
+{
+  "contracts": {
+    "agent_registry": "CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN",
+    "attestation_registry": "CC6MPEYHMS43PKFZXPIBMG2WR2DJIZWQYTX252AANJLPH2HG3AVWTTYL",
+    "payment_escrow": "CC4HZXMIK4L4OQQDQCPEQ4OUYOCHWUFCW3QAJDEENENKNJYYL6GP3NEX",
+    "reputation_ledger": "CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA"
+  },
+  "exit_code": 4,
+  "failures": {
+    "escrow": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503",
+    "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+  },
+  "generated_at": 1790000000,
+  "generated_utc": "2026-09-21T14:13:20Z",
+  "metrics": [
+    {
+      "achieved": "Not measured",
+      "counted": [],
+      "excluded": [],
+      "id": "m01",
+      "measured": false,
+      "metric": "Externally-operated agents registered on Testnet",
+      "status": "not_met",
+      "unmeasured_because": {
+        "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+      }
+    },
+    {
+      "achieved": "Not measured",
+      "counted": [],
+      "excluded": [],
+      "id": "m02",
+      "measured": false,
+      "metric": "Unique external operator wallet addresses",
+      "status": "not_met",
+      "unmeasured_because": {
+        "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+      }
+    },
+    {
+      "achieved": "Not measured",
+      "counted": [],
+      "excluded": [],
+      "id": "m03",
+      "measured": false,
+      "metric": "Workflows routed to external agents & settled on Testnet",
+      "status": "not_met",
+      "unmeasured_because": {
+        "escrow": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503",
+        "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+      }
+    },
+    {
+      "achieved": "Not measured",
+      "counted": [],
+      "excluded": [],
+      "id": "m04",
+      "measured": false,
+      "metric": "On-chain USDC settlements (charges) recorded",
+      "status": "not_met",
+      "unmeasured_because": {
+        "escrow": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503",
+        "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+      }
+    },
+    {
+      "achieved": "Not measured",
+      "counted": [],
+      "excluded": [],
+      "id": "m05",
+      "measured": false,
+      "metric": "Dispute → partial-refund settlements",
+      "status": "not_met",
+      "unmeasured_because": {
+        "escrow": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503",
+        "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+      }
+    },
+    {
+      "achieved": "Yes",
+      "counted": [
+        {
+          "page": "/app/register",
+          "registrations_not_signed_by_admin": 6,
+          "route": "POST /api/stellar/build/register-agent",
+          "route_live": true,
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m06",
+      "measured": true,
+      "metric": "Permissionless AgentRegistry.register flow live on the dApp",
+      "status": "met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "Yes",
+      "counted": [
+        {
+          "enabled": true,
+          "floor_bps": 5500,
+          "prior_bps": 7000
+        }
+      ],
+      "excluded": [],
+      "id": "m07",
+      "measured": true,
+      "metric": "Reputation-gated routing (reads avg_bps, applies a floor) live",
+      "status": "met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "Not measured",
+      "counted": [],
+      "excluded": [],
+      "id": "m08",
+      "measured": false,
+      "metric": "Automated dispute window + partial-credit refund live",
+      "status": "not_met",
+      "unmeasured_because": {
+        "escrow": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503",
+        "platform_keys": "RetryableStatus: HTTP 503; RetryableStatus: HTTP 503; RetryableStatus: HTTP 503"
+      }
+    },
+    {
+      "achieved": "Yes",
+      "counted": [
+        {
+          "page": "/guide/list-your-agent",
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m09",
+      "measured": true,
+      "metric": "Public \"List your agent on Orizon\" integration guide published",
+      "status": "met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "Yes",
+      "counted": [
+        {
+          "page": "/demo",
+          "seconds": 222,
+          "state": "published",
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m10",
+      "measured": true,
+      "metric": "3–5 min demo video published",
+      "status": "met",
+      "unmeasured_because": {}
+    },
+    {
+      "achieved": "Yes",
+      "counted": [
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-FE-Stellar",
+          "role": "frontend",
+          "spdx_id": "MIT",
+          "status": 200
+        },
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-BE-Stellar",
+          "role": "backend",
+          "spdx_id": "MIT",
+          "status": 200
+        },
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar",
+          "role": "smart contracts",
+          "spdx_id": "MIT",
+          "status": 200
+        },
+        {
+          "repository": "Bl0cksmiths/Orizon-Agents-Example-Agent-Stellar",
+          "role": "example agent",
+          "spdx_id": "MIT",
+          "status": 200
+        }
+      ],
+      "excluded": [],
+      "id": "m11",
+      "measured": true,
+      "metric": "All source code released under MIT License",
+      "status": "met",
+      "unmeasured_because": {}
+    }
+  ],
+  "network": "testnet",
+  "platform_keys": {
+    "GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N": "ratings signer",
+    "GDIMDIW7AW7CCHLN25B6PXMPPBKIGCUK7VIF6CZFJY5JRKWJ4HQHD7CA": "dispatch signer",
+    "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO": "network admin key"
+  },
+  "sources": {
+    "adoption": "https://orizon.test/api/ecosystem/adoption",
+    "api": "https://orizon.test",
+    "backend": "https://backend.test",
+    "frontend": "https://front.test",
+    "github": "https://github-api.test",
+    "horizon": "https://horizon.test",
+    "openapi": "https://backend.test/openapi.json",
+    "params": "https://orizon.test/api/stellar/reputation/params",
+    "readiness": "https://backend.test/readiness",
+    "rpc": "https://rpc.test"
+  },
+  "summary": {
+    "bound_per_adoption_report": {
+      "alpha": true,
+      "beta": true,
+      "gamma": true,
+      "house_agent": false,
+      "qa_agent": false,
+      "signer_agent": false
+    },
+    "dispute_ratings": 1,
+    "escrows": [],
+    "ledger_lifetime_disputes": 1,
+    "platform_transfers": [
+      {
+        "amount_stroops": 540000,
+        "created_at": "2026-09-12T12:00:00Z",
+        "destination": "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+        "muxed_id": null,
+        "source": "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO",
+        "tx_hash": "0a39a9e3e363a057a4c710aa255a2c2a0763dcac25c6dbc2f23105db37e29400"
+      },
+      {
+        "amount_stroops": 500000,
+        "created_at": "2026-09-24T09:05:00Z",
+        "destination": "GAVIAEAGF4KKX7JBHLBUX4WEGMFPLHQU3CHSMQVO6D7PWV6HHZS7HYIV",
+        "muxed_id": null,
+        "source": "GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N",
+        "tx_hash": "ab32b558076428d8e1f35c8c258338f5ce667033048f2f702082c30eb923898f"
+      }
+    ],
+    "ratings_by_kind": {
+      "auto": 3,
+      "dispute": 1
+    },
+    "registered_agents": 6
+  },
+  "team_register": {
+    "GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ": "QA throwaway operator key",
+    "GC4JNBUTT35KQNPTLHKRTIZNYFMJ4EPFLRNILDGSMY3VCZGOZB6SYPMC": "QA throwaway buyer key",
+    "GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO": "contract admin and v1 escrow settler"
+  },
+  "warnings": [],
+  "withheld_external": true
+}

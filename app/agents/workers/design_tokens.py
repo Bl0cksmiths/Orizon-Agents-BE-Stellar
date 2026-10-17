@@ -19,12 +19,11 @@ Output dict shape (consumed by code.gen and emitted in the trace):
 
 from __future__ import annotations
 
-import asyncio
-import random
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from ... import pacing
 from ...config import settings
 from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
@@ -113,7 +112,7 @@ class DesignTokens(ModelWorker):
             palette = kit["palette"]
             typo = kit["typography"]
             # A tiny pause so the agent feels like it's doing real work in the trace.
-            await asyncio.sleep(0.25 + random.random() * 0.15)
+            await pacing.pause(0.25, 0.15)
             return self._pack(
                 palette=palette,
                 typography=typo,

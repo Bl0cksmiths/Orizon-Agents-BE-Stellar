@@ -66,7 +66,8 @@ def test_an_over_long_text_keeps_its_whole_sentences() -> None:
 
 def test_with_no_sentence_to_keep_it_cuts_at_a_word_and_says_so() -> None:
     out = trim_text("one two three four five six seven eight nine ten", 20)
-    assert out == "one two three four…" and len(out) <= 20
+    assert out == "one two three four…"
+    assert len(out) <= 20
 
 
 def test_a_cut_never_lands_inside_a_bracketed_citation() -> None:
@@ -75,7 +76,8 @@ def test_a_cut_never_lands_inside_a_bracketed_citation() -> None:
     )
     out = trim_text(text, 70)
     assert out.endswith("entry…")
-    assert "(" not in out and len(out) <= 70
+    assert "(" not in out
+    assert len(out) <= 70
 
 
 def test_a_sentence_end_inside_brackets_is_not_a_sentence_end() -> None:
@@ -87,7 +89,8 @@ def test_a_sentence_end_inside_brackets_is_not_a_sentence_end() -> None:
 
 def test_a_single_unbreakable_word_is_still_bounded() -> None:
     out = trim_text("x" * 500, 50)
-    assert len(out) == 50 and out.endswith("…")
+    assert len(out) == 50
+    assert out.endswith("…")
 
 
 # ── every structured worker sends a schema without hard bounds ──────────────
@@ -144,7 +147,8 @@ def test_research_pro_fits_the_live_evals_long_answer_into_its_contract(claude: 
     assert all(len(f["claim"]) <= 200 for f in out["findings"])
     # Whole sentences kept: the 120-character first sentence of each claim.
     assert all(f["claim"].endswith(".") for f in out["findings"])
-    assert len(out["summary"]) <= 300 and out["summary"].endswith(".")
+    assert len(out["summary"]) <= 300
+    assert out["summary"].endswith(".")
     assert len(out["sources"]) == 6
     assert out["findings"][0]["confidence"] == 1.0
     assert out["counts"] == {"findings": 6, "sources": 6}
@@ -188,7 +192,8 @@ def test_sol_audit_fits_long_rationales_extra_findings_and_an_out_of_range_score
     )
     out = run("agt_04m1")
     assert len(out["summary"]) <= 280
-    assert len(out["findings"]) == 6 and all(len(f["rationale"]) <= 240 for f in out["findings"])
+    assert len(out["findings"]) == 6
+    assert all(len(f["rationale"]) <= 240 for f in out["findings"])
     assert out["cvss_estimate"] == 10.0
 
 
@@ -207,7 +212,8 @@ def test_copywrite_fits_long_bodies_and_extra_sections(claude: FakeClaude) -> No
         }
     )
     out = run("agt_01h8")
-    assert len(out["sections"]) == 5 and all(len(s["body"]) <= 280 for s in out["sections"])
+    assert len(out["sections"]) == 5
+    assert all(len(s["body"]) <= 280 for s in out["sections"])
 
 
 def test_copywrite_with_one_section_is_still_invalid(claude: FakeClaude) -> None:

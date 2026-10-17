@@ -79,6 +79,23 @@ def decode_scval(b64: str) -> Any:
     return plain(scval.to_native(stellar_xdr.SCVal.from_xdr(b64)))
 
 
+def chain_event(raw: dict[str, Any]) -> ChainEvent:
+    """One raw getEvents entry, its topics and value decoded."""
+    return ChainEvent(
+        contract_id=str(raw.get("contractId")),
+        tx_hash=str(raw.get("txHash")),
+        ledger=int(raw.get("ledger") or 0),
+        topics=[decode_scval(t) for t in raw.get("topic") or []],
+        value=decode_scval(raw["value"]) if raw.get("value") else None,
+        successful=raw.get("inSuccessfulContractCall", True) is not False,
+    )
+
+
+def _next_cursor(result: dict[str, Any], batch: list[dict[str, Any]]) -> Any:
+    """Where the next getEvents page starts: the answer's cursor, else the last event's own."""
+    return result.get("cursor") or (batch[-1].get("pagingToken") or batch[-1].get("id") if batch else None)
+
+
 @dataclass
 class ChainReader:
     client: httpx.Client
@@ -185,17 +202,8 @@ class ChainReader:
             for raw in batch:
                 if tx_hash is not None and raw.get("txHash") != tx_hash:
                     continue
-                out.append(
-                    ChainEvent(
-                        contract_id=str(raw.get("contractId")),
-                        tx_hash=str(raw.get("txHash")),
-                        ledger=int(raw.get("ledger") or 0),
-                        topics=[decode_scval(t) for t in raw.get("topic") or []],
-                        value=decode_scval(raw["value"]) if raw.get("value") else None,
-                        successful=raw.get("inSuccessfulContractCall", True) is not False,
-                    )
-                )
-            cursor = result.get("cursor") or (batch[-1].get("pagingToken") or batch[-1].get("id") if batch else None)
+                out.append(chain_event(raw))
+            cursor = _next_cursor(result, batch)
             if len(batch) < _EVENT_PAGE or not cursor:
                 break
             params = {

@@ -131,7 +131,8 @@ def test_blank_intent_needs_detail_without_spending_a_call(fake_jev, fake_claude
     decision = check("  \x00\n ")
     assert decision.verdict == "needs_detail"
     assert decision.message == prompts.NEEDS_DETAIL_QUESTION
-    assert fake_jev.calls == [] and fake_claude.calls == []
+    assert fake_jev.calls == []
+    assert fake_claude.calls == []
 
 
 # --- verdicts ------------------------------------------------------------------------
@@ -241,7 +242,8 @@ def test_policy_is_overridable_for_threshold_sweeps(fake_jev):
 
 
 def test_watch_band_sits_between_the_two_injection_lines():
-    assert GuardPolicy().injection_watch == 0.35 and GuardPolicy().injection_block == 0.40
+    assert GuardPolicy().injection_watch == 0.35
+    assert GuardPolicy().injection_block == 0.40
     with pytest.raises(ValueError):
         GuardPolicy(injection_watch=0.5, injection_block=0.4)
 
@@ -263,7 +265,8 @@ def test_jev_outage_falls_back_to_haiku_with_a_fenced_intent(fake_jev, fake_clau
     assert call.effort is None  # Haiku 4.5 takes no effort
     assert call.schema_name == "IntentAssessment"
     assert call.system == prompts.INTENT_FALLBACK_SYSTEM
-    assert "BEGIN USER_REQUEST" in call.user and "UNTRUSTED INPUT" in call.user
+    assert "BEGIN USER_REQUEST" in call.user
+    assert "UNTRUSTED INPUT" in call.user
     assert "[redacted marker]" in call.user  # the forged END marker cannot close the real fence
     assert call.user.count("END USER_REQUEST (") == 1
 
@@ -272,7 +275,8 @@ def test_fallback_applies_the_same_thresholds(fake_jev, fake_claude):
     fake_jev.fail()
     fake_claude.reply(assessment(injection=0.37), purpose="guard.intent.fallback")
     decision = check()
-    assert decision.verdict == "allow" and decision.watch is True
+    assert decision.verdict == "allow"
+    assert decision.watch is True
 
     fake_jev.fail()
     fake_claude.reply(assessment(severity=2), purpose="guard.intent.fallback")

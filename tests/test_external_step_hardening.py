@@ -162,7 +162,8 @@ def test_string_artifact_degrades_the_step_not_the_run(monkeypatch, caplog):
     assert task.status != "failed"
     assert task.status == "complete"  # the honest step delivered, so the run did
     assert task.spent == PRICE  # only the step that delivered was billed
-    assert task.artifact is not None and task.artifact["title"] == "landing.html"
+    assert task.artifact is not None
+    assert task.artifact["title"] == "landing.html"
 
     lines = state.traces[task_id]
     assert any(ln.level == "error" and "external.ext_hostile returned an unusable artifact" in ln.msg for ln in lines)
@@ -193,7 +194,8 @@ def test_hostile_field_shapes_never_sink_the_run(monkeypatch, label, hostile):
 
     assert task.status == "complete", f"{label} sank the run"
     assert task.spent == PRICE, f"{label} was billed despite being unusable"
-    assert task.artifact is not None and task.artifact["title"] == "landing.html"
+    assert task.artifact is not None
+    assert task.artifact["title"] == "landing.html"
     lines = state.traces[task_id]
     assert any(ln.level == "error" and "unusable" in ln.msg for ln in lines)
 
@@ -414,7 +416,8 @@ def test_an_over_long_artifact_title_is_capped_in_the_trace(monkeypatch):
     assert "T" * 181 not in traced.msg
     # Only the trace is capped: the artifact is still handed back whole.
     artifact = state.tasks["tsk_hostile_long_title"].artifact
-    assert artifact is not None and artifact["title"] == title
+    assert artifact is not None
+    assert artifact["title"] == title
 
 
 @pytest.mark.parametrize(

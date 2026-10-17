@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import random
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from ... import pacing
 from ...config import settings
 from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
@@ -102,7 +101,7 @@ class SeoBrief(ModelWorker):
 
         # ── Kit fast path: deterministic brand block, no LLM ────────────────
         if kit:
-            await asyncio.sleep(0.3 + random.random() * 0.2)
+            await pacing.pause(0.3, 0.2)
             brand = kit.get("brand", {}) or {}
             name = brand.get("name", "Artifact")
             tagline = brand.get("tagline", "")

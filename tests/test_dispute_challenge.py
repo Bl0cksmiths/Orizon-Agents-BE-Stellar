@@ -100,8 +100,9 @@ def test_the_dispute_key_space_cannot_be_reached_by_an_endpoint_url() -> None:
     challenge could be aimed at a pending dispute's key and grief it. It is not
     a URL the policy accepts, and every endpoint that reaches `issue_challenge`
     has already passed that policy."""
+    subject = dispute_subject(0)
     with pytest.raises(EndpointPolicyError):
-        validate_endpoint_url(dispute_subject(0))
+        validate_endpoint_url(subject)
 
 
 def test_the_dispute_key_space_cannot_collide_with_the_unbind_one() -> None:
@@ -274,7 +275,7 @@ def test_the_ttl_is_the_time_to_sign_not_the_time_to_dispute() -> None:
     assert eb.CHALLENGE_TTL_SECONDS < 86_400
 
 
-@pytest.fixture()
+@pytest.fixture
 def empty_table():
     """An empty challenge table, restored afterwards."""
     saved = eb._challenges.copy()

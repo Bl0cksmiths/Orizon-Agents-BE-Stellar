@@ -36,7 +36,8 @@ def test_planned_and_authorized_stroops_round_trip(pg: PostgresDisputeStore, pg_
     read, rows = run(pg, go())
 
     assert read == record
-    assert read is not None and read.authorized_stroops == 2**100
+    assert read is not None
+    assert read.authorized_stroops == 2**100
     assert [s.planned_stroops for s in read.steps] == [120_000, 200_000]
 
 

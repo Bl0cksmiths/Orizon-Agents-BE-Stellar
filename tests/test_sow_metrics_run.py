@@ -224,12 +224,14 @@ def test_every_runtime_platform_key_is_excluded(tmp_path: Path, role_source: str
 def test_one_outside_operator_misses_both_adoption_targets(tmp_path: Path) -> None:
     register = FakeWorld.write_register(tmp_path / "r.json", {**REGISTER_ROLES, OP2: "second QA operator key"})
     out = run(met_world(), tmp_path, register=register)
-    assert out.status("m01") == "not_met" and out.metric("m01")["achieved"] == "1"
+    assert out.status("m01") == "not_met"
+    assert out.metric("m01")["achieved"] == "1"
     assert out.metric("m01")["reason"] == (
         "Only 1 agent is registered by outside operators; the other 5 belong to wallets the team controls. "
         "The target is 2."
     )
-    assert out.status("m02") == "not_met" and out.metric("m02")["achieved"] == "1"
+    assert out.status("m02") == "not_met"
+    assert out.metric("m02")["achieved"] == "1"
     assert out.metric("m02")["reason"] == "Only 1 outside operator wallet owns an agent. The target is 2."
 
 
@@ -451,15 +453,19 @@ def test_a_v1_charge_to_an_outside_agent_counts(tmp_path: Path) -> None:
     assert out.metric("m04")["achieved"] == "5"
     assert out.metric("m03")["achieved"] == "4"
     links = [link for link in out.metric("m04")["links"] if link.get("tx_hash") == tx]
-    assert links and links[0]["label"] == "Charge of 0.03 XLM to beta on the v1 escrow — 2026-09-26 (counted)"
+    assert links
+    assert links[0]["label"] == "Charge of 0.03 XLM to beta on the v1 escrow — 2026-09-26 (counted)"
 
 
 def test_each_escrow_is_read_by_its_version(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path)
     escrows = {e["contract"]: e for e in out.raw()["summary"]["escrows"]}
-    assert escrows[ESCROW_V2]["version"] == 2 and escrows[ESCROW_V2]["live"] is True
-    assert escrows[ESCROW_V1]["version"] == 1 and escrows[ESCROW_V1]["live"] is False
-    assert escrows[ESCROW_V2]["receipts"] == 4 and escrows[ESCROW_V1]["receipts"] == 1
+    assert escrows[ESCROW_V2]["version"] == 2
+    assert escrows[ESCROW_V2]["live"] is True
+    assert escrows[ESCROW_V1]["version"] == 1
+    assert escrows[ESCROW_V1]["live"] is False
+    assert escrows[ESCROW_V2]["receipts"] == 4
+    assert escrows[ESCROW_V1]["receipts"] == 1
     kinds = [link["label"] for link in out.metric("m04")["links"] if link["kind"] == "contract"]
     assert kinds == [
         "PaymentEscrow v2 contract (live) (every charge it recorded)",
@@ -492,7 +498,8 @@ def test_a_dispute_refund_needs_the_dispute_rating_and_the_refund(tmp_path: Path
     out = run(met_world(), tmp_path)
     counted = out.raw_metric("m05")["counted"]
     assert len(counted) == 1
-    assert counted[0]["payer"] == BUYER1 and counted[0]["charge"]["job_id"] == JOB1
+    assert counted[0]["payer"] == BUYER1
+    assert counted[0]["charge"]["job_id"] == JOB1
     labels = out.labels("m05")
     assert "Dispute rating on alpha — 2026-09-24 (counted: refunded)" in labels
     assert "Refund of 0.05 XLM to the payer of the disputed charge — 2026-09-24 (counted)" in labels
@@ -622,7 +629,8 @@ def test_the_register_page_must_answer_with_no_login(tmp_path: Path, status: int
     world = met_world()
     world.pages[REGISTER_PAGE] = (status, "")
     out = run(world, tmp_path)
-    assert out.status("m06") == "not_met" and out.metric("m06")["achieved"] == "No"
+    assert out.status("m06") == "not_met"
+    assert out.metric("m06")["achieved"] == "No"
     assert out.metric("m06")["reason"] == expected
 
 
@@ -665,7 +673,8 @@ def test_reputation_gating_needs_the_floor_on(tmp_path: Path, params: dict[str, 
     world = met_world()
     world.params = params
     out = run(world, tmp_path)
-    assert out.status("m07") == "not_met" and out.metric("m07")["reason"] == expected
+    assert out.status("m07") == "not_met"
+    assert out.metric("m07")["reason"] == expected
 
 
 def _v1_world() -> FakeWorld:
@@ -749,7 +758,9 @@ def test_the_dispute_milestone_needs_a_real_refund(tmp_path: Path) -> None:
 
 def test_the_dispute_milestone_is_yes_when_everything_holds(tmp_path: Path) -> None:
     m = run(met_world(), tmp_path).metric("m08")
-    assert m["achieved"] == "Yes" and m["status"] == "met" and "reason" not in m
+    assert m["achieved"] == "Yes"
+    assert m["status"] == "met"
+    assert "reason" not in m
 
 
 def test_the_guide_must_answer_with_no_login(tmp_path: Path) -> None:
@@ -788,7 +799,8 @@ def test_the_demo_video_must_be_published_and_three_to_five_minutes(
     world = met_world()
     world.pages[DEMO_PAGE] = page
     out = run(world, tmp_path)
-    assert out.status("m10") == "not_met" and out.metric("m10")["reason"] == expected
+    assert out.status("m10") == "not_met"
+    assert out.metric("m10")["reason"] == expected
 
 
 @pytest.mark.parametrize("seconds", [180, 300])
@@ -996,7 +1008,8 @@ def test_a_404_page_is_never_linked(tmp_path: Path) -> None:
     assert not [u for u in urls if u.startswith(FRONTEND)], urls
     for metric_id in ("m09", "m10"):
         m = out.metric(metric_id)
-        assert m["links"] == [] and m["status"] == "not_met"
+        assert m["links"] == []
+        assert m["status"] == "not_met"
         assert m["method"].endswith(
             "The page answered 404 when this ran, so it is not linked: a dead link would prove nothing."
         )
@@ -1059,4 +1072,5 @@ def test_a_bad_pending_link_is_refused(tmp_path: Path, value: str) -> None:
 
 def test_a_pending_link_given_twice_is_refused(tmp_path: Path) -> None:
     out = run(met_world(), tmp_path, "--pending-link", f"m09={PR91}", "--pending-link", f"m09={PR92}")
-    assert out.code == EXIT_REFUSED and "given twice" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "given twice" in out.out

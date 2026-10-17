@@ -257,7 +257,7 @@ def _sync_log(caplog: pytest.LogCaptureFixture, level: int) -> list[logging.LogR
     return [r for r in caplog.records if r.name == SYNC_LOGGER and r.levelno == level]
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
     """A configured registry contract backed by an in-memory record set.
 
@@ -296,8 +296,9 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
 def test_the_mapper_refuses_a_price_the_floor_could_never_reach(stroops: int, why: str):
     # Zero and negative stay refused: the floor is positive, so it SUBSUMES
     # #44's sign check rather than replacing or duplicating it.
+    raw = _raw(DUST, price=stroops)
     with pytest.raises(registry_sync.UnbelievablePrice):
-        registry_sync._to_agent(_raw(DUST, price=stroops))
+        registry_sync._to_agent(raw)
 
 
 def test_the_minimum_itself_is_believable():

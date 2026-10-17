@@ -95,9 +95,24 @@ D039 = (
     "(Smart-Contract #3)"
 )
 
+# What a check skipped behind an earlier one says, and the check to fix first.
+_NO_ANSWER = "the backend never answered"
+_FIX_WARM = "Fix network.warm first."
+_FIX_READINESS = "Fix build.readiness first."
+_FIX_BELOW_FLOOR = "Fix exclusion.below_floor first."
+
 
 class Refused(Exception):
     """The run must not be judged at all: the wrong network, or one that cannot be confirmed."""
+
+
+class _Finding(Exception):
+    """A FAIL found inside a check's helper; the check reports it as `check.failed(detail, fix)`."""
+
+    def __init__(self, detail: str, fix: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.fix = fix
 
 
 @dataclass
@@ -246,7 +261,7 @@ def check_warm(reads: Reads, facts: Facts, budget: float = WARMUP_BUDGET_SECONDS
 def check_api_network(reads: Reads, facts: Facts) -> Check:
     check = Check("network.api", "network", "The API is on testnet (GET /api/stellar/network)")
     if not facts.warm:
-        return check.skipped("the backend never answered", "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     try:
         answer = reads.network()
     except Unreachable as exc:
@@ -269,7 +284,7 @@ def check_api_network(reads: Reads, facts: Facts) -> Check:
 def check_adoption_route(reads: Reads, facts: Facts) -> Check:
     check = Check("build.adoption", "build", "The 5.02 adoption route answers (GET /api/ecosystem/adoption)")
     if not facts.warm:
-        return check.skipped("the backend never answered", "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     try:
         answer = reads.adoption()
     except Unreachable as exc:
@@ -297,10 +312,15 @@ def check_agent_readiness_route(reads: Reads, facts: Facts) -> Check:
         "build.agent_readiness", "build", "The 5.02 operator readiness route answers (GET /api/agents/{id}/readiness)"
     )
     if not facts.warm:
-        return check.skipped("the backend never answered", "Fix network.warm first.")
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
     external = external_agents(facts.adoption)
     listed = [a.get("id") for a in facts.agents or [] if a.get("source") == "onchain"]
-    probe = external[0][0] if external else (str(listed[0]) if listed else "demo_preflight_probe")
+    if external:
+        probe = external[0][0]
+    elif listed:
+        probe = str(listed[0])
+    else:
+        probe = "demo_preflight_probe"
     try:
         answer = reads.agent_readiness(probe)
     except Unreachable as exc:
@@ -319,6 +339,24 @@ def check_agent_readiness_route(reads: Reads, facts: Facts) -> Check:
     )
 
 
+def _missing_readiness_fields(body: dict[str, Any]) -> list[str]:
+    """The 5.01 `/readiness` fields `body` lacks, in the order the failure names them."""
+    missing: list[str] = []
+    disputes = body.get("disputes")
+    if not isinstance(disputes, dict):
+        missing.append("disputes")
+    else:
+        if "store" not in disputes:
+            missing.append("disputes.store")
+        reconcile = disputes.get("reconcile")
+        if not isinstance(reconcile, dict) or "enabled" not in reconcile:
+            missing.append("disputes.reconcile")
+    escrow = body.get("escrow")
+    if not isinstance(escrow, dict) or "contract" not in escrow or "version" not in escrow:
+        missing.append("escrow {contract, version}")
+    return missing
+
+
 def read_backend_readiness(reads: Reads, facts: Facts) -> Check:
     check = Check("build.readiness", "build", "The backend reports ready, with the 5.01 fields (GET /readiness)")
     try:
@@ -335,19 +373,9 @@ def read_backend_readiness(reads: Reads, facts: Facts) -> Check:
             f"Pass --backend with the backend's own host; /readiness is root-level and {reads.api} proxies only /api.",
         )
     facts.readiness = body
-    missing: list[str] = []
+    missing = _missing_readiness_fields(body)
     disputes = body.get("disputes")
-    if not isinstance(disputes, dict):
-        missing.append("disputes")
-    else:
-        if "store" not in disputes:
-            missing.append("disputes.store")
-        reconcile = disputes.get("reconcile")
-        if not isinstance(reconcile, dict) or "enabled" not in reconcile:
-            missing.append("disputes.reconcile")
     escrow = body.get("escrow")
-    if not isinstance(escrow, dict) or "contract" not in escrow or "version" not in escrow:
-        missing.append("escrow {contract, version}")
     if missing:
         return check.failed(
             f"{answer.url} has no {', '.join(missing)}: the deployed backend predates story 5.01's readiness fields",
@@ -399,7 +427,7 @@ def check_escrow_settler(chain: ChainReader, facts: Facts) -> Check:
     if escrow is None or facts.escrow_version != ESCROW_V2:
         return check.skipped("the escrow is not a readable v2", "Fix escrow.version first.")
     if facts.readiness is None:
-        return check.skipped("/readiness was not read", "Fix build.readiness first.")
+        return check.skipped("/readiness was not read", _FIX_READINESS)
     signer = facts.signer
     if signer is None:
         return check.failed(
@@ -426,7 +454,7 @@ def check_refunds_enabled(facts: Facts) -> Check:
     disputes = (facts.readiness or {}).get("disputes")
     reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
     if not isinstance(reconcile, dict) or "enabled" not in reconcile:
-        return check.skipped("/readiness has no disputes.reconcile block", "Fix build.readiness first.")
+        return check.skipped("/readiness has no disputes.reconcile block", _FIX_READINESS)
     if reconcile.get("enabled") is not True:
         return check.failed(
             "disputes.reconcile.enabled is false: DISPUTE_REFUNDS_ENABLED or REFUND_RECONCILE_ENABLED is off, "
@@ -446,7 +474,7 @@ def check_dispute_store(facts: Facts) -> Check:
     disputes = (facts.readiness or {}).get("disputes")
     store = disputes.get("store") if isinstance(disputes, dict) else None
     if store is None:
-        return check.skipped("/readiness has no disputes.store", "Fix build.readiness first.")
+        return check.skipped("/readiness has no disputes.store", _FIX_READINESS)
     if store != "postgres":
         return check.failed(
             f"disputes.store is {store!r}, not a durable store: a restart between the settle and the dispute "
@@ -508,6 +536,24 @@ def check_external_count(facts: Facts) -> Check:
     return check.passed(", ".join(f"{a} ({_short(o)})" for a, o in external))
 
 
+def _unready_reason(reads: Reads, agent_id: str) -> str | None:
+    """Why `agent_id` is not ready and reachable, read from its readiness route; None when it is."""
+    try:
+        answer = reads.agent_readiness(agent_id)
+    except Unreachable as exc:
+        return f"readiness unreadable ({exc})"
+    body = answer.obj()
+    if not answer.ok:
+        return f"readiness answered {_status_line(answer)}"
+    step = first_unready_step(body)
+    if body.get("ready") is True and step is None:
+        return None
+    if step is None:
+        return f"ready is {body.get('ready')!r}"
+    action = f" — {step.get('action')}" if step.get("action") else ""
+    return f"`{step.get('key')}` is {step.get('status')} ({step.get('detail')}){action}"
+
+
 def check_external_ready(reads: Reads, facts: Facts) -> Check:
     check = Check("operator.ready", "operator", "Every external agent is ready and reachable")
     external = external_agents(facts.adoption)
@@ -525,24 +571,11 @@ def check_external_ready(reads: Reads, facts: Facts) -> Check:
     unready: list[str] = []
     ready: list[str] = []
     for agent_id, _owner in judged:
-        try:
-            answer = reads.agent_readiness(agent_id)
-        except Unreachable as exc:
-            unready.append(f"{agent_id}: readiness unreadable ({exc})")
-            continue
-        body = answer.obj()
-        if not answer.ok:
-            unready.append(f"{agent_id}: readiness answered {_status_line(answer)}")
-            continue
-        step = first_unready_step(body)
-        if body.get("ready") is True and step is None:
+        why = _unready_reason(reads, agent_id)
+        if why is None:
             ready.append(agent_id)
-            continue
-        if step is None:
-            unready.append(f"{agent_id}: ready is {body.get('ready')!r}")
-            continue
-        action = f" — {step.get('action')}" if step.get("action") else ""
-        unready.append(f"{agent_id}: `{step.get('key')}` is {step.get('status')} ({step.get('detail')}){action}")
+        else:
+            unready.append(f"{agent_id}: {why}")
     if unready:
         return check.failed(
             "not ready: " + "; ".join(unready),
@@ -608,66 +641,39 @@ def all_degraded(reputations: dict[str, Any], agent_ids: list[str]) -> bool:
     return bool(entries) and all(e.get("degraded") is True for e in entries)
 
 
-def check_below_floor(reads: Reads, facts: Facts) -> Check:
-    check = Check(
-        "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
-    )
-    if not facts.warm:
-        return check.skipped("the backend never answered", "Fix network.warm first.")
-    if facts.agents is None:
-        return check.skipped("GET /api/agents was not read", "Rerun once the backend answers.")
-    try:
-        params = reads.reputation_params()
-        batch = reads.reputation()
-    except Unreachable as exc:
-        return check.failed(str(exc), "Rerun; the reputation routes did not answer.")
-    if not params.ok or not batch.ok:
-        return check.failed(
-            f"reputation params {_status_line(params)}, batch {_status_line(batch)}",
-            "Deploy a backend build that serves /api/stellar/reputation and /params.",
-        )
-    if params.obj().get("enabled") is not True:
-        return check.failed(
-            "reputation-gated routing is off: the floor excludes no one",
-            "Set REPUTATION_ENABLED=true on the Render dashboard.",
-        )
-    floor = params.obj().get("floor_bps")
-    if not isinstance(floor, int):
-        return check.failed("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
-    facts.floor_bps = floor
-    registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
-    reputations = batch.obj().get("reputations") or {}
-    # A cold start reads every agent degraded until the backend's first
-    # ledger read answers. That is the backend waking, not a finding about
-    # any agent, so the batch is read again before anything is concluded.
-    reads_made = 1
-    while all_degraded(reputations, registered) and reads_made < REPUTATION_READ_ATTEMPTS:
-        reads.sleep(REPUTATION_REREAD_SECONDS)
-        try:
-            batch = reads.reputation()
-        except Unreachable as exc:
-            return check.failed(str(exc), "Rerun; the reputation route did not answer.")
-        if not batch.ok:
-            return check.failed(
-                f"reputation batch {_status_line(batch)} on re-read {reads_made + 1}",
-                "Rerun; the reputation route did not answer.",
-            )
-        reputations = batch.obj().get("reputations") or {}
-        reads_made += 1
-    if all_degraded(reputations, registered):
-        return check.failed(
-            f"every registered agent ({len(registered)}) read degraded on each of {reads_made} reads "
-            f"{REPUTATION_REREAD_SECONDS:.0f} s apart: the backend could not read the ReputationLedger, so this "
-            "is no verdict on any agent, not a finding that none is below the floor",
-            "Check the Soroban RPC the backend reads (/api/stellar/network rpc_url) answers and that the "
-            "reputation_ledger id there is right, wait a minute for the backend's ledger read, and rerun. On "
-            "camera a degraded read shows '⚠ unverified' and no exclusion at all.",
-        )
-    facts.reputations = reputations if isinstance(reputations, dict) else {}
-    reread = (
-        f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
-    )
-    rows = {str(a.get("id")): a for a in facts.agents}
+def _not_a_verdict(rep: dict[str, Any]) -> str | None:
+    """`degraded` or `stale` when this reputation read is no verdict on its agent, else None."""
+    if rep.get("degraded") is True:
+        return "degraded"
+    if rep.get("stale") is True:
+        return "stale"
+    return None
+
+
+def _ignored_reason(rep: dict[str, Any], row: dict[str, Any]) -> str | None:
+    """Why a below-floor read is set aside rather than counted as excluded, else None.
+
+    The planner only judges agents it could route to. An unbound one renders
+    as "no endpoint" and a delisted one not at all: neither is the "excluded"
+    row the exclusion scene films.
+    """
+    why = _not_a_verdict(rep)
+    if why is not None:
+        return why
+    if not routable(row):
+        why = "delisted" if row.get("status") == "offline" else "not bound"
+        return f"{why}: not routable, so never excluded"
+    return None
+
+
+def _judge_below_floor(
+    facts: Facts, registered: list[str], reputations: dict[str, Any], floor: int
+) -> tuple[list[str], list[str]]:
+    """(genuinely below the floor, set aside with why) among `registered`, in their order.
+
+    Each genuine agent is also recorded on `facts`, with the lower bound it was judged on.
+    """
+    rows = {str(a.get("id")): a for a in facts.agents or []}
     genuine: list[str] = []
     ignored: list[str] = []
     for agent_id in registered:
@@ -676,25 +682,20 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             continue
         if rep["lower_bound_bps"] >= floor:
             continue
-        if rep.get("degraded") is True or rep.get("stale") is True:
-            why = "degraded" if rep.get("degraded") is True else "stale"
+        why = _ignored_reason(rep, rows[agent_id])
+        if why is not None:
             ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why})")
-            continue
-        # The planner only judges agents it could route to. An unbound one
-        # renders as "no endpoint" and a delisted one not at all: neither is
-        # the "excluded" row the exclusion scene films.
-        if not routable(rows[agent_id]):
-            why = "delisted" if rows[agent_id].get("status") == "offline" else "not bound"
-            ignored.append(f"{agent_id} ({rep['lower_bound_bps']} bps, {why}: not routable, so never excluded)")
             continue
         genuine.append(agent_id)
         facts.below_floor.append(agent_id)
         facts.lower_bounds[agent_id] = rep["lower_bound_bps"]
-    if genuine:
-        detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
-        return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
+    return genuine, ignored
+
+
+def _no_genuine_detail(floor: int, ignored: list[str], registered: list[str], reputations: dict[str, Any]) -> str:
+    """The floor check's finding when no agent is genuinely below `floor`, naming what was set aside."""
     degraded = [a for a in registered if isinstance(reputations.get(a), dict) and reputations[a].get("degraded")]
-    return check.failed(
+    return (
         f"no registered, bound and listed agent has an on-chain lower bound below {floor} bps"
         + (f"; ignored as not a verdict: {', '.join(ignored)}" if ignored else "")
         + (
@@ -702,7 +703,92 @@ def check_below_floor(reads: Reads, facts: Facts) -> Check:
             if degraded
             else ""
         )
-        + reread,
+    )
+
+
+def _reputation_floor(params: Answer, batch: Answer) -> int:
+    """The floor reputation-gated routing applies; raises `_Finding` when no floor applies."""
+    if not params.ok or not batch.ok:
+        raise _Finding(
+            f"reputation params {_status_line(params)}, batch {_status_line(batch)}",
+            "Deploy a backend build that serves /api/stellar/reputation and /params.",
+        )
+    if params.obj().get("enabled") is not True:
+        raise _Finding(
+            "reputation-gated routing is off: the floor excludes no one",
+            "Set REPUTATION_ENABLED=true on the Render dashboard.",
+        )
+    floor = params.obj().get("floor_bps")
+    if not isinstance(floor, int):
+        raise _Finding("the params carry no floor_bps", "Deploy a backend build whose params name the floor.")
+    return floor
+
+
+def _read_past_cold_start(reads: Reads, batch: Answer, registered: list[str]) -> tuple[Any, int]:
+    """The reputation batch's entries once past a cold start, and how many reads that took.
+
+    A cold start reads every agent degraded until the backend's first ledger
+    read answers. That is the backend waking, not a finding about any agent,
+    so the batch is read again before anything is concluded. Raises `_Finding`
+    when a re-read gets no answer, or when every read is degraded.
+    """
+    reputations = batch.obj().get("reputations") or {}
+    reads_made = 1
+    while all_degraded(reputations, registered) and reads_made < REPUTATION_READ_ATTEMPTS:
+        reads.sleep(REPUTATION_REREAD_SECONDS)
+        try:
+            batch = reads.reputation()
+        except Unreachable as exc:
+            raise _Finding(str(exc), "Rerun; the reputation route did not answer.") from exc
+        if not batch.ok:
+            raise _Finding(
+                f"reputation batch {_status_line(batch)} on re-read {reads_made + 1}",
+                "Rerun; the reputation route did not answer.",
+            )
+        reputations = batch.obj().get("reputations") or {}
+        reads_made += 1
+    if all_degraded(reputations, registered):
+        raise _Finding(
+            f"every registered agent ({len(registered)}) read degraded on each of {reads_made} reads "
+            f"{REPUTATION_REREAD_SECONDS:.0f} s apart: the backend could not read the ReputationLedger, so this "
+            "is no verdict on any agent, not a finding that none is below the floor",
+            "Check the Soroban RPC the backend reads (/api/stellar/network rpc_url) answers and that the "
+            "reputation_ledger id there is right, wait a minute for the backend's ledger read, and rerun. On "
+            "camera a degraded read shows '⚠ unverified' and no exclusion at all.",
+        )
+    return reputations, reads_made
+
+
+def check_below_floor(reads: Reads, facts: Facts) -> Check:
+    check = Check(
+        "exclusion.below_floor", "exclusion", "A registered, routable agent is genuinely below the reputation floor"
+    )
+    if not facts.warm:
+        return check.skipped(_NO_ANSWER, _FIX_WARM)
+    if facts.agents is None:
+        return check.skipped("GET /api/agents was not read", "Rerun once the backend answers.")
+    try:
+        params = reads.reputation_params()
+        batch = reads.reputation()
+    except Unreachable as exc:
+        return check.failed(str(exc), "Rerun; the reputation routes did not answer.")
+    registered = [str(a.get("id")) for a in facts.agents if a.get("source") == "onchain"]
+    try:
+        floor = _reputation_floor(params, batch)
+        facts.floor_bps = floor
+        reputations, reads_made = _read_past_cold_start(reads, batch, registered)
+    except _Finding as finding:
+        return check.failed(finding.detail, finding.fix)
+    facts.reputations = reputations if isinstance(reputations, dict) else {}
+    reread = (
+        f" (after {reads_made} reads: every agent read degraded first, the backend waking)" if reads_made > 1 else ""
+    )
+    genuine, ignored = _judge_below_floor(facts, registered, reputations, floor)
+    if genuine:
+        detail = ", ".join(f"{a} ({reputations[a]['lower_bound_bps']} < {floor} bps)" for a in genuine)
+        return check.passed(detail + (f"; ignored {', '.join(ignored)}" if ignored else "") + reread)
+    return check.failed(
+        _no_genuine_detail(floor, ignored, registered, reputations) + reread,
         "Give one registered agent a real low record: paid runs rated low, or an upheld dispute, until its "
         "lower bound reads below the floor on GET /api/stellar/reputation with degraded and stale false. "
         "A degraded or stale read is the prior or an old read, never a verdict. The agent must also be bound "
@@ -724,6 +810,17 @@ def routable(agent: dict[str, Any]) -> bool:
     return agent.get("source") == "onchain" and agent.get("bound") is True
 
 
+def _unjudged_reason(rep: Any) -> str | None:
+    """Why this reputation entry cannot count as clearing the floor, else None.
+
+    A degraded read is the prior served because the ledger could not be read,
+    and a stale one may predate a rating: neither is a verdict.
+    """
+    if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
+        return "no reputation entry"
+    return _not_a_verdict(rep)
+
+
 def check_routable_count(facts: Facts) -> Check:
     check = Check(
         "exclusion.routable_count",
@@ -731,7 +828,7 @@ def check_routable_count(facts: Facts) -> Check:
         f"At least {MIN_ROUTABLE_AGENTS} routable agents clear the floor, so the subject is excluded, not kept",
     )
     if facts.agents is None or facts.reputations is None or facts.floor_bps is None:
-        return check.skipped("the agents or the reputation batch were not read", "Fix exclusion.below_floor first.")
+        return check.skipped("the agents or the reputation batch were not read", _FIX_BELOW_FLOOR)
     floor = facts.floor_bps
     clear: list[str] = []
     unjudged: list[str] = []
@@ -740,14 +837,8 @@ def check_routable_count(facts: Facts) -> Check:
             continue
         agent_id = str(agent.get("id"))
         rep = facts.reputations.get(agent_id)
-        if not isinstance(rep, dict) or not isinstance(rep.get("lower_bound_bps"), int):
-            unjudged.append(f"{agent_id} (no reputation entry)")
-            continue
-        # A degraded read is the prior served because the ledger could not be
-        # read, and a stale one may predate a rating: neither is a verdict, so
-        # neither is counted as clearing the floor.
-        if rep.get("degraded") is True or rep.get("stale") is True:
-            why = "degraded" if rep.get("degraded") is True else "stale"
+        why = _unjudged_reason(rep)
+        if why is not None:
             unjudged.append(f"{agent_id} ({why})")
             continue
         if rep["lower_bound_bps"] >= floor:
@@ -774,7 +865,7 @@ def check_card_figure(facts: Facts) -> Check:
         "The plan card prints the excluded agent's lower bound below the floor's figure",
     )
     if not facts.below_floor or facts.floor_bps is None:
-        return check.skipped("there is no genuinely below-floor agent to judge", "Fix exclusion.below_floor first.")
+        return check.skipped("there is no genuinely below-floor agent to judge", _FIX_BELOW_FLOOR)
     floor = facts.floor_bps
     floor_figure = card_stars(floor)
     ceiling = highest_visibly_below(floor)
@@ -810,7 +901,7 @@ def check_decompose(reads: Reads, facts: Facts, intent: str | None) -> Check:
             'Pass --with-decompose "<the intent the video uses>" to confirm the plan names the exclusion.',
         )
     if not facts.below_floor:
-        return check.skipped("there is no genuinely below-floor agent to look for", "Fix exclusion.below_floor first.")
+        return check.skipped("there is no genuinely below-floor agent to look for", _FIX_BELOW_FLOOR)
     try:
         answer = reads.decompose(intent)
     except Unreachable as exc:

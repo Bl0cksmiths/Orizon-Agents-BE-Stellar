@@ -9,7 +9,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..schemas import TraceLine
 from ..services import execution_svc
 from ..state import state
-from ..task_auth import require_task_read
+from ..task_auth import TASK_READ_RESPONSES, require_task_read
 from ..trace_bus import bus
 
 router = APIRouter(tags=["trace"])
@@ -17,9 +17,9 @@ router = APIRouter(tags=["trace"])
 
 @router.get(
     "/trace/{task_id}",
-    response_model=list[TraceLine],
     summary="Get a task's recorded trace",
     dependencies=[Depends(require_task_read)],
+    responses=TASK_READ_RESPONSES,
 )
 async def get_trace(task_id: str) -> list[TraceLine]:
     if task_id not in state.traces and task_id not in state.tasks:
@@ -40,10 +40,43 @@ def _replay_events(task_id: str) -> Iterator[dict[str, str]]:
         yield {"event": "trace", "data": line.model_dump_json()}
 
 
+async def _replay_then_done(task_id: str) -> AsyncIterator[dict[str, str]]:
+    """A finished task's stream: its recorded trace, then `done`."""
+    for event in _replay_events(task_id):
+        yield event
+    yield {"event": "done", "data": "{}"}
+
+
+async def _live_events(task_id: str, queue: asyncio.Queue[TraceLine | None]) -> AsyncIterator[dict[str, str]]:
+    """A running task's stream: its recorded trace, then each live line from
+    `queue` (a ping every 15 s of quiet) until the bus closes it with `done`.
+    The queue is unsubscribed however the stream ends."""
+    try:
+        # Replay anything already recorded so late subscribers see full history.
+        for event in _replay_events(task_id):
+            yield event
+
+        while True:
+            try:
+                line = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                # keepalive
+                yield {"event": "ping", "data": "{}"}
+                continue
+
+            if line is None:
+                yield {"event": "done", "data": "{}"}
+                break
+            yield {"event": "trace", "data": line.model_dump_json()}
+    finally:
+        bus.unsubscribe(task_id, queue)
+
+
 @router.get(
     "/trace/{task_id}/stream",
     summary="Stream a task's trace as SSE",
     dependencies=[Depends(require_task_read)],
+    responses=TASK_READ_RESPONSES,
 )
 async def stream_trace(task_id: str) -> EventSourceResponse:
     """Server-Sent Events — replays the existing trace then streams live lines.
@@ -73,34 +106,8 @@ async def stream_trace(task_id: str) -> EventSourceResponse:
         # Finished (or never started) — replay history and end the stream.
         # No subscription: no producer exists, so a live queue would only
         # ping forever and leak.
-        async def replay() -> AsyncIterator[dict[str, str]]:
-            for event in _replay_events(task_id):
-                yield event
-            yield {"event": "done", "data": "{}"}
+        return EventSourceResponse(_replay_then_done(task_id))
 
-        return EventSourceResponse(replay())
-
-    queue = bus.subscribe(task_id)
-
-    async def generator() -> AsyncIterator[dict[str, str]]:
-        try:
-            # Replay anything already recorded so late subscribers see full history.
-            for event in _replay_events(task_id):
-                yield event
-
-            while True:
-                try:
-                    line = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    # keepalive
-                    yield {"event": "ping", "data": "{}"}
-                    continue
-
-                if line is None:
-                    yield {"event": "done", "data": "{}"}
-                    break
-                yield {"event": "trace", "data": line.model_dump_json()}
-        finally:
-            bus.unsubscribe(task_id, queue)
-
-    return EventSourceResponse(generator())
+    # Subscribed here, before the response streams, so no line published
+    # between this answer and the first read is missed.
+    return EventSourceResponse(_live_events(task_id, bus.subscribe(task_id)))

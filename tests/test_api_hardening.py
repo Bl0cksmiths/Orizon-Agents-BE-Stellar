@@ -555,8 +555,10 @@ def test_app_orders_header_middleware_outside_limiter():
     names = [m.cls.__name__ for m in app.user_middleware]  # outermost first
     assert names.index("SecurityHeadersMiddleware") < names.index("RateLimitMiddleware")
     assert names.index("RateLimitMiddleware") < names.index("BodyLimitMiddleware")
-    # Request-id context is outermost, so 413/429 short-circuits carry it.
-    assert names.index("RequestContextMiddleware") == 0
+    # CORS is outermost so every response the stack makes carries it; the
+    # request-id context sits right inside, so 413/429 short-circuits carry it.
+    assert names.index("CORSMiddleware") == 0
+    assert names.index("RequestContextMiddleware") == 1
 
 
 def test_cors_keeps_only_exact_secure_origins(caplog):

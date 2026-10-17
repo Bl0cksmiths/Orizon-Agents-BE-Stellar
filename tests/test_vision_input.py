@@ -75,8 +75,9 @@ def _fetch(url: str, server: Server) -> Any:
 
 
 def _refused(url: str, server: Server | None = None) -> ImageInputError:
+    served = server or Server({})
     with pytest.raises(ImageInputError) as info:
-        _fetch(url, server or Server({}))
+        _fetch(url, served)
     return info.value
 
 
@@ -240,8 +241,9 @@ def test_a_slow_image_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         return httpx.Response(200, content=PNG)
 
     transport = httpx.MockTransport(slow)
+    fetching = fetch_image("https://img.example.com/a.png", transport=transport)
     with pytest.raises(ImageInputError) as info:
-        asyncio.run(fetch_image("https://img.example.com/a.png", transport=transport))
+        asyncio.run(fetching)
     assert info.value.rule == "image_timeout"
 
 
@@ -271,6 +273,7 @@ def test_an_unusable_upload_is_refused(data: str, rule: str) -> None:
 
 def test_an_oversized_upload_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vision_input, "MAX_IMAGE_BYTES", 10)
+    upload = {"data": base64.b64encode(PNG).decode()}
     with pytest.raises(ImageInputError) as info:
-        vision_input.decode_upload({"data": base64.b64encode(PNG).decode()}, "upload 1")
+        vision_input.decode_upload(upload, "upload 1")
     assert info.value.rule == "image_too_large"

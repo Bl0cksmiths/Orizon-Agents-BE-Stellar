@@ -6,7 +6,7 @@ mapping from a failure to a status and code, not about planning.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +22,7 @@ KIT_INTENT = "pomodoro timer app"
 
 
 @pytest.fixture(autouse=True)
-def fresh_planner_budget(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def fresh_planner_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """A per-test planner budget, so no test spends another's — or the suite's."""
     monkeypatch.setattr(
         router,
@@ -30,7 +30,6 @@ def fresh_planner_budget(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         KeyedRateLimiter(lambda: settings.decompose_rate_limit_per_minute),
         raising=False,
     )
-    yield
 
 
 def _answering(calls: list[str]) -> Callable[[str], Awaitable[DecomposeResponse]]:

@@ -12,12 +12,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
-from stellar_sdk import Address, InvokeHostFunction, Keypair, StrKey, scval
+from stellar_sdk import Address, InvokeHostFunction, Keypair, Network, StrKey, scval
 from stellar_sdk import TransactionEnvelope as SdkEnvelope
 from stellar_sdk import xdr as stellar_xdr
 
@@ -29,7 +30,7 @@ FRONTEND = "https://front.test"
 RPC = "https://rpc.test"
 AGENT_ENDPOINT = "https://agent.test"
 HORIZON = "https://horizon.test"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 
 def _contract(tag: str) -> str:
@@ -56,6 +57,10 @@ FLOOR = 5500
 
 def _json(status: int, body: Any) -> httpx.Response:
     return httpx.Response(status, json=body)
+
+
+def _not_found() -> httpx.Response:
+    return _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
 
 
 def ready_steps(**overrides: str) -> list[dict[str, Any]]:
@@ -176,10 +181,7 @@ class FakeWorld:
             return self.api(request.method, path)
         if url.startswith(BACKEND):
             self.calls.append(f"backend {request.method} {path}")
-            if path == "/readiness" and self.readiness is not None:
-                status = 200 if self.readiness.get("status") == "ready" else 503
-                return _json(status, self.readiness)
-            return _json(404, {"detail": "Not Found"})
+            return self.backend(path)
         if url.startswith(FRONTEND):
             self.calls.append(f"frontend {request.method} {path}")
             status = self.pages.get(path, 404)
@@ -200,43 +202,59 @@ class FakeWorld:
             return self.horizon(path)
         raise AssertionError(f"unexpected request {request.method} {url}")
 
+    def backend(self, path: str) -> httpx.Response:
+        """The backend host: only the root-level /readiness, 503 with its report unless ready."""
+        if path == "/readiness" and self.readiness is not None:
+            status = 200 if self.readiness.get("status") == "ready" else 503
+            return _json(status, self.readiness)
+        return _json(404, {"detail": "Not Found"})
+
+    def health(self) -> httpx.Response:
+        """GET /api/health: 503 while the backend is down or still waking, then 200."""
+        self._health_seen += 1
+        if self.health_down or self._health_seen <= self.health_failures:
+            return _json(503, {"error": "waking"})
+        return _json(200, {"status": "ok"})
+
+    def agent_readiness_answer(self, agent_id: str) -> httpx.Response:
+        """GET /api/agents/{id}/readiness: the agent's report, or an unregistered one's."""
+        body = self.agent_readiness.get(agent_id)
+        if body is None:
+            body = {"agent_id": agent_id, "checked_at": 1, "ready": False, "steps": ready_steps(registered="todo")}
+        return _json(200, body)
+
+    def reputation_batch(self) -> httpx.Response:
+        """GET /api/stellar/reputation: every entry reads degraded (the prior) while a cold start lasts."""
+        reputations = self.reputations
+        if self.degraded_batches > 0:
+            self.degraded_batches -= 1
+            reputations = {
+                a: {**r, "lower_bound_bps": 5677, "source": "prior", "degraded": True} for a, r in reputations.items()
+            }
+        return _json(200, {"reputations": reputations, "floor_bps": FLOOR, "prior_bps": 7000})
+
     def api(self, method: str, path: str) -> httpx.Response:
-        not_found = _json(404, {"detail": "Not Found", "error": {"code": "not_found"}})
         if method == "POST":
             if path == "/api/orchestrator/decompose":
                 return _json(self.decompose_status, self.decompose_body)
-            return not_found
-        if path == "/api/health":
-            self._health_seen += 1
-            if self.health_down or self._health_seen <= self.health_failures:
-                return _json(503, {"error": "waking"})
-            return _json(200, {"status": "ok"})
-        if path == "/api/stellar/network":
-            return _json(200, {**self.network, "network_passphrase": self.api_passphrase})
-        if path == "/api/ecosystem/adoption":
-            return not_found if self.adoption is None else _json(200, self.adoption)
-        if path == "/api/agents":
-            return _json(200, self.agents)
+            return _not_found()
+        route = self.api_reads().get(path)
+        if route is not None:
+            return route()
         if path.startswith("/api/agents/") and path.endswith("/readiness"):
-            if not self.readiness_route:
-                return not_found
-            agent_id = path.split("/")[3]
-            body = self.agent_readiness.get(agent_id)
-            if body is None:
-                body = {"agent_id": agent_id, "checked_at": 1, "ready": False, "steps": ready_steps(registered="todo")}
-            return _json(200, body)
-        if path == "/api/stellar/reputation":
-            reputations = self.reputations
-            if self.degraded_batches > 0:
-                self.degraded_batches -= 1
-                reputations = {
-                    a: {**r, "lower_bound_bps": 5677, "source": "prior", "degraded": True}
-                    for a, r in reputations.items()
-                }
-            return _json(200, {"reputations": reputations, "floor_bps": FLOOR, "prior_bps": 7000})
-        if path == "/api/stellar/reputation/params":
-            return _json(200, self.params)
-        return not_found
+            return self.agent_readiness_answer(path.split("/")[3]) if self.readiness_route else _not_found()
+        return _not_found()
+
+    def api_reads(self) -> dict[str, Callable[[], httpx.Response]]:
+        """The API's fixed-path GET routes, each answering from the world as it is now."""
+        return {
+            "/api/health": self.health,
+            "/api/stellar/network": lambda: _json(200, {**self.network, "network_passphrase": self.api_passphrase}),
+            "/api/ecosystem/adoption": lambda: _not_found() if self.adoption is None else _json(200, self.adoption),
+            "/api/agents": lambda: _json(200, self.agents),
+            "/api/stellar/reputation": self.reputation_batch,
+            "/api/stellar/reputation/params": lambda: _json(200, self.params),
+        }
 
     def rpc(self, payload: dict[str, Any]) -> httpx.Response:
         method, params = payload.get("method"), payload.get("params") or {}
@@ -379,7 +397,7 @@ def healthy_world() -> FakeWorld:
     world.fund(OP1, 5)
     world.fund(TEAM_BUYER, 20)
     world.fund(TEAM, 20)
-    world.pages = {p: 200 for p in FRONTEND_PAGES}
+    world.pages = dict.fromkeys(FRONTEND_PAGES, 200)
     world.decompose_body = {
         "plan_id": "plan_1",
         "intent": "x",

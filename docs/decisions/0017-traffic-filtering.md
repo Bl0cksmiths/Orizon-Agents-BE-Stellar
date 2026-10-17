@@ -68,7 +68,11 @@ the token; CORSMiddleware answers it before the lock in any case).
 `add_middleware`. The lock is added after `RateLimitMiddleware` and before
 `SecurityHeadersMiddleware`, so the stack, outermost first, is:
 
-`RequestContext → GZip → CORS → SecurityHeaders → OriginLock → RateLimit → RouteRateLimit → BodyLimit → router`
+`CORS → RequestContext → GZip → SecurityHeaders → OriginLock → RateLimit → RouteRateLimit → BodyLimit → router`
+
+(CORS moved from third to outermost after this ADR was written, so its
+header reaches every response a layer makes on its own; the lock's position
+relative to it did not change. `app/main.py` says what that move cost.)
 
 - Outside both limiters and the body cap: a refusal costs a header compare.
   It spends no visitor's budget, so a flood of direct calls cannot 429 the

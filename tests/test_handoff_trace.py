@@ -253,4 +253,5 @@ def test_code_critic_after_code_next_is_not_attempted_and_the_project_is_what_sh
     assert claude.calls_for("worker.code.critic") == []
     assert task.spent == pytest.approx(0.02)  # code.next and deploy.v0; the critic is not billed
     assert ft.consecutive_failures("agt_12r0") == 0
-    assert task.artifact is not None and task.artifact.get("framework") == "next"
+    assert task.artifact is not None
+    assert task.artifact.get("framework") == "next"

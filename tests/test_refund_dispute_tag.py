@@ -147,7 +147,8 @@ def test_the_signed_refund_pays_the_payer_muxed_with_its_dispute_id(monkeypatch)
     m_address = Address.from_xdr_sc_address(to.address).address
     assert MuxedAccount.from_account(m_address).account_id == PAYER
     assert MuxedAccount.from_account(m_address).account_muxed_id == DISPUTE_ID_MUX
-    assert amount.i128.lo.uint64 == 500_000 and amount.i128.hi.int64 == 0
+    assert amount.i128.lo.uint64 == 500_000
+    assert amount.i128.hi.int64 == 0
 
 
 # ── the fallback ────────────────────────────────────────────────────
@@ -214,7 +215,8 @@ def test_a_tagged_transfer_that_may_have_been_sent_is_never_paid_again(monkeypat
     assert len(rpc.sent) == 1
     assert _to(rpc.sent[0]).address.type == SCAddressType.SC_ADDRESS_TYPE_MUXED_ACCOUNT
     # The hash of what was signed, so the dispute records what to look for.
-    assert outcome.tx_hash is not None and len(outcome.tx_hash) == 64
+    assert outcome.tx_hash is not None
+    assert len(outcome.tx_hash) == 64
 
 
 def test_without_a_dispute_the_transfer_is_plain(monkeypatch) -> None:

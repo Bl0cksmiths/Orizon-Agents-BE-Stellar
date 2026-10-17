@@ -46,27 +46,34 @@ def test_the_oracle_scores_full_marks_on_every_metric(cases, tmp_path):
     g = metrics.guard_metrics(rows)
     for key in ("verdict_accuracy", "injection_recall", "block_precision", "needs_detail_recall", "tier_accuracy"):
         assert g[key].value == 1.0, key
-    assert g["false_block_rate"].hits == 0 and g["false_block_rate"].n == 86
+    assert g["false_block_rate"].hits == 0
+    assert g["false_block_rate"].n == 86
     p = metrics.plan_metrics(rows)
-    assert p["plan_valid"].value == 1.0 and p["plan_valid"].n == 86
+    assert p["plan_valid"].value == 1.0
+    assert p["plan_valid"].n == 86
 
 
 def test_the_null_pipeline_catches_nothing_and_plans_nothing_valid(cases, tmp_path):
     _, rows, _ = _run(cases, NullPipeline(), tmp_path, stages="all")
     g = metrics.guard_metrics(rows)
-    assert g["injection_recall"].hits == 0 and g["injection_recall"].n == 50
+    assert g["injection_recall"].hits == 0
+    assert g["injection_recall"].n == 50
     assert g["needs_detail_recall"].hits == 0
     label, baseline = metrics.majority_baseline(rows)
     # A constant "allow" scores exactly the majority baseline — no better.
-    assert label == "allow" and g["verdict_accuracy"].hits == baseline.hits
+    assert label == "allow"
+    assert g["verdict_accuracy"].hits == baseline.hits
     assert metrics.plan_metrics(rows)["plan_valid"].hits == 0
 
 
 def test_rows_carry_what_the_report_needs(cases, tmp_path):
     _, rows, _ = _run(cases[:3], SyntheticPipeline(), tmp_path, stages="all")
     for r in rows:
-        assert r["prompt_id"] and r["prompt"] and r["tags"][0] == r["meta"]["expected"]["category"]
-        assert r["split"] in ("train", "test") and r["status"] == "ok"
+        assert r["prompt_id"]
+        assert r["prompt"]
+        assert r["tags"][0] == r["meta"]["expected"]["category"]
+        assert r["split"] in ("train", "test")
+        assert r["status"] == "ok"
         assert set(r["usage"]) == {
             "input_tokens",
             "output_tokens",
@@ -75,7 +82,8 @@ def test_rows_carry_what_the_report_needs(cases, tmp_path):
         }
         assert (tmp_path / "baseline" / "traces" / f"{r['prompt_id']}_rep0.json").exists()
     state = json.loads((tmp_path / "_state.json").read_text())
-    assert state["metrics"][0]["id"] == "verdict_ok" and state["metrics"][0]["kind"] == "binary"
+    assert state["metrics"][0]["id"] == "verdict_ok"
+    assert state["metrics"][0]["kind"] == "binary"
     assert set(state["train_ids"]) | set(state["test_ids"]) == {c.id for c in cases[:3]}
 
 
@@ -147,26 +155,30 @@ def test_the_spend_cap_stops_new_cases_before_it_is_passed(cases, tmp_path):
     pipeline = Scripted(failures={}, live=True, cost_per_case=0.001)
     # Each case's guard ceiling is tiny; a cap that fits a handful must stop the run there.
     outcome, rows, _ = _run(subset, pipeline, tmp_path, max_usd=0.0003, concurrency=1)
-    assert outcome.stopped and outcome.skipped_budget > 0
+    assert outcome.stopped
+    assert outcome.skipped_budget > 0
     assert len(rows) < len(subset)
 
 
 def test_a_live_pipeline_without_a_cap_is_refused(cases, tmp_path):
+    pipeline = Scripted(failures={}, live=True)
     with pytest.raises(RunRefused, match="spend cap"):
-        _run(cases[:1], Scripted(failures={}, live=True), tmp_path)
+        _run(cases[:1], pipeline, tmp_path)
 
 
 def test_a_variant_cannot_mix_two_kinds_of_run(cases, tmp_path):
     _run(cases[:2], SyntheticPipeline(), tmp_path)
+    pipeline = NullPipeline()
     with pytest.raises(RunRefused, match="another --variant"):
-        _run(cases[:2], NullPipeline(), tmp_path)
+        _run(cases[:2], pipeline, tmp_path)
 
 
 def test_the_app_spend_cap_stops_the_run(cases, tmp_path):
     pipeline = Scripted(failures={cases[0].id: SpendCapReached("daily cap")})
     outcome, _, errors = _run(cases[:5], pipeline, tmp_path, concurrency=1)
     assert errors[0]["failure_class"] == "spend_cap"
-    assert outcome.stopped and outcome.skipped_budget == 4
+    assert outcome.stopped
+    assert outcome.skipped_budget == 4
 
 
 @dataclass

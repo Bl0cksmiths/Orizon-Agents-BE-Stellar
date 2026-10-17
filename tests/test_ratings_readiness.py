@@ -214,7 +214,8 @@ def test_a_stale_answer_is_served_and_refreshed_behind_the_probe(client, monkeyp
         await asyncio.wait({task})
 
     client.portal.call(join)
-    assert rw._last_read is not None and rw._last_read.scorer == SIGNER
+    assert rw._last_read is not None
+    assert rw._last_read.scorer == SIGNER
     for _ in range(3):
         assert client.get("/readiness").json()["ratings"] == {"writer": "scorer", "signer": SIGNER, "scorer": SIGNER}
     assert reads == [LEDGER]  # one read behind four probes

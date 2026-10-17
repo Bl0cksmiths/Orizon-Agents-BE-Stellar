@@ -104,7 +104,7 @@ def _newcomer() -> Agent:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> object:
     """The seeded catalog plus one brand-new on-chain agent, BOUND.
 

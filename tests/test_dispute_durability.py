@@ -201,8 +201,9 @@ def test_the_duplicate_rule_still_holds_after_a_restart(monkeypatch: pytest.Monk
         first = run(store, before())
 
     with pg_process(monkeypatch, pg_dsn) as store:
+        reopening = store.open_dispute(a_dispute(id="dsp_after_restart", reason="trying again"))
         with pytest.raises(DuplicateDisputeError) as excinfo:
-            run(store, store.open_dispute(a_dispute(id="dsp_after_restart", reason="trying again")))
+            run(store, reopening)
 
         assert excinfo.value.existing == first
         assert run(store, store.get_dispute("dsp_after_restart")) is None

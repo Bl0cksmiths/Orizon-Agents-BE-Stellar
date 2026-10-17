@@ -48,7 +48,7 @@ from app.state import state
 FREE_FORM_INTENT = "write a haiku about the sea"
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded() -> object:
     """Fresh 12-agent registry, restored after."""
     saved = dict(state.agents)

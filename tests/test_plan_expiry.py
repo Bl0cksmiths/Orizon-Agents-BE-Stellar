@@ -36,7 +36,7 @@ def _plan(plan_id: str, created_at: float = BUILT_AT) -> StoredPlan:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def clock(monkeypatch):
     """Pin the wall clock execute_plan reads; returns a setter."""
     now = {"t": BUILT_AT}
@@ -44,7 +44,7 @@ def clock(monkeypatch):
     return lambda t: now.__setitem__("t", t)
 
 
-@pytest.fixture()
+@pytest.fixture
 def runs(monkeypatch):
     """Replace the run loop; records which plans were started."""
     started: list[str] = []
@@ -82,8 +82,9 @@ def test_a_plan_exactly_ttl_old_still_executes(clock, runs):
 def test_a_plan_just_past_its_ttl_is_refused_before_any_task_is_minted(clock, runs):
     clock(BUILT_AT + settings.plan_ttl_seconds + 0.001)
     tasks_before = set(state.tasks)
+    plan = _plan("pln_exp_past")
     with pytest.raises(execution_svc.PlanExpiredError) as refused:
-        _execute(_plan("pln_exp_past"))
+        _execute(plan)
     assert refused.value.status_code == 410
     assert refused.value.detail == "plan_expired"
     assert runs == []

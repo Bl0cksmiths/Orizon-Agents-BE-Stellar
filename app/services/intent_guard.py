@@ -297,7 +297,7 @@ async def _fallback_decision(intent: str, policy: GuardPolicy) -> GuardDecision:
         logger.warning("guard fallback refused (category=%s)", getattr(exc, "category", None))
         return _refused(model)
     except (LLMError, MalformedAnswer) as exc:
-        logger.error("guard unavailable: jev and fallback both failed (%s)", type(exc).__name__)
+        logger.exception("guard unavailable: jev and fallback both failed (%s)", type(exc).__name__)
         return unavailable(model=model)
     return decide(scores, source="fallback", model=result.served_by or result.model, policy=policy)
 

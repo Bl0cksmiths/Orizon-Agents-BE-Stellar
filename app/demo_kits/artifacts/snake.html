@@ -109,7 +109,7 @@
     color: var(--muted);
     margin-bottom: 4px;
   }
-  .stat b {
+  .stat output {
     font-size: 18px;
     font-weight: 500;
     color: var(--text);
@@ -271,13 +271,14 @@
     color: var(--text);
   }
   .overlay h2.win { color: var(--primary); }
-  .overlay p {
+  .overlay p, .overlay label {
     font-size: 11px;
     color: var(--muted);
     letter-spacing: 0.12em;
     text-transform: uppercase;
     margin: 0;
   }
+  .overlay label { display: block; }
   .overlay .stats {
     display: grid;
     grid-template-columns: auto auto;
@@ -306,7 +307,6 @@
     font-family: 'JetBrains Mono', monospace;
     font-size: 24px;
     letter-spacing: 0.5em;
-    padding-left: 0.5em;
     width: 140px;
     border-radius: 4px;
     padding: 8px;
@@ -401,7 +401,7 @@
           <span>speed</span><span id="final-speed">normal</span>
         </div>
         <div id="initials-block">
-          <p>enter your initials</p>
+          <label for="initials">enter your initials</label>
           <input class="initials" id="initials" maxlength="3" autocomplete="off" />
         </div>
         <button id="restart-btn" type="button">restart · R</button>
@@ -416,16 +416,16 @@
 
       <div class="hud">
         <div class="stat">
-          <label>score</label>
-          <b id="score">0</b>
+          <label for="score">score</label>
+          <output id="score" aria-live="off">0</output>
         </div>
         <div class="stat">
-          <label>length</label>
-          <b id="length">3</b>
+          <label for="length">length</label>
+          <output id="length" aria-live="off">3</output>
         </div>
         <div class="stat full">
-          <label>session best</label>
-          <b id="best">0</b>
+          <label for="best">session best</label>
+          <output id="best" aria-live="off">0</output>
         </div>
       </div>
 
@@ -472,7 +472,6 @@
 
   const COLOR_BG = '#02060A';
   const COLOR_GRID = 'rgba(31,61,39,0.45)';
-  const COLOR_SNAKE = '#3DFF85';
   const COLOR_SNAKE_HEAD = '#7DFFB1';
   const COLOR_FOOD = '#00FFD1';
   const COLOR_BONUS = '#FF2EC4';
@@ -487,7 +486,6 @@
     nextBonusAt: 0,
     score: 0,
     best: 0,
-    length: 3,
     paused: false,
     over: false,
     started: false,
@@ -526,8 +524,12 @@
   function beep(freq, duration = 80, type = 'square') {
     if (state.muted) return;
     if (!audioCtx) {
-      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-      catch (e) { return; }
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) {
+        // No Web Audio here (unsupported or blocked): sound is optional, so play silently.
+        return;
+      }
     }
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
@@ -647,10 +649,8 @@
   }
 
   // ── Tick: advance snake one cell ─────────────────────────────────────────
-  function tick() {
-    if (state.paused || state.over || !state.started) return;
-    // Commit pending direction (debounced — prevents instant-reverse death).
-    state.dir = state.pendingDir;
+  // Next head cell in the current direction, or null when it hits a wall.
+  function nextHead() {
     const head = state.snake[0];
     let nx = head.x + state.dir.x;
     let ny = head.y + state.dir.y;
@@ -662,29 +662,41 @@
       if (ny < 0) ny = ROWS - 1;
       if (ny >= ROWS) ny = 0;
     } else if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) {
-      return gameOver();
+      return null;
     }
+    return { x: nx, y: ny };
+  }
+  // Self-collision: check against body cells (tail moves unless growing).
+  function hitsBody(nx, ny, growing) {
+    const limit = growing ? state.snake.length : state.snake.length - 1;
+    for (let i = 0; i < limit; i++) {
+      if (state.snake[i].x === nx && state.snake[i].y === ny) return true;
+    }
+    return false;
+  }
+  function tick() {
+    if (state.paused || state.over || !state.started) return;
+    // Commit pending direction (debounced — prevents instant-reverse death).
+    state.dir = state.pendingDir;
+    const next = nextHead();
+    if (!next) return gameOver();
+    const nx = next.x;
+    const ny = next.y;
 
     // Eat? Note: tail collision is OK if we're not also growing this tick.
     const willEat = state.food && state.food.x === nx && state.food.y === ny;
     const willBonus = state.bonus && state.bonus.x === nx && state.bonus.y === ny;
     const growthThisTick = willEat || willBonus;
 
-    // Self-collision: check against body cells (tail moves unless growing).
-    const limit = growthThisTick ? state.snake.length : state.snake.length - 1;
-    for (let i = 0; i < limit; i++) {
-      if (state.snake[i].x === nx && state.snake[i].y === ny) return gameOver();
-    }
+    if (hitsBody(nx, ny, growthThisTick)) return gameOver();
 
     state.snake.unshift({ x: nx, y: ny });
     if (willEat) {
       state.score += 10;
-      state.length++;
       beep(660, 80);
       spawnFood();
     } else if (willBonus) {
       state.score += 50;
-      state.length += 3;
       beep(880, 80);
       beep(1320, 80);   // a quick two-tone for bonus
       state.bonus = null;
@@ -700,7 +712,8 @@
   // ── HUD ──────────────────────────────────────────────────────────────────
   function updateHud() {
     scoreEl.textContent = state.score.toString();
-    lengthEl.textContent = state.length.toString();
+    // Length is read off the body, so the counter always matches the snake on the board.
+    lengthEl.textContent = state.snake.length.toString();
     bestEl.textContent = state.best.toString();
   }
 
@@ -712,10 +725,17 @@
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
       return arr.filter(e => e && typeof e.score === 'number').slice(0, 5);
-    } catch (e) { return []; }
+    } catch (e) {
+      // Storage is blocked or the saved board isn't valid JSON: show an empty board.
+      return [];
+    }
   }
   function saveLb(arr) {
-    try { localStorage.setItem(LB_KEY, JSON.stringify(arr.slice(0, 5))); } catch (e) {}
+    try {
+      localStorage.setItem(LB_KEY, JSON.stringify(arr.slice(0, 5)));
+    } catch (e) {
+      // Storage is blocked or full: the score just isn't kept, and the game plays on.
+    }
   }
   function renderLb() {
     const arr = loadLb();
@@ -744,7 +764,7 @@
     arr.push({
       name: (name || '???').toUpperCase().slice(0, 3).padEnd(3, '?'),
       score: state.score,
-      length: state.length,
+      length: state.snake.length,
       speed: state.speed,
       ts: Date.now(),
     });
@@ -767,12 +787,16 @@
       const p = JSON.parse(raw);
       if (typeof p.wrap === 'boolean') state.wrap = p.wrap;
       if (typeof p.speed === 'string' && p.speed in SPEEDS) state.speed = p.speed;
-    } catch (e) {}
+    } catch (e) {
+      // Storage is blocked or the saved prefs aren't usable: keep the default speed and wrap.
+    }
   }
   function savePrefs() {
     try {
       localStorage.setItem(PREF_KEY, JSON.stringify({ wrap: state.wrap, speed: state.speed }));
-    } catch (e) {}
+    } catch (e) {
+      // Storage is blocked or full: the choice still applies, it just won't survive a reload.
+    }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -786,7 +810,6 @@
     state.dir = { x: 1, y: 0 };
     state.pendingDir = { x: 1, y: 0 };
     state.score = 0;
-    state.length = 3;
     state.paused = false;
     state.over = false;
     state.started = false;
@@ -821,7 +844,7 @@
     if (state.tickHandle) clearInterval(state.tickHandle);
     if (state.bonusTimer) clearTimeout(state.bonusTimer);
     finalScore.textContent = state.score.toLocaleString('en-US');
-    finalLength.textContent = String(state.length);
+    finalLength.textContent = String(state.snake.length);
     finalSpeed.textContent = state.speed;
     const willPrompt = qualifiesForLb();
     initialsBlock.style.display = willPrompt ? '' : 'none';
@@ -860,6 +883,11 @@
     if (state.dir.x === -dx && state.dir.y === -dy) return;
     state.pendingDir = { x: dx, y: dy };
   }
+  function steer(dx, dy) {
+    // A direction key also starts an idle game.
+    if (!state.started) { start(); }
+    setDir(dx, dy);
+  }
 
   function onKey(e) {
     const k = e.key.toLowerCase();
@@ -870,10 +898,19 @@
       e.preventDefault();
       return;
     }
-    if (k === 'w' || k === 'arrowup') { if (!state.started) start(); setDir(0, -1); e.preventDefault(); }
-    else if (k === 's' || k === 'arrowdown') { if (!state.started) start(); setDir(0, 1); e.preventDefault(); }
-    else if (k === 'a' || k === 'arrowleft') { if (!state.started) start(); setDir(-1, 0); e.preventDefault(); }
-    else if (k === 'd' || k === 'arrowright') { if (!state.started) start(); setDir(1, 0); e.preventDefault(); }
+    if (k === 'w' || k === 'arrowup') {
+      steer(0, -1);
+      e.preventDefault();
+    } else if (k === 's' || k === 'arrowdown') {
+      steer(0, 1);
+      e.preventDefault();
+    } else if (k === 'a' || k === 'arrowleft') {
+      steer(-1, 0);
+      e.preventDefault();
+    } else if (k === 'd' || k === 'arrowright') {
+      steer(1, 0);
+      e.preventDefault();
+    }
   }
 
   // Touch swipe input
@@ -910,7 +947,12 @@
   });
   wrapToggle.addEventListener('click', toggleWrap);
   wrapToggle.addEventListener('keydown', (e) => {
-    if (e.key === ' ' || e.key === 'Enter') { toggleWrap(); e.preventDefault(); }
+    if (e.key === ' ' || e.key === 'Enter') {
+      toggleWrap();
+      e.preventDefault();
+      // Space here operates the switch only; it must not also pause the game.
+      e.stopPropagation();
+    }
   });
   restartBtn.addEventListener('click', () => {
     const name = (initialsInput.value || '').trim();
@@ -919,6 +961,8 @@
     start();
   });
   initialsInput.addEventListener('keydown', (e) => {
+    // Keys typed here are initials, not game controls: keep them away from onKey.
+    e.stopPropagation();
     if (e.key === 'Enter') restartBtn.click();
   });
 

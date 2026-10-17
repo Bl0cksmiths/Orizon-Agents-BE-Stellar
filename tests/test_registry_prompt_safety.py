@@ -164,12 +164,12 @@ def clean_state():
     registry_sync._disabled_logged = False
 
 
-@pytest.fixture()
+@pytest.fixture
 def registry_configured(monkeypatch):
     monkeypatch.setattr(settings, "stellar_agent_registry", REGISTRY_ID)
 
 
-@pytest.fixture()
+@pytest.fixture
 def planner_sees(monkeypatch):
     """Put a bound (therefore dispatchable) external agent with a chosen name
     in front of the planner, and return its AVAILABLE_AGENTS entry."""
@@ -315,8 +315,9 @@ def test_mapper_leaves_a_legitimate_name_alone():
     ],
 )
 def test_mapper_refuses_a_price_we_could_never_settle(stroops):
+    raw = _raw(EVIL, price=stroops)
     with pytest.raises(registry_sync.UnbelievablePrice):
-        registry_sync._to_agent(_raw(EVIL, price=stroops))
+        registry_sync._to_agent(raw)
 
 
 def test_mapper_accepts_a_price_at_the_ceiling():
@@ -331,8 +332,9 @@ def test_the_api_ceiling_still_binds_when_the_charge_cap_is_raised(monkeypatch):
     # ceiling is the TIGHTER of the charge cap and our own API's le=10_000.
     monkeypatch.setattr(settings, "max_charge_usdc", 1_000_000.0)
 
+    raw = _raw(EVIL, price=50_000 * 10_000_000)
     with pytest.raises(registry_sync.UnbelievablePrice):
-        registry_sync._to_agent(_raw(EVIL, price=50_000 * 10_000_000))
+        registry_sync._to_agent(raw)
     assert registry_sync._to_agent(_raw(EVIL, price=9_000 * 10_000_000)).price == pytest.approx(9_000.0)
 
 

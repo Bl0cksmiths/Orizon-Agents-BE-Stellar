@@ -753,8 +753,27 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
 
 @router.post(
     "/disputes/challenge",
-    response_model=DisputeChallengeResponse,
     summary="Mint a dispute challenge to sign",
+    responses={
+        404: {"model": ErrorEnvelope, "description": "`unknown_job` — no settled workflow with that job id."},
+        409: {
+            "model": ErrorEnvelope,
+            "description": (
+                "The step cannot be disputed: `dispute_window_closed`, `step_not_settled` or `nothing_was_charged`."
+            ),
+        },
+        429: {
+            "model": ErrorEnvelope,
+            "description": (
+                "Rate limited (+ Retry-After): the global limit, or `dispute_challenge_rate_limited` — this "
+                "client's challenge budget is spent."
+            ),
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": "`challenge_capacity_dispute` — every dispute-challenge slot is live. Ask again shortly.",
+        },
+    },
 )
 async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> DisputeChallengeResponse:
     """Issue the nonce and the exact string the payer's wallet must sign.
@@ -832,7 +851,6 @@ _READ_GRANT_RESPONSES: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/disputes/read-challenge",
-    response_model=DisputeReadChallengeResponse,
     summary="Mint a challenge the payer signs to read their disputes' free text",
     responses=_READ_CHALLENGE_RESPONSES,
 )
@@ -861,7 +879,6 @@ async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadCh
 
 @router.post(
     "/disputes/read-grant",
-    response_model=DisputeReadGrantResponse,
     summary="Exchange the payer's read signature for a read grant",
     responses=_READ_GRANT_RESPONSES,
 )
@@ -971,7 +988,11 @@ async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
     return DisputeResponse.of(record, free_text=True)
 
 
-@router.get("/disputes/{dispute_id}", response_model=DisputeResponse, summary="Read one dispute")
+@router.get(
+    "/disputes/{dispute_id}",
+    summary="Read one dispute",
+    responses={404: {"model": ErrorEnvelope, "description": "`unknown_dispute` — no dispute with that id."}},
+)
 async def get_dispute(
     dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
     proof: Annotated[TaskReadProof, Depends(task_read_proof)],
@@ -1047,7 +1068,6 @@ async def _require_listing_read(
 
 @router.get(
     "/tasks/{task_id}/disputes",
-    response_model=TaskDisputesResponse,
     summary="A task's dispute window and the disputes raised on it",
     dependencies=[Depends(_require_listing_read)],
 )
@@ -1211,13 +1231,12 @@ _UPHOLD_RESPONSES: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/disputes/{dispute_id}/uphold",
-    response_model=DisputeResponse,
     summary="Uphold a dispute and credit the buyer",
     dependencies=[Depends(require_adjudicator)],
     responses=_UPHOLD_RESPONSES,
 )
 async def uphold_dispute(
-    dispute_id: str = Path(..., min_length=1, max_length=64),
+    dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
 ) -> DisputeResponse:
     """Find for the buyer: credit the step back out of the settler's balance.
 
@@ -1273,7 +1292,6 @@ async def uphold_dispute(
 
 @router.post(
     "/disputes/{dispute_id}/reject",
-    response_model=DisputeResponse,
     summary="Reject a dispute, with a reason the buyer is shown",
     dependencies=[Depends(require_adjudicator)],
     # No 502/504: nothing here signs, so there is no ledger for it to report
@@ -1283,7 +1301,7 @@ async def uphold_dispute(
 )
 async def reject_dispute(
     body: RejectDisputeReq,
-    dispute_id: str = Path(..., min_length=1, max_length=64),
+    dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
 ) -> DisputeResponse:
     """Find for the platform: close the dispute without crediting anything.
 

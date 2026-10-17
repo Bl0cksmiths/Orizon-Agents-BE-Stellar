@@ -47,6 +47,7 @@ from .sweep import render as render_sweep
 from .sweep import sweep as run_sweep
 
 STAGES = ("s1-guard", "s2-external", "s3-haiku", "s4-full")
+RESULTS_FILE = "results.jsonl"
 SNAPSHOT = re.compile(r"-\d{8}$")
 JEV_USD_PER_MTOK = 0.042
 TIER_MODEL = {"low": "claude-haiku-4-5", "moderate": "claude-sonnet-5-5", "complex": "claude-opus-5-5"}
@@ -471,27 +472,30 @@ def per_request_costs(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 # ── tier rules and the recommended policy ───────────────────────────────────
 
+CURRENT_TIER_RULE = "round up below 0.50 (current)"
+RECOMMENDED_TIER_RULE = "only low->moderate below 0.50"
+
 
 def _rule(name: str) -> Callable[[str, float], str]:
     def below(line: float) -> Callable[[str, float], str]:
         return lambda tier, conf: tier_up(tier) if conf < line else tier
 
     rules: dict[str, Callable[[str, float], str]] = {
-        "round up below 0.50 (current)": below(0.50),
+        CURRENT_TIER_RULE: below(0.50),
         "round up below 0.35": below(0.35),
         "round up below 0.25": below(0.25),
         "never round up": lambda tier, conf: tier,
-        "only low->moderate below 0.50": lambda tier, conf: "moderate" if tier == "low" and conf < 0.50 else tier,
+        RECOMMENDED_TIER_RULE: lambda tier, conf: "moderate" if tier == "low" and conf < 0.50 else tier,
     }
     return rules[name]
 
 
 TIER_RULES = (
-    "round up below 0.50 (current)",
+    CURRENT_TIER_RULE,
     "round up below 0.35",
     "round up below 0.25",
     "never round up",
-    "only low->moderate below 0.50",
+    RECOMMENDED_TIER_RULE,
 )
 
 
@@ -567,10 +571,9 @@ def watch_sweep(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # The policy this campaign recommends: the train-picked injection line (the
 # only knob whose held-out result improved without a cost), and the tier rule
-# with the best accuracy and fewest over-tiered requests. Everything else stays.
+# with the best accuracy and fewest over-tiered requests (RECOMMENDED_TIER_RULE,
+# named with the tier rules above). Everything else stays.
 RECOMMENDED = STARTING.with_(injection_block=0.40)
-RECOMMENDED_TIER_RULE = "only low->moderate below 0.50"
-CURRENT_TIER_RULE = "round up below 0.50 (current)"
 
 
 def recommended(sweep_rows: list[dict[str, Any]], tier_test_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -671,7 +674,7 @@ class Campaign:
     out: Path
 
     def rows(self, stage: str) -> list[dict[str, Any]]:
-        return read_jsonl(self.runs / stage / "results.jsonl")
+        return read_jsonl(self.runs / stage / RESULTS_FILE)
 
     def errors(self, stage: str) -> list[dict[str, Any]]:
         return read_jsonl(self.runs / stage / "errors.jsonl")
@@ -691,7 +694,7 @@ class Campaign:
             "diagnostic_reruns_usd": sum(w["cost_usd"] for w in workers.values() if w.get("diagnostic")),
             "by_worker": {k: w["cost_usd"] for k, w in workers.items()},
         }
-        smoke = read_jsonl(self.runs / "smoke" / "results.jsonl")
+        smoke = read_jsonl(self.runs / "smoke" / RESULTS_FILE)
         costs["smoke"] = cost_block(smoke, [])
         grand = (
             sum(c["list_price_usd"] for c in costs.values() if "list_price_usd" in c)
@@ -775,7 +778,7 @@ class Campaign:
             rows = self.rows(stage)
             if stage == "s2-external":
                 rows = [_redact_external(r) for r in rows]
-            (dest / "results.jsonl").write_text(
+            (dest / RESULTS_FILE).write_text(
                 "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
             )
             errs = self.errors(stage)

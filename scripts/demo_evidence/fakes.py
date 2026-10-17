@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from stellar_sdk import Network
 
 from .config import TESTNET_PASSPHRASE
 
 RPC = "https://rpc.test"
 HORIZON = "https://horizon.test"
-MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+MAINNET_PASSPHRASE = Network.PUBLIC_NETWORK_PASSPHRASE
 
 
 def tx_hash(tag: str) -> str:
@@ -65,41 +66,47 @@ class FakeLedger:
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
+    def _rpc(self, request: httpx.Request) -> httpx.Response:
+        """A JSON-RPC call: `getNetwork`, `getTransaction`, else method-not-found."""
+        payload = json.loads(request.content)
+        method, params = payload.get("method"), payload.get("params") or {}
+        self.calls.append(f"rpc {method}")
+
+        def ok(result: Any) -> httpx.Response:
+            return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "result": result})
+
+        if method == "getNetwork":
+            return ok({"passphrase": self.rpc_passphrase})
+        if method == "getTransaction":
+            if self.rpc_down:
+                return _json(503, {"error": "unavailable"})
+            tx = self.txs.get(params["hash"])
+            if tx is None or not tx.rpc_visible:
+                return ok({"status": "NOT_FOUND", "latestLedger": 5000})
+            return ok({"status": tx.status, "ledger": tx.ledger, "latestLedger": 5000})
+        return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601}})
+
+    def _horizon(self, request: httpx.Request) -> httpx.Response:
+        """A Horizon read: the root, `/transactions/{hash}`, else 404."""
+        path = request.url.path
+        self.calls.append(f"horizon {request.method} {path}")
+        if path == "/":
+            return _json(200, {"network_passphrase": self.horizon_passphrase})
+        if not path.startswith("/transactions/"):
+            return _json(404, {"status": 404})
+        if self.horizon_down:
+            return _json(503, {"status": 503})
+        tx = self.txs.get(path.split("/")[2])
+        if tx is None or not tx.horizon_visible:
+            return _json(404, {"status": 404})
+        return _json(200, {"successful": tx.status == "SUCCESS", "ledger": tx.ledger, "created_at": tx.created_at})
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url.startswith(RPC):
-            payload = json.loads(request.content)
-            method, params = payload.get("method"), payload.get("params") or {}
-            self.calls.append(f"rpc {method}")
-
-            def ok(result: Any) -> httpx.Response:
-                return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "result": result})
-
-            if method == "getNetwork":
-                return ok({"passphrase": self.rpc_passphrase})
-            if method == "getTransaction":
-                if self.rpc_down:
-                    return _json(503, {"error": "unavailable"})
-                tx = self.txs.get(params["hash"])
-                if tx is None or not tx.rpc_visible:
-                    return ok({"status": "NOT_FOUND", "latestLedger": 5000})
-                return ok({"status": tx.status, "ledger": tx.ledger, "latestLedger": 5000})
-            return _json(200, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32601}})
+            return self._rpc(request)
         if url.startswith(HORIZON):
-            path = request.url.path
-            self.calls.append(f"horizon {request.method} {path}")
-            if path == "/":
-                return _json(200, {"network_passphrase": self.horizon_passphrase})
-            if path.startswith("/transactions/"):
-                if self.horizon_down:
-                    return _json(503, {"status": 503})
-                tx = self.txs.get(path.split("/")[2])
-                if tx is None or not tx.horizon_visible:
-                    return _json(404, {"status": 404})
-                return _json(
-                    200, {"successful": tx.status == "SUCCESS", "ledger": tx.ledger, "created_at": tx.created_at}
-                )
-            return _json(404, {"status": 404})
+            return self._horizon(request)
         raise AssertionError(f"unexpected request {request.method} {url}")
 
 

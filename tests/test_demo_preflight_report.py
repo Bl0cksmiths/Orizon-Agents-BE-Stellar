@@ -41,7 +41,8 @@ def test_warn_holds() -> None:
 def test_a_required_skip_is_never_a_pass() -> None:
     code, line = verdict([_check(PASS), _check(SKIPPED)])
     assert code == EXIT_INCOMPLETE
-    assert line.startswith("NO-GO") and "skipped is not a pass" in line
+    assert line.startswith("NO-GO")
+    assert "skipped is not a pass" in line
 
 
 def test_an_advisory_skip_or_fail_does_not_gate() -> None:
@@ -64,8 +65,11 @@ def test_json_shape(tmp_path: Path) -> None:
     facts = Facts(cold_start_seconds=12.5, disclosures=["The operator G… is a team wallet: say so on camera."])
     code, line = verdict(checks)
     body = render_json(checks, facts, RUN, code, line)
-    assert body["verdict"] == "NO-GO" and body["exit_code"] == EXIT_NO_GO and body["network"] == "testnet"
-    assert body["generated_at"] == 1_790_000_000 and body["cold_start_seconds"] == 12.5
+    assert body["verdict"] == "NO-GO"
+    assert body["exit_code"] == EXIT_NO_GO
+    assert body["network"] == "testnet"
+    assert body["generated_at"] == 1_790_000_000
+    assert body["cold_start_seconds"] == 12.5
     assert [c["id"] for c in body["checks"]] == ["a.b", "c.d"]
     assert set(body["checks"][0]) == {"id", "group", "title", "required", "status", "detail", "fix"}
     md_path, json_path = write(tmp_path, render_markdown(checks, facts, RUN, code, line), body)
@@ -84,7 +88,9 @@ def test_reports_mask_anything_shaped_like_a_secret(tmp_path: Path) -> None:
     body = render_json([check], Facts(), RUN, code, line)
     markdown = render_markdown([check], Facts(), RUN, code, line)
     for text in (json.dumps(body), markdown):
-        assert seed not in text and blob not in text and "[redacted]" in text
+        assert seed not in text
+        assert blob not in text
+        assert "[redacted]" in text
 
 
 def test_scrub_leaves_the_evidence_alone() -> None:

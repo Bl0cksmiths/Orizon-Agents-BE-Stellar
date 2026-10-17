@@ -81,7 +81,8 @@ def test_reputation_switched_off_is_disabled(monkeypatch):
     configure(monkeypatch, enabled=False)
     v = asyncio.run(rw.check())
     assert v.status == "disabled"
-    assert v.gap is not None and "REPUTATION_ENABLED" in v.gap.problem
+    assert v.gap is not None
+    assert "REPUTATION_ENABLED" in v.gap.problem
     assert (v.signer, v.scorer) == (None, None)
 
 
@@ -89,14 +90,16 @@ def test_no_ledger_is_disabled(monkeypatch):
     configure(monkeypatch, ledger="")
     v = asyncio.run(rw.check())
     assert v.status == "disabled"
-    assert v.gap is not None and "STELLAR_REPUTATION_LEDGER" in v.gap.problem
+    assert v.gap is not None
+    assert "STELLAR_REPUTATION_LEDGER" in v.gap.problem
 
 
 def test_no_signing_key_is_no_signer(monkeypatch):
     configure(monkeypatch, key=False)
     v = asyncio.run(rw.check())
     assert v.status == "no_signer"
-    assert v.gap is not None and v.gap.problem == "STELLAR_SIGNING_KEY is unset"
+    assert v.gap is not None
+    assert v.gap.problem == "STELLAR_SIGNING_KEY is unset"
     assert (v.signer, v.scorer) == (None, None)
 
 
@@ -112,7 +115,8 @@ def test_a_key_that_does_not_parse_is_no_signer_and_never_quoted(monkeypatch):
     monkeypatch.setattr(sc, "signer_public_key", _bad_key)
     v = asyncio.run(rw.check())
     assert v.status == "no_signer"
-    assert v.gap is not None and "STELLAR_SIGNING_KEY is set but" in v.gap.problem
+    assert v.gap is not None
+    assert "STELLAR_SIGNING_KEY is set but" in v.gap.problem
     assert secret_ish not in repr(v)
 
 
@@ -412,7 +416,8 @@ def test_the_warning_returns_after_the_interval_with_the_runs_it_held_back(monke
         rw.note_skipped("tsk_later", rw._NO_KEY)
     first, second = _warnings(caplog)
     assert "0 more run(s)" in first
-    assert "tsk_later" in second and "3 more run(s)" in second
+    assert "tsk_later" in second
+    assert "3 more run(s)" in second
 
 
 def test_each_cause_is_warned_on_its_own_clock(caplog):
@@ -427,4 +432,5 @@ def test_each_cause_is_warned_on_its_own_clock(caplog):
 def test_the_trace_reasons_name_no_setting():
     """The operator line names the variable; the buyer's trace does not."""
     for gap in (rw._REPUTATION_OFF, rw._NO_LEDGER, rw._NO_KEY, rw._BAD_KEY):
-        assert "STELLAR_" not in gap.reason and "REPUTATION_" not in gap.reason
+        assert "STELLAR_" not in gap.reason
+        assert "REPUTATION_" not in gap.reason

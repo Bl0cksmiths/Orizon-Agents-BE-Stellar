@@ -23,10 +23,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import cost
 from .app_pipeline import RecordingClaude, _CaseLog, _current
+from .contract import StageCall
+
+if TYPE_CHECKING:
+    from app.agents.workers.base import Worker
 
 # A contract small enough for the 500-character intent bound, with one
 # classic reentrancy bug (state written after the external call).
@@ -226,7 +230,7 @@ def ceiling_usd(jobs: tuple[Job, ...] = JOBS) -> float:
     return sum(cost.call_cost(j.model, 6_000 + j.max_tokens, j.max_tokens) for j in jobs)
 
 
-def _digest(agent_id: str, out: dict[str, Any]) -> dict[str, Any]:
+def _digest(out: dict[str, Any]) -> dict[str, Any]:
     """The parts of a worker's output a reader needs, without the bulk."""
     digest: dict[str, Any] = {"summary": out.get("summary"), "counts": out.get("counts")}
     artifact = out.get("artifact")
@@ -240,6 +244,95 @@ def _digest(agent_id: str, out: dict[str, Any]) -> dict[str, Any]:
         if key in out:
             digest[key] = out[key]
     return digest
+
+
+def _save_artifact(out_dir: Path, label: str, out: dict[str, Any]) -> None:
+    """Write each file of the output's artifact, if it has one, beside the
+    record as `<label stem>__<file name>`."""
+    artifact = out.get("artifact") if isinstance(out.get("artifact"), dict) else None
+    if not artifact:
+        return
+    stem = label.replace(".", "_").replace("#", "_")
+    for f in artifact.get("files", []):
+        path = out_dir / f"{stem}__{Path(str(f.get('path', 'index.html'))).name}"
+        path.write_text(str(f.get("content", "")), encoding="utf-8")
+
+
+async def _run_job(
+    worker: Worker, job: Job, context: dict[str, Any], budgeted: BudgetedClaude | None, log: _CaseLog
+) -> tuple[dict[str, Any], str | None, float]:
+    """Run one job's worker with its calls booked to `log`.
+
+    Returns the worker's output (empty when it failed), its error, and what
+    was billed but never reported back: the estimate at a budget cut-off, or
+    the running estimate of a stream aborted from outside (the worker's own
+    wall-clock budget)."""
+    token = _current.set(log)
+    error = None
+    unreported = 0.0
+    if budgeted is not None:
+        budgeted.in_flight_usd = 0.0
+    out: dict[str, Any] = {}
+    try:
+        if job.tier is not None:
+            out = await worker.run(job.intent, job.rationale, dict(context), tier=job.tier)  # type: ignore[call-arg]
+        else:
+            out = await worker.run(job.intent, job.rationale, dict(context))
+    except BudgetExceeded as e:
+        error = f"BudgetExceeded: {e}"
+        unreported = e.estimate_usd
+    except Exception as e:  # a worker failure is a result to report, not a crash
+        error = f"{type(e).__name__}: {e}"
+        if budgeted is not None and budgeted.in_flight_usd:
+            unreported = budgeted.in_flight_usd
+            error += f" (stream aborted; estimated ${unreported:.4f} unreported)"
+    finally:
+        _current.reset(token)
+    return out, error, unreported
+
+
+def _job_record(
+    job: Job,
+    worker_name: str,
+    label: str,
+    elapsed: float,
+    calls: list[StageCall],
+    error: str | None,
+    unreported: float,
+    out: dict[str, Any],
+) -> dict[str, Any]:
+    """The saved record of one job: what ran, every call it made, and a digest of its output."""
+    return {
+        "agent_id": job.agent_id,
+        "worker": worker_name,
+        "label": label,
+        "unreported_estimated_usd": unreported,
+        "case_id": job.case_id,
+        "tier": job.tier,
+        "intent": job.intent,
+        "latency_s": round(elapsed, 2),
+        "cost_usd": sum(c.cost_usd for c in calls),
+        "calls": [
+            {
+                "model": c.model,
+                "response_model": c.response_model,
+                "served_by": c.served_by,
+                "input_tokens": c.input_tokens,
+                "output_tokens": c.output_tokens,
+                "cache_read_input_tokens": c.cache_read_input_tokens,
+                "cache_creation_input_tokens": c.cache_creation_input_tokens,
+                "cost_usd": c.cost_usd,
+                "app_cost_usd": c.app_cost_usd,
+                "latency_ms": round(c.latency_ms),
+                "first_token_ms": round(c.first_token_ms) if c.first_token_ms is not None else None,
+                "effort": c.effort,
+                "stop_reason": c.stop_reason,
+            }
+            for c in calls
+        ],
+        "error": error,
+        "output": _digest(out),
+    }
 
 
 async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: float | None = None) -> dict[str, Any]:
@@ -274,74 +367,16 @@ async def run_sample(out_dir: Path, jobs: tuple[Job, ...] = JOBS, budget_usd: fl
         if job.critic_of is not None:
             context["code.gen"] = drafts.get(job.critic_of, {})
         log = _CaseLog()
-        token = _current.set(log)
         started = time.perf_counter()
-        error = None
-        unreported = 0.0
-        if budgeted is not None:
-            budgeted.in_flight_usd = 0.0
-        out: dict[str, Any] = {}
-        try:
-            if job.tier is not None:
-                out = await worker.run(job.intent, job.rationale, dict(context), tier=job.tier)  # type: ignore[call-arg]
-            else:
-                out = await worker.run(job.intent, job.rationale, dict(context))
-        except BudgetExceeded as e:
-            error = f"BudgetExceeded: {e}"
-            spent += e.estimate_usd
-            unreported = e.estimate_usd
-        except Exception as e:  # a worker failure is a result to report, not a crash
-            error = f"{type(e).__name__}: {e}"
-            if budgeted is not None and budgeted.in_flight_usd:
-                # A stream aborted from outside (the worker's own wall-clock
-                # budget): billed, never reported. Book the running estimate.
-                unreported = budgeted.in_flight_usd
-                spent += unreported
-                error += f" (stream aborted; estimated ${unreported:.4f} unreported)"
-        finally:
-            _current.reset(token)
+        out, error, unreported = await _run_job(worker, job, context, budgeted, log)
+        spent += unreported
         elapsed = time.perf_counter() - started
         spent += sum(c.cost_usd for c in log.calls)
         if job.agent_id == "agt_11c0" and out:
             context["code.gen"] = out  # the critic polishes this draft
             drafts[label] = out
-        artifact = out.get("artifact") if isinstance(out.get("artifact"), dict) else None
-        if artifact:
-            stem = label.replace(".", "_").replace("#", "_")
-            for f in artifact.get("files", []):
-                path = out_dir / f"{stem}__{Path(str(f.get('path', 'index.html'))).name}"
-                path.write_text(str(f.get("content", "")), encoding="utf-8")
-        record = {
-            "agent_id": job.agent_id,
-            "worker": worker.name,
-            "label": label,
-            "unreported_estimated_usd": unreported,
-            "case_id": job.case_id,
-            "tier": job.tier,
-            "intent": job.intent,
-            "latency_s": round(elapsed, 2),
-            "cost_usd": sum(c.cost_usd for c in log.calls),
-            "calls": [
-                {
-                    "model": c.model,
-                    "response_model": c.response_model,
-                    "served_by": c.served_by,
-                    "input_tokens": c.input_tokens,
-                    "output_tokens": c.output_tokens,
-                    "cache_read_input_tokens": c.cache_read_input_tokens,
-                    "cache_creation_input_tokens": c.cache_creation_input_tokens,
-                    "cost_usd": c.cost_usd,
-                    "app_cost_usd": c.app_cost_usd,
-                    "latency_ms": round(c.latency_ms),
-                    "first_token_ms": round(c.first_token_ms) if c.first_token_ms is not None else None,
-                    "effort": c.effort,
-                    "stop_reason": c.stop_reason,
-                }
-                for c in log.calls
-            ],
-            "error": error,
-            "output": _digest(job.agent_id, out),
-        }
+        _save_artifact(out_dir, label, out)
+        record = _job_record(job, worker.name, label, elapsed, log.calls, error, unreported, out)
         results[label] = record
         (out_dir / f"{label.replace('.', '_').replace('#', '_')}.json").write_text(
             json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

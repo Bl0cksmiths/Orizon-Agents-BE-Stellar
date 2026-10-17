@@ -74,8 +74,13 @@ from .signing import (
 #   f"reputation submit failed for {step.agent_name}: {reason} · tx {tx[:10]}…"
 # The trace carries only the first ten hex characters of the hash; the full
 # hash is recovered from the ReputationLedger's `rated` event (`rating_hashes`).
+# The unlanded name runs to the first ": " (one character at least), spelled
+# so it cannot also claim what the reason's `.*` matches: a lazy `.+?` there
+# backtracks quadratically on a line with many colons.
 RATED_LINE = re.compile(r"^reputation → (?P<name>.+) rated (?P<rating>\d+)/100 · tx (?P<prefix>[0-9a-f]{10})…$")
-UNLANDED_LINE = re.compile(r"^reputation submit failed for (?P<name>.+?): .* · tx (?P<prefix>[0-9a-f]{10})…$")
+UNLANDED_LINE = re.compile(
+    r"^reputation submit failed for (?P<name>.(?:[^:\n]|:(?! ))*): .* · tx (?P<prefix>[0-9a-f]{10})…$"
+)
 
 TERMINAL_TASK = ("complete", "failed")
 RESUME_SCAN_LEDGERS = 17_280
@@ -107,6 +112,32 @@ def plan_total_stroops(plan: dict[str, Any]) -> int:
 
 def fmt_amount(value: float | int | None) -> str | None:
     return None if value is None else f"{float(value):.7f}"
+
+
+def wanted_ratings(lines: list[dict[str, Any]], names: dict[str, str]) -> list[tuple[str, str, str | None, bool]]:
+    """(hash prefix, agent id, rating, landed) for each rating line in the trace, in trace order.
+
+    A landed rating carries its score; an unlanded one (`reputation submit
+    failed`) has none. `names` maps the agent names the trace prints to ids.
+    """
+    wanted: list[tuple[str, str, str | None, bool]] = []
+    for line in lines:
+        msg = str(line.get("msg") or "")
+        m = RATED_LINE.match(msg)
+        if m:
+            wanted.append((m.group("prefix"), names.get(m.group("name"), m.group("name")), m.group("rating"), True))
+            continue
+        u = UNLANDED_LINE.match(msg)
+        if u:
+            wanted.append((u.group("prefix"), names.get(u.group("name"), u.group("name")), None, False))
+    return wanted
+
+
+def check_mark(ok: bool | None) -> str:
+    """A settlement check's four-character mark: PASS, FAIL, or `n/a ` when it does not apply."""
+    if ok is None:
+        return "n/a "
+    return "PASS" if ok else "FAIL"
 
 
 @dataclass
@@ -225,27 +256,8 @@ class Runner:
         try:
             start = self.preflight()
             if self.cfg.dry_run:
-                self.print_plan(start)
-                if self.blockers:
-                    self.say("")
-                    self.say("A real run with these flags would stop:")
-                    for blocker in self.blockers:
-                        self.say(f"  - {blocker}")
-                    raise Stop(
-                        EXIT_REFUSED,
-                        f"dry run: {len(self.blockers)} blocker(s) a real run would hit: " + "; ".join(self.blockers),
-                    )
-                return EXIT_OK
-            last = stage_index(self.cfg.until)
-            for name in STAGES[stage_index(start) : last + 1]:
-                self.say(f"== {name}")
-                getattr(self, f"stage_{name}")()
-                self.state.done(name)
-                self.save()
-            self.state.stopped = None
-            self.save()
-            self.say(f"done through '{self.cfg.until}'. Evidence: {self.log.jsonl} and {self.log.markdown}")
-            return EXIT_OK
+                return self.dry_run(start)
+            return self.run_stages(start)
         except SigningRefused as exc:
             return self.stopped(Stop(EXIT_STAGE_FAILED if self.state.run_id else EXIT_REFUSED, str(exc)))
         except Stop as exc:
@@ -262,6 +274,33 @@ class Runner:
                 self.note("run", "run_crashed", f"{type(exc).__name__}: {self.console.redactor.scrub(str(exc))}")
             raise
 
+    def run_stages(self, start: str) -> int:
+        """Run each stage from `start` through `--until`, saving state after every one."""
+        last = stage_index(self.cfg.until)
+        for name in STAGES[stage_index(start) : last + 1]:
+            self.say(f"== {name}")
+            getattr(self, f"stage_{name}")()
+            self.state.done(name)
+            self.save()
+        self.state.stopped = None
+        self.save()
+        self.say(f"done through '{self.cfg.until}'. Evidence: {self.log.jsonl} and {self.log.markdown}")
+        return EXIT_OK
+
+    def dry_run(self, start: str) -> int:
+        """Print the plan. A dry run that found blockers stops, naming each, as the real run would."""
+        self.print_plan(start)
+        if self.blockers:
+            self.say("")
+            self.say("A real run with these flags would stop:")
+            for blocker in self.blockers:
+                self.say(f"  - {blocker}")
+            raise Stop(
+                EXIT_REFUSED,
+                f"dry run: {len(self.blockers)} blocker(s) a real run would hit: " + "; ".join(self.blockers),
+            )
+        return EXIT_OK
+
     def stopped(self, exc: Stop) -> int:
         self.say(f"STOPPED (exit {exc.code}): {exc.message}")
         if self.state.run_id and not self.cfg.dry_run and self.log.directory.exists():
@@ -274,6 +313,103 @@ class Runner:
     # ── preflight (every invocation, dry runs included) ─────────
     def preflight(self) -> str:
         self.warm()
+        chain, rpc_url = self.confirm_testnet()
+
+        self.buyer = load_keypair(self.cfg.buyer_secret_env, self.console.redactor, self.environ)
+        if stage_index(self.cfg.until) >= stage_index("uphold"):
+            self.load_adjudicator_key()
+
+        start = self.resume_point()
+        version, how = self.read_escrow_version(chain)
+        self.state.escrow_version = version
+        self.state.network = str(self.network.get("network") or "testnet")
+        self.state.agent = self.cfg.agent
+        self.state.buyer = self.need_buyer().public_key
+
+        listed = self.api.agents()
+        agents = {a.get("id"): a for a in listed}
+        self.directory = {str(a.get("name")): str(a.get("id")) for a in listed if a.get("name")}
+        readiness = self.api.readiness()
+        self.say(f"network: {self.state.network} · escrow v{version} ({how}) · buyer {self.state.buyer}")
+        self.say(f"api {self.api.base} · rpc {rpc_url}")
+        if readiness is not None:
+            self.say(f"readiness: {readiness.get('status')} · ratings {readiness.get('ratings')}")
+        records = self.agent_records(agents, start)
+
+        if not self.cfg.dry_run:
+            self.save()
+            self.note(
+                "preflight",
+                "preflight",
+                f"testnet confirmed by API and RPC; escrow v{version}; starting at '{start}'",
+                escrow_version=version,
+                escrow_version_source=how,
+                escrow=self.contracts.get("payment_escrow"),
+                readiness=readiness,
+                agent_record=records[self.cfg.agent],
+                start_stage=start,
+                until=self.cfg.until,
+                **({"agents": list(self.cfg.all_agents), "agent_records": records} if self.cfg.multi_agent else {}),
+            )
+        self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
+        return start
+
+    def agent_records(self, agents: dict[Any, dict[str, Any]], start: str) -> dict[str, dict[str, Any]]:
+        """Each --agent's GET /api/agents row.
+
+        A fresh run refuses an agent that is not external and bound; a dry run
+        records it as a blocker instead.
+        """
+        records: dict[str, dict[str, Any]] = {}
+        for agent_id in self.cfg.all_agents:
+            agent = agents.get(agent_id)
+            if agent is None:
+                raise Stop(EXIT_REFUSED, f"agent {agent_id!r} is not listed by GET /api/agents")
+            records[agent_id] = agent
+            self.say(
+                f"agent {agent_id}: source={agent.get('source')} bound={agent.get('bound')} "
+                f"owner={agent.get('owner')} price={agent.get('price')}"
+            )
+            external = agent.get("source") == "onchain" and agent.get("bound") is True
+            if not external and start == "decompose":
+                message = (
+                    f"agent {agent_id!r} is not an external, bound agent "
+                    f"(source={agent.get('source')}, bound={agent.get('bound')})"
+                )
+                if not self.cfg.dry_run:
+                    raise Stop(EXIT_REFUSED, message)
+                self.blockers.append(f"{message}: a real run refuses it before decompose (exit {EXIT_REFUSED})")
+        return records
+
+    def read_escrow_version(self, chain: ChainReader) -> tuple[int, str]:
+        """(version, how it was decided) of the escrow this run's money goes through."""
+        version, how = chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
+        run_escrow = (self.state.authorize or {}).get("escrow")
+        if run_escrow and run_escrow != self.contracts["payment_escrow"]:
+            # A resume across the escrow switch: this run's money went through
+            # the escrow it authorized against, so that is what gets verified.
+            self.say(
+                f"NOTE: this run authorized against {run_escrow}; the API now names {self.contracts['payment_escrow']}"
+            )
+            version, how = chain.escrow_version(run_escrow, self.need_buyer().public_key)
+        return version, how
+
+    def load_adjudicator_key(self) -> None:
+        """The operator key a run through 'uphold' adjudicates with."""
+        if self.cfg.adjudicator_key_env:
+            self.adjudicator_key = load_api_key(self.cfg.adjudicator_key_env, self.console.redactor, self.environ)
+        elif not self.cfg.dry_run:
+            raise Stop(EXIT_REFUSED, "--adjudicator-key-env is required to run through 'uphold'")
+        else:
+            # A dry run signs and adjudicates nothing, so it does not ask
+            # for the operator key; the real run still will.
+            self.say("NOTE: the real run through 'uphold' needs --adjudicator-key-env; this dry run does not")
+
+    def confirm_testnet(self) -> tuple[ChainReader, str]:
+        """Read the API's network and open the RPC reader; refuse unless both say testnet.
+
+        Returns the reader and the RPC url it reads.
+        """
         self.network = self.api.network()
         passphrase = self.network.get("network_passphrase")
         if passphrase != TESTNET_PASSPHRASE:
@@ -295,79 +431,7 @@ class Runner:
         rpc_passphrase = self.chain.network_passphrase()
         if rpc_passphrase != TESTNET_PASSPHRASE:
             raise Stop(EXIT_REFUSED, f"refusing to run: the RPC at {rpc_url} is on {rpc_passphrase!r}, not testnet")
-
-        self.buyer = load_keypair(self.cfg.buyer_secret_env, self.console.redactor, self.environ)
-        needs_uphold = stage_index(self.cfg.until) >= stage_index("uphold")
-        if needs_uphold:
-            if self.cfg.adjudicator_key_env:
-                self.adjudicator_key = load_api_key(self.cfg.adjudicator_key_env, self.console.redactor, self.environ)
-            elif not self.cfg.dry_run:
-                raise Stop(EXIT_REFUSED, "--adjudicator-key-env is required to run through 'uphold'")
-            else:
-                # A dry run signs and adjudicates nothing, so it does not ask
-                # for the operator key; the real run still will.
-                self.say("NOTE: the real run through 'uphold' needs --adjudicator-key-env; this dry run does not")
-
-        start = self.resume_point()
-        version, how = self.chain.escrow_version(self.contracts["payment_escrow"], self.need_buyer().public_key)
-        run_escrow = (self.state.authorize or {}).get("escrow")
-        if run_escrow and run_escrow != self.contracts["payment_escrow"]:
-            # A resume across the escrow switch: this run's money went through
-            # the escrow it authorized against, so that is what gets verified.
-            self.say(
-                f"NOTE: this run authorized against {run_escrow}; the API now names {self.contracts['payment_escrow']}"
-            )
-            version, how = self.chain.escrow_version(run_escrow, self.need_buyer().public_key)
-        self.state.escrow_version = version
-        self.state.network = str(self.network.get("network") or "testnet")
-        self.state.agent = self.cfg.agent
-        self.state.buyer = self.need_buyer().public_key
-
-        listed = self.api.agents()
-        agents = {a.get("id"): a for a in listed}
-        self.directory = {str(a.get("name")): str(a.get("id")) for a in listed if a.get("name")}
-        readiness = self.api.readiness()
-        self.say(f"network: {self.state.network} · escrow v{version} ({how}) · buyer {self.state.buyer}")
-        self.say(f"api {self.api.base} · rpc {rpc_url}")
-        if readiness is not None:
-            self.say(f"readiness: {readiness.get('status')} · ratings {readiness.get('ratings')}")
-        records: dict[str, dict[str, Any]] = {}
-        for agent_id in self.cfg.all_agents:
-            agent = agents.get(agent_id)
-            if agent is None:
-                raise Stop(EXIT_REFUSED, f"agent {agent_id!r} is not listed by GET /api/agents")
-            records[agent_id] = agent
-            self.say(
-                f"agent {agent_id}: source={agent.get('source')} bound={agent.get('bound')} "
-                f"owner={agent.get('owner')} price={agent.get('price')}"
-            )
-            external = agent.get("source") == "onchain" and agent.get("bound") is True
-            if not external and start == "decompose":
-                message = (
-                    f"agent {agent_id!r} is not an external, bound agent "
-                    f"(source={agent.get('source')}, bound={agent.get('bound')})"
-                )
-                if not self.cfg.dry_run:
-                    raise Stop(EXIT_REFUSED, message)
-                self.blockers.append(f"{message}: a real run refuses it before decompose (exit {EXIT_REFUSED})")
-
-        if not self.cfg.dry_run:
-            self.save()
-            self.note(
-                "preflight",
-                "preflight",
-                f"testnet confirmed by API and RPC; escrow v{version}; starting at '{start}'",
-                escrow_version=version,
-                escrow_version_source=how,
-                escrow=self.contracts.get("payment_escrow"),
-                readiness=readiness,
-                agent_record=records[self.cfg.agent],
-                start_stage=start,
-                until=self.cfg.until,
-                **({"agents": list(self.cfg.all_agents), "agent_records": records} if self.cfg.multi_agent else {}),
-            )
-        self.snapshot("start" if start == "decompose" else f"resume_at_{start}")
-        return start
+        return self.chain, rpc_url
 
     def warm(self) -> None:
         """Wake the backend the way components/backend-warmup.tsx does — GET
@@ -392,13 +456,7 @@ class Runner:
         """Where this invocation starts, and whether the evidence dir allows it."""
         prior = self.store.load()
         if prior is not None:
-            if prior.agent and prior.agent != self.cfg.agent:
-                raise Stop(
-                    EXIT_RESUME_CONFLICT, f"{self.store.path} is agent {prior.agent}'s run, not {self.cfg.agent}'s"
-                )
-            if prior.buyer and self.buyer is not None and prior.buyer != self.buyer.public_key:
-                raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is buyer {prior.buyer}'s run, not this key's")
-            self.state = prior
+            self.adopt_prior_state(prior)
         if self.cfg.from_dispute:
             if self.state.dispute is None or self.state.dispute.get("id") != self.cfg.from_dispute:
                 self.state.dispute = {"id": self.cfg.from_dispute}
@@ -415,39 +473,56 @@ class Runner:
             self.ensure_run_id()
             return "poll"
         if prior is not None and (prior.plan or prior.authorize or prior.task_id):
-            pending = (prior.authorize or {}).get("status") in ("signed", "unknown")
-            raise Stop(
-                EXIT_RESUME_CONFLICT,
-                f"{self.store.path} already holds a run (task {prior.task_id}"
-                + (f", authorize {prior.authorize['tx_hash']} unconfirmed" if pending and prior.authorize else "")
-                + "). Resume it with --from-task / --from-dispute, or start a new run in a new --evidence-dir. "
-                "A fresh run here could authorize a second payment.",
-            )
+            raise self.held_run(prior)
         if not self.cfg.intent:
             raise Stop(EXIT_REFUSED, "--intent is required for a fresh run")
         self.ensure_run_id()
         return "decompose"
 
+    def adopt_prior_state(self, prior: RunState) -> None:
+        """Carry on from the evidence dir's saved state, unless it is another agent's or buyer's run."""
+        if prior.agent and prior.agent != self.cfg.agent:
+            raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is agent {prior.agent}'s run, not {self.cfg.agent}'s")
+        if prior.buyer and self.buyer is not None and prior.buyer != self.buyer.public_key:
+            raise Stop(EXIT_RESUME_CONFLICT, f"{self.store.path} is buyer {prior.buyer}'s run, not this key's")
+        self.state = prior
+
+    def held_run(self, prior: RunState) -> Stop:
+        """The refusal of a fresh run in an evidence dir that already holds one."""
+        pending = (prior.authorize or {}).get("status") in ("signed", "unknown")
+        return Stop(
+            EXIT_RESUME_CONFLICT,
+            f"{self.store.path} already holds a run (task {prior.task_id}"
+            + (f", authorize {prior.authorize['tx_hash']} unconfirmed" if pending and prior.authorize else "")
+            + "). Resume it with --from-task / --from-dispute, or start a new run in a new --evidence-dir. "
+            "A fresh run here could authorize a second payment.",
+        )
+
     def ensure_run_id(self) -> None:
         if not self.state.run_id:
             self.state.run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{self.cfg.agent}"
+
+    def plan_buyer_balance(self, chain: ChainReader, buyer: str, stages: tuple[str, ...]) -> None:
+        """Say the buyer's balance; a buyer that does not exist blocks a run that would decompose."""
+        sac = self.network.get("asset_sac")
+        if not sac:
+            return
+        balance = chain.sac_balance(str(sac), buyer, buyer)
+        if balance is not None:
+            self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
+            return
+        self.say(f"buyer {buyer} does not exist on testnet: fund it (friendbot) before a real run")
+        if "decompose" in stages:
+            self.blockers.append(
+                f"the buyer {buyer} does not exist on testnet: a real run refuses it after decompose, "
+                f"before anything is signed (exit {EXIT_REFUSED}); fund it (friendbot) first"
+            )
 
     def print_plan(self, start: str) -> None:
         buyer = self.need_buyer().public_key
         chain = self.need_chain()
         stages = STAGES[stage_index(start) : stage_index(self.cfg.until) + 1]
-        sac = self.network.get("asset_sac")
-        if sac:
-            balance = chain.sac_balance(str(sac), buyer, buyer)
-            if balance is None:
-                self.say(f"buyer {buyer} does not exist on testnet: fund it (friendbot) before a real run")
-                if "decompose" in stages:
-                    self.blockers.append(
-                        f"the buyer {buyer} does not exist on testnet: a real run refuses it after decompose, "
-                        f"before anything is signed (exit {EXIT_REFUSED}); fund it (friendbot) first"
-                    )
-            else:
-                self.say(f"buyer balance: {balance} stroops of {asset_label(self.network.get('asset'))}")
+        self.plan_buyer_balance(chain, buyer, stages)
         version = self.state.escrow_version or 1
         if version < 2 and "verify" in stages:
             escrow = (self.state.authorize or {}).get("escrow") or self.contracts.get("payment_escrow")
@@ -788,16 +863,7 @@ class Runner:
         recovered from the ReputationLedger's `rated` events (topic: the
         agent's id), matched by that prefix, from the ledger the run started at.
         """
-        wanted: list[tuple[str, str, str | None, bool]] = []  # (prefix, agent_id, rating, landed)
-        for line in lines:
-            msg = str(line.get("msg") or "")
-            m = RATED_LINE.match(msg)
-            if m:
-                wanted.append((m.group("prefix"), names.get(m.group("name"), m.group("name")), m.group("rating"), True))
-                continue
-            u = UNLANDED_LINE.match(msg)
-            if u:
-                wanted.append((u.group("prefix"), names.get(u.group("name"), u.group("name")), None, False))
+        wanted = wanted_ratings(lines, names)
         self.ratings = []
         if not wanted:
             return
@@ -824,21 +890,25 @@ class Runner:
                     scanned_from_ledger=start,
                 )
                 continue
-            seen = chain.observe(match.tx_hash, self.budgets.tx_observe)
-            value = match.value if isinstance(match.value, list) else []
-            if self.ratings is not None:
-                self.ratings.append((agent_id, int(value[0]) if value else None, seen.status))
-            self.tx(
-                "poll",
-                "rating",
-                seen,
-                contract=self.contracts["reputation_ledger"],
-                agent=agent_id,
-                summary=f"ReputationLedger.submit for {agent_id}: {rating or (value[0] if value else '?')}/100",
-                rating=value[0] if value else rating,
-                weight=value[1] if len(value) > 1 else None,
-                kind=value[3] if len(value) > 3 else None,
-            )
+            self.record_rating(chain, match, agent_id, rating)
+
+    def record_rating(self, chain: ChainReader, match: ChainEvent, agent_id: str, rating: str | None) -> None:
+        """The evidence row for one rating found on the ledger, with the ledger's status for its hash."""
+        seen = chain.observe(match.tx_hash, self.budgets.tx_observe)
+        value = match.value if isinstance(match.value, list) else []
+        if self.ratings is not None:
+            self.ratings.append((agent_id, int(value[0]) if value else None, seen.status))
+        self.tx(
+            "poll",
+            "rating",
+            seen,
+            contract=self.contracts["reputation_ledger"],
+            agent=agent_id,
+            summary=f"ReputationLedger.submit for {agent_id}: {rating or (value[0] if value else '?')}/100",
+            rating=value[0] if value else rating,
+            weight=value[1] if len(value) > 1 else None,
+            kind=value[3] if len(value) > 3 else None,
+        )
 
     # ── 5. verify ───────────────────────────────────────────────
     def read_settlement(self) -> dict[str, Any] | None:
@@ -857,75 +927,101 @@ class Runner:
             return dict(settlement)
         return self.state.settlement
 
-    def stage_verify(self) -> None:
-        chain, buyer = self.need_chain(), self.need_buyer().public_key
-        settlement = self.read_settlement()
-        escrow = (self.state.authorize or {}).get("escrow") or self.contracts["payment_escrow"]
-        version = self.state.escrow_version or 1
-        if not settlement:
-            why = (
-                " Escrow v1 cannot settle an external payer's funds (D-039), so this is expected until v2 is deployed."
-                if version == 1
-                else ""
+    def settle_events(
+        self, chain: ChainReader, charge_seen: Observation, settlement: dict[str, Any], escrow: str, version: int
+    ) -> list[ChainEvent]:
+        """Record the settle (v2) or charge (v1) row, then read the escrow's events in that transaction."""
+        self.tx(
+            "verify",
+            "settle" if version >= 2 else "charge",
+            charge_seen,
+            contract=escrow,
+            amount=settlement.get("settled_usdc"),
+            summary=f"PaymentEscrow v{version} {'settle' if version >= 2 else 'charge'} "
+            f"for job {settlement.get('job_id_hex')}",
+            job_id_hex=settlement.get("job_id_hex"),
+        )
+        if not charge_seen.ledger:
+            return []
+        try:
+            return chain.events(escrow, charge_seen.ledger, tx_hash=charge_seen.tx_hash)
+        except RpcError as exc:
+            # A settle older than the RPC's event retention: the checks
+            # then fail on missing events, and say why.
+            self.note("verify", "events_unavailable", f"getEvents refused: {exc}", ledger=charge_seen.ledger)
+            return []
+
+    def v2_checks(
+        self,
+        chain: ChainReader,
+        settlement: dict[str, Any],
+        escrow: str,
+        charge_seen: Observation | None,
+        events: list[ChainEvent],
+    ) -> tuple[list[verify.Check], list[str]]:
+        """v2's settle, checked against the ledger.
+
+        Its payouts, the settled event, the authorization view and the balances.
+        Returns the checks and the receipts the settle's `charged` events carry.
+        """
+        buyer = self.need_buyer().public_key
+        checks = [verify.check_tx("v2_settle_tx", charge_seen)]
+        if self.state.owners is None:
+            self.state.owners = self.owners_for([str(s.get("agent_id")) for s in settlement.get("steps") or []])
+            self.save()
+        charged, paid = verify.check_charged_events(events, settlement, self.state.owners)
+        max_stroops = (self.state.authorize or {}).get("max_stroops")
+        checks += [*charged, verify.check_settled_event(events, settlement, paid, max_stroops)]
+        auth_id = (self.state.authorize or {}).get("auth_id_hex") or verify.settled_auth_id(events)
+        if auth_id:
+            checks.append(
+                verify.check_authorization_view(chain.escrow_authorization(escrow, auth_id, buyer), paid, buyer)
             )
-            self.note("verify", "no_settlement", "the task has no settlement record" + why)
+        checks += self.balance_checks(events, paid, escrow)
+        receipts = verify.charged_receipts(events)
+        for e in events:
+            if e.topics[:1] == ["charged"]:
+                self.say(f"    charged {e.topics[1:2]} {e.value}")
+        return checks, receipts
+
+    def report_checks(
+        self,
+        checks: list[verify.Check],
+        version: int,
+        attestation: dict[str, Any] | None,
+        settlement: dict[str, Any],
+    ) -> None:
+        """Print each check and record them all; stop unless every one passes."""
+        ok = verify.passed(checks)
+        for c in checks:
+            mark = check_mark(c.ok)
+            self.say(f"    [{mark}] {c.name}: {c.detail}")
+        self.note(
+            "verify",
+            "settlement_checks",
+            f"escrow v{version}: {'all checks pass' if ok else 'CHECKS FAILED'}",
+            escrow_version=version,
+            checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+            attestation=attestation,
+            steps=settlement.get("steps"),
+        )
+        if not ok:
             raise Stop(
-                EXIT_VERIFY_FAILED,
-                "no settlement was recorded for this task, so there is nothing to verify or dispute." + why,
+                EXIT_VERIFY_FAILED, "the ledger does not show the settlement the API reports; see the checks above"
             )
 
-        checks: list[verify.Check] = [
-            verify.Check(
-                "settlement_payer_is_buyer", settlement.get("payer") == buyer, f"payer {settlement.get('payer')}"
-            )
-        ]
-        charge_tx = settlement.get("charge_tx")
-        charge_seen = chain.observe(str(charge_tx), self.budgets.tx_observe) if charge_tx else None
-        events: list[ChainEvent] = []
-        if charge_seen is not None:
-            self.tx(
-                "verify",
-                "settle" if version >= 2 else "charge",
-                charge_seen,
-                contract=escrow,
-                amount=settlement.get("settled_usdc"),
-                summary=f"PaymentEscrow v{version} {'settle' if version >= 2 else 'charge'} "
-                f"for job {settlement.get('job_id_hex')}",
-                job_id_hex=settlement.get("job_id_hex"),
-            )
-            if charge_seen.ledger:
-                try:
-                    events = chain.events(escrow, charge_seen.ledger, tx_hash=charge_seen.tx_hash)
-                except RpcError as exc:
-                    # A settle older than the RPC's event retention: the
-                    # checks below then fail on missing events, and say why.
-                    self.note("verify", "events_unavailable", f"getEvents refused: {exc}", ledger=charge_seen.ledger)
+    def seal_checks(
+        self, chain: ChainReader, settlement: dict[str, Any], receipts: list[str] | None
+    ) -> tuple[list[verify.Check], dict[str, Any] | None]:
+        """The seal, checked against the ledger: its transaction and the attestation it wrote.
 
-        receipts: list[str] | None = None
-        if version >= 2:
-            checks.append(verify.check_tx("v2_settle_tx", charge_seen))
-            if self.state.owners is None:
-                self.state.owners = self.owners_for([str(s.get("agent_id")) for s in settlement.get("steps") or []])
-                self.save()
-            charged, paid = verify.check_charged_events(events, settlement, self.state.owners)
-            max_stroops = (self.state.authorize or {}).get("max_stroops")
-            checks += [*charged, verify.check_settled_event(events, settlement, paid, max_stroops)]
-            auth_id = (self.state.authorize or {}).get("auth_id_hex") or verify.settled_auth_id(events)
-            if auth_id:
-                checks.append(
-                    verify.check_authorization_view(chain.escrow_authorization(escrow, auth_id, buyer), paid, buyer)
-                )
-            checks += self.balance_checks(events, paid, escrow)
-            receipts = verify.charged_receipts(events)
-            for e in events:
-                if e.topics[:1] == ["charged"]:
-                    self.say(f"    charged {e.topics[1:2]} {e.value}")
-        else:
-            checks += verify.check_v1_charge(charge_seen, events)
-
+        A multi-agent run also checks the seal names which steps delivered.
+        Returns the checks and the attestation read.
+        """
+        buyer = self.need_buyer().public_key
         proof_tx = settlement.get("proof_tx")
         proof_seen = chain.observe(str(proof_tx), self.budgets.tx_observe) if proof_tx else None
-        checks.append(verify.check_tx("seal_tx", proof_seen))
+        checks = [verify.check_tx("seal_tx", proof_seen)]
         if proof_seen is not None:
             self.tx(
                 "verify",
@@ -947,24 +1043,49 @@ class Runner:
                 verify.check_seal_receipts_are_delivered_steps(attestation, settlement),
                 *verify.check_failed_steps_rated(settlement, self.ratings),
             ]
+        return checks, attestation
 
-        ok = verify.passed(checks)
-        for c in checks:
-            mark = "PASS" if c.ok else ("n/a " if c.ok is None else "FAIL")
-            self.say(f"    [{mark}] {c.name}: {c.detail}")
-        self.note(
-            "verify",
-            "settlement_checks",
-            f"escrow v{version}: {'all checks pass' if ok else 'CHECKS FAILED'}",
-            escrow_version=version,
-            checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
-            attestation=attestation,
-            steps=settlement.get("steps"),
+    def no_settlement(self, version: int) -> Stop:
+        """Record that the task has no settlement, and the stop that follows: nothing to verify or dispute."""
+        why = (
+            " Escrow v1 cannot settle an external payer's funds (D-039), so this is expected until v2 is deployed."
+            if version == 1
+            else ""
         )
-        if not ok:
-            raise Stop(
-                EXIT_VERIFY_FAILED, "the ledger does not show the settlement the API reports; see the checks above"
+        self.note("verify", "no_settlement", "the task has no settlement record" + why)
+        return Stop(
+            EXIT_VERIFY_FAILED,
+            "no settlement was recorded for this task, so there is nothing to verify or dispute." + why,
+        )
+
+    def stage_verify(self) -> None:
+        chain, buyer = self.need_chain(), self.need_buyer().public_key
+        settlement = self.read_settlement()
+        escrow = (self.state.authorize or {}).get("escrow") or self.contracts["payment_escrow"]
+        version = self.state.escrow_version or 1
+        if not settlement:
+            raise self.no_settlement(version)
+
+        checks: list[verify.Check] = [
+            verify.Check(
+                "settlement_payer_is_buyer", settlement.get("payer") == buyer, f"payer {settlement.get('payer')}"
             )
+        ]
+        charge_tx = settlement.get("charge_tx")
+        charge_seen = chain.observe(str(charge_tx), self.budgets.tx_observe) if charge_tx else None
+        events = self.settle_events(chain, charge_seen, settlement, escrow, version) if charge_seen is not None else []
+
+        receipts: list[str] | None = None
+        if version >= 2:
+            v2_checks, receipts = self.v2_checks(chain, settlement, escrow, charge_seen, events)
+            checks += v2_checks
+        else:
+            checks += verify.check_v1_charge(charge_seen, events)
+
+        seal_checks, attestation = self.seal_checks(chain, settlement, receipts)
+        checks += seal_checks
+
+        self.report_checks(checks, version, attestation, settlement)
 
     def balance_checks(self, events: list[ChainEvent], paid: int, escrow: str) -> list[verify.Check]:
         chain, buyer = self.need_chain(), self.need_buyer().public_key
@@ -1107,6 +1228,37 @@ class Runner:
         self.console.redactor.register(self.grant)
 
     # ── 7. uphold ───────────────────────────────────────────────
+    def uphold_unanswered(self, dispute_id: str, exc: UnknownOutcome | ApiError) -> Stop:
+        """The stop after an uphold whose answer was lost or refused; it is never retried.
+
+        The dispute is read back first, and what it shows is recorded, with any
+        credit the interrupted uphold left behind.
+        """
+        after = self.api.dispute(dispute_id, grant=self.grant)
+        unknown = isinstance(exc, UnknownOutcome)
+        self.note(
+            "uphold",
+            "uphold_unknown" if unknown else "uphold_refused",
+            f"{exc}; the dispute now reads {after.get('status')}",
+            dispute_id=dispute_id,
+            status=after.get("status"),
+            refund_tx=after.get("refund_tx"),
+        )
+        if after.get("refund_tx"):
+            self.tx(
+                "uphold",
+                "refund",
+                self.need_chain().observe(str(after["refund_tx"]), self.budgets.tx_observe),
+                contract=self.network.get("asset_sac"),
+                amount=after.get("credited_usdc") or after.get("creditable_usdc"),
+                summary="the credit the interrupted uphold left behind",
+            )
+        return Stop(
+            EXIT_UNKNOWN_OUTCOME if unknown else EXIT_STAGE_FAILED,
+            f"uphold {'outcome unknown' if unknown else 'refused'} ({exc}); dispute reads {after.get('status')}. "
+            "Not retried.",
+        )
+
     def stage_uphold(self) -> None:
         dispute_id = str((self.state.dispute or {}).get("id") or "")
         current = self.api.dispute(dispute_id, grant=self.grant)
@@ -1125,30 +1277,7 @@ class Runner:
         try:
             upheld = self.api.uphold(dispute_id, self.adjudicator_key)
         except (UnknownOutcome, ApiError) as exc:
-            after = self.api.dispute(dispute_id, grant=self.grant)
-            unknown = isinstance(exc, UnknownOutcome)
-            self.note(
-                "uphold",
-                "uphold_unknown" if unknown else "uphold_refused",
-                f"{exc}; the dispute now reads {after.get('status')}",
-                dispute_id=dispute_id,
-                status=after.get("status"),
-                refund_tx=after.get("refund_tx"),
-            )
-            if after.get("refund_tx"):
-                self.tx(
-                    "uphold",
-                    "refund",
-                    self.need_chain().observe(str(after["refund_tx"]), self.budgets.tx_observe),
-                    contract=self.network.get("asset_sac"),
-                    amount=after.get("credited_usdc") or after.get("creditable_usdc"),
-                    summary="the credit the interrupted uphold left behind",
-                )
-            raise Stop(
-                EXIT_UNKNOWN_OUTCOME if unknown else EXIT_STAGE_FAILED,
-                f"uphold {'outcome unknown' if unknown else 'refused'} ({exc}); dispute reads {after.get('status')}. "
-                "Not retried.",
-            ) from exc
+            raise self.uphold_unanswered(dispute_id, exc) from exc
         self.state.dispute = {**(self.state.dispute or {}), "status": upheld.get("status")}
         self.save()
         self.say(f"  upheld: dispute {dispute_id} is {upheld.get('status')}")

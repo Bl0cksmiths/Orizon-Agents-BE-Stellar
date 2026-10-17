@@ -1,0 +1,263 @@
+[
+  {
+    "id": "m01",
+    "category": "Adoption targets",
+    "metric": "Externally-operated agents registered on Testnet",
+    "target": "≥ 2",
+    "achieved": "3",
+    "status": "met",
+    "method": "Read every agent the AgentRegistry contract lists, with its owner, straight from testnet. An agent counts only if its owner is neither one of the team's wallets (the committed register) nor a key the platform runs (network admin, dispatch signer, ratings signer and scorer, registry admin, escrow settler and admin, ledger scorer, attestation sealer).",
+    "links": [
+      {
+        "label": "AgentRegistry contract (every registered agent)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN",
+        "kind": "contract"
+      },
+      {
+        "label": "Registration of house_agent by the team's contract admin and v1 escrow settler — 2026-04-20 (excluded: team wallet)",
+        "url": "https://stellar.expert/explorer/testnet/tx/045ef594d81d2f2134d61151ed71260d8f79e657c7cb6ed1d893688532017409",
+        "kind": "tx",
+        "tx_hash": "045ef594d81d2f2134d61151ed71260d8f79e657c7cb6ed1d893688532017409",
+        "date": "2026-04-20"
+      },
+      {
+        "label": "Registration of qa_agent by the team's QA throwaway operator key — 2026-09-17 (excluded: team wallet)",
+        "url": "https://stellar.expert/explorer/testnet/tx/eea1ad3fbf2142ede510d0220518d902a5ba9b502851530d7fc1454f5147206c",
+        "kind": "tx",
+        "tx_hash": "eea1ad3fbf2142ede510d0220518d902a5ba9b502851530d7fc1454f5147206c",
+        "date": "2026-09-17"
+      },
+      {
+        "label": "Outside operators' agents, on the Ecosystem page. Their agent ids, wallets and transaction hashes are held back until each operator's consent to publish them is recorded",
+        "url": "https://front.test/app/ecosystem",
+        "kind": "page"
+      }
+    ]
+  },
+  {
+    "id": "m02",
+    "category": "Adoption targets",
+    "metric": "Unique external operator wallet addresses",
+    "target": "≥ 2",
+    "achieved": "2",
+    "status": "met",
+    "method": "The distinct owner wallets of the registered agents, each checked the same way as the row above. A wallet counts only if it is neither one of the team's wallets (the committed register) nor a key the platform runs (network admin, dispatch signer, ratings signer and scorer, registry admin, escrow settler and admin, ledger scorer, attestation sealer).",
+    "links": [
+      {
+        "label": "Outside operators' agents, on the Ecosystem page. Their agent ids, wallets and transaction hashes are held back until each operator's consent to publish them is recorded",
+        "url": "https://front.test/app/ecosystem",
+        "kind": "page"
+      },
+      {
+        "label": "The platform's ratings signer — owns signer_agent (excluded: platform key)",
+        "url": "https://stellar.expert/explorer/testnet/account/GBFZRFVWIXH6ABE55TCZ2XAPACNVWBGW2P7EKZECRRZBULOKPZGPSS6N",
+        "kind": "account"
+      },
+      {
+        "label": "The team's QA throwaway operator key — owns qa_agent (excluded: team wallet)",
+        "url": "https://stellar.expert/explorer/testnet/account/GBNRRKOSAXFYIWGSEEYM34SCNNREKRB65GRLHMBHRNGMF3FDW3XTHCNZ",
+        "kind": "account"
+      },
+      {
+        "label": "The team's contract admin and v1 escrow settler — owns house_agent (excluded: team wallet)",
+        "url": "https://stellar.expert/explorer/testnet/account/GDPH6XWBZBHHNKJQWR3N6RHTCDCYKJ2KC6XUG4NCH7E46PHJWYMPO7NO",
+        "kind": "account"
+      }
+    ]
+  },
+  {
+    "id": "m03",
+    "category": "Transaction targets",
+    "metric": "Workflows routed to external agents & settled on Testnet",
+    "target": "≥ 3",
+    "achieved": "Not measured",
+    "status": "not_met",
+    "reason": "Not measured: the escrow's payment records could not be read when this ran, so this row reports no number rather than a wrong one. Run the generator again once it answers.",
+    "method": "Walked every id each escrow contract has issued (its id counter numbers every authorization and receipt, so this does not depend on how long the network keeps events) and read each receipt and the payer that authorized it. A v1 charge and each payout of a v2 settle count as one charge. A charge is excluded when it is a self-payment (the payer owns the agent, is the escrow's settler, or is a platform key) or settled before the sprint began on 2026-09-07. Testnet settles in native XLM, not USDC: the escrow's payment asset is the native XLM asset contract. A workflow counts when at least one of its counted charges paid an agent owned by an outside operator; several charges of one job are one workflow.",
+    "links": [
+      {
+        "label": "PaymentEscrow v1 contract (every charge it recorded)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI",
+        "kind": "contract"
+      }
+    ]
+  },
+  {
+    "id": "m04",
+    "category": "Transaction targets",
+    "metric": "On-chain USDC settlements (charges) recorded",
+    "target": "≥ 3",
+    "achieved": "Not measured",
+    "status": "not_met",
+    "reason": "Not measured: the escrow's payment records could not be read when this ran, so this row reports no number rather than a wrong one. Run the generator again once it answers.",
+    "method": "Walked every id each escrow contract has issued (its id counter numbers every authorization and receipt, so this does not depend on how long the network keeps events) and read each receipt and the payer that authorized it. A v1 charge and each payout of a v2 settle count as one charge. A charge is excluded when it is a self-payment (the payer owns the agent, is the escrow's settler, or is a platform key) or settled before the sprint began on 2026-09-07. Testnet settles in native XLM, not USDC: the escrow's payment asset is the native XLM asset contract.",
+    "links": [
+      {
+        "label": "PaymentEscrow v1 contract (every charge it recorded)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CBJPTMAPMGODGZCZ2IMEQSRUX3WGUXNMKDTNN2KMJ3NFGYZ5OJ5525PI",
+        "kind": "contract"
+      }
+    ]
+  },
+  {
+    "id": "m05",
+    "category": "Transaction targets",
+    "metric": "Dispute → partial-refund settlements",
+    "target": "≥ 1",
+    "achieved": "Not measured",
+    "status": "not_met",
+    "reason": "Not measured: the escrow's payment records and the platform keys' transaction history could not be read when this ran, so this row reports no number rather than a wrong one. Run the generator again once it answers.",
+    "method": "Read the dispute ratings the platform wrote to the ReputationLedger (from its keys' full transaction history) and traced each back, through the derived job id the backend records a dispute under, to the charge it disputes. A refund counts only when that charge counts and the platform then paid its payer back over the asset contract, no more than the charge. A transfer with no dispute behind it (such as a refund drill) does not count. The ledger's lifetime dispute count for every agent is read as a cross-check.",
+    "links": [
+      {
+        "label": "ReputationLedger contract (every rating)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA",
+        "kind": "contract"
+      }
+    ]
+  },
+  {
+    "id": "m06",
+    "category": "Technical milestones",
+    "metric": "Permissionless AgentRegistry.register flow live on the dApp",
+    "target": "Yes",
+    "achieved": "Yes",
+    "status": "met",
+    "method": "Opened the /app/register page on the live dApp with no login, and checked the live backend publishes the route that builds an unsigned registration transaction for the owner's own wallet to sign. The registry contract's register needs only the owner's signature, no admin.",
+    "links": [
+      {
+        "label": "Register an agent page (opens with no login)",
+        "url": "https://front.test/app/register",
+        "kind": "page"
+      },
+      {
+        "label": "Live backend route list",
+        "url": "https://backend.test/openapi.json",
+        "kind": "doc"
+      },
+      {
+        "label": "AgentRegistry contract (every registered agent)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CCDSJENDBVQNLGEWFXTOPOBUVN3LFKTF7OVRALDOXKVONLG4EOECECFN",
+        "kind": "contract"
+      },
+      {
+        "label": "Outside operators' agents, on the Ecosystem page. Their agent ids, wallets and transaction hashes are held back until each operator's consent to publish them is recorded",
+        "url": "https://front.test/app/ecosystem",
+        "kind": "page"
+      }
+    ]
+  },
+  {
+    "id": "m07",
+    "category": "Technical milestones",
+    "metric": "Reputation-gated routing (reads avg_bps, applies a floor) live",
+    "target": "Yes",
+    "achieved": "Not measured",
+    "status": "not_met",
+    "reason": "Not measured: the live reputation settings could not be read when this ran, so this row reports no number rather than a wrong one. Run the generator again once it answers.",
+    "method": "Read the live reputation settings the router applies (whether the floor is on, and its value) from the deployed API. The router scores each agent from the ReputationLedger's on-chain average and leaves out any agent below the floor.",
+    "links": [
+      {
+        "label": "Live reputation settings",
+        "url": "https://orizon.test/api/stellar/reputation/params",
+        "kind": "doc"
+      },
+      {
+        "label": "ReputationLedger contract (every rating)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA",
+        "kind": "contract"
+      }
+    ]
+  },
+  {
+    "id": "m08",
+    "category": "Technical milestones",
+    "metric": "Automated dispute window + partial-credit refund live",
+    "target": "Yes",
+    "achieved": "Not measured",
+    "status": "not_met",
+    "reason": "Not measured: the escrow's payment records and the platform keys' transaction history could not be read when this ran, so this row reports no number rather than a wrong one. Run the generator again once it answers.",
+    "method": "Checked that the live backend publishes the dispute routes (open, read, uphold, reject); that a dispute window can open at all, which needs a settled payment, and so the escrow v2 contract live; that its readiness report shows refunds switched on (disputes.reconcile.enabled, true only when refunds and the refund sweep are both on); and that at least one dispute has been refunded on-chain (the dispute refund row above). Yes when all hold, Partly when the routes are deployed but the rest does not, and No when the routes are not.",
+    "links": [
+      {
+        "label": "Live backend route list",
+        "url": "https://backend.test/openapi.json",
+        "kind": "doc"
+      },
+      {
+        "label": "Live backend readiness report",
+        "url": "https://backend.test/readiness",
+        "kind": "doc"
+      },
+      {
+        "label": "ReputationLedger contract (every rating)",
+        "url": "https://stellar.expert/explorer/testnet/contract/CD7BIAILJ7UDGA4FF4CGPSIZ56NHZIEJXEPJNY5K27KCNXMHA6JJOFNA",
+        "kind": "contract"
+      }
+    ]
+  },
+  {
+    "id": "m09",
+    "category": "Technical milestones",
+    "metric": "Public \"List your agent on Orizon\" integration guide published",
+    "target": "Yes",
+    "achieved": "Yes",
+    "status": "met",
+    "method": "Opened the /guide/list-your-agent page on the live dApp with no login; published means it answers there.",
+    "links": [
+      {
+        "label": "\"List your agent on Orizon\" guide",
+        "url": "https://front.test/guide/list-your-agent",
+        "kind": "page"
+      }
+    ]
+  },
+  {
+    "id": "m10",
+    "category": "Technical milestones",
+    "metric": "3–5 min demo video published",
+    "target": "Yes",
+    "achieved": "Yes",
+    "status": "met",
+    "method": "Opened the /demo page on the live dApp with no login and read the published marker the page renders (data-demo=\"published\") and the video's running time, which must be 3 to 5 minutes.",
+    "links": [
+      {
+        "label": "Demo page",
+        "url": "https://front.test/demo",
+        "kind": "page"
+      }
+    ]
+  },
+  {
+    "id": "m11",
+    "category": "Technical milestones",
+    "metric": "All source code released under MIT License",
+    "target": "Yes",
+    "achieved": "Not measured",
+    "status": "not_met",
+    "reason": "Not measured: GitHub's repository records could not be read when this ran, so this row reports no number rather than a wrong one. Run the generator again once it answers.",
+    "method": "Asked GitHub which licence it detects on each repository: the frontend, backend and smart contracts the SOW names, and the example agent. Each must be MIT.",
+    "links": [
+      {
+        "label": "Frontend repository",
+        "url": "https://github.com/Bl0cksmiths/Orizon-Agents-FE-Stellar",
+        "kind": "repo"
+      },
+      {
+        "label": "Backend repository",
+        "url": "https://github.com/Bl0cksmiths/Orizon-Agents-BE-Stellar",
+        "kind": "repo"
+      },
+      {
+        "label": "Smart contracts repository",
+        "url": "https://github.com/Bl0cksmiths/Orizon-Agents-Smart-Contract-Stellar",
+        "kind": "repo"
+      },
+      {
+        "label": "Example agent repository",
+        "url": "https://github.com/Bl0cksmiths/Orizon-Agents-Example-Agent-Stellar",
+        "kind": "repo"
+      }
+    ]
+  }
+]

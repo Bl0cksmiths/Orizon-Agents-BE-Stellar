@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from ... import pacing
 from ...config import settings
 from ..model_factory import claude_workers, lazy_agent
 from . import claude_step
@@ -121,8 +122,9 @@ def coerce_artifact(content: Any) -> CodeArtifact:
         return CodeArtifact.model_validate(content)
     if isinstance(content, str):
         s = content.strip()
-        # Strip ```json ... ``` or ``` ... ``` fences if present
-        fence = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```$", s, re.DOTALL)
+        # Strip ```json ... ``` or ``` ... ``` fences if present. One greedy
+        # group, stripped below, so an unclosed fence fails in linear time.
+        fence = re.match(r"^```(?:json)?(.*)```$", s, re.DOTALL)
         if fence:
             s = fence.group(1).strip()
         # Try direct JSON parse
@@ -637,9 +639,6 @@ class CodeGen(ModelWorker):
         *,
         tier: Tier | None = None,
     ) -> dict[str, Any]:
-        import asyncio
-        import random
-
         # Lazy import — avoids a hard dependency cycle between code_gen ↔ code_validator
         from .code_validator import harden_artifact, validate_html
 
@@ -649,7 +648,7 @@ class CodeGen(ModelWorker):
         baked = self._baked(context)
         if baked:
             # Mimic generation time so the trace doesn't feel instant.
-            await asyncio.sleep(0.4 + random.random() * 0.6)
+            await pacing.pause(0.4, 0.6)
             # Baked artifacts are repo-owned and already clean, but they go
             # through the same hardening so every artifact the frontend
             # renders carries the same policy.

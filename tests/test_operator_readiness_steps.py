@@ -110,7 +110,7 @@ def _evidence(*entries: SettlementEntry, unavailable: str | None = None) -> Sett
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(monkeypatch):
     """A deployment that records ratings, so first_run can be judged."""
     monkeypatch.setattr(settings, "reputation_enabled", True)
@@ -216,7 +216,8 @@ def test_each_step_in_each_status(ledger, key, status, build):
     assert (step.key, step.status) == (key, status)
     assert step.detail.strip()
     if status in ("todo", "failed"):
-        assert step.action and step.action.strip(), f"{key} {status} has no next action"
+        assert step.action, f"{key} {status} has no next action"
+        assert step.action.strip(), f"{key} {status} has no next action"
     assert _leaks(step) == []
 
 

@@ -26,7 +26,8 @@ def test_live_without_a_cap_is_refused_before_anything_runs(tmp_path, capsys):
     code = cli.main(["run", "--live", "--flow-dir", str(tmp_path)])
     assert code == cli.EXIT_REFUSED
     out = capsys.readouterr()
-    assert "estimate:" in out.out and "--max-usd" in out.err
+    assert "estimate:" in out.out
+    assert "--max-usd" in out.err
     assert not (tmp_path / "baseline").exists()
 
 
@@ -45,7 +46,8 @@ def test_live_without_keys_is_refused(tmp_path, capsys, monkeypatch):
     code = cli.main(["run", "--live", "--max-usd", "1", "--flow-dir", str(tmp_path)])
     assert code == cli.EXIT_REFUSED
     err = capsys.readouterr().err
-    assert "ANTHROPIC_API_KEY" in err and "TYPESAFE_API_KEY" in err
+    assert "ANTHROPIC_API_KEY" in err
+    assert "TYPESAFE_API_KEY" in err
 
 
 def test_live_only_applies_to_the_real_pipeline(tmp_path, capsys):
@@ -66,7 +68,8 @@ def test_the_estimate_counts_planning_only_for_expected_allows():
     cases = load()
     guard_only = cost.estimate(cases, stages="guard")
     full = cost.estimate(cases, stages="all", reps=2)
-    assert guard_only.planned_cases == 0 and set(guard_only.by_stage_usd) == {"guard"}
+    assert guard_only.planned_cases == 0
+    assert set(guard_only.by_stage_usd) == {"guard"}
     assert full.planned_cases == sum(c.expected_verdict == "allow" for c in cases)
     assert full.ceiling_usd > full.expected_usd > guard_only.expected_usd * 2
     assert cost.estimate(cases, stages="all", reps=1).expected_usd * 2 == pytest.approx(full.expected_usd)
@@ -122,8 +125,9 @@ def test_fetch_maps_labels_skips_out_of_bound_rows_and_repeats(tmp_path):
 
 
 def test_fetch_refuses_a_revision_that_moved(tmp_path):
+    client = _mock_hf({}, sha="0" * 40)
     with pytest.raises(external.FetchError, match="not the pinned"):
-        external.fetch("deepset", client=_mock_hf({}, sha="0" * 40), cache=tmp_path)
+        external.fetch("deepset", client=client, cache=tmp_path)
 
 
 def test_fetch_reads_the_pinned_csv_files(tmp_path):
@@ -197,10 +201,11 @@ def test_a_streamed_reply_is_cut_off_at_the_budget():
         stream=True,
     )
     guard = BudgetedClaude(Streaming(), remaining=lambda: 0.01)
-    with pytest.raises(BudgetExceeded) as caught:
-        import asyncio
+    import asyncio
 
-        asyncio.run(guard.complete(request))
+    completion = guard.complete(request)
+    with pytest.raises(BudgetExceeded) as caught:
+        asyncio.run(completion)
     assert 0.0099 < caught.value.estimate_usd < 0.0115
 
 
@@ -237,7 +242,8 @@ def test_a_stream_aborted_from_outside_leaves_its_running_estimate():
     async def abort() -> None:
         await asyncio.wait_for(guard.complete(request), timeout=0.05)
 
+    aborted = abort()
     with pytest.raises(TimeoutError):
-        asyncio.run(abort())
+        asyncio.run(aborted)
     # ~1,000 text tokens x 1.7 for thinking at $10/MTok
     assert guard.in_flight_usd == pytest.approx(0.017, rel=0.05)

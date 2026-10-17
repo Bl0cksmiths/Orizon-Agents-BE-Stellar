@@ -232,6 +232,51 @@ class _Advance:
     ledgers_in_window: int
 
 
+def _resume_or_start(escrow_id: str, held: _Index | None, window_start: int, seconds_per_ledger: float) -> _Index:
+    """`held` trimmed to the window when it is this escrow's and reaches it; otherwise an empty index at its start."""
+    if held is not None and held.escrow_id == escrow_id and held.next_ledger >= window_start:
+        first = max(held.first_ledger, window_start)
+        charges = [c for c in held.charges if c.charge.ledger >= first]
+        return replace(held, first_ledger=first, charges=tuple(charges))
+    return _Index(escrow_id, window_start, window_start, (), seconds_per_ledger)
+
+
+def _read_past_dense(
+    server: Any, filters: list[EventFilter], dense: _Dense, cursor: int, end: int, deadline: float
+) -> tuple[list[EventInfo], int]:
+    """The page `[cursor, end)` around a dense ledger: what that ledger returned, then the rest of the range.
+
+    Returns the events and the end the page may claim: `end` when the rest was
+    read, or just past the dense ledger when that read failed.
+    """
+    logger.warning("[charges] %s; the charges read from it are a subset", dense)
+    events = dense.events
+    # The rest of the range is still readable: carry on past the ledger.
+    try:
+        events += _read_range(server, filters, dense.ledger + 1, end, deadline) if dense.ledger + 1 < end else []
+    except Exception as e:
+        logger.warning("[charges] page [%d, %d) failed after a dense ledger: %s", cursor, end, e)
+        end = dense.ledger + 1
+    return events, end
+
+
+def _new_charges(events: list[EventInfo], seen: set[str]) -> list[_Indexed]:
+    """The charges in `events` not already in `seen`, each added to it as it is taken.
+
+    Every event is decoded, so an undecodable one is logged even when it names
+    no agent; one that names no agent or decodes to no charge is skipped.
+    """
+    taken: list[_Indexed] = []
+    for event in events:
+        agent_id = _agent_of(event)
+        charge = settlement_svc._decode_charged(event)
+        if agent_id is None or charge is None or event.id in seen:
+            continue
+        seen.add(event.id)
+        taken.append(_Indexed(agent_id, event.id, charge))
+    return taken
+
+
 def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Advance:
     """Bring `held` up to the node's tip, as far as the deadline allows. Blocking.
 
@@ -247,13 +292,11 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
     seconds_per_ledger = settlement_svc._seconds_per_ledger(probe)
     in_window = latest - window_start + 1
 
-    if held is not None and held.escrow_id == escrow_id and held.next_ledger >= window_start:
-        first = max(held.first_ledger, window_start)
-        charges = [c for c in held.charges if c.charge.ledger >= first]
-        index = replace(held, first_ledger=first, charges=tuple(charges))
-    else:
-        index = _Index(escrow_id, window_start, window_start, (), seconds_per_ledger)
-    index = replace(index, seconds_per_ledger=seconds_per_ledger, latest=latest)
+    index = replace(
+        _resume_or_start(escrow_id, held, window_start, seconds_per_ledger),
+        seconds_per_ledger=seconds_per_ledger,
+        latest=latest,
+    )
 
     seen = {c.event_id for c in index.charges}
     found = list(index.charges)
@@ -268,29 +311,15 @@ def _advance_sync(escrow_id: str, held: _Index | None, deadline: float) -> _Adva
         try:
             events = _read_range(server, filters, cursor, end, deadline)
         except _Dense as dense:
-            logger.warning("[charges] %s; the charges read from it are a subset", dense)
-            events, lossy = dense.events, max(lossy, dense.ledger)
-            # The rest of the range is still readable: carry on past the ledger.
-            try:
-                events += (
-                    _read_range(server, filters, dense.ledger + 1, end, deadline) if dense.ledger + 1 < end else []
-                )
-            except Exception as e:
-                logger.warning("[charges] page [%d, %d) failed after a dense ledger: %s", cursor, end, e)
-                end = dense.ledger + 1
+            events, end = _read_past_dense(server, filters, dense, cursor, end, deadline)
+            lossy = max(lossy, dense.ledger)
         except _OutOfTime:
             out_of_time = True
             break
         except Exception as e:
             logger.warning("[charges] page [%d, %d) failed: %s: %s", cursor, end, type(e).__name__, e)
             break
-        for event in events:
-            agent_id = _agent_of(event)
-            charge = settlement_svc._decode_charged(event)
-            if agent_id is None or charge is None or event.id in seen:
-                continue
-            seen.add(event.id)
-            found.append(_Indexed(agent_id, event.id, charge))
+        found.extend(_new_charges(events, seen))
         cursor = end
 
     index = replace(index, next_ledger=cursor, charges=tuple(found), lossy_ledger=lossy)
@@ -454,6 +483,119 @@ def _unavailable_for(owners: Mapping[str, str], reason: str, *, out_of_time: boo
     )
 
 
+@dataclass(frozen=True)
+class _Scanned:
+    """What one build's walk left: the index to answer from, and how far the walk got."""
+
+    index: _Index | None
+    out_of_time: bool = False
+    ledgers_in_window: int = 0
+    reached_tip: bool = False
+
+
+def _held_index(escrow_id: str) -> _Index | None:
+    """The index this process holds for `escrow_id`, or None, forgetting every payer when it holds none.
+
+    Payers are kept for `_held.index.escrow_id` only, so an index for another
+    escrow (or none) leaves nothing they could be matched against.
+    """
+    held = _held.index if _held.index is not None and _held.index.escrow_id == escrow_id else None
+    if held is None:
+        _held.payers.clear()
+    return held
+
+
+async def _scan(escrow_id: str, held: _Index | None, deadline: float) -> _Scanned:
+    """Advance `held` as far as the deadline allows, keeping the result in `_held`. Called under `_lock`.
+
+    A walk that cannot start (out of time) or cannot anchor (the node
+    unreadable) leaves `held` as it was, for the caller to serve as truncated.
+    """
+    if time.monotonic() >= deadline:
+        return _Scanned(held, out_of_time=True)
+    try:
+        advance = await asyncio.to_thread(_advance_sync, escrow_id, held, deadline)
+    except Exception as e:
+        logger.warning("[charges] the event window could not be read: %s: %s", type(e).__name__, e)
+        return _Scanned(held)
+    _held.index = index = advance.index
+    if index is not None:
+        # A payer is kept only while its charge is in the window,
+        # so what a long-lived process holds is bounded by it.
+        live = {c.charge.auth_id for c in index.charges}
+        for auth_id in [a for a in _held.payers if a not in live]:
+            del _held.payers[auth_id]
+    return _Scanned(
+        index,
+        out_of_time=advance.out_of_time,
+        ledgers_in_window=advance.ledgers_in_window,
+        reached_tip=index is not None and index.next_ledger > index.latest,
+    )
+
+
+def _charges_by_agent(index: _Index, owners: Mapping[str, str]) -> dict[str, list[_Charge]]:
+    """The index's charges to the agents in `owners`, filed by agent in the order they were read."""
+    by_agent: dict[str, list[_Charge]] = {}
+    for indexed in index.charges:
+        if indexed.agent_id in owners:
+            by_agent.setdefault(indexed.agent_id, []).append(indexed.charge)
+    return by_agent
+
+
+def _evidence_by_agent(
+    owners: Mapping[str, str],
+    by_agent: Mapping[str, list[_Charge]],
+    payers: dict[str, str],
+    index: _Index,
+    truncated: bool,
+    *,
+    settler: str | None,
+    platform: frozenset[str],
+    asset: str,
+) -> dict[str, SettlementEvidence]:
+    """Each agent's evidence from its charges in `index`, attributed by `settlement_svc`'s own rule."""
+    window_days = round(index.scanned_ledgers * index.seconds_per_ledger / 86_400.0, 3)
+    evidence: dict[str, SettlementEvidence] = {}
+    for agent_id, owner in owners.items():
+        entries, total, excluded = settlement_svc._build_entries(
+            by_agent.get(agent_id, []), payers, owner, settler, platform
+        )
+        evidence[agent_id] = SettlementEvidence(
+            agent_id=agent_id,
+            asset=asset,
+            window_days=window_days,
+            scanned_ledgers=index.scanned_ledgers,
+            entries=entries,
+            total_stroops=total,
+            self_payment_stroops=excluded,
+            truncated=truncated,
+            unavailable=None,
+        )
+    return evidence
+
+
+def _warn_truncated(index: _Index, out_of_time: bool) -> None:
+    """Say how far a truncated window was read, and why it stopped short."""
+    if out_of_time:
+        why = "out of time"
+    elif index.lossy:
+        why = "lossy ledger"
+    else:
+        why = "a read failed"
+    logger.warning(
+        "[charges] window read to ledger %d of %d (%s) — settlements are a floor",
+        index.next_ledger - 1,
+        index.latest,
+        why,
+    )
+
+
+def _unscanned(owners: Mapping[str, str], *, out_of_time: bool) -> WindowSettlements:
+    """Every agent unavailable: no index was read this build and none is held to answer from."""
+    reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
+    return _unavailable_for(owners, reason, out_of_time=out_of_time)
+
+
 async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> WindowSettlements:
     """Settlement evidence for every agent in `owners` (agent id → owner), from
     one scan of the escrow's window. Never raises; never runs past `deadline`
@@ -472,38 +614,12 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
 
     async with _lock:
         await _restore(escrow_id)
-        held = _held.index if _held.index is not None and _held.index.escrow_id == escrow_id else None
+        scanned = await _scan(escrow_id, _held_index(escrow_id), deadline)
+        held, out_of_time = scanned.index, scanned.out_of_time
         if held is None:
-            _held.payers.clear()
-        out_of_time = False
-        in_window = 0
-        reached_tip = False
-        if time.monotonic() >= deadline:
-            out_of_time = True
-        else:
-            try:
-                advance = await asyncio.to_thread(_advance_sync, escrow_id, held, deadline)
-            except Exception as e:
-                logger.warning("[charges] the event window could not be read: %s: %s", type(e).__name__, e)
-            else:
-                _held.index = held = advance.index
-                if held is not None:
-                    # A payer is kept only while its charge is in the window,
-                    # so what a long-lived process holds is bounded by it.
-                    live = {c.charge.auth_id for c in held.charges}
-                    for auth_id in [a for a in _held.payers if a not in live]:
-                        del _held.payers[auth_id]
-                out_of_time = advance.out_of_time
-                in_window = advance.ledgers_in_window
-                reached_tip = held is not None and held.next_ledger > held.latest
-        if held is None:
-            reason = "out of time before the event scan" if out_of_time else "soroban rpc unreachable"
-            return _unavailable_for(owners, reason, out_of_time=out_of_time)
+            return _unscanned(owners, out_of_time=out_of_time)
 
-        by_agent: dict[str, list[_Charge]] = {}
-        for indexed in held.charges:
-            if indexed.agent_id in owners:
-                by_agent.setdefault(indexed.agent_id, []).append(indexed.charge)
+        by_agent = _charges_by_agent(held, owners)
         needed = {c.auth_id for charges in by_agent.values() for c in charges}
         if await _resolve_payers(escrow_id, needed, deadline):
             out_of_time = True
@@ -513,37 +629,18 @@ async def fetch_settlements(owners: Mapping[str, str], *, deadline: float) -> Wi
     settler = await settlement_svc._read_settler(escrow_id) if needed else None
     platform = settlement_svc._platform_keys()
     asset = await settlement_svc._read_asset(settings.stellar_asset_sac)
-    truncated = not reached_tip or held.lossy
-    window_days = round(held.scanned_ledgers * held.seconds_per_ledger / 86_400.0, 3)
-    evidence: dict[str, SettlementEvidence] = {}
-    for agent_id, owner in owners.items():
-        entries, total, excluded = settlement_svc._build_entries(
-            by_agent.get(agent_id, []), payers, owner, settler, platform
-        )
-        evidence[agent_id] = SettlementEvidence(
-            agent_id=agent_id,
-            asset=asset,
-            window_days=window_days,
-            scanned_ledgers=held.scanned_ledgers,
-            entries=entries,
-            total_stroops=total,
-            self_payment_stroops=excluded,
-            truncated=truncated,
-            unavailable=None,
-        )
+    truncated = not scanned.reached_tip or held.lossy
+    evidence = _evidence_by_agent(
+        owners, by_agent, payers, held, truncated, settler=settler, platform=platform, asset=asset
+    )
     charges = sum(len(c) for c in by_agent.values())
     unattributed = sum(1 for cs in by_agent.values() for c in cs if c.auth_id not in payers)
     if truncated:
-        logger.warning(
-            "[charges] window read to ledger %d of %d (%s) — settlements are a floor",
-            held.next_ledger - 1,
-            held.latest,
-            "out of time" if out_of_time else "lossy ledger" if held.lossy else "a read failed",
-        )
+        _warn_truncated(held, out_of_time)
     return WindowSettlements(
         by_agent=evidence,
         ledgers_scanned=held.scanned_ledgers,
-        ledgers_in_window=in_window,
+        ledgers_in_window=scanned.ledgers_in_window,
         out_of_time=out_of_time,
         charges=charges,
         unattributed=unattributed,

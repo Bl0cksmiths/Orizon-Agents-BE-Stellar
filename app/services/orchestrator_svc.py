@@ -3,18 +3,17 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import random
 import re
 import secrets
 from collections import deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Protocol
 
 from pydantic import ValidationError
 
-from .. import money
+from .. import money, pacing
 from ..agents.model_factory import claude_workers
 from ..agents.orchestrator import draft_plan, orchestrator_agent
 from ..agents.registry import get_worker
@@ -90,6 +89,9 @@ class NoRoutableAgentsError(RuntimeError):
     agent is relisted or bound), and a caller has to be able to tell it apart
     from an upstream fault to say so.
     """
+
+
+_NO_ROUTABLE_AGENTS = "no listed, dispatchable agent to plan with"
 
 
 class PlannerBusyError(RuntimeError):
@@ -939,7 +941,7 @@ async def _kit_thinking() -> None:
     1.4–2.4 s of real sleep per kit plan or patching `asyncio.sleep` for the
     whole process.
     """
-    await asyncio.sleep(1.4 + random.random() * 1.0)
+    await pacing.pause(1.4, 1.0)
 
 
 class _DroppedKitRole(NamedTuple):
@@ -949,6 +951,99 @@ class _DroppedKitRole(NamedTuple):
     agent: Agent
     rationale: str
     info: reputation_svc.RepInfo | None
+
+
+def _kit_backstop(
+    dropped: list[_DroppedKitRole],
+    placed: int,
+    reps: dict[str, reputation_svc.RepInfo],
+    role_tier: Callable[[str], Tier | None],
+) -> tuple[list[tuple[int, PlanStep]], list[PlanFloorNotice]]:
+    """The starvation backstop over the sub-floor kit roles: the steps it
+    re-admits, at their pipeline positions, and a notice for every dropped role.
+
+    Reuses _MIN_ROUTABLE_AGENTS rather than invent a second rule. If the floor
+    left too few steps (`placed`), dropped kit agents are re-admitted to cover
+    the deficit and the degradation recorded; the remainder are recorded as
+    exclusions. A re-admitted step goes back to its own pipeline position,
+    never onto the end: appended, design tokens would run AFTER the code.gen
+    step that needs them, and it would build without them.
+
+    The builder goes first whatever its score, then `_backstop_rank` — the
+    free-form path's rule. Score alone once turned a battered tetris kit into
+    research + brand + tokens with no code.gen: three paid steps preparing
+    inputs for a build nobody was asked to do, and no artifact at the end.
+    """
+    by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
+    deficit = max(0, _MIN_ROUTABLE_AGENTS - placed)
+    readmit_ids = {d.agent.id for d in by_priority[:deficit]}
+    if readmit_ids:
+        logger.warning(
+            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s), builder first",
+            placed,
+            len(readmit_ids),
+        )
+    readmitted: list[tuple[int, PlanStep]] = []
+    notices: list[PlanFloorNotice] = []
+    for position, agent, rationale, info in dropped:
+        if agent.id in readmit_ids:
+            step = _kit_step(
+                agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True, tier=role_tier(agent.id)
+            )
+            readmitted.append((position, step))
+            notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
+        else:
+            notices.append(below_floor_exclusion(agent, info))
+    return readmitted, notices
+
+
+def _kit_candidate(
+    agent_id: str,
+    by_id: dict[str, Agent],
+    routable: set[str],
+    reps: dict[str, reputation_svc.RepInfo],
+) -> tuple[Agent, reputation_svc.RepInfo] | None:
+    """The kit role's agent and its reputation, when a step can be planned for
+    it at all; None when the step is dropped before the floor is consulted."""
+    agent = by_id.get(agent_id)
+    if agent is None:
+        # The kit pipeline references an agent that isn't seeded — this
+        # is a programmer error. Skip the step rather than crash the
+        # whole pipeline.
+        return None
+
+    if not _is_listed(agent):
+        # Delisted by its operator: for routing purposes as absent as an id
+        # that is not in the registry at all, so it is handled the same way
+        # — the step is dropped, with no substitute and no notice.
+        #
+        # The placement is the load-bearing part. It sits BEFORE the floor
+        # check and outside `dropped`, which is the list the starvation
+        # backstop re-admits from, so no combination of bad ratings can put
+        # a withdrawn agent back into a kit slot.
+        #
+        # No substitute, because a substitution is a FLOOR action: it emits
+        # `kind="substituted"` with `reason_code="below_floor"` and a
+        # sentence naming the bps the designated agent failed on. A delisted
+        # agent failed nothing, so the only honest notice here is none —
+        # which is also this lane's reporting decision (see
+        # `_routable_registry`). Quietly promoting a stand-in with no notice
+        # would be the silently reshuffled pipeline story 3.02 forbids.
+        return None
+
+    if agent.id not in routable or not _still_routable(agent.id):
+        # Listed but with nothing to execute it — a seeded worker missing
+        # from this deployment — or delisted or unbound during the pause.
+        # No step can run it, so it is dropped the same silent way.
+        return None
+
+    info = reps.get(agent.id)
+    if info is None:
+        # Routable but unscored: the floor cannot judge it, so it is not
+        # offered — the same rule `_scored` applies to the free-form path.
+        logger.warning("kit agent %s had no reputation entry and was not planned", agent.id)
+        return None
+    return agent, info
 
 
 async def _build_kit_plan(
@@ -1005,44 +1100,10 @@ async def _build_kit_plan(
     dropped: list[_DroppedKitRole] = []
 
     for position, (agent_id, rationale) in enumerate(_KIT_PIPELINE):
-        agent = by_id.get(agent_id)
-        if agent is None:
-            # The kit pipeline references an agent that isn't seeded — this
-            # is a programmer error. Skip the step rather than crash the
-            # whole pipeline.
+        candidate = _kit_candidate(agent_id, by_id, routable, reps)
+        if candidate is None:
             continue
-
-        if not _is_listed(agent):
-            # Delisted by its operator: for routing purposes as absent as an id
-            # that is not in the registry at all, so it is handled the same way
-            # — the step is dropped, with no substitute and no notice.
-            #
-            # The placement is the load-bearing part. It sits BEFORE the floor
-            # check and outside `dropped`, which is the list the starvation
-            # backstop re-admits from, so no combination of bad ratings can put
-            # a withdrawn agent back into a kit slot.
-            #
-            # No substitute, because a substitution is a FLOOR action: it emits
-            # `kind="substituted"` with `reason_code="below_floor"` and a
-            # sentence naming the bps the designated agent failed on. A delisted
-            # agent failed nothing, so the only honest notice here is none —
-            # which is also this lane's reporting decision (see
-            # `_routable_registry`). Quietly promoting a stand-in with no notice
-            # would be the silently reshuffled pipeline story 3.02 forbids.
-            continue
-
-        if agent.id not in routable or not _still_routable(agent.id):
-            # Listed but with nothing to execute it — a seeded worker missing
-            # from this deployment — or delisted or unbound during the pause.
-            # No step can run it, so it is dropped the same silent way.
-            continue
-
-        info = reps.get(agent.id)
-        if info is None:
-            # Routable but unscored: the floor cannot judge it, so it is not
-            # offered — the same rule `_scored` applies to the free-form path.
-            logger.warning("kit agent %s had no reputation entry and was not planned", agent.id)
-            continue
+        agent, info = candidate
 
         eta = _KIT_ETAS.get(agent_id, 1.0)
         if reputation_svc.passes_floor(info):
@@ -1062,36 +1123,9 @@ async def _build_kit_plan(
         else:
             dropped.append(_DroppedKitRole(position, agent, rationale, info))
 
-    # Starvation backstop — reuse _MIN_ROUTABLE_AGENTS rather than invent a
-    # second rule. If the floor left too few steps, re-admit dropped kit agents
-    # to cover the deficit and record the degradation; the remainder are
-    # recorded as exclusions. A re-admitted step goes back to its own pipeline
-    # position, never onto the end: appended, design tokens would run AFTER the
-    # code.gen step that needs them, and it would build without them.
-    #
-    # The builder goes first whatever its score, then `_backstop_rank` — the
-    # free-form path's rule. Score alone once turned a battered tetris kit into
-    # research + brand + tokens with no code.gen: three paid steps preparing
-    # inputs for a build nobody was asked to do, and no artifact at the end.
-    by_priority = sorted(dropped, key=lambda d: (d.agent.id != _KIT_BUILDER_ID, _backstop_rank(d.agent, reps)))
-    deficit = max(0, _MIN_ROUTABLE_AGENTS - len(placed))
-    readmit_ids = {d.agent.id for d in by_priority[:deficit]}
-    if readmit_ids:
-        logger.warning(
-            "reputation floor left only %d kit step(s); re-admitting %d dropped agent(s), builder first",
-            len(placed),
-            len(readmit_ids),
-        )
-    for position, agent, rationale, info in dropped:
-        if agent.id in readmit_ids:
-            step = _kit_step(
-                agent, rationale, _KIT_ETAS.get(agent.id, 1.0), reps, degraded=True, tier=role_tier(agent.id)
-            )
-            placed.append((position, step))
-            taken.add(agent.id)
-            notices.append(relaxation(agent, info, min_routable=_MIN_ROUTABLE_AGENTS))
-        else:
-            notices.append(below_floor_exclusion(agent, info))
+    readmitted, backstop_notices = _kit_backstop(dropped, len(placed), reps, role_tier)
+    placed += readmitted
+    notices += backstop_notices
     # Last, as on the free-form path, so both lists group the same way: what
     # the floor did first, then registry entries nothing could dispatch. This
     # path used to report none, so a demo intent showed a marketplace with
@@ -1663,7 +1697,7 @@ async def _decompose_claude(intent: str, user_spec: UnderstoodSpec | None) -> De
     kit = detect_kit(intent)
     if kit is None and not registry.routable:
         # Before any paid call, as on the legacy path: no agent, nothing to screen for.
-        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+        raise NoRoutableAgentsError(_NO_ROUTABLE_AGENTS)
     reading = asyncio.create_task(reputation_svc.fetch_reps([a.id for a in registry.routable]))
     try:
         if kit is not None:
@@ -1694,7 +1728,7 @@ async def _screen_and_plan(
         reps = await reading
         shortlist = _routable_registry(reps, registry)
         if not shortlist.offered:
-            raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+            raise NoRoutableAgentsError(_NO_ROUTABLE_AGENTS)
         request: str | Spec = screening.spec if screening.spec is not None else intent
         try:
             result = await draft_plan(request, tier=tier, agents_block=shortlist.block)
@@ -1765,7 +1799,7 @@ async def _decompose_legacy(intent: str) -> DecomposeResponse:
         # Checked before the gate, not after the call: an empty AVAILABLE_AGENTS
         # block can only produce steps the clamp discards, so the LLM call would
         # be paid for, hold a planning slot, and change nothing.
-        raise NoRoutableAgentsError("no listed, dispatchable agent to plan with")
+        raise NoRoutableAgentsError(_NO_ROUTABLE_AGENTS)
     prompt = build_planning_prompt(shortlist.block, intent)
 
     async def _bounded_plan() -> Any:

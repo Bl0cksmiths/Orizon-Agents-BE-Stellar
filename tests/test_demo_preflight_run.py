@@ -200,7 +200,8 @@ def test_mainnet_is_refused(tmp_path: Path, where: str) -> None:
     setattr(world, f"{where}_passphrase", MAINNET_PASSPHRASE)
     out = run(world, tmp_path)
     assert out.code == EXIT_REFUSED
-    assert "REFUSED:" in out.out and "testnet only" in out.out
+    assert "REFUSED:" in out.out
+    assert "testnet only" in out.out
     assert not (out.dir / "demo-preflight.json").exists()
     assert not [c for c in world.calls if c.startswith("frontend")]
 
@@ -236,7 +237,9 @@ def test_a_backend_that_never_wakes_fails_and_skips_what_needs_it(tmp_path: Path
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     warm = out.check("network.warm")
-    assert warm["status"] == FAIL and "within 120 s" in warm["detail"] and "Render" in warm["fix"]
+    assert warm["status"] == FAIL
+    assert "within 120 s" in warm["detail"]
+    assert "Render" in warm["fix"]
     for dependent in ("network.api", "build.adoption", "exclusion.below_floor"):
         assert out.status(dependent) == SKIPPED
     # Reads that do not need the API still ran.
@@ -251,7 +254,8 @@ def test_a_build_without_the_adoption_route_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("build.adoption")
-    assert check["status"] == FAIL and "predates story 5.02" in check["detail"]
+    assert check["status"] == FAIL
+    assert "predates story 5.02" in check["detail"]
     assert out.status("operator.external") == SKIPPED
 
 
@@ -260,7 +264,8 @@ def test_a_build_without_the_readiness_route_fails(tmp_path: Path) -> None:
     world.readiness_route = False
     out = run(world, tmp_path)
     check = out.check("build.agent_readiness")
-    assert check["status"] == FAIL and "/api/agents/alpha/readiness answered 404" in check["detail"]
+    assert check["status"] == FAIL
+    assert "/api/agents/alpha/readiness answered 404" in check["detail"]
     assert out.code == EXIT_NO_GO
 
 
@@ -271,7 +276,9 @@ def test_a_build_without_the_5_01_readiness_fields_fails(tmp_path: Path, field: 
     del world.readiness[field]
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "predates story 5.01" in check["detail"] and field in check["detail"]
+    assert check["status"] == FAIL
+    assert "predates story 5.01" in check["detail"]
+    assert field in check["detail"]
     assert out.code == EXIT_NO_GO
 
 
@@ -281,7 +288,8 @@ def test_a_backend_host_that_is_another_deployment_fails(tmp_path: Path) -> None
     world.readiness["escrow"]["contract"] = "CSOMETHINGELSE"
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "not the same deployment" in check["detail"]
+    assert check["status"] == FAIL
+    assert "not the same deployment" in check["detail"]
     assert "--backend" in check["fix"]
 
 
@@ -291,7 +299,8 @@ def test_a_backend_that_is_not_ready_fails(tmp_path: Path) -> None:
     world.readiness.update(status="not_ready", llm="missing_key")
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "OPENAI_API_KEY" in check["fix"]
+    assert check["status"] == FAIL
+    assert "OPENAI_API_KEY" in check["fix"]
 
 
 def test_readiness_unreachable_on_the_backend_host_fails(tmp_path: Path) -> None:
@@ -299,7 +308,8 @@ def test_readiness_unreachable_on_the_backend_host_fails(tmp_path: Path) -> None
     world.readiness = None
     out = run(world, tmp_path)
     check = out.check("build.readiness")
-    assert check["status"] == FAIL and "--backend" in check["fix"]
+    assert check["status"] == FAIL
+    assert "--backend" in check["fix"]
     assert out.status("refunds.enabled") == SKIPPED
 
 
@@ -311,7 +321,8 @@ def test_a_v1_escrow_fails_naming_d039(tmp_path: Path) -> None:
     assert out.code == EXIT_NO_GO
     check = out.check("escrow.version")
     assert check["status"] == FAIL
-    assert "D-039" in check["detail"] and ESCROW in check["detail"]
+    assert "D-039" in check["detail"]
+    assert ESCROW in check["detail"]
     assert "STELLAR_PAYMENT_ESCROW" in check["fix"]
     assert out.status("escrow.settler") == SKIPPED
 
@@ -322,7 +333,8 @@ def test_an_rpc_outage_is_never_read_as_v1(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     check = out.check("escrow.version")
     assert check["status"] == FAIL
-    assert "could not be read" in check["detail"] and "D-039" not in check["detail"]
+    assert "could not be read" in check["detail"]
+    assert "D-039" not in check["detail"]
 
 
 def test_a_settler_that_is_not_the_signing_key_fails(tmp_path: Path) -> None:
@@ -332,7 +344,9 @@ def test_a_settler_that_is_not_the_signing_key_fails(tmp_path: Path) -> None:
     assert out.code == EXIT_NO_GO
     check = out.check("escrow.settler")
     assert check["status"] == FAIL
-    assert OTHER_SIGNER in check["detail"] and SIGNER in check["detail"] and "Unauthorized" in check["detail"]
+    assert OTHER_SIGNER in check["detail"]
+    assert SIGNER in check["detail"]
+    assert "Unauthorized" in check["detail"]
 
 
 def test_no_signing_key_fails_the_settler_check(tmp_path: Path) -> None:
@@ -341,7 +355,8 @@ def test_no_signing_key_fails_the_settler_check(tmp_path: Path) -> None:
     world.readiness["ratings"]["signer"] = None
     out = run(world, tmp_path)
     check = out.check("escrow.settler")
-    assert check["status"] == FAIL and "STELLAR_SIGNING_KEY" in check["fix"]
+    assert check["status"] == FAIL
+    assert "STELLAR_SIGNING_KEY" in check["fix"]
     assert "no usable signing key" in check["detail"]
 
 
@@ -354,12 +369,14 @@ def test_refunds_off_fails(tmp_path: Path) -> None:
     assert out.code == EXIT_NO_GO
     check = out.check("refunds.enabled")
     assert check["status"] == FAIL
-    assert "DISPUTE_REFUNDS_ENABLED=true" in check["fix"] and "REFUND_RECONCILE_ENABLED=true" in check["fix"]
+    assert "DISPUTE_REFUNDS_ENABLED=true" in check["fix"]
+    assert "REFUND_RECONCILE_ENABLED=true" in check["fix"]
 
 
 def test_a_durable_dispute_store_passes(tmp_path: Path) -> None:
     check = run(healthy_world(), tmp_path).check("refunds.store")
-    assert check["status"] == PASS and check["required"] is True
+    assert check["status"] == PASS
+    assert check["required"] is True
 
 
 def test_an_in_memory_dispute_store_fails_and_gates(tmp_path: Path) -> None:
@@ -369,8 +386,10 @@ def test_an_in_memory_dispute_store_fails_and_gates(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO, out.out
     check = out.check("refunds.store")
-    assert check["status"] == FAIL and check["required"] is True
-    assert "'memory'" in check["detail"] and "DATABASE_URL" in check["fix"]
+    assert check["status"] == FAIL
+    assert check["required"] is True
+    assert "'memory'" in check["detail"]
+    assert "DATABASE_URL" in check["fix"]
 
 
 def test_a_settler_that_cannot_pay_a_refund_fails(tmp_path: Path) -> None:
@@ -379,7 +398,8 @@ def test_a_settler_that_cannot_pay_a_refund_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path, "--max-refund", "1.0")
     check = out.check("refunds.settler_balance")
     assert check["status"] == FAIL
-    assert "2.5000000" in check["detail"] and "3.0000000" in check["detail"]
+    assert "2.5000000" in check["detail"]
+    assert "3.0000000" in check["detail"]
     assert "0.5000000" in check["fix"]
     assert out.code == EXIT_NO_GO
 
@@ -399,7 +419,8 @@ def test_no_external_operator_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("operator.external")
-    assert check["status"] == FAIL and "onboarding-session-runbook" in check["fix"]
+    assert check["status"] == FAIL
+    assert "onboarding-session-runbook" in check["fix"]
     assert out.status("operator.ready") == SKIPPED
 
 
@@ -415,7 +436,8 @@ def test_an_external_operator_that_is_not_ready_is_named_with_its_step(tmp_path:
     assert out.code == EXIT_NO_GO
     check = out.check("operator.ready")
     assert check["status"] == FAIL
-    assert "beta: `reachable` is failed" in check["detail"] and "fix reachable" in check["detail"]
+    assert "beta: `reachable` is failed" in check["detail"]
+    assert "fix reachable" in check["detail"]
     assert "alpha" not in check["detail"]
 
 
@@ -431,7 +453,8 @@ def test_the_exclusion_subject_is_not_held_to_routable(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("operator.ready")
     assert check["status"] == PASS
-    assert "below the floor by design" in check["detail"] and "lowrep" in check["detail"]
+    assert "below the floor by design" in check["detail"]
+    assert "lowrep" in check["detail"]
 
 
 def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path: Path) -> None:
@@ -439,19 +462,22 @@ def test_an_external_operator_whose_only_agent_is_below_the_floor_fails(tmp_path
     world.adoption = world.adoption_payload({OP1: ["lowrep"]})
     out = run(world, tmp_path)
     check = out.check("operator.ready")
-    assert check["status"] == FAIL and "none can serve the recording" in check["detail"]
+    assert check["status"] == FAIL
+    assert "none can serve the recording" in check["detail"]
 
 
 def test_a_healthy_operator_endpoint_passes_and_its_secret_is_never_shown(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("operator.endpoint")
-    assert check["status"] == PASS and check["required"] is True
+    assert check["status"] == PASS
+    assert check["required"] is True
     assert check["detail"] == (
         'https://agent.test/ answered {"ok": true} with no fault_injection field and no X-Fault-Injection header'
     )
     assert "agent GET /?" in out.world.calls  # the origin's root, not the bound path and its query
     for text in (out.out, (out.dir / "demo-preflight.json").read_text(), (out.dir / "demo-preflight.md").read_text()):
-        assert "bound-secret-7f3" not in text and "/dispatch" not in text
+        assert "bound-secret-7f3" not in text
+        assert "/dispatch" not in text
 
 
 @pytest.mark.parametrize("how", ["field", "header", "both"])
@@ -463,7 +489,8 @@ def test_fault_injection_on_the_operator_endpoint_fails(tmp_path: Path, how: str
         world.agent_headers["X-Fault-Injection"] = "hang_after:0 (scope process)"
     out = run(world, tmp_path)
     check = out.check("operator.endpoint")
-    assert check["status"] == FAIL and "fault injection is on" in check["detail"]
+    assert check["status"] == FAIL
+    assert "fault injection is on" in check["detail"]
     assert ("fault_injection: 'hang_after:0 (scope process)'" in check["detail"]) is (how != "header")
     assert ("X-Fault-Injection header" in check["detail"]) is (how != "field")
     assert "FAULT_MODE" in check["fix"]
@@ -475,7 +502,8 @@ def test_an_operator_endpoint_that_is_not_healthy_fails(tmp_path: Path, status: 
     world = healthy_world()
     world.agent_status, world.agent_health = status, body
     check = run(world, tmp_path).check("operator.endpoint")
-    assert check["status"] == FAIL and f"answered HTTP {status} without" in check["detail"]
+    assert check["status"] == FAIL
+    assert f"answered HTTP {status} without" in check["detail"]
 
 
 def test_no_operator_endpoint_is_skipped_and_keeps_the_verdict_incomplete(tmp_path: Path) -> None:
@@ -487,7 +515,8 @@ def test_no_operator_endpoint_is_skipped_and_keeps_the_verdict_incomplete(tmp_pa
 def test_an_operator_endpoint_that_is_not_a_url_is_refused_unechoed(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path, endpoint="agent.test/?token=bound-secret-7f3")
     assert out.code == EXIT_REFUSED
-    assert "bound-secret-7f3" not in out.out and "--operator-endpoint" in out.out
+    assert "bound-secret-7f3" not in out.out
+    assert "--operator-endpoint" in out.out
 
 
 # ── the exclusion moment ────────────────────────────────────────
@@ -497,7 +526,8 @@ def test_no_below_floor_agent_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("exclusion.below_floor")
-    assert check["status"] == FAIL and "below 5500 bps" in check["detail"]
+    assert check["status"] == FAIL
+    assert "below 5500 bps" in check["detail"]
 
 
 @pytest.mark.parametrize("flag", ["degraded", "stale"])
@@ -573,7 +603,8 @@ def test_a_below_floor_agent_that_is_not_routable_does_not_count(tmp_path: Path,
 
 def test_a_bound_listed_below_floor_agent_counts(tmp_path: Path) -> None:
     check = run(healthy_world(), tmp_path).check("exclusion.below_floor")
-    assert check["status"] == PASS and check["detail"] == "lowrep (4100 < 5500 bps)"
+    assert check["status"] == PASS
+    assert check["detail"] == "lowrep (4100 < 5500 bps)"
 
 
 def test_a_seeded_agent_below_the_floor_does_not_count(tmp_path: Path) -> None:
@@ -608,8 +639,10 @@ def test_a_bound_of_5489_prints_below_the_floor_and_passes(tmp_path: Path) -> No
     world.reputations["lowrep"] = rep("lowrep", 5489)
     out = run(world, tmp_path)
     check = out.check("exclusion.card_figure")
-    assert check["status"] == PASS and check["required"] is True, check
-    assert "lowrep: 2.74 (5489 bps)" in check["detail"] and "2.75 (5500 bps)" in check["detail"]
+    assert check["status"] == PASS, check
+    assert check["required"] is True, check
+    assert "lowrep: 2.74 (5489 bps)" in check["detail"]
+    assert "2.75 (5500 bps)" in check["detail"]
     assert out.code == EXIT_GO, out.out
 
 
@@ -635,7 +668,8 @@ def test_the_card_figure_is_skipped_without_a_below_floor_agent(tmp_path: Path) 
 def test_three_routable_agents_clearing_the_floor_pass(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("exclusion.routable_count")
-    assert check["status"] == PASS and check["required"] is True
+    assert check["status"] == PASS
+    assert check["required"] is True
     assert check["detail"].startswith("3 clear 5500 bps: agt_01h8, alpha, beta")
 
 
@@ -676,7 +710,8 @@ def test_reputation_routing_off_fails(tmp_path: Path) -> None:
     world = healthy_world()
     world.params["enabled"] = False
     check = run(world, tmp_path).check("exclusion.below_floor")
-    assert check["status"] == FAIL and "REPUTATION_ENABLED" in check["fix"]
+    assert check["status"] == FAIL
+    assert "REPUTATION_ENABLED" in check["fix"]
 
 
 def test_a_plan_that_does_not_exclude_the_agent_fails(tmp_path: Path) -> None:
@@ -686,7 +721,9 @@ def test_a_plan_that_does_not_exclude_the_agent_fails(tmp_path: Path) -> None:
     ]
     out = run(world, tmp_path, "--with-decompose", INTENT)
     check = out.check("exclusion.decompose")
-    assert check["status"] == FAIL and check["required"] is True and "lowrep" in check["detail"]
+    assert check["status"] == FAIL
+    assert check["required"] is True
+    assert "lowrep" in check["detail"]
     assert out.code == EXIT_NO_GO
 
 
@@ -699,7 +736,8 @@ def test_a_plan_that_substitutes_the_agent_passes(tmp_path: Path) -> None:
 def test_decompose_is_skipped_and_advisory_by_default(tmp_path: Path) -> None:
     out = run(healthy_world(), tmp_path)
     check = out.check("exclusion.decompose")
-    assert check["status"] == SKIPPED and check["required"] is False
+    assert check["status"] == SKIPPED
+    assert check["required"] is False
     assert out.code == EXIT_GO
 
 
@@ -710,21 +748,26 @@ def test_an_unfunded_buyer_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("wallets.buyer")
-    assert check["status"] == FAIL and "2.5000000" in check["detail"] and BUYER in check["fix"]
+    assert check["status"] == FAIL
+    assert "2.5000000" in check["detail"]
+    assert BUYER in check["fix"]
 
 
 def test_a_buyer_that_does_not_exist_fails(tmp_path: Path) -> None:
     world = healthy_world()
     del world.accounts[BUYER]
     check = run(world, tmp_path).check("wallets.buyer")
-    assert check["status"] == FAIL and "does not exist" in check["detail"] and "friendbot" in check["fix"]
+    assert check["status"] == FAIL
+    assert "does not exist" in check["detail"]
+    assert "friendbot" in check["fix"]
 
 
 def test_an_operator_without_a_bound_agent_fails(tmp_path: Path) -> None:
     world = healthy_world()
     world.agents = [agent_row("alpha", OP1, bound=False)] + [a for a in world.agents if a["id"] != "alpha"]
     check = run(world, tmp_path).check("wallets.operator")
-    assert check["status"] == FAIL and "/app/bind" in check["fix"]
+    assert check["status"] == FAIL
+    assert "/app/bind" in check["fix"]
 
 
 def test_an_unfunded_operator_fails(tmp_path: Path) -> None:
@@ -739,7 +782,9 @@ def test_a_team_operator_without_the_flag_fails(tmp_path: Path) -> None:
     out = run(world, tmp_path, operator=TEAM)
     assert out.code == EXIT_NO_GO
     check = out.check("wallets.team")
-    assert check["status"] == FAIL and TEAM in check["detail"] and "--allow-team-operator" in check["fix"]
+    assert check["status"] == FAIL
+    assert TEAM in check["detail"]
+    assert "--allow-team-operator" in check["fix"]
     assert out.report()["disclosures"] == []
 
 
@@ -749,9 +794,12 @@ def test_a_team_operator_with_the_flag_warns_and_must_be_disclosed(tmp_path: Pat
     out = run(world, tmp_path, "--allow-team-operator", operator=TEAM)
     assert out.code == EXIT_GO, out.out
     check = out.check("wallets.team")
-    assert check["status"] == WARN and "Disclose on camera" in check["fix"]
+    assert check["status"] == WARN
+    assert "Disclose on camera" in check["fix"]
     disclosures = out.report()["disclosures"]
-    assert len(disclosures) == 1 and TEAM in disclosures[0] and "on camera" in disclosures[0]
+    assert len(disclosures) == 1
+    assert TEAM in disclosures[0]
+    assert "on camera" in disclosures[0]
     assert f"DISCLOSE: The operator {TEAM}" in out.out
     assert "## Disclose on camera" in (out.dir / "demo-preflight.md").read_text()
 
@@ -774,7 +822,8 @@ def test_a_seed_given_as_the_buyer_is_refused_unechoed(tmp_path: Path) -> None:
     seed = "S" + "A" * 55
     out = run(healthy_world(), tmp_path, buyer=seed)
     assert out.code == EXIT_REFUSED
-    assert seed not in out.out and "SECRET seed" in out.out
+    assert seed not in out.out
+    assert "SECRET seed" in out.out
 
 
 def test_an_unreadable_team_register_is_refused(tmp_path: Path) -> None:
@@ -791,7 +840,8 @@ def test_a_page_that_is_not_200_fails(tmp_path: Path, status: int) -> None:
     out = run(world, tmp_path)
     assert out.code == EXIT_NO_GO
     check = out.check("frontend./guide/list-your-agent")
-    assert check["status"] == FAIL and f"answered {status}" in check["detail"]
+    assert check["status"] == FAIL
+    assert f"answered {status}" in check["detail"]
     if status == 307:
         assert "/login" in check["detail"]
 
@@ -803,5 +853,7 @@ def test_the_trace_and_demo_pages_are_required(tmp_path: Path, path: str) -> Non
     world.pages[path] = 404
     out = run(world, tmp_path)
     check = out.check(f"frontend.{path}")
-    assert check["status"] == FAIL and check["required"] is True and "answered 404" in check["detail"]
+    assert check["status"] == FAIL
+    assert check["required"] is True
+    assert "answered 404" in check["detail"]
     assert out.code == EXIT_NO_GO

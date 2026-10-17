@@ -23,7 +23,7 @@ from .config import (
     usdc_to_stroops,
 )
 from .register import TeamRegister
-from .verify import Check, Verification, as_dict, met, summary_line
+from .verify import Check, Verification, VerifiedOperator, as_dict, met, summary_line
 
 MARKDOWN_NAME = "adoption-report.md"
 JSON_NAME = "adoption-report.json"
@@ -68,6 +68,31 @@ def target_lines(totals: dict[str, int]) -> list[str]:
     ]
 
 
+def _operator_rows(i: int, op: VerifiedOperator) -> list[str]:
+    """Operator `OP-<i>`'s rows: one per agent, or a dash row when it claimed none."""
+    if not op.agents:
+        return [f"| OP-{i} | {_acct(op.claim.owner)} | — | — | — | — | no |"]
+    return [
+        f"| OP-{i} | {_acct(op.claim.owner)} | `{_cell(agent.claim.agent_id)}` | {_cell(agent.claim.name)} "
+        f"| {agent.claim.active} | {agent.claim.bound} | {'yes' if agent.counted else 'no'} |"
+        for agent in op.agents
+    ]
+
+
+def _workflow_rows(result: Verification) -> list[str]:
+    """One row per claimed workflow, every agent of every operator in order,
+    or a single "none claimed" row."""
+    rows = [
+        f"| `{_cell(agent.claim.agent_id)}` | `{_cell(wf.claim.job_id_hex)}` | {_tx(wf.claim.tx_hash)} "
+        f"| {wf.tx.ledger if wf.tx is not None else '—'} | {usdc_to_stroops(wf.claim.amount_usdc)} "
+        f"| {_acct(wf.claim.payer)} | {_cell(wf.proof or '—')} | {'yes' if wf.counted else 'no'} |"
+        for op in result.operators
+        for agent in op.agents
+        for wf in agent.workflows
+    ]
+    return rows or ["| — | — | none claimed | — | — | — | — | — |"]
+
+
 def render_markdown(claim: AdoptionClaim, result: Verification, team: TeamRegister, run: RunFacts) -> str:
     lines = [
         "# Adoption evidence — SOW §6.3 (testnet)",
@@ -106,13 +131,7 @@ def render_markdown(claim: AdoptionClaim, result: Verification, team: TeamRegist
         "|---|---|---|---|---|---|---|",
     ]
     for i, op in enumerate(result.operators, 1):
-        if not op.agents:
-            lines.append(f"| OP-{i} | {_acct(op.claim.owner)} | — | — | — | — | no |")
-        for agent in op.agents:
-            lines.append(
-                f"| OP-{i} | {_acct(op.claim.owner)} | `{_cell(agent.claim.agent_id)}` | {_cell(agent.claim.name)} "
-                f"| {agent.claim.active} | {agent.claim.bound} | {'yes' if agent.counted else 'no'} |"
-            )
+        lines += _operator_rows(i, op)
 
     lines += [
         "",
@@ -121,19 +140,7 @@ def render_markdown(claim: AdoptionClaim, result: Verification, team: TeamRegist
         "| Agent | Job | Transaction | Ledger | Amount (stroops) | Payer | Proof | Counted |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    any_wf = False
-    for op in result.operators:
-        for agent in op.agents:
-            for wf in agent.workflows:
-                any_wf = True
-                ledger = wf.tx.ledger if wf.tx is not None else "—"
-                lines.append(
-                    f"| `{_cell(agent.claim.agent_id)}` | `{_cell(wf.claim.job_id_hex)}` | {_tx(wf.claim.tx_hash)} "
-                    f"| {ledger} | {usdc_to_stroops(wf.claim.amount_usdc)} | {_acct(wf.claim.payer)} "
-                    f"| {_cell(wf.proof or '—')} | {'yes' if wf.counted else 'no'} |"
-                )
-    if not any_wf:
-        lines.append("| — | — | none claimed | — | — | — | — | — |")
+    lines += _workflow_rows(result)
 
     lines += [
         "",

@@ -368,7 +368,9 @@ def _record_cut_stream(request: ClaudeRequest, error: BaseException) -> None:
             progress.output_tokens,
         )
     except Exception as e:  # recording must never replace the error being raised
-        logger.error("claude stream cut purpose=%s: usage not recorded: %s: %s", request.purpose, type(e).__name__, e)
+        logger.exception(
+            "claude stream cut purpose=%s: usage not recorded: %s: %s", request.purpose, type(e).__name__, e
+        )
 
 
 def _result(value: V, request: ClaudeRequest, completion: Completion, cost: float, latency_ms: int) -> LLMResult[V]:
@@ -475,16 +477,21 @@ async def _on_stream_event(event: Any, request: ClaudeRequest) -> None:
         if progress is not None and reported is not None:
             progress.output_tokens = max(progress.output_tokens, int(reported))
     elif kind == "content_block_delta":
-        delta = event.delta
-        if delta.type == "text_delta":
-            if progress is not None:
-                progress.streamed_chars += len(delta.text)
-            if request.on_text is not None:
-                maybe = request.on_text(delta.text)
-                if inspect.isawaitable(maybe):
-                    await maybe
-        elif delta.type == "thinking_delta" and progress is not None:
-            progress.streamed_chars += len(delta.thinking)
+        await _on_content_delta(event.delta, request)
+
+
+async def _on_content_delta(delta: Any, request: ClaudeRequest) -> None:
+    """Count a text or thinking delta in `request.progress`; pass text to `on_text`."""
+    progress = request.progress
+    if delta.type == "text_delta":
+        if progress is not None:
+            progress.streamed_chars += len(delta.text)
+        if request.on_text is not None:
+            maybe = request.on_text(delta.text)
+            if inspect.isawaitable(maybe):
+                await maybe
+    elif delta.type == "thinking_delta" and progress is not None:
+        progress.streamed_chars += len(delta.thinking)
 
 
 def _sdk_kwargs(request: ClaudeRequest) -> dict[str, Any]:
@@ -584,7 +591,7 @@ def _retry_after(error: Any) -> float | None:
     return None
 
 
-def _unavailable(error: Exception, model: str) -> Exception:
+def _unavailable(error: Exception, model: str) -> LLMUnavailable | LLMRequestError:
     """The SDK's typed error as this layer's (classified by class and status, never by message)."""
     import anthropic
 

@@ -136,6 +136,11 @@
     min-height: 24px;
   }
   .display .result {
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    unicode-bidi: isolate;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     color: var(--text);
     font-size: clamp(28px, 4vw, 44px);
@@ -324,7 +329,7 @@
       <div class="display" id="display">
         <div class="memory-badge" id="memory-badge" aria-live="polite">M</div>
         <div class="expr" id="expr" aria-live="polite">0</div>
-        <div class="result" id="result" tabindex="0" role="button" title="click to copy">0</div>
+        <button class="result" id="result" type="button" title="click to copy">0</button>
       </div>
 
       <div class="keypad">
@@ -392,7 +397,7 @@
     </aside>
   </main>
 </div>
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<output class="toast" id="toast" aria-live="polite"></output>
 
 <script>
 (() => {
@@ -413,27 +418,41 @@
 
   // ── Tokenizer ────────────────────────────────────────────────────────────
   // Produces: { kind: 'num'|'op'|'lparen'|'rparen'|'fn'|'const', value }
-  const TOKEN_RE = /\s*(?:(\d+\.\d+|\.\d+|\d+)|(sin|cos|tan|asin|acos|atan|log|ln|sqrt|abs)|(pi|π|e)|([+\-*/^%])|(\()|(\)))\s*/y;
+  // Each rule is a sticky regex tried in order at the current position; the
+  // first one that matches wins, just like a single alternation of them.
+  const SPACE_RE = /\s*/y;
+  const TOKEN_RULES = [
+    { re: /\d+\.\d+|\.\d+|\d+/y, make: (s) => ({ kind: 'num', value: Number.parseFloat(s) }) },
+    { re: /sin|cos|tan|asin|acos|atan|log|ln|sqrt|abs/y, make: (s) => ({ kind: 'fn', value: s }) },
+    { re: /pi|π|e/y, make: (s) => ({ kind: 'num', value: s === 'e' ? Math.E : Math.PI }) },
+    { re: /[+\-*/^%]/y, make: (s) => ({ kind: 'op', value: s }) },
+    { re: /\(/y, make: () => ({ kind: 'lparen' }) },
+    { re: /\)/y, make: () => ({ kind: 'rparen' }) },
+  ];
+  function skipSpace(src, i) {
+    SPACE_RE.lastIndex = i;
+    SPACE_RE.exec(src);
+    return SPACE_RE.lastIndex;
+  }
+  function readToken(src, at) {
+    for (const rule of TOKEN_RULES) {
+      rule.re.lastIndex = at;
+      const m = rule.re.exec(src);
+      if (m) return { token: rule.make(m[0]), end: rule.re.lastIndex };
+    }
+    return null;
+  }
   function tokenize(src) {
     const tokens = [];
     if (!src.trim()) return tokens;
     let i = 0;
     while (i < src.length) {
-      TOKEN_RE.lastIndex = i;
-      const m = TOKEN_RE.exec(src);
-      if (!m || m.index !== i) {
+      const hit = readToken(src, skipSpace(src, i));
+      if (!hit) {
         throw new Error('unexpected character at position ' + i + ': ' + src.charAt(i));
       }
-      if (m[1] !== undefined) tokens.push({ kind: 'num', value: parseFloat(m[1]) });
-      else if (m[2] !== undefined) tokens.push({ kind: 'fn', value: m[2] });
-      else if (m[3] !== undefined) {
-        if (m[3] === 'pi' || m[3] === 'π') tokens.push({ kind: 'num', value: Math.PI });
-        else tokens.push({ kind: 'num', value: Math.E });
-      }
-      else if (m[4] !== undefined) tokens.push({ kind: 'op', value: m[4] });
-      else if (m[5] !== undefined) tokens.push({ kind: 'lparen' });
-      else if (m[6] !== undefined) tokens.push({ kind: 'rparen' });
-      i = TOKEN_RE.lastIndex;
+      tokens.push(hit.token);
+      i = skipSpace(src, hit.end);
     }
     return tokens;
   }
@@ -442,8 +461,7 @@
   // becomes a special op "u-" with high precedence.
   function resolveUnary(tokens) {
     const out = [];
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
+    for (const t of tokens) {
       if (t.kind === 'op' && t.value === '-') {
         const prev = out[out.length - 1];
         if (!prev || prev.kind === 'op' || prev.kind === 'lparen' || prev.kind === 'fn') {
@@ -459,35 +477,37 @@
   // ── Shunting-yard → RPN ──────────────────────────────────────────────────
   const PREC = { 'u-': 5, '^': 4, '*': 3, '/': 3, '%': 3, '+': 2, '-': 2 };
   const RIGHT_ASSOC = new Set(['^', 'u-']);
+  // A pending function, or an operator that binds at least as tightly as `t`,
+  // must be emitted before `t` goes on the stack.
+  function popsBefore(top, t) {
+    if (top.kind === 'fn') return true;
+    if (top.kind !== 'op') return false;
+    const tp = PREC[t.value], pp = PREC[top.value];
+    return pp > tp || (pp === tp && !RIGHT_ASSOC.has(t.value));
+  }
+  function pushOperator(t, stack, out) {
+    while (stack.length && popsBefore(stack[stack.length - 1], t)) out.push(stack.pop());
+    stack.push(t);
+  }
+  // Emit everything back to the matching "(", drop it, then emit the
+  // function that owned the group, if any.
+  function closeParen(stack, out) {
+    while (stack.length && stack[stack.length - 1].kind !== 'lparen') {
+      out.push(stack.pop());
+    }
+    if (!stack.length) throw new Error('unmatched right paren');
+    stack.pop();
+    if (stack.length && stack[stack.length - 1].kind === 'fn') out.push(stack.pop());
+  }
   function toRPN(tokens) {
     const out = [];
     const stack = [];
     for (const t of tokens) {
       if (t.kind === 'num') out.push(t);
       else if (t.kind === 'fn') stack.push(t);
-      else if (t.kind === 'op') {
-        while (stack.length) {
-          const top = stack[stack.length - 1];
-          if (top.kind === 'fn') { out.push(stack.pop()); continue; }
-          if (top.kind === 'op') {
-            const tp = PREC[t.value], pp = PREC[top.value];
-            if (pp > tp || (pp === tp && !RIGHT_ASSOC.has(t.value))) {
-              out.push(stack.pop());
-              continue;
-            }
-          }
-          break;
-        }
-        stack.push(t);
-      } else if (t.kind === 'lparen') stack.push(t);
-      else if (t.kind === 'rparen') {
-        while (stack.length && stack[stack.length - 1].kind !== 'lparen') {
-          out.push(stack.pop());
-        }
-        if (!stack.length) throw new Error('unmatched right paren');
-        stack.pop();
-        if (stack.length && stack[stack.length - 1].kind === 'fn') out.push(stack.pop());
-      }
+      else if (t.kind === 'op') pushOperator(t, stack, out);
+      else if (t.kind === 'lparen') stack.push(t);
+      else if (t.kind === 'rparen') closeParen(stack, out);
     }
     while (stack.length) {
       const top = stack.pop();
@@ -498,46 +518,48 @@
   }
 
   // ── RPN evaluator ────────────────────────────────────────────────────────
+  function applyFn(name, a) {
+    switch (name) {
+      case 'sin': return Math.sin(a);
+      case 'cos': return Math.cos(a);
+      case 'tan': return Math.tan(a);
+      case 'asin': return Math.asin(a);
+      case 'acos': return Math.acos(a);
+      case 'atan': return Math.atan(a);
+      case 'log': return Math.log10(a);
+      case 'ln':  return Math.log(a);
+      case 'sqrt': return Math.sqrt(a);
+      case 'abs': return Math.abs(a);
+      default: throw new Error('syntax');
+    }
+  }
+  function applyOperator(op, stack) {
+    if (op === 'u-') {
+      if (!stack.length) throw new Error('syntax');
+      stack.push(-stack.pop());
+      return;
+    }
+    if (stack.length < 2) throw new Error('syntax');
+    const b = stack.pop(), a = stack.pop();
+    switch (op) {
+      case '+': stack.push(a + b); break;
+      case '-': stack.push(a - b); break;
+      case '*': stack.push(a * b); break;
+      case '/':
+        if (b === 0) { const e = new Error('/0'); e.code = '/0'; throw e; }
+        stack.push(a / b); break;
+      case '%': stack.push(a % b); break;
+      case '^': stack.push(Math.pow(a, b)); break;
+    }
+  }
   function evalRPN(rpn) {
     const stack = [];
     for (const t of rpn) {
       if (t.kind === 'num') stack.push(t.value);
-      else if (t.kind === 'op') {
-        if (t.value === 'u-') {
-          if (!stack.length) throw new Error('syntax');
-          stack.push(-stack.pop());
-        } else {
-          if (stack.length < 2) throw new Error('syntax');
-          const b = stack.pop(), a = stack.pop();
-          switch (t.value) {
-            case '+': stack.push(a + b); break;
-            case '-': stack.push(a - b); break;
-            case '*': stack.push(a * b); break;
-            case '/':
-              if (b === 0) { const e = new Error('/0'); e.code = '/0'; throw e; }
-              stack.push(a / b); break;
-            case '%': stack.push(a % b); break;
-            case '^': stack.push(Math.pow(a, b)); break;
-          }
-        }
-      } else if (t.kind === 'fn') {
+      else if (t.kind === 'op') applyOperator(t.value, stack);
+      else if (t.kind === 'fn') {
         if (!stack.length) throw new Error('syntax');
-        const a = stack.pop();
-        let r;
-        switch (t.value) {
-          case 'sin': r = Math.sin(a); break;
-          case 'cos': r = Math.cos(a); break;
-          case 'tan': r = Math.tan(a); break;
-          case 'asin': r = Math.asin(a); break;
-          case 'acos': r = Math.acos(a); break;
-          case 'atan': r = Math.atan(a); break;
-          case 'log': r = Math.log10(a); break;
-          case 'ln':  r = Math.log(a); break;
-          case 'sqrt': r = Math.sqrt(a); break;
-          case 'abs': r = Math.abs(a); break;
-          default: throw new Error('syntax');
-        }
-        stack.push(r);
+        stack.push(applyFn(t.value, stack.pop()));
       }
     }
     if (stack.length !== 1) throw new Error('syntax');
@@ -545,7 +567,7 @@
   }
 
   function evaluate(srcRaw) {
-    const src = srcRaw.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-').replace(/π/g, 'pi');
+    const src = srcRaw.replaceAll('×', '*').replaceAll('÷', '/').replaceAll('−', '-').replaceAll('π', 'pi');
     if (!src.trim()) return 0;
     const tokens = resolveUnary(tokenize(src));
     const rpn = toRPN(tokens);
@@ -566,28 +588,38 @@
   const toastEl = document.getElementById('toast');
 
   // ── Display helpers ──────────────────────────────────────────────────────
+  // Same result as s.replace(/0+$/, ''), without the regex's quadratic backtracking.
+  function trimTrailingZeros(s) {
+    let end = s.length;
+    while (end > 0 && s[end - 1] === '0') end--;
+    return s.slice(0, end);
+  }
   function formatNum(n) {
     if (n === 0) return '0';
     if (Number.isNaN(n)) return 'NaN';
     const abs = Math.abs(n);
     if (abs >= 1e15 || (abs < 1e-6 && abs > 0)) return n.toExponential(8);
     // 12 significant digits, trim trailing zeros.
-    let s = parseFloat(n.toPrecision(12)).toString();
+    let s = Number.parseFloat(n.toPrecision(12)).toString();
     if (s.includes('.') && !s.includes('e')) {
-      s = s.replace(/0+$/, '').replace(/\.$/, '');
+      s = trimTrailingZeros(s).replace(/\.$/, '');
     }
     return s;
+  }
+
+  function errorText(code) {
+    if (code === '/0') return 'Error · /0';
+    if (code === 'overflow') return 'Error · overflow';
+    return 'Error · syntax';
   }
 
   function render() {
     exprEl.textContent = state.expr || '0';
     if (state.error) {
-      resultEl.textContent = state.error === '/0' ? 'Error · /0'
-        : state.error === 'overflow' ? 'Error · overflow'
-        : 'Error · syntax';
+      resultEl.textContent = errorText(state.error);
       resultEl.classList.add('error');
     } else {
-      resultEl.textContent = formatNum(parseFloat(state.result));
+      resultEl.textContent = formatNum(Number.parseFloat(state.result));
       resultEl.classList.remove('error');
     }
     memBadge.classList.toggle('visible', state.memory !== 0);
@@ -620,7 +652,7 @@
     if (state.error) state.expr = '';
     state.error = null;
     // Smart leading zero: replace leading "0" with first digit unless decimal.
-    if (state.expr === '0' && /[\d]/.test(tok)) state.expr = tok;
+    if (state.expr === '0' && /\d/.test(tok)) state.expr = tok;
     else state.expr += tok;
     tryLiveEval();
   }
@@ -654,18 +686,48 @@
     state.expr = state.expr.slice(0, -1);
     tryLiveEval();
   }
+  // The number at the end of `s` (digits with at most one "."), plus a "-"
+  // right before it when that "-" is followed by a digit, or null. It returns
+  // what /(-?\d+\.?\d*|\d*\.?\d+)$/ matched, in one backward scan instead
+  // of the regex's polynomial backtracking.
+  function trailingNumber(s) {
+    let start = s.length;
+    let seenDot = false;
+    while (start > 0) {
+      const c = s[start - 1];
+      if (c === '.') {
+        if (seenDot) break;
+        seenDot = true;
+      } else if (c < '0' || c > '9') {
+        break;
+      }
+      start--;
+    }
+    const body = s.slice(start);
+    if (!/\d/.test(body)) return null;
+    if (s[start - 1] === '-' && /^\d/.test(body)) return s.slice(start - 1);
+    return body;
+  }
+  // Whether the "-" at index i subtracts rather than signs the number after
+  // it: it follows an operand (a digit, ".", ")" or the constant π, pi or e),
+  // the case resolveUnary() leaves as binary minus.
+  function isSubtraction(s, i) {
+    return /[\d.)πie]$/.test(s.slice(0, i).trimEnd());
+  }
   function neg() {
-    // Find the last number in the expression and toggle its sign.
+    // Find the last number in the expression and toggle its sign. After a
+    // subtraction the sign goes after the "-": 3-5 becomes 3--5, as 3+5
+    // becomes 3+-5.
     if (state.error) return;
-    const m = state.expr.match(/(-?\d+\.?\d*|\d*\.?\d+)$/);
-    if (m && m[0] !== '') {
-      const start = state.expr.length - m[0].length;
-      const cur = m[0];
-      const flipped = cur.startsWith('-') ? cur.slice(1) : '-' + cur;
+    const cur = trailingNumber(state.expr);
+    if (cur) {
+      const start = state.expr.length - cur.length;
+      const signed = cur.startsWith('-') && !isSubtraction(state.expr, start);
+      const flipped = signed ? cur.slice(1) : '-' + cur;
       state.expr = state.expr.slice(0, start) + flipped;
       tryLiveEval();
     } else if (state.result && state.result !== '0') {
-      const r = parseFloat(state.result);
+      const r = Number.parseFloat(state.result);
       state.result = String(-r);
       render();
     }
@@ -676,7 +738,7 @@
       const v = evaluate(state.expr);
       state.result = String(v);
       state.error = null;
-    } catch (e) {
+    } catch {
       // Don't show error mid-typing — keep last result, only flag at "=".
     }
     render();
@@ -698,15 +760,15 @@
 
   // ── Memory ───────────────────────────────────────────────────────────────
   function memSet() {
-    const v = parseFloat(state.result);
+    const v = Number.parseFloat(state.result);
     if (Number.isFinite(v)) { state.memory = v; saveState(); render(); toast('memory set'); }
   }
   function memAdd() {
-    const v = parseFloat(state.result);
+    const v = Number.parseFloat(state.result);
     if (Number.isFinite(v)) { state.memory += v; saveState(); render(); toast('M+ ' + formatNum(state.memory)); }
   }
   function memSub() {
-    const v = parseFloat(state.result);
+    const v = Number.parseFloat(state.result);
     if (Number.isFinite(v)) { state.memory -= v; saveState(); render(); toast('M− ' + formatNum(state.memory)); }
   }
   function memRecall() {
@@ -727,7 +789,9 @@
   // ── Persistence ──────────────────────────────────────────────────────────
   function saveState() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ memory: state.memory })); }
-    catch (e) {}
+    catch {
+      // Storage blocked or full: memory still works, it just isn't kept across reloads.
+    }
   }
   function loadState() {
     try {
@@ -736,10 +800,15 @@
         const v = JSON.parse(raw);
         if (typeof v.memory === 'number') state.memory = v.memory;
       }
-    } catch (e) {}
+    } catch {
+      // Storage blocked or the saved value is corrupt: start with empty memory.
+    }
   }
   function saveHistory() {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); } catch (e) {}
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); }
+    catch {
+      // Storage blocked or full: the history list still shows, it just isn't kept across reloads.
+    }
   }
   function loadHistory() {
     try {
@@ -748,23 +817,31 @@
         const arr = JSON.parse(raw);
         if (Array.isArray(arr)) state.history = arr.slice(0, 20);
       }
-    } catch (e) {}
+    } catch {
+      // Storage blocked or the saved value is corrupt: start with no history.
+    }
   }
 
   // ── Theme ────────────────────────────────────────────────────────────────
   function loadTheme() {
     let t;
-    try { t = localStorage.getItem(THEME_KEY); } catch (e) {}
+    try { t = localStorage.getItem(THEME_KEY); }
+    catch {
+      // Storage blocked: no saved choice, so the system color scheme below decides.
+    }
     if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
-    else document.documentElement.removeAttribute('data-theme');
+    if (t === 'light') document.documentElement.dataset.theme = 'light';
+    else delete document.documentElement.dataset.theme;
   }
   function toggleTheme() {
-    const cur = document.documentElement.getAttribute('data-theme');
+    const cur = document.documentElement.dataset.theme;
     const next = cur === 'light' ? 'dark' : 'light';
-    if (next === 'light') document.documentElement.setAttribute('data-theme', 'light');
-    else document.documentElement.removeAttribute('data-theme');
-    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    if (next === 'light') document.documentElement.dataset.theme = 'light';
+    else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem(THEME_KEY, next); }
+    catch {
+      // Storage blocked or full: the theme still switches, it just isn't remembered.
+    }
   }
 
   // ── Toast + clipboard ────────────────────────────────────────────────────
@@ -779,15 +856,21 @@
     try {
       await navigator.clipboard.writeText(text);
       toast('copied · ' + text);
-    } catch (e) {
-      // Fallback for older browsers / insecure contexts.
+    } catch {
+      // The Clipboard API is missing or denied (older browsers, insecure
+      // contexts), so the reason does not matter: fall back to execCommand.
       const ta = document.createElement('textarea');
       ta.value = text;
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand('copy'); toast('copied · ' + text); }
-      catch (e2) { toast('copy failed'); }
-      document.body.removeChild(ta);
+      try {
+        document.execCommand('copy');
+        toast('copied · ' + text);
+      } catch {
+        // Both copy paths failed; the toast tells the user, nothing else to do.
+        toast('copy failed');
+      }
+      ta.remove();
     }
   }
 
@@ -833,9 +916,7 @@
 
   window.addEventListener('keydown', (e) => {
     const k = e.key;
-    // Allow standard text input on .display result for copy
-    if (e.target === resultEl) {/* fall through */}
-    if (/^[0-9]$/.test(k)) { appendTok(k); flashKey(`[data-tok="${k}"]`); e.preventDefault(); }
+    if (/^\d$/.test(k)) { appendTok(k); flashKey(`[data-tok="${k}"]`); e.preventDefault(); }
     else if (k === '.') { appendTok('.'); flashKey('[data-tok="."]'); e.preventDefault(); }
     else if (k === '+' || k === '-' || k === '*' || k === '/' || k === '%' || k === '^') {
       appendOp(k); flashKey(`[data-op="${k}"]`); e.preventDefault();

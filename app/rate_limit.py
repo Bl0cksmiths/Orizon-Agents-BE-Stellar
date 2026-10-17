@@ -257,7 +257,7 @@ def _wallet(body: bytes, fields: tuple[str, ...]) -> str | None:
     """
     try:
         payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError are both ValueErrors
         return None
     if not isinstance(payload, dict):
         return None
@@ -294,6 +294,39 @@ async def _refuse(send: Any, wait_seconds: float) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _refused_for_client(policy: RoutePolicy, backend: RateLimitBackend, scope: dict[str, Any], send: Any) -> bool:
+    """Spend the client's budget; True once it refused the request (the 429 is sent).
+
+    A caller `client_identity` cannot attribute has no client budget to spend."""
+    client = client_identity(scope)
+    if client is None:
+        return False
+    wait = await backend.take(f"{policy.name}:client:{client}", policy.per_client, _WINDOW_SECONDS)
+    if wait is None:
+        return False
+    logger.warning("route rate limit: policy=%s scope=client", policy.name)
+    await _refuse(send, wait)
+    return True
+
+
+async def _spend_wallet(
+    policy: RoutePolicy, backend: RateLimitBackend, scope: dict[str, Any], receive: Receive, send: Any
+) -> Receive | None:
+    """Spend the budget of the wallet the body names. The receive channel to hand
+    on (the sniffed body replayed through it), or None once the wallet's budget
+    refused the request (the 429 is sent)."""
+    body, receive = await _sniff(scope, receive)
+    wallet = _wallet(body, policy.wallet_fields) if body is not None else None
+    if wallet is None:
+        return receive
+    wait = await backend.take(f"{policy.name}:wallet:{wallet}", policy.per_wallet, _WINDOW_SECONDS)
+    if wait is None:
+        return receive
+    logger.warning("route rate limit: policy=%s scope=wallet wallet=%s", policy.name, wallet)
+    await _refuse(send, wait)
+    return None
+
+
 class RouteRateLimitMiddleware:
     """Spend the matching `POLICIES` budgets: ceiling, client, then wallet (pure ASGI).
 
@@ -318,20 +351,11 @@ class RouteRateLimitMiddleware:
             logger.warning("route rate limit: policy=%s scope=ceiling", policy.name)
             await _refuse(send, wait)
             return
-        client = client_identity(scope)
-        if client is not None:
-            wait = await backend.take(f"{policy.name}:client:{client}", policy.per_client, _WINDOW_SECONDS)
-            if wait is not None:
-                logger.warning("route rate limit: policy=%s scope=client", policy.name)
-                await _refuse(send, wait)
-                return
+        if await _refused_for_client(policy, backend, scope, send):
+            return
         if policy.per_wallet > 0 and policy.wallet_fields:
-            body, receive = await _sniff(scope, receive)
-            wallet = _wallet(body, policy.wallet_fields) if body is not None else None
-            if wallet is not None:
-                wait = await backend.take(f"{policy.name}:wallet:{wallet}", policy.per_wallet, _WINDOW_SECONDS)
-                if wait is not None:
-                    logger.warning("route rate limit: policy=%s scope=wallet wallet=%s", policy.name, wallet)
-                    await _refuse(send, wait)
-                    return
+            replay = await _spend_wallet(policy, backend, scope, receive, send)
+            if replay is None:
+                return
+            receive = replay
         await self.app(scope, receive, send)

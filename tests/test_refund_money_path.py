@@ -95,8 +95,9 @@ def test_a_transfer_refused_before_the_send_hands_the_claim_back(monkeypatch, wh
     calls = _chain(monkeypatch, why)
     dispute = a_dispute()
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert (refused.value.code, refused.value.status_code) == ("refund_failed", 502)
     assert len(calls) == 1
@@ -122,8 +123,9 @@ def test_a_signing_key_that_will_not_parse_is_failed_and_releases(monkeypatch) -
     sc._signer_keypair.cache_clear()
     try:
         assert refund_svc.config_gap() is None
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as refused:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
     finally:
         sc._signer_keypair.cache_clear()
 
@@ -151,8 +153,9 @@ def test_a_transfer_lost_after_the_send_records_its_signed_hash(monkeypatch) -> 
     calls = _chain(monkeypatch, sc.InFlightError("send failed: connection reset", signed))
     dispute = a_dispute()
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as unconfirmed:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert unconfirmed.value.code == "refund_unconfirmed"
     current, queue = _stored(dispute.id)
@@ -218,8 +221,9 @@ def test_a_failure_between_the_claim_and_the_transfer_hands_the_claim_back(monke
     dispute = a_dispute()
     real = _flaky(monkeypatch, "get_settlement", error)
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(type(error)):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     monkeypatch.setattr(dispute_store, "_store", real)
     assert calls == []  # nothing was signed
@@ -236,8 +240,9 @@ def test_a_bug_while_pricing_the_credit_hands_the_claim_back(monkeypatch) -> Non
         raise TypeError("a bug in the arithmetic")
 
     monkeypatch.setattr(refund_svc, "creditable_for", _broken)
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(TypeError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert calls == []
     current, queue = _stored(dispute.id)
@@ -249,8 +254,9 @@ def test_a_release_that_fails_after_failed_records_the_failed_hash(monkeypatch) 
     dispute = a_dispute()
     real = _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     monkeypatch.setattr(dispute_store, "_store", real)
     assert refused.value.code == "refund_failed"
@@ -268,8 +274,9 @@ def test_a_release_that_fails_on_a_refusal_still_answers_the_refusal(monkeypatch
     monkeypatch.setattr(settings, "max_refund_usdc", 0.01)
     _flaky(monkeypatch, "release_refund_claim", ConnectionError("database unreachable"))
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "refund_above_cap"
     assert calls == []
@@ -281,8 +288,9 @@ def test_a_cancel_after_the_transfer_was_handed_over_holds_the_claim(monkeypatch
     calls = _chain(monkeypatch, asyncio.CancelledError())
     dispute = a_dispute()
 
+    upholding = dispute_svc.uphold(dispute.id)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(dispute_svc.uphold(dispute.id))
+        asyncio.run(upholding)
 
     assert len(calls) == 1
     current, queue = _stored(dispute.id)
@@ -327,8 +335,9 @@ def test_an_unconfirmed_credit_never_overwrites_a_dispute_moved_mid_flight(monke
     dispute = a_dispute()
 
     with caplog.at_level(logging.CRITICAL, logger=SVC_LOGGER):
+        upholding = dispute_svc.uphold(dispute.id)
         with pytest.raises(DisputeError) as unconfirmed:
-            asyncio.run(dispute_svc.uphold(dispute.id))
+            asyncio.run(upholding)
 
     assert unconfirmed.value.code == "refund_unconfirmed"
     current, _ = _stored(dispute.id)
@@ -384,8 +393,9 @@ def test_a_credit_still_in_flight_is_reserved_at_its_promise(monkeypatch) -> Non
     calls = _chain(monkeypatch, {"status": "timeout", "hash": "tx_inflight"})
     first, second = _two_disputes_of_one_job(settled_usdc=0.10)
 
+    upholding = dispute_svc.uphold(second.id)
     with pytest.raises(DisputeError):
-        asyncio.run(dispute_svc.uphold(second.id))  # 0.07 out, may still land
+        asyncio.run(upholding)  # 0.07 out, may still land
     assert asyncio.run(dispute_svc.uphold(first.id)).credited_usdc == pytest.approx(0.03, abs=1e-12)
     assert [args[2][1] for _, _, args in calls] == [700_000, 300_000]
 
@@ -395,8 +405,9 @@ def test_nothing_left_of_the_settlement_is_nothing_to_credit(monkeypatch) -> Non
     first, second = _two_disputes_of_one_job(settled_usdc=0.07)
 
     asyncio.run(dispute_svc.uphold(second.id))
+    upholding = dispute_svc.uphold(first.id)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.uphold(first.id))
+        asyncio.run(upholding)
 
     assert refused.value.code == "nothing_to_credit"
     assert len(calls) == 1

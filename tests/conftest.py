@@ -30,36 +30,38 @@ def _no_live_rpc(*, submit: bool = False):
 
 
 @pytest.fixture(autouse=True)
-def hermetic_settings():
+def hermetic_settings(monkeypatch: pytest.MonkeyPatch):
     """Neutralize anything secret/live that .env may have provided, and
-    restore every setting mutated by a test."""
-    saved = {
-        "stellar_signing_key": settings.stellar_signing_key,
-        "api_key": settings.api_key,
-        "max_charge_usdc": settings.max_charge_usdc,
-        "stellar_reputation_ledger": settings.stellar_reputation_ledger,
-        "stellar_agent_registry": settings.stellar_agent_registry,
-        "stellar_admin_address": settings.stellar_admin_address,
-    }
-    settings.stellar_signing_key = ""
-    settings.api_key = ""
+    restore every setting mutated by a test.
+
+    Through `monkeypatch`, which the suite's other fixtures and tests patch
+    settings with too: one undo stack, unwound last in first out, so what the
+    environment set comes back last whatever order the fixtures were set up
+    in. Restored by hand after a yield instead, it came back too early
+    whenever monkeypatch was set up first, and a test that patched one of
+    these settings then left behind this fixture's blank, not the
+    environment's value.
+    """
+    # Not blanked, but tests assign it directly; patching it to its own value
+    # puts its restore on the same stack.
+    monkeypatch.setattr(settings, "max_charge_usdc", settings.max_charge_usdc)
+    monkeypatch.setattr(settings, "stellar_signing_key", "")
+    monkeypatch.setattr(settings, "api_key", "")
     # Reads need a source address to build a simulation envelope, and the
     # default is "" — so without this the suite only passes on a machine whose
     # gitignored .env happens to supply one, and fails in CI with
     # "no source address; set STELLAR_ADMIN_ADDRESS". Pinning a known-valid
     # public key here keeps the suite hermetic; it is an identifier, not a
     # secret, and nothing in the suite reaches the network.
-    settings.stellar_admin_address = "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV"
+    monkeypatch.setattr(settings, "stellar_admin_address", "GA7AI5TAJEZA27I666DSJC4MUJYBEWUYNNZWPU7R2ONA7IZQVO6R5OQV")
     # A live ledger id in .env would make reputation reads hit testnet RPC —
     # tests must stay offline, so force the prior-fallback path.
-    settings.stellar_reputation_ledger = ""
+    monkeypatch.setattr(settings, "stellar_reputation_ledger", "")
     # Same reasoning for the agent registry: a live id in .env would let the
     # 1.02 registry-sync loop (started by lifespan, which every TestClient
     # runs) fire real testnet RPC from inside the hermetic suite.
-    settings.stellar_agent_registry = ""
-    yield settings
-    for k, v in saved.items():
-        setattr(settings, k, v)
+    monkeypatch.setattr(settings, "stellar_agent_registry", "")
+    return settings
 
 
 @pytest.fixture(autouse=True)
@@ -173,7 +175,7 @@ def pre_pipeline_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator_svc, "claude_workers", lambda: True)
 
 
-@pytest.fixture()
+@pytest.fixture
 def client():
     with TestClient(app) as c:
         yield c

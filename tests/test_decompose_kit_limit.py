@@ -32,7 +32,7 @@ CALLER = "81.2.69.160"
 OTHER_CALLER = "2.125.160.216"
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """A fresh seeded registry and no kit thinking pause, for the real pipeline."""
 
@@ -183,4 +183,5 @@ def test_a_kit_on_the_legacy_provider_makes_no_model_call_and_is_not_counted(
     monkeypatch.setattr(orchestrator_svc.orchestrator_agent, "arun", _no_planner)
 
     assert [_post(client, KIT_INTENT).status_code for _ in range(3)] == [200, 200, 200]
-    assert fake_claude.calls == [] and fake_jev.calls == []
+    assert fake_claude.calls == []
+    assert fake_jev.calls == []

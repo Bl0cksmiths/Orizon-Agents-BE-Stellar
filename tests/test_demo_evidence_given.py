@@ -139,7 +139,8 @@ def test_a_given_hash_the_ledger_does_not_know_is_never_published(tmp_path: Path
     out = run(ledger, tmp_path, "--rows", str(rows_file(tmp_path, [{"kind": "settle", "tx_hash": ghost}])))
     assert out.code == EXIT_NOT_SUCCESS
     assert out.items() == []
-    assert "NOT_FOUND" in out.sheet() and ghost not in out.description()
+    assert "NOT_FOUND" in out.sheet()
+    assert ghost not in out.description()
 
 
 def test_a_malformed_given_hash_is_listed_and_never_asked(tmp_path: Path) -> None:
@@ -147,7 +148,8 @@ def test_a_malformed_given_hash_is_listed_and_never_asked(tmp_path: Path) -> Non
     out = run(ledger, tmp_path, "--tx", "seal=abc123")
     assert out.code == EXIT_NOT_SUCCESS
     assert out.items() == []
-    assert "MALFORMED" in out.sheet() and "not 64 hex" in out.sheet()
+    assert "MALFORMED" in out.sheet()
+    assert "not 64 hex" in out.sheet()
     assert "rpc getTransaction" not in ledger.calls
 
 
@@ -170,7 +172,8 @@ def test_a_bad_tx_is_refused(tmp_path: Path, args: list[str], says: str) -> None
     out = run(ledger, tmp_path, *(a.replace("HASH", h) for a in args))
     assert out.code == EXIT_REFUSED, out.out
     assert says in out.out
-    assert not out.dir.exists() and ledger.calls == []
+    assert not out.dir.exists()
+    assert ledger.calls == []
 
 
 @pytest.mark.parametrize(
@@ -196,12 +199,14 @@ def test_a_malformed_rows_file_is_refused(tmp_path: Path, body: Any, says: str) 
     out = run(ledger, tmp_path, "--rows", str(rows_file(tmp_path, text)))
     assert out.code == EXIT_REFUSED, out.out
     assert says in out.out
-    assert not out.dir.exists() and ledger.calls == []
+    assert not out.dir.exists()
+    assert ledger.calls == []
 
 
 def test_an_unreadable_rows_file_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path, "--rows", str(tmp_path / "nowhere.json"))
-    assert out.code == EXIT_REFUSED and "cannot be read" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "cannot be read" in out.out
 
 
 @pytest.mark.parametrize(
@@ -218,8 +223,10 @@ def test_a_given_hash_from_another_network_is_refused(tmp_path: Path, args: list
     rows = rows_file(tmp_path, [{"kind": "settle", "tx_hash": h, "network": "public"}])
     out = run(ledger, tmp_path, *(a.replace("ROWS", str(rows)).replace("HASH", h) for a in args))
     assert out.code == EXIT_REFUSED, out.out
-    assert "testnet only" in out.out and "'public'" in out.out
-    assert not out.dir.exists() and ledger.calls == []
+    assert "testnet only" in out.out
+    assert "'public'" in out.out
+    assert not out.dir.exists()
+    assert ledger.calls == []
 
 
 @pytest.mark.parametrize("where", ["rpc", "horizon"])
@@ -227,19 +234,22 @@ def test_given_hashes_on_a_mainnet_ledger_are_refused(tmp_path: Path, where: str
     ledger = FakeLedger()
     setattr(ledger, f"{where}_passphrase", MAINNET_PASSPHRASE)
     out = run(ledger, tmp_path, "--tx", f"settle={ledger.add('x')}")
-    assert out.code == EXIT_REFUSED and "testnet only" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "testnet only" in out.out
     assert not out.dir.exists()
     assert "rpc getTransaction" not in ledger.calls
 
 
 def test_nothing_to_read_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path)
-    assert out.code == EXIT_REFUSED and "nothing to read" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "nothing to read" in out.out
 
 
 def test_an_empty_rows_file_alone_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path, "--rows", str(rows_file(tmp_path, [])))
-    assert out.code == EXIT_REFUSED and "no transaction rows" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no transaction rows" in out.out
 
 
 # ── merged with the harness ─────────────────────────────────────
@@ -284,7 +294,8 @@ def test_a_hash_given_as_two_kinds_is_refused(tmp_path: Path) -> None:
     harness = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("settle", h)])
     out = run(ledger, tmp_path, str(harness), "--tx", f"refund={h}")
     assert out.code == EXIT_REFUSED
-    assert "is given as 'refund'" in out.out and "filed it as 'settle'" in out.out
+    assert "is given as 'refund'" in out.out
+    assert "filed it as 'settle'" in out.out
     assert not out.dir.exists()
 
 
@@ -300,4 +311,5 @@ def test_a_harness_file_with_no_transactions_is_fine_beside_a_given_hash(tmp_pat
 def test_a_harness_file_with_no_transactions_alone_is_still_refused(tmp_path: Path) -> None:
     harness = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("preflight", None, network="unknown")])
     out = run(FakeLedger(), tmp_path, str(harness))
-    assert out.code == EXIT_REFUSED and "no transaction rows" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no transaction rows" in out.out

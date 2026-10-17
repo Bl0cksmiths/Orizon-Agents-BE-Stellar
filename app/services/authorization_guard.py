@@ -142,6 +142,13 @@ def _escrow_id() -> str:
     return escrow
 
 
+def _definite_version(escrow: str, value: Any) -> int:
+    """`value` as a version: a positive int (never a bool), or a 503 naming what came back."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise _unreadable(f"PaymentEscrow {escrow} version() returned {value!r}")
+    return value
+
+
 async def escrow_version() -> int:
     """The configured escrow's `version()`: 1 when it has none. Raises 503 when unreadable.
 
@@ -158,9 +165,7 @@ async def escrow_version() -> int:
             value = await asyncio.wait_for(asyncio.to_thread(shared, escrow), timeout=READ_TIMEOUT_SECONDS)
         except Exception as e:
             raise _unreadable(f"PaymentEscrow {escrow} version() failed: {type(e).__name__}: {str(e)[:200]}") from e
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise _unreadable(f"PaymentEscrow {escrow} version() returned {value!r}")
-        return value
+        return _definite_version(escrow, value)
     cached = _versions.get(escrow)
     if cached is not None:
         return cached
@@ -174,9 +179,7 @@ async def escrow_version() -> int:
     except Exception as e:
         raise _unreadable(f"PaymentEscrow {escrow} version() failed: {type(e).__name__}") from e
     else:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise _unreadable(f"PaymentEscrow {escrow} version() returned {value!r}")
-        version = value
+        version = _definite_version(escrow, value)
     _versions[escrow] = version
     return version
 

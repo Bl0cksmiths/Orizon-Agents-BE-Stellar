@@ -112,16 +112,19 @@ def test_a_structured_opus_call_sends_effort_schema_cache_and_fallbacks(api: Cal
     result = _plan(effort="high")
     assert result.value == Plan(steps=["a", "b"])
     sent = recorder.body()
-    assert sent["model"] == "claude-opus-5-5" and sent["max_tokens"] == 16_000
+    assert sent["model"] == "claude-opus-5-5"
+    assert sent["max_tokens"] == 16_000
     assert sent["system"] == [{"type": "text", "text": "Plan the work.", "cache_control": {"type": "ephemeral"}}]
     assert sent["messages"] == [{"role": "user", "content": "build a todo app"}]
     assert sent["output_config"]["effort"] == "high"
     schema = sent["output_config"]["format"]
-    assert schema["type"] == "json_schema" and schema["schema"]["additionalProperties"] is False
+    assert schema["type"] == "json_schema"
+    assert schema["schema"]["additionalProperties"] is False
     assert sent["fallbacks"] == "default"
     assert "server-side-fallback-2026-07-01" in recorder.requests[0].headers["anthropic-beta"]
     # Never sent: thinking (always-on adaptive on Opus 5.5), forced tool_choice, a prefill.
-    assert "thinking" not in sent and "tool_choice" not in sent
+    assert "thinking" not in sent
+    assert "tool_choice" not in sent
     # 1000 in at $4 + 500 out at $20 + 4000 cache reads at $0.20, per million.
     assert result.usage == Usage(input_tokens=1000, output_tokens=500, cache_read_tokens=4000)
     assert result.cost_usd == pytest.approx(0.0148)
@@ -132,7 +135,8 @@ def test_haiku_gets_no_effort_and_no_fallbacks(api: Callable[..., Recorder]) -> 
     recorder = api(_ok(_message(model="claude-haiku-4-5")))
     _plan(model="claude-haiku-4-5", effort="low")
     sent = recorder.body()
-    assert "effort" not in sent["output_config"] and "fallbacks" not in sent
+    assert "effort" not in sent["output_config"]
+    assert "fallbacks" not in sent
     assert "anthropic-beta" not in recorder.requests[0].headers
 
 
@@ -157,8 +161,9 @@ def test_an_image_claude_cannot_read_is_refused_before_anything_is_sent(
     api: Callable[..., Recorder], image: tuple[str, str]
 ) -> None:
     recorder = api()
+    images = [claude.ImageBlock(*image)]
     with pytest.raises(ValueError, match="image"):
-        _plan(images=[claude.ImageBlock(*image)])
+        _plan(images=images)
     assert recorder.requests == []
 
 
@@ -212,7 +217,8 @@ def test_a_server_side_fallback_is_served_by_and_priced_per_attempt(api: Callabl
         )
     )
     result = _plan()
-    assert result.value == Plan(steps=["x"]) and result.served_by == "claude-opus-5"
+    assert result.value == Plan(steps=["x"])
+    assert result.served_by == "claude-opus-5"
     # Declined attempt on Opus 5.5 ($4/MTok in) + serving attempt on Opus 5 ($5 in, $25 out).
     assert result.cost_usd == pytest.approx(0.004 + 0.005 + 0.0025)
     assert result.usage == Usage(input_tokens=2000, output_tokens=100)
@@ -295,7 +301,8 @@ def test_a_streamed_reply_reaches_the_callback_and_the_final_message(api: Callab
             on_text=seen.append,
         )
     )
-    assert seen == ["<html>", "</html>"] and result.value == "<html></html>"
+    assert seen == ["<html>", "</html>"]
+    assert result.value == "<html></html>"
     assert result.usage.output_tokens == 900
     assert recorder.body()["stream"] is True
 
@@ -332,7 +339,8 @@ def test_a_rejected_request_is_a_request_error_not_an_outage(api: Callable[..., 
     api(_status(code, "invalid_request_error"))
     with pytest.raises(LLMRequestError) as caught:
         _plan()
-    assert caught.value.status == code and caught.value.error_type == "invalid_request_error"
+    assert caught.value.status == code
+    assert caught.value.error_type == "invalid_request_error"
 
 
 def test_a_dropped_connection_is_unavailable(api: Callable[..., Recorder]) -> None:
@@ -369,7 +377,8 @@ def test_no_key_means_not_configured_and_nothing_is_sent(api: Callable[..., Reco
     monkeypatch.setattr(settings, "anthropic_api_key", "  ")
     with pytest.raises(LLMNotConfigured) as caught:
         _plan()
-    assert caught.value.reason == "missing_key" and recorder.requests == []
+    assert caught.value.reason == "missing_key"
+    assert recorder.requests == []
     assert spend.snapshot().spent_usd == 0.0
 
 
@@ -385,5 +394,7 @@ def test_one_client_per_loop_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
         return first, again, rotated
 
     first, again, rotated = asyncio.run(clients())
-    assert first is again and rotated is not first
-    assert isinstance(first, anthropic.AsyncAnthropic) and first.max_retries == settings.claude_max_retries
+    assert first is again
+    assert rotated is not first
+    assert isinstance(first, anthropic.AsyncAnthropic)
+    assert first.max_retries == settings.claude_max_retries

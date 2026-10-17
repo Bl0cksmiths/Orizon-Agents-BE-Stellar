@@ -355,7 +355,8 @@ def test_log_serves_a_direct_call_but_counts_and_logs_it(client, mode, caplog):
     (line,) = _lock_lines(caplog)
     assert line.startswith("origin lock would refuse GET /api/agents/{agent_id}: not from the frontend [")
     # The template, never the path or its query string.
-    assert "agt_01h8" not in line and "never-logged" not in line
+    assert "agt_01h8" not in line
+    assert "never-logged" not in line
     assert f"[{response.headers['x-request-id']}]" in line
 
 

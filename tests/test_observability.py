@@ -104,7 +104,7 @@ class _FakeServer:
 _TEST_AGENT_REGISTRY = "CAPHXWU53UZUZJGV7IAE57NNMH3YYB5MTWO6YA53KKMXSFVLOITBJ3GQ"
 
 
-@pytest.fixture()
+@pytest.fixture
 def fake_rpc(monkeypatch):
     """Point client._server() at a scriptable in-process fake."""
     # contract_ids() is lru_cached, so the id has to be in place before the
@@ -136,7 +136,8 @@ def test_simulate_read_logs_one_timed_line_per_call(fake_rpc, caplog):
     assert len(debug) == 1, debug
     line = debug[0]
     assert "read agent_registry.get ok in" in line
-    assert "load_ms=" in line and "sim_ms=" in line
+    assert "load_ms=" in line
+    assert "sim_ms=" in line
 
 
 def test_successful_read_never_logs_at_info(fake_rpc, caplog):
@@ -152,8 +153,9 @@ def test_successful_read_never_logs_at_info(fake_rpc, caplog):
 
 def test_failed_read_logs_error_naming_the_stage(fake_rpc, caplog):
     fake_rpc(fail_on="load_account")
+    registry = sc.contract_ids().agent_registry
     with caplog.at_level(logging.DEBUG, logger=RPC_LOGGER), pytest.raises(RuntimeError):
-        sc.simulate_read(sc.contract_ids().agent_registry, "get", [])
+        sc.simulate_read(registry, "get", [])
 
     errors = _rpc_lines(caplog, logging.ERROR)
     assert len(errors) == 1, errors
@@ -206,7 +208,8 @@ def test_envelope_identity_never_leaks_the_xdr():
     tx_hash, source = sc.envelope_identity(xdr)
     assert source == kp.public_key
     assert len(tx_hash) == 64
-    assert tx_hash not in xdr and source not in xdr
+    assert tx_hash not in xdr
+    assert source not in xdr
     # Undecodable input must degrade to placeholders, never raise.
     assert sc.envelope_identity("not-xdr") == ("unparseable", "unknown")
 
@@ -227,7 +230,7 @@ SEAL_BODY = {
 }
 
 
-@pytest.fixture()
+@pytest.fixture
 def server_signing_key(hermetic_settings):
     """Give the backend a throwaway signing key for one test, clearing the
     lru_cached keypair on both sides so it never leaks into another test."""
@@ -241,7 +244,7 @@ def server_signing_key(hermetic_settings):
     sc._signer_keypair.cache_clear()
 
 
-@pytest.fixture()
+@pytest.fixture
 def failing_invoke(monkeypatch):
     """Make the backend-signed invoke blow up without touching the network."""
 
@@ -316,7 +319,8 @@ def test_submit_failure_log_identifies_tx_without_leaking_the_xdr(client, monkey
     assert "signed xdr submit failed" in line
     assert f"source={kp.public_key}" in line
     tx_hash = line.split("tx_hash=")[1].split()[0]
-    assert len(tx_hash) == 64 and tx_hash != "unparseable"
+    assert len(tx_hash) == 64
+    assert tx_hash != "unparseable"
     # The envelope carries the user's signature — it must stay out of the log.
     assert signed_xdr not in caplog.text
     assert kp.secret not in caplog.text

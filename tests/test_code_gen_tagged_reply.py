@@ -96,7 +96,8 @@ def test_both_prompts_share_one_brief_and_differ_in_upstream_section_length_targ
     # block, so its upstream section differs too; the rest of the brief is one.
     brief = INSTRUCTIONS[: INSTRUCTIONS.index("# Using the upstream context")]
     assert CLAUDE_INSTRUCTIONS.startswith(brief + CLAUDE_UPSTREAM + "# Length target")
-    assert "<artifact_html>" in CLAUDE_INSTRUCTIONS and "<artifact_html>" not in INSTRUCTIONS
+    assert "<artifact_html>" in CLAUDE_INSTRUCTIONS
+    assert "<artifact_html>" not in INSTRUCTIONS
     assert "preview_html" in INSTRUCTIONS
 
 

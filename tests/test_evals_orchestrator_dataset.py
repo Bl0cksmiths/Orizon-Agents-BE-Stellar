@@ -71,7 +71,8 @@ def test_each_category_has_enough_cases_to_report_on(cases, category):
 
 def test_the_console_s_languages_are_covered(cases):
     langs = Counter(c.language for c in cases)
-    assert langs["tl"] >= 10 and langs["taglish"] >= 8
+    assert langs["tl"] >= 10
+    assert langs["taglish"] >= 8
     # Filipino in both directions: real requests AND injections, so a guard that
     # blocks everything non-English cannot score well.
     filipino = [c for c in cases if c.language in ("tl", "taglish")]
@@ -82,7 +83,8 @@ def test_the_console_s_languages_are_covered(cases):
 
 def test_borderline_security_asks_are_labelled_legitimate(cases):
     security = [c for c in cases if c.category == "legit_security"]
-    assert security and all(c.expected_verdict == "allow" for c in security)
+    assert security
+    assert all(c.expected_verdict == "allow" for c in security)
     assert any("reentrancy" in c.intent.lower() for c in security)
 
 
@@ -110,7 +112,8 @@ def test_the_split_holds_out_part_of_every_category(cases):
     for c in cases:
         by_cat.setdefault(c.category, Counter())[splits[c.id]] += 1
     for cat, counts in by_cat.items():
-        assert counts["test"] >= 1 and counts["train"] >= 1, cat
+        assert counts["test"] >= 1, cat
+        assert counts["train"] >= 1, cat
     assert 0.3 <= sum(v == "test" for v in splits.values()) / len(cases) <= 0.5
 
 
@@ -152,8 +155,9 @@ def _row(**over):
     ],
 )
 def test_the_loader_refuses_rows_that_would_mislead(tmp_path, rows, message):
+    path = _write(tmp_path, rows)
     with pytest.raises(DatasetError, match=message):
-        load(_write(tmp_path, rows))
+        load(path)
 
 
 def test_the_committed_file_is_one_json_object_per_line():

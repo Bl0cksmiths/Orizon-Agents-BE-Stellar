@@ -45,12 +45,13 @@ def _worker(handler: Handler, endpoint: str = ENDPOINT) -> eh.ExternalHttpWorker
 
 def _failure(handler: Handler, endpoint: str = ENDPOINT) -> eh.ExternalDispatchError:
     """Drive one real dispatch and hand back the error it failed with."""
+    dispatch = _worker(handler, endpoint).run("build it", "because")
     with pytest.raises(eh.ExternalDispatchError) as caught:
-        asyncio.run(_worker(handler, endpoint).run("build it", "because"))
+        asyncio.run(dispatch)
     return caught.value
 
 
-@pytest.fixture()
+@pytest.fixture
 def short_deadline(monkeypatch: pytest.MonkeyPatch) -> float:
     """A 1 s budget so the suite stays fast; the mechanism is identical."""
     monkeypatch.setattr(eh, "DISPATCH_DEADLINE_SECONDS", 1.0)

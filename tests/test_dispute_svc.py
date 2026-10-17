@@ -138,7 +138,9 @@ def test_the_payer_opens_a_dispute_against_a_settled_step() -> None:
     # promises for it — not the workflow's 0.12 total.
     assert record.charged_usdc == 0.07
     assert record.creditable_usdc == 0.07
-    assert record.resolved_at is None and record.refund_tx is None and record.rating_tx is None
+    assert record.resolved_at is None
+    assert record.refund_tx is None
+    assert record.rating_tx is None
     assert record.opened_at <= time.time()
 
 
@@ -280,8 +282,9 @@ def test_a_wrong_signature_reveals_nothing_about_the_workflow() -> None:
 
     with pytest.raises(DisputeError) as healthy:
         _open(impostor, claimed_payer=payer.public_key)
+    damaged_nonce = _raw_nonce("dead" * 8, 0)
     with pytest.raises(DisputeError) as damaged:
-        _open(impostor, job="dead" * 8, nonce=_raw_nonce("dead" * 8, 0), claimed_payer=payer.public_key)
+        _open(impostor, job="dead" * 8, nonce=damaged_nonce, claimed_payer=payer.public_key)
 
     assert (healthy.value.code, healthy.value.status_code) == ("not_the_payer", 403)
     assert (damaged.value.code, damaged.value.status_code) == ("not_the_payer", 403)
@@ -313,9 +316,10 @@ def test_a_dispute_without_a_challenge_is_refused() -> None:
     payer = Keypair.random()
     _seed(payer.public_key)
     never_issued = "0" * 32
+    signature = _sign(payer, dispute_message(JOB, 0, never_issued))
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=never_issued, signature=_sign(payer, dispute_message(JOB, 0, never_issued)))
+        _open(payer, nonce=never_issued, signature=signature)
 
     assert refused.value.code == "challenge_expired"
     assert refused.value.status_code == 400
@@ -359,9 +363,10 @@ def test_a_job_that_never_settled_cannot_be_disputed() -> None:
     _seed(payer.public_key)
     unknown = "ff" * 16
     nonce = "0" * 32
+    signature = _sign(payer, dispute_message(unknown, 0, nonce))
 
     with pytest.raises(DisputeError) as refused:
-        _open(payer, job=unknown, nonce=nonce, signature=_sign(payer, dispute_message(unknown, 0, nonce)))
+        _open(payer, job=unknown, nonce=nonce, signature=signature)
 
     assert refused.value.code == "unknown_job"
     assert refused.value.status_code == 404
@@ -374,10 +379,12 @@ def test_no_challenge_is_minted_for_a_job_or_step_that_cannot_be_disputed() -> N
     payer = Keypair.random()
     _seed(payer.public_key)
 
+    issuing = dispute_svc.issue_dispute_challenge("ff" * 16, 0)
     with pytest.raises(DisputeError) as unknown:
-        asyncio.run(dispute_svc.issue_dispute_challenge("ff" * 16, 0))
+        asyncio.run(issuing)
+    issuing = dispute_svc.issue_dispute_challenge(JOB, 7)
     with pytest.raises(DisputeError) as no_step:
-        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 7))
+        asyncio.run(issuing)
 
     assert (unknown.value.code, unknown.value.status_code) == ("unknown_job", 404)
     assert (no_step.value.code, no_step.value.status_code) == ("step_not_settled", 409)
@@ -408,8 +415,9 @@ def test_no_challenge_slot_is_spent_on_a_step_that_can_never_be_disputed(seeded:
     and the price are public in `SettlementView`, so the mint asks them too."""
     _seed(Keypair.random().public_key, **seeded)
 
+    issuing = dispute_svc.issue_dispute_challenge(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
+        asyncio.run(issuing)
 
     assert (refused.value.code, refused.value.status_code) == (code, 409)
     assert len(eb._challenges) == 0
@@ -422,8 +430,9 @@ def test_closed_windows_cannot_crowd_out_a_buyer_inside_theirs() -> None:
     for i in range(eb.CHALLENGE_BUDGETS["dispute"]):
         job = f"{i:032x}"
         _seed(Keypair.random().public_key, job=job, task=f"tsk_old{i}", window_seconds=-86_400.0)
+        issuing = dispute_svc.issue_dispute_challenge(job, 0)
         with pytest.raises(DisputeError):
-            asyncio.run(dispute_svc.issue_dispute_challenge(job, 0))
+            asyncio.run(issuing)
     _seed(Keypair.random().public_key)
 
     nonce, _ = asyncio.run(dispute_svc.issue_dispute_challenge(JOB, 0))
@@ -439,8 +448,9 @@ def test_a_dispute_after_the_window_closed_is_refused_and_says_when() -> None:
     settlement = _seed(payer.public_key, window_seconds=-60.0)
     closed_at = datetime.fromtimestamp(settlement.window_closes_at, timezone.utc).isoformat(timespec="seconds")
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "dispute_window_closed"
     assert refused.value.status_code == 409
@@ -457,8 +467,9 @@ def test_the_window_is_judged_on_the_stamped_value_not_the_setting(monkeypatch) 
     _seed(payer.public_key, job="beef" * 8, task="tsk_open", window_seconds=3600.0)
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 365 * 86_400.0)
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as still_closed:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
     assert still_closed.value.code == "dispute_window_closed"
 
     monkeypatch.setattr(settings, "dispute_window_seconds", 0.0)
@@ -492,8 +503,9 @@ def test_a_step_that_produced_no_output_cannot_be_disputed() -> None:
         steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.05, delivered=False),),
     )
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "step_not_settled"
     assert refused.value.status_code == 409
@@ -509,8 +521,9 @@ def test_a_workflow_that_charged_nothing_cannot_be_disputed() -> None:
     payer = Keypair.random()
     _seed(payer.public_key, settled_usdc=0.0)
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "nothing_was_charged"
     assert refused.value.status_code == 409
@@ -523,8 +536,9 @@ def test_a_free_step_cannot_be_disputed() -> None:
         steps=(SettlementStep(step_index=0, agent_id="agt_x", agent_name=None, price_usdc=0.0, delivered=True),),
     )
 
+    nonce = _raw_nonce(JOB, 0)
     with pytest.raises(DisputeError) as refused:
-        _open(payer, nonce=_raw_nonce(JOB, 0))
+        _open(payer, nonce=nonce)
 
     assert refused.value.code == "nothing_was_charged"
     assert "free" in refused.value.message
@@ -668,7 +682,8 @@ def test_control_characters_are_stripped_from_a_stored_reason() -> None:
 
     record = _open(payer, reason="step one\nwas \x00wrong\x1b[31m and late")
 
-    assert "\x00" not in record.reason and "\x1b" not in record.reason
+    assert "\x00" not in record.reason
+    assert "\x1b" not in record.reason
     assert "\n" in record.reason
     assert record.reason.startswith("step one")
 

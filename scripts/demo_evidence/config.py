@@ -75,18 +75,19 @@ KIND_LABEL: dict[str, str] = {
 # the authorize, settle and seal of a routed workflow are D4-d's ("each with
 # its on-chain receipt and attestation"); a rating feeds D2-a's plan card; any
 # other transaction is RD-f's "viewable on Stellar Expert".
+_ROUTED_WORKFLOW_ITEM = "6.1-D4-d"
 KIND_INDEX_ITEM: dict[str, str] = {
     "register": "6.1-D1-c",
     "rating": "6.1-D2-a",
     "dispute_rating": "6.1-D3-a",
     "refund": "6.1-D3-b",
-    "authorize": "6.1-D4-d",
-    "settle": "6.1-D4-d",
-    "seal": "6.1-D4-d",
+    "authorize": _ROUTED_WORKFLOW_ITEM,
+    "settle": _ROUTED_WORKFLOW_ITEM,
+    "seal": _ROUTED_WORKFLOW_ITEM,
     "other": "6.1-RD-f",
 }
 # The order those items appear in the index, which the index-links file keeps.
-INDEX_ITEMS: tuple[str, ...] = ("6.1-D1-c", "6.1-D2-a", "6.1-D3-a", "6.1-D3-b", "6.1-D4-d", "6.1-RD-f")
+INDEX_ITEMS: tuple[str, ...] = ("6.1-D1-c", "6.1-D2-a", "6.1-D3-a", "6.1-D3-b", _ROUTED_WORKFLOW_ITEM, "6.1-RD-f")
 INDEX_LINKS_SCHEMA = "orizon.evidence-index-links/1"
 
 KIND_PROVES: dict[str, str] = {

@@ -144,7 +144,8 @@ def test_a_structured_worker_hands_back_the_same_output_on_claude_as_on_agno(
     assert call.system == _instructions(module)
     # Claude is asked for the draft shape where the output carries hard bounds
     # (tests/test_worker_output_bounds.py); design tokens has none to lift.
-    assert call.schema_name == DRAFTS.get(agent_id, type(reply()).__name__) and call.json_schema
+    assert call.schema_name == DRAFTS.get(agent_id, type(reply()).__name__)
+    assert call.json_schema
     assert call.stream is False
     assert call.max_tokens == module.MAX_TOKENS
 
@@ -265,7 +266,8 @@ def test_the_agno_path_is_untouched_when_the_provider_is_openai(
 
     monkeypatch.setattr(WORKERS["agt_01h8"]._agent, "arun", arun)
     run("agt_01h8", tier="complex")
-    assert len(seen) == 1 and fake_claude.calls == []
+    assert len(seen) == 1
+    assert fake_claude.calls == []
     assert WORKERS["agt_01h8"].step_model("complex", None) == settings.worker_model
 
 
@@ -303,16 +305,19 @@ def test_code_gen_streams_a_tagged_app_and_returns_the_same_contract(claude: Fak
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.code.gen", SONNET, "low")
-    assert call.stream is True and call.json_schema is None
+    assert call.stream is True
+    assert call.json_schema is None
     assert call.system == code_gen.CLAUDE_INSTRUCTIONS
     assert call.max_tokens == code_gen.MAX_TOKENS
-    assert "BEGIN USER_INPUT" in call.user and call.user.rstrip().endswith("Return the CodeArtifact.")
+    assert "BEGIN USER_INPUT" in call.user
+    assert call.user.rstrip().endswith("Return the CodeArtifact.")
 
     art = out["artifact"]
     assert set(out) == {"summary", "artifact", "counts", "validator_violations"}
     assert out["summary"] == "Spoke — Book a repair stand in two taps."
     assert set(art) == {"title", "summary", "files", "entry", "preview_html"}
-    assert art["entry"] == "index.html" and [f["path"] for f in art["files"]] == ["index.html"]
+    assert art["entry"] == "index.html"
+    assert [f["path"] for f in art["files"]] == ["index.html"]
     # Hardened on the way out, exactly like the agno path's artifact.
     assert "Content-Security-Policy" in art["preview_html"]
     assert art["files"][0]["content"] == art["preview_html"]
@@ -362,7 +367,8 @@ def _baked_kit() -> dict[str, Any]:
 def test_code_gen_serves_a_baked_artifact_without_asking(claude: FakeClaude) -> None:
     context = {"kit": _baked_kit()}
     out = run("agt_11c0", context=context)
-    assert out["source"] == "baked" and claude.calls == []
+    assert out["source"] == "baked"
+    assert claude.calls == []
     assert WORKERS["agt_11c0"].step_model(None, context) is None
 
 

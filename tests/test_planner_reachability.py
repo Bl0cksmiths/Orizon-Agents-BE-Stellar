@@ -85,7 +85,7 @@ async def _noop(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def world(monkeypatch: pytest.MonkeyPatch):
     """The seeded catalog plus two bound external agents, every one scored above
     the floor, a clean reachability memory and no background probing unless a
@@ -191,7 +191,8 @@ def test_the_free_form_planner_never_routes_to_a_fresh_failure(world, monkeypatc
     assert [s.agent_id for s in resp.steps] == [ALIVE]
     assert _codes(resp)[DEAD] == "unreachable_endpoint"
     stored = state.plans.get(resp.plan_id)
-    assert stored is not None and [n.reason_code for n in stored.notices] == [n.reason_code for n in resp.notices]
+    assert stored is not None
+    assert [n.reason_code for n in stored.notices] == [n.reason_code for n in resp.notices]
 
 
 def test_a_dead_endpoint_is_never_offered_to_the_planner(world) -> None:
@@ -278,7 +279,7 @@ def test_the_fallback_never_lands_on_the_dead_agent(world, monkeypatch: pytest.M
 # ── the planner keeps the memory warm ───────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def probes(monkeypatch: pytest.MonkeyPatch):
     """Replace the endpoint check under `refresh_stale` with a scripted one."""
     script: dict[str, readiness.ProbeResult | None] = {}
@@ -312,7 +313,8 @@ def test_refresh_probes_an_unknown_agent_and_remembers_the_verdict(probes) -> No
 
     assert sorted(probes.calls) == [ALIVE, DEAD]
     assert reachability.is_failing(DEAD)
-    assert not reachability.is_failing(ALIVE) and reachability.has_fresh_verdict(ALIVE)
+    assert not reachability.is_failing(ALIVE)
+    assert reachability.has_fresh_verdict(ALIVE)
 
 
 def test_refresh_skips_fresh_verdicts_and_never_doubles_a_probe(probes) -> None:

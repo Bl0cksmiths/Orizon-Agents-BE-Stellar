@@ -179,7 +179,8 @@ def test_a_refused_polish_still_ships_code_gens_draft_unbilled(claude: FakeClaud
     assert "code.critic failed (model_refused)" in trace
     assert task.spent == pytest.approx(0.1)
     assert task.status == "complete"
-    assert task.artifact is not None and task.artifact["title"] == "Spoke"
+    assert task.artifact is not None
+    assert task.artifact["title"] == "Spoke"
 
 
 def test_a_kit_step_names_no_model(claude: FakeClaude) -> None:

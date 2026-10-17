@@ -110,7 +110,9 @@ def test_first_unready_step_reads_a_real_readiness() -> None:
     )
     body = {"ready": operator_readiness.is_ready(steps), "steps": [s.__dict__ for s in steps]}
     step = checks.first_unready_step(body)
-    assert body["ready"] is False and step is not None and step["key"] == "reachable"
+    assert body["ready"] is False
+    assert step is not None
+    assert step["key"] == "reachable"
 
 
 def test_the_exclusion_notice_kinds_exist() -> None:
@@ -148,4 +150,5 @@ def test_nothing_imports_app_at_runtime() -> None:
     for source in PACKAGE.glob("*.py"):
         text = source.read_text()
         assert not re.search(r"^\s*(from app\b|import app\b)", text, re.MULTILINE), source
-        assert "from ..app" not in text and "scripts.lifecycle" not in text, source
+        assert "from ..app" not in text, source
+        assert "scripts.lifecycle" not in text, source

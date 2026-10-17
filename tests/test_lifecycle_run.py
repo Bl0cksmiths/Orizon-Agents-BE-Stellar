@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from stellar_sdk import Keypair
 
-from scripts.lifecycle.cli import main
+from scripts.lifecycle.cli import _env_name, main
 from scripts.lifecycle.config import (
     EXIT_OK,
     EXIT_PLAN_MISSING_AGENT,
@@ -139,7 +139,8 @@ def test_v2_lifecycle_records_every_hash_with_the_ledgers_status(
         "seal_on_registry",
     }
     md = (tmp_path / "lifecycle.md").read_text()
-    assert "## Transactions" in md and "## Reputation snapshots" in md
+    assert "## Transactions" in md
+    assert "## Reputation snapshots" in md
     assert result.row("settle")["tx_hash"][:8] in md
 
 
@@ -160,9 +161,11 @@ def test_v1_authorizes_the_batch_label_the_console_sends(buyer: Keypair, tmp_pat
     result = run(world, buyer, tmp_path)
     assert result.code == EXIT_OK, result.out
     body = world.call_log("/api/stellar/build/authorize")[0]["json"]
-    assert body["agent_id"] == "orizon_batch" and body["ttl_seconds"] == 600
+    assert body["agent_id"] == "orizon_batch"
+    assert body["ttl_seconds"] == 600
     names = {c["name"] for c in result.row("settlement_checks")["detail"]["checks"]}
-    assert "v1_charge_tx" in names and "v1_charged_event" in names
+    assert "v1_charge_tx" in names
+    assert "v1_charged_event" in names
 
 
 def test_v1_charge_that_failed_on_the_ledger_stops_before_any_dispute(buyer: Keypair, tmp_path: Path) -> None:
@@ -200,7 +203,8 @@ def test_the_uphold_carries_the_adjudicator_key(world: FakeWorld, buyer: Keypair
 def test_dispute_reads_send_the_read_grant(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     run(world, buyer, tmp_path)
     reads = [c for c in world.calls if c["path"].startswith("/api/disputes/dsp_") and c["method"] == "GET"]
-    assert reads and all(c["headers"].get("x-dispute-read-grant") in world.grants for c in reads)
+    assert reads
+    assert all(c["headers"].get("x-dispute-read-grant") in world.grants for c in reads)
 
 
 def test_a_backend_without_the_read_grant_routes_still_completes(buyer: Keypair, tmp_path: Path) -> None:
@@ -286,7 +290,8 @@ def test_a_dry_run_blocks_on_a_v1_escrow_that_the_run_would_verify(buyer: Keypai
     world = FakeWorld(buyer=buyer.public_key, escrow_version=1)
     result = run(world, buyer, tmp_path / "run", "--dry-run")
     assert result.code == EXIT_REFUSED, result.out
-    assert f"the escrow {ESCROW} is v1" in result.out and "D-039" in result.out
+    assert f"the escrow {ESCROW} is v1" in result.out
+    assert "D-039" in result.out
     assert "stops at 'verify' with exit 7" in result.out
     assert not (tmp_path / "run").exists()
 
@@ -305,7 +310,8 @@ def test_a_dry_run_names_every_blocker_at_once(buyer: Keypair, tmp_path: Path) -
     assert result.code == EXIT_REFUSED
     assert "dry run: 3 blocker(s)" in result.out
     assert "is not an external, bound agent" in result.out
-    assert "does not exist on testnet" in result.out and "is v1" in result.out
+    assert "does not exist on testnet" in result.out
+    assert "is v1" in result.out
 
 
 def test_a_dry_run_blocks_on_an_agent_a_real_run_refuses(buyer: Keypair, tmp_path: Path) -> None:
@@ -354,6 +360,17 @@ def test_refuses_a_seed_pasted_where_a_variable_name_belongs(world: FakeWorld, b
     assert world.calls == []
 
 
+@pytest.mark.parametrize("name", ["BUYER_1_SECRET", "_PRIVATE", "a1", "x"])
+def test_an_ascii_variable_name_is_taken_as_given(name: str) -> None:
+    assert _env_name(name, "--buyer-secret-env") == name
+
+
+@pytest.mark.parametrize("name", ["", "1ABC", "BUYER-KEY", "BUYER KEY", "CAFÉ_KEY", "KEY\u0663", "KEY²"])
+def test_a_name_outside_ascii_letters_digits_and_underscore_is_refused(name: str) -> None:
+    with pytest.raises(ValueError, match="takes the NAME of an environment variable"):
+        _env_name(name, "--buyer-secret-env")
+
+
 # ── secrets ─────────────────────────────────────────────────────
 def test_never_prints_or_records_a_secret(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     result = run(world, buyer, tmp_path)
@@ -366,7 +383,9 @@ def test_never_prints_or_records_a_secret(world: FakeWorld, buyer: Keypair, tmp_
         assert secret not in result.out
         assert secret not in evidence
     state = (tmp_path / "state.json").read_text()
-    assert buyer.secret not in state and world.adjudicator_key not in state and signed not in state
+    assert buyer.secret not in state
+    assert world.adjudicator_key not in state
+    assert signed not in state
     assert stat.S_IMODE((tmp_path / "state.json").stat().st_mode) == 0o600
 
 
@@ -377,7 +396,8 @@ def test_a_server_that_echoes_the_signed_envelope_is_redacted(buyer: Keypair, tm
     result = run(world, buyer, tmp_path)
     assert result.code == EXIT_STAGE_FAILED
     signed = world.call_log("/api/stellar/submit")[0]["json"]["signed_xdr"]
-    assert "validation_error" in result.out and "[redacted]" in result.out
+    assert "validation_error" in result.out
+    assert "[redacted]" in result.out
     assert signed not in result.out
     assert signed not in (tmp_path / "lifecycle.jsonl").read_text()
     assert signed not in (tmp_path / "lifecycle.md").read_text()
@@ -507,7 +527,8 @@ def test_the_dispute_is_signed_sep53_by_the_payer_over_the_servers_message(
     body = world.call_log("/api/disputes")[0]["json"]
     message = f"orizon-dispute:v1:{challenge_call['job_id_hex']}:{challenge_call['step_index']}:{body['nonce']}"
     Keypair.from_public_key(buyer.public_key).verify_message(message, base64.b64decode(body["signature_b64"]))
-    assert body["payer"] == buyer.public_key and body["step_index"] == 0
+    assert body["payer"] == buyer.public_key
+    assert body["step_index"] == 0
 
 
 # ── the settlement checks ───────────────────────────────────────
@@ -529,7 +550,8 @@ def test_an_operator_who_is_the_settler_is_not_isolatable_even_behind_the_proxy(
     result = run(world, buyer, tmp_path, "--until", "verify")
     assert result.code == EXIT_OK, result.out
     (delta,) = [c for c in result.row("settlement_checks")["detail"]["checks"] if c["name"].startswith("v2_operator")]
-    assert delta["ok"] is None and "not isolatable" in delta["detail"]
+    assert delta["ok"] is None
+    assert "not isolatable" in delta["detail"]
 
 
 def test_a_settle_past_the_rpcs_event_window_fails_verification_and_says_why(buyer: Keypair, tmp_path: Path) -> None:
@@ -664,7 +686,8 @@ def test_evidence_is_appended_across_a_resume(world: FakeWorld, buyer: Keypair, 
 def test_dry_run_reads_and_signs_nothing(world: FakeWorld, buyer: Keypair, tmp_path: Path) -> None:
     result = run(world, buyer, tmp_path / "run", "--dry-run")
     assert result.code == EXIT_OK
-    assert "DRY RUN" in result.out and "POST /api/stellar/submit" in result.out
+    assert "DRY RUN" in result.out
+    assert "POST /api/stellar/submit" in result.out
     assert not [c for c in world.calls if c["method"] == "POST" and not c["path"] == "/"]
     assert not (tmp_path / "run").exists()
 

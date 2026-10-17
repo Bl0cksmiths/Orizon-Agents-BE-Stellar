@@ -126,8 +126,9 @@ def test_a_waiter_that_times_out_gives_its_place_back(monkeypatch: pytest.Monkey
         holder = asyncio.create_task(_hold(gate, release, entered))
         await _until(lambda: entered == [1])
 
+        waiter = _hold(gate, release, entered)
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(_hold(gate, release, entered), timeout=0.01)
+            await asyncio.wait_for(waiter, timeout=0.01)
         assert gate.waiting == 0
 
         late = asyncio.create_task(_hold(gate, release, entered))

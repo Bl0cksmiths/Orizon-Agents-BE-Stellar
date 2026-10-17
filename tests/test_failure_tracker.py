@@ -150,7 +150,8 @@ def test_a_new_failure_class_warns_again_and_names_the_transition(caplog):
     # Both ends of the transition, because "it changed" without saying from
     # what is not actionable — the operator is deciding whether their fix
     # moved the failure or their endpoint got worse.
-    assert "connect_failed" in changed and "http_status" in changed
+    assert "connect_failed" in changed
+    assert "http_status" in changed
     assert "3 consecutive" in changed
 
 
@@ -251,7 +252,7 @@ def test_a_class_reported_before_a_recovery_is_reported_again_after_it(caplog):
 # ── bounded: the cap, the eviction order, and the line it writes ─
 
 
-@pytest.fixture()
+@pytest.fixture
 def tiny_cap(monkeypatch):
     """Three slots, so eviction is exercised in four lines instead of 257.
 
@@ -320,7 +321,8 @@ def test_the_first_eviction_warns_and_names_what_was_dropped(tiny_cap, caplog):
     assert "ext_a" in dropped
     # The streak that was lost, so the operator can tell a dropped counter from
     # an agent that genuinely just started failing.
-    assert "connect_failed" in dropped and "2 consecutive" in dropped
+    assert "connect_failed" in dropped
+    assert "2 consecutive" in dropped
 
 
 def test_evictions_coalesce_to_debug_while_the_map_stays_full(tiny_cap, caplog):

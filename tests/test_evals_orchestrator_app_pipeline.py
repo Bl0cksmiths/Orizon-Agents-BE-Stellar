@@ -102,7 +102,10 @@ def test_all_stages_run_improve_recheck_and_plan_for_allowed_cases(cases, tmp_pa
     assert errors == []
     for r in rows:
         stages = [c["stage"] for c in r["meta"]["calls"]]
-        assert stages[0] == "guard" and "improve" in stages and stages.count("recheck") == 2 and stages[-1] == "plan"
+        assert stages[0] == "guard"
+        assert "improve" in stages
+        assert stages.count("recheck") == 2
+        assert stages[-1] == "plan"
         assert r["grade"]["plan_valid"] == 1
         assert r["meta"]["spec"]["goal"]
         assert "same_request" in r["meta"]["observed"]["scores"]
@@ -124,8 +127,9 @@ def test_a_guard_outage_is_an_error_not_a_verdict(cases):
     pipeline = AppPipeline.create(live=False, cases=cases)
     jev.set_transport(RecordingJev(testing.OfflineJev()))
     claude.set_transport(RecordingClaude(testing.OfflineClaude()))
+    guarding = pipeline.run(cases[0].intent, stages="guard")
     with pytest.raises(PipelineUnavailable) as caught:
-        asyncio.run(pipeline.run(cases[0].intent, stages="guard"))
+        asyncio.run(guarding)
     assert caught.value.failure_class == "guard_unavailable"
 
 
@@ -213,4 +217,6 @@ def test_a_streamed_call_records_its_effort_and_first_token_time():
     finally:
         _current.reset(token)
     call = log.calls[0]
-    assert call.effort == "low" and call.first_token_ms is not None and call.first_token_ms <= call.latency_ms
+    assert call.effort == "low"
+    assert call.first_token_ms is not None
+    assert call.first_token_ms <= call.latency_ms

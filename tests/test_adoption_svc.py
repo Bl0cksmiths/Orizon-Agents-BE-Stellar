@@ -245,7 +245,7 @@ class _World:
         return asyncio.run(adoption_svc.build_report())
 
 
-@pytest.fixture()
+@pytest.fixture
 def world(hermetic_settings: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_World]:
     saved_agents = dict(state.agents)
     state.agents.clear()
@@ -279,7 +279,9 @@ def test_an_external_owner_counts_with_its_settled_workflow_linked(world: _World
     report = world.report()
 
     assert _totals(report) == (1, 1, 1)
-    assert report.degraded is False and report.unreadable_agents == [] and report.excluded == []
+    assert report.degraded is False
+    assert report.unreadable_agents == []
+    assert report.excluded == []
     (operator,) = report.operators
     assert operator.owner == EXT_A
     assert operator.owner_explorer == f"https://stellar.expert/explorer/testnet/account/{EXT_A}"
@@ -467,7 +469,8 @@ def test_the_real_settlement_scan_excludes_what_it_excludes(world: _World, monke
     assert _totals(report) == (1, 1, 1)
     (workflow,) = report.operators[0].agents[0].settled_workflows
     assert (workflow.job_id_hex, workflow.payer) == (_job_id(3).hex(), BUYER)
-    assert report.degraded is False and report.complete is True
+    assert report.degraded is False
+    assert report.complete is True
     # The window is the one the scan measured, not a constant: the fake node
     # holds 101 ledgers at 5 s each.
     assert report.window_days == round(101 * 5 / 86_400, 3) > 0
@@ -676,7 +679,8 @@ def test_two_agents_under_one_owner_are_one_operator_wallet(world: _World) -> No
     report = world.report()
 
     assert _totals(report) == (2, 1, 0)
-    assert report.met.external_agents is True and report.met.unique_operator_wallets is False
+    assert report.met.external_agents is True
+    assert report.met.unique_operator_wallets is False
 
 
 # ── the cache ───────────────────────────────────────────────────────────────
@@ -808,7 +812,8 @@ def test_a_complete_build_says_so_and_what_it_covered(world: _World) -> None:
 
     report = world.report()
 
-    assert report.complete is True and report.degraded is False
+    assert report.complete is True
+    assert report.degraded is False
     assert report.coverage is not None
     assert report.coverage.model_dump() == {
         "agents_listed": 2,
@@ -826,7 +831,8 @@ def test_an_unreadable_registry_listing_is_coverage_unknown(world: _World) -> No
 
     report = world.report()
 
-    assert report.coverage is not None and report.coverage.agents_listed is None
+    assert report.coverage is not None
+    assert report.coverage.agents_listed is None
     assert report.degraded is True
 
 

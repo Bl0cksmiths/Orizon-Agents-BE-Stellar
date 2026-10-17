@@ -27,7 +27,7 @@ LOGGER_NAME = "app.services.reputation_svc"
 USDC = rep.STROOPS_PER_USDC
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger_configured(monkeypatch):
     """Reputation on with a ledger id, so reads take the on-chain path."""
     monkeypatch.setattr(settings, "reputation_enabled", True)

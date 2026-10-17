@@ -83,13 +83,15 @@ def test_every_verified_hash_is_published_in_the_frozen_shape(tmp_path: Path) ->
     assert out.code == EXIT_OK, out.out
     body = out.json()
     assert set(body) == {"generated_at", "network", "items"}
-    assert body["generated_at"] == 1_790_000_000 and body["network"] == "testnet"
+    assert body["generated_at"] == 1_790_000_000
+    assert body["network"] == "testnet"
     assert [i["tx_hash"] for i in body["items"]] == [
         hashes[k] for k in ("authorize", "settle", "seal", "rating", "refund", "dispute")
     ]
     for item in body["items"]:
         assert set(item) == {"label", "deliverable", "kind", "tx_hash", "explorer", "verified"}
-        assert isinstance(item["label"], str) and item["label"]
+        assert isinstance(item["label"], str)
+        assert item["label"]
         assert item["deliverable"] in ("D1", "D2", "D3", "D4")
         assert item["kind"] in KINDS
         assert re.fullmatch(r"[0-9a-f]{64}", item["tx_hash"])
@@ -113,7 +115,8 @@ def test_the_description_lists_every_verified_hash_with_its_link(tmp_path: Path)
     assert text.startswith("Orizon demo\n")
     assert "Chapters\n00:00 [CHAPTERS" in text
     for h in hashes.values():
-        assert h in text and f"https://stellar.expert/explorer/testnet/tx/{h}" in text
+        assert h in text
+        assert f"https://stellar.expert/explorer/testnet/tx/{h}" in text
     assert "Limitations. Everything in this video runs on the Stellar TESTNET" in text
 
 
@@ -125,8 +128,11 @@ def test_the_sheet_is_an_ordered_table_with_status_and_deliverable(tmp_path: Pat
     lines = [line for line in sheet.splitlines() if line.startswith("| ") and "`" in line]
     assert len(lines) == 6
     assert lines[0].startswith("| 1 | authorize · Buyer authorization — alpha (0.0200000 XLM) |")
-    assert "| D4 |" in lines[0] and f"`{hashes['authorize']}`" in lines[0] and "| SUCCESS | SUCCESS (rpc) |" in lines[0]
-    assert "| D3 |" in lines[5] and "kind=dispute rating" in lines[5]
+    assert "| D4 |" in lines[0]
+    assert f"`{hashes['authorize']}`" in lines[0]
+    assert "| SUCCESS | SUCCESS (rpc) |" in lines[0]
+    assert "| D3 |" in lines[5]
+    assert "kind=dispute rating" in lines[5]
     assert "Failed verification" not in sheet
 
 
@@ -141,7 +147,8 @@ def test_several_runs_keep_their_order_and_a_repeated_hash_once(tmp_path: Path) 
     out = run(ledger, tmp_path, first.parent, second)  # a directory and a file
     assert out.code == EXIT_OK, out.out
     items = [i["tx_hash"] for i in out.json()["items"]]
-    assert items[:6] == list(h1.values()) and items[6:] == list(h2.values())
+    assert items[:6] == list(h1.values())
+    assert items[6:] == list(h2.values())
     assert "1 repeated hash(es)" in out.sheet()
 
 
@@ -194,7 +201,8 @@ def test_a_hash_the_ledger_does_not_know_is_never_published(tmp_path: Path) -> N
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_NOT_SUCCESS
     assert out.json()["items"] == []
-    assert "NOT_FOUND" in out.sheet() and ghost not in out.description()
+    assert "NOT_FOUND" in out.sheet()
+    assert ghost not in out.description()
 
 
 def test_a_malformed_hash_is_never_asked_or_published(tmp_path: Path) -> None:
@@ -203,7 +211,8 @@ def test_a_malformed_hash_is_never_asked_or_published(tmp_path: Path) -> None:
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_NOT_SUCCESS
     assert out.json()["items"] == []
-    assert "MALFORMED" in out.sheet() and "not 64 hex" in out.sheet()
+    assert "MALFORMED" in out.sheet()
+    assert "not 64 hex" in out.sheet()
     assert "rpc getTransaction" not in ledger.calls
 
 
@@ -223,7 +232,8 @@ def test_a_contradiction_outranks_an_unreadable_read(tmp_path: Path) -> None:
     path = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("seal", bad), row("settle", unread)])
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_NOT_SUCCESS
-    assert "FAILED (rpc)" in out.sheet() and "UNREADABLE" in out.sheet()
+    assert "FAILED (rpc)" in out.sheet()
+    assert "UNREADABLE" in out.sheet()
 
 
 # ── the network ─────────────────────────────────────────────────
@@ -235,7 +245,8 @@ def test_a_row_from_another_network_is_refused(tmp_path: Path) -> None:
     write_jsonl(path, rows)
     out = run(ledger, tmp_path, path)
     assert out.code == EXIT_REFUSED
-    assert "network 'mainnet'" in out.out and "lifecycle.jsonl:4" in out.out
+    assert "network 'mainnet'" in out.out
+    assert "lifecycle.jsonl:4" in out.out
     assert not out.dir.exists()
     assert ledger.calls == []
 
@@ -254,7 +265,8 @@ def test_a_transaction_row_that_names_no_network_is_refused(tmp_path: Path) -> N
     h = ledger.add("x")
     path = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("settle", h, network="unknown")])
     out = run(ledger, tmp_path, path)
-    assert out.code == EXIT_REFUSED and "not testnet" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "not testnet" in out.out
 
 
 @pytest.mark.parametrize("where", ["rpc", "horizon"])
@@ -263,7 +275,8 @@ def test_a_mainnet_ledger_is_refused(tmp_path: Path, where: str) -> None:
     setattr(ledger, f"{where}_passphrase", MAINNET_PASSPHRASE)
     path, _ = full_run(ledger, tmp_path)
     out = run(ledger, tmp_path, path)
-    assert out.code == EXIT_REFUSED and "testnet only" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "testnet only" in out.out
     assert not out.dir.exists()
 
 
@@ -280,12 +293,14 @@ def test_a_torn_last_line_is_skipped(tmp_path: Path) -> None:
 def test_no_transaction_rows_is_refused(tmp_path: Path) -> None:
     path = write_jsonl(tmp_path / "t" / "lifecycle.jsonl", [row("preflight", None, network="unknown")])
     out = run(FakeLedger(), tmp_path, path)
-    assert out.code == EXIT_REFUSED and "no transaction rows" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no transaction rows" in out.out
 
 
 def test_a_missing_input_is_refused(tmp_path: Path) -> None:
     out = run(FakeLedger(), tmp_path, tmp_path / "nowhere")
-    assert out.code == EXIT_REFUSED and "no lifecycle.jsonl" in out.out
+    assert out.code == EXIT_REFUSED
+    assert "no lifecycle.jsonl" in out.out
 
 
 def test_disclosures_join_the_limitations(tmp_path: Path) -> None:

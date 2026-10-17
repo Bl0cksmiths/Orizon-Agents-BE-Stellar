@@ -67,7 +67,8 @@ def test_the_stable_half_is_byte_identical_across_requests(fake_claude: FakeClau
 
     first, second = fake_claude.calls_for("planner")
     assert first.system == second.system == f"{CLAUDE_INSTRUCTIONS}\n\n{BLOCK}"
-    assert "bakery" not in first.system and "oolong" not in second.system
+    assert "bakery" not in first.system
+    assert "oolong" not in second.system
     assert first.user != second.user
 
 
@@ -108,8 +109,9 @@ def test_the_raw_plan_is_returned_unclamped(fake_claude: FakeClaude) -> None:
 def test_a_refusal_is_raised_for_the_caller_to_judge(fake_claude: FakeClaude) -> None:
     fake_claude.refuse(purpose="planner", category="cyber")
 
+    drafting = draft_plan("anything at all", tier="low", agents_block=BLOCK)
     with pytest.raises(LLMRefused):
-        asyncio.run(draft_plan("anything at all", tier="low", agents_block=BLOCK))
+        asyncio.run(drafting)
 
 
 def _text() -> str:
@@ -134,7 +136,8 @@ def test_the_instructions_compose_pipelines_instead_of_one_code_step() -> None:
     text = _text()
 
     # The old default — prefer code.gen, often as a single step — is gone.
-    assert "single-step plan" not in text and "prefer it" not in text
+    assert "single-step plan" not in text
+    assert "prefer it" not in text
     assert "Use every listed specialist whose work makes this deliverable better, and no other" in text
     assert "Order the steps so each one's output flows into the steps after it" in text
     assert "Never add a step that contributes nothing to this request" in text
@@ -169,5 +172,6 @@ def test_the_instructions_name_only_agents_the_catalog_has() -> None:
 
 def test_the_instructions_carry_nothing_per_request() -> None:
     # A timestamp, an id or a model name here would change the cached prefix.
-    assert "{" not in CLAUDE_INSTRUCTIONS and "}" not in CLAUDE_INSTRUCTIONS
+    assert "{" not in CLAUDE_INSTRUCTIONS
+    assert "}" not in CLAUDE_INSTRUCTIONS
     assert orchestrator.planner_system("X") == f"{CLAUDE_INSTRUCTIONS}\n\nX"

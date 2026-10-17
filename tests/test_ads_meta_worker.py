@@ -70,10 +70,12 @@ def test_an_ad_set_is_written_on_haiku_and_handed_on(claude: FakeClaude) -> None
 
     (call,) = claude.calls
     assert (call.purpose, call.model, call.effort) == ("worker.ads.meta", "claude-haiku-4-5", None)
-    assert call.schema_name == "AdSetDraft" and call.system == ads_meta.INSTRUCTIONS
+    assert call.schema_name == "AdSetDraft"
+    assert call.system == ads_meta.INSTRUCTIONS
     assert call.max_tokens == ads_meta.MAX_TOKENS
     assert out["summary"] == "3 Meta ad variants — Fix your bike, together"
-    assert out["objective"] == "OUTCOME_TRAFFIC" and out["special_ad_category"] == "NONE"
+    assert out["objective"] == "OUTCOME_TRAFFIC"
+    assert out["special_ad_category"] == "NONE"
     assert out["ads"][0] == {
         "primary_text": "Bring your bike on Saturday. Our stands and tools are yours to use.",
         "headline": "Fix your bike, together",
@@ -81,12 +83,14 @@ def test_an_ad_set_is_written_on_haiku_and_handed_on(claude: FakeClaude) -> None
         "cta": "LEARN_MORE",
         "cta_label": "Learn more",
     }
-    assert out["audience"]["locations"] == ["Quezon City"] and (
+    assert out["audience"]["locations"] == ["Quezon City"]
+    assert (
         out["audience"]["age_min"],
         out["audience"]["age_max"],
     ) == (18, 45)
     assert out["counts"] == {"ads": 3, "interests": 2}
-    assert out["unverified_figures"] == [] and out["issues"] == []
+    assert out["unverified_figures"] == []
+    assert out["issues"] == []
 
 
 def test_the_steps_tier_picks_the_model(claude: FakeClaude) -> None:
@@ -133,6 +137,16 @@ def test_an_unfittable_description_is_blanked_and_the_variant_kept(claude: FakeC
     assert out["issues"] == [{"variant": 1, "problem": "description_dropped_no_boundary_fits"}]
 
 
+def test_a_variant_with_blank_copy_is_dropped_as_empty(claude: FakeClaude) -> None:
+    claude.reply(_draft(_ad(primary_text="   "), _ad("  "), _ad("Second"), _ad("Third")))
+    out = run()
+    assert [a["headline"] for a in out["ads"]] == ["Second", "Third"]
+    assert out["issues"] == [
+        {"variant": 1, "problem": "dropped_empty"},
+        {"variant": 2, "problem": "dropped_empty"},
+    ]
+
+
 def test_too_few_fitting_variants_fail_the_step(claude: FakeClaude) -> None:
     unfit = _ad("Ok", primary_text="An unbroken run of words that never reaches a sentence end " * 3)
     claude.reply(_draft(_ad(), unfit))
@@ -149,6 +163,10 @@ def test_too_few_fitting_variants_fail_the_step(claude: FakeClaude) -> None:
         ("Save on [placeholder: price, per class] and more fun", 30, None),  # never inside brackets
         ("A run of words with no boundary anywhere in it at all", 30, None),
         ("Hi. Then a very long run of words with no boundary at all", 30, None),  # "Hi." is a stub
+        # A closed bracket reopens the boundaries after it; a stray closer is plain text.
+        ("Save on [placeholder: price] today. More words follow on", 40, "Save on [placeholder: price] today."),
+        ("Save (a lot) on tools, with friends and neighbours every week", 40, "Save (a lot) on tools"),
+        ("Closing ] stray, then words keep going on and on and on", 30, "Closing ] stray"),
     ],
 )
 def test_fit_at_boundary_never_cuts_mid_sentence(text: str, limit: int, expected: str | None) -> None:
@@ -207,7 +225,8 @@ def test_the_facts_rule_is_asked_for_and_unbacked_figures_are_surfaced(claude: F
 def test_an_ad_set_the_model_did_not_deliver_fails_the_step(claude: FakeClaude, script: Any, rule: str) -> None:
     script(claude)
     err = _failure()
-    assert err.rule == rule and "MODEL-PROSE" not in str(err)
+    assert err.rule == rule
+    assert "MODEL-PROSE" not in str(err)
 
 
 def test_off_claude_the_step_is_not_attempted(fake_claude: FakeClaude) -> None:

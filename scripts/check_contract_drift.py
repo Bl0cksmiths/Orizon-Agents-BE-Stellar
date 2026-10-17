@@ -71,6 +71,10 @@ CANONICAL_FILES: Mapping[str, str] = {
     "mainnet": "addresses.mainnet.json",
 }
 
+# This repo's env-style sources, each reported under its file name.
+ENV_EXAMPLE = ".env.example"
+RENDER_YAML = "render.yaml"
+
 # Printed in place of an id a source does not carry. An omission is drift too:
 # it produces the same unconfigured read, only reached by absence.
 MISSING = "<missing>"
@@ -92,7 +96,10 @@ _RELEVANT: frozenset[str] = frozenset({*_ENV_KEYS, _NETWORK_KEY})
 _ASSIGNMENT = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 
 _YAML_KEY = re.compile(r"^\s*-\s*key:\s*(\S+)\s*$")
-_YAML_VALUE = re.compile(r"^\s*value:\s*(.*)$")
+# The value's surrounding whitespace is left in the group and stripped by the
+# caller: a `\s*` before `(.*)` would let both quantifiers claim the same
+# spaces and backtrack quadratically on a long run of them.
+_YAML_VALUE = re.compile(r"^\s*value:(.*)$")
 
 
 class DriftCheckError(Exception):
@@ -216,7 +223,7 @@ def _attribute(source: str, blocks: Sequence[Mapping[str, str]]) -> NetworkMap:
     return out
 
 
-def parse_env_example(text: str, source: str = ".env.example") -> NetworkMap:
+def parse_env_example(text: str, source: str = ENV_EXAMPLE) -> NetworkMap:
     """Read both network blocks out of an env file, live one and commented one."""
     live: dict[str, str] = {}
     commented: dict[str, str] = {}
@@ -232,7 +239,7 @@ def parse_env_example(text: str, source: str = ".env.example") -> NetworkMap:
     return _attribute(source, [live, commented])
 
 
-def parse_render_yaml(text: str, source: str = "render.yaml") -> NetworkMap:
+def parse_render_yaml(text: str, source: str = RENDER_YAML) -> NetworkMap:
     """Pull the contract ids out of the Render blueprint's envVars block.
 
     A line scanner rather than a YAML parser: PyYAML is not a declared
@@ -362,8 +369,8 @@ def load_sources(repo_root: Path, contracts_dir: Path) -> dict[str, NetworkMap]:
     """The three places a contract id is written down, canonical first."""
     return {
         "canonical": load_canonical(contracts_dir),
-        ".env.example": parse_env_example(_read(repo_root / ".env.example")),
-        "render.yaml": parse_render_yaml(_read(repo_root / "render.yaml")),
+        ENV_EXAMPLE: parse_env_example(_read(repo_root / ENV_EXAMPLE)),
+        RENDER_YAML: parse_render_yaml(_read(repo_root / RENDER_YAML)),
     }
 
 

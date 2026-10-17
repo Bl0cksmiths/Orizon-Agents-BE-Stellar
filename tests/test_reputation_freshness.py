@@ -73,7 +73,7 @@ class Chain:
         return dict(value)
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch) -> Chain:
     fake = Chain()
     monkeypatch.setattr(settings, "reputation_enabled", True)
@@ -142,8 +142,10 @@ def test_a_slow_read_after_invalidation_serves_the_last_value_stale_never_the_pr
 
     assert served.source == "onchain"
     assert served.degraded is False
-    assert served.stale is True and served.superseded is True
-    assert served.stale_age_seconds is not None and 0.0 <= served.stale_age_seconds < 5.0
+    assert served.stale is True
+    assert served.superseded is True
+    assert served.stale_age_seconds is not None
+    assert 0.0 <= served.stale_age_seconds < 5.0
     assert (served.smoothed_bps, served.count, served.disputed) == (before.smoothed_bps, 4, 0)
     assert served.smoothed_bps != settings.reputation_prior_bps
     assert rep.passes_floor(served) is False
@@ -171,8 +173,10 @@ def test_a_superseded_read_is_served_even_past_the_stale_grace(chain, monkeypatc
     served = asyncio.run(scenario())
 
     assert served.degraded is False
-    assert served.stale is True and served.superseded is True
-    assert served.stale_age_seconds is not None and served.stale_age_seconds >= 600.0
+    assert served.stale is True
+    assert served.superseded is True
+    assert served.stale_age_seconds is not None
+    assert served.stale_age_seconds >= 600.0
     assert rep.passes_floor(served) is False
 
 
@@ -188,7 +192,9 @@ def test_a_fast_read_after_invalidation_serves_the_post_rating_value_fresh(chain
     served = asyncio.run(scenario())
 
     assert (served.count, served.disputed) == (5, 1)
-    assert served.stale is False and served.superseded is False and served.degraded is False
+    assert served.stale is False
+    assert served.superseded is False
+    assert served.degraded is False
     assert rep.passes_floor(served) is False  # judged, and failed, on its own post-dispute numbers
 
 
@@ -208,7 +214,8 @@ def test_a_cold_agent_with_no_known_value_is_still_the_degraded_prior(chain):
 
     assert served.source == "prior"
     assert served.degraded is True
-    assert served.stale is False and served.superseded is False
+    assert served.stale is False
+    assert served.superseded is False
 
 
 def test_the_warning_says_a_superseded_agent_is_refused_not_judged(chain, caplog):
@@ -256,7 +263,8 @@ def test_invalidation_refreshes_the_agent_in_the_background(chain):
     assert chain.count("agt_01h8") == 2  # the batch after it was a cache hit
     assert (served.count, served.disputed) == (5, 1)
     stored = rcache.last_stored(_key("agt_01h8"))
-    assert stored is not None and stored.superseded is False
+    assert stored is not None
+    assert stored.superseded is False
 
 
 def test_invalidation_never_waits_on_the_refresh(chain):
@@ -330,7 +338,8 @@ def test_repeated_invalidation_keeps_one_refresh_that_goes_round_once_more(chain
     assert same is True
     assert chain.count("agt_01h8") == 3  # the first read, the parked one, one more
     stored = rcache.last_stored(_key("agt_01h8"))
-    assert stored is not None and stored.superseded is False
+    assert stored is not None
+    assert stored.superseded is False
     assert stored.value == POST
 
 
@@ -386,7 +395,7 @@ async def _noop(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch):
     """Fresh seeded registry, restored after; kit thinking-sleep no-op'd."""
     saved = dict(state.agents)

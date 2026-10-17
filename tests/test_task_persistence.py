@@ -106,7 +106,7 @@ class FakeStore:
             self.traces[(task.id, seq)] = TraceLine(t=f"00.{seq:03d}", level="exec", msg=msg).model_dump_json()
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeStore]:
     """A fresh store AND a fresh journal: the suite's own journal is the
     process observer, and its queue must not leak between tests."""
@@ -181,7 +181,7 @@ class _Slow:
         return {"summary": "done"}
 
 
-@pytest.fixture()
+@pytest.fixture
 def slow_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(execution_svc, "_execute_refusal", lambda *a, **k: None)
 
@@ -246,7 +246,8 @@ def test_a_database_that_fails_is_retried_until_it_takes_the_write(
 
     with caplog.at_level(logging.WARNING, logger="app.services.task_persistence"):
         assert asyncio.run(run()) is True
-    assert _id(2) in store.tasks and store.tasks[_id(2)].read_token_sha256 == read_token_digest(TOKEN)
+    assert _id(2) in store.tasks
+    assert store.tasks[_id(2)].read_token_sha256 == read_token_digest(TOKEN)
     assert sum("failed (attempt" in r.getMessage() for r in caplog.records) == 3
 
 
@@ -263,7 +264,8 @@ def test_a_database_that_stays_down_never_blocks_the_caller(store: FakeStore) ->
         return flushed, time.monotonic() - began
 
     flushed, took = asyncio.run(run())
-    assert flushed is False and took < 1.0
+    assert flushed is False
+    assert took < 1.0
     assert state.tasks[_id(3)].status == "complete"
     assert store.tasks == {}
 
@@ -309,7 +311,7 @@ def test_without_a_database_nothing_is_queued(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ── reading: a task this process never ran ──────────────────────────────
-@pytest.fixture()
+@pytest.fixture
 def client_on(store: FakeStore, client: Any) -> Any:
     return client
 

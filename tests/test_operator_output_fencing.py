@@ -124,7 +124,8 @@ def test_an_operators_summary_reaches_the_next_step_fenced(monkeypatch):
     fenced = reader.seen["external.ext_op"]["summary"]
     assert fenced == fence_untrusted(summary, label=LABEL)
     assert "SECURITY DIRECTIVE" in fenced
-    assert f"BEGIN {LABEL}" in fenced and f"END {LABEL}" in fenced
+    assert f"BEGIN {LABEL}" in fenced
+    assert f"END {LABEL}" in fenced
     # The payload survives as DATA — fencing isolates it, it does not censor it.
     assert summary in fenced
 
@@ -141,8 +142,10 @@ def test_critic_notes_are_fenced_per_item_and_stay_a_list(monkeypatch):
     )
 
     seen = reader.seen["external.ext_op"]
-    assert isinstance(seen["critic_notes"], list) and len(seen["critic_notes"]) == 2
-    assert isinstance(seen["critic_violations"], list) and len(seen["critic_violations"]) == 1
+    assert isinstance(seen["critic_notes"], list)
+    assert len(seen["critic_notes"]) == 2
+    assert isinstance(seen["critic_violations"], list)
+    assert len(seen["critic_violations"]) == 1
     assert all("SECURITY DIRECTIVE" in note for note in seen["critic_notes"])
     # Marker forgery: the payload's own "END <LABEL>" is neutralised, so it
     # cannot close the block it sits inside.

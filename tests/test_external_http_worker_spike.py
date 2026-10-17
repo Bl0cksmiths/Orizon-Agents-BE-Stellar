@@ -94,7 +94,8 @@ def test_dispatch_carries_the_envelope_and_returns_the_output() -> None:
     # v2 since story 2.02 (ADR 0004): the envelope gained `ts` and `network`,
     # both inside the signed bytes.
     assert body["v"] == 2
-    assert isinstance(body["ts"], int) and body["ts"] > 0
+    assert isinstance(body["ts"], int)
+    assert body["ts"] > 0
     assert body["network"]
     # The operator's budget, emitted from the constant so the wire value can
     # never drift from what the worker actually enforces.
@@ -216,8 +217,9 @@ def test_response_missing_summary_is_rejected() -> None:
 
     async def go() -> None:
         async with _client_for(app) as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())
 
@@ -234,8 +236,9 @@ def test_connect_failure_retries_once_then_raises() -> None:
     async def go() -> None:
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport, base_url="https://operator.example") as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())
     assert calls["n"] == 2  # original attempt + exactly one retry
@@ -250,8 +253,9 @@ def test_oversize_response_is_rejected() -> None:
 
     async def go() -> None:
         async with _client_for(app) as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())
 
@@ -265,8 +269,9 @@ def test_non_json_response_is_rejected() -> None:
 
     async def go() -> None:
         async with _client_for(app) as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())
 
@@ -280,7 +285,8 @@ def test_non_object_json_response_is_rejected() -> None:
 
     async def go() -> None:
         async with _client_for(app) as client:
+            worker = _worker(client)
             with pytest.raises(ExternalDispatchError):
-                await _worker(client).run("x", "y")
+                await worker.run("x", "y")
 
     asyncio.run(go())

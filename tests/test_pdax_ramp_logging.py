@@ -222,9 +222,10 @@ def test_interrupted_advance_is_logged_with_traceback(caplog, monkeypatch):
     ramp_store.save(record)
 
     async def run():
+        client = _FailingClient(PdaxError("x"))
         with caplog.at_level(logging.ERROR, logger=RAMP_LOGGER):
             with pytest.raises(RuntimeError):
-                await ramp._advance_guarded(_FailingClient(PdaxError("x")), record, ramp.advance_onramp)
+                await ramp._advance_guarded(client, record, ramp.advance_onramp)
 
     asyncio.run(run())
     records = [r for r in caplog.records if r.name == RAMP_LOGGER and r.levelno == logging.ERROR]

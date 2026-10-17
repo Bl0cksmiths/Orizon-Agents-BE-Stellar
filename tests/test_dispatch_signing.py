@@ -33,7 +33,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from collections.abc import Iterator
 
 import pytest
 from stellar_sdk import Keypair
@@ -66,7 +65,7 @@ EXPECTED_MESSAGE = (
 
 
 @pytest.fixture(autouse=True)
-def isolated_signing_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def isolated_signing_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every test unconfigured, and leave nothing behind.
 
     The key is restored by monkeypatch (conftest's hermetic fixture predates
@@ -78,7 +77,6 @@ def isolated_signing_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(settings, "orizon_dispatch_signing_key", "")
     monkeypatch.setattr(ds, "_cached", ("", None))
     monkeypatch.setattr(ds, "_warned_reason", None)
-    yield
 
 
 def _configure(key: str) -> None:
@@ -116,8 +114,10 @@ def test_the_signed_payload_is_sep53_framed_not_the_raw_message() -> None:
     Keypair.from_public_key(SIGNER.public_key).verify(payload, signature)  # raises if it disagrees
 
     # And emphatically NOT a signature over the message bytes themselves.
+    signer = Keypair.from_public_key(SIGNER.public_key)
+    message = EXPECTED_MESSAGE.encode("utf-8")
     with pytest.raises(BadSignatureError):
-        Keypair.from_public_key(SIGNER.public_key).verify(EXPECTED_MESSAGE.encode("utf-8"), signature)
+        signer.verify(message, signature)
 
 
 def test_a_signature_verifies_for_the_published_signer_address() -> None:
@@ -157,11 +157,13 @@ def test_a_signature_for_one_endpoint_does_not_verify_for_another() -> None:
     assert for_b[ds.SIGNATURE_HEADER] != for_a[ds.SIGNATURE_HEADER]
 
     # B cannot verify A's envelope...
+    message_at_b, signature_for_a = dispatch_message(OTHER_URL, BODY), _signature(for_a)
     with pytest.raises(BadSignatureError):
-        pinned.verify_message(dispatch_message(OTHER_URL, BODY), _signature(for_a))
+        pinned.verify_message(message_at_b, signature_for_a)
     # ...and B's own signature is equally useless to A.
+    message_at_a, signature_for_b = dispatch_message(URL, BODY), _signature(for_b)
     with pytest.raises(BadSignatureError):
-        pinned.verify_message(dispatch_message(URL, BODY), _signature(for_b))
+        pinned.verify_message(message_at_a, signature_for_b)
 
 
 def test_a_signature_does_not_carry_over_to_a_different_body() -> None:
@@ -175,8 +177,10 @@ def test_a_signature_does_not_carry_over_to_a_different_body() -> None:
     tampered = BODY.replace(b'"d1"', b'"d2"')
     assert tampered != BODY
 
+    signer = Keypair.from_public_key(SIGNER.public_key)
+    message = dispatch_message(URL, tampered)
     with pytest.raises(BadSignatureError):
-        Keypair.from_public_key(SIGNER.public_key).verify_message(dispatch_message(URL, tampered), signature)
+        signer.verify_message(message, signature)
 
 
 def test_a_mnemonic_key_signs_like_a_secret_key() -> None:

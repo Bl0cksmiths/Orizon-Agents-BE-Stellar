@@ -23,10 +23,9 @@ The order of checks in `bind` is load-bearing, not stylistic; see its docstring.
 from __future__ import annotations
 
 import base64
-import binascii
 import logging
 import secrets
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query
@@ -34,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..schemas import AGENT_ID_PATTERN
+from ..security import ErrorEnvelope
 from ..services import external_binding, operator_readiness
 from ..services.binding_registry import note_bound, note_unbound
 from ..services.binding_store import get_binding_store
@@ -47,6 +47,15 @@ router = APIRouter(prefix="/agents", tags=["binding"])
 # An ed25519 signature is exactly 64 bytes; base64 of that is 88 characters.
 # Bounded at the edge so a megabyte of "signature" is rejected before decode.
 _SIGNATURE_BYTES = 64
+
+# What `_require_owner` answers, on every route that resolves the agent's owner.
+_OWNER_RESPONSES: dict[int | str, dict[str, Any]] = {
+    404: {"model": ErrorEnvelope, "description": "`agent_not_found` — the registry names no owner for this agent id."},
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`registry_unavailable` — the owner could not be read on-chain. Retry.",
+    },
+}
 
 
 class BindChallengeReq(BaseModel):
@@ -220,7 +229,7 @@ def _check_policy(agent_id: str, endpoint_url: str, stage: str) -> None:
 # it can never be captured as an agent id — `GET /api/agents/{agent_id}` in
 # app/routers/agents.py has no pattern constraint and would otherwise swallow
 # a two-segment spelling regardless of router registration order.
-@router.get("/bind/endpoint-check", response_model=EndpointCheckResponse, summary="Preflight an endpoint URL")
+@router.get("/bind/endpoint-check", summary="Preflight an endpoint URL")
 async def endpoint_check(url: Annotated[str, Query(min_length=1, max_length=2048)]) -> EndpointCheckResponse:
     """Advisory: would this URL be accepted? Pure — no DNS, no outbound request.
 
@@ -236,8 +245,17 @@ async def endpoint_check(url: Annotated[str, Query(min_length=1, max_length=2048
 
 @router.post(
     "/{agent_id}/unbind/challenge",
-    response_model=UnbindChallengeResponse,
     summary="Mint an unbind challenge to sign",
+    responses={
+        **_OWNER_RESPONSES,
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`registry_unavailable` — the owner could not be read on-chain; or `challenge_capacity_unbind` — "
+                "every unbind challenge slot is live. Retry."
+            ),
+        },
+    },
 )
 async def unbind_challenge(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
@@ -274,8 +292,21 @@ async def unbind_challenge(
 
 @router.post(
     "/{agent_id}/bind/challenge",
-    response_model=BindChallengeResponse,
     summary="Mint a binding challenge to sign",
+    responses={
+        **_OWNER_RESPONSES,
+        422: {
+            "model": ErrorEnvelope,
+            "description": "`endpoint_not_allowed` — the endpoint fails the endpoint policy; or invalid input.",
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`registry_unavailable` — the owner could not be read on-chain; or `challenge_capacity_bind` — "
+                "every bind challenge slot is live. Retry."
+            ),
+        },
+    },
 )
 async def bind_challenge(
     body: BindChallengeReq,
@@ -300,7 +331,21 @@ async def bind_challenge(
     )
 
 
-@router.post("/{agent_id}/bind", response_model=BindingResponse, summary="Bind an endpoint to an agent id")
+@router.post(
+    "/{agent_id}/bind",
+    summary="Bind an endpoint to an agent id",
+    responses={
+        **_OWNER_RESPONSES,
+        401: {
+            "model": ErrorEnvelope,
+            "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+        },
+        422: {
+            "model": ErrorEnvelope,
+            "description": "`endpoint_not_allowed`, `signature_malformed`, or invalid input.",
+        },
+    },
+)
 async def bind(
     body: BindReq,
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
@@ -329,7 +374,7 @@ async def bind(
 
     try:
         raw_signature = base64.b64decode(body.signature, validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:  # binascii.Error, which b64decode raises, is a ValueError
         raise HTTPException(422, "signature_malformed") from None
     if len(raw_signature) != _SIGNATURE_BYTES:
         raise HTTPException(422, "signature_malformed")
@@ -384,7 +429,18 @@ async def bind(
     )
 
 
-@router.delete("/{agent_id}/bind", response_model=UnbindResponse, summary="Revoke an agent's endpoint binding")
+@router.delete(
+    "/{agent_id}/bind",
+    summary="Revoke an agent's endpoint binding",
+    responses={
+        **_OWNER_RESPONSES,
+        401: {
+            "model": ErrorEnvelope,
+            "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+        },
+        422: {"model": ErrorEnvelope, "description": "`signature_malformed`, or invalid input."},
+    },
+)
 async def unbind(
     body: UnbindReq,
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
@@ -427,7 +483,7 @@ async def unbind(
     """
     try:
         raw_signature = base64.b64decode(body.signature, validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:  # binascii.Error, which b64decode raises, is a ValueError
         raise HTTPException(422, "signature_malformed") from None
     if len(raw_signature) != _SIGNATURE_BYTES:
         raise HTTPException(422, "signature_malformed")
@@ -468,7 +524,11 @@ async def unbind(
     return UnbindResponse(agent_id=agent_id, owner=owner, was_bound=True, unbound_at=record.unbound_at)
 
 
-@router.get("/{agent_id}/binding", response_model=BindingResponse, summary="Read an agent's binding")
+@router.get(
+    "/{agent_id}/binding",
+    summary="Read an agent's binding",
+    responses={404: {"model": ErrorEnvelope, "description": "`binding_not_found` — this agent has no live binding."}},
+)
 async def read_binding(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
@@ -497,7 +557,6 @@ async def read_binding(
 
 @router.get(
     "/{agent_id}/readiness",
-    response_model=ReadinessResponse,
     summary="Operator readiness self-check: the next thing to fix",
 )
 async def readiness(agent_id: str = Path(..., pattern=AGENT_ID_PATTERN)) -> ReadinessResponse:

@@ -87,7 +87,8 @@ def test_a_rating_only_dispute_claims_the_rating_and_no_refund(tmp_path: Path) -
     rows = [*settled_run(ledger), row("dispute_rating", ledger.add("dispute"), stage="refund", seq=5)]
     text = described(ledger, tmp_path, rows)
     assert text == paragraph(RATED_ONLY)
-    assert "upheld" not in text and "partial credit" not in text
+    assert "upheld" not in text
+    assert "partial credit" not in text
 
 
 def test_a_refund_that_failed_on_the_ledger_is_not_claimed(tmp_path: Path) -> None:
@@ -192,7 +193,8 @@ def test_the_asset_sentence_says_testnet_xlm_labelled_xlm(tmp_path: Path) -> Non
     ledger = FakeLedger()
     text = described(ledger, tmp_path, settled_run(ledger))
     assert ASSET in text
-    assert "labels USDC" not in text and "interface labels it XLM" in text
+    assert "labels USDC" not in text
+    assert "interface labels it XLM" in text
 
 
 # ── the sheet's "what it proves" ────────────────────────────────
@@ -206,4 +208,5 @@ def test_the_sheet_claims_no_uphold_for_a_dispute_rating_or_a_refund(tmp_path: P
     sheet = out.sheet()
     assert "| the platform's signing key paid the buyer a partial credit for the disputed step |" in sheet
     assert "| a kind=dispute rating against the disputed agent landed on the ReputationLedger |" in sheet
-    assert "upheld" not in sheet and "settler" not in sheet
+    assert "upheld" not in sheet
+    assert "settler" not in sheet

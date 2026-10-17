@@ -120,7 +120,7 @@ def empty_table():
         eb._exhausted.clear()
 
 
-@pytest.fixture()
+@pytest.fixture
 def settled(monkeypatch):
     """`TASK` settled by PAYER, with one rejected dispute on it.
 
@@ -267,7 +267,7 @@ def test_a_grant_minted_by_another_process_reads_nothing(client, settled, monkey
 # ── the grant buys the free text and nothing else ───────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def running_task():
     """`TASK` in memory with a read token, so the guarded routes have something to guard."""
     state.tasks[TASK] = Task(id=TASK, intent="read my reason", agents=1, spent=0.0, status="complete", started="now")

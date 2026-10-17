@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ... import pacing
 from .base import ModelWorker
 from .claude_step import ModelStepError
 from .code_critic import CRITIC_DEFAULT_TIER, CodeCritic
@@ -60,6 +61,65 @@ def _is_project(output: dict[str, Any]) -> bool:
     return isinstance(artifact, dict) and artifact.get("framework") == "next"
 
 
+def _draft_html(artifact: dict[str, Any]) -> str:
+    """The draft's HTML: its preview, or the entry file's content (else the
+    first file's) when the preview is empty."""
+    draft_html: str = artifact.get("preview_html") or ""
+    if not draft_html.strip():
+        files = artifact.get("files", [])
+        entry = artifact.get("entry")
+        entry_file = next((f for f in files if f.get("path") == entry), files[0] if files else None)
+        draft_html = (entry_file or {}).get("content", "")
+    return draft_html
+
+
+def _polish_notes(draft_html: str, revised_html: str, fixed: int, kit_requirements: int) -> list[str]:
+    """The notes for a kept revision: its size change and what it fixed, then
+    the kit requirements it applied, if the kit set any."""
+    draft_lines = draft_html.count("\n") + 1
+    revised_lines = revised_html.count("\n") + 1
+    delta = revised_lines - draft_lines
+    notes = [
+        f"polished: {draft_lines}L → {revised_lines}L "
+        f"({'+' if delta >= 0 else ''}{delta}) · "
+        f"{fixed} structural issue"
+        f"{'s' if fixed != 1 else ''} fixed"
+    ]
+    if kit_requirements:
+        notes.append(f"applied {kit_requirements} kit requirement{'s' if kit_requirements != 1 else ''}")
+    return notes
+
+
+async def _baked_review(
+    ctx: dict[str, Any], draft_artifact: dict[str, Any], draft_html: str, validator_violations: list[str]
+) -> dict[str, Any]:
+    """The critic's answer for a baked draft: validated and hardened, no model
+    asked. The kit's checklist items are pre-met by design."""
+    checklist = (ctx.get("kit") or {}).get("critic_checklist", [])
+    await pacing.pause(0.4, 0.6)
+    title = draft_artifact.get("title", "artifact")
+    kit_id = (ctx.get("kit") or {}).get("kit_id", "kit")
+    draft_artifact = harden_artifact(draft_artifact)
+    return {
+        "summary": (
+            f"{title} · verified · {len(validator_violations)} structural "
+            f"issue(s) · {len(checklist)} kit requirements ✓"
+        ),
+        "artifact": draft_artifact,
+        "critic_violations": validator_violations,
+        "critic_notes": [
+            f"validated baked artifact ({len(draft_html):,} bytes)",
+            f"{len(checklist)} {kit_id} kit requirements pre-met by design",
+        ],
+        "counts": {
+            "violations": len(validator_violations),
+            "kit_requirements": len(checklist),
+            "notes": 2,
+        },
+        "source": "baked",
+    }
+
+
 class CodeCriticWorker(ModelWorker):
     id = "agt_12r0"
     name = "code.critic"
@@ -94,9 +154,6 @@ class CodeCriticWorker(ModelWorker):
         *,
         tier: Tier | None = None,
     ) -> dict[str, Any]:
-        import asyncio
-        import random
-
         ctx = context or {}
         draft = _draft(ctx)
         if draft and _is_project(draft[1]):
@@ -115,13 +172,7 @@ class CodeCriticWorker(ModelWorker):
                 "counts": {"violations": 0, "notes": 1},
             }
 
-        draft_html = draft_artifact.get("preview_html") or ""
-        if not draft_html.strip():
-            # Try the entry file's content if preview_html is empty
-            files = draft_artifact.get("files", [])
-            entry = draft_artifact.get("entry")
-            entry_file = next((f for f in files if f.get("path") == entry), files[0] if files else None)
-            draft_html = (entry_file or {}).get("content", "")
+        draft_html = _draft_html(draft_artifact)
 
         # ── 1. Structural violations from the validator ─────────────────────
         validator_violations = validate_html(draft_html)
@@ -131,29 +182,7 @@ class CodeCriticWorker(ModelWorker):
         # validates and emits a polished-looking summary — no LLM call. The
         # kit's checklist items are pre-met by design.
         if prior.get("source") == "baked":
-            checklist = (ctx.get("kit") or {}).get("critic_checklist", [])
-            await asyncio.sleep(0.4 + random.random() * 0.6)
-            title = draft_artifact.get("title", "artifact")
-            kit_id = (ctx.get("kit") or {}).get("kit_id", "kit")
-            draft_artifact = harden_artifact(draft_artifact)
-            return {
-                "summary": (
-                    f"{title} · verified · {len(validator_violations)} structural "
-                    f"issue(s) · {len(checklist)} kit requirements ✓"
-                ),
-                "artifact": draft_artifact,
-                "critic_violations": validator_violations,
-                "critic_notes": [
-                    f"validated baked artifact ({len(draft_html):,} bytes)",
-                    f"{len(checklist)} {kit_id} kit requirements pre-met by design",
-                ],
-                "counts": {
-                    "violations": len(validator_violations),
-                    "kit_requirements": len(checklist),
-                    "notes": 2,
-                },
-                "source": "baked",
-            }
+            return await _baked_review(ctx, draft_artifact, draft_html, validator_violations)
 
         # ── 2. Kit-specific must-haves (treated as REQUIRED items) ──────────
         kit = ctx.get("kit") or {}
@@ -183,19 +212,7 @@ class CodeCriticWorker(ModelWorker):
                     f"issues vs. {len(validator_violations)} in draft"
                 )
             else:
-                draft_lines = draft_html.count("\n") + 1
-                revised_lines = revised_html.count("\n") + 1
-                delta = revised_lines - draft_lines
-                critic_notes.append(
-                    f"polished: {draft_lines}L → {revised_lines}L "
-                    f"({'+' if delta >= 0 else ''}{delta}) · "
-                    f"{len(validator_violations)} structural issue"
-                    f"{'s' if len(validator_violations) != 1 else ''} fixed"
-                )
-                if kit_required:
-                    critic_notes.append(
-                        f"applied {len(kit_required)} kit requirement{'s' if len(kit_required) != 1 else ''}"
-                    )
+                critic_notes += _polish_notes(draft_html, revised_html, len(validator_violations), len(kit_required))
                 # The draft's "Deferred: …" list survives the rewrite: the
                 # critic writes its own summary, and the buyer must still be
                 # told what was left out (merged with any list it adds).

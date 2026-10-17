@@ -102,8 +102,9 @@ def test_a_valid_register_keeps_every_field_trimmed(tmp_path: Path) -> None:
     ],
 )
 def test_an_invalid_register_is_refused_with_the_entry_named(tmp_path: Path, payload: Any, names: list[str]) -> None:
+    register = _write(tmp_path, payload)
     with pytest.raises(TeamRegisterError) as caught:
-        load_team_register(_write(tmp_path, payload))
+        load_team_register(register)
 
     for name in names:
         assert name in str(caught.value)

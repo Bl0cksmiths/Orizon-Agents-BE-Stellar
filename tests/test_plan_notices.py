@@ -345,7 +345,9 @@ def test_simulated_exclusion_is_policy_not_a_verdict_on_the_agent():
 
     assert (n.kind, n.reason_code) == ("excluded", "simulated_worker")
     assert (n.agent_id, n.agent_name) == ("agt_03d9", "code.next")
-    assert n.lower_bound_bps is None and n.count is None and n.floor_bps == FLOOR
+    assert n.lower_bound_bps is None
+    assert n.count is None
+    assert n.floor_bps == FLOOR
     assert n.reason == (
         "its built-in worker only simulates this agent's output so far (a buyer is never charged for simulated "
         "work, so the planner passed it over)"
@@ -356,8 +358,10 @@ def test_the_external_policy_notice_names_no_agent():
     n = plan_notices.external_policy_notice()
 
     assert (n.kind, n.reason_code) == ("excluded", "external_not_routed")
-    assert n.agent_id == plan_notices.EXTERNAL_POLICY_ID and n.agent_name is None
-    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.agent_id == plan_notices.EXTERNAL_POLICY_ID
+    assert n.agent_name is None
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
     assert n.reason == "Plans currently use Orizon's built-in agents only; outside operators' agents aren't routed."
     # A sentinel no Soroban Symbol can spell, so it can never be a real agent's id.
     assert not plan_notices.EXTERNAL_POLICY_ID.replace("_", "").isalnum()
@@ -367,7 +371,8 @@ def test_no_image_exclusion_says_there_was_nothing_to_read():
     n = plan_notices.no_image_exclusion(_agent("agt_06q4", "vision.ocr"))
 
     assert (n.kind, n.reason_code) == ("excluded", "no_image_input")
-    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
     assert n.reason == (
         "the plan asked it to read an image, but the request has no image or https image link (nothing to read, so "
         "the step was left out)"
@@ -378,7 +383,8 @@ def test_no_input_exclusion_says_what_the_step_lacked():
     n = plan_notices.no_input_exclusion(_agent("agt_12r0", "code.critic"), "there is no code.gen build to review")
 
     assert (n.kind, n.reason_code) == ("excluded", "no_step_input")
-    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
     assert n.reason == (
         "the plan asked it for a step, but there is no code.gen build to review (nothing to work on, so the step "
         "was left out)"
@@ -389,7 +395,8 @@ def test_provider_exclusion_blames_the_provider_not_the_agent():
     n = plan_notices.provider_exclusion(_agent("agt_07w3", "ads.meta"))
 
     assert (n.kind, n.reason_code, n.agent_id) == ("excluded", "provider_unavailable", "agt_07w3")
-    assert n.lower_bound_bps is None and n.floor_bps == FLOOR
+    assert n.lower_bound_bps is None
+    assert n.floor_bps == FLOOR
     assert n.reason == (
         "it runs on Claude only, and the platform's AI work is not running on Claude right now (so the planner "
         "passed it over)"

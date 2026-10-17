@@ -35,12 +35,24 @@ _BARE_HEX = re.compile(r"^(?:0x)?[0-9a-f]{8,}$", re.IGNORECASE)
 _SHORT_HEX = re.compile(r"^[0-9a-f]{4,}\s*(?:…|\.{2,3})\s*[0-9a-f]{4,}$", re.IGNORECASE)
 _BARE_STRKEY = re.compile(r"^[GCM][A-Z2-7]{55}$")
 _SHORT_STRKEY = re.compile(r"^[GCM][A-Z2-7]{2,}\s*(?:…|\.{2,3})\s*[A-Z2-7]{3,}$")
-_EDGES = re.compile(r"^[\W_]+|[\W_]+$")  # anything but a letter or a digit, at either end of a token
 _WORD = re.compile(r"[^\W\d_]{2,}")  # two letters in a row
 
 # A full id inside a label, which is shortened the way the index writes them.
 _FULL_HEX = re.compile(r"\b[0-9a-f]{64}\b")
 _FULL_STRKEY = re.compile(r"\b[GCM][A-Z2-7]{55}\b")
+
+
+def _strip_edges(token: str) -> str:
+    r"""`token` without the runs of anything but a letter or a digit at either
+    end (the validator's `^[\W_]+|[\W_]+$`). A scan rather than that regex:
+    its trailing half, tried at every position, backtracks quadratically
+    through a long run of punctuation inside a token."""
+    start, end = 0, len(token)
+    while start < end and not token[start].isalnum():
+        start += 1
+    while end > start and not token[end - 1].isalnum():
+        end -= 1
+    return token[start:end]
 
 
 def _is_bare_id(token: str) -> bool:
@@ -54,7 +66,7 @@ def label_problem(label: str) -> str | None:
         return "must be a non-empty string"
     if _is_bare_id(text):
         return "is a bare hash or address; say in words what the link shows"
-    words = [t for t in (_EDGES.sub("", tok) for tok in text.split()) if _WORD.search(t) and not _is_bare_id(t)]
+    words = [t for t in (_strip_edges(tok) for tok in text.split()) if _WORD.search(t) and not _is_bare_id(t)]
     if len(words) < 2:
         return "must be at least two words of plain language, not just an id"
     return None

@@ -1,10 +1,12 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from ..config import settings
 from ..schemas import Task, TaskSummary
 from ..state import state
-from ..task_auth import require_task_read
+from ..task_auth import TASK_READ_RESPONSES, require_task_read
 
 router = APIRouter(tags=["tasks"])
 
@@ -23,7 +25,7 @@ class ArtifactResponse(BaseModel):
 
 
 @router.get("/tasks", response_model=list[TaskSummary], summary="List recent tasks")
-async def list_tasks(limit: int = Query(20, ge=1, le=200)) -> list[Task]:
+async def list_tasks(limit: Annotated[int, Query(ge=1, le=200)] = 20) -> list[Task]:
     # response_model narrows every row to TaskSummary, dropping the artifact:
     # this route is polled every 5 seconds and no client reads the field from
     # it. GET /tasks/{id}/artifact serves the payload on demand.
@@ -38,9 +40,9 @@ async def list_tasks(limit: int = Query(20, ge=1, le=200)) -> list[Task]:
 
 @router.get(
     "/tasks/{task_id}",
-    response_model=Task,
     summary="Get a task's status",
     dependencies=[Depends(require_task_read)],
+    responses=TASK_READ_RESPONSES,
 )
 async def get_task(task_id: str) -> Task:
     task = state.tasks.get(task_id)
@@ -57,9 +59,9 @@ async def get_task(task_id: str) -> Task:
 
 @router.get(
     "/tasks/{task_id}/artifact",
-    response_model=ArtifactResponse,
     summary="Get a task's produced artifact",
     dependencies=[Depends(require_task_read)],
+    responses=TASK_READ_RESPONSES,
 )
 async def get_artifact(task_id: str) -> ArtifactResponse:
     """Returns the code artifact produced by the workflow, if any."""

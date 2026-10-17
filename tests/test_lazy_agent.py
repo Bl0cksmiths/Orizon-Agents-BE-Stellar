@@ -30,10 +30,12 @@ def test_nothing_is_built_until_first_use_and_then_only_once() -> None:
         return _Built()
 
     agent = LazyAgent(build)
-    assert builds == [] and agent.built is False
+    assert builds == []
+    assert agent.built is False
     assert agent.instructions == "be brief"
     assert asyncio.run(agent.arun("x", stream=False)) == "ran x {'stream': False}"
-    assert builds == [1] and agent.built is True
+    assert builds == [1]
+    assert agent.built is True
 
 
 def test_arun_can_be_replaced_on_the_wrapper_like_on_an_agent(monkeypatch: pytest.MonkeyPatch) -> None:

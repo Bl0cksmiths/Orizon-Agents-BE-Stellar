@@ -94,7 +94,8 @@ def test_invalidate_supersedes_the_stored_value():
     served, after = asyncio.run(run())
     assert served == "post-dispute"
     assert fresh_calls["n"] == 1
-    assert after is not None and (after.value, after.superseded) == ("post-dispute", False)
+    assert after is not None
+    assert (after.value, after.superseded) == ("post-dispute", False)
 
 
 def test_a_read_in_flight_at_invalidation_does_not_write_back():
@@ -316,7 +317,7 @@ def test_clear_fences_a_flight_that_is_still_running():
 # ── reputation ──────────────────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, int]]:
     """A fake ReputationLedger, read through the REAL cache.
 
@@ -357,7 +358,8 @@ def test_invalidate_rep_makes_the_next_batch_read_see_the_landed_rating(ledger):
         return before, cached, after
 
     before, cached, after = asyncio.run(run())
-    assert before.source == "onchain" and before.disputed == 0
+    assert before.source == "onchain"
+    assert before.disputed == 0
     # Without the invalidation the TTL cache serves the pre-dispute score —
     # the exact failure this story closes.
     assert cached == before
@@ -370,7 +372,7 @@ async def _noop(*_a: object, **_k: object) -> None:
     return None
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded(monkeypatch: pytest.MonkeyPatch) -> object:
     """Fresh seeded registry, restored after; kit thinking-sleep no-op'd."""
     saved = dict(state.agents)

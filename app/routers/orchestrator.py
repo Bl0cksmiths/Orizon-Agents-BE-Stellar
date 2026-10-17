@@ -86,10 +86,21 @@ def _refused(err: IntentRefused) -> JSONResponse:
             "model": ErrorEnvelope,
             "description": "`intent_blocked` (+ `reason`), `intent_needs_detail` (+ `question`), or invalid input.",
         },
+        429: {
+            "model": ErrorEnvelope,
+            "description": (
+                "Rate limited (+ Retry-After): the global limit, or `decompose_rate_limited` — this client's "
+                "planner budget is spent."
+            ),
+        },
+        502: {"model": ErrorEnvelope, "description": "`decompose_failed` — planning failed unexpectedly."},
         503: {
             "model": ErrorEnvelope,
-            "description": "`intent_unavailable` or `planning_paused` (+ Retry-After), `no_routable_agents`",
+            "description": (
+                "`intent_unavailable` or `planning_paused` (+ Retry-After), `no_routable_agents`, `planner_busy`"
+            ),
         },
+        504: {"model": ErrorEnvelope, "description": "`decompose_timeout` — the planner did not answer in time."},
     },
 )
 async def orchestrator_decompose(req: DecomposeRequest, request: Request) -> DecomposeResponse | JSONResponse:
@@ -173,7 +184,42 @@ async def _response(task_id: str) -> ExecuteResponse:
     return ExecuteResponse(task_id=task_id, read_token=state.task_tokens.get(task_id))
 
 
-@router.post("/execute", response_model=ExecuteResponse, summary="Execute a stored plan")
+@router.post(
+    "/execute",
+    response_model=ExecuteResponse,
+    summary="Execute a stored plan",
+    responses={
+        403: {
+            "model": ErrorEnvelope,
+            "description": "`authorization_payer_mismatch` — the authorization was made by a different wallet.",
+        },
+        404: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`not_found` — the plan is no longer held (+ `release_tx_hash` when custody was released); "
+                "or `authorization_not_found`."
+            ),
+        },
+        409: {
+            "model": ErrorEnvelope,
+            "description": (
+                "The authorization cannot pay for this run: `authorization_used`, `authorization_plan_mismatch`, "
+                "`authorization_spent`, `authorization_insufficient` or `authorization_expiring`."
+            ),
+        },
+        410: {
+            "model": ErrorEnvelope,
+            "description": "`plan_expired` (+ `release_tx_hash` when custody was released).",
+        },
+        503: {
+            "model": ErrorEnvelope,
+            "description": (
+                "`plan_store_unavailable` (+ Retry-After), `capacity_exhausted` (+ `release_tx_hash` when "
+                "custody was released), or `authorization_unreadable`."
+            ),
+        },
+    },
+)
 async def orchestrator_execute(req: ExecuteRequest) -> ExecuteResponse | JSONResponse:
     if (req.auth_id_hex is None) != (req.payer is None):
         # Half a pair used to run SIMULATED without a word, so a buyer who

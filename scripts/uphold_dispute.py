@@ -561,6 +561,32 @@ def bounds(dispute: DisputeRecord, settlement: SettlementRecord, step: Settlemen
     ]
 
 
+def _say_bounds(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep) -> None:
+    """Print D4's three bounds with the one that binds marked, then D5's cap."""
+    say()
+    say("  D4 — the credit is the SMALLEST of three bounds:")
+    bounded = bounds(dispute, settlement, step)
+    smallest = min(value for value, _ in bounded)
+    # ONE marker, however many bounds sit at the smallest figure — which is
+    # the ordinary case, since a full-fraction credit on a workflow whose
+    # only settled step is the disputed one makes all three the same
+    # number. Three "<- BINDS" beside a promise of "which one binds" reads
+    # as the arithmetic disagreeing with itself. The others are counted
+    # instead, because an agreement is a fact worth seeing and a silent
+    # one looks like a bound that was skipped.
+    agreeing = sum(1 for value, _ in bounded if value == smallest) - 1
+    marked = False
+    for value, why in bounded:
+        mark = ""
+        if not marked and value == smallest:
+            marked = True
+            mark = "   <- BINDS"
+            if agreeing:
+                mark += f" ({agreeing} other bound{'s' if agreeing > 1 else ''} at the same figure)"
+        say(f"    {value:.7f} USDC  {why}{mark}")
+    say(f"  D5 — cap on ONE credit: MAX_REFUND_USDC = {settings.max_refund_usdc:.7f} USDC")
+
+
 def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementStep | None) -> tuple[float | None, int]:
     """Print what would be paid and why, and return it alongside an exit code.
 
@@ -576,28 +602,7 @@ def plan(dispute: DisputeRecord, settlement: SettlementRecord, step: SettlementS
     through `refuse`.
     """
     if step is not None:
-        say()
-        say("  D4 — the credit is the SMALLEST of three bounds:")
-        bounded = bounds(dispute, settlement, step)
-        smallest = min(value for value, _ in bounded)
-        # ONE marker, however many bounds sit at the smallest figure — which is
-        # the ordinary case, since a full-fraction credit on a workflow whose
-        # only settled step is the disputed one makes all three the same
-        # number. Three "<- BINDS" beside a promise of "which one binds" reads
-        # as the arithmetic disagreeing with itself. The others are counted
-        # instead, because an agreement is a fact worth seeing and a silent
-        # one looks like a bound that was skipped.
-        agreeing = sum(1 for value, _ in bounded if value == smallest) - 1
-        marked = False
-        for value, why in bounded:
-            mark = ""
-            if not marked and value == smallest:
-                marked = True
-                mark = "   <- BINDS"
-                if agreeing:
-                    mark += f" ({agreeing} other bound{'s' if agreeing > 1 else ''} at the same figure)"
-            say(f"    {value:.7f} USDC  {why}{mark}")
-        say(f"  D5 — cap on ONE credit: MAX_REFUND_USDC = {settings.max_refund_usdc:.7f} USDC")
+        _say_bounds(dispute, settlement, step)
 
     try:
         amount = refund_svc.creditable_for(settlement, dispute, settings.dispute_credited_fraction)
@@ -727,6 +732,81 @@ def check_config() -> int:
     )
 
 
+def _report_credited(dispute: DisputeRecord, refund_tx: str, amount: float | None, fallback: int) -> int:
+    """`report` for a dispute credited with its refund on record: whose payment
+    it was (this run's, an earlier run's, or a concurrent adjudication's), and
+    the evidence for it."""
+    say()
+    if fallback == EXIT_ADJUDICATION_RACE:
+        # This run planned an amount and never signed it: the adjudication
+        # it lost the race to has since paid. Crediting it to this run's
+        # own preview would put a figure this process computed beside a
+        # hash it had no part in.
+        say(f"  CREDITED — {dispute.payer} was paid by the adjudication running alongside this one;")
+        say("             this run signed no transfer, and the hash below is not its doing.")
+    elif amount is None:
+        say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
+    else:
+        say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
+    say(f"  status:    {dispute.status}")
+    say(f"  tx:        {refund_tx}")
+    say(f"  evidence:  {expert_url('tx', refund_tx)}")
+    say(f"  payer:     {expert_url('account', dispute.payer)}")
+    say()
+    say("  Funded by the platform's settler wallet. The disputed agent was NOT charged —")
+    say("  label it that way wherever this hash is quoted.")
+    say()
+    return EXIT_OK
+
+
+def _report_upheld(dispute: DisputeRecord, fallback: int) -> int:
+    """`report` for a dispute the store still reads `upheld`: no credit was paid.
+
+    Never EXIT_OK: an `upheld` dispute is a buyer who has not been paid."""
+    say()
+    if fallback == EXIT_ADJUDICATION_RACE:
+        # The ONE case where "no claim is held" must not be said. The
+        # caller that won the compare-and-set is between the decision and
+        # the claim, so the claim may be taken and a transfer signed while
+        # this block is on the screen — and the generic `upheld` sentence
+        # below ends "then re-run", which is how this run races the other
+        # one a second time.
+        say(f"  ANOTHER ADJUDICATION OF {dispute.id} IS RUNNING — this one refused rather than race it.")
+        say("  Nothing was signed HERE. Whether anything has been signed THERE is not knowable")
+        say("  from this process: the dispute reads `upheld`, which is the state the other caller")
+        say("  claims from, so it may be signing a transfer as you read this.")
+        say()
+        say("  Read the dispute back before deciding anything — this signs nothing:")
+        say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id} --dry-run")
+        say()
+        say("  and go by what it says:")
+        say("    * `credited`  — they paid it. A live re-run writes the RATING only, never a transfer.")
+        say("    * `crediting` — their transfer is on the network. Do NOT re-run; reconcile it (10).")
+        say("    * `upheld`    — they failed or gave up and nothing moved, so a re-run pays it.")
+        say()
+        return fallback
+    # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
+    # outcome reached two ways: `uphold` refusing with `refund_failed`, and
+    # a call that returned while leaving the claim released. Both mean the
+    # ledger rejected the transfer, so both get the sentence that matters —
+    # nothing moved, and this is the one case where re-running is right.
+    if fallback in (EXIT_OK, EXIT_TRANSFER_FAILED):
+        say(f"  the transfer FAILED — dispute {dispute.id} is back at `upheld` and nothing moved.")
+        say("  The claim was released, so running this again once the cause is fixed (settler")
+        say("  balance, asset SAC, RPC) pays the credit. The log lines above name it.")
+        say()
+        return EXIT_TRANSFER_FAILED
+    say(f"  dispute {dispute.id} stands at `upheld`: the decision was recorded, the credit was")
+    say("  not paid, and no claim is held. Fix what the refusal above names, then re-run.")
+    say()
+    # NEVER 0 from here, whatever `fallback` says: a dispute left `upheld`
+    # is a buyer who has not been paid, and 0 is the code a wrapper reads
+    # as "credit and rating both landed". The branch above is meant to
+    # catch a clean return; if it ever stops doing so, this one must not
+    # turn that into a success.
+    return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+
+
 def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None, fallback: int) -> int:
     """What the STORE says happened to the money, and the exit code that follows.
 
@@ -781,71 +861,10 @@ def report(dispute: DisputeRecord | None, dispute_id: str, amount: float | None,
         return unresolved_credit(dispute, EXIT_TIMEOUT, "THE TRANSFER TIMED OUT — IT MAY STILL LAND.", amount)
 
     if dispute.status == "credited" and dispute.refund_tx:
-        say()
-        if fallback == EXIT_ADJUDICATION_RACE:
-            # This run planned an amount and never signed it: the adjudication
-            # it lost the race to has since paid. Crediting it to this run's
-            # own preview would put a figure this process computed beside a
-            # hash it had no part in.
-            say(f"  CREDITED — {dispute.payer} was paid by the adjudication running alongside this one;")
-            say("             this run signed no transfer, and the hash below is not its doing.")
-        elif amount is None:
-            say(f"  CREDITED EARLIER — {dispute.payer} was paid by an earlier run; this one signed no transfer")
-        else:
-            say(f"  CREDITED — {amount:.7f} USDC paid to {dispute.payer}")
-        say(f"  status:    {dispute.status}")
-        say(f"  tx:        {dispute.refund_tx}")
-        say(f"  evidence:  {expert_url('tx', dispute.refund_tx)}")
-        say(f"  payer:     {expert_url('account', dispute.payer)}")
-        say()
-        say("  Funded by the platform's settler wallet. The disputed agent was NOT charged —")
-        say("  label it that way wherever this hash is quoted.")
-        say()
-        return EXIT_OK
+        return _report_credited(dispute, dispute.refund_tx, amount, fallback)
 
     if dispute.status == "upheld":
-        say()
-        if fallback == EXIT_ADJUDICATION_RACE:
-            # The ONE case where "no claim is held" must not be said. The
-            # caller that won the compare-and-set is between the decision and
-            # the claim, so the claim may be taken and a transfer signed while
-            # this block is on the screen — and the generic `upheld` sentence
-            # below ends "then re-run", which is how this run races the other
-            # one a second time.
-            say(f"  ANOTHER ADJUDICATION OF {dispute.id} IS RUNNING — this one refused rather than race it.")
-            say("  Nothing was signed HERE. Whether anything has been signed THERE is not knowable")
-            say("  from this process: the dispute reads `upheld`, which is the state the other caller")
-            say("  claims from, so it may be signing a transfer as you read this.")
-            say()
-            say("  Read the dispute back before deciding anything — this signs nothing:")
-            say(f"    python scripts/uphold_dispute.py --dispute-id {dispute.id} --dry-run")
-            say()
-            say("  and go by what it says:")
-            say("    * `credited`  — they paid it. A live re-run writes the RATING only, never a transfer.")
-            say("    * `crediting` — their transfer is on the network. Do NOT re-run; reconcile it (10).")
-            say("    * `upheld`    — they failed or gave up and nothing moved, so a re-run pays it.")
-            say()
-            return fallback
-        # EXIT_TRANSFER_FAILED alongside EXIT_OK because they are the same
-        # outcome reached two ways: `uphold` refusing with `refund_failed`, and
-        # a call that returned while leaving the claim released. Both mean the
-        # ledger rejected the transfer, so both get the sentence that matters —
-        # nothing moved, and this is the one case where re-running is right.
-        if fallback in (EXIT_OK, EXIT_TRANSFER_FAILED):
-            say(f"  the transfer FAILED — dispute {dispute.id} is back at `upheld` and nothing moved.")
-            say("  The claim was released, so running this again once the cause is fixed (settler")
-            say("  balance, asset SAC, RPC) pays the credit. The log lines above name it.")
-            say()
-            return EXIT_TRANSFER_FAILED
-        say(f"  dispute {dispute.id} stands at `upheld`: the decision was recorded, the credit was")
-        say("  not paid, and no claim is held. Fix what the refusal above names, then re-run.")
-        say()
-        # NEVER 0 from here, whatever `fallback` says: a dispute left `upheld`
-        # is a buyer who has not been paid, and 0 is the code a wrapper reads
-        # as "credit and rating both landed". The branch above is meant to
-        # catch a clean return; if it ever stops doing so, this one must not
-        # turn that into a success.
-        return EXIT_UNEXPECTED if fallback == EXIT_OK else fallback
+        return _report_upheld(dispute, fallback)
 
     say()
     if fallback != EXIT_OK and dispute.status == "open":

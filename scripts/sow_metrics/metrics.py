@@ -43,7 +43,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from .collect import AgentRecord, DisputeRating, ReceiptRecord, Snapshot, Transfer
+from .api import Answer
+from .collect import AgentRecord, DisputeRating, EscrowScan, ReceiptRecord, Registration, Snapshot, Transfer
 from .config import (
     DEMO_MAX_SECONDS,
     DEMO_MIN_SECONDS,
@@ -239,27 +240,32 @@ class Rules:
         return self.external(self.owner_of.get(rating.agent_id)) or self.external(rating.payer)
 
     # ── charges ─────────────────────────────────────────────────
+    def _payer_exclusion(self, payer: str | None, owner: str | None, settler: str | None) -> str | None:
+        """Why a charge's payer rules it out: unknown, or paying itself. None for a real buyer."""
+        if payer is None:
+            return "its authorization could not be read, so its payer is unknown"
+        if payer == owner:
+            return "self-payment (the payer owns the agent)"
+        if payer == settler:
+            return "self-payment (the payer is the escrow's settler)"
+        if payer in self.snap.platform:
+            return f"self-payment (the payer is the platform's {self.snap.platform[payer]})"
+        return None
+
+    def _classify(self, escrow: EscrowScan, r: ReceiptRecord) -> Charge:
+        """One receipt as a charge: its payer and owner, why it does not count, and the transaction that made it."""
+        auth = escrow.auths.get(r.auth_id)
+        payer = auth.payer if auth else None
+        owner = self.owner_of.get(r.agent_id)
+        payer_reason = self._payer_exclusion(payer, owner, escrow.settler)
+        reasons = [payer_reason] if payer_reason else []
+        if iso(r.settled_at) < SPRINT_ISO:
+            reasons.append(f"settled before the sprint began on {SPRINT_DAY}")
+        tx = self.snap.charge_txs.get((r.escrow, r.id_hex))
+        return Charge(r, payer, owner, reasons, tx.tx_hash if tx else None, tx.date if tx else None)
+
     def _classify_charges(self) -> list[Charge]:
-        out: list[Charge] = []
-        for escrow in self.snap.escrows:
-            for r in escrow.receipts:
-                auth = escrow.auths.get(r.auth_id)
-                payer = auth.payer if auth else None
-                owner = self.owner_of.get(r.agent_id)
-                reasons: list[str] = []
-                if payer is None:
-                    reasons.append("its authorization could not be read, so its payer is unknown")
-                elif payer == owner:
-                    reasons.append("self-payment (the payer owns the agent)")
-                elif payer == escrow.settler:
-                    reasons.append("self-payment (the payer is the escrow's settler)")
-                elif payer in self.snap.platform:
-                    reasons.append(f"self-payment (the payer is the platform's {self.snap.platform[payer]})")
-                if iso(r.settled_at) < SPRINT_ISO:
-                    reasons.append(f"settled before the sprint began on {SPRINT_DAY}")
-                tx = self.snap.charge_txs.get((r.escrow, r.id_hex))
-                out.append(Charge(r, payer, owner, reasons, tx.tx_hash if tx else None, tx.date if tx else None))
-        return out
+        return [self._classify(escrow, r) for escrow in self.snap.escrows for r in escrow.receipts]
 
 
 def _role(role: str) -> str:
@@ -333,6 +339,19 @@ EXTERNAL_RULE = (
 )
 
 
+def _registered_on(reg: Registration | None, agent: AgentRecord) -> str:
+    """The registration transaction's day, else the registry's own timestamp's, else "" when neither is known."""
+    if reg:
+        return reg.date
+    return day(agent.registered_at) if agent.registered_at else ""
+
+
+def _registration_label(agent: AgentRecord, party: Party, date: str) -> str:
+    """Whose registration it is, when, and whether it counts."""
+    verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
+    return f"Registration of {agent.id} by {party.phrase}" + (f" — {date}" if date else "") + f" ({verdict})"
+
+
 def m01(snap: Snapshot, rules: Rules) -> Metric:
     row = SOW_ROWS[0]
     method = (
@@ -345,10 +364,9 @@ def m01(snap: Snapshot, rules: Rules) -> Metric:
     counted, excluded, item_links = [], [], []
     for agent in sorted(snap.agents, key=lambda a: (a.registered_at or 0, a.id)):
         party = rules.party(agent.owner)
-        verdict = "counted: outside operator" if party.exclusion is None else f"excluded: {party.exclusion}"
         reg = snap.registrations.get(agent.id)
-        date = reg.date if reg else (day(agent.registered_at) if agent.registered_at else "")
-        label = f"Registration of {agent.id} by {party.phrase}" + (f" — {date}" if date else "") + f" ({verdict})"
+        date = _registered_on(reg, agent)
+        label = _registration_label(agent, party, date)
         if reg:
             item_links.append(tx_link(label, reg.tx_hash, reg.date, external=party.exclusion is None))
         item = {"agent_id": agent.id, "owner": agent.owner, "active": agent.active, "registered": date, "label": label}
@@ -357,24 +375,27 @@ def m01(snap: Snapshot, rules: Rules) -> Metric:
             counted.append(item)
         else:
             excluded.append({**item, "reason": party.exclusion, "role": party.phrase})
-    n, total = len(counted), len(snap.agents)
-    team_owners = len({e["owner"] for e in excluded})
-    reason = None
-    if n < 2:
-        if total == 0:
-            reason = "No agent is registered on the AgentRegistry contract yet."
-        elif n == 0:
-            reason = (
-                f"No outside operator has registered an agent yet; all {plural(total, 'registered agent')} belong to "
-                f"{plural(team_owners, 'wallet')} the team controls."
-            )
-        else:
-            reason = (
-                f"Only {plural(n, 'agent')} {'is' if n == 1 else 'are'} registered by outside operators; the other "
-                f"{total - n} belong to wallets the team controls. The target is 2."
-            )
+    n = len(counted)
+    reason = _m01_reason(n, len(snap.agents), len({e["owner"] for e in excluded}))
     return Metric(
         row, str(n), MET if n >= 2 else NOT_MET, method, links + _by_date(item_links), reason, counted, excluded
+    )
+
+
+def _m01_reason(n: int, total: int, team_owners: int) -> str | None:
+    """Why fewer than 2 registered agents are externally operated; None when the target is met."""
+    if n >= 2:
+        return None
+    if total == 0:
+        return "No agent is registered on the AgentRegistry contract yet."
+    if n == 0:
+        return (
+            f"No outside operator has registered an agent yet; all {plural(total, 'registered agent')} belong to "
+            f"{plural(team_owners, 'wallet')} the team controls."
+        )
+    return (
+        f"Only {plural(n, 'agent')} {'is' if n == 1 else 'are'} registered by outside operators; the other "
+        f"{total - n} belong to wallets the team controls. The target is 2."
     )
 
 
@@ -464,6 +485,14 @@ def _missing_links_warning(snap: Snapshot, charges: list[Charge]) -> None:
         snap.warnings.append(note)
 
 
+def _one_agent_bound(bound: int, unknown: int) -> str:
+    """Whether the only outside agent is bound, or that it could not be checked."""
+    if unknown:
+        return "The one agent owned by an outside operator could not be checked for a binding"
+    state = "is bound" if bound else "is not bound"
+    return f"The one agent owned by an outside operator {state} to an endpoint"
+
+
 def bound_sentence(snap: Snapshot, agents: list[AgentRecord]) -> str:
     """How many of these outside agents are bound to an endpoint, in the adoption report's own words.
 
@@ -482,8 +511,7 @@ def bound_sentence(snap: Snapshot, agents: list[AgentRecord]) -> str:
     bound = sum(1 for f in flags if f is True)
     unknown = sum(1 for f in flags if f is None)
     if total == 1:
-        state = "could not be checked for a binding" if unknown else ("is bound" if bound else "is not bound")
-        text = f"The one agent owned by an outside operator {state}" + ("" if unknown else " to an endpoint")
+        text = _one_agent_bound(bound, unknown)
     elif bound == 0 and not unknown:
         text = f"None of the {total} agents owned by outside operators is bound to an endpoint"
     else:
@@ -524,28 +552,32 @@ def m03(snap: Snapshot, rules: Rules) -> Metric:
         for (escrow, job), cs in sorted(workflows.items())
     ]
     n = len(counted)
-    external_agents = [a for a in snap.agents if rules.external(a.owner)]
-    reason = None
-    if n < 3:
-        if n == 0 and not external_agents:
-            reason = (
-                "No agent owned by an outside operator exists yet, so no workflow could be routed to one and settled. "
-                f"None of the {plural(len(rules.charges), 'charge')} on record paid one."
-            )
-        elif n == 0:
-            reason = (
-                f"{plural(len(external_agents), 'agent')} owned by outside operators "
-                f"{'is' if len(external_agents) == 1 else 'are'} registered, but no workflow paid to one has "
-                f"settled since the sprint began on {SPRINT_DAY}. " + bound_sentence(snap, external_agents)
-            )
-        else:
-            reason = (
-                f"Only {plural(n, 'workflow')} paid to agents owned by outside operators "
-                f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3. "
-                + bound_sentence(snap, external_agents)
-            )
+    reason = _m03_reason(snap, rules, n)
     return Metric(
         row, str(n), MET if n >= 3 else NOT_MET, method, links + _by_date(item_links), reason, counted, excluded
+    )
+
+
+def _m03_reason(snap: Snapshot, rules: Rules, n: int) -> str | None:
+    """Why fewer than 3 workflows to outside operators' agents settled; None when the target is met."""
+    if n >= 3:
+        return None
+    external_agents = [a for a in snap.agents if rules.external(a.owner)]
+    if n == 0 and not external_agents:
+        return (
+            "No agent owned by an outside operator exists yet, so no workflow could be routed to one and settled. "
+            f"None of the {plural(len(rules.charges), 'charge')} on record paid one."
+        )
+    if n == 0:
+        return (
+            f"{plural(len(external_agents), 'agent')} owned by outside operators "
+            f"{'is' if len(external_agents) == 1 else 'are'} registered, but no workflow paid to one has "
+            f"settled since the sprint began on {SPRINT_DAY}. " + bound_sentence(snap, external_agents)
+        )
+    return (
+        f"Only {plural(n, 'workflow')} paid to agents owned by outside operators "
+        f"{'has' if n == 1 else 'have'} settled since the sprint began. The target is 3. "
+        + bound_sentence(snap, external_agents)
     )
 
 
@@ -628,6 +660,39 @@ def trace_dispute(rating: DisputeRating, charges: list[Charge]) -> Charge | None
     return matches[0] if matches else None
 
 
+def _claim_refund(snap: Snapshot, charge: Charge, used: set[tuple[str, str, int]]) -> Transfer | None:
+    """The first unclaimed transfer to the charge's payer after it settled (and the sprint began), no larger than it.
+
+    The transfer found is marked used, so no other dispute can claim it.
+    """
+    settled = iso(charge.receipt.settled_at)
+    for t in snap.transfers:
+        key = (t.tx_hash, t.destination, t.amount_stroops)
+        if (
+            key not in used
+            and t.destination == charge.payer
+            and t.created_at >= max(settled, SPRINT_ISO)
+            and 0 < t.amount_stroops <= charge.receipt.amount
+        ):
+            used.add(key)
+            return t
+    return None
+
+
+def _dispute_refund(
+    snap: Snapshot, charge: Charge | None, used: set[tuple[str, str, int]]
+) -> tuple[Transfer | None, str | None]:
+    """(the refund that answers a dispute of this charge, None) or (None, why none counts)."""
+    if charge is None:
+        return None, "its job id traces back to no charge on record"
+    if not charge.counts:
+        return None, "the charge it disputes does not count (" + "; ".join(charge.reasons) + ")"
+    refund = _claim_refund(snap, charge, used)
+    if refund is None:
+        return None, "no refund from the platform to the charge's payer followed it"
+    return refund, None
+
+
 def pair_refunds(snap: Snapshot, rules: Rules) -> tuple[list[RefundPair], list[dict[str, Any]], list[Transfer]]:
     """(refunded disputes, disputes that did not count with why, transfers left over)."""
     used: set[tuple[str, str, int]] = set()
@@ -635,27 +700,7 @@ def pair_refunds(snap: Snapshot, rules: Rules) -> tuple[list[RefundPair], list[d
     rejected: list[dict[str, Any]] = []
     for rating in snap.dispute_ratings:
         charge = trace_dispute(rating, rules.charges)
-        why: str | None = None
-        refund: Transfer | None = None
-        if charge is None:
-            why = "its job id traces back to no charge on record"
-        elif not charge.counts:
-            why = "the charge it disputes does not count (" + "; ".join(charge.reasons) + ")"
-        else:
-            settled = iso(charge.receipt.settled_at)
-            for t in snap.transfers:
-                key = (t.tx_hash, t.destination, t.amount_stroops)
-                if (
-                    key not in used
-                    and t.destination == charge.payer
-                    and t.created_at >= max(settled, SPRINT_ISO)
-                    and 0 < t.amount_stroops <= charge.receipt.amount
-                ):
-                    refund = t
-                    used.add(key)
-                    break
-            if refund is None:
-                why = "no refund from the platform to the charge's payer followed it"
+        refund, why = _dispute_refund(snap, charge, used)
         if refund is not None and charge is not None:
             pairs.append(RefundPair(rating, charge, refund))
         else:
@@ -696,21 +741,25 @@ def _m05_story(snap: Snapshot, rules: Rules, rejected: list[dict[str, Any]], lef
     if not any(c.counts for c in rules.charges):
         out.append(f"No charge has settled since the sprint began on {SPRINT_DAY} that a dispute could refund.")
     if leftover:
-        to_team = all(rules.party(t.destination).exclusion for t in leftover)
-        dates = _join(sorted({t.created_at[:10] for t in leftover}))
-        if len(leftover) == 1:
-            out.append(
-                f"The only transfer out of a platform key on record, on {dates}, went to "
-                + ("a team key" if to_team else "an account")
-                + " with no dispute behind it."
-            )
-        else:
-            out.append(
-                f"The {len(leftover)} transfers out of platform keys on record ({dates}) went to "
-                + ("team keys" if to_team else "accounts")
-                + " with no dispute behind them."
-            )
+        out.append(_leftover_sentence(rules, leftover))
     return out
+
+
+def _leftover_sentence(rules: Rules, leftover: list[Transfer]) -> str:
+    """The transfers out of platform keys that no dispute stands behind, and whether they all went to team keys."""
+    to_team = all(rules.party(t.destination).exclusion for t in leftover)
+    dates = _join(sorted({t.created_at[:10] for t in leftover}))
+    if len(leftover) == 1:
+        return (
+            f"The only transfer out of a platform key on record, on {dates}, went to "
+            + ("a team key" if to_team else "an account")
+            + " with no dispute behind it."
+        )
+    return (
+        f"The {len(leftover)} transfers out of platform keys on record ({dates}) went to "
+        + ("team keys" if to_team else "accounts")
+        + " with no dispute behind them."
+    )
 
 
 def m05(snap: Snapshot, rules: Rules) -> Metric:
@@ -864,7 +913,7 @@ def m06(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Met
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m07(snap: Snapshot, rules: Rules) -> Metric:
+def m07(snap: Snapshot) -> Metric:
     row = SOW_ROWS[6]
     method = (
         "Read the live reputation settings the router applies (whether the floor is on, and its value) from the "
@@ -898,7 +947,36 @@ def _and_list(parts: list[str]) -> str:
     return ", ".join(parts[:-1]) + ", and " + parts[-1]
 
 
-def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
+def _refund_switch(readiness: dict[str, Any] | None) -> tuple[bool, bool]:
+    """(refunds are switched on, the readiness report carries the refund switch at all)."""
+    disputes = (readiness or {}).get("disputes")
+    reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
+    return isinstance(reconcile, dict) and reconcile.get("enabled") is True, isinstance(disputes, dict)
+
+
+def _m08_shortfalls(
+    *, v2_live: bool, v2_settled: bool, refunds_on: bool, switch_reported: bool, refunded: bool
+) -> list[str]:
+    """What keeps a deployed dispute flow from being fully live, as clauses, in the order the row states them."""
+    parts = []
+    if not v2_live:
+        parts.append("no dispute window can open until a payment settles, which needs escrow v2")
+    elif not v2_settled:
+        parts.append("no dispute window has opened yet, because no payment has settled on escrow v2")
+    if not refunds_on:
+        parts.append(
+            "refunds are switched off"
+            if switch_reported
+            else "refunds are not reported as switched on (the readiness report predates the refund switch)"
+        )
+    # With no window able to open, no refund is implied; it is said only
+    # when a window could have opened and none was refunded.
+    if not refunded and v2_live and v2_settled:
+        parts.append("no dispute has been refunded on-chain yet (see the dispute refund row)")
+    return parts
+
+
+def m08(snap: Snapshot, refunds: Metric) -> Metric:
     row = SOW_ROWS[7]
     method = (
         "Checked that the live backend publishes the dispute routes (open, read, uphold, reject); that a dispute "
@@ -922,9 +1000,7 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     # settles one (v1's charge cannot move a payer's funds, D-039).
     v2_live = any(e.live and e.version >= 2 for e in snap.escrows)
     v2_settled = any(e.receipts for e in snap.escrows if e.version >= 2)
-    disputes = (snap.readiness or {}).get("disputes")
-    reconcile = disputes.get("reconcile") if isinstance(disputes, dict) else None
-    refunds_on = isinstance(reconcile, dict) and reconcile.get("enabled") is True
+    refunds_on, switch_reported = _refund_switch(snap.readiness)
     refunded = refunds.status == MET
     met = not missing and v2_live and v2_settled and refunds_on and refunded
     achieved, reason = "Yes", None
@@ -932,21 +1008,13 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
         achieved = "No"
         reason = "The live backend does not publish every dispute route."
     elif not met:
-        parts = []
-        if not v2_live:
-            parts.append("no dispute window can open until a payment settles, which needs escrow v2")
-        elif not v2_settled:
-            parts.append("no dispute window has opened yet, because no payment has settled on escrow v2")
-        if not refunds_on:
-            parts.append(
-                "refunds are switched off"
-                if isinstance(disputes, dict)
-                else "refunds are not reported as switched on (the readiness report predates the refund switch)"
-            )
-        # With no window able to open, no refund is implied; it is said only
-        # when a window could have opened and none was refunded.
-        if not refunded and v2_live and v2_settled:
-            parts.append("no dispute has been refunded on-chain yet (see the dispute refund row)")
+        parts = _m08_shortfalls(
+            v2_live=v2_live,
+            v2_settled=v2_settled,
+            refunds_on=refunds_on,
+            switch_reported=switch_reported,
+            refunded=refunded,
+        )
         achieved = "Partly: the dispute routes are deployed, but " + _and_list(parts) + "."
         reason = _sentence(_and_list(parts)) + "."
     counted = [
@@ -961,7 +1029,7 @@ def m08(snap: Snapshot, rules: Rules, refunds: Metric) -> Metric:
     return Metric(row, achieved, MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m09(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
+def m09(snap: Snapshot, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[8]
     method = f"Opened the {GUIDE_PAGE} page on the live dApp with no login; published means it answers there."
     page = Link('"List your agent on Orizon" guide', snap.page_urls[GUIDE_PAGE], "page")
@@ -995,7 +1063,7 @@ def demo_state(html: str) -> tuple[str | None, int | None]:
     return (state.group(1) if state else None), seconds
 
 
-def m10(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Metric:
+def m10(snap: Snapshot, pending: PendingLink | None = None) -> Metric:
     row = SOW_ROWS[9]
     method = (
         f"Opened the {DEMO_PAGE} page on the live dApp with no login and read the published marker the page renders "
@@ -1028,7 +1096,19 @@ def m10(snap: Snapshot, rules: Rules, pending: PendingLink | None = None) -> Met
     return Metric(row, "Yes" if met else "No", MET if met else NOT_MET, method, links, reason, counted)
 
 
-def m11(snap: Snapshot, rules: Rules) -> Metric:
+def _licence_verdict(answer: Answer) -> tuple[Any, str, str | None]:
+    """(the licence GitHub detects, what the proof link says, why it misses — None when it is MIT)."""
+    spdx = ((answer.obj().get("license") or {}) if answer.ok else {}).get("spdx_id")
+    if answer.status == 404:
+        return spdx, "not found on GitHub", "not found"
+    if spdx == "MIT":
+        return spdx, "MIT licence detected", None
+    if spdx in (None, "NOASSERTION"):
+        return spdx, "GitHub detects no licence", "no licence detected"
+    return spdx, f"licence detected: {spdx}, not MIT", f"licence {spdx}"
+
+
+def m11(snap: Snapshot) -> Metric:
     row = SOW_ROWS[10]
     method = (
         "Asked GitHub which licence it detects on each repository: the frontend, backend and smart contracts the "
@@ -1041,15 +1121,7 @@ def m11(snap: Snapshot, rules: Rules) -> Metric:
     links, counted, excluded, missing = [], [], [], []
     for name, role in REPOSITORIES:
         answer = snap.repos[name]
-        spdx = ((answer.obj().get("license") or {}) if answer.ok else {}).get("spdx_id")
-        if answer.status == 404:
-            text, why = "not found on GitHub", "not found"
-        elif spdx == "MIT":
-            text, why = "MIT licence detected", None
-        elif spdx in (None, "NOASSERTION"):
-            text, why = "GitHub detects no licence", "no licence detected"
-        else:
-            text, why = f"licence detected: {spdx}, not MIT", f"licence {spdx}"
+        spdx, text, why = _licence_verdict(answer)
         links.append(Link(f"{_sentence(role)} repository — {text}", f"https://github.com/{name}", "repo"))
         item = {"repository": name, "role": role, "status": answer.status, "spdx_id": spdx}
         if why is None:
@@ -1104,9 +1176,9 @@ def measure(snap: Snapshot, pending_links: dict[str, PendingLink] | None = None)
         m04(snap, rules),
         refunds,
         m06(snap, rules, pending.get("m06")),
-        m07(snap, rules),
-        m08(snap, rules, refunds),
-        m09(snap, rules, pending.get("m09")),
-        m10(snap, rules, pending.get("m10")),
-        m11(snap, rules),
+        m07(snap),
+        m08(snap, refunds),
+        m09(snap, pending.get("m09")),
+        m10(snap, pending.get("m10")),
+        m11(snap),
     ]

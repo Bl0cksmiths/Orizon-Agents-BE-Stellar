@@ -92,8 +92,10 @@ def test_each_row_that_named_an_outsider_links_the_ecosystem_page_once(tmp_path:
             assert links == [{"label": WITHHELD_LABEL, "url": ECOSYSTEM, "kind": "page"}], entry["id"]
         else:
             assert links == [], entry["id"]
-    assert "held back" in WITHHELD_LABEL and "consent" in WITHHELD_LABEL
-    assert G_ADDRESS.search(WITHHELD_LABEL) is None and OUTSIDE_AGENTS.search(WITHHELD_LABEL) is None
+    assert "held back" in WITHHELD_LABEL
+    assert "consent" in WITHHELD_LABEL
+    assert G_ADDRESS.search(WITHHELD_LABEL) is None
+    assert OUTSIDE_AGENTS.search(WITHHELD_LABEL) is None
 
 
 def test_withholding_changes_the_links_and_nothing_else(tmp_path: Path) -> None:
@@ -102,7 +104,8 @@ def test_withholding_changes_the_links_and_nothing_else(tmp_path: Path) -> None:
     for w, p in zip(withheld, published, strict=True):
         assert {k: v for k, v in w.items() if k != "links"} == {k: v for k, v in p.items() if k != "links"}
     team_links = [link for link in published[0]["links"] if "excluded" in link["label"]]
-    assert team_links and all(link in withheld[0]["links"] for link in team_links)
+    assert team_links
+    assert all(link in withheld[0]["links"] for link in team_links)
 
 
 def test_publish_external_links_every_outside_operator(tmp_path: Path) -> None:
@@ -133,6 +136,7 @@ def test_a_world_with_no_outsider_is_unchanged_by_withholding(tmp_path: Path) ->
 
 
 def test_the_two_flags_cannot_be_combined(tmp_path: Path) -> None:
+    world = met_world()
     with pytest.raises(SystemExit) as exc:
-        run(met_world(), tmp_path, "--publish-external", consent="--withhold-external")
+        run(world, tmp_path, "--publish-external", consent="--withhold-external")
     assert exc.value.code == 2

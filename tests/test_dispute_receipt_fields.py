@@ -325,13 +325,17 @@ def test_the_credited_amount_and_the_confirmation_are_carried_forward(store: Dis
 
     credited, in_flight, silent, confirmed, later, stored = asyncio.run(go())
 
-    assert credited.credited_usdc == 1.25 and credited.rating_confirmed is None
+    assert credited.credited_usdc == 1.25
+    assert credited.rating_confirmed is None
     # What moved, not the 1.5 promised at opening — and kept by the rating.
-    assert in_flight.credited_usdc == 1.25 and in_flight.creditable_usdc == 1.5
+    assert in_flight.credited_usdc == 1.25
+    assert in_flight.creditable_usdc == 1.5
     assert in_flight.rating_confirmed is False
-    assert silent.rating_confirmed is False and silent.rating_tx == "tx_rating"
+    assert silent.rating_confirmed is False
+    assert silent.rating_tx == "tx_rating"
     assert confirmed.rating_confirmed is True
-    assert later.rating_confirmed is True and later.credited_usdc == 1.25
+    assert later.rating_confirmed is True
+    assert later.credited_usdc == 1.25
     assert stored == later
 
 
@@ -350,7 +354,9 @@ def test_a_confirmed_rating_is_not_walked_back_by_a_later_attempt(store: Dispute
         confirmed = await store.append_status(opened.id, "credited", rating_tx="tx_r1", rating_confirmed=True)
         retried = await store.append_status(opened.id, "credited", rating_tx="tx_r2", rating_confirmed=False)
         stored = await store.get_dispute(opened.id)
-        assert confirmed is not None and retried is not None and stored is not None
+        assert confirmed is not None
+        assert retried is not None
+        assert stored is not None
         return confirmed, retried, stored
 
     confirmed, retried, stored = asyncio.run(go())
@@ -371,7 +377,9 @@ def test_a_rating_that_was_never_submitted_is_still_told_from_one_in_flight(stor
         upheld = await store.append_status(opened.id, "upheld")
         in_flight = await store.append_status(opened.id, "credited", rating_confirmed=False)
         silent = await store.append_status(opened.id, "credited")
-        assert upheld is not None and in_flight is not None and silent is not None
+        assert upheld is not None
+        assert in_flight is not None
+        assert silent is not None
         return upheld, in_flight, silent
 
     upheld, in_flight, silent = asyncio.run(go())
@@ -397,7 +405,8 @@ def test_a_claim_and_a_release_carry_the_receipt_verbatim(store: DisputeStore) -
 
     upheld, claimed, released = asyncio.run(go())
 
-    assert claimed is not None and released is not None
+    assert claimed is not None
+    assert released is not None
     assert claimed == replace(upheld, status="crediting", updated_at=claimed.updated_at)
     assert released == replace(upheld, status="upheld", updated_at=released.updated_at)
 
@@ -440,4 +449,5 @@ def test_the_receipt_survives_a_restart(monkeypatch: pytest.MonkeyPatch) -> None
 
     with process(monkeypatch, database) as store:
         assert asyncio.run(store.get_dispute(opened.id)) == confirmed
-        assert confirmed.rating_confirmed is True and confirmed.credited_usdc == 1.25
+        assert confirmed.rating_confirmed is True
+        assert confirmed.credited_usdc == 1.25

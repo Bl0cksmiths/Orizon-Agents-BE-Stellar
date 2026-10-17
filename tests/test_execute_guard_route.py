@@ -71,14 +71,14 @@ def guarded(monkeypatch: pytest.MonkeyPatch) -> None:
     state.plans.pop(PLAN_ID, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def runs(monkeypatch: pytest.MonkeyPatch) -> RunRecorder:
     recorder = RunRecorder()
     monkeypatch.setattr(orchestrator_router, "execute_plan", recorder)
     return recorder
 
 
-@pytest.fixture()
+@pytest.fixture
 def releases(monkeypatch: pytest.MonkeyPatch) -> ReleaseRecorder:
     recorder = ReleaseRecorder()
     monkeypatch.setattr(execution_svc, "release_authorization", recorder, raising=False)
@@ -145,9 +145,11 @@ def test_execute_plans_refusal_passes_through_unreleased_and_unclaimed(
     r = paid(client)
     assert r.status_code == status
     body = r.json()
-    assert body["detail"] == code and body["error"]["code"] == code
+    assert body["detail"] == code
+    assert body["error"]["code"] == code
     assert "release_tx_hash" not in body
-    assert releases.calls == [] and (ESCROW, "authorization") not in escrow.calls
+    assert releases.calls == []
+    assert (ESCROW, "authorization") not in escrow.calls
     assert guard.claimed_by(AUTH) is None
     # So the same authorization is not refused as "used" when the buyer retries.
     assert paid(client).json()["error"]["code"] == code
@@ -160,7 +162,8 @@ def test_an_unreadable_version_is_503_and_never_runs(client: TestClient, monkeyp
     live_plan()
     r = paid(client)
     assert (r.status_code, r.json()["error"]["code"]) == (503, "authorization_unreadable")
-    assert runs.calls == [] and releases.calls == []
+    assert runs.calls == []
+    assert releases.calls == []
     assert guard.claimed_by(AUTH) is None
 
 
@@ -184,14 +187,16 @@ def test_v1_runs_exactly_as_before(client: TestClient, monkeypatch, runs, releas
     assert paid(client, auth=upper, payer=OTHER).status_code == 200
     # Handed on exactly as sent — the case included — as it always was.
     assert runs.calls == [(PLAN_ID, upper, OTHER), (PLAN_ID, upper, OTHER)]
-    assert guard.claimed_by(AUTH) is None and releases.calls == []
+    assert guard.claimed_by(AUTH) is None
+    assert releases.calls == []
     assert escrow.calls == [(ESCROW, "version")]
 
 
 def test_v1_refusals_keep_their_old_envelopes(client: TestClient, monkeypatch, releases) -> None:
     install(monkeypatch, FakeEscrow(version=None))
     r = paid(client, plan_id="pln_nowhere")
-    assert r.status_code == 404 and r.json()["detail"] == "unknown plan_id: pln_nowhere"
+    assert r.status_code == 404
+    assert r.json()["detail"] == "unknown plan_id: pln_nowhere"
     assert "release_tx_hash" not in r.json()
 
     live_plan(created_at=time.time() - settings.plan_ttl_seconds - 60)
@@ -224,7 +229,7 @@ def test_the_claim_outlives_the_run(client: TestClient, monkeypatch, runs) -> No
     install(monkeypatch, FakeEscrow())
     live_plan()
     task_id = paid(client).json()["task_id"]
-    state.tasks[task_id].status = "failed"
+    monkeypatch.setattr(state.tasks[task_id], "status", "failed")
     assert paid(client).json()["error"]["code"] == "authorization_used"
     assert len(runs.calls) == 1
 
@@ -253,10 +258,13 @@ def test_two_concurrent_executes_against_one_authorization_start_exactly_one_run
     outcomes = asyncio.run(both())
     started = [o for o in outcomes if not isinstance(o, BaseException)]
     refused = [o for o in outcomes if isinstance(o, guard.AuthorizationRefused)]
-    assert len(started) == 1 and len(refused) == 1
+    assert len(started) == 1
+    assert len(refused) == 1
     assert refused[0].code == "authorization_used"
     assert len(runs.calls) == 1
-    assert guard._locks == {} and guard._lock_users == {}  # nothing left behind
+    # nothing left behind
+    assert guard._locks == {}
+    assert guard._lock_users == {}
 
 
 class SlowRun(RunRecorder):
@@ -399,11 +407,14 @@ def test_an_unowned_or_spent_authorization_is_never_released(
 ) -> None:
     install(monkeypatch, FakeEscrow(auth=live_record(**auth)))
     r = paid(client)  # PLAN_ID is unknown: the release path
-    assert r.status_code == 404 and "release_tx_hash" not in r.json()
+    assert r.status_code == 404
+    assert "release_tx_hash" not in r.json()
     live_plan(created_at=time.time() - settings.plan_ttl_seconds - 60)
     r = paid(client)
-    assert r.status_code == 410 and "release_tx_hash" not in r.json()
-    assert releases.calls == [] and runs.calls == []
+    assert r.status_code == 410
+    assert "release_tx_hash" not in r.json()
+    assert releases.calls == []
+    assert runs.calls == []
 
 
 def test_capacity_never_releases_an_unowned_authorization(client: TestClient, monkeypatch, releases) -> None:
@@ -412,13 +423,15 @@ def test_capacity_never_releases_an_unowned_authorization(client: TestClient, mo
     monkeypatch.setattr(orchestrator_router, "execute_plan", RunRecorder(fail=CapacityExhaustedError("full")))
     r = paid(client)
     assert (r.status_code, r.json()["detail"]) == (503, "capacity_exhausted")
-    assert "release_tx_hash" not in r.json() and releases.calls == []
+    assert "release_tx_hash" not in r.json()
+    assert releases.calls == []
 
 
 def test_an_unreadable_chain_never_releases(client: TestClient, monkeypatch, releases) -> None:
     install(monkeypatch, FakeEscrow(auth=ConnectionError("rpc down")))
     r = paid(client)
-    assert r.status_code == 404 and "release_tx_hash" not in r.json()
+    assert r.status_code == 404
+    assert "release_tx_hash" not in r.json()
     assert releases.calls == []
 
 
@@ -497,7 +510,7 @@ class ChainSpy:
         return {"status": "FAILED", "hash": "1" * 64}
 
 
-@pytest.fixture()
+@pytest.fixture
 def chain(monkeypatch: pytest.MonkeyPatch) -> ChainSpy:
     """A deployment that COULD rate: a signing key and a ledger are configured."""
     spy = ChainSpy()
@@ -517,7 +530,8 @@ def test_a_simulated_run_writes_no_rating_and_nothing_else_on_chain(client: Test
     assert client.portal is not None
     client.portal.call(_drain_workflows)
     assert state.tasks[task["task_id"]].status == "complete"  # the run delivered, so it had something to rate
-    assert chain.ratings == [] and chain.invokes == []
+    assert chain.ratings == []
+    assert chain.invokes == []
 
 
 def test_the_spy_does_see_a_paid_runs_ratings(client: TestClient, monkeypatch, chain: ChainSpy) -> None:
