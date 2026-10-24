@@ -1001,7 +1001,7 @@ running, and `disputes.store: "postgres"`. It does not poll: a pass runs at
 boot, when a refund claim taken by an uphold is old enough to judge (five
 minutes and a few seconds after it was taken), two minutes after a pass that
 left a claim it can still finish (too young, still pending, the RPC or the
-store unreadable), and otherwise every `REFUND_RECONCILE_INTERVAL_SECONDS`
+store unreadable) — doubling for each such pass in a row — and otherwise every `REFUND_RECONCILE_INTERVAL_SECONDS`
 (default 3600, from 30 to 86400 — anything else refuses to boot) as a
 fallback, so an idle deployment lets a serverless Postgres suspend.
 `/readiness` names the next pass in `disputes.reconcile.next_run_at` and

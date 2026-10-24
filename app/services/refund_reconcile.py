@@ -80,7 +80,9 @@ CLAIM_WAKE_MARGIN_SECONDS = 15
 
 # A pass that met a claim it may still settle itself — too young, a transfer
 # that may yet land, a chain or store it could not ask — runs again after this
-# long (or after REFUND_RECONCILE_INTERVAL_SECONDS, if that is shorter).
+# long, doubling with every such pass in a row (an RPC outage must not keep
+# the database awake for its whole length), and never later than the
+# REFUND_RECONCILE_INTERVAL_SECONDS fallback.
 RETRY_SECONDS = 120.0
 
 # The outcomes that are the sweep's to finish on a later pass. Everything else
@@ -551,17 +553,21 @@ def _needs_retry(report: SweepReport | None) -> bool:
     return any(action in _RETRYABLE for action in report.outcomes)
 
 
-def next_run(report: SweepReport | None, due: float | None, *, finished_at: float) -> tuple[float, NextReason]:
+def next_run(
+    report: SweepReport | None, due: float | None, *, finished_at: float, streak: int = 1
+) -> tuple[float, NextReason]:
     """When the pass after `report` (None: it raised) runs, and why.
 
-    The earliest of: the fallback interval after it finished; a short retry
-    when it left something it can still finish; and `due`, the moment a claim
-    taken since becomes old enough to judge.
+    The earliest of: the fallback interval after it finished; a retry when it
+    left something it can still finish — RETRY_SECONDS, doubled for each of
+    the `streak` passes in a row that did so after the first; and `due`, the
+    moment a claim taken since becomes old enough to judge.
     """
     interval = settings.refund_reconcile_interval_seconds
     runs: list[tuple[float, NextReason]] = [(finished_at + interval, "fallback")]
     if _needs_retry(report):
-        runs.append((finished_at + min(RETRY_SECONDS, interval), "retry"))
+        backoff = RETRY_SECONDS * 2 ** min(max(streak, 1) - 1, 16)
+        runs.append((finished_at + min(backoff, interval), "retry"))
     if due is not None:
         runs.append((due, "claim"))
     return min(runs, key=lambda run: run[0])
@@ -581,6 +587,7 @@ async def _loop() -> None:
     global _wake, _due, _next_at, _next_reason
     _wake = asyncio.Event()
     _next_at, _next_reason = _now(), "boot"
+    streak = 0  # passes in a row that left something to retry
     while True:
         if _due is not None and _due <= _now():
             _due = None  # this pass is the one that claim was waiting for
@@ -594,9 +601,10 @@ async def _loop() -> None:
             logger.exception("refund reconcile: a pass failed; the next one runs on schedule")
             report = None
         finished = _now()
+        streak = streak + 1 if _needs_retry(report) else 0
         while True:
             _wake.clear()
-            _next_at, _next_reason = next_run(report, _due, finished_at=finished)
+            _next_at, _next_reason = next_run(report, _due, finished_at=finished, streak=streak)
             wait = _next_at - _now()
             # Woken early: a claim was taken, so the next run may be sooner.
             if wait <= 0 or not await _wait_for_wake(wait):
