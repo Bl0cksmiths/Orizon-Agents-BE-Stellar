@@ -427,7 +427,7 @@ app = FastAPI(
 # being in use, which keeps the database-reading keep-warm running (activity.py).
 app.add_middleware(ActivityMiddleware)
 
-# Added first → runs innermost: oversized bodies are rejected before the
+# Added next → innermost but one: oversized bodies are rejected before the
 # router, while the 413 still passes through the header/CORS/request-id
 # layers wrapping it.
 app.add_middleware(BodyLimitMiddleware)
