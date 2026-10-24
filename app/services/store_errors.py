@@ -30,9 +30,11 @@ import functools
 import logging
 import sys
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Any, ParamSpec, TypeVar
+
+from ..security import ErrorEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -192,3 +194,24 @@ def outage_boundary(
         return guarded
 
     return wrap
+
+
+def with_store_outage(responses: Mapping[int | str, Mapping[str, Any]], store: str) -> dict[int | str, dict[str, Any]]:
+    """A route's documented `responses`, plus the 503 an outage of `store` answers.
+
+    For the routes that reach a guarded store, so the spec names the status
+    they can raise. A route-level 503 replaces the one `include_router` would
+    merge in rather than joining it, so when the route already documents a 503
+    of its own, the outage is added to that description instead of hiding it
+    or being hidden by it.
+    """
+    outage = (
+        f"`store_unavailable` — the {store} store cannot reach its database right now; ask again after Retry-After."
+    )
+    merged: dict[int | str, dict[str, Any]] = {status: dict(row) for status, row in responses.items()}
+    own = merged.get(503)
+    if own is None:
+        merged[503] = {"model": ErrorEnvelope, "description": outage}
+    else:
+        merged[503] = {**own, "description": f"{own['description']} Or {outage}"}
+    return merged
