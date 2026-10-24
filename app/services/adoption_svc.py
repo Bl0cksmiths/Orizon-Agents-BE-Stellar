@@ -962,11 +962,26 @@ snapshots.keep_warm(
         pauses_when_idle=True,
     )
 )
-# Every build is saved, and the next process serves it until its own lands.
+
+
+def report_content_key(report: AdoptionReport) -> str:
+    """What makes two reports different enough to write the second.
+
+    Leaves out what moves on every build without changing what a reviewer is
+    shown: `generated_at` (the build's own stamp), and the scan's measured
+    reach — `window_days` and `coverage` advance with every ledger closed.
+    """
+    return report.model_dump_json(exclude={"generated_at", "window_days", "coverage"})
+
+
+# A build whose counts, operators or verdicts changed is saved (spaced by
+# SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS), and the next process serves the last
+# one saved until its own build lands.
 snapshot_store.persist(
     report_cell,
     AdoptionReport.model_validate_json,
     max_restore_age_seconds=REPORT_RESTORE_MAX_AGE_SECONDS,
+    content_key=report_content_key,
 )
 
 

@@ -460,6 +460,47 @@ def test_after_a_restart_the_last_adoption_report_is_served_at_once(monkeypatch:
     assert adoption_svc.report_cell.building() is False
 
 
+def _report(**changes: Any) -> adoption_svc.AdoptionReport:
+    report = adoption_svc.AdoptionReport(
+        network="testnet",
+        generated_at=int(time.time()),
+        window_days=7.0,
+        targets=adoption_svc.TARGETS,
+        totals=adoption_svc.AdoptionCounts(external_agents=2, unique_operator_wallets=2, settled_external_workflows=3),
+        met=adoption_svc.AdoptionMet(
+            external_agents=True, unique_operator_wallets=True, settled_external_workflows=True
+        ),
+        operators=[],
+        excluded=[],
+        degraded=False,
+        unreadable_agents=[],
+    )
+    return report.model_copy(update=changes)
+
+
+def test_an_adoption_report_that_only_moved_its_stamp_or_scan_reach_is_not_a_change() -> None:
+    key = adoption_svc.report_content_key
+    coverage = adoption_svc.AdoptionCoverage(
+        agents_listed=4,
+        agents_accounted=4,
+        settlement_ledgers_scanned=100,
+        settlement_ledgers_in_window=120_000,
+        external_charges=3,
+        external_charges_unattributed=0,
+    )
+    moved = _report(
+        generated_at=int(time.time()) + 300,
+        window_days=6.9,
+        coverage=coverage.model_copy(update={"settlement_ledgers_scanned": 160}),
+    )
+    assert key(_report(coverage=coverage)) == key(moved)
+    counted = _report(
+        totals=adoption_svc.AdoptionCounts(external_agents=2, unique_operator_wallets=2, settled_external_workflows=4)
+    )
+    assert key(_report()) != key(counted)
+    assert key(_report()) != key(_report(degraded=True))
+
+
 def test_an_adoption_report_of_any_age_is_served_marked_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """Once any report has been built, a restart never answers 202 or 503
     while one is stored: the stored one is served, dated, until the first
