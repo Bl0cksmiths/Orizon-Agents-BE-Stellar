@@ -764,6 +764,27 @@ def test_a_refund_reconcile_interval_outside_the_bounds_refuses_to_boot(interval
     assert str(interval) not in message.replace("30 to 3600", "")
 
 
+# ── keep-warm idle pause ───────────────────────────────────────────────────
+
+
+def test_the_keep_warm_idle_pause_defaults_to_ten_minutes():
+    assert _settings().keep_warm_idle_pause_seconds == 600.0
+
+
+@pytest.mark.parametrize("pause", [60, 600.0, 86_400])
+def test_a_keep_warm_idle_pause_inside_the_bounds_boots(pause):
+    assert _settings(keep_warm_idle_pause_seconds=pause).keep_warm_idle_pause_seconds == pause
+
+
+@pytest.mark.parametrize("pause", [float("nan"), float("inf"), -1, 0, 59.9, 86_400.5])
+def test_a_keep_warm_idle_pause_outside_the_bounds_refuses_to_boot(pause):
+    with pytest.raises(ConfigurationError) as refused:
+        _load_settings(_env_file=None, keep_warm_idle_pause_seconds=pause)
+    message = str(refused.value)
+    assert "KEEP_WARM_IDLE_PAUSE_SECONDS" in message
+    assert str(pause) not in message.replace("60 to 86400", "")
+
+
 # ── registry boot sync wait ────────────────────────────────────────────────
 
 

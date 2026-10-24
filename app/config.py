@@ -258,6 +258,16 @@ class Settings(BaseSettings):
     # for why Neon rather than Render's own free Postgres, which expires after 30
     # days, i.e. exactly at award time.
     database_url: str = ""
+    # Seconds without a meaningful API request (app/services/activity.py: not
+    # a health or readiness probe, not the docs) after which the keep-warm
+    # schedules whose builds read Postgres stop rebuilding in the background.
+    # Neon suspends a compute only after a fixed five minutes with no query,
+    # so a rebuild every 30 s kept it running around the clock with nobody
+    # looking; once paused, the next request is served from the snapshot as
+    # it would be anyway and resumes the schedule. Bounded both ways
+    # (`_keep_warm_idle_pause_is_a_bound`): under a minute pauses between two
+    # polls of an open dashboard, over a day is never pausing at all.
+    keep_warm_idle_pause_seconds: float = 600.0
 
     # ── External dispatch (story 2.02 — envelope signing) ────
     # S… secret (or a 12/24-word mnemonic) used to sign the SEP-53 envelope on
@@ -594,6 +604,23 @@ class Settings(BaseSettings):
             raise ValueError(
                 "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — the "
                 "reputation pre-warm waits this long, in the background, for the first registry sync pass"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _keep_warm_idle_pause_is_a_bound(self) -> "Settings":
+        """Refuse an idle pause that is not a bound.
+
+        NaN would compare as "not idle yet" forever and inf never pauses, which
+        is the always-on compute this setting exists to end; under 60 s the
+        background rebuilds would stop between two polls of an open dashboard.
+        Names the variable, never the value.
+        """
+        pause = self.keep_warm_idle_pause_seconds
+        if not (math.isfinite(pause) and 60 <= pause <= 86_400):
+            raise ValueError(
+                "KEEP_WARM_IDLE_PAUSE_SECONDS must be a finite number of seconds from 60 to 86400 — the background "
+                "snapshot rebuilds that read the database pause once no API request has arrived for this long"
             )
         return self
 
