@@ -188,3 +188,24 @@ def test_the_next_run_is_reported_while_the_sweep_waits(monkeypatch: pytest.Monk
     assert status["next_run_reason"] == "fallback"
     refund_reconcile._task = None
     assert refund_reconcile.status()["next_run_at"] is None
+
+
+def test_readiness_says_when_the_sweep_runs_next_and_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    async def waiting() -> None:
+        refund_reconcile._next_at, refund_reconcile._next_reason = FINISHED + 3600, "fallback"
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(refund_reconcile, "_loop", waiting)
+    monkeypatch.setattr(settings, "refund_reconcile_enabled", True)
+    monkeypatch.setattr(settings, "dispute_refunds_enabled", True)
+    with TestClient(app) as client:
+        client.portal.call(asyncio.sleep, 0.01)
+        during = client.get("/readiness").json()["disputes"]["reconcile"]
+    after = refund_reconcile.status()
+
+    assert (during["next_run_at"], during["next_run_reason"]) == (FINISHED + 3600, "fallback")
+    assert (after["next_run_at"], after["next_run_reason"]) == (None, None)

@@ -797,7 +797,11 @@ class RefundReconcileReadiness(BaseModel):
     nonzero `history_gap`, `no_hash`, `not_this_refund`, `amount_mismatch`,
     `not_crediting`, `missing` or `lost_race` is a claim waiting on a human,
     and the log names it. `last_skipped` says why a pass read nothing, such
-    as a deployment that cannot pay credits. Informational, like the rest.
+    as a deployment that cannot pay credits. `next_run_at` and
+    `next_run_reason` say when the loop runs again and why — `boot`, `claim`
+    (a refund claim taken is old enough to judge), `retry` (the last pass left
+    one it can still finish) or `fallback` (REFUND_RECONCILE_INTERVAL_SECONDS)
+    — both null while it is not running. Informational, like the rest.
     """
 
     enabled: bool
@@ -805,6 +809,8 @@ class RefundReconcileReadiness(BaseModel):
     last_run_at: float | None  # epoch seconds, this process's clock
     last_skipped: str | None
     last_outcomes: dict[str, int]
+    next_run_at: float | None = None  # epoch seconds, this process's clock
+    next_run_reason: refund_reconcile.NextReason | None = None
 
 
 class DisputesReadiness(BaseModel):
