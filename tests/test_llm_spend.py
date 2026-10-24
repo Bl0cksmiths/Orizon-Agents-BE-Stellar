@@ -195,6 +195,46 @@ def test_refresh_if_stale_reads_the_store_in_the_background(monkeypatch: pytest.
     spend.refresh_if_stale()  # stale, but no running loop: nothing scheduled, nothing raised
 
 
+def test_refresh_if_stale_leaves_the_store_alone_while_the_api_is_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import activity
+
+    class Clock:
+        now = 1_000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = Clock()
+    monkeypatch.setattr(activity, "tracker", activity.ActivityTracker(clock))
+    monkeypatch.setattr(settings, "keep_warm_idle_pause_seconds", 600.0)
+    reads: list[date] = []
+
+    class CountingStore(InMemorySpendStore):
+        async def total(self, day: date) -> float:
+            reads.append(day)
+            return await super().total(day)
+
+    ledger_clock = {"now": datetime(2026, 10, 6, 12, tzinfo=UTC).timestamp()}
+    spend.set_ledger(SpendLedger(CountingStore(), clock=lambda: ledger_clock["now"]))
+    clock.now += 3_600.0  # idle
+
+    async def probe() -> None:
+        spend.refresh_if_stale()  # never read today: read once, idle or not
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        ledger_clock["now"] += 60.0  # stale again
+        spend.refresh_if_stale()  # idle: no read
+        await asyncio.sleep(0)
+        activity.note_request()
+        spend.refresh_if_stale()  # in use: read
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(probe())
+    assert len(reads) == 2
+    spend.set_ledger(SpendLedger(InMemorySpendStore()))
+
+
 def test_the_process_ledger_follows_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     spend.set_ledger(None)
     monkeypatch.setattr(settings, "database_url", "postgresql://u:p@db.invalid/x")

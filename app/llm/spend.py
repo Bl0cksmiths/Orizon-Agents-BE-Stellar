@@ -34,6 +34,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 from ..config import settings
+from ..services import activity
 from ..services.pg_schema import create_schema
 from .errors import SpendCapReached
 
@@ -336,6 +337,12 @@ class SpendLedger:
                 self._synced_at = self._clock()
 
     @property
+    def synced(self) -> bool:
+        """Whether today's total has been read from the store at least once."""
+        self._roll()
+        return self._synced_at is not None
+
+    @property
     def stale(self) -> bool:
         """Whether the held total is due a re-read from the store."""
         self._roll()
@@ -472,7 +479,15 @@ def refresh_if_stale() -> None:
     0 until its first check, and this lets the next probe see the real total.
     """
     global _refresh
-    if not get_ledger().stale or (_refresh is not None and not _refresh.done()):
+    ledger = get_ledger()
+    if not ledger.stale or (_refresh is not None and not _refresh.done()):
+        return
+    # While nobody is using the API this process spends nothing (uvicorn runs
+    # one worker), so the re-read would only wake the database — and an uptime
+    # monitor polling /readiness would keep a serverless Postgres from ever
+    # suspending. The day's first read is still made, so a probe never shows
+    # 0 for a spend this process has not read yet.
+    if ledger.synced and activity.idle():
         return
     try:
         _refresh = asyncio.get_running_loop().create_task(spent_today())
