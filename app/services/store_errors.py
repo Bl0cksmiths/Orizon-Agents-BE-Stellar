@@ -27,9 +27,14 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import logging
 import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any, ParamSpec, TypeVar
+
+logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -94,15 +99,78 @@ def is_connection_failure(exc: BaseException) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class StoreHealth:
+    """What this process last learned about a store's database, without asking it.
+
+    `available` is None until a call has gone through the boundary since boot,
+    True after one succeeded and False after one failed to connect. `since` is
+    when the current outage began (epoch seconds) and `cause` the class of the
+    failure that began it; both are None while the store is reachable.
+    """
+
+    available: bool | None
+    since: float | None = None
+    cause: str | None = None
+
+
+# Per store: the outage in progress, or nothing. Learned passively, from the
+# calls the service makes anyway — never by dialling the database to find out,
+# because a probe that connects is a probe that keeps a serverless Postgres
+# awake, and an idle Neon endpoint that is never allowed to suspend is how a
+# free project runs out of compute in the first place.
+_health: dict[str, StoreHealth] = {}
+
+
+def store_health(store: str) -> StoreHealth:
+    """The store's last known reachability; `available` is None if never exercised."""
+    return _health.get(store, StoreHealth(available=None))
+
+
+def _note_failure(store: str, exc: BaseException) -> None:
+    """Record a failed connect, logging only the first of an outage.
+
+    During an outage every request fails the same way, and a line per request
+    buries the one that says when it started. So the transition is logged at
+    WARNING, with the cause's class and never its text, and the rest at DEBUG.
+    """
+    current = _health.get(store)
+    if current is not None and current.available is False:
+        logger.debug("%s store still unavailable: %s", store, type(exc).__name__)
+        return
+    _health[store] = StoreHealth(available=False, since=time.time(), cause=type(exc).__name__)
+    logger.warning(
+        "%s store unavailable (%s): answering 503 store_unavailable until a call gets through",
+        store,
+        type(exc).__name__,
+    )
+
+
+def _note_success(store: str) -> None:
+    current = _health.get(store)
+    if current is not None and current.available is True:
+        return
+    _health[store] = StoreHealth(available=True)
+    if current is not None and current.since is not None:
+        logger.info("%s store reachable again after %.0fs", store, time.time() - current.since)
+
+
 @contextlib.asynccontextmanager
 async def store_boundary(store: str) -> AsyncIterator[None]:
-    """Translate a connection failure inside the block into `StoreUnavailable`."""
+    """Translate a connection failure inside the block into `StoreUnavailable`.
+
+    Also the source of `store_health`: a block that completes proves the
+    database answered, and one that fails to connect opens (or extends) an
+    outage. Any other exception says nothing either way and is left alone.
+    """
     try:
         yield
     except Exception as exc:
         if not is_connection_failure(exc):
             raise
+        _note_failure(store, exc)
         raise StoreUnavailable(store, exc) from exc
+    _note_success(store)
 
 
 def outage_boundary(
