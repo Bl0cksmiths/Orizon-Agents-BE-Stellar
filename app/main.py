@@ -83,10 +83,11 @@ from .services import (
 )
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
+from .services.dispute_store import STORE_NAME as DISPUTE_STORE_NAME
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
 from .services.snapshot_store import close_snapshot_store
-from .services.store_errors import StoreUnavailable
+from .services.store_errors import StoreUnavailable, store_health
 from .stellar import client as sc
 
 
@@ -810,15 +811,25 @@ class DisputesReadiness(BaseModel):
     whoever cannot read that log, or reads it after a restart took the line.
 
     The KIND of store only, never the DSN or anything derived from it: the DSN
-    carries the database password. It reports the selection, not a live
-    connection — the probe dials nothing, and a Postgres that is unreachable
-    is answered by the first request that needs it, loudly, never by a quiet
-    fall back to memory.
+    carries the database password. The probe dials nothing — a probe that
+    connects would keep a serverless Postgres from ever suspending — so
+    `available` is what this process last LEARNED from the calls it made
+    anyway (requests and the refund reconcile sweep; `store_errors.store_health`):
+    false from the first call that could not connect, which the API answered
+    503 `store_unavailable`, until one gets through. `unavailable_since` (epoch
+    seconds) and `cause` (the failure's class, e.g. InsufficientResourcesError
+    for a Neon project over its quota) say when and why, and are null while it
+    is reachable. `available` is null on Postgres until a call has been made
+    since boot. An unreachable Postgres is never a quiet fall back to memory.
 
-    Informational, like `cold_start`: an in-memory store serves every request.
+    Informational, like `cold_start`: an in-memory store serves every request,
+    and an unreachable one fails only the routes that need it.
     """
 
     store: Literal["postgres", "memory"]
+    available: bool | None = None
+    unavailable_since: float | None = None
+    cause: str | None = None
     reconcile: RefundReconcileReadiness
 
 
@@ -869,6 +880,21 @@ class TreasuryReadiness(BaseModel):
 
     address: str | None
     agents: dict[str, registry_sync.PlatformVerdict]
+
+
+def _disputes_readiness() -> DisputesReadiness:
+    """The dispute store's kind and its last known reachability, from memory."""
+    reconcile = RefundReconcileReadiness(**refund_reconcile.status())
+    if not isinstance(get_dispute_store(), PostgresDisputeStore):
+        return DisputesReadiness(store="memory", available=True, reconcile=reconcile)
+    health = store_health(DISPUTE_STORE_NAME)
+    return DisputesReadiness(
+        store="postgres",
+        available=health.available,
+        unavailable_since=health.since,
+        cause=health.cause,
+        reconcile=reconcile,
+    )
 
 
 def _treasury_readiness() -> TreasuryReadiness:
@@ -989,10 +1015,7 @@ async def readiness(
             margin_bps=margin.margin_bps,
         ),
         ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
-        disputes=DisputesReadiness(
-            store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
-            reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
-        ),
+        disputes=_disputes_readiness(),
         escrow=_escrow_readiness(),
         registry=RegistryReadiness(
             synced=sync.synced,

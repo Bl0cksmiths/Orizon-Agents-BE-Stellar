@@ -41,6 +41,16 @@ _CONTRACT_ID_FIELDS = (
 # pass through the app: off, not running, never run.
 _RECONCILE_OFF = {"enabled": False, "running": False, "last_run_at": None, "last_skipped": None, "last_outcomes": {}}
 
+# The hermetic suite runs the in-memory dispute store, which cannot be out of
+# reach: always available, with no outage to describe.
+_DISPUTES_IN_MEMORY = {
+    "store": "memory",
+    "available": True,
+    "unavailable_since": None,
+    "cause": None,
+    "reconcile": _RECONCILE_OFF,
+}
+
 # The registry mirror's status is whatever passes this process has run, which
 # the lifespan's loop and every earlier test decide; pinned so the exact
 # payloads below do not depend on test order.
@@ -99,7 +109,7 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         # without a chain read and without leaving "ready".
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
         # No DATABASE_URL in the hermetic suite: the in-memory fallback.
-        "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
+        "disputes": _DISPUTES_IN_MEMORY,
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,
@@ -136,7 +146,7 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         "cold_start": {"routable": False, "lower_bound_bps": 5677, "floor_bps": 6000, "margin_bps": -323},
         "ratings": {"writer": "no_signer", "signer": None, "scorer": None},
         # No DATABASE_URL in the hermetic suite: the in-memory fallback.
-        "disputes": {"store": "memory", "reconcile": _RECONCILE_OFF},
+        "disputes": _DISPUTES_IN_MEMORY,
         # Never read on the probe's path, so null until a background read lands.
         "escrow": {"contract": "C" + "A" * 55, "version": None},
         "registry": _REGISTRY_SYNCED,

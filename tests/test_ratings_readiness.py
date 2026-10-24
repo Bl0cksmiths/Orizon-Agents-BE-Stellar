@@ -96,6 +96,10 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
         # the refund reconcile sweep as it ships — off, and never run.
         "disputes": {
             "store": "memory",
+            # Memory cannot be out of reach, so it is always available.
+            "available": True,
+            "unavailable_since": None,
+            "cause": None,
             "reconcile": {
                 "enabled": False,
                 "running": False,
