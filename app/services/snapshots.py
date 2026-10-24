@@ -46,6 +46,8 @@ from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, TypeVar
 
+from . import activity
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -397,15 +399,29 @@ class KeepWarm:
     registry mirror gained, lost or changed an agent), but not more often than
     `min_change_rebuild_seconds`. A cell that should not be built yet says so
     through its own `may_build` gate, which this respects like any reader.
+
+    `pauses_when_idle` is for a cell whose build reads the database: while no
+    meaningful API request has arrived for KEEP_WARM_IDLE_PAUSE_SECONDS
+    (activity.py) the schedule does nothing at all, so a serverless Postgres
+    can suspend. Only the schedule pauses: a request still serves the cell
+    and starts the rebuild it needs, exactly as `SnapshotCell.get` says, and
+    that same request resumes the schedule.
     """
 
     cell: SnapshotCell[Any]
     every_seconds: float
     fingerprint: Callable[[], Hashable] | None = None
     min_change_rebuild_seconds: float = 0.0
+    pauses_when_idle: bool = False
     _built_fingerprint: Hashable | None = field(default=None, init=False)
 
+    def paused(self) -> bool:
+        """Whether this schedule is standing down because the API is idle."""
+        return self.pauses_when_idle and activity.idle()
+
     def tick(self) -> None:
+        if self.paused():
+            return
         cell = self.cell
         snap = cell.current()
         if snap is None or snap.source != "live":
