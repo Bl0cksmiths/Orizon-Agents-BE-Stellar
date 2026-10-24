@@ -350,6 +350,8 @@ def test_the_report_is_rebuilt_on_a_schedule_and_when_the_registry_changes(world
     schedule = _schedule()
     assert schedule.every_seconds == adoption_svc.REPORT_REFRESH_SECONDS <= 1800
     assert schedule.min_change_rebuild_seconds == adoption_svc.REPORT_REGISTRY_REBUILD_SECONDS
+    # A build reads the binding store and is persisted: idle, it stands down.
+    assert schedule.pauses_when_idle is True
     world.agent("ext_a1", EXT_A)
     before = adoption_svc.registry_fingerprint()
     assert adoption_svc.registry_fingerprint() == before
