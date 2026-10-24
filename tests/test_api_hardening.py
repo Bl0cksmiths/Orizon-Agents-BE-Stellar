@@ -39,7 +39,16 @@ _CONTRACT_ID_FIELDS = (
 
 # The refund reconcile sweep ships off, and the hermetic suite never runs a
 # pass through the app: off, not running, never run.
-_RECONCILE_OFF = {"enabled": False, "running": False, "last_run_at": None, "last_skipped": None, "last_outcomes": {}}
+_RECONCILE_OFF = {
+    "enabled": False,
+    "running": False,
+    "last_run_at": None,
+    "last_skipped": None,
+    "last_outcomes": {},
+    # Not running, so no next run to report.
+    "next_run_at": None,
+    "next_run_reason": None,
+}
 
 # The hermetic suite runs the in-memory dispute store, which cannot be out of
 # reach: always available, with no outage to describe.

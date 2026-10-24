@@ -106,6 +106,8 @@ def test_a_scorer_deployment_reports_the_full_payload(client, monkeypatch):
                 "last_run_at": None,
                 "last_skipped": None,
                 "last_outcomes": {},
+                "next_run_at": None,
+                "next_run_reason": None,
             },
         },
         # Never read on the probe's path, so null until a background read lands.
