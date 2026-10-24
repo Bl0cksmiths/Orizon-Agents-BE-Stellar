@@ -86,6 +86,7 @@ from .services.binding_store import close_binding_store
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
 from .services.snapshot_store import close_snapshot_store
+from .services.store_errors import StoreUnavailable
 from .stellar import client as sc
 
 
@@ -615,6 +616,38 @@ async def challenge_budget_handler(request: Request, exc: ChallengeBudgetExhaust
             f"challenge_capacity_{exc.purpose}",
             f"no {exc.purpose} challenge capacity right now — ask again shortly",
         ),
+    )
+
+
+# How long a client is told to wait before asking a store again. Long enough
+# that a page polling every few seconds backs off instead of hammering a
+# database that is already refusing it; short enough that a cold or briefly
+# throttled one is retried soon after it is back.
+STORE_RETRY_AFTER_SECONDS = 30
+
+
+@app.exception_handler(StoreUnavailable)
+async def store_unavailable_handler(request: Request, exc: StoreUnavailable) -> JSONResponse:
+    """A store that cannot reach its database, answered 503 rather than 500.
+
+    The request was fine and the service is not broken: the records it needs
+    are out of reach for now — a Postgres over its quota, cold or restarting —
+    and asking again later is the right move, which is what 503 and
+    Retry-After say. A 500 `internal_error` said the opposite, and taught every
+    client that a dispute or a binding read had found a bug.
+
+    The message names the KIND of record (`StoreUnavailable.store`) and never
+    the database: no host, no DSN, no driver text. The outage itself is logged
+    once, when it begins, by `store_errors` — not here, once per request.
+    """
+    return JSONResponse(
+        status_code=503,
+        content=_error_envelope(
+            "store_unavailable",
+            "store_unavailable",
+            f"the {exc.store} store is temporarily unavailable; try again shortly",
+        ),
+        headers={"Retry-After": str(STORE_RETRY_AFTER_SECONDS)},
     )
 
 
