@@ -114,3 +114,23 @@ def test_the_middleware_notes_a_meaningful_request_and_passes_every_request_on(
     asyncio.run(middleware(_scope("/api/metrics/overview"), None, None))
     assert tracker.seconds_since_last_request() == 0.0
     assert reached == ["/health", "/api/metrics/overview"]
+
+
+def test_the_app_counts_an_api_request_and_not_a_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    clock = Clock()
+    tracker = ActivityTracker(clock)
+    monkeypatch.setattr(activity, "tracker", tracker)
+    client = TestClient(app)
+
+    clock.now += 900.0
+    for path in ("/health", "/api/health", "/readiness", "/"):
+        client.get(path)
+    client.head("/api/agents")
+    assert tracker.seconds_since_last_request() == 900.0
+
+    client.get("/api/agents")
+    assert tracker.seconds_since_last_request() == 0.0

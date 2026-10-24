@@ -81,6 +81,7 @@ from .services import (
     task_persistence,
     task_warmup,
 )
+from .services.activity import ActivityMiddleware
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
 from .services.dispute_store import STORE_NAME as DISPUTE_STORE_NAME
@@ -421,6 +422,10 @@ app = FastAPI(
         {"name": "pdax", "description": "PDAX PHP-to-crypto on/off-ramp: trade, funding, withdrawals, webhooks."},
     ],
 )
+
+# Innermost of all: only a request every layer let through counts as the API
+# being in use, which keeps the database-reading keep-warm running (activity.py).
+app.add_middleware(ActivityMiddleware)
 
 # Added first → runs innermost: oversized bodies are rejected before the
 # router, while the 413 still passes through the header/CORS/request-id

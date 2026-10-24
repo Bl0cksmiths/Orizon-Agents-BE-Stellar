@@ -197,4 +197,5 @@ def test_the_middleware_order_is_pinned():
         "RateLimitMiddleware",
         "RouteRateLimitMiddleware",
         "BodyLimitMiddleware",
+        "ActivityMiddleware",
     ]
