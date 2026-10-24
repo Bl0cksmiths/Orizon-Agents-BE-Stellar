@@ -294,6 +294,98 @@ def test_a_first_build_that_matches_the_restored_row_is_not_written(monkeypatch:
     assert [json.loads(b)["n"] for b in counting.writes] == [2]
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 5_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _spaced_cell(
+    builds: _Same, counting: _CountingStore, monkeypatch: pytest.MonkeyPatch, interval: float
+) -> SnapshotCell[_Doc]:
+    cell = _keyed_cell(builds, counting, monkeypatch)
+    monkeypatch.setattr(settings, "snapshot_persist_min_interval_seconds", interval)
+    return cell
+
+
+def _written(counting: _CountingStore) -> list[int]:
+    return [json.loads(b)["n"] for b in counting.writes]
+
+
+def test_a_change_inside_the_window_is_held_and_the_latest_is_written_at_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(snapshot_store, "_clock", clock)
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 900.0)
+
+    async def go() -> list[int]:
+        await _build(cell)  # nothing written yet: at once
+        for n in (2, 3):
+            clock.now += 10.0
+            builds.n = n
+            await _build(cell)  # inside the window: held
+        held = _written(counting)
+        await snapshot_store.close_snapshot_store()
+        return held
+
+    assert asyncio.run(go()) == [1]
+    assert _written(counting) == [1, 3]
+
+
+def test_a_change_after_the_window_is_written_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(snapshot_store, "_clock", clock)
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 900.0)
+
+    async def go() -> None:
+        await _build(cell)
+        clock.now += 900.0
+        builds.n = 2
+        await _build(cell)
+
+    asyncio.run(go())
+    assert _written(counting) == [1, 2]
+
+
+def test_the_held_change_is_written_when_the_window_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 0.05)
+
+    async def go() -> list[list[int]]:
+        await _build(cell)
+        builds.n = 2
+        await _build(cell)
+        early = _written(counting)
+        await asyncio.sleep(0.1)
+        await _drain_saves()
+        return [early, _written(counting)]
+
+    assert asyncio.run(go()) == [[1], [1, 2]]
+
+
+def test_a_held_change_undone_before_the_window_closes_is_never_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(snapshot_store, "_clock", clock)
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 900.0)
+
+    async def go() -> None:
+        await _build(cell)
+        builds.n = 2
+        await _build(cell)  # held
+        builds.n = 1
+        await _build(cell)  # what the row already holds: the held one is dropped
+        await snapshot_store.close_snapshot_store()
+
+    asyncio.run(go())
+    assert _written(counting) == [1]
+
+
 class _BrokenStore:
     async def load(self, name: str, scope: str) -> StoredSnapshot | None:
         raise ConnectionError("neon asleep")
