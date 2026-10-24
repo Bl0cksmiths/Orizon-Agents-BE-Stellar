@@ -785,6 +785,28 @@ def test_a_keep_warm_idle_pause_outside_the_bounds_refuses_to_boot(pause):
     assert str(pause) not in message.replace("60 to 86400", "")
 
 
+# ── snapshot persistence spacing ───────────────────────────────────────────
+
+
+def test_the_snapshot_persist_min_interval_defaults_to_fifteen_minutes():
+    assert _settings().snapshot_persist_min_interval_seconds == 900.0
+
+
+@pytest.mark.parametrize("interval", [0, 900.0, 86_400])
+def test_a_snapshot_persist_min_interval_inside_the_bounds_boots(interval):
+    settings = _settings(snapshot_persist_min_interval_seconds=interval)
+    assert settings.snapshot_persist_min_interval_seconds == interval
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), -1, -0.1, 86_400.5])
+def test_a_snapshot_persist_min_interval_outside_the_bounds_refuses_to_boot(interval):
+    with pytest.raises(ConfigurationError) as refused:
+        _load_settings(_env_file=None, snapshot_persist_min_interval_seconds=interval)
+    message = str(refused.value)
+    assert "SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS" in message
+    assert str(interval) not in message.replace("0 to 86400", "")
+
+
 # ── registry boot sync wait ────────────────────────────────────────────────
 
 

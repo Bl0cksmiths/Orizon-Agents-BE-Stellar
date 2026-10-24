@@ -268,6 +268,14 @@ class Settings(BaseSettings):
     # (`_keep_warm_idle_pause_is_a_bound`): under a minute pauses between two
     # polls of an open dashboard, over a day is never pausing at all.
     keep_warm_idle_pause_seconds: float = 600.0
+    # The least time between two writes of one persisted snapshot
+    # (app/services/snapshot_store.py). A build whose content is unchanged is
+    # never written; a changed one inside this window is held and written when
+    # it closes, so the row is at most this far behind the process. It only
+    # serves the next boot, so a write per build was a database wake-up per
+    # build for nothing. From 0 (no spacing) to 86400
+    # (`_snapshot_persist_min_interval_is_a_bound`).
+    snapshot_persist_min_interval_seconds: float = 900.0
 
     # ── External dispatch (story 2.02 — envelope signing) ────
     # S… secret (or a 12/24-word mnemonic) used to sign the SEP-53 envelope on
@@ -621,6 +629,23 @@ class Settings(BaseSettings):
             raise ValueError(
                 "KEEP_WARM_IDLE_PAUSE_SECONDS must be a finite number of seconds from 60 to 86400 — the background "
                 "snapshot rebuilds that read the database pause once no API request has arrived for this long"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _snapshot_persist_min_interval_is_a_bound(self) -> "Settings":
+        """Refuse a persistence spacing that is not a bound.
+
+        NaN would make every comparison against it false, and inf (or anything
+        past a day) would hold a changed snapshot back from the database for so
+        long that the next boot restores one that old. Names the variable,
+        never the value.
+        """
+        interval = self.snapshot_persist_min_interval_seconds
+        if not (math.isfinite(interval) and 0 <= interval <= 86_400):
+            raise ValueError(
+                "SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS must be a finite number of seconds from 0 to 86400 — a "
+                "changed read snapshot is written to the database at most this often"
             )
         return self
 
